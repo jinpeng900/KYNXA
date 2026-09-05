@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "KYNXA.Desktop (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "KYNXA.Desktop (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
