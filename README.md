@@ -1,6 +1,8 @@
 # KYNXA
 
-[简体中文](./README.zh-CN.md)
+<p align="center">
+  English | <a href="./README.zh.md">中文</a>
+</p>
 
 **KYNXA** is a local-first personal agent runtime for Windows, designed for durable tasks, model-independent state, governed capabilities, and adaptive execution.
 
