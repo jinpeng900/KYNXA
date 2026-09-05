@@ -1,6 +1,8 @@
 # KYNXA
 
-[English](./README.md)
+<p align="center">
+  <a href="./README.md">English</a> | 中文
+</p>
 
 **KYNXA** 是一个面向 Windows 的 local-first 个人 Agent Runtime，重点关注长期任务、模型无关状态、受控能力执行以及自适应运行。
 
