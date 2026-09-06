@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="KYNXA_Desktop.Views.ShellPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:KYNXA_Desktop.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="using:KYNXA_Desktop.ViewModels"
+    x:Name="PageRoot"
+    Background="{StaticResource KynxaMainBrush}"
+    Loaded="PageRoot_Loaded"
+    mc:Ignorable="d">
+
+    <Grid x:Name="ShellGrid" SizeChanged="ShellGrid_SizeChanged">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="SidebarColumn" Width="176" />
+            <ColumnDefinition Width="8" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Sidebar slot -->
+        <Grid Grid.Column="0" Background="{StaticResource KynxaSidebarBrush}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="56" />
+                <RowDefinition Height="224" />
+                <RowDefinition Height="1" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="48" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="15,0,11,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="32" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="32" />
+                </Grid.ColumnDefinitions>
+                <Button
+                    Click="SidebarToggle_Click"
+                    Style="{StaticResource KynxaIconButtonStyle}"
+                    ToolTipService.ToolTip="收起或展开侧边栏">
+                    <Image Width="20" Height="20" Source="{StaticResource IconSidebarToggle}" />
+                </Button>
+                <Button
+                    Grid.Column="2"
+                    Style="{StaticResource KynxaIconButtonStyle}"
+                    ToolTipService.ToolTip="搜索">
+                    <Image Width="20" Height="20" Source="{StaticResource IconSearch}" />
+                </Button>
+            </Grid>
+
+            <StackPanel Grid.Row="1">
+                <Button Click="NewConversation_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="20" Height="20" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新对话" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconKnowledge}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="知识库" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconWork}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconConnect}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="连接" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconScheduledTask}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="定时任务" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconSkills}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="技能" /></Grid>
+                </Button>
+                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconModelManagement}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="模型管理" /></Grid>
+                </Button>
+            </StackPanel>
+
+            <Border Grid.Row="2" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
+
+            <Grid x:Name="RecentArea" Grid.Row="3" Margin="20,14,10,6">
+                <Grid.RowDefinitions><RowDefinition Height="24" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <TextBlock FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="最近对话" />
+                <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RecentConversations}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="viewModels:RecentConversation">
+                                <Button Height="43" Padding="0" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="23" /><RowDefinition Height="17" /></Grid.RowDefinitions>
+                                        <TextBlock FontSize="13" FontWeight="Medium" Foreground="{StaticResource KynxaTextBrush}" Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Row="1" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="{x:Bind RelativeTime}" />
+                                    </Grid>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+
+            <Grid Grid.Row="4" Margin="14,0,10,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                <Button Style="{StaticResource KynxaIconButtonStyle}" ToolTipService.ToolTip="设置"><Image Width="20" Height="20" Source="{StaticResource IconSettings}" /></Button>
+                <Grid Grid.Column="2" ToolTipService.ToolTip="设备在线">
+                    <Image Width="20" Height="20" Source="{StaticResource IconDeviceStatus}" />
+                    <Ellipse Width="8" Height="8" Margin="0,0,0,2" HorizontalAlignment="Right" VerticalAlignment="Bottom" Fill="{StaticResource KynxaOnlineBrush}" Stroke="{StaticResource KynxaSidebarBrush}" StrokeThickness="1.5" />
+                </Grid>
+            </Grid>
+        </Grid>
+
+        <controls:ResizeGrip
+            x:Name="SidebarGrip"
+            Grid.Column="1"
+            Axis="Horizontal"
+            CancelRequested="SidebarGrip_CancelRequested"
+            DragCompleted="LayoutGrip_DragCompleted"
+            DragDelta="SidebarGrip_DragDelta"
+            DragStarted="SidebarGrip_DragStarted"
+            ResetRequested="SidebarGrip_ResetRequested" />
+
+        <!-- Stable main slots: top workspace, primary content and optional preview. -->
+        <Grid x:Name="MainRegion" Grid.Column="2" Background="{StaticResource KynxaMainBrush}" SizeChanged="MainRegion_SizeChanged">
+            <Grid.RowDefinitions>
+                <RowDefinition x:Name="TopWorkspaceRow" Height="96" />
+                <RowDefinition Height="8" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0">
+                <Grid x:Name="TopContextSlot" />
+                <Border
+                    x:Name="ChatWorkSwitcher"
+                    Width="284"
+                    Height="40"
+                    Margin="0,30,0,0"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Top"
+                    Background="{StaticResource KynxaSegmentIdleBrush}"
+                    CornerRadius="12"
+                    Translation="0,0,16">
+                    <Border.Shadow><ThemeShadow /></Border.Shadow>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
+                        <Button x:Name="ChatModeButton" Background="White" BorderThickness="0" Click="ChatModeButton_Click" CornerRadius="11" FontSize="17" FontWeight="SemiBold" Content="聊天" />
+                        <Button x:Name="WorkModeButton" Grid.Column="1" Background="Transparent" BorderThickness="0" Click="WorkModeButton_Click" CornerRadius="11" FontSize="17" FontWeight="SemiBold" Content="工作" />
+                    </Grid>
+                </Border>
+                <Grid x:Name="TopToolbarSlot" HorizontalAlignment="Right" />
+            </Grid>
+
+            <controls:ResizeGrip
+                x:Name="TopWorkspaceGrip"
+                Grid.Row="1"
+                Axis="Vertical"
+                CancelRequested="TopWorkspaceGrip_CancelRequested"
+                DragCompleted="LayoutGrip_DragCompleted"
+                DragDelta="TopWorkspaceGrip_DragDelta"
+                DragStarted="TopWorkspaceGrip_DragStarted"
+                ResetRequested="TopWorkspaceGrip_ResetRequested" />
+
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition x:Name="PreviewGripColumn" Width="0" />
+                    <ColumnDefinition x:Name="PreviewColumn" Width="0" />
+                </Grid.ColumnDefinitions>
+
+                <Grid x:Name="PrimaryContentSlot">
+                    <Canvas IsHitTestVisible="False" Opacity="0.5">
+                        <Ellipse Width="870" Height="310" Canvas.Left="180" Canvas.Top="42" Stroke="{StaticResource KynxaAmbientWaveBrush}" StrokeThickness="50" />
+                        <Ellipse Width="720" Height="250" Canvas.Left="270" Canvas.Top="105" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
+                    </Canvas>
+
+                    <StackPanel x:Name="MainContentHost" Margin="0,160,0,0" HorizontalAlignment="Center" VerticalAlignment="Top" Spacing="32">
+                        <Grid Width="176" Height="132" HorizontalAlignment="Center">
+                            <Image
+                                Width="353"
+                                Height="235"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Source="{StaticResource KynxaLogoImage}"
+                                Stretch="Uniform" />
+                        </Grid>
+
+                        <Border
+                            x:Name="ComposerHost"
+                            Width="824"
+                            Height="110"
+                            Background="{StaticResource KynxaSurfaceBrush}"
+                            BorderBrush="{StaticResource KynxaComposerBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="14"
+                            Translation="0,0,24">
+                            <Border.Shadow><ThemeShadow /></Border.Shadow>
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
+                                <TextBox
+                                    x:Name="PromptTextBox"
+                                    Margin="10,8,10,0"
+                                    Padding="6,2"
+                                    AcceptsReturn="True"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    FontSize="16"
+                                    Foreground="{StaticResource KynxaTextBrush}"
+                                    PlaceholderText="向 KYNXA 提问任何问题..."
+                                    Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}"
+                                    TextWrapping="Wrap" />
+
+                                <Grid Grid.Row="1" Margin="12,0,12,6">
+                                    <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
+                                        <Button Width="38" Height="38" Padding="8" Background="{StaticResource KynxaComposerActionBrush}" BorderThickness="0" CornerRadius="19" ToolTipService.ToolTip="添加"><Image Width="20" Height="20" Source="{StaticResource IconAdd}" /></Button>
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="联网搜索"><Image Width="18" Height="18" Source="{StaticResource IconWebSearch}" /></Button>
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="添加附件"><Image Width="18" Height="18" Source="{StaticResource IconAttachment}" /></Button>
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="深度思考"><Image Width="18" Height="18" Source="{StaticResource IconDeepThinking}" /></Button>
+                                    </StackPanel>
+                                    <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="4">
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="快速模式"><Image Width="18" Height="18" Source="{StaticResource IconQuickMode}" /></Button>
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="选择模型"><Image Width="18" Height="18" Source="{StaticResource IconModelSelect}" /></Button>
+                                        <Button Width="40" Height="40" Padding="9" Background="{StaticResource KynxaSendBrush}" BorderThickness="0" Click="SendButton_Click" CornerRadius="20" ToolTipService.ToolTip="发送"><Image Width="20" Height="20" Source="{StaticResource IconSend}" /></Button>
+                                    </StackPanel>
+                                </Grid>
+
+                                <controls:ResizeGrip
+                                    x:Name="ComposerLeftGrip"
+                                    Grid.RowSpan="2"
+                                    HorizontalAlignment="Left"
+                                    Axis="Horizontal"
+                                    CancelRequested="ComposerWidthGrip_CancelRequested"
+                                    DragCompleted="LayoutGrip_DragCompleted"
+                                    DragDelta="ComposerLeftGrip_DragDelta"
+                                    DragStarted="ComposerWidthGrip_DragStarted"
+                                    ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                <controls:ResizeGrip
+                                    x:Name="ComposerRightGrip"
+                                    Grid.RowSpan="2"
+                                    HorizontalAlignment="Right"
+                                    Axis="Horizontal"
+                                    CancelRequested="ComposerWidthGrip_CancelRequested"
+                                    DragCompleted="LayoutGrip_DragCompleted"
+                                    DragDelta="ComposerRightGrip_DragDelta"
+                                    DragStarted="ComposerWidthGrip_DragStarted"
+                                    ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                <controls:ResizeGrip
+                                    x:Name="ComposerTopGrip"
+                                    Grid.RowSpan="2"
+                                    VerticalAlignment="Top"
+                                    Axis="Vertical"
+                                    CancelRequested="ComposerHeightGrip_CancelRequested"
+                                    DragCompleted="LayoutGrip_DragCompleted"
+                                    DragDelta="ComposerTopGrip_DragDelta"
+                                    DragStarted="ComposerHeightGrip_DragStarted"
+                                    ResetRequested="ComposerHeightGrip_ResetRequested" />
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Grid>
+    </Grid>
+</Page>
