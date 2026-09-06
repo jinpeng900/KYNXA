@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Color x:Key="KynxaTitleBarColor">#EDF0F7</Color>
+    <Color x:Key="KynxaSidebarColor">#ECF0FB</Color>
+    <Color x:Key="KynxaMainColor">#FCFEFD</Color>
+    <Color x:Key="KynxaSurfaceColor">#FEFEFE</Color>
+    <Color x:Key="KynxaIconColor">#0A1123</Color>
+    <Color x:Key="KynxaTextColor">#111827</Color>
+    <Color x:Key="KynxaSecondaryTextColor">#7D899D</Color>
+    <Color x:Key="KynxaDividerColor">#D9E0EB</Color>
+    <Color x:Key="KynxaSegmentIdleColor">#EDF1FC</Color>
+    <Color x:Key="KynxaSendColor">#2A3852</Color>
+    <Color x:Key="KynxaOnlineColor">#03C027</Color>
+    <Color x:Key="KynxaComposerBorderColor">#E5E9F1</Color>
+    <Color x:Key="KynxaComposerActionColor">#F2F5FB</Color>
+    <Color x:Key="KynxaAmbientWaveColor">#ECF2FF</Color>
+    <Color x:Key="KynxaAmbientWaveSoftColor">#F3F6FF</Color>
+
+    <SolidColorBrush x:Key="KynxaTitleBarBrush" Color="{StaticResource KynxaTitleBarColor}" />
+    <SolidColorBrush x:Key="KynxaSidebarBrush" Color="{StaticResource KynxaSidebarColor}" />
+    <SolidColorBrush x:Key="KynxaMainBrush" Color="{StaticResource KynxaMainColor}" />
+    <SolidColorBrush x:Key="KynxaSurfaceBrush" Color="{StaticResource KynxaSurfaceColor}" />
+    <SolidColorBrush x:Key="KynxaIconBrush" Color="{StaticResource KynxaIconColor}" />
+    <SolidColorBrush x:Key="KynxaTextBrush" Color="{StaticResource KynxaTextColor}" />
+    <SolidColorBrush x:Key="KynxaSecondaryTextBrush" Color="{StaticResource KynxaSecondaryTextColor}" />
+    <SolidColorBrush x:Key="KynxaDividerBrush" Color="{StaticResource KynxaDividerColor}" />
+    <SolidColorBrush x:Key="KynxaSegmentIdleBrush" Color="{StaticResource KynxaSegmentIdleColor}" />
+    <SolidColorBrush x:Key="KynxaSendBrush" Color="{StaticResource KynxaSendColor}" />
+    <SolidColorBrush x:Key="KynxaOnlineBrush" Color="{StaticResource KynxaOnlineColor}" />
+    <SolidColorBrush x:Key="KynxaComposerBorderBrush" Color="{StaticResource KynxaComposerBorderColor}" />
+    <SolidColorBrush x:Key="KynxaComposerActionBrush" Color="{StaticResource KynxaComposerActionColor}" />
+    <SolidColorBrush x:Key="KynxaAmbientWaveBrush" Color="{StaticResource KynxaAmbientWaveColor}" />
+    <SolidColorBrush x:Key="KynxaAmbientWaveSoftBrush" Color="{StaticResource KynxaAmbientWaveSoftColor}" />
+</ResourceDictionary>
