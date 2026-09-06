@@ -4,7 +4,7 @@ using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Input;
 using System.Numerics;
 
 namespace KYNXA_Desktop.Views;
@@ -24,11 +24,14 @@ public sealed partial class ShellPage : Page
     private const double ComposerWidthMax = 1040;
     private const double ComposerHeightDefault = 110;
     private const double ComposerHeightMin = 96;
-    private const double ComposerHeightMax = 260;
+    private const double ComposerAutoHeightMax = 210;
+    private const double ComposerHeightMax = 420;
 
     private readonly LayoutStateService _layoutStateService = new();
     private LayoutState _layout = LayoutState.CreateDefault();
     private double _dragStartValue;
+    private double _autoComposerHeight = ComposerHeightDefault;
+    private bool _composerExpanded;
 
     public ShellViewModel ViewModel { get; } = new();
 
@@ -41,7 +44,7 @@ public sealed partial class ShellPage : Page
     {
         _layout = _layoutStateService.Load();
         ApplyLayout();
-        SetPrimaryMode(_layout.LastPrimaryContent != "work");
+        SetPrimaryMode(true);
     }
 
     private void ApplyLayout()
@@ -51,22 +54,86 @@ public sealed partial class ShellPage : Page
             : Math.Clamp(_layout.SidebarWidth, SidebarMin, SidebarMax);
 
         SidebarColumn.Width = new GridLength(sidebar);
-        RecentArea.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        WorkNavigationContent.Margin = _layout.SidebarCollapsed
+            ? new Thickness(0)
+            : new Thickness(0, 0, 26, 0);
+        if (_layout.SidebarCollapsed)
+        {
+            WorkAddButton.Opacity = 0;
+            WorkAddButton.IsHitTestVisible = false;
+        }
+        RecentArea.Visibility = _layout.SidebarCollapsed || !ViewModel.IsChatMode
+            ? Visibility.Collapsed
+            : Visibility.Visible;
         TopWorkspaceRow.Height = new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
 
         double available = PrimaryContentSlot.ActualWidth > 0 ? PrimaryContentSlot.ActualWidth : MainRegion.ActualWidth;
-        double maximumComposerWidth = Math.Min(ComposerWidthMax, Math.Max(ComposerWidthMin, available - 96));
-        ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, ComposerWidthMin, maximumComposerWidth);
-        ComposerHost.Height = Math.Clamp(_layout.ComposerHeight, ComposerHeightMin, ComposerHeightMax);
-        UpdateVisualAxis();
+        if (available > 0)
+        {
+            (double minimumComposerWidth, double maximumComposerWidth) = GetComposerWidthRange(available);
+            ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, minimumComposerWidth, maximumComposerWidth);
+        }
+
+        double maximumComposerHeight = GetComposerHeightMaximum();
+        double minimumComposerHeight = Math.Min(ComposerHeightMin, maximumComposerHeight);
+        double requestedComposerHeight = _composerExpanded
+            ? maximumComposerHeight
+            : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
+        ComposerHost.Height = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
+        UpdateAdaptiveContentLayout();
     }
 
-    private void UpdateVisualAxis()
+    private static (double Minimum, double Maximum) GetComposerWidthRange(double availableWidth)
     {
-        // The approved composition is centered at 47.7% of the main region.
-        float offset = (float)(MainRegion.ActualWidth * -0.023);
-        ChatWorkSwitcher.Translation = new Vector3(offset, 0, 16);
-        MainContentHost.Translation = new Vector3(offset, 0, 0);
+        double horizontalPadding = availableWidth switch
+        {
+            >= 1200 => 144,
+            >= 800 => 96,
+            >= 520 => 56,
+            _ => 24
+        };
+
+        double maximum = Math.Min(ComposerWidthMax, Math.Max(240, availableWidth - horizontalPadding));
+        return (Math.Min(ComposerWidthMin, maximum), maximum);
+    }
+
+    private void UpdateAdaptiveContentLayout()
+    {
+        double width = PrimaryContentSlot.ActualWidth;
+        double height = PrimaryContentSlot.ActualHeight;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        // Scale gently around the reference layout while keeping compact windows usable.
+        double scale = Math.Clamp(Math.Min(width / 1100, height / 720), 0.76, 1.12);
+        LogoHost.Width = 176 * scale;
+        LogoHost.Height = 132 * scale;
+        KynxaLogo.Width = 353 * scale;
+        KynxaLogo.Height = 235 * scale;
+        MainContentHost.Spacing = Math.Clamp(22 + ((height - 520) * 0.04), 22, 42);
+
+        double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
+        ChatWorkSwitcher.Translation = new Vector3(0, 0, 16);
+        MainContentHost.Translation = new Vector3(0, (float)-upwardOffset, 0);
+
+        AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
+        AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
+        AmbientSoftWave.Width = AmbientLargeWave.Width * 0.82;
+        AmbientSoftWave.Height = AmbientLargeWave.Height * 0.8;
+    }
+
+    private double GetComposerHeightMaximum()
+    {
+        double availableHeight = PrimaryContentSlot.ActualHeight;
+        if (availableHeight <= 0)
+        {
+            return ComposerHeightMax;
+        }
+
+        // Keep a small breathing space so the editor never exceeds its conversation region.
+        return Math.Min(ComposerHeightMax, Math.Max(72, availableHeight - 32));
     }
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
@@ -74,6 +141,9 @@ public sealed partial class ShellPage : Page
     private void ShellGrid_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout();
 
     private void MainRegion_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout();
+
+    private void PrimaryContentSlot_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        UpdateAdaptiveContentLayout();
 
     private void SidebarToggle_Click(object sender, RoutedEventArgs e)
     {
@@ -163,8 +233,8 @@ public sealed partial class ShellPage : Page
 
     private void SetComposerWidth(double requested)
     {
-        double max = Math.Min(ComposerWidthMax, Math.Max(ComposerWidthMin, PrimaryContentSlot.ActualWidth - 96));
-        _layout.ComposerWidth = Math.Clamp(requested, ComposerWidthMin, max);
+        (double min, double max) = GetComposerWidthRange(PrimaryContentSlot.ActualWidth);
+        _layout.ComposerWidth = Math.Clamp(requested, min, max);
         ApplyLayout();
     }
 
@@ -181,12 +251,19 @@ public sealed partial class ShellPage : Page
         SaveLayout();
     }
 
-    private void ComposerHeightGrip_DragStarted(object? sender, EventArgs e) =>
+    private void ComposerHeightGrip_DragStarted(object? sender, EventArgs e)
+    {
+        _composerExpanded = false;
+        UpdateComposerExpandVisual();
         _dragStartValue = ComposerHost.ActualHeight;
+    }
 
     private void ComposerTopGrip_DragDelta(object? sender, ResizeDeltaEventArgs e)
     {
-        _layout.ComposerHeight = Math.Clamp(_dragStartValue - e.Delta, ComposerHeightMin, ComposerHeightMax);
+        _layout.ComposerHeight = Math.Clamp(
+            _dragStartValue - e.Delta,
+            Math.Min(ComposerHeightMin, GetComposerHeightMaximum()),
+            GetComposerHeightMaximum());
         ApplyLayout();
     }
 
@@ -198,6 +275,8 @@ public sealed partial class ShellPage : Page
 
     private void ComposerHeightGrip_ResetRequested(object? sender, EventArgs e)
     {
+        _composerExpanded = false;
+        UpdateComposerExpandVisual();
         _layout.ComposerHeight = ComposerHeightDefault;
         ApplyLayout();
         SaveLayout();
@@ -213,14 +292,182 @@ public sealed partial class ShellPage : Page
     {
         ViewModel.IsChatMode = chat;
         _layout.LastPrimaryContent = chat ? "chat" : "work";
-        ChatModeButton.Background = chat ? new SolidColorBrush(Microsoft.UI.Colors.White) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        WorkModeButton.Background = chat ? new SolidColorBrush(Microsoft.UI.Colors.Transparent) : new SolidColorBrush(Microsoft.UI.Colors.White);
+        double switcherWidth = ChatWorkSwitcher.ActualWidth > 0 ? ChatWorkSwitcher.ActualWidth : 220;
+        double pillTravel = Math.Max(0, switcherWidth - PrimaryModeSelectionPill.Width);
+        PrimaryModeSelectionPill.Translation = new Vector3(chat ? 0 : (float)pillTravel, 0, 8);
+        ChatAmbientLayer.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
+        MainContentHost.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
+        WorkHistoryHost.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
+        NewPrimaryActionLabel.Text = chat ? "新对话" : "新工作";
+        RecentArea.Visibility = chat && !_layout.SidebarCollapsed
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         PromptTextBox.PlaceholderText = chat ? "向 KYNXA 提问任何问题..." : "描述你想完成的工作...";
         SaveLayout();
     }
 
-    private void NewConversation_Click(object sender, RoutedEventArgs e)
+    private void ConversationRow_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
+        if (sender is not FrameworkElement row)
+        {
+            return;
+        }
+
+        if (row.FindName("ConversationOpenButton") is Button conversationButton)
+        {
+            conversationButton.Background =
+                (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["KynxaControlHoverBrush"];
+        }
+
+        if (row.FindName("ConversationMoreButton") is Button moreButton)
+        {
+            moreButton.IsHitTestVisible = true;
+            moreButton.Opacity = 1;
+        }
+    }
+
+    private void ConversationRow_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement row)
+        {
+            return;
+        }
+
+        if (row.FindName("ConversationOpenButton") is Button conversationButton)
+        {
+            conversationButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        }
+
+        if (row.FindName("ConversationMoreButton") is Button moreButton)
+        {
+            moreButton.Opacity = 0;
+            moreButton.IsHitTestVisible = false;
+        }
+    }
+
+    private void WorkRow_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        WorkNavigationButton.Background =
+            (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["KynxaControlHoverBrush"];
+        if (_layout.SidebarCollapsed)
+        {
+            return;
+        }
+
+        WorkAddButton.IsHitTestVisible = true;
+        WorkAddButton.Opacity = 1;
+    }
+
+    private void WorkRow_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        WorkNavigationButton.Background =
+            new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        WorkAddButton.Opacity = 0;
+        WorkAddButton.IsHitTestVisible = false;
+    }
+
+    private void AllWorksFilterButton_Click(object sender, RoutedEventArgs e) => SetWorkFilter(null);
+
+    private void PersonalWorksFilterButton_Click(object sender, RoutedEventArgs e) =>
+        SetWorkFilter(WorkCategory.Personal);
+
+    private void SharedWorksFilterButton_Click(object sender, RoutedEventArgs e) =>
+        SetWorkFilter(WorkCategory.Shared);
+
+    private void SetWorkFilter(WorkCategory? category)
+    {
+        ViewModel.FilterWorks(category);
+        ViewModel.SelectedWork = null;
+        WorkList.SelectedItem = null;
+
+        int filterIndex = category switch
+        {
+            WorkCategory.Personal => 1,
+            WorkCategory.Shared => 2,
+            _ => 0
+        };
+        double trackWidth = WorkFilterSelectionPill.Parent is FrameworkElement track && track.ActualWidth > 0
+            ? track.ActualWidth
+            : 234;
+        double travelStep = (trackWidth - WorkFilterSelectionPill.Width) / 2;
+        WorkFilterSelectionPill.Translation = new Vector3((float)(filterIndex * travelStep), 0, 8);
+    }
+
+    private void WorkList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is WorkSummary work)
+        {
+            ViewModel.SelectedWork = work;
+        }
+    }
+
+    private void WorkList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (WorkList.SelectedItem is WorkSummary work)
+        {
+            OpenWork(work);
+            e.Handled = true;
+        }
+    }
+
+    private void OpenWork(WorkSummary work)
+    {
+        // This is the navigation boundary for the future work-detail surface.
+        ViewModel.SelectedWork = work;
+    }
+
+    private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        // Match the editor's reserved scrollbar lane so wrapping never runs beneath it.
+        double availableTextWidth = Math.Max(120, PromptTextBox.ActualWidth - 88);
+        TextBlock measure = new()
+        {
+            Text = string.IsNullOrEmpty(PromptTextBox.Text) ? " " : PromptTextBox.Text,
+            FontFamily = PromptTextBox.FontFamily,
+            FontSize = PromptTextBox.FontSize,
+            FontStyle = PromptTextBox.FontStyle,
+            FontWeight = PromptTextBox.FontWeight,
+            TextWrapping = TextWrapping.Wrap,
+            Width = availableTextWidth
+        };
+        measure.Measure(new Windows.Foundation.Size(availableTextWidth, double.PositiveInfinity));
+
+        double extraContentHeight = Math.Max(0, measure.DesiredSize.Height - 24);
+        double maximumComposerHeight = GetComposerHeightMaximum();
+        double minimumAutoHeight = Math.Min(ComposerHeightDefault, maximumComposerHeight);
+        double maximumAutoHeight = Math.Max(
+            minimumAutoHeight,
+            Math.Min(ComposerAutoHeightMax, maximumComposerHeight));
+        _autoComposerHeight = Math.Clamp(
+            ComposerHeightDefault + extraContentHeight,
+            minimumAutoHeight,
+            maximumAutoHeight);
+        ApplyLayout();
+    }
+
+    private void ComposerExpandButton_Click(object sender, RoutedEventArgs e)
+    {
+        _composerExpanded = !_composerExpanded;
+        UpdateComposerExpandVisual();
+        ApplyLayout();
+        PromptTextBox.Focus(FocusState.Programmatic);
+    }
+
+    private void UpdateComposerExpandVisual()
+    {
+        ComposerExpandIcon.Glyph = _composerExpanded ? "\uE73F" : "\uE740";
+        ToolTipService.SetToolTip(
+            ComposerExpandButton,
+            _composerExpanded ? "收起输入区" : "展开输入区");
+    }
+
+    private void NewPrimaryAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ViewModel.IsChatMode)
+        {
+            return;
+        }
+
         ViewModel.Prompt = string.Empty;
         PromptTextBox.Focus(FocusState.Programmatic);
     }

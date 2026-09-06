@@ -22,6 +22,20 @@
                 FontWeight="SemiBold"
                 Foreground="{StaticResource KynxaTextBrush}"
                 Text="KYNXA" />
+            <Button
+                Width="32"
+                Height="32"
+                Margin="82,0,0,0"
+                Padding="7"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="更多功能"
+                Background="Transparent"
+                BorderThickness="0"
+                CornerRadius="8"
+                ToolTipService.ToolTip="更多功能">
+                <FontIcon FontSize="14" Glyph="&#xE712;" />
+            </Button>
             <Border
                 VerticalAlignment="Bottom"
                 BorderBrush="{StaticResource KynxaDividerBrush}"
