@@ -23,7 +23,7 @@
         <Grid Grid.Column="0" Background="{StaticResource KynxaSidebarBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
-                <RowDefinition Height="224" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="1" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="48" />
@@ -49,16 +49,44 @@
                 </Button>
             </Grid>
 
-            <StackPanel Grid.Row="1">
-                <Button Click="NewConversation_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="20" Height="20" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新对话" /></Grid>
+            <StackPanel Grid.Row="1" HorizontalAlignment="Stretch">
+                <Button Click="NewPrimaryAction_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="20" Height="20" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock x:Name="NewPrimaryActionLabel" Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新对话" /></Grid>
                 </Button>
                 <Button Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconKnowledge}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="知识库" /></Grid>
                 </Button>
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconWork}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作" /></Grid>
-                </Button>
+                <Grid PointerEntered="WorkRow_PointerEntered" PointerExited="WorkRow_PointerExited">
+                    <Button x:Name="WorkNavigationButton" Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid x:Name="WorkNavigationContent" Margin="0,0,26,0"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconWork}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作" /></Grid>
+                    </Button>
+                    <Button
+                        x:Name="WorkAddButton"
+                        Width="26"
+                        Height="26"
+                        Margin="0,0,11,0"
+                        Padding="4"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="新建工作"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        CornerRadius="6"
+                        IsHitTestVisible="False"
+                        Opacity="0">
+                        <Button.OpacityTransition>
+                            <ScalarTransition Duration="0:0:0.14" />
+                        </Button.OpacityTransition>
+                        <Button.Resources>
+                            <SolidColorBrush x:Key="ButtonForeground" Color="#7D899D" />
+                            <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#111827" />
+                            <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#111827" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#120A1123" />
+                        </Button.Resources>
+                        <FontIcon FontSize="14" Glyph="&#xE710;" />
+                    </Button>
+                </Grid>
                 <Button Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconConnect}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="连接" /></Grid>
                 </Button>
@@ -75,20 +103,50 @@
 
             <Border Grid.Row="2" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
 
-            <Grid x:Name="RecentArea" Grid.Row="3" Margin="20,14,10,6">
+            <Grid x:Name="RecentArea" Grid.Row="3" Margin="10,14,10,6">
                 <Grid.RowDefinitions><RowDefinition Height="24" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                <TextBlock FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="最近对话" />
+                <TextBlock Margin="10,0,0,0" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="最近对话" />
                 <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.RecentConversations}">
+                    <ItemsControl HorizontalContentAlignment="Stretch" ItemsSource="{x:Bind ViewModel.RecentConversations}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:RecentConversation">
-                                <Button Height="43" Padding="0" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch">
-                                    <Grid>
-                                        <Grid.RowDefinitions><RowDefinition Height="23" /><RowDefinition Height="17" /></Grid.RowDefinitions>
-                                        <TextBlock FontSize="13" FontWeight="Medium" Foreground="{StaticResource KynxaTextBrush}" Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Row="1" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="{x:Bind RelativeTime}" />
-                                    </Grid>
-                                </Button>
+                                <Grid
+                                    PointerEntered="ConversationRow_PointerEntered"
+                                    PointerExited="ConversationRow_PointerExited">
+                                    <Button x:Name="ConversationOpenButton" Style="{StaticResource KynxaConversationButtonStyle}">
+                                        <Grid Margin="0,0,30,0">
+                                            <Grid.RowDefinitions><RowDefinition Height="23" /><RowDefinition Height="17" /></Grid.RowDefinitions>
+                                            <TextBlock FontSize="13" FontWeight="Medium" Foreground="{StaticResource KynxaTextBrush}" Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Grid.Row="1" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="{x:Bind RelativeTime}" />
+                                        </Grid>
+                                    </Button>
+                                    <Button
+                                        x:Name="ConversationMoreButton"
+                                        Width="30"
+                                        Height="30"
+                                        Margin="0,0,4,0"
+                                        Padding="5"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center"
+                                        AutomationProperties.Name="更多对话操作"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        CornerRadius="7"
+                                        IsHitTestVisible="False"
+                                        Opacity="0">
+                                        <Button.OpacityTransition>
+                                            <ScalarTransition Duration="0:0:0.14" />
+                                        </Button.OpacityTransition>
+                                        <Button.Resources>
+                                            <SolidColorBrush x:Key="ButtonForeground" Color="#7D899D" />
+                                            <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#111827" />
+                                            <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#111827" />
+                                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#120A1123" />
+                                        </Button.Resources>
+                                        <FontIcon FontSize="15" Glyph="&#xE712;" />
+                                    </Button>
+                                </Grid>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -127,19 +185,42 @@
                 <Grid x:Name="TopContextSlot" />
                 <Border
                     x:Name="ChatWorkSwitcher"
-                    Width="284"
-                    Height="40"
+                    Width="220"
+                    Height="38"
                     Margin="0,30,0,0"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Top"
                     Background="{StaticResource KynxaSegmentIdleBrush}"
-                    CornerRadius="12"
+                    CornerRadius="11"
                     Translation="0,0,16">
                     <Border.Shadow><ThemeShadow /></Border.Shadow>
                     <Grid>
                         <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
-                        <Button x:Name="ChatModeButton" Background="White" BorderThickness="0" Click="ChatModeButton_Click" CornerRadius="11" FontSize="17" FontWeight="SemiBold" Content="聊天" />
-                        <Button x:Name="WorkModeButton" Grid.Column="1" Background="Transparent" BorderThickness="0" Click="WorkModeButton_Click" CornerRadius="11" FontSize="17" FontWeight="SemiBold" Content="工作" />
+                        <Border
+                            x:Name="PrimaryModeSelectionPill"
+                            Grid.ColumnSpan="2"
+                            Width="116"
+                            HorizontalAlignment="Left"
+                            Background="White"
+                            CornerRadius="11"
+                            Translation="0,0,8">
+                            <Border.Shadow><ThemeShadow /></Border.Shadow>
+                            <Border.TranslationTransition>
+                                <Vector3Transition Duration="0:0:0.2" />
+                            </Border.TranslationTransition>
+                        </Border>
+                        <Button x:Name="ChatModeButton" Background="Transparent" Click="ChatModeButton_Click" Content="聊天" Style="{StaticResource KynxaSegmentButtonStyle}">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" />
+                            </Button.Resources>
+                        </Button>
+                        <Button x:Name="WorkModeButton" Grid.Column="1" Background="Transparent" Click="WorkModeButton_Click" Content="工作" Style="{StaticResource KynxaSegmentButtonStyle}">
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" />
+                            </Button.Resources>
+                        </Button>
                     </Grid>
                 </Border>
                 <Grid x:Name="TopToolbarSlot" HorizontalAlignment="Right" />
@@ -162,15 +243,149 @@
                     <ColumnDefinition x:Name="PreviewColumn" Width="0" />
                 </Grid.ColumnDefinitions>
 
-                <Grid x:Name="PrimaryContentSlot">
-                    <Canvas IsHitTestVisible="False" Opacity="0.5">
-                        <Ellipse Width="870" Height="310" Canvas.Left="180" Canvas.Top="42" Stroke="{StaticResource KynxaAmbientWaveBrush}" StrokeThickness="50" />
-                        <Ellipse Width="720" Height="250" Canvas.Left="270" Canvas.Top="105" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
-                    </Canvas>
+                <Grid x:Name="PrimaryContentSlot" SizeChanged="PrimaryContentSlot_SizeChanged">
+                    <Grid x:Name="ChatAmbientLayer" IsHitTestVisible="False" Opacity="0.5">
+                        <Ellipse x:Name="AmbientLargeWave" Width="870" Height="310" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveBrush}" StrokeThickness="50" />
+                        <Ellipse x:Name="AmbientSoftWave" Width="720" Height="250" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
+                    </Grid>
 
-                    <StackPanel x:Name="MainContentHost" Margin="0,160,0,0" HorizontalAlignment="Center" VerticalAlignment="Top" Spacing="32">
-                        <Grid Width="176" Height="132" HorizontalAlignment="Center">
+                    <!-- Reserved for the durable work history surface. -->
+                    <Grid
+                        x:Name="WorkHistoryHost"
+                        MaxWidth="960"
+                        Margin="48,38,48,40"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="18" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="10" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock
+                            FontSize="24"
+                            FontWeight="SemiBold"
+                            Foreground="{StaticResource KynxaTextBrush}"
+                            Text="工作" />
+
+                        <Border
+                            Grid.Row="2"
+                            Width="234"
+                            Height="36"
+                            HorizontalAlignment="Left"
+                            Background="{StaticResource KynxaSegmentIdleBrush}"
+                            CornerRadius="10">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                <Border
+                                    x:Name="WorkFilterSelectionPill"
+                                    Grid.ColumnSpan="3"
+                                    Width="82"
+                                    HorizontalAlignment="Left"
+                                    Background="White"
+                                    CornerRadius="10"
+                                    Translation="0,0,8">
+                                    <Border.Shadow><ThemeShadow /></Border.Shadow>
+                                    <Border.TranslationTransition>
+                                        <Vector3Transition Duration="0:0:0.2" />
+                                    </Border.TranslationTransition>
+                                </Border>
+                                <Button x:Name="AllWorksFilterButton" Background="Transparent" Click="AllWorksFilterButton_Click" Content="全部" CornerRadius="10" FontSize="13" BorderThickness="0">
+                                    <Button.Resources><SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" /><SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" /></Button.Resources>
+                                </Button>
+                                <Button x:Name="PersonalWorksFilterButton" Grid.Column="1" Background="Transparent" Click="PersonalWorksFilterButton_Click" Content="个人" CornerRadius="10" FontSize="13" BorderThickness="0">
+                                    <Button.Resources><SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" /><SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" /></Button.Resources>
+                                </Button>
+                                <Button x:Name="SharedWorksFilterButton" Grid.Column="2" Background="Transparent" Click="SharedWorksFilterButton_Click" Content="共享" CornerRadius="10" FontSize="13" BorderThickness="0">
+                                    <Button.Resources><SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" /><SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" /></Button.Resources>
+                                </Button>
+                            </Grid>
+                        </Border>
+
+                        <Grid Grid.Row="4" Height="32" Margin="12,0,12,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="34" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="140" />
+                                <ColumnDefinition Width="38" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="工作名称" />
+                            <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="创建时间" />
+                        </Grid>
+
+                        <ListView
+                            x:Name="WorkList"
+                            Grid.Row="5"
+                            IsItemClickEnabled="True"
+                            ItemClick="WorkList_ItemClick"
+                            ItemsSource="{x:Bind ViewModel.VisibleWorks}"
+                            SelectionMode="Single"
+                            DoubleTapped="WorkList_DoubleTapped">
+                            <ListView.Resources>
+                                <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="#E8ECF4" />
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#DFE5F0" />
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#D9E0EC" />
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#D4DCE8" />
+                            </ListView.Resources>
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="MinHeight" Value="56" />
+                                    <Setter Property="Margin" Value="0,1" />
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="CornerRadius" Value="9" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="viewModels:WorkSummary">
+                                    <Grid Height="54" Margin="12,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="34" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="140" />
+                                            <ColumnDefinition Width="38" />
+                                        </Grid.ColumnDefinitions>
+                                        <Image Width="20" Height="20" HorizontalAlignment="Left" Source="{StaticResource IconWork}" />
+                                        <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource KynxaTextBrush}" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="{x:Bind CreatedAt}" />
+                                        <Button Grid.Column="3" Width="30" Height="30" Padding="5" HorizontalAlignment="Right" Background="Transparent" BorderThickness="0" CornerRadius="7" AutomationProperties.Name="工作操作">
+                                            <Button.Resources>
+                                                <SolidColorBrush x:Key="ButtonForeground" Color="#7D899D" />
+                                                <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#111827" />
+                                                <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#111827" />
+                                            </Button.Resources>
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="打开" />
+                                                    <MenuFlyoutSubItem Style="{StaticResource KynxaWorkSubMenuItemStyle}" Text="添加已有内容">
+                                                        <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="普通聊天" />
+                                                        <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="其他工作" />
+                                                        <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="其他工作中的聊天" />
+                                                    </MenuFlyoutSubItem>
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="重命名" />
+                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="分享" />
+                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="归档" />
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="删除" />
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                            <FontIcon FontSize="15" Glyph="&#xE712;" />
+                                        </Button>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+
+                    <StackPanel x:Name="MainContentHost" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="32">
+                        <Grid x:Name="LogoHost" Width="176" Height="132" HorizontalAlignment="Center">
                             <Image
+                                x:Name="KynxaLogo"
                                 Width="353"
                                 Height="235"
                                 HorizontalAlignment="Center"
@@ -193,16 +408,46 @@
                                 <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
                                 <TextBox
                                     x:Name="PromptTextBox"
-                                    Margin="10,8,10,0"
-                                    Padding="6,2"
+                                    Margin="46,8,10,0"
+                                    Padding="6,2,24,2"
                                     AcceptsReturn="True"
                                     Background="Transparent"
                                     BorderThickness="0"
                                     FontSize="16"
                                     Foreground="{StaticResource KynxaTextBrush}"
                                     PlaceholderText="向 KYNXA 提问任何问题..."
+                                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                    ScrollViewer.VerticalScrollBarVisibility="Auto"
                                     Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}"
-                                    TextWrapping="Wrap" />
+                                    TextChanged="PromptTextBox_TextChanged"
+                                    TextWrapping="Wrap">
+                                    <TextBox.Resources>
+                                        <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+                                        <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
+                                        <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
+                                    </TextBox.Resources>
+                                </TextBox>
+
+                                <Button
+                                    x:Name="ComposerExpandButton"
+                                    Width="28"
+                                    Height="28"
+                                    Margin="12,8,0,0"
+                                    Padding="4"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Top"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    Click="ComposerExpandButton_Click"
+                                    CornerRadius="7"
+                                    ToolTipService.ToolTip="展开输入区">
+                                    <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="&#xE740;" />
+                                </Button>
 
                                 <Grid Grid.Row="1" Margin="12,0,12,6">
                                     <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
@@ -214,7 +459,13 @@
                                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="4">
                                         <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="快速模式"><Image Width="18" Height="18" Source="{StaticResource IconQuickMode}" /></Button>
                                         <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="选择模型"><Image Width="18" Height="18" Source="{StaticResource IconModelSelect}" /></Button>
-                                        <Button Width="40" Height="40" Padding="9" Background="{StaticResource KynxaSendBrush}" BorderThickness="0" Click="SendButton_Click" CornerRadius="20" ToolTipService.ToolTip="发送"><Image Width="20" Height="20" Source="{StaticResource IconSend}" /></Button>
+                                        <Button Width="40" Height="40" Padding="9" Background="{StaticResource KynxaSendBrush}" BorderThickness="0" Click="SendButton_Click" CornerRadius="20" ToolTipService.ToolTip="发送">
+                                            <Button.Resources>
+                                                <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="KynxaSendHoverBrush" />
+                                                <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="KynxaSendPressedBrush" />
+                                            </Button.Resources>
+                                            <Image Width="20" Height="20" Source="{StaticResource IconSend}" />
+                                        </Button>
                                     </StackPanel>
                                 </Grid>
 
