@@ -452,12 +452,53 @@
                                 <Grid Grid.Row="1" Margin="12,0,12,6">
                                     <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
                                         <Button Width="38" Height="38" Padding="8" Background="{StaticResource KynxaComposerActionBrush}" BorderThickness="0" CornerRadius="19" ToolTipService.ToolTip="添加"><Image Width="20" Height="20" Source="{StaticResource IconAdd}" /></Button>
-                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="联网搜索"><Image Width="18" Height="18" Source="{StaticResource IconWebSearch}" /></Button>
-                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="添加附件"><Image Width="18" Height="18" Source="{StaticResource IconAttachment}" /></Button>
-                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="深度思考"><Image Width="18" Height="18" Source="{StaticResource IconDeepThinking}" /></Button>
+                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="引用或添加附件"><Image Width="18" Height="18" Source="{StaticResource IconAttachment}" /></Button>
+                                        <ToggleButton
+                                            x:Name="WebSearchToggleButton"
+                                            Width="32"
+                                            Height="32"
+                                            Padding="7"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            Checked="WebSearchToggleButton_StateChanged"
+                                            CornerRadius="8"
+                                            IsChecked="True"
+                                            ToolTipService.ToolTip="联网搜索：已开启"
+                                            Unchecked="WebSearchToggleButton_StateChanged">
+                                            <ToggleButton.Resources>
+                                                <SolidColorBrush x:Key="ToggleButtonBackground" Color="Transparent" />
+                                                <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="#E3E8F2" />
+                                                <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="#D9E0EC" />
+                                                <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#DCE9FF" />
+                                                <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#D3E3FC" />
+                                                <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#C8DCF8" />
+                                                <SolidColorBrush x:Key="ToggleButtonBorderBrush" Color="Transparent" />
+                                                <SolidColorBrush x:Key="ToggleButtonBorderBrushChecked" Color="Transparent" />
+                                            </ToggleButton.Resources>
+                                            <Image Width="18" Height="18" Source="{StaticResource IconWebSearch}" />
+                                        </ToggleButton>
                                     </StackPanel>
                                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="4">
-                                        <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="快速模式"><Image Width="18" Height="18" Source="{StaticResource IconQuickMode}" /></Button>
+                                        <Button
+                                            x:Name="ExecutionModeButton"
+                                            Height="32"
+                                            Padding="8,0"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            CornerRadius="8"
+                                            ToolTipService.ToolTip="执行模式：标准">
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Click="ExecutionModeMenuItem_Click" Style="{StaticResource KynxaWorkMenuItemStyle}" Tag="quick" Text="快速" />
+                                                    <MenuFlyoutItem Click="ExecutionModeMenuItem_Click" Style="{StaticResource KynxaWorkMenuItemStyle}" Tag="standard" Text="标准" />
+                                                    <MenuFlyoutItem Click="ExecutionModeMenuItem_Click" Style="{StaticResource KynxaWorkMenuItemStyle}" Tag="deep" Text="深度" />
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <Image Width="16" Height="16" Source="{StaticResource IconQuickMode}" />
+                                                <TextBlock x:Name="ExecutionModeLabel" VerticalAlignment="Center" FontSize="12" Text="标准" />
+                                            </StackPanel>
+                                        </Button>
                                         <Button Style="{StaticResource KynxaComposerIconButtonStyle}" ToolTipService.ToolTip="选择模型"><Image Width="18" Height="18" Source="{StaticResource IconModelSelect}" /></Button>
                                         <Button Width="40" Height="40" Padding="9" Background="{StaticResource KynxaSendBrush}" BorderThickness="0" Click="SendButton_Click" CornerRadius="20" ToolTipService.ToolTip="发送">
                                             <Button.Resources>

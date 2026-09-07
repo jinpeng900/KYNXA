@@ -4,6 +4,7 @@ using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using System.Numerics;
 
@@ -451,6 +452,32 @@ public sealed partial class ShellPage : Page
         UpdateComposerExpandVisual();
         ApplyLayout();
         PromptTextBox.Focus(FocusState.Programmatic);
+    }
+
+    private void ExecutionModeMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem { Tag: string mode })
+        {
+            return;
+        }
+
+        ExecutionModeLabel.Text = mode switch
+        {
+            "quick" => "快速",
+            "deep" => "深度",
+            _ => "标准"
+        };
+        ToolTipService.SetToolTip(ExecutionModeButton, $"执行模式：{ExecutionModeLabel.Text}");
+    }
+
+    private void WebSearchToggleButton_StateChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is ToggleButton toggle)
+        {
+            ToolTipService.SetToolTip(
+                toggle,
+                toggle.IsChecked == true ? "联网搜索：已开启" : "联网搜索：已关闭");
+        }
     }
 
     private void UpdateComposerExpandVisual()
