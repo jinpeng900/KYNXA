@@ -34,7 +34,6 @@ public sealed partial class ShellPage : Page
     private double _autoComposerHeight = ComposerHeightDefault;
     private bool _composerExpanded;
     private bool _isWorkDetailMode;
-    private bool _workChatsExpanded;
     private WorkCategory? _selectedWorkCategory;
 
     public ShellViewModel ViewModel { get; } = new();
@@ -69,7 +68,10 @@ public sealed partial class ShellPage : Page
         RecentArea.Visibility = _layout.SidebarCollapsed || !ViewModel.IsChatMode || _isWorkDetailMode
             ? Visibility.Collapsed
             : Visibility.Visible;
-        TopWorkspaceRow.Height = new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
+        TopWorkspaceRow.Height = _isWorkDetailMode
+            ? new GridLength(0)
+            : new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
+        TopWorkspaceGrip.Visibility = _isWorkDetailMode ? Visibility.Collapsed : Visibility.Visible;
 
         double available = PrimaryContentSlot.ActualWidth > 0 ? PrimaryContentSlot.ActualWidth : MainRegion.ActualWidth;
         if (available > 0)
@@ -309,6 +311,8 @@ public sealed partial class ShellPage : Page
         GlobalNavigationArea.Visibility = Visibility.Visible;
         GlobalNavigationDivider.Visibility = Visibility.Visible;
         ChatWorkSwitcher.Visibility = Visibility.Visible;
+        TopWorkspaceRow.Height = new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
+        TopWorkspaceGrip.Visibility = Visibility.Visible;
         NewPrimaryActionLabel.Text = chat ? "新对话" : "新工作";
         RecentArea.Visibility = chat && !_layout.SidebarCollapsed
             ? Visibility.Visible
@@ -324,13 +328,17 @@ public sealed partial class ShellPage : Page
             return;
         }
 
-        if (row.FindName("ConversationOpenButton") is Button conversationButton)
+        Button? conversationButton = row.FindName("ConversationOpenButton") as Button ??
+            FindTaggedButton(row, "ConversationOpen");
+        if (conversationButton is not null)
         {
             conversationButton.Background =
                 (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["KynxaControlHoverBrush"];
         }
 
-        if (row.FindName("ConversationMoreButton") is Button moreButton)
+        Button? moreButton = row.FindName("ConversationMoreButton") as Button ??
+            FindTaggedButton(row, "ConversationMore");
+        if (moreButton is not null)
         {
             moreButton.IsHitTestVisible = true;
             moreButton.Opacity = 1;
@@ -344,16 +352,38 @@ public sealed partial class ShellPage : Page
             return;
         }
 
-        if (row.FindName("ConversationOpenButton") is Button conversationButton)
+        Button? conversationButton = row.FindName("ConversationOpenButton") as Button ??
+            FindTaggedButton(row, "ConversationOpen");
+        if (conversationButton is not null)
         {
             conversationButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
         }
 
-        if (row.FindName("ConversationMoreButton") is Button moreButton)
+        Button? moreButton = row.FindName("ConversationMoreButton") as Button ??
+            FindTaggedButton(row, "ConversationMore");
+        if (moreButton is not null)
         {
             moreButton.Opacity = 0;
             moreButton.IsHitTestVisible = false;
         }
+    }
+
+    private static Button? FindTaggedButton(FrameworkElement row, string tag)
+    {
+        if (row is not Panel panel)
+        {
+            return null;
+        }
+
+        foreach (UIElement child in panel.Children)
+        {
+            if (child is Button { Tag: string buttonTag } button && buttonTag == tag)
+            {
+                return button;
+            }
+        }
+
+        return null;
     }
 
     private void WorkRow_PointerEntered(object sender, PointerRoutedEventArgs e)
@@ -438,17 +468,15 @@ public sealed partial class ShellPage : Page
     {
         ViewModel.SelectedWork = work;
         _isWorkDetailMode = true;
-        _workChatsExpanded = false;
 
         WorkDetailNameText.Text = work.Name;
         WorkDetailTitleText.Text = work.Name;
-        WorkChatsList.Visibility = Visibility.Collapsed;
-        WorkChatsChevron.Glyph = "\uE76C";
+        PromptTextBox.PlaceholderText = "向 KYNXA 提问任何问题...";
 
-        ChatAmbientLayer.Visibility = Visibility.Collapsed;
-        MainContentHost.Visibility = Visibility.Collapsed;
+        ChatAmbientLayer.Visibility = Visibility.Visible;
+        MainContentHost.Visibility = Visibility.Visible;
         WorkHistoryHost.Visibility = Visibility.Collapsed;
-        WorkDetailHost.Visibility = Visibility.Visible;
+        WorkDetailHost.Visibility = Visibility.Collapsed;
         ChatWorkSwitcher.Visibility = Visibility.Collapsed;
 
         GlobalSidebarHeader.Visibility = Visibility.Collapsed;
@@ -456,6 +484,8 @@ public sealed partial class ShellPage : Page
         GlobalNavigationDivider.Visibility = Visibility.Collapsed;
         RecentArea.Visibility = Visibility.Collapsed;
         WorkDetailSidebarHost.Visibility = Visibility.Visible;
+        TopWorkspaceRow.Height = new GridLength(0);
+        TopWorkspaceGrip.Visibility = Visibility.Collapsed;
     }
 
     private void OpenWorkMenuItem_Click(object sender, RoutedEventArgs e)
@@ -471,13 +501,6 @@ public sealed partial class ShellPage : Page
         ViewModel.SelectedWork = null;
         WorkList.SelectedItem = null;
         SetPrimaryMode(true);
-    }
-
-    private void WorkChatsToggle_Click(object sender, RoutedEventArgs e)
-    {
-        _workChatsExpanded = !_workChatsExpanded;
-        WorkChatsList.Visibility = _workChatsExpanded ? Visibility.Visible : Visibility.Collapsed;
-        WorkChatsChevron.Glyph = _workChatsExpanded ? "\uE70D" : "\uE76C";
     }
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
