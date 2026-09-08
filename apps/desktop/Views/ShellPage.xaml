@@ -29,7 +29,7 @@
                 <RowDefinition Height="48" />
             </Grid.RowDefinitions>
 
-            <Grid Grid.Row="0" Margin="15,0,11,0">
+            <Grid x:Name="GlobalSidebarHeader" Grid.Row="0" Margin="15,0,11,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="32" />
                     <ColumnDefinition Width="*" />
@@ -49,7 +49,7 @@
                 </Button>
             </Grid>
 
-            <StackPanel Grid.Row="1" HorizontalAlignment="Stretch">
+            <StackPanel x:Name="GlobalNavigationArea" Grid.Row="1" HorizontalAlignment="Stretch">
                 <Button Click="NewPrimaryAction_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="20" Height="20" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock x:Name="NewPrimaryActionLabel" Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新对话" /></Grid>
                 </Button>
@@ -101,7 +101,7 @@
                 </Button>
             </StackPanel>
 
-            <Border Grid.Row="2" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
+            <Border x:Name="GlobalNavigationDivider" Grid.Row="2" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
 
             <Grid x:Name="RecentArea" Grid.Row="3" Margin="10,14,10,6">
                 <Grid.RowDefinitions><RowDefinition Height="24" /><RowDefinition Height="*" /></Grid.RowDefinitions>
@@ -151,6 +151,84 @@
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                 </ScrollViewer>
+            </Grid>
+
+            <!-- Contextual navigation shown after a work is opened. -->
+            <Grid
+                x:Name="WorkDetailSidebarHost"
+                Grid.Row="0"
+                Grid.RowSpan="4"
+                Background="{StaticResource KynxaSidebarBrush}"
+                Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="56" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="1" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Button
+                    Width="32"
+                    Height="32"
+                    Margin="15,0,0,0"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    Click="WorkDetailBackButton_Click"
+                    Style="{StaticResource KynxaIconButtonStyle}"
+                    ToolTipService.ToolTip="返回聊天">
+                    <FontIcon FontSize="16" Glyph="&#xE72B;" />
+                </Button>
+
+                <StackPanel Grid.Row="1" Margin="20,2,14,14" Spacing="4">
+                    <TextBlock x:Name="WorkDetailNameText" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource KynxaTextBrush}" TextTrimming="CharacterEllipsis" />
+                    <TextBlock FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="当前工作" />
+                </StackPanel>
+
+                <StackPanel Grid.Row="2" HorizontalAlignment="Stretch">
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="19" Height="19" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新建工作对话" /></Grid>
+                    </Button>
+                    <Grid>
+                        <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                            <Grid Margin="0,0,26,0"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconWork}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="子工作" /></Grid>
+                        </Button>
+                        <Button Width="26" Height="26" Margin="0,0,11,0" Padding="4" HorizontalAlignment="Right" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" CornerRadius="6" ToolTipService.ToolTip="创建子工作">
+                            <FontIcon FontSize="13" Glyph="&#xE710;" />
+                        </Button>
+                    </Grid>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconSkills}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作任务" /></Grid>
+                    </Button>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconKnowledge}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作知识库" /></Grid>
+                    </Button>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconConnect}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="连接" /></Grid>
+                    </Button>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconScheduledTask}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="定时任务" /></Grid>
+                    </Button>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconModelManagement}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="模型配置" /></Grid>
+                    </Button>
+                </StackPanel>
+
+                <Border Grid.Row="3" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
+
+                <StackPanel Grid.Row="4" Margin="10,10,10,6">
+                    <Button Click="WorkChatsToggle_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="24" /></Grid.ColumnDefinitions>
+                            <TextBlock Margin="10,0,0,0" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="工作中的聊天" />
+                            <FontIcon x:Name="WorkChatsChevron" Grid.Column="1" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" Glyph="&#xE76C;" />
+                        </Grid>
+                    </Button>
+                    <StackPanel x:Name="WorkChatsList" Visibility="Collapsed">
+                        <Button Content="需求梳理" Style="{StaticResource KynxaConversationButtonStyle}" />
+                        <Button Content="执行记录" Style="{StaticResource KynxaConversationButtonStyle}" />
+                    </StackPanel>
+                </StackPanel>
             </Grid>
 
             <Grid Grid.Row="4" Margin="14,0,10,0">
@@ -266,11 +344,54 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
 
-                        <TextBlock
-                            FontSize="24"
-                            FontWeight="SemiBold"
-                            Foreground="{StaticResource KynxaTextBrush}"
-                            Text="工作" />
+                        <StackPanel Height="34" Orientation="Horizontal" Spacing="22">
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontFamily="Microsoft YaHei UI"
+                                FontSize="22"
+                                FontWeight="SemiBold"
+                                Foreground="{StaticResource KynxaTextBrush}"
+                                LineHeight="34"
+                                LineStackingStrategy="BlockLineHeight"
+                                Text="工作" />
+                            <Grid
+                                Width="320"
+                                Height="34"
+                                VerticalAlignment="Center"
+                                Background="{StaticResource KynxaComposerActionBrush}"
+                                CornerRadius="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="36" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Image Width="15" Height="15" Source="{StaticResource IconSearch}" />
+                                <TextBox
+                                    x:Name="WorkSearchBox"
+                                    Grid.Column="1"
+                                    Margin="0,0,8,0"
+                                    Padding="0,1,0,0"
+                                    VerticalAlignment="Stretch"
+                                    VerticalContentAlignment="Center"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    FontFamily="Microsoft YaHei UI"
+                                    FontSize="14"
+                                    PlaceholderText="搜索工作"
+                                    Translation="0,6,0"
+                                    TextChanged="WorkSearchBox_TextChanged">
+                                    <TextBox.Resources>
+                                        <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+                                        <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+                                        <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
+                                        <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
+                                    </TextBox.Resources>
+                                </TextBox>
+                            </Grid>
+                        </StackPanel>
 
                         <Border
                             Grid.Row="2"
@@ -360,7 +481,7 @@
                                             </Button.Resources>
                                             <Button.Flyout>
                                                 <MenuFlyout>
-                                                    <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="打开" />
+                                                    <MenuFlyoutItem Click="OpenWorkMenuItem_Click" CommandParameter="{Binding}" Style="{StaticResource KynxaWorkMenuItemStyle}" Text="打开" />
                                                     <MenuFlyoutSubItem Style="{StaticResource KynxaWorkSubMenuItemStyle}" Text="添加已有内容">
                                                         <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="普通聊天" />
                                                         <MenuFlyoutItem Style="{StaticResource KynxaWorkMenuItemStyle}" Text="其他工作" />
@@ -380,6 +501,22 @@
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
+                    </Grid>
+
+                    <Grid
+                        x:Name="WorkDetailHost"
+                        MaxWidth="760"
+                        Margin="48,38,48,40"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        Visibility="Collapsed">
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
+                            <Border Width="64" Height="64" Background="{StaticResource KynxaComposerActionBrush}" CornerRadius="18">
+                                <Image Width="28" Height="28" Source="{StaticResource IconWork}" />
+                            </Border>
+                            <TextBlock x:Name="WorkDetailTitleText" HorizontalAlignment="Center" FontFamily="Microsoft YaHei UI" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource KynxaTextBrush}" />
+                            <TextBlock HorizontalAlignment="Center" FontSize="13" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="从左侧选择一项，开始组织这个工作" TextAlignment="Center" />
+                        </StackPanel>
                     </Grid>
 
                     <StackPanel x:Name="MainContentHost" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="32">

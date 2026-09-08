@@ -53,10 +53,13 @@ public partial class ShellViewModel : ObservableObject
         FilterWorks(null);
     }
 
-    public void FilterWorks(WorkCategory? category)
+    public void FilterWorks(WorkCategory? category, string? query = null)
     {
         VisibleWorks.Clear();
-        foreach (WorkSummary work in _allWorks.Where(work => category is null || work.Category == category))
+        string normalizedQuery = query?.Trim() ?? string.Empty;
+        foreach (WorkSummary work in _allWorks.Where(work =>
+                     (category is null || work.Category == category) &&
+                     (normalizedQuery.Length == 0 || work.Name.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))))
         {
             VisibleWorks.Add(work);
         }

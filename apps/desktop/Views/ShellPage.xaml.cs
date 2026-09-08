@@ -33,6 +33,9 @@ public sealed partial class ShellPage : Page
     private double _dragStartValue;
     private double _autoComposerHeight = ComposerHeightDefault;
     private bool _composerExpanded;
+    private bool _isWorkDetailMode;
+    private bool _workChatsExpanded;
+    private WorkCategory? _selectedWorkCategory;
 
     public ShellViewModel ViewModel { get; } = new();
 
@@ -63,7 +66,7 @@ public sealed partial class ShellPage : Page
             WorkAddButton.Opacity = 0;
             WorkAddButton.IsHitTestVisible = false;
         }
-        RecentArea.Visibility = _layout.SidebarCollapsed || !ViewModel.IsChatMode
+        RecentArea.Visibility = _layout.SidebarCollapsed || !ViewModel.IsChatMode || _isWorkDetailMode
             ? Visibility.Collapsed
             : Visibility.Visible;
         TopWorkspaceRow.Height = new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
@@ -291,6 +294,7 @@ public sealed partial class ShellPage : Page
 
     private void SetPrimaryMode(bool chat)
     {
+        _isWorkDetailMode = false;
         ViewModel.IsChatMode = chat;
         _layout.LastPrimaryContent = chat ? "chat" : "work";
         double switcherWidth = ChatWorkSwitcher.ActualWidth > 0 ? ChatWorkSwitcher.ActualWidth : 220;
@@ -299,6 +303,12 @@ public sealed partial class ShellPage : Page
         ChatAmbientLayer.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
         MainContentHost.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
         WorkHistoryHost.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
+        WorkDetailHost.Visibility = Visibility.Collapsed;
+        WorkDetailSidebarHost.Visibility = Visibility.Collapsed;
+        GlobalSidebarHeader.Visibility = Visibility.Visible;
+        GlobalNavigationArea.Visibility = Visibility.Visible;
+        GlobalNavigationDivider.Visibility = Visibility.Visible;
+        ChatWorkSwitcher.Visibility = Visibility.Visible;
         NewPrimaryActionLabel.Text = chat ? "新对话" : "新工作";
         RecentArea.Visibility = chat && !_layout.SidebarCollapsed
             ? Visibility.Visible
@@ -377,7 +387,8 @@ public sealed partial class ShellPage : Page
 
     private void SetWorkFilter(WorkCategory? category)
     {
-        ViewModel.FilterWorks(category);
+        _selectedWorkCategory = category;
+        ViewModel.FilterWorks(category, WorkSearchBox.Text);
         ViewModel.SelectedWork = null;
         WorkList.SelectedItem = null;
 
@@ -392,6 +403,18 @@ public sealed partial class ShellPage : Page
             : 234;
         double travelStep = (trackWidth - WorkFilterSelectionPill.Width) / 2;
         WorkFilterSelectionPill.Translation = new Vector3((float)(filterIndex * travelStep), 0, 8);
+    }
+
+    private void WorkSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is not TextBox searchBox)
+        {
+            return;
+        }
+
+        ViewModel.FilterWorks(_selectedWorkCategory, searchBox.Text);
+        ViewModel.SelectedWork = null;
+        WorkList.SelectedItem = null;
     }
 
     private void WorkList_ItemClick(object sender, ItemClickEventArgs e)
@@ -413,8 +436,48 @@ public sealed partial class ShellPage : Page
 
     private void OpenWork(WorkSummary work)
     {
-        // This is the navigation boundary for the future work-detail surface.
         ViewModel.SelectedWork = work;
+        _isWorkDetailMode = true;
+        _workChatsExpanded = false;
+
+        WorkDetailNameText.Text = work.Name;
+        WorkDetailTitleText.Text = work.Name;
+        WorkChatsList.Visibility = Visibility.Collapsed;
+        WorkChatsChevron.Glyph = "\uE76C";
+
+        ChatAmbientLayer.Visibility = Visibility.Collapsed;
+        MainContentHost.Visibility = Visibility.Collapsed;
+        WorkHistoryHost.Visibility = Visibility.Collapsed;
+        WorkDetailHost.Visibility = Visibility.Visible;
+        ChatWorkSwitcher.Visibility = Visibility.Collapsed;
+
+        GlobalSidebarHeader.Visibility = Visibility.Collapsed;
+        GlobalNavigationArea.Visibility = Visibility.Collapsed;
+        GlobalNavigationDivider.Visibility = Visibility.Collapsed;
+        RecentArea.Visibility = Visibility.Collapsed;
+        WorkDetailSidebarHost.Visibility = Visibility.Visible;
+    }
+
+    private void OpenWorkMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { CommandParameter: WorkSummary work })
+        {
+            OpenWork(work);
+        }
+    }
+
+    private void WorkDetailBackButton_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectedWork = null;
+        WorkList.SelectedItem = null;
+        SetPrimaryMode(true);
+    }
+
+    private void WorkChatsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _workChatsExpanded = !_workChatsExpanded;
+        WorkChatsList.Visibility = _workChatsExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WorkChatsChevron.Glyph = _workChatsExpanded ? "\uE70D" : "\uE76C";
     }
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
