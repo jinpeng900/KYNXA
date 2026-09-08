@@ -187,16 +187,11 @@
 
                 <StackPanel Grid.Row="2" HorizontalAlignment="Stretch">
                     <Button Style="{StaticResource KynxaNavigationButtonStyle}">
-                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="19" Height="19" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="新建工作对话" /></Grid>
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="19" Height="19" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作对话" /></Grid>
                     </Button>
-                    <Grid>
-                        <Button Style="{StaticResource KynxaNavigationButtonStyle}">
-                            <Grid Margin="0,0,26,0"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconWork}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="子工作" /></Grid>
-                        </Button>
-                        <Button Width="26" Height="26" Margin="0,0,11,0" Padding="4" HorizontalAlignment="Right" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" CornerRadius="6" ToolTipService.ToolTip="创建子工作">
-                            <FontIcon FontSize="13" Glyph="&#xE710;" />
-                        </Button>
-                    </Grid>
+                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="19" Height="19" HorizontalAlignment="Left" Source="{StaticResource IconAdd}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="子工作" /></Grid>
+                    </Button>
                     <Button Style="{StaticResource KynxaNavigationButtonStyle}">
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconSkills}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="工作任务" /></Grid>
                     </Button>
@@ -216,17 +211,69 @@
 
                 <Border Grid.Row="3" Margin="20,0,12,0" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" />
 
-                <StackPanel Grid.Row="4" Margin="10,10,10,6">
-                    <Button Click="WorkChatsToggle_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="24" /></Grid.ColumnDefinitions>
-                            <TextBlock Margin="10,0,0,0" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="工作中的聊天" />
-                            <FontIcon x:Name="WorkChatsChevron" Grid.Column="1" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" Glyph="&#xE76C;" />
+                <StackPanel Grid.Row="4" Margin="10,14,10,6" Spacing="6">
+                    <TextBlock Margin="10,0,0,0" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" Text="工作中的聊天" />
+                    <StackPanel x:Name="WorkChatsList">
+                        <Grid PointerEntered="ConversationRow_PointerEntered" PointerExited="ConversationRow_PointerExited">
+                            <Button x:Name="WorkConversationOpenButton1" Tag="ConversationOpen" Style="{StaticResource KynxaConversationButtonStyle}">
+                                <TextBlock Margin="0,0,30,0" FontSize="13" Foreground="{StaticResource KynxaTextBrush}" Text="需求梳理" TextTrimming="CharacterEllipsis" />
+                            </Button>
+                            <Button
+                                x:Name="WorkConversationMoreButton1"
+                                Tag="ConversationMore"
+                                Width="30"
+                                Height="30"
+                                Margin="0,0,4,0"
+                                Padding="5"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="更多工作对话操作"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                CornerRadius="7"
+                                IsHitTestVisible="False"
+                                Opacity="0">
+                                <Button.OpacityTransition><ScalarTransition Duration="0:0:0.14" /></Button.OpacityTransition>
+                                <Button.Resources>
+                                    <SolidColorBrush x:Key="ButtonForeground" Color="#7D899D" />
+                                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#111827" />
+                                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#111827" />
+                                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#120A1123" />
+                                </Button.Resources>
+                                <FontIcon FontSize="15" Glyph="&#xE712;" />
+                            </Button>
                         </Grid>
-                    </Button>
-                    <StackPanel x:Name="WorkChatsList" Visibility="Collapsed">
-                        <Button Content="需求梳理" Style="{StaticResource KynxaConversationButtonStyle}" />
-                        <Button Content="执行记录" Style="{StaticResource KynxaConversationButtonStyle}" />
+                        <Grid PointerEntered="ConversationRow_PointerEntered" PointerExited="ConversationRow_PointerExited">
+                            <Button x:Name="WorkConversationOpenButton2" Tag="ConversationOpen" Style="{StaticResource KynxaConversationButtonStyle}">
+                                <TextBlock Margin="0,0,30,0" FontSize="13" Foreground="{StaticResource KynxaTextBrush}" Text="执行记录" TextTrimming="CharacterEllipsis" />
+                            </Button>
+                            <Button
+                                x:Name="WorkConversationMoreButton2"
+                                Tag="ConversationMore"
+                                Width="30"
+                                Height="30"
+                                Margin="0,0,4,0"
+                                Padding="5"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="更多工作对话操作"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                CornerRadius="7"
+                                IsHitTestVisible="False"
+                                Opacity="0">
+                                <Button.OpacityTransition><ScalarTransition Duration="0:0:0.14" /></Button.OpacityTransition>
+                                <Button.Resources>
+                                    <SolidColorBrush x:Key="ButtonForeground" Color="#7D899D" />
+                                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#111827" />
+                                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#111827" />
+                                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#120A1123" />
+                                </Button.Resources>
+                                <FontIcon FontSize="15" Glyph="&#xE712;" />
+                            </Button>
+                        </Grid>
                     </StackPanel>
                 </StackPanel>
             </Grid>
