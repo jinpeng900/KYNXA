@@ -281,6 +281,7 @@ Search Provider
 Network Route
 ≠
 Authority Policy
+
 ```
 
 A local model such as DeepSeek, Qwen, Llama, or another supported model may use KYNXA Web Search without directly owning network access.
