@@ -96,7 +96,7 @@
                 <Button Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconSkills}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="技能" /></Grid>
                 </Button>
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                <Button Click="ModelManagementButton_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconModelManagement}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="模型管理" /></Grid>
                 </Button>
             </StackPanel>
@@ -204,8 +204,8 @@
                     <Button Style="{StaticResource KynxaNavigationButtonStyle}">
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconScheduledTask}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="定时任务" /></Grid>
                     </Button>
-                    <Button Style="{StaticResource KynxaNavigationButtonStyle}">
-                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconModelManagement}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="模型配置" /></Grid>
+                    <Button Click="ModelManagementButton_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconModelManagement}" /><TextBlock Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" FontSize="14" Text="模型管理" /></Grid>
                     </Button>
                 </StackPanel>
 
