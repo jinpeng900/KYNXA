@@ -35,6 +35,7 @@ public sealed partial class ShellPage : Page
     private bool _composerExpanded;
     private bool _isWorkDetailMode;
     private WorkCategory? _selectedWorkCategory;
+    private ModelManagementWindow? _modelManagementWindow;
 
     public ShellViewModel ViewModel { get; } = new();
 
@@ -501,6 +502,24 @@ public sealed partial class ShellPage : Page
         ViewModel.SelectedWork = null;
         WorkList.SelectedItem = null;
         SetPrimaryMode(true);
+    }
+
+    private void ModelManagementButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_modelManagementWindow is not null)
+        {
+            _modelManagementWindow.Activate();
+            return;
+        }
+
+        _modelManagementWindow = new ModelManagementWindow();
+        _modelManagementWindow.Closed += ModelManagementWindow_Closed;
+        _modelManagementWindow.Activate();
+    }
+
+    private void ModelManagementWindow_Closed(object sender, WindowEventArgs args)
+    {
+        _modelManagementWindow = null;
     }
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
