@@ -14,11 +14,12 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Height="40" Background="{StaticResource KynxaTitleBarBrush}">
+        <Grid x:Name="AppTitleBar" Height="48" Background="{StaticResource KynxaTitleBarBrush}">
             <TextBlock
                 Margin="20,0,0,0"
                 VerticalAlignment="Center"
-                FontSize="16"
+                FontFamily="Segoe UI"
+                FontSize="14"
                 FontWeight="SemiBold"
                 Foreground="{StaticResource KynxaTextBrush}"
                 Text="KYNXA" />
@@ -36,10 +37,6 @@
                 ToolTipService.ToolTip="更多功能">
                 <FontIcon FontSize="14" Glyph="&#xE712;" />
             </Button>
-            <Border
-                VerticalAlignment="Bottom"
-                BorderBrush="{StaticResource KynxaDividerBrush}"
-                BorderThickness="0,0,0,1" />
         </Grid>
 
         <Frame x:Name="RootFrame" Grid.Row="1" />

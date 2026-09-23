@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <SvgImageSource x:Key="IconSidebarToggle" UriSource="ms-appx:///Resources/UI/Icons/sidebar-toggle.svg" />
+    <SvgImageSource x:Key="IconPermissionAsk" UriSource="ms-appx:///Resources/UI/Icons/permission-ask.svg" />
+    <SvgImageSource x:Key="IconPermissionSmart" UriSource="ms-appx:///Resources/UI/Icons/permission-smart.svg" />
+    <SvgImageSource x:Key="IconPermissionFull" UriSource="ms-appx:///Resources/UI/Icons/permission-full.svg" />
     <SvgImageSource x:Key="IconSearch" UriSource="ms-appx:///Resources/UI/Icons/search.svg" />
     <SvgImageSource x:Key="IconAdd" UriSource="ms-appx:///Resources/UI/Icons/add.svg" />
     <SvgImageSource x:Key="IconKnowledge" UriSource="ms-appx:///Resources/UI/Icons/knowledge.svg" />
     <SvgImageSource x:Key="IconWork" UriSource="ms-appx:///Resources/UI/Icons/work-folder.svg" />
+    <SvgImageSource x:Key="IconFolderAdd" UriSource="ms-appx:///Resources/UI/Icons/folder-add.svg" />
+    <SvgImageSource x:Key="IconChatAdd" UriSource="ms-appx:///Resources/UI/Icons/chat-add.svg" />
     <SvgImageSource x:Key="IconConnect" UriSource="ms-appx:///Resources/UI/Icons/connect.svg" />
     <SvgImageSource x:Key="IconScheduledTask" UriSource="ms-appx:///Resources/UI/Icons/scheduled-task.svg" />
     <SvgImageSource x:Key="IconSkills" UriSource="ms-appx:///Resources/UI/Icons/skills.svg" />

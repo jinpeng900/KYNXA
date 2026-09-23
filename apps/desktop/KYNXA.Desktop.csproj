@@ -31,6 +31,7 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
+    <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
   </ItemGroup>
 
   <!--

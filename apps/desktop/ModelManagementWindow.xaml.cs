@@ -40,6 +40,8 @@ public sealed partial class ModelManagementWindow : Window
     private void OfficialModelsButton_Click(object sender, RoutedEventArgs e) => ShowCategory(1);
     private void CustomModelsButton_Click(object sender, RoutedEventArgs e) => ShowCategory(2);
 
+    public void ShowCustomModels() => ShowCategory(2);
+
     private void ShowCategory(int index)
     {
         LocalModelsHost.Visibility = index == 0 ? Visibility.Visible : Visibility.Collapsed;

@@ -4,10 +4,13 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     IsTabStop="True"
+    HorizontalContentAlignment="Stretch"
+    VerticalContentAlignment="Stretch"
     DoubleTapped="Grip_DoubleTapped"
     KeyDown="Grip_KeyDown"
     PointerEntered="Grip_PointerEntered"
     PointerExited="Grip_PointerExited"
+    PointerCaptureLost="Grip_PointerCaptureLost"
     PointerMoved="Grip_PointerMoved"
     PointerPressed="Grip_PointerPressed"
     PointerReleased="Grip_PointerReleased">

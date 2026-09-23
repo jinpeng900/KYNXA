@@ -22,6 +22,7 @@ public sealed class ResizeDeltaEventArgs(double delta) : EventArgs
 public sealed partial class ResizeGrip : UserControl
 {
     private bool _dragging;
+    private bool _pointerOver;
     private Point _startPoint;
 
     public ResizeAxis Axis
@@ -34,6 +35,27 @@ public sealed partial class ResizeGrip : UserControl
         nameof(Axis), typeof(ResizeAxis), typeof(ResizeGrip),
         new PropertyMetadata(ResizeAxis.Horizontal, OnAxisChanged));
 
+    public bool AlwaysShowIndicator
+    {
+        get => (bool)GetValue(AlwaysShowIndicatorProperty);
+        set => SetValue(AlwaysShowIndicatorProperty, value);
+    }
+
+    public static readonly DependencyProperty AlwaysShowIndicatorProperty = DependencyProperty.Register(
+        nameof(AlwaysShowIndicator), typeof(bool), typeof(ResizeGrip), new PropertyMetadata(false, OnIndicatorChanged));
+
+    public Brush? IndicatorBrush
+    {
+        get => (Brush?)GetValue(IndicatorBrushProperty);
+        set => SetValue(IndicatorBrushProperty, value);
+    }
+
+    public static readonly DependencyProperty IndicatorBrushProperty = DependencyProperty.Register(
+        nameof(IndicatorBrush), typeof(Brush), typeof(ResizeGrip), new PropertyMetadata(null, OnIndicatorChanged));
+
+    private static void OnIndicatorChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args) =>
+        ((ResizeGrip)sender).UpdateIndicator();
+
     public event EventHandler? DragStarted;
     public event EventHandler<ResizeDeltaEventArgs>? DragDelta;
     public event EventHandler? DragCompleted;
@@ -44,6 +66,7 @@ public sealed partial class ResizeGrip : UserControl
     {
         InitializeComponent();
         UpdateAxisVisuals();
+        UpdateIndicator();
     }
 
     private static void OnAxisChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args) =>
@@ -61,12 +84,16 @@ public sealed partial class ResizeGrip : UserControl
             Width = 8;
             Indicator.Width = 1;
             Indicator.Height = double.NaN;
+            Indicator.HorizontalAlignment = HorizontalAlignment.Center;
+            Indicator.VerticalAlignment = VerticalAlignment.Stretch;
         }
         else
         {
             Height = 8;
             Indicator.Height = 1;
             Indicator.Width = double.NaN;
+            Indicator.HorizontalAlignment = HorizontalAlignment.Stretch;
+            Indicator.VerticalAlignment = VerticalAlignment.Center;
         }
     }
 
@@ -74,6 +101,7 @@ public sealed partial class ResizeGrip : UserControl
 
     private void Grip_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
         _dragging = CapturePointer(e.Pointer);
         if (!_dragging)
         {
@@ -108,6 +136,7 @@ public sealed partial class ResizeGrip : UserControl
 
         _dragging = false;
         ReleasePointerCapture(e.Pointer);
+        UpdateIndicator();
         DragCompleted?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
@@ -127,22 +156,38 @@ public sealed partial class ResizeGrip : UserControl
 
         _dragging = false;
         ReleasePointerCaptures();
+        UpdateIndicator();
         CancelRequested?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
 
     private void Grip_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
-        Indicator.Background = (Brush)Application.Current.Resources["KynxaDividerBrush"];
+        _pointerOver = true;
+        UpdateIndicator();
         ProtectedCursor = InputSystemCursor.Create(
             Axis == ResizeAxis.Horizontal ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeNorthSouth);
     }
 
     private void Grip_PointerExited(object sender, PointerRoutedEventArgs e)
     {
-        if (!_dragging)
-        {
-            Indicator.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        }
+        _pointerOver = false;
+        UpdateIndicator();
+    }
+
+    private void Grip_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_dragging) return;
+        _dragging = false;
+        UpdateIndicator();
+        DragCompleted?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateIndicator()
+    {
+        if (Indicator is null) return;
+        Indicator.Background = AlwaysShowIndicator || _pointerOver || _dragging
+            ? IndicatorBrush ?? (Brush)Application.Current.Resources["KynxaDividerBrush"]
+            : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
     }
 }

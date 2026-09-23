@@ -1,0 +1,198 @@
+{
+    "source_archive_sha256":  "7FA3E54BBD17FF95A35ACAA3C175CB9B7DAF7CF0FDBF7E64306E14F08974D638",
+    "source_content_nonspace":  107988,
+    "refined_content_nonspace":  92879,
+    "chapters":  23,
+    "tables":  84,
+    "original_record_checks":  796,
+    "preserved_record_checks":  796,
+    "xml_parts_valid":  10,
+    "table_geometry":  "passed",
+    "render_qa":  "not performed: bundled Python/LibreOffice unavailable in this Windows environment",
+    "coverage":  [
+                     {
+                         "chapter":  "00",
+                         "records":  42,
+                         "preserved":  42,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "01",
+                         "records":  44,
+                         "preserved":  44,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "02",
+                         "records":  44,
+                         "preserved":  44,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "03",
+                         "records":  42,
+                         "preserved":  42,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "04",
+                         "records":  45,
+                         "preserved":  45,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "05",
+                         "records":  42,
+                         "preserved":  42,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "06",
+                         "records":  46,
+                         "preserved":  46,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "07",
+                         "records":  44,
+                         "preserved":  44,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "08",
+                         "records":  44,
+                         "preserved":  44,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "09",
+                         "records":  45,
+                         "preserved":  45,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "10",
+                         "records":  40,
+                         "preserved":  40,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "11",
+                         "records":  36,
+                         "preserved":  36,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "12",
+                         "records":  37,
+                         "preserved":  37,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "13",
+                         "records":  35,
+                         "preserved":  35,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "14",
+                         "records":  40,
+                         "preserved":  40,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "15",
+                         "records":  41,
+                         "preserved":  41,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "16",
+                         "records":  40,
+                         "preserved":  40,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "17",
+                         "records":  45,
+                         "preserved":  45,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "Appendix_A",
+                         "records":  18,
+                         "preserved":  18,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "Appendix_B",
+                         "records":  11,
+                         "preserved":  11,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "Appendix_C",
+                         "records":  0,
+                         "preserved":  0,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "Appendix_D",
+                         "records":  15,
+                         "preserved":  15,
+                         "missing":  [
+
+                                     ]
+                     },
+                     {
+                         "chapter":  "Appendix_E",
+                         "records":  0,
+                         "preserved":  0,
+                         "missing":  [
+
+                                     ]
+                     }
+                 ]
+}

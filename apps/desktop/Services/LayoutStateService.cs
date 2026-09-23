@@ -17,6 +17,15 @@ public sealed class LayoutStateService
                 LayoutState? state = JsonSerializer.Deserialize<LayoutState>(json);
                 if (state is not null && state.LayoutVersion <= LayoutState.CurrentVersion)
                 {
+                    if (state.LayoutVersion < 3)
+                    {
+                        state.SidebarWidth = 240;
+                    }
+                    if (state.LayoutVersion < 4)
+                    {
+                        state.PreviewVisible = true;
+                        state.PreviewWidth = 0;
+                    }
                     state.LayoutVersion = LayoutState.CurrentVersion;
                     return state;
                 }

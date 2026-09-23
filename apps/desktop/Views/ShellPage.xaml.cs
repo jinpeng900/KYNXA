@@ -13,9 +13,9 @@ namespace KYNXA_Desktop.Views;
 /// <summary>The default KYNXA desktop shell defined by UI Design Spec v1.1.</summary>
 public sealed partial class ShellPage : Page
 {
-    private const double SidebarDefault = 176;
+    private const double SidebarDefault = 240;
     private const double SidebarCollapsed = 56;
-    private const double SidebarMin = 144;
+    private const double SidebarMin = 200;
     private const double SidebarMax = 360;
     private const double TopDefault = 96;
     private const double TopMin = 72;
@@ -33,8 +33,13 @@ public sealed partial class ShellPage : Page
     private double _dragStartValue;
     private double _autoComposerHeight = ComposerHeightDefault;
     private bool _composerExpanded;
-    private bool _isWorkDetailMode;
-    private WorkCategory? _selectedWorkCategory;
+    private bool _applyingLayout;
+    private string _workDraft = string.Empty;
+    private string _chatDraft = string.Empty;
+    private string _workConversationTitle = string.Empty;
+    private string _chatConversationTitle = string.Empty;
+
+    private Microsoft.UI.Xaml.Media.Animation.Storyboard? _sidebarTransition;
     private ModelManagementWindow? _modelManagementWindow;
 
     public ShellViewModel ViewModel { get; } = new();
@@ -44,50 +49,50 @@ public sealed partial class ShellPage : Page
         InitializeComponent();
     }
 
-    private void PageRoot_Loaded(object sender, RoutedEventArgs e)
+    private async void PageRoot_Loaded(object sender, RoutedEventArgs e)
     {
         _layout = _layoutStateService.Load();
         ApplyLayout();
-        SetPrimaryMode(true);
+        InitializeModelPicker();
+        InitializePermissionPicker();
+        await InitializeProjectsAsync();
+        SetPrimaryMode(false);
     }
 
     private void ApplyLayout()
     {
-        double sidebar = _layout.SidebarCollapsed
-            ? SidebarCollapsed
-            : Math.Clamp(_layout.SidebarWidth, SidebarMin, SidebarMax);
-
-        SidebarColumn.Width = new GridLength(sidebar);
-        WorkNavigationContent.Margin = _layout.SidebarCollapsed
-            ? new Thickness(0)
-            : new Thickness(0, 0, 26, 0);
-        if (_layout.SidebarCollapsed)
+        if (_applyingLayout || WorkContextPanel is null) return;
+        _applyingLayout = true;
+        try
         {
-            WorkAddButton.Opacity = 0;
-            WorkAddButton.IsHitTestVisible = false;
-        }
-        RecentArea.Visibility = _layout.SidebarCollapsed || !ViewModel.IsChatMode || _isWorkDetailMode
-            ? Visibility.Collapsed
-            : Visibility.Visible;
-        TopWorkspaceRow.Height = _isWorkDetailMode
-            ? new GridLength(0)
-            : new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
-        TopWorkspaceGrip.Visibility = _isWorkDetailMode ? Visibility.Collapsed : Visibility.Visible;
+            double sidebar = _layout.SidebarCollapsed
+                ? SidebarCollapsed
+                : Math.Clamp(_layout.SidebarWidth, SidebarMin, SidebarMax);
 
-        double available = PrimaryContentSlot.ActualWidth > 0 ? PrimaryContentSlot.ActualWidth : MainRegion.ActualWidth;
-        if (available > 0)
-        {
-            (double minimumComposerWidth, double maximumComposerWidth) = GetComposerWidthRange(available);
-            ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, minimumComposerWidth, maximumComposerWidth);
-        }
+            SidebarColumn.Width = new GridLength(sidebar);
+            RecentArea.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            ChatWorkSwitcher.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            TopWorkspaceRow.Height = new GridLength(0);
+            TopWorkspaceGrip.Visibility = Visibility.Collapsed;
+            UpdateWorkspacePickerVisibility();
 
-        double maximumComposerHeight = GetComposerHeightMaximum();
-        double minimumComposerHeight = Math.Min(ComposerHeightMin, maximumComposerHeight);
-        double requestedComposerHeight = _composerExpanded
-            ? maximumComposerHeight
-            : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
-        ComposerHost.Height = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
-        UpdateAdaptiveContentLayout();
+            double available = UpdateWorkPanelLayout();
+            if (available > 0)
+            {
+                (double minimumComposerWidth, double maximumComposerWidth) = GetComposerWidthRange(available);
+                ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, minimumComposerWidth, maximumComposerWidth);
+            }
+
+            double maximumComposerHeight = GetComposerHeightMaximum();
+            double minimumComposerHeight = Math.Min(ComposerHeightMin, maximumComposerHeight);
+            double requestedComposerHeight = _composerExpanded
+                ? maximumComposerHeight
+                : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
+            ComposerHost.Height = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
+            ModelPickerButton.MaxWidth = Math.Max(64, ComposerHost.Width - 250);
+            UpdateAdaptiveContentLayout(available);
+        }
+        finally { _applyingLayout = false; }
     }
 
     private static (double Minimum, double Maximum) GetComposerWidthRange(double availableWidth)
@@ -104,9 +109,9 @@ public sealed partial class ShellPage : Page
         return (Math.Min(ComposerWidthMin, maximum), maximum);
     }
 
-    private void UpdateAdaptiveContentLayout()
+    private void UpdateAdaptiveContentLayout(double availableWidth)
     {
-        double width = PrimaryContentSlot.ActualWidth;
+        double width = availableWidth;
         double height = PrimaryContentSlot.ActualHeight;
         if (width <= 0 || height <= 0)
         {
@@ -122,8 +127,10 @@ public sealed partial class ShellPage : Page
         MainContentHost.Spacing = Math.Clamp(22 + ((height - 520) * 0.04), 22, 42);
 
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
-        ChatWorkSwitcher.Translation = new Vector3(0, 0, 16);
-        MainContentHost.Translation = new Vector3(0, (float)-upwardOffset, 0);
+
+        MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
+        ConversationMessages.Width = Math.Min(920, Math.Max(0, width - 48));
+        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.Height + 40 + WorkspacePickerHeight);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
         AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
@@ -140,7 +147,7 @@ public sealed partial class ShellPage : Page
         }
 
         // Keep a small breathing space so the editor never exceeds its conversation region.
-        return Math.Min(ComposerHeightMax, Math.Max(72, availableHeight - 32));
+        return Math.Min(ComposerHeightMax, Math.Max(72, availableHeight - 32 - WorkspacePickerHeight));
     }
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
@@ -150,7 +157,7 @@ public sealed partial class ShellPage : Page
     private void MainRegion_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout();
 
     private void PrimaryContentSlot_SizeChanged(object sender, SizeChangedEventArgs e) =>
-        UpdateAdaptiveContentLayout();
+        ApplyLayout();
 
     private void SidebarToggle_Click(object sender, RoutedEventArgs e)
     {
@@ -297,31 +304,104 @@ public sealed partial class ShellPage : Page
 
     private void SetPrimaryMode(bool chat)
     {
-        _isWorkDetailMode = false;
+        bool changed = ViewModel.IsChatMode != chat;
+        if (changed)
+        {
+            if (ViewModel.IsChatMode)
+            {
+                _chatDraft = PromptTextBox.Text;
+                CaptureStandaloneDraft();
+                DiscardEmptyStandaloneChats();
+            }
+            else
+            {
+                _workDraft = PromptTextBox.Text;
+                CaptureProjectDraft();
+                DiscardEmptyProjectChats();
+            }
+        }
         ViewModel.IsChatMode = chat;
         _layout.LastPrimaryContent = chat ? "chat" : "work";
-        double switcherWidth = ChatWorkSwitcher.ActualWidth > 0 ? ChatWorkSwitcher.ActualWidth : 220;
-        double pillTravel = Math.Max(0, switcherWidth - PrimaryModeSelectionPill.Width);
-        PrimaryModeSelectionPill.Translation = new Vector3(chat ? 0 : (float)pillTravel, 0, 8);
-        ChatAmbientLayer.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
-        MainContentHost.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
-        WorkHistoryHost.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
-        WorkDetailHost.Visibility = Visibility.Collapsed;
-        WorkDetailSidebarHost.Visibility = Visibility.Collapsed;
-        GlobalSidebarHeader.Visibility = Visibility.Visible;
-        GlobalNavigationArea.Visibility = Visibility.Visible;
-        GlobalNavigationDivider.Visibility = Visibility.Visible;
-        ChatWorkSwitcher.Visibility = Visibility.Visible;
-        TopWorkspaceRow.Height = new GridLength(Math.Clamp(_layout.TopWorkspaceHeight, TopMin, TopMax));
-        TopWorkspaceGrip.Visibility = Visibility.Visible;
-        NewPrimaryActionLabel.Text = chat ? "新对话" : "新工作";
-        RecentArea.Visibility = chat && !_layout.SidebarCollapsed
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        UpdateModeSelection();
+        WorkModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.Medium;
+        ChatModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Medium : Microsoft.UI.Text.FontWeights.Normal;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WorkModeButton, chat ? "未选中" : "已选中");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(ChatModeButton, chat ? "已选中" : "未选中");
+        WorkSidebarContent.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
+        ChatSidebarContent.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
+        ChatAmbientLayer.Visibility = Visibility.Visible;
+        MainContentHost.Visibility = Visibility.Visible;
+        if (changed)
+        {
+            // TextBox's two-way source can still be pending a focus change.
+            PromptTextBox.Text = chat ? _chatDraft : _workDraft;
+            ViewModel.Prompt = PromptTextBox.Text;
+            AnimateSidebarEntrance(chat ? ChatSidebarContent : WorkSidebarContent);
+        }
+        UpdateConversationTitle();
+        UpdateConversationPresentation();
         PromptTextBox.PlaceholderText = chat ? "向 KYNXA 提问任何问题..." : "描述你想完成的工作...";
         SaveLayout();
     }
 
+    private void ModeSwitchTrack_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (PrimaryModeSelectionPill is null) return;
+        // Resize immediately; only mode changes animate between the two equal halves.
+        var transition = PrimaryModeSelectionPill.TranslationTransition;
+        PrimaryModeSelectionPill.TranslationTransition = null;
+        UpdateModeSelection();
+        PrimaryModeSelectionPill.TranslationTransition = transition;
+    }
+
+    private void UpdateModeSelection()
+    {
+        double half = ModeSwitchTrack.ActualWidth / 2;
+        if (half <= 0) return;
+        PrimaryModeSelectionPill.Width = half;
+        PrimaryModeSelectionPill.Translation = new Vector3(ViewModel.IsChatMode ? (float)half : 0, 0, 0);
+    }
+
+    private void AnimateSidebarEntrance(FrameworkElement target)
+    {
+        _sidebarTransition?.Stop();
+        var fade = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            From = 0.5, To = 1,
+            Duration = new Duration(TimeSpan.FromMilliseconds(120)),
+            FillBehavior = Microsoft.UI.Xaml.Media.Animation.FillBehavior.Stop
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fade, target);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fade, "Opacity");
+        _sidebarTransition = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+        _sidebarTransition.Children.Add(fade);
+        _sidebarTransition.Begin();
+    }
+
+    private void UpdateConversationTitle()
+    {
+        ConversationTitle.Text = ViewModel.IsChatMode ? _chatConversationTitle : _workConversationTitle;
+        ConversationTitle.Visibility = string.IsNullOrEmpty(ConversationTitle.Text) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void ProjectsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        bool visible = ProjectTree.Visibility == Visibility.Visible;
+        ProjectTree.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
+        ProjectsChevron.Glyph = visible ? "\uE76C" : "\uE70D";
+    }
+
+    private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (ProjectTree is null) return;
+        // Keep tasks below the projects, with space before the footer even when expanded.
+        UpdateWorkSidebarHeights(e.NewSize.Height);
+    }
+
+    private void ChatHistoryList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is RecentConversation conversation) SelectStandaloneChat(conversation);
+    }
     private void ConversationRow_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not FrameworkElement row)
@@ -387,133 +467,20 @@ public sealed partial class ShellPage : Page
         return null;
     }
 
-    private void WorkRow_PointerEntered(object sender, PointerRoutedEventArgs e)
-    {
-        WorkNavigationButton.Background =
-            (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["KynxaControlHoverBrush"];
-        if (_layout.SidebarCollapsed)
-        {
-            return;
-        }
+    private void ModelManagementButton_Click(object sender, RoutedEventArgs e) => OpenModelManagement();
 
-        WorkAddButton.IsHitTestVisible = true;
-        WorkAddButton.Opacity = 1;
-    }
-
-    private void WorkRow_PointerExited(object sender, PointerRoutedEventArgs e)
-    {
-        WorkNavigationButton.Background =
-            new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        WorkAddButton.Opacity = 0;
-        WorkAddButton.IsHitTestVisible = false;
-    }
-
-    private void AllWorksFilterButton_Click(object sender, RoutedEventArgs e) => SetWorkFilter(null);
-
-    private void PersonalWorksFilterButton_Click(object sender, RoutedEventArgs e) =>
-        SetWorkFilter(WorkCategory.Personal);
-
-    private void SharedWorksFilterButton_Click(object sender, RoutedEventArgs e) =>
-        SetWorkFilter(WorkCategory.Shared);
-
-    private void SetWorkFilter(WorkCategory? category)
-    {
-        _selectedWorkCategory = category;
-        ViewModel.FilterWorks(category, WorkSearchBox.Text);
-        ViewModel.SelectedWork = null;
-        WorkList.SelectedItem = null;
-
-        int filterIndex = category switch
-        {
-            WorkCategory.Personal => 1,
-            WorkCategory.Shared => 2,
-            _ => 0
-        };
-        double trackWidth = WorkFilterSelectionPill.Parent is FrameworkElement track && track.ActualWidth > 0
-            ? track.ActualWidth
-            : 234;
-        double travelStep = (trackWidth - WorkFilterSelectionPill.Width) / 2;
-        WorkFilterSelectionPill.Translation = new Vector3((float)(filterIndex * travelStep), 0, 8);
-    }
-
-    private void WorkSearchBox_TextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (sender is not TextBox searchBox)
-        {
-            return;
-        }
-
-        ViewModel.FilterWorks(_selectedWorkCategory, searchBox.Text);
-        ViewModel.SelectedWork = null;
-        WorkList.SelectedItem = null;
-    }
-
-    private void WorkList_ItemClick(object sender, ItemClickEventArgs e)
-    {
-        if (e.ClickedItem is WorkSummary work)
-        {
-            ViewModel.SelectedWork = work;
-        }
-    }
-
-    private void WorkList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-    {
-        if (WorkList.SelectedItem is WorkSummary work)
-        {
-            OpenWork(work);
-            e.Handled = true;
-        }
-    }
-
-    private void OpenWork(WorkSummary work)
-    {
-        ViewModel.SelectedWork = work;
-        _isWorkDetailMode = true;
-
-        WorkDetailNameText.Text = work.Name;
-        WorkDetailTitleText.Text = work.Name;
-        PromptTextBox.PlaceholderText = "向 KYNXA 提问任何问题...";
-
-        ChatAmbientLayer.Visibility = Visibility.Visible;
-        MainContentHost.Visibility = Visibility.Visible;
-        WorkHistoryHost.Visibility = Visibility.Collapsed;
-        WorkDetailHost.Visibility = Visibility.Collapsed;
-        ChatWorkSwitcher.Visibility = Visibility.Collapsed;
-
-        GlobalSidebarHeader.Visibility = Visibility.Collapsed;
-        GlobalNavigationArea.Visibility = Visibility.Collapsed;
-        GlobalNavigationDivider.Visibility = Visibility.Collapsed;
-        RecentArea.Visibility = Visibility.Collapsed;
-        WorkDetailSidebarHost.Visibility = Visibility.Visible;
-        TopWorkspaceRow.Height = new GridLength(0);
-        TopWorkspaceGrip.Visibility = Visibility.Collapsed;
-    }
-
-    private void OpenWorkMenuItem_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is MenuFlyoutItem { CommandParameter: WorkSummary work })
-        {
-            OpenWork(work);
-        }
-    }
-
-    private void WorkDetailBackButton_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.SelectedWork = null;
-        WorkList.SelectedItem = null;
-        SetPrimaryMode(true);
-    }
-
-    private void ModelManagementButton_Click(object sender, RoutedEventArgs e)
+    private void OpenModelManagement(bool customModels = false)
     {
         if (_modelManagementWindow is not null)
         {
+            if (customModels) _modelManagementWindow.ShowCustomModels();
             _modelManagementWindow.Activate();
             return;
         }
 
         _modelManagementWindow = new ModelManagementWindow();
         _modelManagementWindow.Closed += ModelManagementWindow_Closed;
+        if (customModels) _modelManagementWindow.ShowCustomModels();
         _modelManagementWindow.Activate();
     }
 
@@ -559,32 +526,6 @@ public sealed partial class ShellPage : Page
         PromptTextBox.Focus(FocusState.Programmatic);
     }
 
-    private void ExecutionModeMenuItem_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuFlyoutItem { Tag: string mode })
-        {
-            return;
-        }
-
-        ExecutionModeLabel.Text = mode switch
-        {
-            "quick" => "快速",
-            "deep" => "深度",
-            _ => "标准"
-        };
-        ToolTipService.SetToolTip(ExecutionModeButton, $"执行模式：{ExecutionModeLabel.Text}");
-    }
-
-    private void WebSearchToggleButton_StateChanged(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleButton toggle)
-        {
-            ToolTipService.SetToolTip(
-                toggle,
-                toggle.IsChecked == true ? "联网搜索：已开启" : "联网搜索：已关闭");
-        }
-    }
-
     private void UpdateComposerExpandVisual()
     {
         ComposerExpandIcon.Glyph = _composerExpanded ? "\uE73F" : "\uE740";
@@ -604,11 +545,4 @@ public sealed partial class ShellPage : Page
         PromptTextBox.Focus(FocusState.Programmatic);
     }
 
-    private void SendButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (string.IsNullOrWhiteSpace(ViewModel.Prompt))
-        {
-            PromptTextBox.Focus(FocusState.Programmatic);
-        }
-    }
 }
