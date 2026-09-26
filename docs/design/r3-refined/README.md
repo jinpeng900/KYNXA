@@ -4,6 +4,8 @@
 
 原始 139 页压缩包保持不变。本版保留 18 章和 5 个附录，将重复的通用规则集中，并补充可实现的接口、状态机、恢复和验收建议。建议内容不自动覆盖原冻结决策。
 
+当前修订采用扁平 Work：每个 Work 都是不可嵌套且相互独立的 Scope；复杂任务层级继续由 Work 内部的 TaskGraph、TaskNode 与 Subagent 表达。标签、置顶、归档和展示分组不产生权限、知识或状态继承。
+
 engineering-additions.md 是新增内容源，build.ps1 从原压缩包提取章节并生成主文档。运行方式：在 PowerShell 中执行 .\build.ps1；也可传 -SourceArchive 指定原压缩包。
 
 content-audit.json 记录原始包摘要、内容规模、章节覆盖和 OOXML 结构校验。源文档的独特表格记录按内容保留检查；不把模板去重等同于删除需求。

@@ -15,6 +15,28 @@ function Read-ZipText($entry) {
     try { $r.ReadToEnd().Replace("`r`n", "`n") } finally { $r.Dispose() }
 }
 function Write-Utf8([string]$path, [string]$value) { [System.IO.File]::WriteAllText($path, $value, $utf8) }
+function Apply-FlatWorkPolicy([string]$text) {
+    $text = $text.Replace('Work、Child Work、Conversation', 'Work、Conversation')
+    $text = $text.Replace('Work 逻辑树与磁盘目录解耦', 'Work 逻辑边界与磁盘目录解耦')
+    $text = $text.Replace('多个 Child Work 移动时循环检测正确', '多个 Work 并发更新时 revision 冲突可检测')
+    $text = $text.Replace(
+        'Work 是长期容器而非文件夹。左侧在 Work Scope 下显示该 Work 的 Conversation 列表；主体仍是标准对话框。Work Overview 展示目标、最近活动、Tasks、Knowledge、Artifacts、待审批项与模型策略。Child Work 以树形层级展示，但内容访问仍按独立 Scope。',
+        'Work 是不可嵌套的长期容器而非文件夹。左侧以扁平列表展示 Work，并在选定的 Work Scope 下显示其 Conversation 列表；主体仍是标准对话框。Work Overview 展示目标、最近活动、Tasks、Knowledge、Artifacts、待审批项与模型策略。置顶、归档、标签、搜索和纯展示分组可以辅助整理，但不得形成父子关系或带来权限、知识、状态继承。')
+    $text = $text.Replace('| STATE-001 | Work Tree | 每个 Work 最多一个 parent_work_id，禁止循环。 |', '| STATE-001 | Flat Work | Work 不可嵌套；每个 Work 是独立 Scope。 |')
+    $text = $text.Replace(
+        'Work 聚合 Conversation、Task、Knowledge、Artifact、Decision、Memory、ModelPolicy 与 PermissionPolicy。磁盘不跟随逻辑树嵌套移动，避免重命名/移动 Work 引发大规模文件搬迁。父 Work 可聚合元数据，但不得自动继承子 Work 私有知识或 Grant。',
+        'Work 聚合 Conversation、Task、Knowledge、Artifact、Decision、Memory、ModelPolicy 与 PermissionPolicy。Work 之间不存在父子关系、层级继承或移动操作；磁盘目录与 Work 身份解耦，重命名、归档或调整展示分组不搬迁文件。任何跨 Work 聚合仅是经过授权的查询投影，不改变各自的 Scope、知识或 Grant。')
+    $text = $text.Replace('Child Work scope 不串', '不同 Work 的 scope 不串')
+    $text = $text.Replace('Work/Child Work 长期 Scope', '扁平且相互独立的 Work 长期 Scope')
+    $text = $text.Replace('Child Work 具有独立 scope，不因父级查看而自动扩权', '每个 Work 具有独立 scope，展示分组、标签或跨 Work 聚合不得自动扩权')
+    $text = $text.Replace('移动 Child Work 做循环检测', '不同 Work 的查询、Context 与 Artifact 引用不能跨 scope')
+    $text = $text.Replace(
+        '`work(parent_work_id)` 形成单父树；',
+        '`work` 是扁平且独立的 Scope；')
+    $text = $text.Replace('Child Work scope 查询隔离', '不同 Work 的 scope 查询隔离')
+    $text = $text.Replace('| Work | Child Work / scope | 无循环；不跨 Work 泄漏 |', '| Work | 扁平 Work / scope | 不嵌套；不跨 Work 泄漏 |')
+    return $text
+}
 $supplement = [System.IO.File]::ReadAllText((Join-Path $outRoot 'engineering-additions.md'))
 $additions = @{}
 foreach ($m in [regex]::Matches($supplement, '(?s)<!-- CHAPTER:([^ ]+) -->\s*(.*?)(?=<!-- CHAPTER:|\z)')) {
@@ -45,7 +67,7 @@ function Compress-Catalog([string]$text, [string]$letter, [string]$label) {
     return $text.Substring(0,$match.Index) + $replacement + $text.Substring($match.Index+$match.Length)
 }
 foreach ($entry in $entries) {
-    $original = Read-ZipText $entry
+    $original = Apply-FlatWorkPolicy (Read-ZipText $entry)
     $id = if ($entry.Name.StartsWith('Appendix_')) { $entry.Name.Substring(0,10) } else { $entry.Name.Substring(0,2) }
     $sourceChapters[$id] = $original
     $body = $original
@@ -97,6 +119,7 @@ $intro = @'
 - 细化 IPC Envelope、消息族、数据库最小表集合、scope 一致性和事务边界。
 - 明确独立进程与实际 OS 隔离的区别，并将未确定的技术选择列为 ADR。
 - 区分代码现状、冻结要求和工程建议；不把示例连接诊断、性能数字或文档测试当成已验证结果。
+- 取消父子 Work；Work 改为扁平、不可嵌套且相互独立的 Scope，复杂任务层级继续由 TaskGraph、TaskNode 与 Subagent 表达。
 
 ### 阅读标识
 
@@ -316,6 +339,12 @@ $stats=[ordered]@{
     preserved_record_checks=($coverage.preserved | Measure-Object -Sum).Sum
     xml_parts_valid=$parts.Count
     table_geometry='passed'
+    active_work_model='flat, non-nestable, independently scoped Work; hierarchy remains inside TaskGraph/TaskNode/Subagent'
+    intentional_supersessions=@(
+        'Removed Child Work and Work-tree requirements'
+        'Removed parent_work_id/parent_id from the proposed Work schema'
+        'Replaced tree-cycle tests with cross-Work scope-isolation and revision-conflict tests'
+    )
     render_qa='not performed: bundled Python/LibreOffice unavailable in this Windows environment'
     coverage=$coverage
 }
@@ -326,6 +355,8 @@ Write-Utf8 (Join-Path $outRoot 'README.md') @'
 主文档：KYNXA_R3_精炼与工程细化版.docx；可维护文本：同名 .md。
 
 原始 139 页压缩包保持不变。本版保留 18 章和 5 个附录，将重复的通用规则集中，并补充可实现的接口、状态机、恢复和验收建议。建议内容不自动覆盖原冻结决策。
+
+当前修订采用扁平 Work：每个 Work 都是不可嵌套且相互独立的 Scope；复杂任务层级继续由 Work 内部的 TaskGraph、TaskNode 与 Subagent 表达。标签、置顶、归档和展示分组不产生权限、知识或状态继承。
 
 engineering-additions.md 是新增内容源，build.ps1 从原压缩包提取章节并生成主文档。运行方式：在 PowerShell 中执行 .\build.ps1；也可传 -SourceArchive 指定原压缩包。
 
