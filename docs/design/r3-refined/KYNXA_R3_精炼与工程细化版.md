@@ -20,6 +20,7 @@
 - 细化 IPC Envelope、消息族、数据库最小表集合、scope 一致性和事务边界。
 - 明确独立进程与实际 OS 隔离的区别，并将未确定的技术选择列为 ADR。
 - 区分代码现状、冻结要求和工程建议；不把示例连接诊断、性能数字或文档测试当成已验证结果。
+- Work 改为扁平、不可嵌套且相互独立的 Scope；复杂任务层级继续由 TaskGraph、TaskNode 与 Subagent 表达。
 
 ### 阅读标识
 
@@ -253,7 +254,7 @@ R3 的系统形态仍是 Windows-first、Local-first、GUI-first 的 Personal Ag
 桌面 UI 只处理视觉状态与命令；Host 将普通 Chat 与 Work 统一建模。需要 Agent 能力时，Host 创建/绑定 DSH Session 并发送 ContextBundle。DSH 负责 agent loop、tool registry、skill、subagent、workflow、compaction；所有有副作用 Tool 通过 KYNXA Tool Bridge 转换为 CapabilityRequest；Authority 返回 DENIED/APPROVAL_REQUIRED/GRANT；Restricted Executor 执行并将 Observation 回写 DSH，同时 Host 将可恢复事实归并到 CognitiveState。
 
 ## 2. 组件责任边界
-KYNXA 负责“用户产品语义”和“长期真相”：Work、Child Work、Conversation、Task、Knowledge、Library、Artifact、Model Management、Resource Scheduler、Remote、Policy。DSH 负责“单个 Agent Session 内如何执行”：模型轮次、工具调用、上下文压缩、subagent、workflow、Web 工具表面。两者通过 SessionBinding 与 Event Bridge 连接。
+KYNXA 负责“用户产品语义”和“长期真相”：Work、Conversation、Task、Knowledge、Library、Artifact、Model Management、Resource Scheduler、Remote、Policy。DSH 负责“单个 Agent Session 内如何执行”：模型轮次、工具调用、上下文压缩、subagent、workflow、Web 工具表面。两者通过 SessionBinding 与 Event Bridge 连接。
 
 ## 3. 生命周期
 App 启动：Resident/Authority 优先；Host 加载 kynxa.db 并恢复未完成任务；Agent Runtime 按需启动并装配 profile；Model Runtime 仅在需要时加载模型。普通 Chat 不应被强制等待完整 DSH 大型 profile。Agent Runtime 崩溃时 Host 保持业务状态，使用 Session Persistence + Checkpoint 再绑定。
@@ -314,7 +315,7 @@ kynxa-desktop.exe；kynxa-host.exe；kynxa-agent-runtime (Node/TS)；kynxa-autho
 - Desktop 不直写 authority.db
 - Agent Runtime 不拥有数据库安全真相
 - Python 仅作为 specialized worker，不再作为中央 Agent Orchestrator
-- Work 逻辑树与磁盘目录解耦
+- Work 逻辑边界与磁盘目录解耦
 - 本地模型不可用时不能自动把内容上传云端，除非策略明确允许
 
 ## G. 错误、恢复与降级
@@ -337,7 +338,7 @@ startup_time_ms；host_ready_time_ms；runtime_restart_total；task_resume_succe
 | T-002 | 运行中杀死 Agent Runtime 后恢复 Task |
 | T-003 | 运行中杀死 Desktop，后台 Task 状态保持 |
 | T-004 | Authority 断开时危险动作 fail closed |
-| T-005 | 多个 Child Work 移动时循环检测正确 |
+| T-005 | 多个 Work 并发更新时 revision 冲突可检测 |
 
 ## J. 实施顺序
 1. Vertical Slice：Work→repo→DSH agent→sandbox build→patch→test→checkpoint→kill/resume
@@ -388,7 +389,7 @@ R3 不改变已经冻结的视觉方向：WinUI 3、简洁、留白、信息密�
 消息区支持 streaming、引用、附件、代码块、工具状态、任务状态。对普通用户只显示“正在读取文件/正在运行测试/等待批准”等可理解步骤；Developer Mode 才显示 DSH session_id、tool_call_id、model_call、profile、checkpoint 等调试信息。消息输入区保持统一视觉，不因进入 Work 更换一套交互。
 
 ## 3. Work
-Work 是长期容器而非文件夹。左侧在 Work Scope 下显示该 Work 的 Conversation 列表；主体仍是标准对话框。Work Overview 展示目标、最近活动、Tasks、Knowledge、Artifacts、待审批项与模型策略。Child Work 以树形层级展示，但内容访问仍按独立 Scope。
+Work 是不可嵌套的长期容器而非文件夹。左侧以扁平列表展示 Work，并在选定的 Work Scope 下显示其 Conversation 列表；主体仍是标准对话框。Work Overview 展示目标、最近活动、Tasks、Knowledge、Artifacts、待审批项与模型策略。置顶、归档、标签、搜索和纯展示分组可以辅助整理，但不得形成父子关系或带来权限、知识、状态继承。
 
 ## 4. 模型管理窗口
 三个主选项：本地模型 / 官方模型 / 自定义模型；保留“全部 / 个人 / 共享”三段式平滑切换。自定义模型至少包含连接名称、协议、Base URL、API Key（Credential Broker 引用）、Model ID、模型列表获取、认证方式、Headers Secret、Network Profile、连接/首 Token/总超时、Retry、能力检测、Context Length、Endpoint Overrides、TLS/自定义 CA、成本与生成参数。
@@ -510,14 +511,14 @@ R3 坚持“长期状态不能依赖某个模型或某个 DSH Session”。DSH S
 ## 冻结决策
 | ID/主题 | 冻结结论 | 工程含义 |
 | --- | --- | --- |
-| STATE-001 | Work Tree | 每个 Work 最多一个 parent_work_id，禁止循环。 |
+| STATE-001 | Flat Work | Work 不可嵌套；每个 Work 是独立 Scope。 |
 | STATE-002 | Conversation | work_id 可空；NULL 表示普通 Chat。 |
 | STATE-003 | Task | Task 属于 Work，可选绑定 Conversation。 |
 | STATE-004 | SessionBinding | 一个 TaskNode 可绑定当前 DSH session_id，并保留历史 generation/session lineage。 |
 | STATE-005 | CognitiveState | 保存继续任务的最小充分状态，不保存模型私有 KV cache 作为真相。 |
 
 ## 1. Work Scope
-Work 聚合 Conversation、Task、Knowledge、Artifact、Decision、Memory、ModelPolicy 与 PermissionPolicy。磁盘不跟随逻辑树嵌套移动，避免重命名/移动 Work 引发大规模文件搬迁。父 Work 可聚合元数据，但不得自动继承子 Work 私有知识或 Grant。
+Work 聚合 Conversation、Task、Knowledge、Artifact、Decision、Memory、ModelPolicy 与 PermissionPolicy。Work 之间不存在父子关系、层级继承或移动操作；磁盘目录与 Work 身份解耦，重命名、归档或调整展示分组不搬迁文件。任何跨 Work 聚合仅是经过授权的查询投影，不改变各自的 Scope、知识或 Grant。
 
 ## 2. CognitiveState Schema
 建议字段：goal、constraints、task_graph_ref、current_node、completed_node_refs、unresolved_questions、decision_refs、evidence_refs、observation_refs、artifact_refs、environment_snapshot、model_policy_revision、permission_scope_ref、resource_budget、verifier_state、recovery_cursor、revision。所有大 payload 使用内容寻址引用，避免单行 JSON 无限制增长。
@@ -534,7 +535,7 @@ CognitiveState 的变更由可审计事件驱动，如 NodeStarted、Observation
 ## Definition of Done
 - 换模型后可继续任务
 - Agent Runtime/Host kill-resume 通过
-- Child Work scope 不串
+- 不同 Work 的 scope 不串
 - Session 与 Task 映射可追踪
 - 状态 revision 并发冲突可检测
 
@@ -563,7 +564,7 @@ CognitiveState {
 ### A.1 本模块拥有的责任
 | 责任 ID | 工程责任 |
 |---|---|
-| OWN-01 | Work/Child Work 长期 Scope |
+| OWN-01 | 扁平且相互独立的 Work 长期 Scope |
 | OWN-02 | Conversation、Task、TaskNode 与 CognitiveState 分层 |
 | OWN-03 | Checkpoint/Snapshot/Handoff/Context Compiler |
 | OWN-04 | TaskGraph revision 与跨模型恢复 |
@@ -592,7 +593,7 @@ WorkService；TaskService；CognitiveStateReducer；CheckpointService；ContextC
 ## E. 不变量与安全要求
 - CognitiveState 不保存私有 chain-of-thought 作为业务真相
 - Work 删除采用 tombstone/retention，不直接抹除审计
-- Child Work 具有独立 scope，不因父级查看而自动扩权
+- 每个 Work 具有独立 scope，展示分组、标签或跨 Work 聚合不得自动扩权
 - session_id 不是 task_id；一项 Task 可产生 session lineage
 - Context 编译必须显式带 scope/revision 和 provenance
 
@@ -614,7 +615,7 @@ checkpoint_write_ms；resume_success_rate；context_bundle_tokens；graph_revisi
 |---|---|
 | T-001 | 模型 A→模型 B 后目标/约束/证据/Verifier 状态不丢 |
 | T-002 | Host kill 后从 checkpoint 恢复 |
-| T-003 | 移动 Child Work 做循环检测 |
+| T-003 | 不同 Work 的查询、Context 与 Artifact 引用不能跨 scope |
 | T-004 | 同 TaskNode 两个并发 worker 不允许重复 side effect |
 | T-005 | 长期会话 compaction 后仍能恢复关键决策 |
 
@@ -660,9 +661,9 @@ Checkpoint 包含 task_id、graph_revision、cognitive_revision、execution_id�
 
 恢复时依次核对 Work scope、图版本、Session 绑定、执行 lease、Authority 副作用状态和 Artifact hash。若 Session 丢失但 checkpoint 可用，可建立新 generation；仍保留旧 Session 引用及恢复原因。缺失关键 Evidence 时降级为待验证，不能以模型总结替代原始结果。
 
-### K.4 Work 树与上下文预算
+### K.4 Work 生命周期与上下文预算
 
-移动 Work 在事务内校验目标父级不等于自身，且目标祖先链不包含当前 Work；并发移动需由同一树写者串行处理。逻辑父子关系不授予内容读取或 Grant 继承。归档限制新任务；删除使用 tombstone，关联审计按独立保留政策保存。
+Work 不嵌套且不存在父级移动操作。重命名、置顶、标签、展示分组、归档与恢复使用 expected_revision 做条件更新；展示关系不得授予内容读取、知识共享或 Grant 继承。归档限制新任务；删除使用 tombstone，关联审计按独立保留政策保存。
 
 ContextBundle 至少划分 pinned constraints、current task、verified observations、retrieved evidence、preferences 和 recent dialogue。预算不足时先删除低相关、可重新检索的材料；Authority 约束和在途副作用引用不得被一般摘要抹掉。任何被引用的私有内容都需再次检查当次 scope 和网络外发政策。
 
@@ -2332,7 +2333,7 @@ Web Fetch 对 URL 协议、主机、端口、每次 DNS 解析和每一跳 redir
 本文件恢复为独立的可编码详细设计，不再作为短附录存在。
 
 ### 核心表关系建议
-`work(parent_work_id)` 形成单父树；`conversation.work_id` 可空；`task.work_id` 必填，`task.conversation_id` 可空；`task_node.task_id` N:1；`cognitive_state.task_id` 维护当前 revision 并可有历史快照；`checkpoint` 保存恢复锚点；`session_binding` 把 task_node 与 DSH session/generation 关联；`artifact` 与 `file_blob` 分离，支持内容去重与多引用。
+`work` 是扁平且独立的 Scope；`conversation.work_id` 可空；`task.work_id` 必填，`task.conversation_id` 可空；`task_node.task_id` N:1；`cognitive_state.task_id` 维护当前 revision 并可有历史快照；`checkpoint` 保存恢复锚点；`session_binding` 把 task_node 与 DSH session/generation 关联；`artifact` 与 `file_blob` 分离，支持内容去重与多引用。
 
 ### 数据库所有权
 Desktop 不直接访问数据库；Host 通过 Repository 层访问 `kynxa.db`；Authority 独占 `authority.db`；Agent Runtime 只通过 Host contract 获取必要状态。向量/FTS/DSH query index 均可删除重建，不能成为唯一来源。
@@ -2398,7 +2399,7 @@ db_write_latency_ms；sqlite_busy_total；migration_duration_ms；index_lag_seco
 | T-001 | 同一附件多 Conversation 引用只存一份 blob |
 | T-002 | 删除向量索引后全量重建 |
 | T-003 | Task/Checkpoint 与 DSH session binding 一致恢复 |
-| T-004 | Child Work scope 查询隔离 |
+| T-004 | 不同 Work 的 scope 查询隔离 |
 | T-005 | 迁移前后 row count/hash/foreign key 一致 |
 
 ## J. 实施顺序
@@ -2414,7 +2415,7 @@ db_write_latency_ms；sqlite_busy_total；migration_duration_ms；index_lag_seco
 
 | 表 | 最小关键字段 | 必要约束/索引 |
 |---|---|---|
-| work | id, parent_id, status, revision, deleted_at | parent FK；id≠parent；树循环在事务内检查 |
+| work | id, title, status, revision, deleted_at | 索引(status, updated_at, id) |
 | conversation | id, work_id nullable, revision | work FK；索引(work_id, updated_at, id) |
 | message | id, conversation_id, operation_id, state | conversation FK；operation_id 唯一 |
 | task | id, work_id, conversation_id nullable, graph_revision, status | Work 必填；关联 Conversation 必须同 scope |
@@ -2438,7 +2439,7 @@ task.conversation_id 存在只说明引用合法，不证明 Conversation 属于
 
 task_edge 的两端必须属于同一个 task；session_binding 的 node 与 checkpoint 的 task 一致；Artifact 引用也做同 scope 校验。安全库里的 device/approval/grant 才是安全真相，业务库 remote_device 只允许存展示投影，不能独立编辑授权字段。
 
-一个活动执行/绑定用部分唯一索引约束明确的活动状态集合，不能只靠 UI 或应用层先查后写。存在未决副作用的旧 execution 会阻止新执行获得相同资源写权限。外键删除默认 RESTRICT，归档、tombstone、审计保留和 GC 各自执行；不可对整棵 Work 树设置无差别级联物理删除。
+一个活动执行/绑定用部分唯一索引约束明确的活动状态集合，不能只靠 UI 或应用层先查后写。存在未决副作用的旧 execution 会阻止新执行获得相同资源写权限。外键删除默认 RESTRICT，归档、tombstone、审计保留和 GC 各自执行；不可对一个 Work Scope 的全部关联数据设置无差别级联物理删除。
 
 ### K.3 条件更新与事件提交示例
 
@@ -2644,7 +2645,7 @@ Stop、Approval、TerminalEvent 使用独立高优先队列，不能与图片/Ar
 | 类别 | P0 场景 | 通过条件 |
 |---|---|---|
 | Chat/UI | 本地 Chat 流式 | 不阻塞 UI；中断可恢复/重试 |
-| Work | Child Work / scope | 无循环；不跨 Work 泄漏 |
+| Work | 扁平 Work / scope | 不嵌套；不跨 Work 泄漏 |
 | DSH | kill/resume | Session/TaskNode 一致恢复 |
 | Tool | file/code/browser | schema/timeout/verifier 完整 |
 | Authority | request binding | 参数/revision 改变使批准失效 |

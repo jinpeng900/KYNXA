@@ -129,9 +129,9 @@ Checkpoint 包含 task_id、graph_revision、cognitive_revision、execution_id�
 
 恢复时依次核对 Work scope、图版本、Session 绑定、执行 lease、Authority 副作用状态和 Artifact hash。若 Session 丢失但 checkpoint 可用，可建立新 generation；仍保留旧 Session 引用及恢复原因。缺失关键 Evidence 时降级为待验证，不能以模型总结替代原始结果。
 
-### K.4 Work 树与上下文预算
+### K.4 Work 生命周期与上下文预算
 
-移动 Work 在事务内校验目标父级不等于自身，且目标祖先链不包含当前 Work；并发移动需由同一树写者串行处理。逻辑父子关系不授予内容读取或 Grant 继承。归档限制新任务；删除使用 tombstone，关联审计按独立保留政策保存。
+Work 不嵌套且不存在父级移动操作。重命名、置顶、标签、展示分组、归档与恢复使用 expected_revision 做条件更新；展示关系不得授予内容读取、知识共享或 Grant 继承。归档限制新任务；删除使用 tombstone，关联审计按独立保留政策保存。
 
 ContextBundle 至少划分 pinned constraints、current task、verified observations、retrieved evidence、preferences 和 recent dialogue。预算不足时先删除低相关、可重新检索的材料；Authority 约束和在途副作用引用不得被一般摘要抹掉。任何被引用的私有内容都需再次检查当次 scope 和网络外发政策。
 
@@ -370,7 +370,7 @@ Web Fetch 对 URL 协议、主机、端口、每次 DNS 解析和每一跳 redir
 
 | 表 | 最小关键字段 | 必要约束/索引 |
 |---|---|---|
-| work | id, parent_id, status, revision, deleted_at | parent FK；id≠parent；树循环在事务内检查 |
+| work | id, title, status, revision, deleted_at | 索引(status, updated_at, id) |
 | conversation | id, work_id nullable, revision | work FK；索引(work_id, updated_at, id) |
 | message | id, conversation_id, operation_id, state | conversation FK；operation_id 唯一 |
 | task | id, work_id, conversation_id nullable, graph_revision, status | Work 必填；关联 Conversation 必须同 scope |
@@ -394,7 +394,7 @@ task.conversation_id 存在只说明引用合法，不证明 Conversation 属于
 
 task_edge 的两端必须属于同一个 task；session_binding 的 node 与 checkpoint 的 task 一致；Artifact 引用也做同 scope 校验。安全库里的 device/approval/grant 才是安全真相，业务库 remote_device 只允许存展示投影，不能独立编辑授权字段。
 
-一个活动执行/绑定用部分唯一索引约束明确的活动状态集合，不能只靠 UI 或应用层先查后写。存在未决副作用的旧 execution 会阻止新执行获得相同资源写权限。外键删除默认 RESTRICT，归档、tombstone、审计保留和 GC 各自执行；不可对整棵 Work 树设置无差别级联物理删除。
+一个活动执行/绑定用部分唯一索引约束明确的活动状态集合，不能只靠 UI 或应用层先查后写。存在未决副作用的旧 execution 会阻止新执行获得相同资源写权限。外键删除默认 RESTRICT，归档、tombstone、审计保留和 GC 各自执行；不可对一个 Work Scope 的全部关联数据设置无差别级联物理删除。
 
 ### K.3 条件更新与事件提交示例
 

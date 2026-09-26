@@ -1,14 +1,20 @@
 {
     "source_archive_sha256":  "7FA3E54BBD17FF95A35ACAA3C175CB9B7DAF7CF0FDBF7E64306E14F08974D638",
     "source_content_nonspace":  107988,
-    "refined_content_nonspace":  92879,
+    "refined_content_nonspace":  93021,
     "chapters":  23,
     "tables":  84,
     "original_record_checks":  796,
     "preserved_record_checks":  796,
     "xml_parts_valid":  10,
     "table_geometry":  "passed",
-    "render_qa":  "not performed: bundled Python/LibreOffice unavailable in this Windows environment",
+    "active_work_model":  "flat, non-nestable, independently scoped Work; hierarchy remains inside TaskGraph/TaskNode/Subagent",
+    "intentional_supersessions":  [
+                                       "Removed Child Work and Work-tree requirements",
+                                       "Removed parent_work_id/parent_id from the proposed Work schema",
+                                       "Replaced tree-cycle tests with cross-Work scope-isolation and revision-conflict tests"
+                                   ],
+    "render_qa":  "LibreOffice headless PDF conversion passed; page-by-page visual review not performed",
     "coverage":  [
                      {
                          "chapter":  "00",
