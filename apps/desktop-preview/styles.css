@@ -106,6 +106,30 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #5672aa; outli
 .message.user { align-self: flex-end; background: var(--idle); }
 .message.assistant { align-self: flex-start; padding-left: 46px; position: relative; }
 .message.assistant::before { content: ""; position: absolute; left: 0; top: 5px; width: 32px; height: 32px; border-radius: 50%; background: var(--idle) url('/desktop-assets/Brand/kynxa-logo.png') center/48px auto no-repeat; }
+.empty-state.conversation-active { z-index: 2; justify-content: flex-end; gap: 0; transform: none; pointer-events: none; padding-bottom: 38px; }
+.empty-state.conversation-active .logo-wrap { display: none; }
+.empty-state.conversation-active .composer-block { pointer-events: auto; }
+.model-dialog { width: min(900px, calc(100vw - 70px)); max-height: calc(100vh - 70px); border: 1px solid var(--divider); border-radius: 18px; padding: 0; box-shadow: 0 24px 90px rgba(14,27,51,.25); color: var(--navy); }
+.model-dialog::backdrop { background: rgba(13,23,42,.3); }
+.model-form { padding: 24px; }
+.model-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; }
+.model-heading h2 { margin: 0; font-size: 21px; }
+.model-heading p { margin: 5px 0 0; color: var(--secondary); font-size: 13px; }
+.model-heading button { background: transparent; font-size: 27px; padding: 0 8px; border-radius: 8px; }
+.model-layout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; }
+.model-layout aside { background: var(--sidebar); border-radius: 13px; padding: 14px; }
+.model-layout h3 { font-size: 15px; margin: 0 0 15px; }
+.model-layout aside button { display: block; width: 100%; background: transparent; text-align: left; border-radius: 8px; padding: 10px; }
+.model-layout aside button:hover, .model-actions button:first-child:hover, .presets button:hover { background: var(--hover); }
+.model-fields { display: grid; gap: 11px; overflow: auto; max-height: min(650px, calc(100vh - 170px)); padding-right: 8px; }
+.model-fields label { display: grid; gap: 5px; font-size: 13px; }
+.model-fields label small { color: var(--secondary); }
+.model-fields input, .model-fields textarea { width: 100%; border: 1px solid var(--divider); border-radius: 8px; padding: 10px; font: inherit; color: var(--navy); background: #f8f9fc; }
+.presets, .model-actions { display: flex; gap: 8px; }
+.presets button, .model-actions button { padding: 9px 12px; border-radius: 8px; background: var(--idle); }
+.model-actions button:last-child { background: #253654; color: white; }
+.model-actions button:last-child:hover { background: #35496b; }
+#modelStatus { color: var(--secondary); font-size: 13px; margin: 0; min-height: 32px; }
 .hidden { display: none !important; }
 .popover { position: absolute; z-index: 20; width: 250px; padding: 6px; border: 1px solid var(--divider); background: white; border-radius: 14px; box-shadow: 0 15px 40px rgba(15, 25, 45, .16); }
 .popover button { width: 100%; height: 38px; padding: 0 12px; border-radius: 8px; background: transparent; text-align: left; }

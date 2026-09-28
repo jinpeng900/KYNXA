@@ -11,50 +11,59 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private readonly ModelSelectionStore _modelSelectionStore = new(ApplicationData.Current.LocalFolder.Path);
-    // Front-end preview names from the supplied reference. Runtime model discovery is not connected yet.
-    private static readonly string[] ModelPreviewNames =
-    [
-        "GLM-5.1", "GLM-5v-Turbo", "MiniMax-M3", "Kimi-K3", "Kimi-K2.8-Preview",
-        "Kimi-K2.7-Code", "Kimi-K2.6", "Deepseek-V4.1-Flash", "Deepseek-V4-Pro",
-        "GPT-5", "GPT-4.1", "GPT-4.1-mini", "GPT-4o", "Claude Sonnet 4", "Claude Opus 4",
-        "Gemini 2.5 Pro", "Gemini 2.5 Flash", "DeepSeek Chat", "DeepSeek Reasoner",
-        "Qwen3 8B", "Qwen3 32B", "Qwen3 235B-A22B", "DeepSeek R1 7B", "Llama 3.2 3B", "Llama 3.3 70B"
-    ];
-    private string? _selectedModelName;
+    private readonly ModelApiClient _modelApiClient = new();
+    private ModelChoice? _selectedModel;
+    private ModelChoice[] _availableModels = [];
 
     private void InitializeModelPicker()
     {
+        try { _selectedModel = _modelSelectionStore.Load(); }
+        catch { /* A preference must not prevent the composer from opening. */ }
+        UpdateModelPickerLabel();
+        _ = RefreshModelPickerAsync();
+    }
+
+    private async Task RefreshModelPickerAsync()
+    {
         try
         {
-            string? saved = _modelSelectionStore.Load();
-            _selectedModelName = ModelPreviewNames.Contains(saved) ? saved : null;
+            var providers = await _modelApiClient.ListAsync();
+            _availableModels = providers.SelectMany(provider => provider.Models.Select(id =>
+                new ModelChoice(provider.ProviderId, provider.DisplayName, id))).ToArray();
+            if (_selectedModel is not null && !_availableModels.Any(choice =>
+                choice.ProviderId == _selectedModel.ProviderId && choice.ModelId == _selectedModel.ModelId))
+            {
+                _selectedModel = null;
+                _modelSelectionStore.Save(null);
+            }
         }
-        catch { /* A UI preference must not prevent the composer from opening. */ }
+        catch (Exception) { _availableModels = []; }
         UpdateModelPickerLabel();
     }
 
     private void UpdateModelPickerLabel()
     {
-        SelectedModelLabel.Text = _selectedModelName ?? "模型选择";
-        AutomationProperties.SetName(ModelPickerButton, SelectedModelLabel.Text);
-        ToolTipService.SetToolTip(ModelPickerButton, SelectedModelLabel.Text);
+        SelectedModelLabel.Text = _selectedModel?.ModelId ?? "模型选择";
+        AutomationProperties.SetName(ModelPickerButton, _selectedModel?.Label ?? "模型选择");
+        ToolTipService.SetToolTip(ModelPickerButton, _selectedModel?.Label ?? "模型选择");
     }
 
-    private void ModelPickerButton_Click(object sender, RoutedEventArgs e)
+    private async void ModelPickerButton_Click(object sender, RoutedEventArgs e)
     {
+        await RefreshModelPickerAsync();
         var menu = new Flyout
         {
             Placement = FlyoutPlacementMode.TopEdgeAlignedRight,
             FlyoutPresenterStyle = (Style)Application.Current.Resources["KynxaModelFlyoutPresenterStyle"]
         };
-        // The footer is a sibling of the scrolling list, so it never scrolls out of view.
         var content = new Grid { Height = Math.Max(120, Math.Min(360, XamlRoot.Size.Height - 32)) };
         content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var models = new ListView
         {
-            ItemsSource = ModelPreviewNames, SelectedItem = _selectedModelName,
+            ItemsSource = _availableModels.Length > 0 ? _availableModels.Cast<object>().ToArray() : new object[] { "尚无已配置模型" },
+            SelectedItem = _availableModels.FirstOrDefault(choice => choice.ProviderId == _selectedModel?.ProviderId && choice.ModelId == _selectedModel?.ModelId),
             IsItemClickEnabled = true, SelectionMode = ListViewSelectionMode.Single,
             ItemContainerStyle = (Style)Application.Current.Resources["KynxaModelListItemStyle"],
             MinHeight = 0, Padding = new Thickness(0)
@@ -66,15 +75,7 @@ public sealed partial class ShellPage
         ScrollViewer.SetVerticalScrollBarVisibility(models, ScrollBarVisibility.Auto);
         AutomationProperties.SetAutomationId(models, "ModelPickerList");
         AutomationProperties.SetName(models, "模型列表");
-        models.ItemClick += (_, args) => SelectModel((string)args.ClickedItem, menu);
-        models.KeyDown += (_, args) =>
-        {
-            if (args.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space && models.SelectedItem is string name)
-            {
-                SelectModel(name, menu);
-                args.Handled = true;
-            }
-        };
+        models.ItemClick += (_, args) => { if (args.ClickedItem is ModelChoice choice) SelectModel(choice, menu); };
         content.Children.Add(models);
         var separator = new Border
         {
@@ -85,7 +86,7 @@ public sealed partial class ShellPage
         content.Children.Add(separator);
         var configure = new Button
         {
-            Content = "配置自定义模型", Style = (Style)Application.Current.Resources["KynxaModelFooterButtonStyle"]
+            Content = "配置模型连接", Style = (Style)Application.Current.Resources["KynxaModelFooterButtonStyle"]
         };
         AutomationProperties.SetAutomationId(configure, "ConfigureCustomModelsButton");
         configure.Click += (_, _) =>
@@ -96,19 +97,15 @@ public sealed partial class ShellPage
         Grid.SetRow(configure, 2);
         content.Children.Add(configure);
         menu.Content = content;
-        menu.Opened += (_, _) =>
-        {
-            if (_selectedModelName is not null) models.ScrollIntoView(_selectedModelName);
-        };
         menu.ShowAt(ModelPickerButton);
     }
 
-    private void SelectModel(string name, Flyout menu)
+    private void SelectModel(ModelChoice choice, Flyout menu)
     {
-        _selectedModelName = name;
+        _selectedModel = choice;
         UpdateModelPickerLabel();
-        try { _modelSelectionStore.Save(name); }
-        catch { /* The in-memory selection remains usable if settings cannot be written. */ }
+        try { _modelSelectionStore.Save(choice); }
+        catch { /* The in-memory selection remains usable. */ }
         menu.Hide();
     }
 }

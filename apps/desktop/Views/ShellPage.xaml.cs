@@ -491,6 +491,7 @@ public sealed partial class ShellPage : Page
     private void ModelManagementWindow_Closed(object sender, WindowEventArgs args)
     {
         _modelManagementWindow = null;
+        _ = RefreshModelPickerAsync();
     }
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)

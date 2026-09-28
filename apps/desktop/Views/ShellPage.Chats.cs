@@ -222,7 +222,7 @@ public sealed partial class ShellPage
                     RenderProjects(project.Id);
                 }
                 PromptTextBox.Text = ViewModel.Prompt = string.Empty;
-                preparedReply = BeginPendingReply(chat.Id, text, _selectedModelName);
+                preparedReply = BeginPendingReply(chat.Id, text, _selectedModel?.ProviderId, _selectedModel?.ModelId);
                 UpdateConversationTitle();
                 UpdateConversationPresentation();
                 return Task.CompletedTask;
