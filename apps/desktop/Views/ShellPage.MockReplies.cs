@@ -26,7 +26,7 @@ public sealed partial class ShellPage
     private bool IsReplyInProgress(Guid? chatId) => chatId is Guid id &&
         _pendingReplies.TryGetValue(id, out var pending) && pending.Error is null;
 
-    private void UpdateSendButtonState() => SendButton.IsEnabled = !IsReplyInProgress(ActiveChatId);
+    private void UpdateSendButtonState() => SendButton.IsEnabled = !_sendingPrompt && !IsReplyInProgress(ActiveChatId);
 
     private PendingChatReply BeginPendingReply(Guid chatId, string question, string? model, string? permissionMode = null)
     {

@@ -47,6 +47,10 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        PromptTextBox.AddHandler(UIElement.KeyDownEvent,
+            new KeyEventHandler(PromptTextBox_KeyDown), handledEventsToo: true);
+        PromptTextBox.AddHandler(UIElement.KeyUpEvent,
+            new KeyEventHandler(PromptTextBox_KeyUp), handledEventsToo: true);
     }
 
     private async void PageRoot_Loaded(object sender, RoutedEventArgs e)

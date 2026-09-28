@@ -4,6 +4,9 @@ using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Input;
+using Windows.System;
+using Windows.UI.Core;
 
 namespace KYNXA_Desktop.Views;
 
@@ -12,6 +15,45 @@ public sealed partial class ShellPage
     private List<ProjectChatState> _standaloneChats = [];
     private ProjectChatState? _activeStandaloneChat;
     public ObservableCollection<ConversationMessageViewModel> ActiveMessages { get; } = [];
+    private bool _promptCompositionActive;
+    private bool _suppressComposingEnter;
+    private bool _sendingPrompt;
+
+    private void PromptTextBox_TextCompositionStarted(TextBox sender, TextCompositionStartedEventArgs args) =>
+        _promptCompositionActive = true;
+
+    private void PromptTextBox_TextCompositionEnded(TextBox sender, TextCompositionEndedEventArgs args)
+    {
+        _promptCompositionActive = false;
+        // Some IMEs finish composition before forwarding the confirming Enter key.
+        _suppressComposingEnter = true;
+    }
+
+    private async void PromptTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Enter)
+        {
+            _suppressComposingEnter = false;
+            return;
+        }
+
+        if (_promptCompositionActive || _suppressComposingEnter)
+        {
+            _suppressComposingEnter = false;
+            return;
+        }
+
+        if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != 0)
+            return;
+
+        e.Handled = true;
+        await SendPromptAsync();
+    }
+
+    private void PromptTextBox_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (!_promptCompositionActive) _suppressComposingEnter = false;
+    }
 
     private void InitializeStandaloneChats()
     {
@@ -120,66 +162,78 @@ public sealed partial class ShellPage
         }
     }
 
-    private async void SendButton_Click(object sender, RoutedEventArgs e)
+    private async void SendButton_Click(object sender, RoutedEventArgs e) => await SendPromptAsync();
+
+    private async Task SendPromptAsync()
     {
+        if (_sendingPrompt || IsReplyInProgress(ActiveChatId)) return;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0) { PromptTextBox.Focus(FocusState.Programmatic); return; }
-        if (IsReplyInProgress(ActiveChatId)) return;
+        _sendingPrompt = true;
+        UpdateSendButtonState();
         PendingChatReply? preparedReply = null;
-        await RunProjectActionAsync(() =>
+        try
         {
-            ProjectChatState chat;
-            if (ViewModel.IsChatMode)
+            await RunProjectActionAsync(() =>
             {
-                chat = _activeStandaloneChat ?? new ProjectChatState();
-                if (_activeStandaloneChat is null) _standaloneChats.Insert(0, chat);
-                _activeStandaloneChat = chat;
-            }
-            else
-            {
-                if (_activeProjectChat is null)
+                ProjectChatState chat;
+                if (ViewModel.IsChatMode)
                 {
-                    if (!_workWithoutFolder)
-                    {
-                        ShowWorkspacePicker();
-                        return Task.CompletedTask;
-                    }
-                    var project = GetFolderlessWorkspace();
-                    _activeProjectChat = new ProjectChatState();
-                    project.Chats.Insert(0, _activeProjectChat);
+                    chat = _activeStandaloneChat ?? new ProjectChatState();
+                    if (_activeStandaloneChat is null) _standaloneChats.Insert(0, chat);
+                    _activeStandaloneChat = chat;
                 }
-                chat = _activeProjectChat;
-            }
-            if (!chat.CanPersist)
-            {
-                string title = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
-                chat.Title = title.Length > 24 ? title[..24] + "…" : title;
-            }
-            chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
-            chat.Draft = string.Empty;
-            // First submitted message is the commit boundary; draft-only chats are filtered by the store.
-            if (ViewModel.IsChatMode)
-            {
-                _projectStore.SaveChats(_standaloneChats);
-                _chatConversationTitle = chat.Title;
-                _chatDraft = string.Empty;
-                RebuildStandaloneRows();
-            }
-            else
-            {
-                var project = _projects.First(p => p.Chats.Contains(chat));
-                _projectStore.Save(_projects);
-                _workConversationTitle = WorkChatTitle(project, chat);
-                _workDraft = string.Empty;
-                RenderProjects(project.Id);
-            }
-            PromptTextBox.Text = ViewModel.Prompt = string.Empty;
-            preparedReply = BeginPendingReply(chat.Id, text, _selectedModelName);
-            UpdateConversationTitle();
-            UpdateConversationPresentation();
-            return Task.CompletedTask;
-        });
-        if (preparedReply is not null) await ReceiveMockReplyAsync(preparedReply);
+                else
+                {
+                    if (_activeProjectChat is null)
+                    {
+                        if (!_workWithoutFolder)
+                        {
+                            ShowWorkspacePicker();
+                            return Task.CompletedTask;
+                        }
+                        var project = GetFolderlessWorkspace();
+                        _activeProjectChat = new ProjectChatState();
+                        project.Chats.Insert(0, _activeProjectChat);
+                    }
+                    chat = _activeProjectChat;
+                }
+                if (!chat.CanPersist)
+                {
+                    string title = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+                    chat.Title = title.Length > 24 ? title[..24] + "…" : title;
+                }
+                chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
+                chat.Draft = string.Empty;
+                // First submitted message is the commit boundary; draft-only chats are filtered by the store.
+                if (ViewModel.IsChatMode)
+                {
+                    _projectStore.SaveChats(_standaloneChats);
+                    _chatConversationTitle = chat.Title;
+                    _chatDraft = string.Empty;
+                    RebuildStandaloneRows();
+                }
+                else
+                {
+                    var project = _projects.First(p => p.Chats.Contains(chat));
+                    _projectStore.Save(_projects);
+                    _workConversationTitle = WorkChatTitle(project, chat);
+                    _workDraft = string.Empty;
+                    RenderProjects(project.Id);
+                }
+                PromptTextBox.Text = ViewModel.Prompt = string.Empty;
+                preparedReply = BeginPendingReply(chat.Id, text, _selectedModelName);
+                UpdateConversationTitle();
+                UpdateConversationPresentation();
+                return Task.CompletedTask;
+            });
+            if (preparedReply is not null) await ReceiveMockReplyAsync(preparedReply);
+        }
+        finally
+        {
+            _sendingPrompt = false;
+            UpdateSendButtonState();
+        }
     }
 
     private void ChatHeader_PointerEntered(object sender, PointerRoutedEventArgs e)
