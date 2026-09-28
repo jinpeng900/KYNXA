@@ -220,7 +220,8 @@ macOS、Linux 和 iOS 暂不属于首版目标范围。
 ```text
 KYNXA/
 ├── apps/
-│   └── desktop/
+│   ├── desktop/              # Windows WinUI 3 正式前端
+│   └── desktop-preview/      # Ubuntu/Linux 视觉与交互预览
 ├── crates/
 │   ├── kynxa-core/
 │   ├── kynxa-protocol/

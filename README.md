@@ -220,7 +220,8 @@ macOS, Linux, and iOS are not part of the initial product scope.
 ```text
 KYNXA/
 ├── apps/
-│   └── desktop/
+│   ├── desktop/              # Production Windows WinUI 3 frontend
+│   └── desktop-preview/      # Ubuntu/Linux visual and interaction preview
 ├── crates/
 │   ├── kynxa-core/
 │   ├── kynxa-protocol/
