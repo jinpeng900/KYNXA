@@ -1,27 +1,22 @@
 using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
+using KYNXA_Desktop.Layout;
+using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 
 namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private const double WorkPanelMinimumWidth = 320;
-    private const double WorkPanelMaximumWidth = 1600;
-    private const double WorkPanelGap = 10;
-    private const double WorkChatMinimumWidth = 420;
-    private const double WorkPanelAutomaticThreshold = 900;
     private double _workPanelWidthBeforeDrag;
 
     private double UpdateWorkPanelLayout()
     {
         double available = MainRegion.ActualWidth;
         bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
-        bool hasSpace = available >= WorkPanelAutomaticThreshold && MainRegion.ActualHeight >= 440;
+        bool hasSpace = CanShowWorkPanel(available, MainRegion.ActualHeight);
         bool canOpen = isWorkConversation && hasSpace;
         bool visible = canOpen && _layout.PreviewVisible;
-        double requestedWidth = double.IsFinite(_layout.PreviewWidth) && _layout.PreviewWidth >= WorkPanelMinimumWidth
-            ? _layout.PreviewWidth : Math.Clamp(available * 0.3, WorkPanelMinimumWidth, 576);
-        double panelWidth = visible ? Math.Clamp(requestedWidth, WorkPanelMinimumWidth, GetWorkPanelMaximumWidth()) : 0;
+        double panelWidth = visible ? GetWorkPanelWidth(available, _layout.PreviewWidth) : 0;
         double gap = visible ? WorkPanelGap : 0;
 
         PreviewColumn.Width = new GridLength(panelWidth);
@@ -35,8 +30,7 @@ public sealed partial class ShellPage
         return Math.Max(0, available - panelWidth - gap);
     }
 
-    private double GetWorkPanelMaximumWidth() => Math.Max(WorkPanelMinimumWidth,
-        Math.Min(WorkPanelMaximumWidth, MainRegion.ActualWidth - WorkChatMinimumWidth - WorkPanelGap));
+    private double GetWorkPanelMaximumWidth() => ShellLayoutMetrics.GetWorkPanelMaximumWidth(MainRegion.ActualWidth);
 
     private void WorkPanelGrip_DragStarted(object? sender, EventArgs e)
     {

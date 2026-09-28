@@ -292,8 +292,8 @@
                                FontSize="14" Foreground="{StaticResource KynxaSecondaryTextBrush}"
                                TextTrimming="CharacterEllipsis" Visibility="Collapsed" />
                     <Button x:Name="OpenWorkPanelButton" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Top"
-                            Margin="0,8,12,0" Width="28" Height="28" Padding="5" Canvas.ZIndex="2"
-                            Style="{StaticResource KynxaIconButtonStyle}" Click="OpenWorkPanelButton_Click"
+                            Margin="0,8,12,0" Canvas.ZIndex="2"
+                            Style="{StaticResource KynxaCompactIconButtonStyle}" Click="OpenWorkPanelButton_Click"
                             AutomationProperties.Name="展开右侧栏" ToolTipService.ToolTip="展开右侧栏">
                         <Image Width="18" Height="18" Source="{StaticResource IconSidebarToggle}" RenderTransformOrigin="0.5,0.5">
                             <Image.RenderTransform><ScaleTransform ScaleX="-1" /></Image.RenderTransform>
@@ -368,83 +368,83 @@
                             <Image x:Name="KynxaLogo" Width="353" Height="235" HorizontalAlignment="Center" VerticalAlignment="Center" Source="{StaticResource KynxaLogoImage}" Stretch="Uniform" />
                         </Grid>
 
-                        <StackPanel Spacing="6">
-                        <Border x:Name="ComposerHost" Width="824" Height="110" Background="{StaticResource KynxaSurfaceBrush}" BorderBrush="{StaticResource KynxaComposerBorderBrush}" BorderThickness="1" CornerRadius="24" Translation="0,0,24">
-                            <Border.Shadow><ThemeShadow /></Border.Shadow>
-                            <Grid>
-                                <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
-                                <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="16" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="向 KYNXA 提问任何问题..." ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
-                                    <TextBox.Resources>
-                                        <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
-                                        <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
-                                        <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
-                                        <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
-                                        <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
-                                        <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
-                                        <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
-                                        <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
-                                    </TextBox.Resources>
-                                </TextBox>
+                        <controls:ComposerSurface x:Name="ComposerHost" AutomationProperties.Name="对话输入区">
+                            <controls:ComposerSurface.Body>
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
+                                    <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="向 KYNXA 提问任何问题..." ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
+                                        <TextBox.Resources>
+                                            <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
+                                            <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+                                            <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+                                            <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
+                                            <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+                                            <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+                                            <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
+                                            <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
+                                        </TextBox.Resources>
+                                    </TextBox>
 
-                                <Button x:Name="ComposerExpandButton" Width="28" Height="28" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Background="Transparent" BorderThickness="0" Click="ComposerExpandButton_Click" CornerRadius="7" ToolTipService.ToolTip="展开输入区">
-                                    <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="" />
-                                </Button>
+                                    <Button x:Name="ComposerExpandButton" Style="{StaticResource KynxaCompactIconButtonStyle}" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Click="ComposerExpandButton_Click" CornerRadius="7" ToolTipService.ToolTip="展开输入区">
+                                        <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="" />
+                                    </Button>
 
-                                <Grid Grid.Row="1" Margin="12,0,12,6">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                                    <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
-                                        <Button Width="38" Height="38" Padding="8" Background="{StaticResource KynxaComposerActionBrush}" BorderThickness="0" CornerRadius="19" ToolTipService.ToolTip="添加"><Image Width="20" Height="20" Source="{StaticResource IconAdd}" /></Button>
-                                        <Button x:Name="PermissionPickerButton" Style="{StaticResource KynxaModelPickerButtonStyle}"
-                                                Click="PermissionPickerButton_Click" AutomationProperties.Name="权限：请求批准">
-                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                                                <Image x:Name="SelectedPermissionIcon" Width="16" Height="16" Source="{StaticResource IconPermissionAsk}" />
-                                                <TextBlock x:Name="SelectedPermissionLabel" Text="请求批准" FontSize="14"
-                                                           VerticalAlignment="Center" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                            </StackPanel>
-                                        </Button>
-                                    </StackPanel>
-                                    <Grid Grid.Column="1" Margin="12,0,0,0" ColumnSpacing="4">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                        <Button x:Name="ModelPickerButton" Style="{StaticResource KynxaModelPickerButtonStyle}"
-                                                HorizontalAlignment="Right"
-                                                Click="ModelPickerButton_Click" AutomationProperties.Name="模型选择" ToolTipService.ToolTip="模型选择">
-                                            <Grid ColumnSpacing="6" MaxWidth="220" VerticalAlignment="Center">
-                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                                <TextBlock x:Name="SelectedModelLabel" VerticalAlignment="Center" FontFamily="{StaticResource KynxaUIFont}"
-                                                           FontSize="14" FontWeight="Normal" LineHeight="20" LineStackingStrategy="BlockLineHeight"
-                                                           Text="模型选择" TextTrimming="CharacterEllipsis" />
-                                                <FontIcon Grid.Column="1" Glyph="&#xE70D;" FontSize="10" VerticalAlignment="Center"
-                                                          Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                            </Grid>
-                                        </Button>
-                                        <Button Grid.Column="1" Width="40" Height="40" Padding="9" Background="{StaticResource KynxaSendBrush}" BorderThickness="0" x:Name="SendButton" AutomationProperties.Name="发送" Click="SendButton_Click" CornerRadius="20" ToolTipService.ToolTip="发送">
-                                            <Button.Resources>
-                                                <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="KynxaSendHoverBrush" />
-                                                <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="KynxaSendPressedBrush" />
-                                            </Button.Resources>
-                                            <Image Width="20" Height="20" Source="{StaticResource IconSend}" />
-                                        </Button>
+                                    <Grid Grid.Row="1" Margin="12,0,12,6">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
+                                            <Button Style="{StaticResource KynxaComposerAddButtonStyle}" ToolTipService.ToolTip="添加"><Image Width="20" Height="20" Source="{StaticResource IconAdd}" /></Button>
+                                            <Button x:Name="PermissionPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
+                                                    Click="PermissionPickerButton_Click" AutomationProperties.Name="权限：请求批准">
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Image x:Name="SelectedPermissionIcon" Width="16" Height="16" Source="{StaticResource IconPermissionAsk}" />
+                                                    <TextBlock x:Name="SelectedPermissionLabel" Text="请求批准" FontSize="14"
+                                                               VerticalAlignment="Center" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </StackPanel>
+                                        <Grid Grid.Column="1" Margin="12,0,0,0" ColumnSpacing="4">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                            <Button x:Name="ModelPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
+                                                    HorizontalAlignment="Right"
+                                                    Click="ModelPickerButton_Click" AutomationProperties.Name="模型选择" ToolTipService.ToolTip="模型选择">
+                                                <Grid ColumnSpacing="6" MaxWidth="220" VerticalAlignment="Center">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                    <TextBlock x:Name="SelectedModelLabel" VerticalAlignment="Center" FontFamily="{StaticResource KynxaUIFont}"
+                                                               FontSize="14" FontWeight="Normal" LineHeight="20" LineStackingStrategy="BlockLineHeight"
+                                                               Text="模型选择" TextTrimming="CharacterEllipsis" />
+                                                    <FontIcon Grid.Column="1" Glyph="&#xE70D;" FontSize="10" VerticalAlignment="Center"
+                                                              Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                                </Grid>
+                                            </Button>
+                                            <Button Grid.Column="1" Style="{StaticResource KynxaComposerSendButtonStyle}" x:Name="SendButton" AutomationProperties.Name="发送" Click="SendButton_Click" ToolTipService.ToolTip="发送">
+                                                <Button.Resources>
+                                                    <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="KynxaSendHoverBrush" />
+                                                    <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="KynxaSendPressedBrush" />
+                                                </Button.Resources>
+                                                <Image Width="20" Height="20" Source="{StaticResource IconSend}" />
+                                            </Button>
+                                        </Grid>
                                     </Grid>
-                                </Grid>
 
-                                <controls:ResizeGrip x:Name="ComposerLeftGrip" Grid.RowSpan="2" HorizontalAlignment="Left" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerLeftGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
-                                <controls:ResizeGrip x:Name="ComposerRightGrip" Grid.RowSpan="2" HorizontalAlignment="Right" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerRightGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
-                                <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="2" VerticalAlignment="Top" Axis="Vertical" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
-                            </Grid>
-                        </Border>
-                        <Button x:Name="WorkspacePickerButton" Visibility="Collapsed" Height="30" MaxWidth="240"
-                                Margin="6,0,0,0" Padding="10,0" HorizontalAlignment="Left" CornerRadius="15"
-                                Background="{StaticResource KynxaSegmentIdleBrush}" BorderThickness="0"
-                                Click="WorkspacePickerButton_Click" AutomationProperties.Name="选择工作区" ToolTipService.ToolTip="选择工作区">
-                            <Grid ColumnSpacing="6">
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /></Grid.ColumnDefinitions>
-                                <Image Width="16" Height="16" Source="{StaticResource IconWork}" />
-                                <TextBlock x:Name="WorkspacePickerLabel" Grid.Column="1" Text="选择项目" FontSize="14"
-                                           Foreground="{StaticResource KynxaSecondaryTextBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                <FontIcon Grid.Column="2" Glyph="&#xE70D;" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                            </Grid>
-                        </Button>
-                        </StackPanel>
+                                    <controls:ResizeGrip x:Name="ComposerLeftGrip" Grid.RowSpan="2" HorizontalAlignment="Left" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerLeftGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerRightGrip" Grid.RowSpan="2" HorizontalAlignment="Right" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerRightGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="2" VerticalAlignment="Top" Axis="Vertical" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
+                                </Grid>
+                            </controls:ComposerSurface.Body>
+                            <controls:ComposerSurface.Footer>
+                                <Button x:Name="WorkspacePickerButton" Visibility="Collapsed" MaxWidth="240"
+                                        Style="{StaticResource KynxaWorkspacePickerButtonStyle}"
+                                        Click="WorkspacePickerButton_Click" AutomationProperties.Name="选择工作区" ToolTipService.ToolTip="选择工作区">
+                                    <Grid ColumnSpacing="6">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /></Grid.ColumnDefinitions>
+                                        <Image Width="16" Height="16" Source="{StaticResource IconWork}" />
+                                        <TextBlock x:Name="WorkspacePickerLabel" Grid.Column="1" Text="选择项目" FontSize="14"
+                                                   Foreground="{StaticResource KynxaSecondaryTextBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <FontIcon Grid.Column="2" Glyph="&#xE70D;" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                    </Grid>
+                                </Button>
+                            </controls:ComposerSurface.Footer>
+                        </controls:ComposerSurface>
                     </StackPanel>
                 </Grid>
                 <controls:ResizeGrip x:Name="WorkPanelGrip" Grid.Column="1" Axis="Horizontal" Width="10" Visibility="Collapsed"
@@ -458,8 +458,8 @@
                         Background="{StaticResource KynxaSurfaceBrush}" AutomationProperties.Name="工作右侧栏">
                     <Grid>
                         <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Top"
-                                Margin="0,7,7,0" Width="28" Height="28" Padding="5"
-                                Style="{StaticResource KynxaIconButtonStyle}" Click="CloseWorkPanelButton_Click"
+                                Margin="0,7,7,0"
+                                Style="{StaticResource KynxaCompactIconButtonStyle}" Click="CloseWorkPanelButton_Click"
                                 AutomationProperties.Name="收起右侧栏" ToolTipService.ToolTip="收起右侧栏">
                             <Image Width="18" Height="18" Source="{StaticResource IconSidebarToggle}" RenderTransformOrigin="0.5,0.5">
                                 <Image.RenderTransform><ScaleTransform ScaleX="-1" /></Image.RenderTransform>
