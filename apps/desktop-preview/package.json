@@ -1,0 +1,13 @@
+{
+  "name": "@kynxa/desktop-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Linux-runnable visual preview for the KYNXA WinUI 3 desktop shell",
+  "scripts": {
+    "dev": "node server.mjs",
+    "dev:open": "node server.mjs --open"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
