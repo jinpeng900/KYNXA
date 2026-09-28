@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using KYNXA_Desktop.Models.UI;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -13,15 +14,14 @@ public sealed partial class ShellPage
 {
     private bool _workWithoutFolder;
     public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
-    private double WorkspacePickerHeight => WorkspacePickerButton.Visibility == Visibility.Visible ? 36 : 0;
 
     private static string WorkChatTitle(ProjectState project, ProjectChatState chat) =>
         project.IsFolderlessWorkspace ? chat.Title : $"{project.Name} / {chat.Title}";
 
     private void UpdateWorkspacePickerVisibility()
     {
-        WorkspacePickerButton.Visibility = !ViewModel.IsChatMode && _activeProjectChat is null
-            ? Visibility.Visible : Visibility.Collapsed;
+        ComposerHost.IsFooterVisible = !ViewModel.IsChatMode && _activeProjectChat is null;
+        WorkspacePickerButton.Visibility = ComposerHost.IsFooterVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkspacePickerButton.IsEnabled = _projectsReady;
         WorkspacePickerLabel.Text = _workWithoutFolder ? "不使用文件夹" : "选择项目";
         AutomationProperties.SetName(WorkspacePickerButton, _workWithoutFolder ? "工作区：不使用文件夹" : "选择工作区");
@@ -32,33 +32,16 @@ public sealed partial class ShellPage
     private void ShowWorkspacePicker()
     {
         if (!_projectsReady || ViewModel.IsChatMode || _activeProjectChat is not null) return;
-        var menu = new Flyout
-        {
-            Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft,
-            FlyoutPresenterStyle = (Style)Application.Current.Resources["KynxaWorkspaceFlyoutPresenterStyle"]
-        };
+        var menu = PickerMenu.Create(FlyoutPlacementMode.BottomEdgeAlignedLeft, "KynxaWorkspaceFlyoutPresenterStyle");
         var choices = _projects.Where(project => !project.IsArchived && !project.IsFolderlessWorkspace)
             .OrderByDescending(project => project.IsPinned).ToList();
-        var content = new Grid { Width = 250 };
-        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        // Only the project list scrolls. Actions remain visible below its fixed maximum height.
-        var projects = new ListView
-        {
-            Height = Math.Min(Math.Max(72, Math.Min(216, XamlRoot.Size.Height - 200)), Math.Max(36, choices.Count * 36)),
-            Padding = new Thickness(0), SelectionMode = ListViewSelectionMode.None, IsItemClickEnabled = true,
-            ItemContainerStyle = (Style)Application.Current.Resources["KynxaWorkspaceListItemStyle"]
-        };
-        projects.Resources["ListViewItemSelectionIndicatorVisualEnabled"] = false;
-        ScrollViewer.SetHorizontalScrollMode(projects, ScrollMode.Disabled);
-        ScrollViewer.SetHorizontalScrollBarVisibility(projects, ScrollBarVisibility.Disabled);
-        ScrollViewer.SetVerticalScrollBarVisibility(projects, ScrollBarVisibility.Auto);
-        AutomationProperties.SetAutomationId(projects, "WorkspaceProjectList");
-        AutomationProperties.SetName(projects, "已有项目");
+        var projects = PickerMenu.CreateList("WorkspaceProjectList", "已有项目", "KynxaWorkspaceListItemStyle", ListViewSelectionMode.None);
+        double rowHeight = PickerMenu.Dimension("KynxaMenuRowHeight");
+        projects.Height = Math.Min(Math.Max(rowHeight * 2, Math.Min(rowHeight * 6, XamlRoot.Size.Height - 200)), Math.Max(rowHeight, choices.Count * rowHeight));
         foreach (var project in choices)
         {
-            var row = WorkspaceMenuRow(project.Name, "\uE8B7");
+            var row = PickerMenu.LabelRow(project.Name, "\uE8B7");
+            row.Tag = project;
             var item = new ListViewItem { Content = row, Tag = project };
             AutomationProperties.SetAutomationId(item, $"WorkspaceProject_{project.Id:N}");
             AutomationProperties.SetName(item, project.Name);
@@ -69,34 +52,21 @@ public sealed partial class ShellPage
         {
             projects.Items.Add(new ListViewItem
             {
-                Content = new TextBlock { Text = "暂无项目", FontSize = 14,
+                Content = new TextBlock { Text = "暂无项目", FontSize = PickerMenu.Dimension("KynxaBodyFontSize"),
                     Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] }, IsEnabled = false
             });
         }
         projects.ItemClick += async (_, args) =>
         {
-            if (args.ClickedItem is not ListViewItem { Tag: ProjectState project }) return;
+            // WinUI can return the explicit item's content instead of its container.
+            if (args.ClickedItem is not FrameworkElement { Tag: ProjectState project }) return;
             menu.Hide();
             await RunProjectActionAsync(() => { StartWorkspaceProject(project); return Task.CompletedTask; });
         };
-        content.Children.Add(projects);
-        var separator = new Border
-        {
-            Height = 1, Margin = new Thickness(8, 5, 8, 5),
-            Background = (Brush)Application.Current.Resources["KynxaDividerBrush"]
-        };
-        Grid.SetRow(separator, 1);
-        content.Children.Add(separator);
         var actions = new StackPanel();
         void AddAction(string label, string glyph, string id, Func<Task> action)
         {
-            var button = new Button
-            {
-                Content = WorkspaceMenuRow(label, glyph), Height = 36,
-                Style = (Style)Application.Current.Resources["KynxaModelFooterButtonStyle"]
-            };
-            AutomationProperties.SetAutomationId(button, id);
-            AutomationProperties.SetName(button, label);
+            var button = PickerMenu.Action(label, id, glyph, rowHeight);
             button.Click += (_, _) =>
             {
                 menu.Hide();
@@ -120,23 +90,8 @@ public sealed partial class ShellPage
             PromptTextBox.Focus(FocusState.Programmatic);
             return Task.CompletedTask;
         });
-        Grid.SetRow(actions, 2);
-        content.Children.Add(actions);
-        menu.Content = content;
+        menu.Content = PickerMenu.WithFixedFooter(projects, actions);
         menu.ShowAt(WorkspacePickerButton);
-    }
-
-    private static Grid WorkspaceMenuRow(string label, string glyph)
-    {
-        var row = new Grid { ColumnSpacing = 8 };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.Children.Add(new FontIcon { Glyph = glyph, FontSize = 16, VerticalAlignment = VerticalAlignment.Center });
-        var text = new TextBlock { Text = label, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis };
-        Grid.SetColumn(text, 1);
-        row.Children.Add(text);
-        return row;
     }
 
     private void StartWorkspaceProject(ProjectState project)

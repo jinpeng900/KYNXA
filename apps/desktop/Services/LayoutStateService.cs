@@ -19,7 +19,7 @@ public sealed class LayoutStateService
                 {
                     if (state.LayoutVersion < 3)
                     {
-                        state.SidebarWidth = 240;
+                        state.SidebarWidth = Layout.ShellLayoutMetrics.SidebarDefault;
                     }
                     if (state.LayoutVersion < 4)
                     {

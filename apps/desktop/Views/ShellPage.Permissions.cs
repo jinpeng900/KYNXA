@@ -1,4 +1,5 @@
 using KYNXA.Contracts;
+using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -40,11 +41,7 @@ public sealed partial class ShellPage
 
     private void PermissionPickerButton_Click(object sender, RoutedEventArgs e)
     {
-        var menu = new Flyout
-        {
-            Placement = FlyoutPlacementMode.TopEdgeAlignedLeft,
-            FlyoutPresenterStyle = (Style)Application.Current.Resources["KynxaPermissionFlyoutPresenterStyle"]
-        };
+        var menu = PickerMenu.Create(FlyoutPlacementMode.TopEdgeAlignedLeft, "KynxaPermissionFlyoutPresenterStyle");
         var options = new StackPanel();
         var buttons = new List<Button>();
         foreach (var option in PermissionOptions)
@@ -62,13 +59,13 @@ public sealed partial class ShellPage
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             text.Children.Add(new TextBlock
             {
-                Text = option.Label, FontSize = 14, LineHeight = 20,
+                Text = option.Label, FontSize = PickerMenu.Dimension("KynxaBodyFontSize"), LineHeight = PickerMenu.Dimension("KynxaBodyLineHeight"),
                 Foreground = option.Mode == ChatPermissionModes.Full ? PermissionBrush(option.Mode)
                     : (Brush)Application.Current.Resources["KynxaTextBrush"]
             });
             text.Children.Add(new TextBlock
             {
-                Text = option.Description, FontSize = 12, LineHeight = 18,
+                Text = option.Description, FontSize = PickerMenu.Dimension("KynxaCaptionFontSize"), LineHeight = 18,
                 TextWrapping = TextWrapping.Wrap, Foreground = PermissionBrush(option.Mode)
             });
             Grid.SetColumn(text, 1);
