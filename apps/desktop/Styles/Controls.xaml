@@ -2,27 +2,48 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <FontFamily x:Key="KynxaUIFont">Microsoft YaHei UI</FontFamily>
     <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei UI</FontFamily>
-    <Style x:Key="KynxaIconButtonStyle" TargetType="Button">
-        <Setter Property="Width" Value="32" />
-        <Setter Property="Height" Value="32" />
-        <Setter Property="Padding" Value="6" />
+    <Style x:Key="KynxaQuietButtonStyle" TargetType="Button">
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="KynxaIconButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="Width" Value="{StaticResource KynxaIconButtonSize}" />
+        <Setter Property="Height" Value="{StaticResource KynxaIconButtonSize}" />
+        <Setter Property="Padding" Value="6" />
         <Setter Property="HorizontalAlignment" Value="Center" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
-    <Style x:Key="KynxaNavigationButtonStyle" TargetType="Button">
-        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-        <Setter Property="FontSize" Value="14" />
-        <Setter Property="Height" Value="40" />
+    <Style x:Key="KynxaNavigationButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="Height" Value="{StaticResource KynxaSidebarRowHeight}" />
         <Setter Property="Margin" Value="8,0" />
         <Setter Property="Padding" Value="8,0" />
-        <Setter Property="Background" Value="Transparent" />
-        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="CornerRadius" Value="12" />
         <Setter Property="HorizontalAlignment" Value="Stretch" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style x:Key="KynxaCompactIconButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
+        <Setter Property="Width" Value="{StaticResource KynxaSmallIconButtonSize}" />
+        <Setter Property="Height" Value="{StaticResource KynxaSmallIconButtonSize}" />
+        <Setter Property="Padding" Value="5" />
+    </Style>
+    <Style x:Key="KynxaComposerAddButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
+        <Setter Property="Width" Value="38" />
+        <Setter Property="Height" Value="38" />
+        <Setter Property="Padding" Value="8" />
+        <Setter Property="CornerRadius" Value="19" />
+        <Setter Property="Background" Value="{StaticResource KynxaComposerActionBrush}" />
+    </Style>
+    <Style x:Key="KynxaComposerSendButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
+        <Setter Property="Width" Value="40" />
+        <Setter Property="Height" Value="40" />
+        <Setter Property="Padding" Value="9" />
+        <Setter Property="CornerRadius" Value="20" />
+        <Setter Property="Background" Value="{StaticResource KynxaSendBrush}" />
     </Style>
     <Style x:Key="KynxaConversationButtonStyle" TargetType="Button">
         <Setter Property="Height" Value="48" />
@@ -42,7 +63,7 @@
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
         <Setter Property="HorizontalAlignment" Value="Stretch" />
         <Setter Property="VerticalAlignment" Value="Stretch" />
@@ -51,19 +72,19 @@
     <Style x:Key="KynxaSidebarListItemStyle" TargetType="ListViewItem">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="FontWeight" Value="Normal" />
-        <Setter Property="MinHeight" Value="40" />
-        <Setter Property="Height" Value="40" />
+        <Setter Property="MinHeight" Value="{StaticResource KynxaSidebarRowHeight}" />
+        <Setter Property="Height" Value="{StaticResource KynxaSidebarRowHeight}" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="Padding" Value="8,0,16,0" />
         <Setter Property="Margin" Value="0" />
         <Setter Property="CornerRadius" Value="8" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
     </Style>
     <Style x:Key="KynxaProjectActionButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
-        <Setter Property="Width" Value="24" />
-        <Setter Property="Height" Value="24" />
+        <Setter Property="Width" Value="{StaticResource KynxaRowActionSize}" />
+        <Setter Property="Height" Value="{StaticResource KynxaRowActionSize}" />
         <Setter Property="Padding" Value="3" />
         <Setter Property="CornerRadius" Value="6" />
         <Setter Property="Foreground" Value="{StaticResource KynxaSecondaryTextBrush}" />
@@ -90,36 +111,36 @@
         <Setter Property="BorderThickness" Value="1" />
     </Style>
     <Style x:Key="KynxaWorkMenuItemStyle" TargetType="MenuFlyoutItem">
-        <Setter Property="Height" Value="36" />
+        <Setter Property="Height" Value="{StaticResource KynxaMenuRowHeight}" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
     </Style>
     <Style x:Key="KynxaWorkSubMenuItemStyle" TargetType="MenuFlyoutSubItem">
         <Setter Property="Height" Value="36" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
     </Style>
     <Style x:Key="KynxaComposerIconButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
         <Setter Property="Padding" Value="7" />
     </Style>
-    <Style x:Key="KynxaModelPickerButtonStyle" TargetType="Button">
-        <Setter Property="Height" Value="32" />
+    <Style x:Key="KynxaPickerButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="Height" Value="{StaticResource KynxaPickerHeight}" />
         <Setter Property="MinWidth" Value="0" />
         <Setter Property="Margin" Value="0,0,4,0" />
         <Setter Property="Padding" Value="8,0" />
-        <Setter Property="Background" Value="Transparent" />
-        <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-        <Setter Property="FontSize" Value="14" />
-        <Setter Property="FontWeight" Value="Normal" />
         <Setter Property="VerticalAlignment" Value="Center" />
-        <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
-    <Style x:Key="KynxaModelFlyoutPresenterStyle" TargetType="FlyoutPresenter">
+    <Style x:Key="KynxaWorkspacePickerButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaPickerButtonStyle}">
+        <Setter Property="Height" Value="{StaticResource KynxaWorkspacePickerHeight}" />
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaSecondaryTextBrush}" />
+    </Style>
+    <Style x:Key="KynxaFlyoutPresenterStyle" TargetType="FlyoutPresenter">
         <Setter Property="Width" Value="264" />
         <Setter Property="Padding" Value="6" />
         <Setter Property="CornerRadius" Value="12" />
@@ -131,33 +152,33 @@
         <Setter Property="VerticalContentAlignment" Value="Stretch" />
     </Style>
     <Style x:Key="KynxaModelListItemStyle" TargetType="ListViewItem">
-        <Setter Property="Height" Value="32" />
-        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="Height" Value="{StaticResource KynxaPickerHeight}" />
+        <Setter Property="MinHeight" Value="{StaticResource KynxaPickerHeight}" />
         <Setter Property="Padding" Value="12,0,16,0" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Margin" Value="0" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
         <Setter Property="CornerRadius" Value="6" />
     </Style>
-    <Style x:Key="KynxaWorkspaceFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource KynxaModelFlyoutPresenterStyle}">
+    <Style x:Key="KynxaWorkspaceFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource KynxaFlyoutPresenterStyle}">
         <Setter Property="Width" Value="264" />
         <Setter Property="CornerRadius" Value="16" />
     </Style>
     <Style x:Key="KynxaWorkspaceListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource KynxaModelListItemStyle}">
-        <Setter Property="Height" Value="36" />
-        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Height" Value="{StaticResource KynxaMenuRowHeight}" />
+        <Setter Property="MinHeight" Value="{StaticResource KynxaMenuRowHeight}" />
         <Setter Property="Padding" Value="12,0" />
     </Style>
-    <Style x:Key="KynxaPermissionFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource KynxaModelFlyoutPresenterStyle}">
+    <Style x:Key="KynxaPermissionFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource KynxaFlyoutPresenterStyle}">
         <Setter Property="Width" Value="388" />
         <Setter Property="Padding" Value="6" />
         <Setter Property="CornerRadius" Value="16" />
     </Style>
-    <Style x:Key="KynxaPermissionOptionStyle" TargetType="Button" BasedOn="{StaticResource KynxaModelPickerButtonStyle}">
+    <Style x:Key="KynxaPermissionOptionStyle" TargetType="Button" BasedOn="{StaticResource KynxaPickerButtonStyle}">
         <Setter Property="Height" Value="Auto" />
         <Setter Property="MinHeight" Value="48" />
         <Setter Property="Margin" Value="0" />
@@ -165,7 +186,7 @@
         <Setter Property="HorizontalAlignment" Value="Stretch" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     </Style>
-    <Style x:Key="KynxaModelFooterButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaModelPickerButtonStyle}">
+    <Style x:Key="KynxaMenuActionButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaPickerButtonStyle}">
         <Setter Property="Margin" Value="0" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="CornerRadius" Value="6" />

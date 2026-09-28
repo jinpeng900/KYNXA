@@ -1,9 +1,9 @@
 using KYNXA_Desktop.Services;
+using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Media;
 using Windows.Storage;
 
 namespace KYNXA_Desktop.Views;
@@ -42,30 +42,10 @@ public sealed partial class ShellPage
 
     private void ModelPickerButton_Click(object sender, RoutedEventArgs e)
     {
-        var menu = new Flyout
-        {
-            Placement = FlyoutPlacementMode.TopEdgeAlignedRight,
-            FlyoutPresenterStyle = (Style)Application.Current.Resources["KynxaModelFlyoutPresenterStyle"]
-        };
-        // The footer is a sibling of the scrolling list, so it never scrolls out of view.
-        var content = new Grid { Height = Math.Max(120, Math.Min(360, XamlRoot.Size.Height - 32)) };
-        content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var models = new ListView
-        {
-            ItemsSource = ModelPreviewNames, SelectedItem = _selectedModelName,
-            IsItemClickEnabled = true, SelectionMode = ListViewSelectionMode.Single,
-            ItemContainerStyle = (Style)Application.Current.Resources["KynxaModelListItemStyle"],
-            MinHeight = 0, Padding = new Thickness(0)
-        };
-        models.Resources["ListViewItemSelectionIndicatorVisualEnabled"] = false;
-        ScrollViewer.SetHorizontalScrollMode(models, ScrollMode.Disabled);
-        ScrollViewer.SetHorizontalScrollBarVisibility(models, ScrollBarVisibility.Disabled);
-        ScrollViewer.SetVerticalScrollMode(models, ScrollMode.Enabled);
-        ScrollViewer.SetVerticalScrollBarVisibility(models, ScrollBarVisibility.Auto);
-        AutomationProperties.SetAutomationId(models, "ModelPickerList");
-        AutomationProperties.SetName(models, "模型列表");
+        var menu = PickerMenu.Create(FlyoutPlacementMode.TopEdgeAlignedRight);
+        var models = PickerMenu.CreateList("ModelPickerList", "模型列表");
+        models.ItemsSource = ModelPreviewNames;
+        models.SelectedItem = _selectedModelName;
         models.ItemClick += (_, args) => SelectModel((string)args.ClickedItem, menu);
         models.KeyDown += (_, args) =>
         {
@@ -75,27 +55,13 @@ public sealed partial class ShellPage
                 args.Handled = true;
             }
         };
-        content.Children.Add(models);
-        var separator = new Border
-        {
-            Height = 1, Margin = new Thickness(6, 4, 6, 4),
-            Background = (Brush)Application.Current.Resources["KynxaDividerBrush"]
-        };
-        Grid.SetRow(separator, 1);
-        content.Children.Add(separator);
-        var configure = new Button
-        {
-            Content = "配置自定义模型", Style = (Style)Application.Current.Resources["KynxaModelFooterButtonStyle"]
-        };
-        AutomationProperties.SetAutomationId(configure, "ConfigureCustomModelsButton");
+        var configure = PickerMenu.Action("配置自定义模型", "ConfigureCustomModelsButton");
         configure.Click += (_, _) =>
         {
             menu.Hide();
             DispatcherQueue.TryEnqueue(() => OpenModelManagement(customModels: true));
         };
-        Grid.SetRow(configure, 2);
-        content.Children.Add(configure);
-        menu.Content = content;
+        menu.Content = PickerMenu.WithFixedFooter(models, configure, Math.Max(120, Math.Min(360, XamlRoot.Size.Height - 32)));
         menu.Opened += (_, _) =>
         {
             if (_selectedModelName is not null) models.ScrollIntoView(_selectedModelName);
