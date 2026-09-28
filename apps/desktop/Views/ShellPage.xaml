@@ -303,6 +303,10 @@
                               SelectionMode="None" IsItemClickEnabled="False" Background="Transparent"
                               HorizontalAlignment="Center" Padding="4,16,16,30"
                               ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemsPanel>
+                            <!-- Keep text alive while selecting across offscreen messages. -->
+                            <ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate>
+                        </ListView.ItemsPanel>
                         <ListView.Resources>
                             <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent" />
                             <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent" />
@@ -323,8 +327,7 @@
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="1*" /><ColumnDefinition Width="4*" /></Grid.ColumnDefinitions>
                                         <Border Grid.Column="1" Padding="12,10" CornerRadius="12" Background="{StaticResource KynxaSegmentIdleBrush}"
                                                 HorizontalAlignment="Right" AutomationProperties.Name="用户消息">
-                                            <TextBlock Text="{x:Bind Content}" FontFamily="{StaticResource KynxaUIFont}" FontSize="16" FontWeight="Normal"
-                                                       LineHeight="26" LineStackingStrategy="BlockLineHeight" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                            <controls:MarkdownReply IsPlainText="True" FontSize="16" Text="{x:Bind Content}" />
                                         </Border>
                                     </Grid>
                                     <Grid ColumnSpacing="10" Visibility="{x:Bind AssistantVisibility}" AutomationProperties.Name="助手回复">
@@ -333,9 +336,7 @@
                                             <Image Width="28" Height="28" Stretch="Uniform" Source="{StaticResource KynxaLogoImage}" />
                                         </Border>
                                         <StackPanel Grid.Column="1" Margin="0,5,0,0" Spacing="8">
-                                            <TextBlock Text="{x:Bind Content}" Visibility="{x:Bind ReplyVisibility}"
-                                                       FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal" LineHeight="22.4"
-                                                       LineStackingStrategy="BlockLineHeight" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                            <controls:MarkdownReply Text="{x:Bind Content}" Visibility="{x:Bind ReplyVisibility}" />
                                             <StackPanel Orientation="Horizontal" Spacing="8" Visibility="{x:Bind WaitingVisibility}">
                                                 <ProgressRing Width="14" Height="14" MinWidth="14" MinHeight="14" IsActive="{x:Bind IsWaiting}"
                                                               Foreground="{StaticResource KynxaSecondaryTextBrush}" />

@@ -13,9 +13,15 @@ public partial class App : Application
         {
             try
             {
-                File.WriteAllText(Path.Combine(Windows.Storage.ApplicationData.Current.LocalFolder.Path, "last-ui-error.txt"), error.Exception.ToString());
+                File.WriteAllText(Path.Combine(Services.StoragePaths.DesktopDirectory, "last-ui-error.txt"), error.Exception.ToString());
             }
-            catch { /* Diagnostics must not obscure the original exception. */ }
+            catch
+            {
+                // If the configured storage location itself fails, preserve startup diagnostics.
+                try { File.WriteAllText(Path.Combine(Windows.Storage.ApplicationData.Current.LocalFolder.Path,
+                    "last-ui-error.txt"), error.Exception.ToString()); }
+                catch { /* Diagnostics must not obscure the original exception. */ }
+            }
         };
     }
 

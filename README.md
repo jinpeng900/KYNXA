@@ -375,6 +375,8 @@ KYNXA is currently in early development.
 
 Contribution guidelines will be expanded as the architecture and public APIs stabilize.
 
+The [five-person development plan](docs/team/README.md) and [team lead overview](docs/team/队长总览.md) (Chinese) define module ownership, interfaces, a proposed six-week schedule, and acceptance criteria. The team lead is included in the five-person team.
+
 Bug reports, architecture discussions, implementation proposals, tests, documentation improvements, and security reviews will be welcome.
 
 ## License

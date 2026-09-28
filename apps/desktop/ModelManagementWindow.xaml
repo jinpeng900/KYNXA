@@ -5,57 +5,124 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="KYNXA 模型管理">
     <Grid Background="{StaticResource KynxaMainBrush}">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="44" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-        <Grid x:Name="ModelTitleBar" Grid.Row="0" Background="{StaticResource KynxaSidebarBrush}">
-            <TextBlock Text="KYNXA   /   模型管理" VerticalAlignment="Center" Margin="22,0" FontSize="13" />
+        <Grid.Resources>
+            <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#888888" />
+            <SolidColorBrush x:Key="ComboBoxBorderBrushFocused" Color="#888888" />
+            <Style TargetType="TextBlock">
+                <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="Foreground" Value="{StaticResource KynxaTextBrush}" />
+            </Style>
+            <Style TargetType="TextBox">
+                <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="MinHeight" Value="38" />
+                <Setter Property="Padding" Value="12,8" />
+                <Setter Property="CornerRadius" Value="8" />
+            </Style>
+            <Style TargetType="PasswordBox">
+                <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="MinHeight" Value="38" />
+                <Setter Property="Padding" Value="12,8" />
+                <Setter Property="CornerRadius" Value="8" />
+            </Style>
+            <Style TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="MinHeight" Value="36" />
+                <Setter Property="Padding" Value="14,8" />
+                <Setter Property="CornerRadius" Value="8" />
+            </Style>
+        </Grid.Resources>
+        <Grid.RowDefinitions><RowDefinition Height="44" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Grid x:Name="ModelTitleBar" Background="{StaticResource KynxaSidebarBrush}">
+            <StackPanel Orientation="Horizontal" Spacing="12" Margin="22,0" VerticalAlignment="Center">
+                <TextBlock Text="KYNXA" FontWeight="SemiBold" />
+                <TextBlock Text="/" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                <TextBlock Text="模型管理" />
+            </StackPanel>
         </Grid>
-        <Grid Grid.Row="1" Padding="28,20,28,24" ColumnSpacing="20">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="240" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <Border Background="{StaticResource KynxaSidebarBrush}" CornerRadius="14" Padding="15">
-                <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                    <StackPanel Spacing="6">
-                        <TextBlock Text="模型连接" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Text="已保存的 OpenAI 兼容连接" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                    </StackPanel>
-                    <ScrollViewer Grid.Row="1" Margin="0,20,0,10" VerticalScrollBarVisibility="Auto">
-                        <StackPanel x:Name="ProviderList" Spacing="6" />
-                    </ScrollViewer>
-                    <Button Grid.Row="2" Content="＋ 新建连接" HorizontalAlignment="Stretch" Click="NewConnectionButton_Click" />
-                </Grid>
-            </Border>
-            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
-                <StackPanel MaxWidth="680" Spacing="14">
-                    <TextBlock Text="连接设置" FontSize="22" FontWeight="SemiBold" />
-                    <TextBlock Text="通过 DeepSeek Harness 调用模型。首阶段支持 OpenAI 兼容 API，可连接云端或本机服务。" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="Ollama 本机预设" Click="LocalPresetButton_Click" />
-                        <Button Content="自定义 API" Click="CustomPresetButton_Click" />
-                    </StackPanel>
-                    <TextBlock Text="连接名称" />
-                    <TextBox x:Name="NameBox" PlaceholderText="例如 Ollama / DeepSeek API" />
-                    <TextBlock Text="Provider ID（小写字母、数字、连字符）" />
-                    <TextBox x:Name="ProviderIdBox" PlaceholderText="例如 ollama 或 deepseek" />
-                    <TextBlock Text="Base URL（包含 /v1）" />
-                    <TextBox x:Name="BaseUrlBox" PlaceholderText="https://api.example.com/v1" />
-                    <TextBlock Text="API Key（留空可保留已保存的 Key）" />
-                    <PasswordBox x:Name="ApiKeyBox" PlaceholderText="本机服务可留空" />
-                    <TextBlock Text="Model ID（每行一个；不支持模型列表接口时可手动填写）" />
-                    <TextBox x:Name="ModelsBox" AcceptsReturn="True" Height="100" TextWrapping="Wrap" PlaceholderText="例如 deepseek-chat" />
-                    <StackPanel Orientation="Horizontal" Spacing="10">
-                        <Button x:Name="ProbeButton" Content="测试并获取模型" Click="TestConnectionButton_Click" />
-                        <Button x:Name="SaveButton" Content="保存连接" Click="SaveConnectionButton_Click" Background="{StaticResource KynxaSendBrush}" Foreground="White" />
-                    </StackPanel>
-                    <TextBlock x:Name="StatusText" Text="先填写连接，再测试或保存。" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                    <TextBlock Text="API Key 保存在本机 KYNXA Harness 数据目录；模型请求由本机网关发送，不在浏览器中保存密钥。" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="212" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Grid x:Name="ProviderPanel" Background="{StaticResource KynxaSidebarBrush}" Padding="16,20,12,18">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <StackPanel Spacing="7" Margin="8,0,0,0">
+                    <TextBlock Text="我的连接" FontSize="15" FontWeight="SemiBold" />
+                    <TextBlock x:Name="ConnectionCount" Text="配置后即可在聊天中选择" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                 </StackPanel>
-            </ScrollViewer>
+                <Grid Grid.Row="1" Margin="0,18,0,12">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="ProviderList" Spacing="4" /></ScrollViewer>
+                    <StackPanel x:Name="EmptyConnections" Margin="8,12" Spacing="8" IsHitTestVisible="False">
+                        <FontIcon Glyph="&#xE774;" FontSize="24" Foreground="#888888" HorizontalAlignment="Left" />
+                        <TextBlock Text="还没有模型连接" />
+                        <TextBlock Text="从右侧选择服务商，&#xA;添加你的第一个模型。" FontSize="12" LineHeight="20" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                    </StackPanel>
+                </Grid>
+                <Button x:Name="NewConnectionButton" Grid.Row="2" HorizontalAlignment="Stretch" Background="White" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="NewConnectionButton_Click">
+                    <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE710;" FontSize="12" /><TextBlock Text="添加连接" /></StackPanel>
+                </Button>
+            </Grid>
+            <Grid Grid.Column="1" Padding="28,22,28,18" RowSpacing="16">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <StackPanel Spacing="7">
+                    <TextBlock x:Name="EditorTitle" Text="添加模型连接" FontSize="22" FontWeight="SemiBold" />
+                    <TextBlock Text="连接你常用的模型，让 KYNXA 帮你完成工作。" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+                <ScrollViewer x:Name="EditorScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="EditorForm" Spacing="18" Margin="0,0,12,8">
+                        <Border Background="{StaticResource KynxaSidebarBrush}" CornerRadius="12" Padding="16">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="服务商" FontWeight="SemiBold" />
+                                <ComboBox x:Name="PresetBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectionChanged="PresetBox_SelectionChanged" AutomationProperties.Name="选择服务商" />
+                                <TextBlock x:Name="PresetHint" TextWrapping="Wrap" FontSize="12" LineHeight="19" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <TextBox x:Name="NameBox" Header="连接名称" PlaceholderText="例如：DeepSeek、我的工作模型" LostFocus="NameBox_LostFocus" />
+                        <TextBox x:Name="BaseUrlBox" Header="服务地址" PlaceholderText="例如 http://127.0.0.1:8080/v1" TextChanged="BaseUrlBox_TextChanged" />
+                        <StackPanel Spacing="6">
+                            <PasswordBox x:Name="ApiKeyBox" Header="API Key" PlaceholderText="粘贴服务商提供的密钥" />
+                            <TextBlock x:Name="KeyHint" Text="密钥仅保存在本机，用于向所选服务发送请求。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        </StackPanel>
+                        <StackPanel Spacing="8">
+                            <Grid>
+                                <TextBlock Text="可用模型" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <TextBlock x:Name="ModelCount" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            </Grid>
+                            <TextBox x:Name="ModelSearchBox" PlaceholderText="搜索模型名称或 ID" TextChanged="ModelSearchBox_TextChanged" AutomationProperties.Name="搜索模型" />
+                            <ScrollViewer MaxHeight="256" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel x:Name="ModelOptions" Spacing="4" />
+                            </ScrollViewer>
+                            <TextBlock x:Name="EmptyModelsHint" Text="暂时没有模型。可获取服务模型列表，或展开下方手动添加。" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            <Expander Header="手动填写模型 ID" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" FontSize="12">
+                                <TextBox x:Name="ModelsBox" AcceptsReturn="True" Height="88" TextWrapping="NoWrap" ScrollViewer.VerticalScrollBarVisibility="Auto" PlaceholderText="每行一个模型 ID" TextChanged="ModelsBox_TextChanged" AutomationProperties.Name="模型 ID 列表" />
+                            </Expander>
+                            <TextBlock x:Name="ModelsHint" Text="已填入常用模型 ID；可直接编辑，或获取账号支持的模型列表。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        </StackPanel>
+                        <Expander x:Name="AdvancedSettings" Header="高级设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13">
+                            <StackPanel Spacing="14">
+                                <ComboBox x:Name="ProtocolBox" Header="接口协议" HorizontalAlignment="Stretch" SelectedIndex="0" FontSize="13">
+                                    <ComboBoxItem Content="OpenAI 兼容 · Chat Completions" Tag="openai-completions" />
+                                    <ComboBoxItem Content="OpenAI · Responses" Tag="openai-responses" />
+                                    <ComboBoxItem Content="Claude · Messages" Tag="anthropic-messages" />
+                                </ComboBox>
+                                <TextBox x:Name="ProviderIdBox" Header="连接 ID" PlaceholderText="自动生成，可修改" />
+                                <TextBlock Text="连接 ID 用于区分配置；已保存连接的 ID 固定不变。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                </ScrollViewer>
+                <Border Grid.Row="2" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" HorizontalAlignment="Left" />
+                            <Button x:Name="ProbeButton" Grid.Column="1" Content="获取模型 / 测试" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="TestConnectionButton_Click" />
+                            <Button x:Name="SaveButton" Grid.Column="2" Content="保存连接" Background="{StaticResource KynxaSendBrush}" Foreground="White" Click="SaveConnectionButton_Click" />
+                        </Grid>
+                        <TextBlock x:Name="StatusText" Text="选好服务商，填写密钥后保存。" FontSize="12" MaxHeight="52" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
+                    </StackPanel>
+                </Border>
+            </Grid>
         </Grid>
     </Grid>
 </Window>

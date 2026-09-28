@@ -1,19 +1,16 @@
 import { createServer } from 'node:http';
-import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { HarnessModelStore, validateConnection } from './store.mjs';
-import { HarnessRuntime } from './harness.mjs';
+import { ModelStore, validateConnection } from './store.mjs';
+import { ModelRuntime } from './runtime.mjs';
+import { authorization } from './protocols.mjs';
+import { modelHome } from './storage.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const harnessRoot = resolve(process.env.KYNXA_DSH_ROOT ?? resolve(here, '../../../../deepseek-harness/deepseek-harness'));
-const dataHome = resolve(process.env.KYNXA_DSH_HOME ?? resolve(homedir(), '.kynxa/harness'));
-const workspaceRoot = resolve(process.env.KYNXA_WORKSPACE_ROOT ?? process.cwd());
+const dataHome = modelHome();
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
-const store = new HarnessModelStore({ harnessRoot, dataHome });
-const runtime = new HarnessRuntime({ harnessRoot, dataHome, workspaceRoot,
-  patchPath: resolve(here, 'kynxa-sdk.cordis.patch.yml') });
+const store = new ModelStore({ dataHome });
+const runtime = new ModelRuntime({ modelStore: store, dataHome });
 
 function json(response, status, value) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -35,14 +32,19 @@ async function probe(input, modelStore) {
   const apiKey = connection.apiKey || await modelStore.savedKeyFor?.(connection.providerId, connection.baseUrl);
   const start = performance.now();
   const response = await fetch(`${connection.baseUrl}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    redirect: 'error',
+    headers: authorization({ ...connection, apiKey }),
     signal: AbortSignal.timeout(10000)
   });
-  if (!response.ok) throw new Error(`模型列表接口返回 HTTP ${response.status}。`);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`模型列表接口返回 HTTP ${response.status}。`);
+  }
   const result = await response.json();
   const models = Array.isArray(result.data) ? result.data : Array.isArray(result.models) ? result.models : [];
   return { ok: true, latencyMs: Math.round(performance.now() - start),
-    models: models.map(model => model?.id ?? model?.name).filter(value => typeof value === 'string') };
+    models: [...new Set(models.map(model => model?.id ?? model?.name)
+      .filter(value => typeof value === 'string' && /^[^\s\x00-\x1f]{1,160}$/.test(value)))].slice(0, 100) };
 }
 
 export function createModelServer({ modelStore = store, modelRuntime = runtime } = {}) {
@@ -63,7 +65,7 @@ export function createModelServer({ modelStore = store, modelRuntime = runtime }
       if (request.method === 'POST' && pathname === '/api/chat') {
         const body = await bodyOf(request);
         if (!body || typeof body.message !== 'string' || !body.message.trim() ||
-            typeof body.conversationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.conversationId))
+            typeof body.conversationId !== 'string' || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.conversationId))
           throw new Error('会话 ID 或消息无效。');
         if (body.permissionMode && !['ask', 'smart', 'full'].includes(body.permissionMode))
           throw new Error('权限模式无效。');
