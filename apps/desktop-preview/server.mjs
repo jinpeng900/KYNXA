@@ -8,6 +8,7 @@ const previewRoot = resolve(import.meta.dirname);
 const desktopAssetsRoot = resolve(previewRoot, "../desktop/Resources/UI");
 const portArgument = process.argv.find((value) => value.startsWith("--port="));
 const port = Number(portArgument?.split("=")[1] ?? process.env.KYNXA_PREVIEW_PORT ?? 4173);
+const modelApi = process.env.KYNXA_MODEL_API_URL ?? "http://127.0.0.1:5218";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -25,6 +26,23 @@ function safeFile(root, requestPath) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname.startsWith("/api/")) {
+    try {
+      const upstream = await fetch(new URL(url.pathname, modelApi), {
+        method: request.method,
+        headers: { "Content-Type": "application/json" },
+        body: request.method === "GET" ? undefined : request,
+        duplex: request.method === "GET" ? undefined : "half",
+        signal: AbortSignal.timeout(300000)
+      });
+      response.writeHead(upstream.status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(Buffer.from(await upstream.arrayBuffer()));
+    } catch {
+      response.writeHead(502, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "模型服务未启动。请先运行 apps/model-gateway。" }));
+    }
+    return;
+  }
   let root = previewRoot;
   let pathname = decodeURIComponent(url.pathname);
 

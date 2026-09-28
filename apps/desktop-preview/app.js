@@ -30,6 +30,64 @@ let mode = "work";
 let toastTimer;
 let composingPrompt = false;
 let suppressComposingEnter = false;
+let providers = [];
+let selectedModel = null;
+let conversationId = crypto.randomUUID();
+let sending = false;
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+async function refreshModels() {
+  ({ providers } = await api("/api/models"));
+  const available = providers.flatMap(provider => provider.models.map(model => ({
+    provider: provider.providerId, model, label: `${provider.displayName} · ${model}`
+  })));
+  if (selectedModel && !available.some(item => item.provider === selectedModel.provider && item.model === selectedModel.model)) selectedModel = null;
+  document.querySelector("#modelButton span").textContent = selectedModel?.model || "模型选择";
+  return available;
+}
+
+function formConnection() {
+  const form = document.querySelector("#modelForm");
+  const values = new FormData(form);
+  return {
+    providerId: String(values.get("providerId")).trim(), displayName: String(values.get("displayName")).trim(),
+    baseUrl: String(values.get("baseUrl")).trim(), apiKey: String(values.get("apiKey")),
+    models: String(values.get("models")).split(/[\n,]/).map(value => value.trim()).filter(Boolean)
+  };
+}
+
+function setConnection(provider) {
+  const form = document.querySelector("#modelForm");
+  for (const field of ["providerId", "displayName", "baseUrl"])
+    form.elements.namedItem(field).value = provider?.[field] || "";
+  form.elements.namedItem("models").value = provider?.models?.join("\n") || "";
+  form.elements.namedItem("apiKey").value = "";
+  document.querySelector("#modelStatus").textContent = provider?.hasApiKey ? "API Key 已保存；留空可保留。" : "填写连接信息后保存。";
+}
+
+function renderProviders() {
+  const list = document.querySelector("#providerList");
+  list.replaceChildren();
+  providers.forEach(provider => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${provider.displayName} · ${provider.models.length} 个模型`;
+    button.addEventListener("click", () => setConnection(provider));
+    list.append(button);
+  });
+}
+
+async function openModels() {
+  document.querySelector("#modelDialog").showModal();
+  try { await refreshModels(); renderProviders(); }
+  catch (error) { document.querySelector("#modelStatus").textContent = error.message; }
+}
 
 function renderRecents() {
   elements.list.replaceChildren();
@@ -92,18 +150,30 @@ function showMenu(anchor, choices, onSelect) {
   elements.popover.classList.remove("hidden");
 }
 
-function send() {
+async function send() {
   const value = elements.prompt.value.trim();
   if (!value) { elements.prompt.focus(); return; }
-  elements.empty.classList.add("hidden");
+  if (sending) return;
+  if (!selectedModel) { showToast("请先配置并选择模型"); return; }
+  sending = true;
+  document.querySelector("#sendButton").disabled = true;
+  elements.empty.classList.add("conversation-active");
   document.querySelector(".ambient").classList.add("hidden");
   elements.conversation.classList.remove("hidden");
+  document.querySelector(".composer-block").classList.add("in-conversation");
   elements.title.textContent = mode === "work" ? "当前工作" : "新聊天";
   const user = document.createElement("div"); user.className = "message user"; user.textContent = value;
   const assistant = document.createElement("div"); assistant.className = "message assistant";
-  assistant.textContent = "这是 Linux 预览层的交互占位回复。正式消息能力仍由 KYNXA 后端提供。";
+  assistant.textContent = "正在等待模型回复…";
   elements.messages.append(user, assistant);
   elements.prompt.value = "";
+  try {
+    const reply = await api("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId, message: value, provider: selectedModel.provider,
+        model: selectedModel.model, permissionMode: "ask" }) });
+    assistant.textContent = reply.content;
+  } catch (error) { assistant.textContent = `调用失败：${error.message}`; }
+  finally { sending = false; document.querySelector("#sendButton").disabled = false; }
 }
 
 function showToast(message) {
@@ -136,10 +206,51 @@ elements.prompt.addEventListener("keydown", (event) => {
 elements.prompt.addEventListener("keyup", () => {
   if (!composingPrompt) suppressComposingEnter = false;
 });
-document.querySelector("#modelButton").addEventListener("click", (event) => showMenu(event.currentTarget, ["本地模型", "OpenAI Compatible", "模拟模型"], (value) => event.currentTarget.querySelector("span").textContent = value));
+document.querySelector("#modelButton").addEventListener("click", async (event) => {
+  try {
+    const choices = await refreshModels();
+    showMenu(event.currentTarget, [...choices.map(item => item.label), "配置模型连接…"], value => {
+      const choice = choices.find(item => item.label === value);
+      if (choice) { selectedModel = choice; event.currentTarget.querySelector("span").textContent = choice.model; }
+      else openModels();
+    });
+  } catch (error) { showToast(error.message); }
+});
 document.querySelector("#permissionButton").addEventListener("click", (event) => showMenu(event.currentTarget, ["请求批准", "智能批准", "完整访问"], (value) => event.currentTarget.querySelector("span").textContent = value));
 elements.workspace.addEventListener("click", (event) => showMenu(event.currentTarget, projects.slice(0, 4).map(([name]) => name), (value) => event.currentTarget.querySelector("span").textContent = value));
-elements.newItem.addEventListener("click", () => showToast(mode === "work" ? "预览：新建项目" : "预览：新建聊天"));
+elements.newItem.addEventListener("click", () => {
+  if (mode === "work") { showToast("预览：新建项目"); return; }
+  conversationId = crypto.randomUUID();
+  elements.messages.replaceChildren();
+  elements.conversation.classList.add("hidden");
+  elements.empty.classList.remove("conversation-active");
+  document.querySelector(".ambient").classList.remove("hidden");
+  elements.prompt.value = "";
+  elements.prompt.focus();
+});
+document.querySelector("#manageModels").addEventListener("click", openModels);
+document.querySelector("#closeModels").addEventListener("click", () => document.querySelector("#modelDialog").close());
+document.querySelector("#newProvider").addEventListener("click", () => setConnection(null));
+document.querySelector("#ollamaPreset").addEventListener("click", () => setConnection({ providerId: "ollama", displayName: "Ollama", baseUrl: "http://127.0.0.1:11434/v1" }));
+document.querySelector("#customPreset").addEventListener("click", () => setConnection({ providerId: "custom-api", displayName: "自定义 API" }));
+document.querySelector("#probeModels").addEventListener("click", async () => {
+  const status = document.querySelector("#modelStatus"); status.textContent = "正在测试…";
+  try {
+    const result = await api("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formConnection()) });
+    if (result.models.length) document.querySelector("#modelForm").elements.namedItem("models").value = result.models.join("\n");
+    status.textContent = `连接成功，${result.latencyMs} ms；发现 ${result.models.length} 个模型。`;
+  } catch (error) { status.textContent = `测试失败：${error.message}。可手动填写 Model ID。`; }
+});
+document.querySelector("#modelForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const status = document.querySelector("#modelStatus"); status.textContent = "正在保存…";
+  try {
+    const result = await api("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formConnection()) });
+    await refreshModels(); renderProviders(); setConnection(result.provider);
+    status.textContent = `已保存 ${result.provider.displayName}。现在可以在输入框选择模型。`;
+  } catch (error) { status.textContent = `保存失败：${error.message}`; }
+});
 document.addEventListener("pointerdown", (event) => { if (!elements.popover.contains(event.target) && !event.target.closest("#modelButton, #permissionButton, #workspaceButton")) elements.popover.classList.add("hidden"); });
 
 setMode("work");
+refreshModels().catch(() => {});

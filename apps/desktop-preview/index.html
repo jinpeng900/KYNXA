@@ -31,7 +31,7 @@
             <button><img src="/desktop-assets/Icons/connect.svg" alt="" />连接</button>
             <button><img src="/desktop-assets/Icons/scheduled-task.svg" alt="" />定时任务</button>
             <button><img src="/desktop-assets/Icons/skills.svg" alt="" />技能</button>
-            <button><img src="/desktop-assets/Icons/model-management.svg" alt="" />模型管理</button>
+            <button id="manageModels"><img src="/desktop-assets/Icons/model-management.svg" alt="" />模型管理</button>
           </nav>
 
           <section class="recents">
@@ -85,6 +85,20 @@
         </section>
       </div>
     </main>
+    <dialog id="modelDialog" class="model-dialog" aria-label="模型管理">
+      <form id="modelForm" class="model-form">
+        <div class="model-heading"><div><h2>模型管理</h2><p>通过 DeepSeek Harness 连接 OpenAI 兼容 API</p></div><button type="button" id="closeModels" aria-label="关闭">×</button></div>
+        <div class="model-layout"><aside><h3>模型连接</h3><div id="providerList"></div><button type="button" id="newProvider">＋ 新建连接</button></aside>
+          <div class="model-fields"><div class="presets"><button type="button" id="ollamaPreset">Ollama 本机预设</button><button type="button" id="customPreset">自定义 API</button></div>
+            <label>连接名称<input name="displayName" required placeholder="例如 Ollama / DeepSeek API" /></label>
+            <label>Provider ID<input name="providerId" required pattern="[a-z][a-z0-9-]{1,39}" placeholder="例如 ollama" /></label>
+            <label>Base URL<input name="baseUrl" type="url" required placeholder="https://api.example.com/v1" /></label>
+            <label>API Key <small>留空可保留已保存的 Key；本机服务可留空</small><input name="apiKey" type="password" autocomplete="off" /></label>
+            <label>Model ID <small>每行一个；无法探测时可手动填写</small><textarea name="models" rows="4" placeholder="例如 deepseek-chat"></textarea></label>
+            <div class="model-actions"><button type="button" id="probeModels">测试并获取模型</button><button type="submit">保存连接</button></div>
+            <p id="modelStatus" role="status">先填写连接，再测试或保存。</p></div></div>
+      </form>
+    </dialog>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

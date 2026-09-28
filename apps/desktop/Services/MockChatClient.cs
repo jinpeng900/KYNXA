@@ -4,6 +4,7 @@ using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
 
+/// <summary>Legacy mock client retained for tests/chat-smoke; the desktop UI uses ModelApiClient.</summary>
 public sealed class MockChatClient : IDisposable
 {
     private readonly HttpClient _http = new()
