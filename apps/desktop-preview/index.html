@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KYNXA Desktop Preview</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="window" aria-label="KYNXA Linux UI 预览">
+      <header class="titlebar">
+        <strong>KYNXA</strong>
+        <button class="icon-button title-more" title="更多功能" aria-label="更多功能">•••</button>
+        <div class="window-controls" aria-hidden="true"><span>―</span><span>□</span><span>×</span></div>
+      </header>
+
+      <div class="shell">
+        <aside class="sidebar">
+          <div class="mode-switch" role="tablist" aria-label="主模式">
+            <span class="mode-pill"></span>
+            <button class="mode active" data-mode="work" role="tab" aria-selected="true">
+              <span class="mode-glyph">▣</span>工作
+            </button>
+            <button class="mode" data-mode="chat" role="tab" aria-selected="false">
+              <span class="mode-glyph">◯</span>聊天
+            </button>
+          </div>
+
+          <nav class="global-nav" aria-label="全局导航">
+            <button><img src="/desktop-assets/Icons/knowledge.svg" alt="" />知识库</button>
+            <button><img src="/desktop-assets/Icons/connect.svg" alt="" />连接</button>
+            <button><img src="/desktop-assets/Icons/scheduled-task.svg" alt="" />定时任务</button>
+            <button><img src="/desktop-assets/Icons/skills.svg" alt="" />技能</button>
+            <button><img src="/desktop-assets/Icons/model-management.svg" alt="" />模型管理</button>
+          </nav>
+
+          <section class="recents">
+            <div class="section-title">
+              <button id="treeToggle" aria-expanded="true"><span class="chevron">⌄</span><span id="sectionLabel">项目</span></button>
+              <button class="section-action" id="newItem" title="添加项目" aria-label="添加项目">
+                <img src="/desktop-assets/Icons/folder-add.svg" alt="" />
+              </button>
+            </div>
+            <div id="recentList" class="recent-list"></div>
+          </section>
+
+          <footer class="sidebar-footer">
+            <button class="icon-button" title="设置"><img src="/desktop-assets/Icons/settings.svg" alt="" /></button>
+            <span class="device" title="设备在线">
+              <img src="/desktop-assets/Icons/device-status.svg" alt="" /><i></i>
+            </span>
+          </footer>
+        </aside>
+
+        <section class="main-region">
+          <div class="ambient" aria-hidden="true"><i></i><i></i></div>
+          <div class="empty-state" id="emptyState">
+            <div class="logo-wrap"><img src="/desktop-assets/Brand/kynxa-logo.png" alt="KYNXA" /></div>
+            <div class="composer-block">
+              <div class="composer">
+                <textarea id="prompt" rows="2" placeholder="向 KYNXA 提问任何问题..." aria-label="消息输入"></textarea>
+                <button class="expand" id="expandComposer" title="展开输入区" aria-label="展开输入区">⌗</button>
+                <div class="composer-actions">
+                  <div class="left-actions">
+                    <button class="round-action" title="添加"><img src="/desktop-assets/Icons/add.svg" alt="" /></button>
+                    <button class="text-action" id="permissionButton"><img src="/desktop-assets/Icons/permission-ask.svg" alt="" /><span>请求批准</span></button>
+                  </div>
+                  <div class="right-actions">
+                    <button class="text-action model-button" id="modelButton"><span>模型选择</span><b>⌄</b></button>
+                    <button class="send" id="sendButton" title="发送" aria-label="发送"><img src="/desktop-assets/Icons/send-arrow.svg" alt="" /></button>
+                  </div>
+                </div>
+              </div>
+              <button class="workspace-chip" id="workspaceButton"><img src="/desktop-assets/Icons/work-folder.svg" alt="" /><span>选择项目</span><b>⌄</b></button>
+            </div>
+          </div>
+
+          <section class="conversation hidden" id="conversation" aria-live="polite">
+            <div class="conversation-title" id="conversationTitle">新工作</div>
+            <div class="messages" id="messages"></div>
+          </section>
+
+          <div class="popover hidden" id="popover" role="menu"></div>
+          <div class="toast hidden" id="toast" role="status"></div>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
