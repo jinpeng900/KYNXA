@@ -7,27 +7,14 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using System.Numerics;
+using KYNXA_Desktop.Layout;
+using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 
 namespace KYNXA_Desktop.Views;
 
 /// <summary>The default KYNXA desktop shell defined by UI Design Spec v1.1.</summary>
 public sealed partial class ShellPage : Page
 {
-    private const double SidebarDefault = 240;
-    private const double SidebarCollapsed = 56;
-    private const double SidebarMin = 200;
-    private const double SidebarMax = 360;
-    private const double TopDefault = 96;
-    private const double TopMin = 72;
-    private const double TopMax = 180;
-    private const double ComposerWidthDefault = 824;
-    private const double ComposerWidthMin = 620;
-    private const double ComposerWidthMax = 1040;
-    private const double ComposerHeightDefault = 110;
-    private const double ComposerHeightMin = 96;
-    private const double ComposerAutoHeightMax = 210;
-    private const double ComposerHeightMax = 420;
-
     private readonly LayoutStateService _layoutStateService = new();
     private LayoutState _layout = LayoutState.CreateDefault();
     private double _dragStartValue;
@@ -92,25 +79,11 @@ public sealed partial class ShellPage : Page
             double requestedComposerHeight = _composerExpanded
                 ? maximumComposerHeight
                 : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
-            ComposerHost.Height = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
+            ComposerHost.EditorHeight = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
             ModelPickerButton.MaxWidth = Math.Max(64, ComposerHost.Width - 250);
             UpdateAdaptiveContentLayout(available);
         }
         finally { _applyingLayout = false; }
-    }
-
-    private static (double Minimum, double Maximum) GetComposerWidthRange(double availableWidth)
-    {
-        double horizontalPadding = availableWidth switch
-        {
-            >= 1200 => 144,
-            >= 800 => 96,
-            >= 520 => 56,
-            _ => 24
-        };
-
-        double maximum = Math.Min(ComposerWidthMax, Math.Max(240, availableWidth - horizontalPadding));
-        return (Math.Min(ComposerWidthMin, maximum), maximum);
     }
 
     private void UpdateAdaptiveContentLayout(double availableWidth)
@@ -133,8 +106,8 @@ public sealed partial class ShellPage : Page
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
 
         MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
-        ConversationMessages.Width = Math.Min(920, Math.Max(0, width - 48));
-        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.Height + 40 + WorkspacePickerHeight);
+        ConversationMessages.Width = Math.Min(ConversationWidthMax, Math.Max(0, width - 48));
+        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 40);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
         AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
@@ -142,17 +115,8 @@ public sealed partial class ShellPage : Page
         AmbientSoftWave.Height = AmbientLargeWave.Height * 0.8;
     }
 
-    private double GetComposerHeightMaximum()
-    {
-        double availableHeight = PrimaryContentSlot.ActualHeight;
-        if (availableHeight <= 0)
-        {
-            return ComposerHeightMax;
-        }
-
-        // Keep a small breathing space so the editor never exceeds its conversation region.
-        return Math.Min(ComposerHeightMax, Math.Max(72, availableHeight - 32 - WorkspacePickerHeight));
-    }
+    private double GetComposerHeightMaximum() =>
+        ShellLayoutMetrics.GetComposerHeightMaximum(PrimaryContentSlot.ActualHeight, ComposerHost.FooterHeight);
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
 
@@ -273,7 +237,7 @@ public sealed partial class ShellPage : Page
     {
         _composerExpanded = false;
         UpdateComposerExpandVisual();
-        _dragStartValue = ComposerHost.ActualHeight;
+        _dragStartValue = ComposerHost.EditorHeight;
     }
 
     private void ComposerTopGrip_DragDelta(object? sender, ResizeDeltaEventArgs e)
