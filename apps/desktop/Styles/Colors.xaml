@@ -9,6 +9,7 @@
     <Color x:Key="KynxaSecondaryTextColor">#99000000</Color>
     <Color x:Key="KynxaDividerColor">#14000000</Color>
     <Color x:Key="KynxaSegmentIdleColor">#F5F5F5</Color>
+    <Color x:Key="KynxaReplySurfaceColor">#F7F7F7</Color>
     <Color x:Key="KynxaSendColor">#262626</Color>
     <Color x:Key="KynxaSendHoverColor">#404040</Color>
     <Color x:Key="KynxaSendPressedColor">#171717</Color>
@@ -31,6 +32,7 @@
     <SolidColorBrush x:Key="KynxaWorkPanelDividerBrush" Color="#C8C8C8" />
     <SolidColorBrush x:Key="KynxaPermissionFullBrush" Color="#946900" />
     <SolidColorBrush x:Key="KynxaSegmentIdleBrush" Color="{StaticResource KynxaSegmentIdleColor}" />
+    <SolidColorBrush x:Key="KynxaReplySurfaceBrush" Color="{StaticResource KynxaReplySurfaceColor}" />
     <SolidColorBrush x:Key="KynxaSendBrush" Color="{StaticResource KynxaSendColor}" />
     <SolidColorBrush x:Key="KynxaSendHoverBrush" Color="{StaticResource KynxaSendHoverColor}" />
     <SolidColorBrush x:Key="KynxaSendPressedBrush" Color="{StaticResource KynxaSendPressedColor}" />

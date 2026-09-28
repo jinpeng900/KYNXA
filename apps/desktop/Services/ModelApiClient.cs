@@ -10,7 +10,7 @@ public sealed record ModelListResponse(ModelProvider[] Providers);
 public sealed record ModelProbeResponse(bool Ok, int LatencyMs, string[] Models);
 public sealed record ModelSaveResponse(ModelProvider Provider);
 public sealed record ModelConnection(string ProviderId, string DisplayName, string BaseUrl,
-    string[] Models, string? ApiKey = null);
+    string[] Models, string? ApiKey = null, string Protocol = "openai-completions");
 
 public sealed class ModelApiClient : IDisposable
 {

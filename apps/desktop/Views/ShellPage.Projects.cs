@@ -14,7 +14,7 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private readonly ProjectStore _projectStore = new(ApplicationData.Current.LocalFolder.Path);
+    private readonly ProjectStore _projectStore = new(StoragePaths.DesktopDirectory);
     private List<ProjectState> _projects = [];
     public ObservableCollection<ProjectTreeEntry> ProjectEntries { get; } = [];
 

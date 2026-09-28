@@ -7,12 +7,16 @@ namespace KYNXA_Desktop.Services;
 public sealed class LayoutStateService
 {
     private const string SettingsKey = "kynxa.ui.layout.v2";
+    private static string SettingsPath => Path.Combine(StoragePaths.DesktopDirectory, "layout.json");
 
     public LayoutState Load()
     {
         try
         {
-            if (ApplicationData.Current.LocalSettings.Values[SettingsKey] is string json)
+            string? json = null;
+            if (File.Exists(SettingsPath)) json = File.ReadAllText(SettingsPath);
+            else if (ApplicationData.Current.LocalSettings.Values[SettingsKey] is string legacy) json = legacy;
+            if (json is not null)
             {
                 LayoutState? state = JsonSerializer.Deserialize<LayoutState>(json);
                 if (state is not null && state.LayoutVersion <= LayoutState.CurrentVersion)
@@ -27,6 +31,7 @@ public sealed class LayoutStateService
                         state.PreviewWidth = 0;
                     }
                     state.LayoutVersion = LayoutState.CurrentVersion;
+                    if (!File.Exists(SettingsPath)) Save(state);
                     return state;
                 }
             }
@@ -43,7 +48,8 @@ public sealed class LayoutStateService
     {
         try
         {
-            ApplicationData.Current.LocalSettings.Values[SettingsKey] = JsonSerializer.Serialize(state);
+            File.WriteAllText(SettingsPath + ".tmp", JsonSerializer.Serialize(state));
+            File.Move(SettingsPath + ".tmp", SettingsPath, overwrite: true);
         }
         catch
         {

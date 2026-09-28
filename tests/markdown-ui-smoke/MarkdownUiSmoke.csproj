@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="../../apps/desktop/Resources/UI/Brand/kynxa-logo.png" Link="logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="Markdig" Version="1.4.0" />
+    <PackageReference Include="ColorCode.Core" Version="2.0.15" />
+    <Compile Include="../../apps/desktop/Controls/MarkdownReply.cs" Link="MarkdownReply.cs" />
+    <Compile Include="../../apps/desktop/Controls/MarkdownReply.Backgrounds.cs" Link="MarkdownReply.Backgrounds.cs" />
+    <Compile Include="../../apps/desktop/Controls/TextSelectionAutoScroll.cs" Link="TextSelectionAutoScroll.cs" />
+    <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
+  </ItemGroup>
+</Project>
