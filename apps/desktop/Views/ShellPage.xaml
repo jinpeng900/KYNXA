@@ -373,7 +373,7 @@
                             <Border.Shadow><ThemeShadow /></Border.Shadow>
                             <Grid>
                                 <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
-                                <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="16" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="向 KYNXA 提问任何问题..." ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextWrapping="Wrap">
+                                <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="16" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="向 KYNXA 提问任何问题..." ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                     <TextBox.Resources>
                                         <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
                                         <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />

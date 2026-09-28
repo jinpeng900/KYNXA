@@ -28,6 +28,8 @@ const elements = {
 
 let mode = "work";
 let toastTimer;
+let composingPrompt = false;
+let suppressComposingEnter = false;
 
 function renderRecents() {
   elements.list.replaceChildren();
@@ -116,7 +118,24 @@ document.querySelector("#treeToggle").addEventListener("click", (event) => {
 });
 document.querySelector("#expandComposer").addEventListener("click", () => elements.composer.classList.toggle("expanded"));
 document.querySelector("#sendButton").addEventListener("click", send);
-elements.prompt.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } });
+elements.prompt.addEventListener("compositionstart", () => { composingPrompt = true; });
+elements.prompt.addEventListener("compositionend", () => {
+  composingPrompt = false;
+  suppressComposingEnter = true;
+});
+elements.prompt.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") { suppressComposingEnter = false; return; }
+  if (event.isComposing || composingPrompt || event.keyCode === 229 || suppressComposingEnter) {
+    suppressComposingEnter = false;
+    return;
+  }
+  if (event.shiftKey) return;
+  event.preventDefault();
+  send();
+});
+elements.prompt.addEventListener("keyup", () => {
+  if (!composingPrompt) suppressComposingEnter = false;
+});
 document.querySelector("#modelButton").addEventListener("click", (event) => showMenu(event.currentTarget, ["本地模型", "OpenAI Compatible", "模拟模型"], (value) => event.currentTarget.querySelector("span").textContent = value));
 document.querySelector("#permissionButton").addEventListener("click", (event) => showMenu(event.currentTarget, ["请求批准", "智能批准", "完整访问"], (value) => event.currentTarget.querySelector("span").textContent = value));
 elements.workspace.addEventListener("click", (event) => showMenu(event.currentTarget, projects.slice(0, 4).map(([name]) => name), (value) => event.currentTarget.querySelector("span").textContent = value));
