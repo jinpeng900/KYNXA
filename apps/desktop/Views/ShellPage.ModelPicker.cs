@@ -11,7 +11,7 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private readonly ModelSelectionStore _modelSelectionStore = new(StoragePaths.DesktopDirectory);
+    private ModelSelectionStore _modelSelectionStore = new(StoragePaths.DesktopDirectory);
     private readonly ModelApiClient _modelApiClient = new();
     private ModelChoice? _selectedModel;
     private ModelChoice[] _availableModels = [];

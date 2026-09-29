@@ -251,7 +251,7 @@
 
             <Grid Grid.Row="4" Margin="14,0,10,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
-                <Button Style="{StaticResource KynxaIconButtonStyle}" ToolTipService.ToolTip="设置"><Image Width="20" Height="20" Source="{StaticResource IconSettings}" /></Button>
+                <Button Style="{StaticResource KynxaIconButtonStyle}" Click="StorageSettings_Click" AutomationProperties.Name="设置" ToolTipService.ToolTip="设置"><Image Width="20" Height="20" Source="{StaticResource IconSettings}" /></Button>
                 <Grid Grid.Column="2" ToolTipService.ToolTip="设备在线">
                     <Image Width="20" Height="20" Source="{StaticResource IconDeviceStatus}" />
                     <Ellipse Width="8" Height="8" Margin="0,0,0,2" HorizontalAlignment="Right" VerticalAlignment="Bottom" Fill="{StaticResource KynxaOnlineBrush}" Stroke="{StaticResource KynxaSidebarBrush}" StrokeThickness="1.5" />

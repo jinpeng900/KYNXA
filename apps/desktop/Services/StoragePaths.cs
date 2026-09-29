@@ -6,7 +6,15 @@ namespace KYNXA_Desktop.Services;
 /// <summary>Shared data-root pointer; legacy locations remain the default until migrated.</summary>
 public static class StoragePaths
 {
-    public static string DesktopDirectory { get; } = ResolveDesktopDirectory();
+    public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Data");
+    public static string PointerPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa", "storage.json");
+    public static string MigrationLockPath => Path.Combine(Path.GetDirectoryName(PointerPath)!, "storage-migration.lock");
+    public static bool IsMigrating { get; set; }
+    public static bool EnvironmentControlled => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_DATA_HOME"))
+        || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME"));
+    public static string? DataRoot { get; private set; }
+    public static string DesktopDirectory { get; private set; } = ResolveDesktopDirectory();
+    public static void Reload() => DesktopDirectory = ResolveDesktopDirectory();
 
     private static string ResolveDesktopDirectory()
     {
@@ -24,6 +32,15 @@ public static class StoragePaths
         }
         if (!string.IsNullOrWhiteSpace(root) && !Path.IsPathFullyQualified(root))
             throw new InvalidDataException("KYNXA 存储目录必须为绝对路径。");
+        if (string.IsNullOrWhiteSpace(root) && !Directory.EnumerateFiles(legacyDirectory, "*.json").Any()
+            && !Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa", "models")))
+        {
+            root = DefaultRoot;
+            Directory.CreateDirectory(Path.GetDirectoryName(PointerPath)!);
+            File.WriteAllText(PointerPath + ".tmp", JsonSerializer.Serialize(new { version = 1, dataRoot = root }));
+            File.Move(PointerPath + ".tmp", PointerPath, overwrite: true);
+        }
+        DataRoot = root;
         string path = string.IsNullOrWhiteSpace(root) ? legacyDirectory
             : Path.Combine(Path.GetFullPath(root), "Desktop");
         Directory.CreateDirectory(path);

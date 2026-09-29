@@ -46,6 +46,7 @@ public sealed class LayoutStateService
 
     public void Save(LayoutState state)
     {
+        if (StoragePaths.IsMigrating) return;
         try
         {
             File.WriteAllText(SettingsPath + ".tmp", JsonSerializer.Serialize(state));

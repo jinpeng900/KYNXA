@@ -6,6 +6,7 @@ import { ModelStore, validateConnection } from './store.mjs';
 import { ModelRuntime } from './runtime.mjs';
 import { authorization } from './protocols.mjs';
 import { modelHome } from './storage.mjs';
+import { storageMigrationActive } from './storage-maintenance.mjs';
 
 const dataHome = modelHome();
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
@@ -47,12 +48,25 @@ async function probe(input, modelStore) {
       .filter(value => typeof value === 'string' && /^[^\s\x00-\x1f]{1,160}$/.test(value)))].slice(0, 100) };
 }
 
-export function createModelServer({ modelStore = store, modelRuntime = runtime } = {}) {
+export function createModelServer(options = {}) {
+  let modelStore = options.modelStore ?? store, modelRuntime = options.modelRuntime ?? runtime;
+  const managed = !options.modelStore && !options.modelRuntime;
+  let activeRequests = 0;
   return createServer(async (request, response) => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+    let counted = false;
     try {
+      const migrating = managed && storageMigrationActive();
+      if (managed && !migrating && activeRequests === 0 && modelStore.dataHome !== modelHome()) {
+        modelStore = new ModelStore({ dataHome: modelHome() });
+        modelRuntime = new ModelRuntime({ modelStore, dataHome: modelStore.dataHome });
+      }
       if (request.method === 'GET' && pathname === '/health')
-        return json(response, 200, { status: 'ok', service: 'kynxa-model-gateway' });
+        return json(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
+          activeRequests, migrating, modelDataHome: modelStore.dataHome });
+      if (migrating) return json(response, 503, { error: '正在迁移数据，请完成后再试。' });
+      activeRequests++;
+      counted = true;
       if (request.method === 'GET' && pathname === '/api/models')
         return json(response, 200, { providers: await modelStore.list() });
       if (request.method === 'POST' && pathname === '/api/models') {
@@ -84,6 +98,8 @@ export function createModelServer({ modelStore = store, modelRuntime = runtime }
         error.message?.includes('模型') || error.message?.includes('请求体') ||
         error.message?.includes('权限模式') || error.message?.includes('会话 ID');
       json(response, clientError ? 400 : 502, { error: error.message ?? '模型调用失败。' });
+    } finally {
+      if (counted) activeRequests--;
     }
   });
 }
