@@ -14,7 +14,7 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private readonly ProjectStore _projectStore = new(StoragePaths.DesktopDirectory);
+    private ProjectStore _projectStore = new(StoragePaths.DesktopDirectory);
     private List<ProjectState> _projects = [];
     public ObservableCollection<ProjectTreeEntry> ProjectEntries { get; } = [];
 
@@ -161,6 +161,20 @@ public sealed partial class ShellPage
             if (!Directory.Exists(project.FolderPath)) throw new DirectoryNotFoundException($"关联文件夹不存在：{project.FolderPath}");
             var folder = await StorageFolder.GetFolderFromPathAsync(project.FolderPath);
             if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException("无法打开文件资源管理器。");
+        });
+        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? "关联工作文件夹" : "重新关联文件夹", "\uE8F4", async () =>
+        {
+            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is null) return;
+            var previous = project.FolderPath;
+            project.FolderPath = folder.Path;
+            try { SaveProjectsAndRender(); }
+            catch { project.FolderPath = previous; throw; }
+            ProjectNotice.Message = $"“{project.Name}”已关联到 {folder.Path}，聊天和原文件夹内容保持不变。";
+            ProjectNotice.IsOpen = true;
         });
         Item("重命名项目", "\uE70F", async () =>
         {
