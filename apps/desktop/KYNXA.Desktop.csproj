@@ -31,6 +31,7 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
+    <Content Include="..\model-gateway\*.mjs" Exclude="..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
   </ItemGroup>
 
@@ -53,6 +54,8 @@
   -->
   <ItemGroup>
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
+    <PackageReference Include="CSharpMath.SkiaSharp" Version="0.5.1" />
+    <PackageReference Include="SkiaSharp" Version="2.88.9" />
     <PackageReference Include="Markdig" Version="1.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />

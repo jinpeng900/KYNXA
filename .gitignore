@@ -22,6 +22,14 @@ venv/
 .env
 .env.*
 
+# Local model credentials and machine-specific configuration
+.kynxa/
+**/connections.json
+**/connections.json.*
+**/local-server.json
+*.gguf
+*.safetensors
+
 # Logs
 *.log
 

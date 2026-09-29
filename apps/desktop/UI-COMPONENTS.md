@@ -48,3 +48,13 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 ```
 
 界面检查：工作首页底栏与输入框等宽且相连；拖动输入框、缩放窗口后继续对齐；进入项目或切换普通聊天时底栏隐藏且没有额外空白；模型和项目菜单只滚动列表，底部操作保持固定。
+
+## 数学公式与工作排序
+
+`MathMarkdown` 将 `\(...\)`、`\[...\]` 转为 Markdown 数学分隔符，也支持 `$...$` 与独占行的 `$$` 公式块。单独方括号包围且包含数学运算符的段落可兼容恢复；普通括号、代码块和行内代码不猜测转换。
+
+`MathFormulaRenderer` 使用 [CSharpMath](https://github.com/verybadcat/CSharpMath) 与 SkiaSharp 在本机排版，不加载远程脚本。支持常见分数、根号、上下标、集合符号、积分、求和和矩阵；不支持或超限的公式回退源码。`MarkdownReply.Math` 的图层不参与鼠标命中，原生文档仍保留可选中的 LaTeX，跨消息复制包含公式源码。公式块使用现有浅灰背景，普通正文不变灰。每条消息限制渲染数量，单公式限制长度、嵌套和图像尺寸。
+
+打开工作内聊天时展开该工作，并将未置顶工作移到置顶项之后；用户显式收起后，普通刷新不会再强制展开。拖动工作行可在相同置顶分组内调整顺序，写回项目列表；不会改变聊天所属工作或创建嵌套工作。之后再次打开工作内聊天会重新按最近使用规则提升该工作。
+
+验证：`dotnet run --project tests/math-project-smoke/MathProjectSmoke.csproj`；原生公式预览使用 `dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj -- --math`。公式变更同时回归已有跨消息选择脚本。

@@ -69,7 +69,13 @@ public sealed partial class ShellPage
     private void RenderProjects(Guid? expandProject = null)
     {
         var expanded = ProjectEntries.Where(p => p.IsExpanded).Select(p => p.Project.Id).ToHashSet();
-        if (expandProject is Guid id) expanded.Add(id);
+        if (_activeProjectChat is not null)
+        {
+            var active = _projects.FirstOrDefault(p => p.Chats.Contains(_activeProjectChat));
+            if (active is not null && !_collapsedByUser.Contains(active.Id)) expanded.Add(active.Id);
+        }
+        if (expandProject is Guid id && !_collapsedByUser.Contains(id)) expanded.Add(id);
+        _renderingProjects = true;
         ProjectEntries.Clear();
         _hoveredProjectRows.Clear();
         foreach (ProjectState project in _projects.Where(p => !p.IsArchived && !p.IsFolderlessWorkspace).OrderByDescending(p => p.IsPinned))
@@ -79,6 +85,7 @@ public sealed partial class ShellPage
                 entry.Children.Add(new ProjectTreeEntry(project, chat));
             ProjectEntries.Add(entry);
         }
+        _renderingProjects = false;
         RebuildWorkTasks();
         DispatcherQueue.TryEnqueue(() =>
         {
@@ -278,6 +285,15 @@ public sealed partial class ShellPage
         CaptureProjectDraft();
         DiscardEmptyProjectChats(chat.Id);
         _activeProjectChat = chat;
+        _collapsedByUser.Remove(project.Id);
+        bool reordered = ProjectOrdering.Activate(_projects, project);
+        RenderProjects(project.Id);
+        if (reordered)
+        {
+            try { _projectStore.Save(_projects); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            { ProjectNotice.Message = "工作顺序暂未保存：" + error.Message; ProjectNotice.IsOpen = true; }
+        }
         _workWithoutFolder = project.IsFolderlessWorkspace;
         _workConversationTitle = WorkChatTitle(project, chat);
         _workDraft = chat.Draft;

@@ -16,8 +16,13 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Markdig" Version="1.4.0" />
+    <PackageReference Include="CSharpMath.SkiaSharp" Version="0.5.1" />
+    <PackageReference Include="SkiaSharp" Version="2.88.9" />
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/MarkdownReply.cs" Link="MarkdownReply.cs" />
+    <Compile Include="../../apps/desktop/Controls/MarkdownReply.Math.cs" Link="MarkdownReply.Math.cs" />
+    <Compile Include="../../apps/desktop/Services/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
+    <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
     <Compile Include="../../apps/desktop/Controls/MarkdownReply.Backgrounds.cs" Link="MarkdownReply.Backgrounds.cs" />
     <Compile Include="../../apps/desktop/Controls/TextSelectionAutoScroll.cs" Link="TextSelectionAutoScroll.cs" />
     <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />

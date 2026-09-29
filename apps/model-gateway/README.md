@@ -2,7 +2,9 @@
 
 KYNXA 自有的本机模型 API 服务，使用 Node.js 内置 HTTP、fetch 和文件接口直接连接云端或本地服务。支持 OpenAI Chat Completions、OpenAI Responses 和 Claude Messages 三种协议；协议适配集中在 `protocols.mjs`，无需额外 SDK、外部源码目录或 npm 依赖。
 
-需要 Node.js 22.19+。在项目根目录运行：
+需要 Node.js 22.19+。桌面应用启动时会自动在后台启动本机网关，已有健康网关时直接复用；请求前也会检查并在网关退出后重新启动。网关脚本随桌面构建和发布复制，Node.js 可安装在系统中，或由发行包提供 `runtime/node.exe`。关闭桌面不会停止共享网关。显式配置的远程地址不会在本机自动启动服务。本地模型推理进程仍需单独启动。
+
+开发调试也可以在项目根目录手动运行：
 
 ```powershell
 node apps/model-gateway/server.mjs

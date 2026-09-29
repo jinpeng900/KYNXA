@@ -29,5 +29,16 @@ public partial class App : Application
     {
         Window = new MainWindow();
         Window.Activate();
+        _ = WarmUpModelGatewayAsync();
+    }
+
+    private static async Task WarmUpModelGatewayAsync()
+    {
+        try { await Services.ModelGatewayService.EnsureReadyAsync(); }
+        catch (Exception error)
+        {
+            // The API client retries and shows the actionable error when a model is used.
+            System.Diagnostics.Debug.WriteLine($"Model gateway startup: {error.Message}");
+        }
     }
 }
