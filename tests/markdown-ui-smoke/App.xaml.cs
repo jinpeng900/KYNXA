@@ -22,6 +22,48 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--math"))
+        {
+            var math = new MarkdownReply { Margin = new Thickness(24), Text = """
+                # 公式渲染
+                皮亚诺算术：\(1+1=S(1)=2\)。普通中文与行内公式 $x^2+y^2=z^2$ 连续排版。
+
+                集合：$0=\varnothing$，$1=\{\varnothing\}$，$1+1\cong 2$。
+
+                \[
+                \frac{a+b}{c}=\sqrt{x^2+y^2}
+                \]
+
+                $$
+                \sum_{i=1}^{n}i=\frac{n(n+1)}{2}
+                $$
+
+                [
+                1+1=0
+                ]
+
+                行内分数 $\frac{1}{2}$ 与根号 $\sqrt{2}$，以及矩阵 $\begin{pmatrix}a&b\\c&d\end{pmatrix}$。
+
+                不支持的公式保留源码：$\unknowncommand{x}$。
+
+                ```python
+                print(r"\(不要渲染代码内的公式\)")
+                ```
+                """ };
+            var scrollMath = new ScrollViewer { Content = math };
+            _window = new Window { Title = "KYNXA Math UI smoke", Content = scrollMath };
+            _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(900, 800));
+            math.Loaded += (_, _) =>
+            {
+                math.Document.SelectAll();
+                Check(math.Document.SelectedText.Contains(@"\frac{a+b}{c}"), "formula source selectable");
+                math.Document.Select(math.Document.ContentStart, math.Document.ContentStart);
+                AutomationProperties.SetAutomationId(math.Document, "MathDocument");
+                File.WriteAllText(_result, "PASS: formula source remains in native selectable document.");
+            };
+            _window.Activate();
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--conversation"))
         {
             var messages = new List<MarkdownReply>();

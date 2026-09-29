@@ -122,6 +122,7 @@
                     </Grid>
                     <TreeView x:Name="ProjectTree" Grid.Row="1" MaxHeight="320" SelectionMode="Single" ItemsSource="{x:Bind ProjectEntries}"
                               CanDragItems="False" CanReorderItems="False" ItemInvoked="ProjectTree_ItemInvoked"
+                              Collapsed="ProjectTree_Collapsed" Expanding="ProjectTree_Expanding"
                               ScrollViewer.HorizontalScrollMode="Disabled"
                               ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                               ScrollViewer.VerticalScrollMode="Auto"
@@ -132,6 +133,9 @@
                                 <TreeViewItem ItemsSource="{x:Bind Children}" IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
                                               AutomationProperties.Name="{x:Bind Title}">
                                     <Grid Height="40" Tag="{x:Bind}" Background="Transparent"
+                                          Loaded="ProjectRow_OrderLoaded" Unloaded="ProjectRow_OrderUnloaded" PointerPressed="ProjectRow_OrderPressed"
+                                          PointerReleased="ProjectRow_OrderReleased" PointerCanceled="ProjectRow_OrderCancelled"
+                                          PointerCaptureLost="ProjectRow_OrderCancelled"
                                           PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                                           GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>

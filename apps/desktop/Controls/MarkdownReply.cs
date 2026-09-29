@@ -1,6 +1,7 @@
 using Markdig;
 using Markdig.Extensions.Tables;
 using Markdig.Extensions.TaskLists;
+using Markdig.Extensions.Mathematics;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
 using Microsoft.UI;
@@ -22,7 +23,7 @@ namespace KYNXA_Desktop.Controls;
 public sealed partial class MarkdownReply : UserControl
 {
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
-        .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().DisableHtml().Build();
+        .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics().DisableHtml().Build();
     private static readonly FontFamily CodeFont = new("Cascadia Mono, Consolas, Microsoft YaHei UI");
     private readonly RichTextBlock _document = new()
     {
@@ -39,10 +40,11 @@ public sealed partial class MarkdownReply : UserControl
         var surface = new Grid();
         surface.Children.Add(_backgrounds);
         surface.Children.Add(_document);
+        surface.Children.Add(_formulaLayer);
         Content = surface;
         _selectionScroll = new TextSelectionAutoScroll(_document);
         _document.SizeChanged += (_, _) => _backgroundsDirty = true;
-        _document.LayoutUpdated += (_, _) => UpdateBackgrounds();
+        _document.LayoutUpdated += (_, _) => { UpdateBackgrounds(); UpdateFormulas(); };
     }
 
     internal RichTextBlock Document => _document;
@@ -70,13 +72,16 @@ public sealed partial class MarkdownReply : UserControl
     {
         _selectionScroll.Stop();
         _document.Blocks.Clear();
+        _formulas.Clear();
+        _formulaBaselines.Clear();
+        _formulaLayer.Children.Clear();
         _backgroundRanges.Clear();
         _backgrounds.Children.Clear();
         _backgroundsDirty = true;
         _document.FontSize = IsPlainText ? FontSize : 14;
         _document.LineHeight = IsPlainText ? 26 : 23;
         if (IsPlainText) NewParagraph().Inlines.Add(new Run { Text = Text ?? string.Empty });
-        else foreach (var block in Markdown.Parse(Text ?? string.Empty, Pipeline)) AddBlock(block);
+        else foreach (var block in Markdown.Parse(MathMarkdown.Normalize(Text ?? string.Empty), Pipeline)) AddBlock(block);
         _document.Select(_document.ContentStart, _document.ContentStart);
     }
 
@@ -98,6 +103,12 @@ public sealed partial class MarkdownReply : UserControl
                 title.FontWeight = FontWeights.SemiBold;
                 title.Margin = new Thickness(indent, _document.Blocks.Count == 1 ? 0 : 18, 0, 3);
                 AddInlines(title.Inlines, heading.Inline);
+                break;
+            case MathBlock math:
+                var equation = NewParagraph(indent + 12, prefix);
+                equation.Margin = new Thickness(indent + 12, 12, 12, 10);
+                AddFormula(equation.Inlines, math.Lines.ToString(), true);
+                _backgroundRanges.Add((equation, true));
                 break;
             case CodeBlock code:
                 var codeParagraph = NewParagraph(indent + 12, prefix);
@@ -164,6 +175,7 @@ public sealed partial class MarkdownReply : UserControl
     {
         switch (inline)
         {
+            case MathInline math: AddFormula(target, math.Content.ToString(), math.DelimiterCount > 1); break;
             case LiteralInline literal: target.Add(new Run { Text = literal.Content.ToString() }); break;
             case HtmlEntityInline entity: target.Add(new Run { Text = entity.Transcoded.ToString() }); break;
             case CodeInline code:

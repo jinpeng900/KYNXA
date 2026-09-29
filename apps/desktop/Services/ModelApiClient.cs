@@ -16,21 +16,31 @@ public sealed class ModelApiClient : IDisposable
 {
     private readonly HttpClient _http = new()
     {
-        BaseAddress = new Uri(Environment.GetEnvironmentVariable("KYNXA_MODEL_API_URL") ?? "http://127.0.0.1:5218"),
+        BaseAddress = ModelGatewayService.Address,
         Timeout = TimeSpan.FromMinutes(5)
     };
 
-    public async Task<ModelProvider[]> ListAsync(CancellationToken cancellationToken = default) =>
-        (await ReadAsync<ModelListResponse>(await _http.GetAsync("/api/models", cancellationToken), cancellationToken)).Providers;
+    public async Task<ModelProvider[]> ListAsync(CancellationToken cancellationToken = default)
+    {
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        return (await ReadAsync<ModelListResponse>(await _http.GetAsync("/api/models", cancellationToken), cancellationToken)).Providers;
+    }
 
-    public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default) =>
-        (await ReadAsync<ModelSaveResponse>(await _http.PostAsJsonAsync("/api/models", connection, cancellationToken), cancellationToken)).Provider;
+    public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default)
+    {
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        return (await ReadAsync<ModelSaveResponse>(await _http.PostAsJsonAsync("/api/models", connection, cancellationToken), cancellationToken)).Provider;
+    }
 
-    public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default) =>
-        await ReadAsync<ModelProbeResponse>(await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken), cancellationToken);
+    public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default)
+    {
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        return await ReadAsync<ModelProbeResponse>(await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken), cancellationToken);
+    }
 
     public async Task<ChatReply> ReplyAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         var reply = await ReadAsync<ChatReply>(await _http.PostAsJsonAsync("/api/chat", request, cancellationToken), cancellationToken);
         if (reply.ConversationId != request.ConversationId || reply.Role != "assistant" || string.IsNullOrWhiteSpace(reply.Content))
             throw new InvalidDataException("模型接口返回了无效的回复。");
