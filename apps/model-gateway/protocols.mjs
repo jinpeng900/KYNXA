@@ -1,19 +1,27 @@
 export const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 
+// Opt in only for known Responses reasoning models on the official endpoint.
+// In particular, chat-latest aliases and o3-mini must not inherit this option.
+const summaryModels = new Set(['o3', 'o3-pro', 'o4-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5-pro',
+  'gpt-5.1', 'gpt-5.2', 'gpt-5.2-pro', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.4-pro',
+  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
+
 export function authorization(connection) {
   if (connection.protocol === 'anthropic-messages')
     return { 'anthropic-version': '2023-06-01', ...(connection.apiKey ? { 'x-api-key': connection.apiKey } : {}) };
   return connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {};
 }
 
-export function chatRequest(connection, model, messages) {
+export function chatRequest(connection, model, messages, { stream = false } = {}) {
   switch (connection.protocol) {
     case 'anthropic-messages':
-      return { path: '/messages', body: { model, messages, max_tokens: 8192, stream: false } };
+      return { path: '/messages', body: { model, messages, max_tokens: 8192, stream } };
     case 'openai-responses':
-      return { path: '/responses', body: { model, input: messages, store: false, stream: false } };
+      return { path: '/responses', body: { model, input: messages, store: false, stream,
+        ...(stream && new URL(connection.baseUrl).hostname === 'api.openai.com' &&
+          summaryModels.has(model.replace(/-\d{4}-\d{2}-\d{2}$/, '')) ? { reasoning: { summary: 'auto' } } : {}) } };
     default:
-      return { path: '/chat/completions', body: { model, messages, stream: false } };
+      return { path: '/chat/completions', body: { model, messages, stream } };
   }
 }
 

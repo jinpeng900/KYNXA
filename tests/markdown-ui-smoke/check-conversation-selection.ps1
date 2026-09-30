@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 public static class ConversationMouse {
  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+ [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
@@ -44,6 +45,7 @@ function Verify-Frozen {
 }
 $original = New-Object ConversationMouse+POINT
 [void][ConversationMouse]::GetCursorPos([ref]$original)
+[void][ConversationMouse]::SetWindowPos([IntPtr]$root.Current.NativeWindowHandle, [IntPtr](-1), 0, 0, 0, 0, 3)
 [void][ConversationMouse]::SetForegroundWindow([IntPtr]$root.Current.NativeWindowHandle)
 $scrollElement = Find-Id 'ConversationScroll'
 $scroll = $scrollElement.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
@@ -135,7 +137,50 @@ try {
    else { [System.Windows.Forms.Clipboard]::Clear() }
   }
  }
+ foreach ($target in @('blank', 'input', 'sidebar', 'selected-text')) {
+  $scroll.SetScrollPercent(-1, 0)
+  Start-Sleep -Milliseconds 250
+  $first = $messages[0].Current.BoundingRectangle
+  $last = $messages[3].Current.BoundingRectangle
+  $startX = $first.Left + 2; $startY = $first.Top + 10
+  $endX = $last.Left + 300; $endY = $last.Bottom - 6
+  Move-Pointer $startX $startY
+  Button $true
+  for ($step = 1; $step -le 15; $step++) {
+   Move-Pointer ($startX + ($endX - $startX) * $step / 15) ($startY + ($endY - $startY) * $step / 15)
+   Start-Sleep -Milliseconds 30
+  }
+  Button $false
+  [void](Verify-Frozen)
+  if ($target -eq 'blank') { $clickX = $bounds.Left + 8; $clickY = $bounds.Top + 60 }
+  elseif ($target -eq 'selected-text') { $clickX = $first.Left + 110; $clickY = $first.Top + 10 }
+  else {
+   $targetId = if ($target -eq 'input') { 'ConversationInput' } else { 'SidebarAction' }
+   $clickBounds = (Find-Id $targetId).Current.BoundingRectangle
+   $clickX = $clickBounds.Left + $clickBounds.Width / 2; $clickY = $clickBounds.Top + $clickBounds.Height / 2
+  }
+  Move-Pointer $clickX $clickY
+  Button $true
+  Start-Sleep -Milliseconds 80
+  Button $false
+  Start-Sleep -Milliseconds 250
+  if ((Aggregate).Length -ne 0 -or (Find-Id 'SelectionState').Current.Name -ne 'idle') {
+   throw "Click $target left conversation selection or highlight active."
+  }
+  foreach ($message in $messages) {
+   if ((Selected $message).Length -ne 0) { throw "Click $target left a native message selection active." }
+  }
+  for ($step = 0; $step -lt 5; $step++) {
+   Move-Pointer ($bounds.Left + 200 + $step * 15) ($bounds.Top + 80 + $step * 20)
+   Start-Sleep -Milliseconds 60
+  }
+  if ((Aggregate).Length -ne 0 -or (Find-Id 'SelectionState').Current.Name -ne 'idle') {
+   throw "Selection reappeared on hover after clicking $target."
+  }
+  Write-Output "PASS click $target clears native and conversation highlights; selection stays cleared on hover"
+ }
 } finally {
  Button $false
  Move-Pointer $original.X $original.Y
+ [void][ConversationMouse]::SetWindowPos([IntPtr]$root.Current.NativeWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 3)
 }

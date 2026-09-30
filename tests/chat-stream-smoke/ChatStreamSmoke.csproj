@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/shared/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="../../apps/desktop/Services/ChatStreamReader.cs" Link="ChatStreamReader.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelApiClient.cs" Link="ModelApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+  </ItemGroup>
+</Project>

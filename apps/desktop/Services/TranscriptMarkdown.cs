@@ -1,0 +1,154 @@
+using System.Globalization;
+using System.Net;
+using Markdig;
+using Markdig.Extensions.Mathematics;
+using Markdig.Extensions.Tables;
+using Markdig.Renderers;
+using Markdig.Renderers.Html;
+using Markdig.Renderers.Html.Inlines;
+using Markdig.Syntax;
+using Markdig.Syntax.Inlines;
+
+namespace KYNXA_Desktop.Services;
+
+/// <summary>Renders conversation Markdown as selectable HTML with deferred, source-preserving math.</summary>
+internal static class TranscriptMarkdown
+{
+    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
+        .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics()
+        .DisableHtml().Build();
+
+    public static string Render(string markdown, bool streaming = false)
+    {
+        if (string.IsNullOrEmpty(markdown)) return string.Empty;
+        var document = Markdown.Parse(MathMarkdown.Normalize(markdown), Pipeline);
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+        var renderer = new HtmlRenderer(writer);
+        Pipeline.Setup(renderer);
+        renderer.ObjectRenderers.ReplaceOrAdd<HtmlMathInlineRenderer>(new FormulaInlineRenderer());
+        renderer.ObjectRenderers.ReplaceOrAdd<HtmlMathBlockRenderer>(new FormulaBlockRenderer(streaming));
+        renderer.ObjectRenderers.ReplaceOrAdd<CodeBlockRenderer>(new HighlightedCodeRenderer(streaming));
+        renderer.ObjectRenderers.ReplaceOrAdd<LinkInlineRenderer>(new SafeLinkRenderer());
+        renderer.ObjectRenderers.ReplaceOrAdd<AutolinkInlineRenderer>(new SafeAutolinkRenderer());
+        renderer.ObjectRenderers.ReplaceOrAdd<HtmlTableRenderer>(new ScrollTableRenderer());
+        renderer.Render(document);
+        return writer.ToString();
+    }
+
+    private static void WriteFormula(HtmlRenderer renderer, string latex, bool display, bool inline = false)
+    {
+        string tag = display && !inline ? "div" : "span";
+        string delimiter = display ? "$$" : "$";
+        renderer.Write("<").Write(tag).Write(" class=\"math\" data-latex=\"")
+            .Write(WebUtility.HtmlEncode(latex)).Write("\" data-display=\"")
+            .Write(display ? "true" : "false").Write("\">")
+            .WriteEscape(delimiter + latex + delimiter).Write("</").Write(tag).Write(">");
+        if (display && !inline) renderer.EnsureLine();
+    }
+
+    private sealed class FormulaInlineRenderer : HtmlObjectRenderer<MathInline>
+    {
+        protected override void Write(HtmlRenderer renderer, MathInline formula) =>
+            WriteFormula(renderer, formula.Content.ToString(), display: formula.DelimiterCount > 1, inline: true);
+    }
+
+    private sealed class FormulaBlockRenderer(bool streaming) : HtmlObjectRenderer<MathBlock>
+    {
+        protected override void Write(HtmlRenderer renderer, MathBlock formula)
+        {
+            renderer.EnsureLine();
+            string latex = formula.Lines.ToString();
+            if (streaming && formula.ClosingFencedCharCount == 0)
+            {
+                renderer.Write("<pre class=\"math-source\">").WriteEscape("$$\n" + latex).WriteLine("</pre>");
+                return;
+            }
+            WriteFormula(renderer, latex, display: true);
+        }
+    }
+
+    private sealed class HighlightedCodeRenderer(bool streaming) : HtmlObjectRenderer<CodeBlock>
+    {
+        protected override void Write(HtmlRenderer renderer, CodeBlock code)
+        {
+            renderer.EnsureLine();
+            string source = code.Lines.ToString();
+            string language = code is FencedCodeBlock fence
+                ? (fence.Info ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty
+                : string.Empty;
+            if (!streaming && string.Equals(language, "math", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteFormula(renderer, source, display: true);
+                return;
+            }
+            renderer.Write("<pre><code");
+            if (language.Length > 0)
+                renderer.Write(" class=\"language-").Write(WebUtility.HtmlEncode(language))
+                    .Write("\" data-language=\"").Write(WebUtility.HtmlEncode(language)).Write("\"");
+            renderer.Write(">");
+            foreach (var token in CodeSyntaxHighlighter.Highlight(source, language))
+            {
+                if (token.Color is uint color)
+                    renderer.Write("<span style=\"color:#").Write((color & 0xFFFFFF).ToString("x6", CultureInfo.InvariantCulture)).Write("\">");
+                renderer.WriteEscape(token.Text);
+                if (token.Color.HasValue) renderer.Write("</span>");
+            }
+            renderer.WriteLine("</code></pre>");
+        }
+    }
+
+    private sealed class ScrollTableRenderer : HtmlTableRenderer
+    {
+        protected override void Write(HtmlRenderer renderer, Table table)
+        {
+            renderer.EnsureLine();
+            renderer.WriteLine("<div class=\"table-scroll\" tabindex=\"0\">");
+            base.Write(renderer, table);
+            renderer.WriteLine("</div>");
+        }
+    }
+
+    private static bool IsSafeUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)
+            || !Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+        return uri.Scheme is "http" or "https" ? uri.Host.Length > 0
+            : uri.Scheme == "mailto" && uri.AbsolutePath.Length > 0;
+    }
+
+    private static void OpenLink(HtmlRenderer renderer, string url, string? title, bool image = false)
+    {
+        renderer.Write("<a href=\"").Write(WebUtility.HtmlEncode(url)).Write("\" rel=\"noopener noreferrer\"");
+        if (image) renderer.Write(" class=\"image-link\"");
+        if (!string.IsNullOrEmpty(title)) renderer.Write(" title=\"").Write(WebUtility.HtmlEncode(title)).Write("\"");
+        renderer.Write(">");
+    }
+
+    private sealed class SafeLinkRenderer : HtmlObjectRenderer<LinkInline>
+    {
+        protected override void Write(HtmlRenderer renderer, LinkInline link)
+        {
+            string? url = link.GetDynamicUrl?.Invoke() ?? link.Url;
+            bool nested = false;
+            for (var parent = link.Parent; parent is not null; parent = parent.Parent)
+                if (parent is LinkInline { IsImage: false }) { nested = true; break; }
+            bool linked = !nested && IsSafeUrl(url);
+            if (linked) OpenLink(renderer, url!, link.Title, link.IsImage);
+            if (link.FirstChild is null && link.IsImage) renderer.WriteEscape(url ?? string.Empty);
+            else renderer.WriteChildren(link);
+            if (linked) renderer.Write("</a>");
+        }
+    }
+
+    private sealed class SafeAutolinkRenderer : HtmlObjectRenderer<AutolinkInline>
+    {
+        protected override void Write(HtmlRenderer renderer, AutolinkInline link)
+        {
+            string url = link.IsEmail ? "mailto:" + link.Url : link.Url;
+            bool linked = IsSafeUrl(url);
+            if (linked) OpenLink(renderer, url, title: null);
+            renderer.WriteEscape(link.Url);
+            if (linked) renderer.Write("</a>");
+        }
+    }
+}

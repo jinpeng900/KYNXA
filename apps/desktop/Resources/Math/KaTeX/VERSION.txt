@@ -1,0 +1,6 @@
+KaTeX 0.16.47
+Source: https://registry.npmjs.org/katex/-/katex-0.16.47.tgz
+Package integrity (SHA-512): Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==
+Files: official dist/katex.min.js, dist/katex.min.css, dist/fonts/*.woff2 and LICENSE.
+The CSS uses WOFF2 first; Chromium supports it. WOFF/TTF fallback files are not bundled.
+MIT license and upstream attribution are retained in LICENSE and distribution headers.

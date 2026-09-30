@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Markdig" Version="1.4.0" />
+    <PackageReference Include="ColorCode.Core" Version="2.0.15" />
+    <Compile Include="../../apps/desktop/Services/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
+  </ItemGroup>
+</Project>

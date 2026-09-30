@@ -13,6 +13,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Content Include="../../apps/desktop/Resources/UI/Brand/kynxa-logo.png" Link="logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../apps/desktop/Resources/Math/**/*" Link="Resources/Math/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Markdig" Version="1.4.0" />
@@ -20,8 +21,11 @@
     <PackageReference Include="SkiaSharp" Version="2.88.9" />
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/MarkdownReply.cs" Link="MarkdownReply.cs" />
+    <Compile Include="../../apps/desktop/Controls/MarkdownReply.Streaming.cs" Link="MarkdownReply.Streaming.cs" />
     <Compile Include="../../apps/desktop/Controls/MarkdownReply.Math.cs" Link="MarkdownReply.Math.cs" />
+    <Compile Include="../../apps/desktop/Controls/MarkdownReply.Tables.cs" Link="MarkdownReply.Tables.cs" />
     <Compile Include="../../apps/desktop/Services/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
+    <Compile Include="../../apps/desktop/Services/KatexFormulaRenderer.cs" Link="KatexFormulaRenderer.cs" />
     <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
     <Compile Include="../../apps/desktop/Controls/MarkdownReply.Backgrounds.cs" Link="MarkdownReply.Backgrounds.cs" />
     <Compile Include="../../apps/desktop/Controls/TextSelectionAutoScroll.cs" Link="TextSelectionAutoScroll.cs" />

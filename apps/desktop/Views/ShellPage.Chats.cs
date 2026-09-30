@@ -132,16 +132,20 @@ public sealed partial class ShellPage
         PromptTextBox.Focus(FocusState.Programmatic);
     }
 
-    private void UpdateConversationPresentation()
+    private void UpdateConversationPresentation(bool openAtBottom = true)
     {
         if (ConversationMessages is null) return;
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         ActiveMessages.Clear();
         if (chat is not null)
         {
-            foreach (var message in chat.Messages) ActiveMessages.Add(new ConversationMessageViewModel(chat.Id, message));
-            if (_pendingReplies.TryGetValue(chat.Id, out var pending))
-                ActiveMessages.Add(new ConversationMessageViewModel(chat.Id, error: pending.Error));
+            foreach (var message in chat.Messages)
+            {
+                var row = _pendingReplies.TryGetValue(chat.Id, out var pending) && pending.Message == message
+                    ? pending.Presentation : new ConversationMessageViewModel(chat.Id, message);
+                row.SetRetryAllowed(message == chat.Messages.LastOrDefault());
+                ActiveMessages.Add(row);
+            }
         }
         bool hasMessages = ActiveMessages.Count > 0;
         ConversationMessages.Visibility = hasMessages ? Visibility.Visible : Visibility.Collapsed;
@@ -151,24 +155,25 @@ public sealed partial class ShellPage
         MainContentHost.Margin = hasMessages ? new Thickness(0, 0, 0, 16) : new Thickness(0);
         ApplyLayout();
         UpdateSendButtonState();
-        if (hasMessages)
-        {
-            var lastMessage = ActiveMessages.Last();
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (!_chatClosing && ConversationMessages.Visibility == Visibility.Visible && ActiveMessages.Contains(lastMessage))
-                    ConversationMessages.ScrollIntoView(lastMessage);
-            });
-        }
+        ConversationMessages.ShowConversation(chat?.Id, ActiveMessages.ToArray(), openAtBottom);
     }
 
-    private async void SendButton_Click(object sender, RoutedEventArgs e) => await SendPromptAsync();
+    private async void SendButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ActiveChatId is Guid id && _pendingReplies.TryGetValue(id, out var pending))
+        {
+            pending.Cancellation.Cancel();
+            return;
+        }
+        await SendPromptAsync();
+    }
 
     private async Task SendPromptAsync()
     {
         if (_sendingPrompt || IsReplyInProgress(ActiveChatId)) return;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0) { PromptTextBox.Focus(FocusState.Programmatic); return; }
+        ConversationMessages.BeforeSend();
         _sendingPrompt = true;
         UpdateSendButtonState();
         PendingChatReply? preparedReply = null;
@@ -224,16 +229,16 @@ public sealed partial class ShellPage
                 PromptTextBox.Text = ViewModel.Prompt = string.Empty;
                 preparedReply = BeginPendingReply(chat.Id, text, _selectedModel?.ProviderId, _selectedModel?.ModelId);
                 UpdateConversationTitle();
-                UpdateConversationPresentation();
+                UpdateConversationPresentation(openAtBottom: false);
                 return Task.CompletedTask;
             });
-            if (preparedReply is not null) await ReceiveMockReplyAsync(preparedReply);
         }
         finally
         {
             _sendingPrompt = false;
             UpdateSendButtonState();
         }
+        if (preparedReply is not null) await ReceiveReplyAsync(preparedReply);
     }
 
     private void ChatHeader_PointerEntered(object sender, PointerRoutedEventArgs e)

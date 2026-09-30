@@ -25,8 +25,19 @@ node apps/model-gateway/server.mjs
 - `POST /api/models`：保存 `{providerId,displayName,baseUrl,apiKey?,models:[id,...],protocol?}`。协议可为 `openai-completions`（旧配置默认）、`openai-responses`、`anthropic-messages`。同一 ID 更新连接；密钥留空且地址不变时保留原密钥，地址改变时不会转移旧密钥。
 - `POST /api/models/test`：同样的参数，读取服务的 `/models`，不保存。部分服务不提供此接口，可直接填写模型 ID 后保存。
 - `POST /api/chat`：`{conversationId,message,provider,model,permissionMode}`，按连接协议请求 `/chat/completions`、`/responses` 或 `/messages` 并返回完整文本。Claude 使用 `x-api-key` 与版本头；Responses 使用客户端会话记录并设置 `store:false`。
+- `POST /api/chat/stream`：相同参数，可额外传入 UUID 格式的 `requestId`，返回 SSE 流。`GET /health` 中的 `streamProtocol:1` 表示已支持此接口。
 
-会话按聊天 ID、连接 ID、模型 ID 隔离，保留最近 50 轮成功对话作为上下文，重启后仍可读取。同一会话的并发请求依次处理；失败请求不写入记录。切换模型时使用该模型对应的独立上下文。当前阶段支持纯文本完整回复，不执行工具或文件操作；权限选择仅作为 UI 元数据，不授予模型系统权限。
+会话按聊天 ID、连接 ID、模型 ID 隔离，保留最近 50 轮成功对话作为上下文，重启后仍可读取。同一会话的完整回复和流式请求共用队列；失败或中断请求不写入模型上下文。切换模型时使用该模型对应的独立上下文。当前支持文本回复，不执行工具或文件操作；权限选择仅作为 UI 元数据，不授予模型系统权限。
+
+## 流式回复与思考内容
+
+每个 SSE `data:` 为 JSON，固定带有 `type`、`conversationId`、`requestId` 和 `createdAt`。请求先返回 `started`；生成时分别发送 `text_delta` / `reasoning_delta`（`delta` 字符串）；结束时发送一次 `completed`（完整 `content`、`reasoning`），或 `interrupted` / `error`（已有 `content`、`reasoning` 和脱敏后的 `error`）。正式输出结束后用完整快照校准正文，避免把最终内容重复追加。请求参数错误在开始 SSE 前返回 JSON 错误；心跳为 SSE 注释。
+
+上游使用 `stream:true`，收到内容立即转发。支持 Chat Completions 的 `content` / `reasoning_content` / `reasoning`，Responses 的正文和思考摘要事件，以及 Claude 的 `text_delta` / `thinking_delta`；不展示签名等不透明字段。若兼容服务忽略流式开关而返回 JSON，则按完整回复处理，不发起第二次模型调用。
+
+思考区只显示模型接口实际返回的可见内容。OpenAI Responses 仅对官方地址的已知支持型号请求 `reasoning.summary:auto`，得到的是摘要；其他兼容地址不会强加此参数。Claude、本地服务是否返回思考取决于模型及服务端配置，当前不自动设置思考预算或解析正文中的 `<think>` 标签。协议可见字段参考 [OpenAI 推理文档](https://developers.openai.com/api/docs/guides/reasoning) 与 [Claude 流式文档](https://platform.claude.com/docs/en/build-with-claude/streaming)。
+
+客户端断开或网关关闭会取消上游请求。默认连续 180 秒未收到上游数据则中断，整个生成最长 15 分钟；在 `ModelRuntime` 构造参数中分别通过 `idleTimeoutMs` 和 `streamTimeoutMs` 调整。网络断流、输出上限或工具调用结束均不算完整回复，也不会自动重试。重试应复用原 `requestId`：最近 50 轮中已成功提交的同一请求直接重放结果，避免终止事件丢失后重复提交；同 ID 携带不同消息会被拒绝。成功回复的 ID、消息摘要和思考内容与会话原子保存，发送后续模型上下文时仅保留 `role` / `content`。
 
 桌面预设包括 DeepSeek、Kimi、OpenAI、Anthropic / Claude、Google / Gemini、阿里云百炼 / Qwen、智谱 / GLM、MiniMax、xAI / Grok、本地 API（直接连接）、Ollama、LM Studio 和自定义服务。API Key 必须来自相应服务商；预设模型仍受账号额度、权限和服务可用性限制。模型列表支持搜索、勾选、模型 ID 和用途说明，获取列表后只启用所勾选的模型。当前桌面聊天只发送文本，即使模型本身还支持其他输入类型。
 
@@ -60,4 +71,4 @@ node apps/model-gateway/server.mjs
 node --test apps/model-gateway/tests/*.test.mjs
 ```
 
-测试使用独立临时目录和本地模拟模型服务，覆盖真实 HTTP 调用链路、模型 ID 和密钥传递、多轮上下文、并发顺序、失败重试以及配置脱敏，无需云端密钥。
+测试使用独立临时目录和本地模拟模型服务，覆盖真实 HTTP 调用链路、模型 ID 和密钥传递、多轮上下文、并发顺序、失败重试以及配置脱敏，无需云端密钥。流式测试还覆盖三种协议、分片 UTF-8 / SSE、思考与正文分离、最终快照、JSON 回退、取消与超时、半途出错、停止后的上下文和请求去重。

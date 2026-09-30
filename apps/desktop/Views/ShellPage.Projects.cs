@@ -51,7 +51,7 @@ public sealed partial class ShellPage
             RenderProjects();
             App.Window.Closed += (_, _) =>
             {
-                StopMockReplies();
+                StopReplies();
                 CaptureProjectDraft();
                 CaptureStandaloneDraft();
                 try { _projectStore.Save(_projects); _projectStore.SaveChats(_standaloneChats); }

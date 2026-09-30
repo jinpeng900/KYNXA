@@ -9,6 +9,12 @@ public sealed class ChatMessageState
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Role { get; set; } = "user";
     public string Content { get; set; } = string.Empty;
+    public string Reasoning { get; set; } = string.Empty;
+    public string Status { get; set; } = "completed";
+    public string Error { get; set; } = string.Empty;
+    public string Provider { get; set; } = string.Empty;
+    public string Model { get; set; } = string.Empty;
+    public long ReasoningDurationMs { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
@@ -20,11 +26,20 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         if (reader.TokenType == JsonTokenType.String) return new ChatMessageState { Content = reader.GetString() ?? string.Empty };
         using var document = JsonDocument.ParseValue(ref reader);
         var value = document.RootElement;
+        string status = ReadString(value, "Status", "completed");
         return new ChatMessageState
         {
             Id = value.TryGetProperty("Id", out var id) ? id.GetGuid() : Guid.NewGuid(),
             Role = value.GetProperty("Role").GetString() ?? "user",
             Content = value.GetProperty("Content").GetString() ?? string.Empty,
+            Reasoning = ReadString(value, "Reasoning"),
+            // A process that exited during generation cannot resume the old HTTP stream.
+            Status = status == "streaming" ? "interrupted" : status,
+            Error = ReadString(value, "Error"),
+            Provider = ReadString(value, "Provider"),
+            Model = ReadString(value, "Model"),
+            ReasoningDurationMs = value.TryGetProperty("ReasoningDurationMs", out var duration) &&
+                duration.TryGetInt64(out long milliseconds) ? Math.Max(0, milliseconds) : 0,
             CreatedAt = value.TryGetProperty("CreatedAt", out var createdAt) ? createdAt.GetDateTimeOffset() : DateTimeOffset.UtcNow
         };
     }
@@ -35,7 +50,16 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         writer.WriteString("Id", value.Id);
         writer.WriteString("Role", value.Role);
         writer.WriteString("Content", value.Content);
+        writer.WriteString("Reasoning", value.Reasoning);
+        writer.WriteString("Status", value.Status);
+        writer.WriteString("Error", value.Error);
+        writer.WriteString("Provider", value.Provider);
+        writer.WriteString("Model", value.Model);
+        writer.WriteNumber("ReasoningDurationMs", value.ReasoningDurationMs);
         writer.WriteString("CreatedAt", value.CreatedAt);
         writer.WriteEndObject();
     }
+
+    private static string ReadString(JsonElement value, string name, string fallback = "") =>
+        value.TryGetProperty(name, out var field) ? field.GetString() ?? fallback : fallback;
 }

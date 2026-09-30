@@ -303,61 +303,7 @@
                             <Image.RenderTransform><ScaleTransform ScaleX="-1" /></Image.RenderTransform>
                         </Image>
                     </Button>
-                    <ListView x:Name="ConversationMessages" ItemsSource="{x:Bind ActiveMessages}" Visibility="Collapsed"
-                              SelectionMode="None" IsItemClickEnabled="False" Background="Transparent"
-                              HorizontalAlignment="Center" Padding="4,16,16,30"
-                              ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                        <ListView.ItemsPanel>
-                            <!-- Keep text alive while selecting across offscreen messages. -->
-                            <ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate>
-                        </ListView.ItemsPanel>
-                        <ListView.Resources>
-                            <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent" />
-                            <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent" />
-                        </ListView.Resources>
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="Margin" Value="0,8" />
-                                <Setter Property="MinHeight" Value="0" />
-                                <Setter Property="IsTabStop" Value="False" />
-                            </Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate x:DataType="viewModels:ConversationMessageViewModel">
-                                <Grid>
-                                    <Grid Visibility="{x:Bind UserVisibility}">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="1*" /><ColumnDefinition Width="4*" /></Grid.ColumnDefinitions>
-                                        <Border Grid.Column="1" Padding="12,10" CornerRadius="12" Background="{StaticResource KynxaSegmentIdleBrush}"
-                                                HorizontalAlignment="Right" AutomationProperties.Name="用户消息">
-                                            <controls:MarkdownReply IsPlainText="True" FontSize="16" Text="{x:Bind Content}" />
-                                        </Border>
-                                    </Grid>
-                                    <Grid ColumnSpacing="10" Visibility="{x:Bind AssistantVisibility}" AutomationProperties.Name="助手回复">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                                        <Border Width="32" Height="32" CornerRadius="16" Background="{StaticResource KynxaSegmentIdleBrush}" VerticalAlignment="Top">
-                                            <Image Width="28" Height="28" Stretch="Uniform" Source="{StaticResource KynxaLogoImage}" />
-                                        </Border>
-                                        <StackPanel Grid.Column="1" Margin="0,5,0,0" Spacing="8">
-                                            <controls:MarkdownReply Text="{x:Bind Content}" Visibility="{x:Bind ReplyVisibility}" />
-                                            <StackPanel Orientation="Horizontal" Spacing="8" Visibility="{x:Bind WaitingVisibility}">
-                                                <ProgressRing Width="14" Height="14" MinWidth="14" MinHeight="14" IsActive="{x:Bind IsWaiting}"
-                                                              Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                                <TextBlock Text="正在回复…" FontSize="14" LineHeight="22.4" VerticalAlignment="Center"
-                                                           Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                            </StackPanel>
-                                            <StackPanel Spacing="8" Visibility="{x:Bind ErrorVisibility}">
-                                                <TextBlock Text="{x:Bind ErrorText}" FontSize="14" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                                <Button Content="重试" Tag="{x:Bind ConversationId}" Click="RetryReply_Click" HorizontalAlignment="Left"
-                                                        Height="28" Padding="10,0" FontSize="13" Background="{StaticResource KynxaSegmentIdleBrush}" BorderThickness="0" CornerRadius="6" />
-                                            </StackPanel>
-                                        </StackPanel>
-                                    </Grid>
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                    <controls:ConversationTranscript x:Name="ConversationMessages" Visibility="Collapsed" HorizontalAlignment="Stretch" />
                     <Grid x:Name="ChatAmbientLayer" IsHitTestVisible="False" Opacity="0.5">
                         <Ellipse x:Name="AmbientLargeWave" Width="870" Height="310" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveBrush}" StrokeThickness="50" />
                         <Ellipse x:Name="AmbientSoftWave" Width="720" Height="250" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
@@ -426,7 +372,10 @@
                                                     <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="KynxaSendHoverBrush" />
                                                     <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="KynxaSendPressedBrush" />
                                                 </Button.Resources>
-                                                <Image Width="20" Height="20" Source="{StaticResource IconSend}" />
+                                                <Grid>
+                                                    <Image x:Name="SendArrow" Width="20" Height="20" Source="{StaticResource IconSend}" />
+                                                    <FontIcon x:Name="StopReplyIcon" Glyph="&#xE71A;" FontSize="14" Visibility="Collapsed" />
+                                                </Grid>
                                             </Button>
                                         </Grid>
                                     </Grid>
