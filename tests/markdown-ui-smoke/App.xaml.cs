@@ -22,6 +22,36 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--table-math"))
+        {
+            RunTableMathChecks();
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--table-probe"))
+        {
+            RunTableProbe();
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--physics-math"))
+        {
+            RunPhysicsMathChecks();
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--delimiter-math"))
+        {
+            RunMathDelimiterChecks();
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--streaming"))
+        {
+            RunStreamingChecks();
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--layout-parity"))
+        {
+            RunStreamingLayoutChecks();
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--math"))
         {
             var math = new MarkdownReply { Margin = new Thickness(24), Text = """
@@ -67,7 +97,7 @@ public partial class App : Application
         if (Environment.GetCommandLineArgs().Contains("--conversation"))
         {
             var messages = new List<MarkdownReply>();
-            var list = new ListView { SelectionMode = ListViewSelectionMode.None, Margin = new Thickness(16, 12, 16, 50),
+            var list = new ListView { SelectionMode = ListViewSelectionMode.None, Margin = new Thickness(120, 12, 16, 94),
                 ItemsPanel = (ItemsPanelTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
                     "<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><StackPanel /></ItemsPanelTemplate>") };
             list.ItemContainerStyle = new Style(typeof(ListViewItem))
@@ -89,10 +119,23 @@ public partial class App : Application
             }
             var status = new TextBlock { MaxLines = 1, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(16) };
             AutomationProperties.SetAutomationId(status, "SelectedConversation");
+            var selectionState = new TextBlock { Margin = new Thickness(8), VerticalAlignment = VerticalAlignment.Top };
+            AutomationProperties.SetAutomationId(selectionState, "SelectionState");
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-            timer.Tick += (_, _) => status.Text = messages[0].SelectedConversationText;
+            timer.Tick += (_, _) =>
+            {
+                status.Text = messages[0].SelectedConversationText;
+                selectionState.Text = !TextSelectionAutoScroll.HasActiveSelection
+                    && messages.All(message => message.Document.TextHighlighters.All(highlight => highlight.Ranges.Count == 0)) ? "idle" : "selected";
+            };
             var content = new Grid { Background = new SolidColorBrush(Colors.White) };
-            content.Children.Add(list); content.Children.Add(status);
+            var sidebarButton = new Button { Content = "侧栏", Margin = new Thickness(8, 50, 8, 0), VerticalAlignment = VerticalAlignment.Top };
+            AutomationProperties.SetAutomationId(sidebarButton, "SidebarAction");
+            var sidebar = new Grid { Width = 104, HorizontalAlignment = HorizontalAlignment.Left, Background = new SolidColorBrush(Colors.WhiteSmoke) };
+            sidebar.Children.Add(sidebarButton); sidebar.Children.Add(selectionState);
+            var input = new TextBox { PlaceholderText = "输入消息", Margin = new Thickness(132, 0, 24, 44), VerticalAlignment = VerticalAlignment.Bottom };
+            AutomationProperties.SetAutomationId(input, "ConversationInput");
+            content.Children.Add(sidebar); content.Children.Add(list); content.Children.Add(input); content.Children.Add(status);
             _window = new Window { Title = "KYNXA Conversation selection smoke", Content = content };
             _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(1000, 850));
             _window.Closed += (_, _) => timer.Stop();
@@ -181,12 +224,15 @@ public partial class App : Application
                 Check(selected.Contains("<script>"), "HTML treated as inert text");
                 var links = document.Blocks.OfType<Paragraph>().SelectMany(p => p.Inlines).OfType<Hyperlink>().ToArray();
                 Check(links.Length == 1 && links[0].NavigateUri.Scheme == "https", "unsafe link rejected");
+                document.Select(document.ContentStart, document.ContentStart);
                 reply.Text = "临时内容";
                 document.SelectAll();
                 Check(document.SelectedText.Trim() == "临时内容", "rebound content clears old blocks");
+                document.Select(document.ContentStart, document.ContentStart);
                 reply.Text = "```python\nprint('未闭合的代码块')";
                 document.SelectAll();
                 Check(document.SelectedText.Contains("print('未闭合的代码块')"), "unfinished code fence");
+                document.Select(document.ContentStart, document.ContentStart);
                 reply.Text = fixture + "\n\n" + string.Join("\n\n", Enumerable.Range(1, 12)
                     .Select(i => $"第 {i:00} 段：用于验证长回复的跨段落拖选。按住鼠标移动到边缘，选区应持续向上或向下扩展。 **内容 {i:00}**。"))
                     + "\n\n```python\n" + string.Join("\n", Enumerable.Range(1, 160)
@@ -203,5 +249,161 @@ public partial class App : Application
     private static void Check(bool condition, string description)
     {
         if (!condition) throw new InvalidOperationException(description);
+    }
+
+    private void RunStreamingChecks()
+    {
+        var earlier = new MarkdownReply { Text = "先前的用户消息", IsPlainText = true };
+        const string prefix = "第一段 **稳定内容** $1+1=2$。\n\n";
+        var reply = new MarkdownReply { IsStreaming = true, Text = prefix + "第二段" };
+        var panel = new StackPanel { Margin = new Thickness(24), Spacing = 16 };
+        panel.Children.Add(earlier);
+        panel.Children.Add(reply);
+        _window = new Window { Title = "KYNXA Streaming markdown smoke", Content = new ScrollViewer { Content = panel } };
+        _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(900, 700));
+        reply.Loaded += async (_, _) =>
+        {
+            try
+            {
+                await WaitForFormulaRendering(reply);
+                var document = reply.Document;
+                var first = document.Blocks[0];
+                var formulaCanvas = (Canvas)((Grid)reply.Content).Children[2];
+                Check(formulaCanvas.Children.Count == 1, "initial inline formula rendered");
+                var firstFormula = formulaCanvas.Children[0];
+                for (int index = 0; index < 30; index++) reply.Text = prefix + "第二段" + new string('字', index + 1);
+                Check(ReferenceEquals(first, document.Blocks[0]), "stable paragraph retained across deltas");
+                Check(ReferenceEquals(firstFormula, formulaCanvas.Children[0]), "stable formula image retained across deltas");
+
+                document.Select(first.ContentStart, first.ContentEnd);
+                string frozen = document.SelectedText;
+                Check(TextSelectionAutoScroll.HasActiveSelection, "native selection pauses auto-follow");
+                reply.Text = prefix + "流式最后一段";
+                reply.IsStreaming = false;
+                reply.Text = prefix + "最终核对后的内容";
+                Check(document.SelectedText == frozen, "selection retained through final reconciliation");
+                Check(ReferenceEquals(first, document.Blocks[0]), "selected paragraph never rebuilt");
+                document.Select(document.ContentStart, document.ContentStart);
+                await Task.Delay(250);
+                Check(ReadDocument(document).Contains("最终核对后的内容"), "latest deferred content resumes after deselection");
+
+                earlier.Document.SelectAll();
+                reply.IsStreaming = true;
+                reply.Text = prefix + "另外消息选中时暂缓更新";
+                Check(ReadDocument(document).Contains("最终核对后的内容"), "selection in earlier message protects conversation");
+                earlier.Document.Select(earlier.Document.ContentStart, earlier.Document.ContentStart);
+                await Task.Delay(250);
+                Check(ReadDocument(document).Contains("另外消息选中时暂缓更新"), "conversation selection release resumes updates");
+
+                reply.Text = "$$\n\\frac{1}{2}";
+                Check(formulaCanvas.Children.Count == 0, "unfinished block formula stays readable source");
+                Check(ReadDocument(document).Contains(@"\frac{1}{2}"), "unfinished formula content retained");
+                reply.Text += "\n$$";
+                await WaitForFormulaRendering(reply);
+                Check(formulaCanvas.Children.Count == 1, "closed formula renders during stream");
+                reply.Text = "```python\nprint('hello";
+                Check(ReadDocument(document).Contains("print('hello"), "unfinished code fence remains readable");
+                reply.Text += "')\n```";
+                reply.IsStreaming = false;
+                Check(ReadDocument(document).Contains("print('hello')"), "finished code content preserved");
+
+                const string delayedLatex = @"\boxed{\sum_{i=1}^{8}i=36}";
+                reply.Text = "选择中的新公式 $" + delayedLatex + "$。";
+                document.SelectAll();
+                string selectedSource = document.SelectedText;
+                var worker = KYNXA_Desktop.Services.KatexFormulaRenderer.ForElement(reply)!;
+                await worker.RenderAsync(delayedLatex, false);
+                await Task.Delay(150);
+                Check(document.SelectedText == selectedSource && formulaCanvas.Children.Count == 0,
+                    "completed asynchronous formula does not change an active native selection");
+                document.Select(document.ContentStart, document.ContentStart);
+                await WaitForFormulaRendering(reply);
+                Check(formulaCanvas.Children.Count == 1, "deferred formula image applies after selection clears");
+
+                reply.Text = @"旧内容 $\boxed{999}$。";
+                reply.Text = @"新内容 $\boxed{888}$。";
+                await WaitForFormulaRendering(reply);
+                await worker.RenderAsync(@"\boxed{999}", false);
+                await Task.Delay(50);
+                Check(formulaCanvas.Children.Count == 1 && ReadDocument(document).Contains(@"\boxed{888}"),
+                    "a replaced formula cannot receive an older asynchronous image");
+                reply.Text = "[链接][ref]";
+                reply.Text += "\n\n[ref]: https://example.com";
+                Check(document.Blocks.OfType<Paragraph>().SelectMany(p => p.Inlines).OfType<Hyperlink>().Any(),
+                    "late reference definition updates earlier semantic block");
+                File.WriteAllText(_result, "PASS: stable paragraphs/formulas, native and conversation selections, deferred final reconciliation, unfinished math/code, reference links.");
+            }
+            catch (Exception error) { File.WriteAllText(_result, "FAIL: " + error); }
+            finally { _window?.Close(); }
+        };
+        _window.Activate();
+    }
+
+    private static string ReadDocument(RichTextBlock document)
+    {
+        document.SelectAll();
+        string text = document.SelectedText;
+        document.Select(document.ContentStart, document.ContentStart);
+        return text;
+    }
+
+    private void RunStreamingLayoutChecks()
+    {
+        const string fixture = "这是流式输出的演示。\n\n## 结果\n\n文字会逐步出现，支持 **加粗** 和公式 $x^2+y^2=z^2$。\n\n```python\nprint(\"你好\")\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| 正文 | 已完成 |";
+        var streamed = new MarkdownReply { IsStreaming = true };
+        var finished = new MarkdownReply { Text = fixture };
+        var panel = new StackPanel { Width = 680, Spacing = 24 };
+        panel.Children.Add(streamed); panel.Children.Add(finished);
+        _window = new Window { Title = "KYNXA Streaming layout parity", Content = new ScrollViewer { Content = panel } };
+        _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(900, 800));
+        panel.Loaded += async (_, _) =>
+        {
+            try
+            {
+                for (int count = 1; count < fixture.Length; count += 12)
+                {
+                    streamed.Text = fixture[..count];
+                    await Task.Delay(20);
+                }
+                streamed.Text = fixture;
+                streamed.IsStreaming = false;
+                await WaitForFormulaRendering(streamed, finished);
+                var beforeResize = new { streamed = Geometry(streamed), finished = Geometry(finished) };
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-streaming-layout.json"), System.Text.Json.JsonSerializer.Serialize(beforeResize));
+                foreach (var reply in new[] { streamed, finished })
+                    Check(((Canvas)((Grid)reply.Content).Children[0]).Children.OfType<Border>()
+                        .All(border => Math.Abs(border.Width - reply.ActualWidth) < 1), "final block backgrounds stretch to reply width");
+                Check(Geometry(streamed) == Geometry(finished), "streamed final geometry equals static rendering");
+                panel.Width = 480;
+                await Task.Delay(250);
+                Check(Geometry(streamed) == Geometry(finished), "streamed and static geometry remain equal after resize");
+                foreach (var reply in new[] { streamed, finished })
+                {
+                    var backgrounds = (Canvas)((Grid)reply.Content).Children[0];
+                    Check(backgrounds.Children.OfType<Border>().All(border => Math.Abs(border.Width - reply.ActualWidth) < 1),
+                        "code and table backgrounds use the full final document width");
+                }
+                File.WriteAllText(_result, "PASS: streamed/static final Markdown geometry matches, formula positions match, code/table backgrounds fill reply width before and after resize.");
+            }
+            catch (Exception error) { File.WriteAllText(_result, "FAIL: " + error); }
+            finally { _window?.Close(); }
+        };
+        _window.Activate();
+    }
+
+    private static string Geometry(MarkdownReply reply)
+    {
+        var surface = (Grid)reply.Content;
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            controlWidth = Math.Round(reply.ActualWidth, 2), documentWidth = Math.Round(reply.Document.ActualWidth, 2),
+            documentHeight = Math.Round(reply.Document.ActualHeight, 2),
+            decorations = new[] { (Canvas)surface.Children[0], (Canvas)surface.Children[2] }
+                .Select(canvas => canvas.Children.OfType<FrameworkElement>().Select(element => new
+                {
+                    x = Math.Round(Canvas.GetLeft(element), 2), y = Math.Round(Canvas.GetTop(element), 2),
+                    width = Math.Round(element.Width, 2), height = Math.Round(element.Height, 2), visibility = element.Visibility.ToString(),
+                }).ToArray()).ToArray(),
+        });
     }
 }

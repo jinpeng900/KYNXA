@@ -7,19 +7,27 @@
 
 增加 UI 时优先使用现有组件与样式。新的数据保存和业务行为放在页面对应功能文件或服务中，避免写入通用控件。
 
-回复展示：`Controls/MarkdownReply.cs` 使用 Markdig 解析 Markdown，在同一个 WinUI `RichTextBlock` 中渲染标题、粗体、斜体、删除线、列表、任务清单、引用、代码和链接，正文 14px / 23px 行高，代码 13px 等宽字体。表格暂以等宽文字排版，图片显示为链接；不执行 HTML，也不在渲染时请求外部图片。聊天记录仍保存原始 Markdown，旧消息打开时同样渲染。
+流式回复：`Views/ShellPage.StreamReplies.cs` 按会话 ID 维护生成任务，40ms 合并刷新当前消息；`ModelApiClient.StreamReplyAsync` 与 `ChatStreamReader` 读取网关 SSE，区分正文、思考和终止事件。思考默认收起，可展开渲染 Markdown；发送按钮在生成期间变成停止。消息保存 `Reasoning`、`ReasoningDurationMs`、`Status`、`Error` 和原模型信息，旧记录兼容；启动时把未完成生成恢复为中断。生成开始、定期快照和完成时保存，重试复用请求 ID，避免网络末包丢失导致重复上下文。
 
-`Controls/MarkdownReply.Backgrounds.cs` 在同一文本表面背后绘制不参与鼠标命中的背景，只有代码块、行内代码、引用和表格有浅灰底，普通正文、标题和列表保持白底。按实际文字排版定位背景，换行和窗口宽度变化时重新定位；不要给整条助手回复套灰色 Border。
+会话展示：`Controls/ConversationTranscript.cs` 用一个 WebView2 承载整段会话，页面资源在 `Resources/Transcript`，所有用户消息、正文、思考和表格处于同一份 DOM。输入框、侧栏和模型菜单继续使用 WinUI。主聊天的公式直接由 KaTeX 排版，不经过截图、Skia 或原生文字上方的图片图层；浏览器负责文字、公式与表格的尺寸和换行。
 
-`Controls/TextSelectionAutoScroll.cs` 按聊天 ScrollViewer 共享一个选择会话，用户消息与模型回复都注册其中；用户消息通过 `MarkdownReply.IsPlainText` 保留原样，仍使用 16px 字号。聊天 ListView 使用 StackPanel 保留屏幕外的文本控件，才能跨消息保持选区，超长会话需关注首次排版成本。选区按视觉顺序连续覆盖首尾的部分文字和中间完整消息，Ctrl+C、右键复制按同一顺序连接内容，输入框的复制保持独立。
+`ConversationTranscript` 按消息内容、思考内容和生成状态缓存 HTML，40ms 合并刷新；Markdig 解析和代码着色在后台任务中执行。切换聊天时清除前一会话，异步结果通过会话代际检查后才能发送给页面，避免旧任务覆盖新会话。聊天记录仍保存原始 Markdown，历史消息走相同的展示路径。
 
-拖选时启用 32ms 定时器，在聊天视口上下 40px 边缘区加速滚动。根元素接管鼠标捕获，并清理原生控件的按下状态；松手事件直接终止拖选，按钮状态轮询处理窗口外松手，取消/失焦/卸载也会停止。松手后的选区保存起止位置，拦截原生迟到的悬停更新；各文本控件使用 TextHighlighter 保持连续高亮，避免只有焦点所在消息显示选中。文字指针和纯文本索引分别转换，复制内容与显示选区一致。拖选期间拦截自动 BringIntoView；DPI 换算、经过头像、反向拖选和 Markdown 代码高亮继续保留。
+`Services/TranscriptMarkdown.cs` 复用 Markdig 和 `MathMarkdown.Normalize`，输出顶层 HTML 块，支持标题、强调、列表、任务清单、引用、代码、链接与真实表格。单元格保留行内节点，公式不再经过纯文本投影。`Resources/Transcript/transcript.css` 统一管理视觉样式：正文 15px、行高 1.7，公式 1.08em，围栏代码 13px。代码长行按可用宽度软换行，保留原始换行和缩进供复制；普通表格随回复区调整宽度，长单词可断行，无法换行的长公式仍可横向滚动。会话视口填满聊天列，正文不再受固定最大宽度限制，右侧栏缩小或收起时同步扩展；滚动条位于聊天列右缘。
 
-代码高亮：`Services/CodeSyntaxHighlighter.cs` 使用 [ColorCode.Core](https://github.com/CommunityToolkit/ColorCode-Universal) 解析代码围栏的语言，返回文字片段与浅色主题配色，由 `MarkdownReply` 在原有段落内创建彩色 `Run`。支持 Python、JS/TS、C#/C++、Java、JSON、SQL、HTML/CSS、XML/XAML、PowerShell 等及常见缩写。关键字紫色、字符串深蓝、注释灰绿、数字蓝色；不改动缩进和代码文字。未标语言、未知语言以及超过 40,000 字符或 4,096 个文字片段的代码保留等宽纯文本。运行 `dotnet run --project tests/code-highlighting-smoke/CodeHighlightingSmoke.csproj` 检查语言匹配、字符串/注释上下文、换行/缩进保真和降级行为。UI 测试还覆盖带颜色的长代码拖选。
+`Resources/Transcript/transcript.js` 按顶层块的源 HTML 比较并保留未变化前缀，追加内容只替换变化尾部；已排版公式缓存 DOM 字符串，不重复生成图片。有活动选区时保留现有 DOM 并暂存最新快照，清除选区后再应用最终内容；切换会话会立即清除旧选区和消息。页面独立维护跟随底部状态：打开聊天到底部，从底部发送后跟随增长，主动向上滚动或选择文字时暂停。
 
-独立 UI 检查：`dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj`，结果写入 `%TEMP%/kynxa-markdown-smoke.txt`，不读写用户聊天。测试使用带头像的 ListView 聊天布局；窗口打开后运行 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/markdown-ui-smoke/check-selection.ps1`，验证持续上下拖选时滚动、选区单调增长、起点不漂移、经过实际头像、不松手反转方向和松手停止（会短暂操作鼠标）。解析器参考：https://github.com/xoofx/markdig ，原生文字控件：https://learn.microsoft.com/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.richtextblock 。
+跨消息选择使用浏览器原生 Range，用户消息按纯文本保留空白。复制时按选区的文档顺序序列化正文、表格和代码，过滤按钮、状态信息及 KaTeX 的辅助 MathML；完整选中的公式复制为带分隔符的原始 TeX，公式内部的部分选择只复制所选可视字符。整条消息的复制按钮直接复制原始内容。输入框仍使用原生控件，其复制不经过会话页面。
 
-跨消息检查：测试程序使用 `--conversation` 参数启动，随后运行 `tests/markdown-ui-smoke/check-conversation-selection.ps1`。包含用户/模型交替消息的双向拖选、松手后悬停不变、屏幕外消息选择及复制顺序检查。可加 `-CheckClipboard` 实测 Ctrl+C 和右键复制，脚本会暂存并恢复原剪贴板。
+聊天页面只加载打包的本地 HTML、脚本、样式和字体。Markdown 原始 HTML 被转义，图片显示为文本链接；只有 `http`、`https`、`mailto` 地址可以作为链接交给宿主打开。WebView2 拦截其他页面导航、资源请求、下载和权限请求，不在排版时获取远程图片或脚本。
+
+代码高亮：`Services/CodeSyntaxHighlighter.cs` 使用 [ColorCode.Core](https://github.com/CommunityToolkit/ColorCode-Universal) 解析围栏语言，`TranscriptMarkdown` 将文字片段输出为彩色 `span`；复制仍使用完整代码文本。支持 Python、JS/TS、C#/C++、Java、JSON、SQL、HTML/CSS、XML/XAML、PowerShell 等及常见缩写。关键字紫色、字符串深蓝、注释灰绿、数字蓝色；不改动缩进和换行。未标语言、未知语言以及超过 40,000 字符或 4,096 个文字片段的代码保留等宽纯文本。
+
+解析与协议检查：`dotnet run --project tests/transcript-markdown-smoke/TranscriptMarkdownSmoke.csproj` 验证 HTML 结构、表格内公式、列对齐、代码保真、安全链接和流式转最终结果；`dotnet run --project tests/code-highlighting-smoke/CodeHighlightingSmoke.csproj` 验证代码语言匹配与降级；`dotnet run --project tests/chat-stream-smoke/ChatStreamSmoke.csproj` 验证 SSE 分包、真实 HTTP 增量、取消与记录兼容。`node tests/streaming-ui-fixture.mjs <空临时目录>` 提供独立模拟上游与真实网关，不含密钥，不应接到日常使用的模型配置中。
+
+主聊天 UI 检查：`dotnet run --project tests/transcript-ui-smoke/TranscriptUiSmoke.csproj` 使用独立 WebView2 会话，检查多公式表格、跨消息选择、完整与部分公式复制、选区期间的最终更新以及打开和跟随底部；`--keep-open` 保留测试窗口。结果写入 `%TEMP%/kynxa-transcript-smoke.txt`，耗时与指标写入同目录的 `kynxa-transcript-smoke.json`，不读写用户聊天。
+
+保留的原生控件：`MarkdownReply.*`、`TextSelectionAutoScroll`、`ConversationAutoFollow` 仍供原生控件与旧测试使用，其 `RichTextBlock`、原生表格、图片公式和鼠标捕获逻辑不再控制主聊天。`tests/markdown-ui-smoke`、`tests/scroll-follow-smoke` 及跨消息选择脚本只验证这些原生路径；它们通过不代表新的浏览器会话展示已经通过 UI 检查。
 
 `Services/StoragePaths.cs` 统一解析桌面数据位置，与网关共享 `~/.kynxa/storage.json`（`dataRoot`）或 `KYNXA_DATA_HOME`。项目、普通聊天、模型选择、布局和界面错误日志均使用该目录下的 `Desktop`；未配置时兼容原 LocalState。移动已有数据使用网关目录下 `migrate-storage.mjs`，切勿只改路径导致旧记录不可见。
 
@@ -51,10 +59,12 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 
 ## 数学公式与工作排序
 
-`MathMarkdown` 将 `\(...\)`、`\[...\]` 转为 Markdown 数学分隔符，也支持 `$...$` 与独占行的 `$$` 公式块。单独方括号包围且包含数学运算符的段落可兼容恢复；普通括号、代码块和行内代码不猜测转换。
+`MathMarkdown` 将 `\(...\)`（含同一段落内的跨行内容）、`\[...\]` 转为 Markdown 数学分隔符，也支持 `$...$`、同一行或跨行的 `$$...$$`。行内公式不能跨越空段落或代码边界。单独方括号包围且包含数学运算符的段落可兼容恢复；普通括号、代码块和行内代码不猜测转换。显式标记为 `math` 的围栏代码块在生成完成后显示为公式；`tex`、`latex` 及其他语言仍按代码展示。
 
-`MathFormulaRenderer` 使用 [CSharpMath](https://github.com/verybadcat/CSharpMath) 与 SkiaSharp 在本机排版，不加载远程脚本。支持常见分数、根号、上下标、集合符号、积分、求和和矩阵；不支持或超限的公式回退源码。`MarkdownReply.Math` 的图层不参与鼠标命中，原生文档仍保留可选中的 LaTeX，跨消息复制包含公式源码。公式块使用现有浅灰背景，普通正文不变灰。每条消息限制渲染数量，单公式限制长度、嵌套和图像尺寸。
+主聊天由 `TranscriptMarkdown` 输出带 `data-latex`、`data-display` 的数学节点，页面直接调用固定版本 [KaTeX 0.16.47](https://github.com/KaTeX/KaTeX/tree/v0.16.47) 渲染为 DOM。原始 TeX 保留在节点数据中，供复制使用；未闭合的流式块公式先显示源码，`math` 围栏到生成完成后再转换。资源、字体和 MIT 许可保存在 `Resources/Math` 并随软件发布，主聊天不进行公式截图，也不依赖图片缓存。
+
+`KatexFormulaRenderer`、`MarkdownReply.Math` 的图片路径及 `MathFormulaRenderer` 的 CSharpMath/SkiaSharp 降级仍保留给原生控件。它们的公式长度、图像尺寸限制和 TeX 兼容改写属于原生渲染实现，不应套用到浏览器主聊天。浏览器渲染始终接收原始 TeX，避免为较小的解析器改写公式含义。
 
 打开工作内聊天时展开该工作，并将未置顶工作移到置顶项之后；用户显式收起后，普通刷新不会再强制展开。拖动工作行可在相同置顶分组内调整顺序，写回项目列表；不会改变聊天所属工作或创建嵌套工作。之后再次打开工作内聊天会重新按最近使用规则提升该工作。
 
-验证：`dotnet run --project tests/math-project-smoke/MathProjectSmoke.csproj`；原生公式预览使用 `dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj -- --math`。公式变更同时回归已有跨消息选择脚本。
+原生兼容检查：`dotnet run --project tests/math-project-smoke/MathProjectSmoke.csproj` 检查 CSharpMath 降级；`dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj -- --math` 预览原生公式。旧的 `--delimiter-math`、`--physics-math`、`--table-math` 与选择脚本继续用于原生控件回归，主聊天公式、表格和复制应在新的 Transcript 页面检查。

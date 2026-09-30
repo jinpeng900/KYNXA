@@ -18,7 +18,7 @@ public sealed partial class MarkdownReply
 
     private void UpdateBackgrounds()
     {
-        if (!_backgroundsDirty || !_document.IsLoaded || _document.ActualWidth <= 0) return;
+        if (!_backgroundsDirty || !_document.IsLoaded || ActualWidth <= 0) return;
         _backgroundsDirty = false;
         _backgrounds.Children.Clear();
         foreach (var (element, block) in _backgroundRanges)
@@ -31,7 +31,9 @@ public sealed partial class MarkdownReply
                 var last = end.GetCharacterRect(LogicalDirection.Backward);
                 double left = Math.Max(0, ((Paragraph)element).Margin.Left - 12);
                 AddBackground(new Rect(left, Math.Max(0, first.Y - 6),
-                    Math.Max(0, _document.ActualWidth - left), Math.Max(first.Height, last.Bottom - first.Y) + 12), true);
+                    // RichTextBlock.ActualWidth is the text's natural width, even when
+                    // arranged in a wider stretched reply. Decorations fill that reply.
+                    Math.Max(0, ActualWidth - left), Math.Max(first.Height, last.Bottom - first.Y) + 12), true);
             }
             else
             {
@@ -56,6 +58,7 @@ public sealed partial class MarkdownReply
                 if (line is { } final) AddBackground(final, false);
             }
         }
+        AddTableBackgrounds();
     }
 
     private void AddBackground(Rect rect, bool block)

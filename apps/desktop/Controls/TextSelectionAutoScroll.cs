@@ -20,6 +20,9 @@ internal sealed class TextSelectionAutoScroll
     private readonly RichTextBlock _text;
     private ConversationSelection? _session;
 
+    internal static bool HasActiveSelection => Sessions.Any(pair => pair.Value.HasSelection);
+    internal bool HasSelection => _session?.HasSelection ?? _text.SelectedText.Length > 0;
+
     public TextSelectionAutoScroll(RichTextBlock text)
     {
         _text = text;
@@ -73,8 +76,13 @@ internal sealed class TextSelectionAutoScroll
         private bool _takingCapture;
         private bool _writing;
         private bool _moved;
+        private ulong _pressTimestamp;
+        private RichTextBlock? _lastPressText;
+        private Point _lastPressPosition;
+        private long _lastPressTime;
 
         public string SelectedText => string.Join("\r\n\r\n", _selection.Select(range => range.Text.SelectedText).Where(text => text.Length > 0));
+        public bool HasSelection => _dragging || _documents.Any(text => IsVisible(text) && text.SelectedText.Length > 0);
 
         public void Add(RichTextBlock text)
         {
@@ -111,17 +119,37 @@ internal sealed class TextSelectionAutoScroll
 
         private void RootPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (!_dragging && e.GetCurrentPoint(null).Properties.IsLeftButtonPressed) Clear();
+            var point = e.GetCurrentPoint(null);
+            if (!point.Properties.IsLeftButtonPressed) return;
+            // Begin runs on the message before this same event bubbles to the root.
+            // Any different press (including controls that handled it) starts a new action.
+            if (_dragging && point.Timestamp == _pressTimestamp) return;
+            Finish();
+            Clear();
+            _lastPressText = null;
         }
 
         public void Begin(RichTextBlock text, PointerRoutedEventArgs e)
         {
             if (e.Pointer.PointerDeviceType != PointerDeviceType.Mouse || !e.GetCurrentPoint(text).Properties.IsLeftButtonPressed || _root is null) return;
-            var anchor = text.GetPositionFromPoint(e.GetCurrentPoint(text).Position);
+            var point = e.GetCurrentPoint(text);
+            var anchor = text.GetPositionFromPoint(point.Position);
             if (anchor is null || text.Blocks.OfType<Paragraph>().Any(p => IsLinkAt(p.Inlines, anchor.Offset))) return;
             Finish();
-            var initial = new Range(text, text.SelectionStart, text.SelectionEnd);
+            long pressedAt = Environment.TickCount64;
+            bool repeatClick = _lastPressText == text && pressedAt - _lastPressTime <= GetDoubleClickTime()
+                && Math.Abs(point.Position.X - _lastPressPosition.X) < 4 && Math.Abs(point.Position.Y - _lastPressPosition.Y) < 4;
+            var native = new Range(text, text.SelectionStart, text.SelectionEnd);
+            bool newNativeRange = native.Start.Offset != native.End.Offset && !_selection.Any(range => range.Text == text
+                && range.Start.Offset == native.Start.Offset && range.End.Offset == native.End.Offset);
+            // A single click, including inside an existing selection, collapses it.
+            // Preserve a new native word selection produced by a double click.
+            var initial = repeatClick && newNativeRange ? native : new Range(text, anchor, anchor);
             Clear();
+            _lastPressText = text;
+            _lastPressPosition = point.Position;
+            _lastPressTime = pressedAt;
+            _pressTimestamp = point.Timestamp;
             _anchorText = text;
             _anchor = anchor;
             _pointer = _pressed = e.GetCurrentPoint(_root).Position;
@@ -274,15 +302,16 @@ internal sealed class TextSelectionAutoScroll
         private void Clear()
         {
             _writing = true;
+            _selection.Clear();
             try
             {
-                foreach (var range in _selection)
-                {
-                    range.Text.Select(range.Text.ContentStart, range.Text.ContentStart);
-                    if (_highlights.TryGetValue(range.Text, out var highlight)) highlight.Ranges.Clear();
-                }
+                // Focus transfer can clear native selection before PointerPressed reaches
+                // this root. Decorations must be cleared even when SelectedText is empty.
+                foreach (var highlight in _highlights.Values) highlight.Ranges.Clear();
+                foreach (var text in _documents.Where(text => text.SelectedText.Length > 0))
+                    text.Select(text.ContentStart, text.ContentStart);
             }
-            finally { _selection.Clear(); _writing = false; }
+            finally { _writing = false; }
         }
 
         private void ApplyRange(Range range)
@@ -340,6 +369,7 @@ internal sealed class TextSelectionAutoScroll
     }
 
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] private static extern uint GetDoubleClickTime();
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out CursorPoint point);
     [DllImport("user32.dll")] private static extern bool ScreenToClient(nint window, ref CursorPoint point);

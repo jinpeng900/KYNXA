@@ -43,8 +43,11 @@ public sealed partial class MarkdownReply : UserControl
         surface.Children.Add(_formulaLayer);
         Content = surface;
         _selectionScroll = new TextSelectionAutoScroll(_document);
-        _document.SizeChanged += (_, _) => _backgroundsDirty = true;
-        _document.LayoutUpdated += (_, _) => { UpdateBackgrounds(); UpdateFormulas(); };
+        _document.SizeChanged += (_, _) => { _backgroundsDirty = true; _tableLayoutDirty = true; };
+        SizeChanged += (_, _) => { _backgroundsDirty = true; _tableLayoutDirty = true; };
+        _document.LayoutUpdated += (_, _) => { UpdateTables(); UpdateBackgrounds(); UpdateFormulas(); };
+        Loaded += (_, _) => { if (_renderPending) Render(); QueueFormulaRendering(); };
+        Unloaded += (_, _) => { _deferredRender?.Stop(); _formulaUpdateTimer?.Stop(); _tableLayoutTimer?.Stop(); };
     }
 
     internal RichTextBlock Document => _document;
@@ -68,23 +71,6 @@ public sealed partial class MarkdownReply : UserControl
         nameof(Text), typeof(string), typeof(MarkdownReply),
         new PropertyMetadata(string.Empty, (sender, _) => ((MarkdownReply)sender).Render()));
 
-    private void Render()
-    {
-        _selectionScroll.Stop();
-        _document.Blocks.Clear();
-        _formulas.Clear();
-        _formulaBaselines.Clear();
-        _formulaLayer.Children.Clear();
-        _backgroundRanges.Clear();
-        _backgrounds.Children.Clear();
-        _backgroundsDirty = true;
-        _document.FontSize = IsPlainText ? FontSize : 14;
-        _document.LineHeight = IsPlainText ? 26 : 23;
-        if (IsPlainText) NewParagraph().Inlines.Add(new Run { Text = Text ?? string.Empty });
-        else foreach (var block in Markdown.Parse(MathMarkdown.Normalize(Text ?? string.Empty), Pipeline)) AddBlock(block);
-        _document.Select(_document.ContentStart, _document.ContentStart);
-    }
-
     private Paragraph NewParagraph(double indent = 0, string prefix = "")
     {
         var paragraph = new Paragraph { Margin = new Thickness(indent, _document.Blocks.Count == 0 ? 0 : 10, 0, 0) };
@@ -107,8 +93,16 @@ public sealed partial class MarkdownReply : UserControl
             case MathBlock math:
                 var equation = NewParagraph(indent + 12, prefix);
                 equation.Margin = new Thickness(indent + 12, 12, 12, 10);
-                AddFormula(equation.Inlines, math.Lines.ToString(), true);
+                if (IsStreaming && math.ClosingFencedCharCount == 0)
+                    equation.Inlines.Add(new Run { Text = math.Lines.ToString(), FontFamily = CodeFont });
+                else AddFormula(equation.Inlines, math.Lines.ToString(), true);
                 _backgroundRanges.Add((equation, true));
+                break;
+            case FencedCodeBlock mathFence when !IsStreaming && IsMathFence(mathFence):
+                var fencedEquation = NewParagraph(indent + 12, prefix);
+                fencedEquation.Margin = new Thickness(indent + 12, 12, 12, 10);
+                AddFormula(fencedEquation.Inlines, mathFence.Lines.ToString(), true);
+                _backgroundRanges.Add((fencedEquation, true));
                 break;
             case CodeBlock code:
                 var codeParagraph = NewParagraph(indent + 12, prefix);
@@ -220,36 +214,4 @@ public sealed partial class MarkdownReply : UserControl
     private static bool TryLink(string? url, out Uri? uri) =>
         Uri.TryCreate(url, UriKind.Absolute, out uri) && uri.Scheme is "https" or "http" or "mailto";
 
-    private void AddTable(Table table, double indent)
-    {
-        // Keep tables in the same text-selection surface as the rest of the reply.
-        var rows = table.Cast<TableRow>().Select(row => row.Cast<TableCell>()
-            .Select(cell => string.Join(" ", cell.OfType<LeafBlock>().Select(leaf => PlainText(leaf.Inline))))
-            .ToArray()).ToArray();
-        if (rows.Length == 0) return;
-        int columns = rows.Max(row => row.Length);
-        var widths = Enumerable.Range(0, columns).Select(i => rows.Max(row => i < row.Length ? DisplayWidth(row[i]) : 0)).ToArray();
-        var paragraph = NewParagraph(indent);
-        paragraph.FontFamily = CodeFont;
-        paragraph.FontSize = 13;
-        _backgroundRanges.Add((paragraph, true));
-        for (int r = 0; r < rows.Length; r++)
-        {
-            if (r > 0) paragraph.Inlines.Add(new LineBreak());
-            string line = string.Join("  │  ", rows[r].Select((cell, i) => cell + new string(' ', Math.Max(0, widths[i] - DisplayWidth(cell)))));
-            paragraph.Inlines.Add(new Run { Text = line, FontWeight = ((TableRow)table[r]).IsHeader ? FontWeights.SemiBold : FontWeights.Normal });
-        }
-    }
-
-    private static string PlainText(ContainerInline? container)
-    {
-        if (container is null) return string.Empty;
-        return string.Concat(container.Select(inline => inline switch
-        {
-            LiteralInline literal => literal.Content.ToString(), CodeInline code => code.Content,
-            HtmlEntityInline entity => entity.Transcoded.ToString(), AutolinkInline auto => auto.Url,
-            LineBreakInline => " ", ContainerInline nested => PlainText(nested), _ => string.Empty,
-        }));
-    }
-    private static int DisplayWidth(string text) => text.EnumerateRunes().Sum(rune => rune.Value >= 0x2E80 ? 2 : 1);
 }

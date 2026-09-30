@@ -34,6 +34,14 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        ConversationMessages.RetryRequested += Transcript_RetryRequested;
+        // A click in native chrome/input is outside the browser document too.
+        AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
+        {
+            for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null; node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+                if (node == ConversationMessages) return;
+            ConversationMessages.ClearSelection();
+        }), handledEventsToo: true);
         PromptTextBox.AddHandler(UIElement.KeyDownEvent,
             new KeyEventHandler(PromptTextBox_KeyDown), handledEventsToo: true);
         PromptTextBox.AddHandler(UIElement.KeyUpEvent,
@@ -43,6 +51,7 @@ public sealed partial class ShellPage : Page
     private async void PageRoot_Loaded(object sender, RoutedEventArgs e)
     {
         _layout = _layoutStateService.Load();
+        ConversationMessages.Preload();
         ApplyLayout();
         InitializeModelPicker();
         InitializePermissionPicker();
@@ -106,7 +115,7 @@ public sealed partial class ShellPage : Page
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
 
         MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
-        ConversationMessages.Width = Math.Min(ConversationWidthMax, Math.Max(0, width - 48));
+        // The transcript fills the remaining grid column as the work panel resizes.
         ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 40);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);

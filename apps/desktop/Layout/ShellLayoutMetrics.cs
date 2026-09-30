@@ -17,7 +17,6 @@ public static class ShellLayoutMetrics
     public const double ComposerHeightMin = 96;
     public const double ComposerAutoHeightMax = 210;
     public const double ComposerHeightMax = 420;
-    public const double ConversationWidthMax = 920;
     public const double WorkPanelMinimumWidth = 320;
     public const double WorkPanelMaximumWidth = 1600;
     public const double WorkPanelGap = 10;

@@ -1,0 +1,11 @@
+html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+body { color: #232323; }
+.row { display: block; width: max-content; }
+.formula { display: inline-block; padding: 4px; white-space: nowrap; line-height: 1; }
+.formula.inline { font-size: 24px; }
+.formula.display { font-size: 28px; }
+.katex { font-size: 1em; text-rendering: auto; }
+.katex-display { display: inline-block; margin: 0; }
+.katex-display > .katex { display: inline-block; white-space: nowrap; }
+.katex .cjk_fallback { font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif; }
+.baseline { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
