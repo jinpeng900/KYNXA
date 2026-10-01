@@ -23,13 +23,22 @@ public static class ModelGatewayService
             var script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "server.mjs");
             if (!File.Exists(script))
                 throw new InvalidOperationException("缺少模型网关文件，请重新构建或安装 KYNXA。");
+            // A shared gateway can outlive the desktop. Keep its current directory
+            // outside the deployment layout so Visual Studio can replace AppX.
+            var workingDirectory = Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Runtime");
+            Directory.CreateDirectory(workingDirectory);
             var start = new ProcessStartInfo(FindNode())
             {
                 UseShellExecute = false, CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(script)!
+                WorkingDirectory = workingDirectory
             };
             start.ArgumentList.Add(script);
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
+            // Preserve the previous base for an explicitly configured relative path.
+            start.Environment.TryGetValue("KYNXA_MODEL_HOME", out var modelHome);
+            if (!string.IsNullOrWhiteSpace(modelHome) && !Path.IsPathFullyQualified(modelHome))
+                start.Environment["KYNXA_MODEL_HOME"] = Path.GetFullPath(modelHome, Path.GetDirectoryName(script)!);
             using var process = Process.Start(start)
                 ?? throw new InvalidOperationException("无法启动模型网关。");
             var deadline = Stopwatch.StartNew();
