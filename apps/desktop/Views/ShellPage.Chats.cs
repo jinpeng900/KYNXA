@@ -55,15 +55,6 @@ public sealed partial class ShellPage
         if (!_promptCompositionActive) _suppressComposingEnter = false;
     }
 
-    private void InitializeStandaloneChats()
-    {
-        _standaloneChats = _projectStore.ChatsExist
-            ? _projectStore.LoadChats().Where(chat => chat.CanPersist).ToList()
-            : ViewModel.RecentConversations.Select(chat => new ProjectChatState { Id = chat.Id, Title = chat.Title, IsSample = true }).ToList();
-        _projectStore.SaveChats(_standaloneChats);
-        RebuildStandaloneRows();
-    }
-
     private void RebuildStandaloneRows()
     {
         ViewModel.RecentConversations.Clear();
@@ -171,7 +162,10 @@ public sealed partial class ShellPage
     private async Task SendPromptAsync()
     {
         if (_sendingPrompt || IsReplyInProgress(ActiveChatId)) return;
-        string text = PromptTextBox.Text.Trim();
+        string originalDraft = PromptTextBox.Text;
+        string text = originalDraft.Trim();
+        bool chatMode = ViewModel.IsChatMode;
+        string? selectedProvider = _selectedModel?.ProviderId, selectedModel = _selectedModel?.ModelId;
         if (text.Length == 0) { PromptTextBox.Focus(FocusState.Programmatic); return; }
         ConversationMessages.BeforeSend();
         _sendingPrompt = true;
@@ -179,10 +173,10 @@ public sealed partial class ShellPage
         PendingChatReply? preparedReply = null;
         try
         {
-            await RunProjectActionAsync(() =>
+            await RunProjectActionAsync(async () =>
             {
                 ProjectChatState chat;
-                if (ViewModel.IsChatMode)
+                if (chatMode)
                 {
                     chat = _activeStandaloneChat ?? new ProjectChatState();
                     if (_activeStandaloneChat is null) _standaloneChats.Insert(0, chat);
@@ -192,12 +186,13 @@ public sealed partial class ShellPage
                 {
                     if (_activeProjectChat is null)
                     {
-                        if (!_workWithoutFolder)
+                        var selectedProject = KYNXA_Desktop.Services.WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+                        if (selectedProject is null && !_workWithoutFolder)
                         {
                             ShowWorkspacePicker();
-                            return Task.CompletedTask;
+                            return;
                         }
-                        var project = GetFolderlessWorkspace();
+                        var project = selectedProject ?? GetFolderlessWorkspace();
                         _activeProjectChat = new ProjectChatState();
                         project.Chats.Insert(0, _activeProjectChat);
                     }
@@ -211,26 +206,37 @@ public sealed partial class ShellPage
                 chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
                 chat.Draft = string.Empty;
                 // First submitted message is the commit boundary; draft-only chats are filtered by the store.
-                if (ViewModel.IsChatMode)
+                if (chatMode)
                 {
-                    _projectStore.SaveChats(_standaloneChats);
-                    _chatConversationTitle = chat.Title;
-                    _chatDraft = string.Empty;
+                    await _projectStore.SaveChatsAsync(_standaloneChats);
+                    if (_activeStandaloneChat == chat)
+                    {
+                        _chatConversationTitle = chat.Title;
+                        _chatDraft = string.Empty;
+                    }
                     RebuildStandaloneRows();
                 }
                 else
                 {
                     var project = _projects.First(p => p.Chats.Contains(chat));
-                    _projectStore.Save(_projects);
-                    _workConversationTitle = WorkChatTitle(project, chat);
-                    _workDraft = string.Empty;
-                    RenderProjects(project.Id);
+                    _selectedWorkProjectId = project.IsFolderlessWorkspace ? null : project.Id;
+                    _workChatToReveal = chat.Id;
+                    KYNXA_Desktop.Services.ProjectOrdering.Activate(_projects, project);
+                    KYNXA_Desktop.Services.WorkSidebarState.ActivateChat(project, chat);
+                    await _projectStore.SaveAsync(_projects);
+                    RecordWorkChatActivity(chat);
+                    if (_activeProjectChat == chat)
+                    {
+                        _workConversationTitle = WorkChatTitle(project, chat);
+                        _workDraft = string.Empty;
+                    }
+                    RenderProjects();
                 }
-                PromptTextBox.Text = ViewModel.Prompt = string.Empty;
-                preparedReply = BeginPendingReply(chat.Id, text, _selectedModel?.ProviderId, _selectedModel?.ModelId);
+                if (ViewModel.IsChatMode == chatMode && ActiveChatId == chat.Id && PromptTextBox.Text == originalDraft)
+                    PromptTextBox.Text = ViewModel.Prompt = string.Empty;
+                preparedReply = BeginPendingReply(chat.Id, text, selectedProvider, selectedModel);
                 UpdateConversationTitle();
                 UpdateConversationPresentation(openAtBottom: false);
-                return Task.CompletedTask;
             });
         }
         finally
@@ -252,5 +258,8 @@ public sealed partial class ShellPage
     private void ChatHeader_GotFocus(object sender, RoutedEventArgs e)
     { if (ContainsKeyboardFocus(ChatHeader)) { NewChatButton.Opacity = 1; NewChatButton.IsHitTestVisible = true; } }
     private void ChatHeader_LostFocus(object sender, RoutedEventArgs e) => DispatcherQueue.TryEnqueue(() =>
-    { if (!ContainsKeyboardFocus(ChatHeader)) { NewChatButton.Opacity = 0; NewChatButton.IsHitTestVisible = false; } });
+    {
+        if (_projectViewClosed || !ChatHeader.IsLoaded) return;
+        if (!ContainsKeyboardFocus(ChatHeader)) { NewChatButton.Opacity = 0; NewChatButton.IsHitTestVisible = false; }
+    });
 }

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/desktop/ViewModels/ProjectTreeEntry.cs" Link="ProjectTreeEntry.cs" />
+    <Compile Include="../../apps/desktop/ViewModels/ProjectTreeReconciler.cs" Link="ProjectTreeReconciler.cs" />
+    <Compile Include="../../apps/desktop/Views/ShellPage.ProjectRendering.cs" Link="ShellPage.ProjectRendering.cs" />
+    <Compile Include="../../apps/desktop/Views/ShellPage.ProjectHover.cs" Link="ShellPage.ProjectHover.cs" />
+    <Compile Include="../../apps/desktop/Views/ShellPage.ProjectOrdering.cs" Link="ShellPage.ProjectOrdering.cs" />
+    <Compile Include="../../apps/desktop/Services/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
+  </ItemGroup>
+</Project>

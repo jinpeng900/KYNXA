@@ -13,9 +13,10 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private sealed class PendingChatReply(Guid conversationId, string question, string? provider, string? model, string permissionMode)
+    private sealed class PendingChatReply(Guid conversationId, Guid userMessageId, string question, string? provider, string? model, string permissionMode)
     {
         public Guid ConversationId { get; } = conversationId;
+        public Guid UserMessageId { get; } = userMessageId;
         public string Question { get; } = question;
         public string? Provider { get; } = provider;
         public string? Model { get; } = model;
@@ -27,7 +28,6 @@ public sealed partial class ShellPage
         public StringBuilder Reasoning { get; } = new();
         public Stopwatch ThinkingTime { get; } = new();
         public bool Dirty { get; set; }
-        public long LastSave { get; set; } = Environment.TickCount64;
         public string? Error => Message.Status == "streaming" ? null : Message.Error;
     }
 
@@ -52,13 +52,15 @@ public sealed partial class ShellPage
     {
         var (chat, _) = FindChat(chatId);
         if (chat is null || _pendingReplies.ContainsKey(chatId)) throw new InvalidOperationException("当前聊天正在生成回复。");
-        var pending = new PendingChatReply(chatId, question, provider, model, permissionMode ?? _layout.PermissionMode);
+        var user = chat.Messages.LastOrDefault(message => message.Role == "user")
+            ?? throw new InvalidOperationException("找不到要回复的用户消息。");
+        var pending = new PendingChatReply(chatId, user.Id, question, provider, model, permissionMode ?? _layout.PermissionMode);
         if (requestId is Guid existingId) pending.Message.Id = existingId;
         pending.Presentation = new ConversationMessageViewModel(chatId, pending.Message);
         pending.Presentation.SetRetryAllowed(true);
         chat.Messages.Add(pending.Message);
         _pendingReplies.Add(chatId, pending);
-        PersistReply(pending);
+        RenderProjects();
         if (_replyRefreshTimer is null)
         {
             _replyRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
@@ -91,27 +93,6 @@ public sealed partial class ShellPage
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
         pending.Dirty = false;
-        if (final || Environment.TickCount64 - pending.LastSave >= 1500)
-        {
-            PersistReply(pending);
-            pending.LastSave = Environment.TickCount64;
-        }
-    }
-
-    private void PersistReply(PendingChatReply pending)
-    {
-        var (chat, project) = FindChat(pending.ConversationId);
-        if (chat is null || !chat.Messages.Contains(pending.Message)) return;
-        try
-        {
-            if (project is null) _projectStore.SaveChats(_standaloneChats);
-            else _projectStore.Save(_projects);
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            pending.Message.Error = "当前回复未能保存，请检查存储位置。";
-            pending.Presentation.Refresh(pending.ThinkingTime.IsRunning);
-        }
     }
 
     private async Task ReceiveReplyAsync(PendingChatReply pending)
@@ -119,7 +100,7 @@ public sealed partial class ShellPage
         try
         {
             await foreach (var update in _modelApiClient.StreamReplyAsync(
-                new ChatRequest(pending.ConversationId, pending.Question, pending.Model, pending.PermissionMode, pending.Provider, pending.Message.Id), pending.Cancellation.Token))
+                new ChatRequest(pending.ConversationId, pending.Question, pending.Model, pending.PermissionMode, pending.Provider, pending.Message.Id, pending.UserMessageId), pending.Cancellation.Token))
             {
                 if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
                 switch (update.Type)
@@ -169,7 +150,11 @@ public sealed partial class ShellPage
             }
             pending.Cancellation.Dispose();
             if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
-            if (!_chatClosing) UpdateSendButtonState();
+            if (!_chatClosing)
+            {
+                UpdateSendButtonState();
+                RenderProjects();
+            }
         }
     }
 
@@ -210,6 +195,7 @@ public sealed partial class ShellPage
         pending.Message.Status = "interrupted";
         pending.Presentation.Refresh();
         pending.Cancellation.Cancel();
+        RenderProjects();
     }
 
     private void StopReplies()

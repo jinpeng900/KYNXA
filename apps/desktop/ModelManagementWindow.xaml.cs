@@ -198,8 +198,8 @@ public sealed partial class ModelManagementWindow : Window
 
     private void ModelsBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (ModelCount is not null) ModelCount.Text = $"已选 {ModelIds().Length} 个";
-        if (!_updatingModelList) RenderModelOptions();
+        if (_updatingModelList) UpdateModelCount();
+        else RenderModelOptions();
     }
 
     private void SetProtocol(string protocol) => ProtocolBox.SelectedItem = ProtocolBox.Items
@@ -207,30 +207,36 @@ public sealed partial class ModelManagementWindow : Window
 
     private void ModelSearchBox_TextChanged(object sender, TextChangedEventArgs e) => RenderModelOptions();
 
+    private string[] CandidateModelIds() => ((PresetBox.SelectedItem as ModelPreset)?.Models ?? [])
+        .Concat(_discoveredModels).Concat(ModelIds()).Distinct(StringComparer.Ordinal).ToArray();
+
+    private void UpdateModelCount()
+    {
+        if (ModelCount is not null) ModelCount.Text = $"共 {CandidateModelIds().Length} 个 · 已选 {ModelIds().Length} 个";
+    }
+
     private void RenderModelOptions()
     {
         if (ModelOptions is null || ModelsBox is null || ModelSearchBox is null || EmptyModelsHint is null) return;
         ModelOptions.Children.Clear();
         var selected = ModelIds().ToHashSet();
-        ModelCount.Text = $"已选 {selected.Count} 个";
-        var defaults = (PresetBox.SelectedItem as ModelPreset)?.Models ?? [];
-        var ids = defaults.Concat(_discoveredModels).Concat(selected).Distinct();
+        UpdateModelCount();
+        var ids = CandidateModelIds();
         string search = ModelSearchBox.Text.Trim();
         foreach (string id in ids)
         {
             var detail = ModelCatalog.Describe(id);
-            if (search.Length > 0 && !$"{detail.Name} {id} {detail.Description}".Contains(search, StringComparison.OrdinalIgnoreCase)) continue;
+            if (search.Length > 0 && !$"{detail.Name} {id}".Contains(search, StringComparison.OrdinalIgnoreCase)) continue;
             var content = new StackPanel { Spacing = 3 };
             content.Children.Add(new TextBlock { Text = detail.Name, FontSize = 13,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
-            content.Children.Add(new TextBlock { Text = id, FontSize = 11, TextWrapping = TextWrapping.Wrap,
-                Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] });
-            content.Children.Add(new TextBlock { Text = detail.Description, FontSize = 11, TextWrapping = TextWrapping.Wrap,
-                Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] });
+            if (detail.Name != id)
+                content.Children.Add(new TextBlock { Text = id, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                    Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] });
             var option = new CheckBox { Content = content, IsChecked = selected.Contains(id),
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new Thickness(10, 8, 10, 8), CornerRadius = new CornerRadius(8) };
-            AutomationProperties.SetName(option, $"{detail.Name}，{id}，{detail.Description}");
+            AutomationProperties.SetName(option, detail.Name == id ? id : $"{detail.Name}，{id}");
             option.Checked += (_, _) => ToggleModel(id, true);
             option.Unchecked += (_, _) => ToggleModel(id, false);
             ModelOptions.Children.Add(option);
@@ -245,7 +251,7 @@ public sealed partial class ModelManagementWindow : Window
         var ids = ModelIds().Where(value => value != id).ToList();
         if (enabled) ids.Add(id);
         ModelsBox.Text = string.Join(Environment.NewLine, ids);
-        ModelCount.Text = $"已选 {ids.Count} 个";
+        UpdateModelCount();
         _updatingModelList = false;
     }
 

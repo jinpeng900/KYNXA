@@ -173,12 +173,5 @@ Check(!ProjectOrdering.Activate(projects, pinned), "pinned order stable");
 Check(ProjectOrdering.Move(projects, b, a, true), "manual reorder");
 Check(projects.OrderByDescending(p => p.IsPinned).SequenceEqual(new[] { pinned, a, b }), "drop below target");
 Check(!ProjectOrdering.Move(projects, a, pinned, false), "cannot cross pinned group");
-var directory = Path.Combine(Path.GetTempPath(), "kynxa-order-test-" + Guid.NewGuid().ToString("N"));
-try
-{
-    var store = new ProjectStore(directory);
-    store.Save(projects);
-    Check(store.Load().Select(p => p.Id).SequenceEqual(projects.Select(p => p.Id)), "persist manual order");
-}
-finally { if (File.Exists(Path.Combine(directory, "projects.json"))) File.Delete(Path.Combine(directory, "projects.json")); if (Directory.Exists(directory)) Directory.Delete(directory); }
-Console.WriteLine($"PASS: 8 formula layouts, {sizedDelimiters.Length} sized delimiters, {aliases.Length} aliases and {modularFormulas.Length} modular formulas in inline/block layouts, {standardFormulas.Length} standard/escaped formulas, scalable delimiter images, scope/unknown-command guards, source fallback, delimiters/code protection, recent/pinned/manual ordering and persistence.");
+// Persistence now belongs to the gateway; HTTP snapshot/order checks live in conversation-store-smoke.
+Console.WriteLine($"PASS: 8 formula layouts, {sizedDelimiters.Length} sized delimiters, {aliases.Length} aliases and {modularFormulas.Length} modular formulas in inline/block layouts, {standardFormulas.Length} standard/escaped formulas, scalable delimiter images, scope/unknown-command guards, source fallback, delimiters/code protection and recent/pinned/manual ordering.");

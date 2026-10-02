@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../apps/desktop/Services/ModelPresets.cs" Link="ModelPresets.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelCatalog.cs" Link="ModelCatalog.cs" />
   </ItemGroup>
 </Project>

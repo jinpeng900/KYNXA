@@ -9,7 +9,7 @@ public static class ChatPermissionModes
 }
 
 public sealed record ChatRequest(Guid ConversationId, string Message, string? Model = null,
-    string PermissionMode = ChatPermissionModes.Ask, string? Provider = null, Guid? RequestId = null);
+    string PermissionMode = ChatPermissionModes.Ask, string? Provider = null, Guid? RequestId = null, Guid? UserMessageId = null);
 public sealed record ChatReply(Guid ConversationId, Guid RequestId, string Role, string Content, DateTimeOffset CreatedAt);
 
 public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid RequestId, DateTimeOffset CreatedAt,

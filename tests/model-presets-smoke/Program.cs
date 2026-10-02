@@ -13,9 +13,23 @@ Check(ModelPresets.UniqueId("kimi", ["deepseek"]) == "kimi", "Unoccupied IDs sho
 Check(ModelPresets.All.Select(p => p.Id).Distinct().Count() == ModelPresets.All.Count, "Preset IDs must be unique.");
 Check(ModelPresets.All.First(p => p.Id == "anthropic").Protocol == "anthropic-messages", "Claude must use Messages.");
 Check(ModelPresets.All.First(p => p.Id == "openai").Protocol == "openai-responses", "OpenAI must use Responses.");
-foreach (var id in ModelPresets.All.SelectMany(p => p.Models))
-    Check(ModelCatalog.Describe(id).Description.Length > 0, "Preset models need a description.");
+foreach (var preset in ModelPresets.All)
+{
+    Check(preset.Models.Distinct(StringComparer.Ordinal).Count() == preset.Models.Length, "Model IDs must not be duplicated in a provider.");
+    foreach (var id in preset.Models)
+    {
+        var model = ModelCatalog.Describe(id);
+        Check(model.Id == id && !string.IsNullOrWhiteSpace(model.Name), "Labels must preserve the exact API ID.");
+        Check(id.Length <= 160 && !id.Any(char.IsWhiteSpace), "Preset IDs must satisfy gateway validation.");
+    }
+}
 Check(ModelCatalog.Describe("my-custom-model").Id == "my-custom-model", "Custom model IDs must remain exact.");
+Check(ModelCatalog.Describe("my-custom-model").Name == "my-custom-model", "Unknown models retain their server name.");
+Check(!ModelCatalog.Describe("qwen3-8b").Name.Contains("本地"), "A shared cloud/local model ID must not claim a deployment location.");
+Check(!ModelPresets.All.First(p => p.Id == "kimi").Models.Any(id => id.StartsWith("moonshot-v1") || id == "kimi-k2.5"),
+    "Retired Kimi models must not be offered as new presets.");
+Check(!ModelPresets.All.First(p => p.Id == "minimax").Models.Contains("MiniMax-M3.1-Flash-Preview"),
+    "A restricted plan-only model must not be the default standard API option.");
 foreach (var preset in ModelPresets.All.Where(p => p.Id != "custom"))
 {
     Check(Uri.TryCreate(preset.BaseUrl, UriKind.Absolute, out var uri), "Preset must have an absolute endpoint.");
@@ -31,3 +45,6 @@ foreach (string host in new[] { "example.com", "192.168.1.2.example.com", "172.1
     "192.169.1.1", "8.8.8.8", "[2001:4860::1]", "[::ffff:8.8.8.8]" })
     Check(!ModelPresets.IsLocalEndpoint(new Uri($"http://{host}/v1")), $"Public address treated as local: {host}");
 Console.WriteLine("Direct local API and LAN address checks passed.");
+foreach (var preset in ModelPresets.All.Where(preset => preset.Models.Length > 0))
+    Console.WriteLine($"{preset.Name}: {preset.Models.Length} model presets");
+Console.WriteLine($"Total: {ModelPresets.All.Sum(preset => preset.Models.Length)} cloud model presets.");

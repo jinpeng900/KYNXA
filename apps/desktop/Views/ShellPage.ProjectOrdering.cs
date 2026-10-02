@@ -30,20 +30,31 @@ public sealed partial class ShellPage
 
     private void ProjectRow_OrderUnloaded(object sender, RoutedEventArgs args)
     {
-        if (sender is Grid row) _orderRows.Remove(row);
+        if (sender is not Grid row) return;
+        _orderRows.Remove(row);
+        row.RemoveHandler(UIElement.PointerMovedEvent, new PointerEventHandler(ProjectRow_OrderMoved));
+        ProjectRow_Unloaded(sender, args);
+        if (_orderingRow == row || _orderingTarget == row) ClearProjectOrdering();
     }
 
     private void ProjectTree_Collapsed(TreeView sender, TreeViewCollapsedEventArgs args)
     {
-        if (!_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry)
+        if (!_projectViewClosed && !_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry
+            && IsCurrentProjectNode(entry, args.Node))
             _collapsedByUser.Add(entry.Project.Id);
     }
 
     private void ProjectTree_Expanding(TreeView sender, TreeViewExpandingEventArgs args)
     {
-        if (!_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry)
+        if (!_projectViewClosed && !_renderingProjects && args.Node.Content is ProjectTreeEntry { Chat: null } entry
+            && IsCurrentProjectNode(entry, args.Node))
             _collapsedByUser.Remove(entry.Project.Id);
     }
+
+    private bool IsCurrentProjectNode(ProjectTreeEntry entry, TreeViewNode node) =>
+        ProjectEntries.Contains(entry) && ProjectTree.IsLoaded
+        && ProjectTree.ContainerFromItem(entry) is TreeViewItem { IsLoaded: true } container
+        && ReferenceEquals(ProjectTree.NodeFromContainer(container), node);
 
     private void ProjectRow_OrderPressed(object sender, PointerRoutedEventArgs args)
     {
@@ -71,7 +82,7 @@ public sealed partial class ShellPage
 
     private void UpdateProjectOrderTarget(Point point, ProjectTreeEntry source)
     {
-        if (_orderingTarget is not null) _orderingTarget.BorderThickness = new Thickness(0);
+        if (_orderingTarget is { IsLoaded: true }) _orderingTarget.BorderThickness = new Thickness(0);
         _orderingTarget = null;
         if (source.Chat is not null) return;
         foreach (var targetRow in _orderRows)
@@ -99,14 +110,13 @@ public sealed partial class ShellPage
         args.Handled = true;
         if (!moved)
         {
-            if (source.Chat is null) source.IsExpanded = !source.IsExpanded;
+            if (source.Chat is null) SelectWorkspaceProject(source.Project);
             else SelectProjectChat(source.Project, source.Chat);
         }
         else if (source.Chat is null && target is not null)
-            await RunProjectActionAsync(() =>
+            await RunProjectActionAsync(async () =>
             {
-                if (ProjectOrdering.Move(_projects, source.Project, target.Project, after)) SaveProjectsAndRender();
-                return Task.CompletedTask;
+                if (ProjectOrdering.Move(_projects, source.Project, target.Project, after)) await SaveProjectsAndRenderAsync();
             });
     }
 
@@ -114,7 +124,7 @@ public sealed partial class ShellPage
 
     private void ClearProjectOrdering()
     {
-        if (_orderingTarget is not null) _orderingTarget.BorderThickness = new Thickness(0);
+        if (_orderingTarget is { IsLoaded: true }) _orderingTarget.BorderThickness = new Thickness(0);
         _orderingRow = _orderingTarget = null;
         _orderingMoved = false;
     }

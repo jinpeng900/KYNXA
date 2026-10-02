@@ -16,7 +16,8 @@ for (const protocol of ['anthropic-messages', 'openai-responses']) {
       for await (const chunk of request) body += chunk;
       seen.push({ path: request.url, headers: request.headers, body: body ? JSON.parse(body) : null });
       response.setHeader('Content-Type', 'application/json');
-      if (request.url === '/v1/models') response.end(JSON.stringify({ data: [{ id: 'native-model' }] }));
+      if (new URL(request.url, 'http://localhost').pathname === '/v1/models')
+        response.end(JSON.stringify({ data: [{ id: 'native-model' }] }));
       else response.end(JSON.stringify(protocol === 'anthropic-messages'
         ? { content: [{ type: 'thinking', thinking: 'private reasoning' }, { type: 'text', text: '真实接口格式' }] }
         : { status: 'completed', output: [{ type: 'reasoning' },

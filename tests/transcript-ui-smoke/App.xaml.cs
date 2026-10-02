@@ -85,6 +85,7 @@ public partial class App : Application
             longRows[1].Refresh();
             await WaitAsync("__transcriptSmoke.bodyText().includes('FOLLOW_APPEND') && __transcriptSmoke.bottomDistance() < 4", "send from bottom follows appended output");
 
+            await CheckConversationSwitchingAsync(longChat, longRows);
             await CheckWrappingAndResizeAsync();
             await CaptureVisualPreviewAsync();
             bool pointerRequested = Environment.GetCommandLineArgs().Contains("--pointer");

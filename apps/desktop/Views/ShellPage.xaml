@@ -86,15 +86,137 @@
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundPointerOver" Color="Transparent" />
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundPressed" Color="Transparent" />
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundDisabled" Color="Transparent" />
+                    <!-- One opaque surface spans the chevron and content; active and hover never compound. -->
+                    <SolidColorBrush x:Key="WorkProjectRowBackgroundBrush" Color="#F3F2F1" />
+                    <Style x:Key="WorkProjectTreeItemStyle" TargetType="TreeViewItem">
+                        <Setter Property="Height" Value="40" />
+                        <Setter Property="MinHeight" Value="40" />
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="BorderThickness" Value="0" />
+                        <Setter Property="FontSize" Value="14" />
+                        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+                        <Setter Property="FontWeight" Value="Normal" />
+                        <Setter Property="GlyphBrush" Value="{StaticResource KynxaSecondaryTextBrush}" />
+                        <Setter Property="CornerRadius" Value="8" />
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="VerticalContentAlignment" Value="Center" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="TreeViewItem">
+                                    <Grid x:Name="ContentPresenterGrid" Background="{TemplateBinding Background}"
+                                          CornerRadius="{TemplateBinding CornerRadius}">
+                                        <VisualStateManager.VisualStateGroups>
+                                            <VisualStateGroup x:Name="CommonStates">
+                                                <VisualState x:Name="Normal" />
+                                                <VisualState x:Name="PointerOver">
+                                                    <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
+                                                </VisualState>
+                                                <VisualState x:Name="Pressed">
+                                                    <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
+                                                </VisualState>
+                                                <VisualState x:Name="Selected" />
+                                                <VisualState x:Name="PointerOverSelected">
+                                                    <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
+                                                </VisualState>
+                                                <VisualState x:Name="PressedSelected">
+                                                    <VisualState.Setters><Setter Target="PointerRowBackground.Visibility" Value="Visible" /></VisualState.Setters>
+                                                </VisualState>
+                                                <VisualState x:Name="Disabled" />
+                                                <VisualState x:Name="SelectedDisabled" />
+                                            </VisualStateGroup>
+                                        </VisualStateManager.VisualStateGroups>
+                                        <Border x:Name="PointerRowBackground" Background="{StaticResource WorkProjectRowBackgroundBrush}"
+                                                CornerRadius="{TemplateBinding CornerRadius}" Visibility="Collapsed" IsHitTestVisible="False" />
+                                        <Border Background="{StaticResource WorkProjectRowBackgroundBrush}"
+                                                CornerRadius="{TemplateBinding CornerRadius}" Visibility="{Binding ActiveVisibility}"
+                                                IsHitTestVisible="False" />
+                                        <!-- Native names/settings keep expansion, keyboard navigation and indentation intact. -->
+                                        <Grid x:Name="MultiSelectGrid"
+                                              Padding="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=TreeViewItemTemplateSettings.Indentation}">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                            <CheckBox x:Name="MultiSelectCheckBox" Width="32" MinWidth="32" Visibility="Collapsed"
+                                                      IsTabStop="False" AutomationProperties.AccessibilityView="Raw" />
+                                            <Grid x:Name="ExpandCollapseChevron" Grid.Column="1" Padding="14,0" Background="Transparent"
+                                                  Opacity="{TemplateBinding GlyphOpacity}">
+                                                <TextBlock x:Name="CollapsedGlyph" Foreground="{TemplateBinding GlyphBrush}" Width="12" Height="12"
+                                                           Visibility="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=TreeViewItemTemplateSettings.CollapsedGlyphVisibility}"
+                                                           FontSize="{TemplateBinding GlyphSize}" Text="{TemplateBinding CollapsedGlyph}"
+                                                           FontFamily="{ThemeResource SymbolThemeFontFamily}" Padding="2" VerticalAlignment="Center"
+                                                           AutomationProperties.AccessibilityView="Raw" IsTextScaleFactorEnabled="False" IsHitTestVisible="False" />
+                                                <TextBlock x:Name="ExpandedGlyph" Foreground="{TemplateBinding GlyphBrush}" Width="12" Height="12"
+                                                           Visibility="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=TreeViewItemTemplateSettings.ExpandedGlyphVisibility}"
+                                                           FontSize="{TemplateBinding GlyphSize}" Text="{TemplateBinding ExpandedGlyph}"
+                                                           FontFamily="{ThemeResource SymbolThemeFontFamily}" Padding="2" VerticalAlignment="Center"
+                                                           AutomationProperties.AccessibilityView="Raw" IsTextScaleFactorEnabled="False" IsHitTestVisible="False" />
+                                            </Grid>
+                                            <ContentPresenter x:Name="ContentPresenter" Grid.Column="2" Margin="0,0,16,0"
+                                                              ContentTransitions="{TemplateBinding ContentTransitions}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                              Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}"
+                                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                        </Grid>
+                                    </Grid>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                    <Style x:Key="WorkChatListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource KynxaSidebarListItemStyle}">
+                        <Setter Property="AutomationProperties.Name" Value="{Binding Title}" />
+                    </Style>
+                    <DataTemplate x:Key="WorkChatRowTemplate" x:DataType="viewModels:ProjectTreeEntry">
+                        <Grid Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
+                              PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
+                              GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
+                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <Border Grid.ColumnSpan="2" CornerRadius="8" Margin="-8,0,-8,0"
+                                    Background="{StaticResource KynxaControlHoverBrush}" IsHitTestVisible="False"
+                                    Visibility="{x:Bind ActiveVisibility, Mode=OneWay}" />
+                            <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title, Mode=OneWay}"
+                                       FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal"
+                                       LineHeight="20" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ContextTitle, Mode=OneWay}" />
+                            <Ellipse Grid.Column="1" Width="5" Height="5" Margin="8,0,0,0" VerticalAlignment="Center"
+                                     Fill="{StaticResource KynxaSecondaryTextBrush}" Visibility="{x:Bind ReplyingVisibility, Mode=OneWay}"
+                                     ToolTipService.ToolTip="正在回复" AutomationProperties.Name="正在回复" />
+                            <StackPanel x:Name="ProjectRowActions" Orientation="Horizontal" HorizontalAlignment="Right"
+                                        VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" Background="Transparent">
+                                <StackPanel.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></StackPanel.OpacityTransition>
+                                <Button Style="{StaticResource KynxaProjectActionButtonStyle}" Tag="{x:Bind}" Click="ProjectMore_Click"
+                                        AutomationProperties.Name="聊天操作" AutomationProperties.AutomationId="{x:Bind MoreId}"
+                                        ToolTipService.ToolTip="聊天操作">
+                                    <FontIcon Glyph="&#xE712;" FontSize="14" />
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
                 </Grid.Resources>
                 <Grid x:Name="WorkSidebarContent" SizeChanged="WorkSidebarContent_SizeChanged">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="32" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" />
+                        <RowDefinition Height="32" /><RowDefinition Height="Auto" /><RowDefinition Height="40" /><RowDefinition Height="Auto" /><RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <Grid x:Name="ProjectsHeader" Background="Transparent" PointerEntered="ProjectsHeader_PointerEntered"
+                    <Button x:Name="WorkRecentToggle" Height="32" Padding="8,4"
+                            Style="{StaticResource KynxaQuietButtonStyle}" Click="WorkRecentToggle_Click"
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            AutomationProperties.Name="展开最近的工作聊天">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="最近" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            <FontIcon x:Name="WorkRecentChevron" Glyph="&#xE76C;" FontSize="10" />
+                            <TextBlock x:Name="WorkRecentCount" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}"
+                                       VerticalAlignment="Center" Visibility="Collapsed" />
+                        </StackPanel>
+                    </Button>
+                    <ListView x:Name="WorkRecentHistory" Grid.Row="1" ItemsSource="{x:Bind WorkRecentEntries}" Visibility="Collapsed"
+                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="WorkChatHistory_ItemClick"
+                              ItemTemplate="{StaticResource WorkChatRowTemplate}"
+                              ItemContainerStyle="{StaticResource WorkChatListItemStyle}"
+                              ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                              ScrollViewer.VerticalScrollMode="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                              AutomationProperties.Name="所有工作中的最近聊天" />
+                    <Grid x:Name="ProjectsHeader" Grid.Row="2" Margin="0,8,0,0" Height="32" Background="Transparent" PointerEntered="ProjectsHeader_PointerEntered"
                           PointerExited="ProjectsHeader_PointerExited" GotFocus="ProjectsHeader_GotFocus" LostFocus="ProjectsHeader_LostFocus">
                         <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
-                        <Button x:Name="ProjectsToggle" Click="ProjectsToggle_Click" Background="Transparent"
+                        <Button x:Name="ProjectsToggle" Click="ProjectsToggle_Click" Style="{StaticResource KynxaQuietButtonStyle}" Background="Transparent"
                                 BorderThickness="0" Padding="8,4" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Left" AutomationProperties.Name="展开或收起项目">
                             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -120,7 +242,8 @@
                             </Button.Flyout>
                         </Button>
                     </Grid>
-                    <TreeView x:Name="ProjectTree" Grid.Row="1" MaxHeight="320" SelectionMode="Single" ItemsSource="{x:Bind ProjectEntries}"
+                    <TreeView x:Name="ProjectTree" Grid.Row="3" SelectionMode="None" ItemsSource="{x:Bind ProjectEntries}"
+                              ItemContainerStyle="{StaticResource WorkProjectTreeItemStyle}"
                               CanDragItems="False" CanReorderItems="False" ItemInvoked="ProjectTree_ItemInvoked"
                               Collapsed="ProjectTree_Collapsed" Expanding="ProjectTree_Expanding"
                               ScrollViewer.HorizontalScrollMode="Disabled"
@@ -131,7 +254,7 @@
                         <TreeView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:ProjectTreeEntry">
                                 <TreeViewItem ItemsSource="{x:Bind Children}" IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
-                                              AutomationProperties.Name="{x:Bind Title}">
+                                              AutomationProperties.Name="{x:Bind Title, Mode=OneWay}">
                                     <Grid Height="40" Tag="{x:Bind}" Background="Transparent"
                                           Loaded="ProjectRow_OrderLoaded" Unloaded="ProjectRow_OrderUnloaded" PointerPressed="ProjectRow_OrderPressed"
                                           PointerReleased="ProjectRow_OrderReleased" PointerCanceled="ProjectRow_OrderCancelled"
@@ -139,12 +262,12 @@
                                           PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                                           GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" Width="16" Height="20" Margin="0,0,6,0" VerticalAlignment="Center"
+                                        <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="16" Width="16" Height="20" Margin="0,0,6,0" VerticalAlignment="Center"
                                                   Visibility="{x:Bind ProjectOnlyVisibility}" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                                        <TextBlock x:Name="ProjectRowTitle" Grid.Column="1" Text="{x:Bind Title}"
+                                        <TextBlock x:Name="ProjectRowTitle" Grid.Column="1" Text="{x:Bind Title, Mode=OneWay}"
                                                    FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal" LineHeight="20"
                                                    LineStackingStrategy="BlockLineHeight"
-                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind Title}" />
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind Title, Mode=OneWay}" />
                                         <StackPanel x:Name="ProjectRowActions" Grid.Column="1" Orientation="Horizontal" Spacing="4"
                                                     HorizontalAlignment="Right" Opacity="0" IsHitTestVisible="False"
                                                     VerticalAlignment="Center" Background="Transparent">
@@ -165,47 +288,24 @@
                                 </TreeViewItem>
                             </DataTemplate>
                         </TreeView.ItemTemplate>
-                        <TreeView.ItemContainerStyle>
-                            <Style TargetType="TreeViewItem">
-                                <Setter Property="Height" Value="40" />
-                                <Setter Property="MinHeight" Value="40" />
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="FontSize" Value="14" />
-                                <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-                                <Setter Property="FontWeight" Value="Normal" />
-                                <Setter Property="CornerRadius" Value="8" />
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="VerticalContentAlignment" Value="Center" />
-                            </Style>
-                        </TreeView.ItemContainerStyle>
                     </TreeView>
-                    <StackPanel x:Name="TasksSection" Grid.Row="2" Margin="8,16,8,12" Spacing="12">
-                        <TextBlock Text="任务" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                        <TextBlock x:Name="WorkTasksPlaceholder" Text="任务会显示在这里" FontSize="13" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                        <ListView x:Name="WorkTaskHistory" ItemsSource="{x:Bind WorkTaskEntries}" Visibility="Collapsed"
-                                  MaxHeight="160" Margin="-8,0,-8,0" SelectionMode="Single" IsItemClickEnabled="True"
-                                  ItemClick="WorkTaskHistory_ItemClick" ItemContainerStyle="{StaticResource KynxaSidebarListItemStyle}"
+                    <Grid x:Name="TasksSection" Grid.Row="4" Margin="0,12,0,0">
+                        <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <Grid Margin="8,0,16,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                            <TextBlock Text="任务" VerticalAlignment="Center" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                            <TextBlock x:Name="WorkTaskProjectLabel" Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center"
+                                       Visibility="Collapsed" FontSize="12" TextTrimming="CharacterEllipsis"
+                                       Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        </Grid>
+                        <ListView x:Name="WorkTaskHistory" Grid.Row="1" ItemsSource="{x:Bind WorkTaskEntries}"
+                                  SelectionMode="None" IsItemClickEnabled="True" ItemClick="WorkChatHistory_ItemClick"
+                                  ItemTemplate="{StaticResource WorkChatRowTemplate}"
+                                  ItemContainerStyle="{StaticResource WorkChatListItemStyle}"
                                   ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                  AutomationProperties.Name="未关联文件夹的工作任务">
-                            <ListView.ItemTemplate>
-                                <DataTemplate x:DataType="viewModels:ProjectTreeEntry">
-                                    <Grid Height="40" Tag="{x:Bind}" Background="Transparent"
-                                          PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
-                                          GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
-                                        <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title}" FontSize="14" LineHeight="20"
-                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind Title}" />
-                                        <StackPanel x:Name="ProjectRowActions" Orientation="Horizontal" HorizontalAlignment="Right"
-                                                    VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" Background="Transparent">
-                                            <Button Style="{StaticResource KynxaProjectActionButtonStyle}" Tag="{x:Bind}" Click="ProjectMore_Click"
-                                                    AutomationProperties.Name="任务操作" AutomationProperties.AutomationId="{x:Bind MoreId}">
-                                                <FontIcon Glyph="&#xE712;" FontSize="14" />
-                                            </Button>
-                                        </StackPanel>
-                                    </Grid>
-                                </DataTemplate>
-                            </ListView.ItemTemplate>
-                        </ListView>
-                    </StackPanel>
+                                  ScrollViewer.VerticalScrollMode="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                  AutomationProperties.Name="当前项目的聊天" />
+                    </Grid>
                 </Grid>
                 <Grid x:Name="ChatSidebarContent" Visibility="Collapsed">
                     <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
@@ -227,7 +327,7 @@
                               AutomationProperties.Name="聊天历史">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:RecentConversation">
-                                <Grid Height="40" Tag="{x:Bind}" Background="Transparent"
+                                <Grid Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
                                       PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                                       GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
                                     <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title}" FontFamily="{StaticResource KynxaUIFont}"

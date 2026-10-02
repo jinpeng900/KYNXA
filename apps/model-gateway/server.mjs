@@ -4,10 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { ModelStore, validateConnection } from './store.mjs';
 import { ModelRuntime } from './runtime.mjs';
-import { authorization } from './protocols.mjs';
+import { discoverModels } from './model-discovery.mjs';
 import { modelHome } from './storage.mjs';
 import { storageMigrationActive } from './storage-maintenance.mjs';
 import { StreamFailure } from './streaming.mjs';
+import { DATA_LAYOUT_VERSION } from './data-layout.mjs';
 
 const dataHome = modelHome();
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
@@ -19,12 +20,12 @@ function json(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
-async function bodyOf(request) {
+async function bodyOf(request, limit = 64 * 1024) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > 64 * 1024) throw new Error('请求体过大。');
+    if (bytes > limit) throw new Error('请求体过大。');
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
@@ -35,20 +36,9 @@ async function probe(input, modelStore) {
   const connection = validateConnection(input, { requireModels: false });
   const apiKey = connection.apiKey || await modelStore.savedKeyFor?.(connection.providerId, connection.baseUrl);
   const start = performance.now();
-  const response = await fetch(`${connection.baseUrl}/models`, {
-    redirect: 'error',
-    headers: authorization({ ...connection, apiKey }),
-    signal: AbortSignal.timeout(10000)
-  });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`模型列表接口返回 HTTP ${response.status}。`);
-  }
-  const result = await response.json();
-  const models = Array.isArray(result.data) ? result.data : Array.isArray(result.models) ? result.models : [];
+  const models = await discoverModels({ ...connection, apiKey });
   return { ok: true, latencyMs: Math.round(performance.now() - start),
-    models: [...new Set(models.map(model => model?.id ?? model?.name)
-      .filter(value => typeof value === 'string' && /^[^\s\x00-\x1f]{1,160}$/.test(value)))].slice(0, 100) };
+    models };
 }
 
 export function createModelServer(options = {}) {
@@ -70,19 +60,25 @@ export function createModelServer(options = {}) {
       }
       if (request.method === 'GET' && pathname === '/health')
         return json(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          streamProtocol: 1, activeRequests, migrating, modelDataHome: modelStore.dataHome });
+          streamProtocol: 1, conversationProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          activeRequests, migrating, modelDataHome: modelStore.dataHome });
       if (migrating) return json(response, 503, { error: '正在迁移数据，请完成后再试。' });
       activeRequests++;
       counted = true;
+      if (pathname === '/api/conversations/catalog') {
+        if (request.method === 'GET') return json(response, 200, await modelRuntime.conversations.catalog());
+        if (request.method === 'PUT') return json(response, 200,
+          await modelRuntime.conversations.saveCatalog(await bodyOf(request, 32 * 1024 * 1024)));
+      }
       if (request.method === 'GET' && pathname === '/api/models')
         return json(response, 200, { providers: await modelStore.list() });
       if (request.method === 'POST' && pathname === '/api/models') {
-        const provider = await modelStore.save(await bodyOf(request));
+        const provider = await modelStore.save(await bodyOf(request, 8 * 1024 * 1024));
         await modelRuntime.invalidate?.(provider.providerId);
         return json(response, 200, { provider });
       }
       if (request.method === 'POST' && pathname === '/api/models/test')
-        return json(response, 200, await probe(await bodyOf(request), modelStore));
+        return json(response, 200, await probe(await bodyOf(request, 8 * 1024 * 1024), modelStore));
       if (request.method === 'POST' && ['/api/chat', '/api/chat/stream'].includes(pathname)) {
         const body = await bodyOf(request);
         if (!body || typeof body.message !== 'string' || !body.message.trim() ||
@@ -93,8 +89,11 @@ export function createModelServer(options = {}) {
         if (body.requestId != null && (typeof body.requestId !== 'string' ||
             !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.requestId)))
           throw new Error('请求 ID 无效。');
-        const provider = (await modelStore.list()).find(item => item.providerId === body.provider);
-        if (!provider || !provider.models.includes(body.model)) throw new Error('请先选择已配置的模型。');
+        if (body.userMessageId != null && (typeof body.userMessageId !== 'string' ||
+            !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.userMessageId)))
+          throw new Error('用户消息 ID 无效。');
+        if (body.userMessageId && body.requestId && body.userMessageId.toLowerCase() === body.requestId.toLowerCase())
+          throw new Error('用户消息 ID 与请求 ID 不能相同。');
         if (pathname === '/api/chat/stream') {
           const controller = new AbortController();
           streamControllers.add(controller);
@@ -120,7 +119,8 @@ export function createModelServer(options = {}) {
           heartbeat.unref();
           try {
             const result = await modelRuntime.replyStream({ conversationId: body.conversationId,
-              message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId }, emit, controller.signal);
+              message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId,
+              userMessageId: body.userMessageId }, emit, controller.signal);
             emit({ type: 'completed', ...result });
           } catch (error) {
             emit({ type: error instanceof StreamFailure ? error.type : 'error',
@@ -134,10 +134,12 @@ export function createModelServer(options = {}) {
           }
           return;
         }
+        const requestId = body.requestId ?? randomUUID();
         const content = await modelRuntime.reply({ conversationId: body.conversationId,
-          message: body.message, provider: body.provider, model: body.model });
+          message: body.message, provider: body.provider, model: body.model,
+          requestId, userMessageId: body.userMessageId });
         return json(response, 200, { conversationId: body.conversationId,
-          requestId: randomUUID(), role: 'assistant', content, createdAt: new Date().toISOString() });
+          requestId, role: 'assistant', content, createdAt: new Date().toISOString() });
       }
       json(response, 404, { error: '接口不存在。' });
     } catch (error) {
@@ -146,7 +148,7 @@ export function createModelServer(options = {}) {
         error.message?.includes('API Key') || error.message?.includes('Base URL') || error.message?.includes('HTTPS') ||
         error.message?.includes('模型') || error.message?.includes('请求体') ||
         error.message?.includes('权限模式') || error.message?.includes('会话 ID');
-      json(response, clientError ? 400 : 502, { error: error.message ?? '模型调用失败。' });
+      json(response, error.statusCode ?? (clientError ? 400 : 502), { error: error.message ?? '模型调用失败。' });
     } finally {
       if (counted) activeRequests--;
     }

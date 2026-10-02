@@ -51,11 +51,13 @@ public sealed partial class ShellPage : Page
     private async void PageRoot_Loaded(object sender, RoutedEventArgs e)
     {
         _layout = _layoutStateService.Load();
+        UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
         ApplyLayout();
         InitializeModelPicker();
         InitializePermissionPicker();
         await InitializeProjectsAsync();
+        if (_projectViewClosed || !IsLoaded) return;
         SetPrimaryMode(false);
     }
 
@@ -279,7 +281,7 @@ public sealed partial class ShellPage : Page
 
     private void WorkModeButton_Click(object sender, RoutedEventArgs e) => SetPrimaryMode(false);
 
-    private void SetPrimaryMode(bool chat)
+    private void SetPrimaryMode(bool chat, bool updateConversation = true)
     {
         bool changed = ViewModel.IsChatMode != chat;
         if (changed)
@@ -298,7 +300,9 @@ public sealed partial class ShellPage : Page
             }
         }
         ViewModel.IsChatMode = chat;
-        _layout.LastPrimaryContent = chat ? "chat" : "work";
+        string primaryContent = chat ? "chat" : "work";
+        bool preferenceChanged = _layout.LastPrimaryContent != primaryContent;
+        _layout.LastPrimaryContent = primaryContent;
         UpdateModeSelection();
         WorkModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.Medium;
         ChatModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Medium : Microsoft.UI.Text.FontWeights.Normal;
@@ -315,10 +319,13 @@ public sealed partial class ShellPage : Page
             ViewModel.Prompt = PromptTextBox.Text;
             AnimateSidebarEntrance(chat ? ChatSidebarContent : WorkSidebarContent);
         }
-        UpdateConversationTitle();
-        UpdateConversationPresentation();
+        if (updateConversation)
+        {
+            UpdateConversationTitle();
+            UpdateConversationPresentation();
+        }
         PromptTextBox.PlaceholderText = chat ? "向 KYNXA 提问任何问题..." : "描述你想完成的工作...";
-        SaveLayout();
+        if (changed || preferenceChanged) SaveLayout();
     }
 
     private void ModeSwitchTrack_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -366,12 +373,13 @@ public sealed partial class ShellPage : Page
         bool visible = ProjectTree.Visibility == Visibility.Visible;
         ProjectTree.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
         ProjectsChevron.Glyph = visible ? "\uE76C" : "\uE70D";
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
     }
 
     private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (ProjectTree is null) return;
-        // Keep tasks below the projects, with space before the footer even when expanded.
+        if (WorkRecentHistory is null || ProjectTree is null) return;
+        // The task list gets all remaining height, above the fixed sidebar footer.
         UpdateWorkSidebarHeights(e.NewSize.Height);
     }
 

@@ -2,7 +2,10 @@
 (() => {
   'use strict';
   const messages = document.getElementById('messages');
-  const entries = new Map();
+  let entries = new Map();
+  const conversations = new Map();
+  let cachedCharacters = 0, cachedNodes = 0;
+  const maxCachedCharacters = 2 * 1024 * 1024, maxCachedNodes = 40000;
   const mathCache = new Map();
   let conversationId = null, pending = null, following = true, applying = false;
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
@@ -100,13 +103,16 @@
     copy.title = '复制'; copy.setAttribute('aria-label', '复制整条消息');
     copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = '重试';
-    const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry, message };
+    const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry, message: null };
     copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: entry.message.content || '' }));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
     actions.append(copy, retry); content.append(reasoning, body, status); article.append(content, actions);
     return entry;
   }
   function updateMessage(entry, message) {
+    const old = entry.message;
+    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'waiting', 'streaming', 'error', 'canRetry']
+      .every(key => old[key] === message[key])) return;
     entry.message = message;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -141,13 +147,44 @@
     entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !message.content;
   }
+  function removeCached(id) {
+    const saved = conversations.get(id);
+    if (!saved) return null;
+    conversations.delete(id); cachedCharacters -= saved.characters; cachedNodes -= saved.nodes;
+    return saved;
+  }
+  function openConversation(id) {
+    if (conversationId === id) return;
+    pending = null; clearSelection(); following = true;
+    // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
+    // and expanded reasoning instead of rebuilding every element.
+    const restored = removeCached(id);
+    if (conversationId && entries.size) {
+      let characters = 0;
+      for (const entry of entries.values()) for (const key of ['content', 'html', 'reasoningHtml'])
+        characters += entry.message?.[key]?.length || 0;
+      const nodes = messages.querySelectorAll('*').length;
+      if (entries.size <= 400 && characters <= maxCachedCharacters && nodes <= maxCachedNodes) {
+        const fragment = document.createDocumentFragment();
+        while (messages.firstChild) fragment.append(messages.firstChild);
+        removeCached(conversationId);
+        conversations.set(conversationId, { entries, fragment, characters, nodes });
+        cachedCharacters += characters; cachedNodes += nodes;
+        while (conversations.size > 4 || cachedCharacters > maxCachedCharacters || cachedNodes > maxCachedNodes)
+          removeCached(conversations.keys().next().value);
+      }
+    }
+    entries = restored?.entries || new Map();
+    messages.replaceChildren(...(restored ? [restored.fragment] : []));
+    conversationId = id;
+    followBottom();
+  }
   function applyTranscript(snapshot) {
     if (!snapshot || !Array.isArray(snapshot.messages)) return;
     const changedConversation = conversationId !== snapshot.conversationId;
+    if (changedConversation) openConversation(snapshot.conversationId);
     if (changedConversation || snapshot.openAtBottom) {
       pending = null; clearSelection(); following = true;
-      if (changedConversation) { entries.clear(); messages.replaceChildren(); }
-      conversationId = snapshot.conversationId;
     } else if (activeSelection()) { pending = snapshot; return; }
     applying = true;
     const ids = new Set(snapshot.messages.map(message => String(message.id)));
@@ -276,11 +313,13 @@
   window.chrome?.webview?.addEventListener('message', event => {
     const command = event.data;
     if (command?.type === 'render') applyTranscript(command);
+    else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
     else if (command?.type === 'beforeSend') { following = atBottom() && !activeSelection(); followBottom(); }
   });
   window.applyTranscript = applyTranscript;
   window.transcriptSelectionText = selectionText;
-  window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size });
+  window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size,
+    cachedConversations: conversations.size, cachedCharacters, cachedNodes });
   send({ type: 'ready' });
 })();

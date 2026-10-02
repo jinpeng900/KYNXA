@@ -21,6 +21,7 @@ public sealed class LayoutStateService
                 LayoutState? state = JsonSerializer.Deserialize<LayoutState>(json);
                 if (state is not null && state.LayoutVersion <= LayoutState.CurrentVersion)
                 {
+                    state.RecentWorkChatIds ??= [];
                     if (state.LayoutVersion < 3)
                     {
                         state.SidebarWidth = Layout.ShellLayoutMetrics.SidebarDefault;

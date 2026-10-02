@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.ViewModels;
@@ -13,7 +12,6 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private bool _workWithoutFolder;
-    public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
 
     private static string WorkChatTitle(ProjectState project, ProjectChatState chat) =>
         project.IsFolderlessWorkspace ? chat.Title : $"{project.Name} / {chat.Title}";
@@ -23,8 +21,10 @@ public sealed partial class ShellPage
         ComposerHost.IsFooterVisible = !ViewModel.IsChatMode && _activeProjectChat is null;
         WorkspacePickerButton.Visibility = ComposerHost.IsFooterVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkspacePickerButton.IsEnabled = _projectsReady;
-        WorkspacePickerLabel.Text = _workWithoutFolder ? "不使用文件夹" : "选择项目";
-        AutomationProperties.SetName(WorkspacePickerButton, _workWithoutFolder ? "工作区：不使用文件夹" : "选择工作区");
+        var project = KYNXA_Desktop.Services.WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+        WorkspacePickerLabel.Text = project?.Name ?? (_workWithoutFolder ? "不使用文件夹" : "选择项目");
+        AutomationProperties.SetName(WorkspacePickerButton, project is not null ? $"工作区：{project.Name}" :
+            _workWithoutFolder ? "工作区：不使用文件夹" : "选择工作区");
     }
 
     private void WorkspacePickerButton_Click(object sender, RoutedEventArgs e) => ShowWorkspacePicker();
@@ -85,7 +85,11 @@ public sealed partial class ShellPage
         });
         AddAction("不使用文件夹", "\uE8B7", "WorkspaceWithoutFolder", () =>
         {
+            _selectedWorkProjectId = null;
             _workWithoutFolder = true;
+            _workConversationTitle = string.Empty;
+            RenderProjects();
+            UpdateConversationTitle();
             UpdateWorkspacePickerVisibility();
             PromptTextBox.Focus(FocusState.Programmatic);
             return Task.CompletedTask;
@@ -103,7 +107,6 @@ public sealed partial class ShellPage
         project.Chats.Insert(0, chat);
         _workWithoutFolder = false;
         ShowProjects();
-        RenderProjects(project.Id);
         SelectProjectChat(project, chat);
     }
 
@@ -116,29 +119,4 @@ public sealed partial class ShellPage
         return workspace;
     }
 
-    private void RebuildWorkTasks()
-    {
-        WorkTaskEntries.Clear();
-        foreach (var project in _projects.Where(project => project.IsFolderlessWorkspace && !project.IsArchived))
-            foreach (var chat in project.Chats.Where(chat => chat.CanPersist && !chat.IsArchived).OrderByDescending(chat => chat.IsPinned))
-                WorkTaskEntries.Add(new ProjectTreeEntry(project, chat));
-        bool hasTasks = WorkTaskEntries.Count > 0;
-        WorkTaskHistory.Visibility = hasTasks ? Visibility.Visible : Visibility.Collapsed;
-        WorkTasksPlaceholder.Visibility = hasTasks ? Visibility.Collapsed : Visibility.Visible;
-        WorkTaskHistory.SelectedItem = WorkTaskEntries.FirstOrDefault(task => task.Chat == _activeProjectChat);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
-    }
-
-    private void UpdateWorkSidebarHeights(double available)
-    {
-        double taskHeight = Math.Max(0, Math.Min(160, available * 0.25));
-        WorkTaskHistory.MaxHeight = taskHeight;
-        double reserved = WorkTaskEntries.Count > 0 ? taskHeight + 96 : 136;
-        ProjectTree.MaxHeight = Math.Max(0, Math.Min(320, Math.Min(available * 0.65, available - reserved)));
-    }
-
-    private void WorkTaskHistory_ItemClick(object sender, ItemClickEventArgs e)
-    {
-        if (e.ClickedItem is ProjectTreeEntry { Chat: { } chat } entry) SelectProjectChat(entry.Project, chat);
-    }
 }

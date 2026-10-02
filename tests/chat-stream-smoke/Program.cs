@@ -15,7 +15,7 @@ static async Task ExpectAsync<T>(Func<Task> action, string name) where T : Excep
     throw new InvalidOperationException(name);
 }
 var json = new JsonSerializerOptions(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-Guid conversationId = Guid.NewGuid(), requestId = Guid.NewGuid();
+Guid conversationId = Guid.NewGuid(), requestId = Guid.NewGuid(), userMessageId = Guid.NewGuid();
 var createdAt = DateTimeOffset.UtcNow;
 ChatStreamEvent Event(string type, string? delta = null, string? content = null, string? reasoning = null, string? error = null) =>
     new(type, conversationId, requestId, createdAt, delta, content, reasoning, error);
@@ -103,12 +103,13 @@ async Task Handle(HttpListenerContext context)
         if (context.Request.Url!.AbsolutePath == "/health")
         {
             context.Response.ContentType = "application/json";
-            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\"}"));
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1}"));
             return;
         }
         var incoming = await JsonSerializer.DeserializeAsync<ChatRequest>(context.Request.InputStream, json)
             ?? throw new InvalidDataException("Missing request body");
         Check(incoming.RequestId == requestId && incoming.ConversationId == conversationId, "Transport changed request IDs");
+        Check(incoming.UserMessageId == userMessageId, "Transport omitted canonical user message identity");
         Check(context.Request.Headers["Accept"] == "text/event-stream", "Missing SSE accept header");
         if (incoming.Message == "http-error")
         {
@@ -137,7 +138,7 @@ try
 {
     using var client = new ModelApiClient();
     using var testDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    var request = new ChatRequest(conversationId, "live", RequestId: requestId);
+    var request = new ChatRequest(conversationId, "live", RequestId: requestId, UserMessageId: userMessageId);
     var received = new List<ChatStreamEvent>();
     await foreach (var item in client.StreamReplyAsync(request, testDeadline.Token))
     {

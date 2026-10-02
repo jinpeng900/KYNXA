@@ -12,6 +12,36 @@ Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", $"http://127.0.0.1:{po
 Environment.SetEnvironmentVariable("KYNXA_STARTUP_TEST_LOG", log);
 try
 {
+    string initializedRoot = Path.Combine(Path.GetTempPath(), "kynxa-storage-helper-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(initializedRoot);
+    await ModelGatewayService.InitializeStorageAsync(initializedRoot);
+    if (File.ReadAllText(Path.Combine(initializedRoot, "initialized.txt")) != initializedRoot)
+        throw new Exception("Storage helper did not receive the explicit target.");
+    Environment.SetEnvironmentVariable("KYNXA_INITIALIZER_TEST_MODE", "failure");
+    try { await ModelGatewayService.InitializeStorageAsync(initializedRoot); throw new Exception("Failed initializer accepted."); }
+    catch (InvalidOperationException error) when (error.Message.Contains("fixture initialization failure")) { }
+    Environment.SetEnvironmentVariable("KYNXA_INITIALIZER_TEST_MODE", "wait");
+    string cancelledRoot = Path.Combine(Path.GetTempPath(), "kynxa-storage-helper-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(cancelledRoot);
+    using (var cancelInitializer = new CancellationTokenSource())
+    {
+        Task initialization = ModelGatewayService.InitializeStorageAsync(cancelledRoot, cancelInitializer.Token);
+        var waitForStart = Stopwatch.StartNew();
+        while (!File.Exists(Path.Combine(cancelledRoot, "initializer.pid")) && waitForStart.Elapsed < TimeSpan.FromSeconds(5))
+            await Task.Delay(25);
+        if (!File.Exists(Path.Combine(cancelledRoot, "initializer.pid"))) throw new Exception("Initializer did not start.");
+        int pid = int.Parse(File.ReadAllText(Path.Combine(cancelledRoot, "initializer.pid")));
+        cancelInitializer.Cancel();
+        try { await initialization; throw new Exception("Initializer cancellation ignored."); }
+        catch (OperationCanceledException) { }
+        try
+        {
+            using var child = Process.GetProcessById(pid);
+            if (!child.HasExited) throw new Exception("Cancelled initializer kept running.");
+        }
+        catch (ArgumentException) { }
+    }
+    Environment.SetEnvironmentVariable("KYNXA_INITIALIZER_TEST_MODE", null);
     await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => ModelGatewayService.EnsureReadyAsync()));
     var starts = File.ReadAllLines(log);
     if (starts.Length != 1) throw new Exception("Concurrent startup spawned duplicate services.");
@@ -31,10 +61,11 @@ try
     Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", "https://example.invalid");
     await ModelGatewayService.EnsureReadyAsync();
     if (File.ReadAllLines(log).Length != 2) throw new Exception("Remote endpoint started a local service.");
-    Console.WriteLine("PASS: cold/concurrent startup, reuse, restart, cancellation, remote endpoint.");
+    Console.WriteLine("PASS: storage initializer success/failure, pipe draining, cancelled child cleanup; gateway cold/concurrent startup, reuse, restart, cancellation, remote endpoint.");
 }
 finally
 {
+    Environment.SetEnvironmentVariable("KYNXA_INITIALIZER_TEST_MODE", null);
     if (File.Exists(log))
     {
         foreach (var pid in File.ReadAllLines(log))
