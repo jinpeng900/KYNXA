@@ -84,6 +84,22 @@
                             <TextBlock x:Name="KeyHint" Text="密钥仅保存在本机，用于向所选服务发送请求。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                         </StackPanel>
                         <StackPanel Spacing="8">
+                            <TextBlock Text="上下文窗口（tokens）" FontWeight="SemiBold" />
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <ComboBox x:Name="ContextWindowBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="0" SelectionChanged="ContextWindowBox_SelectionChanged" AutomationProperties.Name="上下文窗口">
+                                    <ComboBoxItem Content="8K · 默认" Tag="8192" />
+                                    <ComboBoxItem Content="32K" Tag="32768" />
+                                    <ComboBoxItem Content="128K" Tag="131072" />
+                                    <ComboBoxItem Content="256K" Tag="262144" />
+                                    <ComboBoxItem Content="1M（1,000,000）" Tag="1000000" />
+                                    <ComboBoxItem Content="自定义" Tag="custom" />
+                                </ComboBox>
+                                <TextBox x:Name="CustomContextWindowBox" Grid.Column="1" Width="154" Visibility="Collapsed" PlaceholderText="2048–2000000" InputScope="Number" AutomationProperties.Name="自定义上下文窗口（tokens）" />
+                            </Grid>
+                            <TextBlock Text="实际上限取决于模型服务；本地服务需使用匹配的启动参数。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        </StackPanel>
+                        <StackPanel Spacing="8">
                             <Grid>
                                 <TextBlock Text="可用模型" FontWeight="SemiBold" VerticalAlignment="Center" />
                                 <TextBlock x:Name="ModelCount" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />

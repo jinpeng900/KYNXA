@@ -24,12 +24,26 @@ node apps/model-gateway/server.mjs
 - `GET /api/conversations/catalog`：正式目录与聊天消息，字段为 PascalCase。
 - `PUT /api/conversations/catalog`：`{Revision,Projects?,Chats?}`，仅替换指定范围的元信息并添加新用户消息；忽略前端 assistant 快照。版本过期返回 409。
 - `GET /api/models`：已配置的连接与模型 ID，不返回密钥。
-- `POST /api/models`：保存 `{providerId,displayName,baseUrl,apiKey?,models:[id,...],protocol?}`。协议可为 `openai-completions`（旧配置默认）、`openai-responses`、`anthropic-messages`。同一 ID 更新连接；密钥留空且地址不变时保留原密钥，地址改变时不会转移旧密钥。
+- `POST /api/models`：保存 `{providerId,displayName,baseUrl,apiKey?,models:[id,...],protocol?,contextWindowTokens?}`。协议可为 `openai-completions`（旧配置默认）、`openai-responses`、`anthropic-messages`。上下文窗口默认为 8192，可配置为 2048–2000000 的整数，须与实际模型服务匹配。同一 ID 更新连接；密钥留空且地址不变时保留原密钥，地址改变时不会转移旧密钥；旧客户端省略窗口字段时保留已保存的值。
 - `POST /api/models/test`：同样的参数，读取服务的 `/models`，不保存。部分服务不提供此接口，可直接填写模型 ID 后保存。
 - `POST /api/chat`：`{conversationId,message,provider,model,permissionMode}`，按连接协议请求 `/chat/completions`、`/responses` 或 `/messages` 并返回完整文本。Claude 使用 `x-api-key` 与版本头；Responses 使用客户端会话记录并设置 `store:false`。
 - `POST /api/chat/stream`：相同参数，可额外传入 UUID 格式的 `requestId`（助手消息 ID）和 `userMessageId`（已保存用户消息 ID），返回 SSE 流。`GET /health` 中的 `streamProtocol:1` 表示已支持此接口。
 
-会话只按稳定聊天 ID 标识；服务商和模型是每次回复的属性，切换后继续使用同一历史。同一聊天的完整回复和流式请求共用队列。正式日志保存全部消息，模型请求目前选取最近 50 轮完整问答，失败/中断尝试保留展示但不加入成功上下文。思考内容不会自动作为正文发送给其他模型。当前支持文本回复，不执行工具或文件操作；权限选择仅作为 UI 元数据，不授予模型系统权限。
+会话只按稳定聊天 ID 标识；服务商和模型是每次回复的属性，切换后继续使用同一历史。同一聊天的完整回复和流式请求共用队列。正式日志保存全部消息；`context.mjs` 按配置窗口选择近期完整问答、已确认记忆和同一聊天的旧对话摘录，预留输出与安全余量。失败/中断尝试保留展示但不加入成功上下文，思考内容不会作为历史正文发送。当前支持文本回复，不执行工具或文件操作；权限选择仅作为 UI 元数据，不授予模型系统权限。
+
+## 聊天与工作记忆
+
+同一工作中的聊天各自保存历史，通过确认的工作记忆延续约定；其他聊天的完整正文不会自动混入当前上下文。普通聊天和「不使用文件夹」的工作聊天各自隔离。用户全局记忆只在明确指定时创建。完整规则及文件职责见 [聊天与工作记忆架构](../../docs/architecture/chat-work-memory.md)。
+
+聊天消息以 `记住：内容` 或 `记住这个：内容` 开头时，在真实项目中保存为工作记忆，在普通/无文件夹聊天中保存为聊天记忆。`聊天记住：` 只影响当前聊天，`项目记住：` / `工作记住：` 明确共享到当前工作，`全局记住：` 保存用户级记忆。冒号可使用中文或英文；引用、代码和模型回复不会触发提取。
+
+- `GET /api/conversations/:chatId/relationships`：当前工作归属、兄弟聊天 ID/标题/归档状态、可用记忆范围，不返回兄弟聊天正文。
+- `GET /api/conversations/:chatId/memory`：按范围返回确认条目、版本、来源与有效状态。
+- `POST /api/conversations/:chatId/memory`：`{scope,content,kind?,source?,expectedRevision?}`，scope 为 `chat` / `project` / `user`。
+- `PATCH /api/conversations/:chatId/memory/:memoryId`：`{scope,expectedRevision,content?,kind?}`。
+- `DELETE /api/conversations/:chatId/memory/:memoryId`：`{scope,expectedRevision}`。修改/删除必须提供范围文档当前版本，冲突返回 409。
+
+记忆来源归档后仍可用；来源聊天删除或移出原工作后暂停注入，撤销删除后恢复。手动确认的记忆不依赖来源消息存活。删除明确记忆后，重试原请求不会将它重新创建。记忆文件损坏、未知版本、容量超限或不安全路径均拒绝覆盖，并返回明确错误。`GET /health` 通过 `memoryProtocol:1`、`contextProtocol:1` 标识本轮能力，桌面拒绝复用旧协议网关。
 
 ## 统一会话存储
 
@@ -40,12 +54,16 @@ Data/
   settings.json                               Storage.LayoutVersion、StoreId；保留其他用户设置
   catalog.json                                项目、聊天标题/排序/归档及删除标记；不含正文
   Projects/<projectId>/project.json            项目元信息清单，由 catalog.json 生成
-  Projects/<projectId>/Memory/                 项目长期记忆预留目录
+  Projects/<projectId>/Memory/entries.json     已确认的工作共享记忆
   Projects/<projectId>/Sessions/<chatId>/events.jsonl
+  Projects/<projectId>/Sessions/<chatId>/context.json
+  Projects/<projectId>/Sessions/<chatId>/Memory/entries.json
   Projects/<projectId>/Sessions/<chatId>/attachments/
   Chats/<chatId>/events.jsonl                   普通聊天
+  Chats/<chatId>/context.json                   可重建的本聊天摘录
+  Chats/<chatId>/Memory/entries.json            已确认的聊天记忆
   Chats/<chatId>/attachments/
-  Memory/                                     用户长期记忆预留目录
+  Memory/entries.json                          已确认的用户全局记忆
   Index/search.sqlite                         可重建的项目/聊天元数据索引
   Trash/<chatId>/events.jsonl                   已删除记录，供撤销恢复
   Backups/conversations-v1/                    一次性迁移的原始备份
@@ -57,7 +75,7 @@ Data/
 
 `data-layout.mjs` 统一负责首次初始化、已有目录补齐和版本检查。启动和项目目录变更时，自动建立上述目录；无对话的草稿仍不创建持久聊天。`project.json` 是由正式目录生成的可重建清单，项目名、排序和关联路径在软件中修改后同步更新，不作为第二份可独立写入的元信息来源。项目改名或重新关联工作文件夹不改变项目/聊天 ID，也不移动聊天记录。
 
-`settings.json` 的 `Storage.LayoutVersion` 标记目录版本；缺少该文件的旧目录自动升级，保留用户已有的其他设置及数据。遇到未知版本或损坏配置时拒绝写入。`conversation-index.mjs` 生成真实 SQLite 列表/标题元数据索引；索引缺失时重建，损坏时保留副本再重建，重建后关闭数据库句柄以便迁移。搜索 UI、正文全文检索、长期记忆提取和自动摘要尚未实现，Memory 目前只预留目录。
+`settings.json` 的 `Storage.LayoutVersion` 标记目录版本；缺少该文件的旧目录自动升级，保留用户已有的其他设置及数据。遇到未知版本或损坏配置时拒绝写入。记忆文件在首次确认记忆时创建；`context.json` 在历史超出本次输入预算时生成确定性的原文摘录，通过来源指纹核验并重建，不替代原日志，也不是模型生成的语义摘要。`conversation-index.mjs` 生成真实 SQLite 列表/标题元数据索引；索引缺失时重建，损坏时保留副本再重建，重建后关闭数据库句柄以便迁移。搜索 UI、正文全文检索、向量检索和模型自动提取记忆尚未实现。
 
 删除将聊天目录（含附件）移到 `Trash` 并建立删除标记，后续模型请求不能重建同一聊天；撤销恢复原日志与附件。当前回收记录与迁移备份不会自动清理，也不会进入模型上下文。
 

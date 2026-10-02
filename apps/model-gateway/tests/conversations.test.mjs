@@ -117,7 +117,7 @@ test('different projects and standalone chats have independent paths; each model
   await stat(join(root, 'Projects', 'p1', 'Sessions', 'c1', 'events.jsonl'));
   await stat(join(root, 'Projects', 'p2', 'Sessions', 'c2', 'events.jsonl'));
   await stat(join(root, 'Chats', 'c3', 'events.jsonl'));
-  assert.deepEqual((await readdir(join(root, 'Projects', 'p1', 'Sessions', 'c1'))).sort(), ['attachments', 'events.jsonl']);
+  assert.deepEqual((await readdir(join(root, 'Projects', 'p1', 'Sessions', 'c1'))).sort(), ['Memory', 'attachments', 'events.jsonl']);
 });
 
 test('deleting a chat tombstones runtime writes and undo restores the complete canonical conversation', async () => {

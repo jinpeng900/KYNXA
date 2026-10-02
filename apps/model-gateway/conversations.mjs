@@ -247,6 +247,71 @@ export class ConversationStore {
     });
   }
 
+  // Memory ownership always follows the canonical catalog, never a caller's path.
+  describeConversation(conversationId) {
+    return this._run(() => {
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      const owner = location.ProjectId == null ? null :
+        this.document.Projects.find(project => key(project.Id) === key(location.ProjectId));
+      return { conversationId: location.Id, projectId: owner?.Id ?? null,
+        projectName: owner?.Name ?? null, isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace),
+        isArchived: Boolean(location.Chat.IsArchived), projectArchived: Boolean(owner?.IsArchived) };
+    });
+  }
+
+  describeProject(projectId) {
+    return this._run(() => {
+      const project = this.document.Projects.find(value => key(value.Id) === key(projectId));
+      if (!project) throw failure('工作不存在。', 'PROJECT_NOT_FOUND', 404);
+      return { projectId: project.Id, name: project.Name,
+        isFolderlessWorkspace: Boolean(project.IsFolderlessWorkspace), isArchived: Boolean(project.IsArchived) };
+    });
+  }
+
+  resolveSessionDirectory(conversationId) {
+    return this._run(async () => {
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      await inspectDataLayout(this.root, this.document);
+      return this._directory(location);
+    });
+  }
+
+  /** Keep current ownership and dependent session IO atomic with catalog moves/deletions. */
+  withConversationStorage(conversationId, operation) {
+    return this._run(() => {
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      const owner = location.ProjectId == null ? null :
+        this.document.Projects.find(project => key(project.Id) === key(location.ProjectId));
+      // The callback uses these app-owned paths under this queue, and must not reenter queued store methods.
+      return operation({ conversationId: location.Id, projectId: owner?.Id ?? null,
+        projectName: owner?.Name ?? null, isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace),
+        isArchived: Boolean(location.Chat.IsArchived), projectArchived: Boolean(owner?.IsArchived),
+        sessionDirectory: this._directory(location) });
+    });
+  }
+
+  relationships(conversationId) {
+    return this._run(() => {
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      const owner = location.ProjectId == null ? null :
+        this.document.Projects.find(project => key(project.Id) === key(location.ProjectId));
+      const sharedWork = owner && !owner.IsFolderlessWorkspace && !owner.IsArchived;
+      return { conversationId: location.Id, projectId: owner?.Id ?? null,
+        projectName: owner?.Name ?? null, isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace),
+        relatedConversations: sharedWork ? owner.Chats.filter(chat => key(chat.Id) !== key(location.Id))
+          .map(chat => ({ id: chat.Id, title: chat.Title, isArchived: Boolean(chat.IsArchived) })) : [],
+        memoryScopes: sharedWork ? ['chat', 'project', 'user'] : ['chat', 'user'] };
+    });
+  }
+
   ensureConversation(conversationId, { title = '新聊天' } = {}) {
     return this._run(async () => {
       validateId(conversationId); this._notDeleted(conversationId);

@@ -66,6 +66,8 @@ export async function inspectDataLayout(root, document) {
         const session = join(folder, 'Sessions', identifier(chat.Id));
         await inspect(session, true);
         await inspect(join(session, 'attachments'), true);
+        await inspect(join(session, 'Memory'), true);
+        await inspect(join(session, 'context.json'), false);
         await inspect(join(session, 'events.jsonl'), false);
       }
     }
@@ -73,6 +75,8 @@ export async function inspectDataLayout(root, document) {
       const session = join(root, 'Chats', identifier(chat.Id));
       await inspect(session, true);
       await inspect(join(session, 'attachments'), true);
+      await inspect(join(session, 'Memory'), true);
+      await inspect(join(session, 'context.json'), false);
       await inspect(join(session, 'events.jsonl'), false);
     }
   }
@@ -113,12 +117,14 @@ export async function ensureDataLayout(root, document) {
       const session = join(folder, 'Sessions', identifier(chat.Id));
       await directory(session);
       await directory(join(session, 'attachments'));
+      await directory(join(session, 'Memory'));
     }
   }
   for (const chat of document.Chats) {
     const session = join(root, 'Chats', identifier(chat.Id));
     await directory(session);
     await directory(join(session, 'attachments'));
+    await directory(join(session, 'Memory'));
   }
 
   // Derived index uses actual SQLite; it can be reconstructed from the catalog.
