@@ -6,15 +6,27 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 public sealed record ModelProvider(string ProviderId, string DisplayName, string BaseUrl,
-    string[] Models, bool HasApiKey, string Protocol);
+    string[] Models, bool HasApiKey, string Protocol, int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens);
 public sealed record ModelListResponse(ModelProvider[] Providers);
 public sealed record ModelProbeResponse(bool Ok, int LatencyMs, string[] Models);
 public sealed record ModelSaveResponse(ModelProvider Provider);
 public sealed record ModelConnection(string ProviderId, string DisplayName, string BaseUrl,
-    string[] Models, string? ApiKey = null, string Protocol = "openai-completions");
+    string[] Models, string? ApiKey = null, string Protocol = "openai-completions",
+    int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens);
 
 public sealed class ModelApiClient : IDisposable
 {
+    public const int DefaultContextWindowTokens = 8192;
+    public const int MinimumContextWindowTokens = 2048;
+    public const int MaximumContextWindowTokens = 2000000;
+
+    public static int ValidateContextWindowTokens(int value)
+    {
+        if (value is < MinimumContextWindowTokens or > MaximumContextWindowTokens)
+            throw new InvalidOperationException("上下文窗口须为 2048–2000000 的整数（tokens）。");
+        return value;
+    }
+
     private readonly HttpClient _http = new()
     {
         BaseAddress = ModelGatewayService.Address,
@@ -29,12 +41,14 @@ public sealed class ModelApiClient : IDisposable
 
     public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
+        ValidateContextWindowTokens(connection.ContextWindowTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         return (await ReadAsync<ModelSaveResponse>(await _http.PostAsJsonAsync("/api/models", connection, cancellationToken), cancellationToken)).Provider;
     }
 
     public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
+        ValidateContextWindowTokens(connection.ContextWindowTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         return await ReadAsync<ModelProbeResponse>(await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken), cancellationToken);
     }

@@ -115,8 +115,12 @@ public static class ModelGatewayService
             if (ready && (!body!.RootElement.TryGetProperty("conversationProtocol", out var protocol) ||
                 !protocol.TryGetInt32(out int version) || version < 1 ||
                 !body.RootElement.TryGetProperty("dataLayoutVersion", out var layout) ||
-                !layout.TryGetInt32(out int layoutVersion) || layoutVersion < 1))
-                throw new InvalidOperationException("正在运行的旧网关不支持当前数据存储结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。");
+                !layout.TryGetInt32(out int layoutVersion) || layoutVersion < 1 ||
+                !body.RootElement.TryGetProperty("memoryProtocol", out var memory) ||
+                !memory.TryGetInt32(out int memoryVersion) || memoryVersion < 1 ||
+                !body.RootElement.TryGetProperty("contextProtocol", out var context) ||
+                !context.TryGetInt32(out int contextVersion) || contextVersion < 1))
+                throw new InvalidOperationException("正在运行的旧网关不支持当前聊天记忆与上下文结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。");
             return ready;
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)

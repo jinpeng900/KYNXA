@@ -17,19 +17,25 @@ export function authorization(connection) {
   return connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {};
 }
 
-export function chatRequest(connection, model, messages, { stream = false } = {}) {
+export function chatRequest(connection, model, messages, { stream = false, system = '', maxOutputTokens } = {}) {
+  const outputLimit = maxOutputTokens == null ? {} : { max_tokens: maxOutputTokens };
   switch (connection.protocol) {
     case 'anthropic-messages':
-      return { path: '/messages', body: { model, messages, max_tokens: 8192, stream } };
+      return { path: '/messages', body: { model, messages, max_tokens: 8192, ...outputLimit, stream,
+        ...(system ? { system } : {}) } };
     case 'openai-responses': {
       const official = new URL(connection.baseUrl).hostname === 'api.openai.com';
       const baseModel = model.replace(/-\d{4}-\d{2}-\d{2}$/, '');
       return { path: '/responses', body: { model, input: messages, store: false,
+        ...(system ? { instructions: system } : {}),
+        ...(maxOutputTokens == null ? {} : { max_output_tokens: maxOutputTokens }),
         stream: stream && !(official && nonStreamingResponseModels.has(baseModel)),
         ...(stream && official && summaryModels.has(baseModel) ? { reasoning: { summary: 'auto' } } : {}) } };
     }
     default:
-      return { path: '/chat/completions', body: { model, messages, stream } };
+      return { path: '/chat/completions', body: { model,
+        messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
+        stream, ...outputLimit } };
   }
 }
 

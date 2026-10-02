@@ -161,7 +161,7 @@ test('Anthropic streams visible thinking separately and ignores opaque signature
   assert.equal(JSON.stringify(received).includes('opaque-private-signature'), false);
   assert.equal(f.seen[0].path, '/v1/messages');
   assert.equal(f.seen[0].headers['x-api-key'], 'secret-not-for-events');
-  assert.equal(f.seen[0].body.max_tokens, 8192);
+  assert.equal(f.seen[0].body.max_tokens, 2048);
 });
 
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {

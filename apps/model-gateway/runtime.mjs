@@ -2,7 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ConversationStore, validateId } from './conversations.mjs';
 import { authorization, chatRequest, responseText } from './protocols.mjs';
 import { readModelStream, StreamFailure } from './streaming.mjs';
+import { MemoryService } from './memory-service.mjs';
+import { buildContext, ContextError } from './context.mjs';
 
+// Compatibility helper for older callers. ModelRuntime uses buildContext below.
 // Failed attempts are visible in the transcript but excluded from model context.
 // Only the request is bounded; durable history is never truncated.
 export function completedContext(messages, beforeUserId) {
@@ -21,9 +24,10 @@ export function completedContext(messages, beforeUserId) {
 
 /** Transport adapters consume the same conversation log the desktop displays. */
 export class ModelRuntime {
-  constructor({ modelStore, dataHome, conversationStore, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = 900000 }) {
+  constructor({ modelStore, dataHome, conversationStore, memoryService, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = 900000 }) {
     this.store = modelStore;
     this.conversations = conversationStore ?? new ConversationStore({ dataHome });
+    this.memory = memoryService ?? new MemoryService({ conversationStore: this.conversations });
     this.timeoutMs = timeoutMs;
     this.idleTimeoutMs = idleTimeoutMs;
     this.streamTimeoutMs = streamTimeoutMs;
@@ -64,7 +68,26 @@ export class ModelRuntime {
       Status: 'streaming', Error: '', Provider: input.provider, Model: input.model,
       CreatedAt: previous?.CreatedAt ?? createdAt, RequestHash: hash, ReplyTo: userId, ReasoningDurationMs: 0 };
     await this.conversations.upsertMessage(id, assistant);
-    return { assistant, messages: [...completedContext(history, userId), { role: 'user', content: input.message }] };
+    try {
+      await this.memory.captureExplicit(id, userId, input.message);
+      const memory = await this.memory.contextFor(id);
+      const summary = await this.memory.repository.readSummary(id);
+      const connection = await this.store.connectionFor(input.provider);
+      const context = buildContext({ conversationId: id,
+        projectId: memory.isFolderlessWorkspace ? null : memory.projectId,
+        history, currentMessage: input.message, beforeUserId: userId,
+        memoryEntries: memory.entries, summary, contextWindowTokens: connection?.contextWindowTokens });
+      if (context.summaryUpdate) await this.memory.repository.writeSummary(id, context.summaryUpdate);
+      return { assistant, messages: context.messages,
+        requestOptions: { system: context.system, maxOutputTokens: context.maxOutputTokens } };
+    } catch (error) {
+      const publicError = error instanceof ContextError || error.code?.includes('MEMORY') || error.code?.includes('SUMMARY');
+      const failure = publicError
+        ? Object.assign(new StreamFailure(error.message), { code: error.code, statusCode: error.statusCode })
+        : safeFailure(error);
+      await this.conversations.upsertMessage(id, { ...assistant, Status: 'error', Error: failure.message });
+      throw failure;
+    }
   }
 
   async connection(input) {
@@ -79,7 +102,7 @@ export class ModelRuntime {
       if (turn.receipt) return turn.receipt.content;
       try {
         const connection = await this.connection(input);
-        const request = chatRequest(connection, input.model, turn.messages);
+        const request = chatRequest(connection, input.model, turn.messages, turn.requestOptions);
         let response;
         try {
           response = await fetch(connection.baseUrl + request.path, {
@@ -173,7 +196,7 @@ export class ModelRuntime {
       turn = await this.prepare(input, id);
       if (turn.receipt) return turn.receipt;
       const connection = await this.connection(input);
-      const request = chatRequest(connection, input.model, turn.messages, { stream: true });
+      const request = chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, stream: true });
       throwIfCancelled();
       activity();
       let response;

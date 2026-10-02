@@ -34,6 +34,10 @@ export function validateConnection(input, { requireModels = true } = {}) {
   const baseUrl = String(input.baseUrl ?? '').trim().replace(/\/+$/, '');
   const apiKey = input.apiKey == null ? undefined : String(input.apiKey);
   const protocol = input.protocol ?? 'openai-completions';
+  const contextWindowTokens = input.contextWindowTokens;
+  if (contextWindowTokens !== undefined && (!Number.isSafeInteger(contextWindowTokens) ||
+      contextWindowTokens < 2048 || contextWindowTokens > 2000000))
+    throw new Error('模型上下文预算须为 2048–2000000 的整数。');
   if (!protocols.includes(protocol)) throw new Error('模型接口协议无效。');
   const models = Array.isArray(input.models) ? [...new Set(input.models.map(value => String(value).trim()))] : [];
   if (!providerPattern.test(providerId)) throw new Error('Provider ID 须为 2–40 位小写字母、数字或连字符，且以字母开头。');
@@ -48,7 +52,8 @@ export function validateConnection(input, { requireModels = true } = {}) {
     throw new Error(`至少填写一个有效 Model ID，最多 ${MAX_CONNECTION_MODELS} 个。`);
   if (apiKey !== undefined && (apiKey.length > 8192 || /[\r\n]/.test(apiKey)))
     throw new Error('API Key 格式无效。');
-  return { providerId, displayName, baseUrl, apiKey, models, protocol };
+  return { providerId, displayName, baseUrl, apiKey, models, protocol,
+    ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }) };
 }
 
 export async function readJson(filename, fallback) {
@@ -103,7 +108,9 @@ export class ModelStore {
       const apiKey = connection.apiKey || (previous?.baseUrl === connection.baseUrl ? previous.apiKey : undefined);
       if (!apiKey && !isLocalEndpoint(new URL(connection.baseUrl)))
         throw new Error('此连接需要 API Key。');
-      const provider = { ...connection, apiKey };
+      const provider = { ...connection, apiKey,
+        ...(connection.contextWindowTokens === undefined && previous?.contextWindowTokens !== undefined
+          ? { contextWindowTokens: previous.contextWindowTokens } : {}) };
       document.providers = document.providers.filter(item => item.providerId !== connection.providerId);
       document.providers.push(provider);
       await atomicJson(this.settingsPath, document);

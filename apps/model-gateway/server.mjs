@@ -60,11 +60,27 @@ export function createModelServer(options = {}) {
       }
       if (request.method === 'GET' && pathname === '/health')
         return json(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          streamProtocol: 1, conversationProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
           activeRequests, migrating, modelDataHome: modelStore.dataHome });
       if (migrating) return json(response, 503, { error: '正在迁移数据，请完成后再试。' });
       activeRequests++;
       counted = true;
+      const memoryRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/memory(?:\/([a-zA-Z0-9_-]+))?$/i.exec(pathname);
+      if (memoryRoute) {
+        const [, conversationId, memoryId] = memoryRoute;
+        if (request.method === 'GET' && !memoryId)
+          return json(response, 200, await modelRuntime.memory.listFor(conversationId));
+        if (request.method === 'POST' && !memoryId)
+          return json(response, 201, await modelRuntime.memory.create(conversationId, await bodyOf(request)));
+        if (request.method === 'PATCH' && memoryId)
+          return json(response, 200, await modelRuntime.memory.update(conversationId, memoryId, await bodyOf(request)));
+        if (request.method === 'DELETE' && memoryId)
+          return json(response, 200, await modelRuntime.memory.delete(conversationId, memoryId, await bodyOf(request)));
+        return json(response, 405, { error: '此记忆接口不支持该操作。' });
+      }
+      const relationshipRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/relationships$/i.exec(pathname);
+      if (request.method === 'GET' && relationshipRoute)
+        return json(response, 200, await modelRuntime.conversations.relationships(relationshipRoute[1]));
       if (pathname === '/api/conversations/catalog') {
         if (request.method === 'GET') return json(response, 200, await modelRuntime.conversations.catalog());
         if (request.method === 'PUT') return json(response, 200,
@@ -125,7 +141,8 @@ export function createModelServer(options = {}) {
           } catch (error) {
             emit({ type: error instanceof StreamFailure ? error.type : 'error',
               content: error.content ?? '', reasoning: error.reasoning ?? '',
-              error: error instanceof StreamFailure ? error.message : '模型调用失败，已保留生成的内容。' });
+              error: error instanceof StreamFailure ? error.message : '模型调用失败，已保留生成的内容。',
+              ...(error instanceof StreamFailure && error.code ? { code: error.code } : {}) });
           } finally {
             clearInterval(heartbeat);
             streamControllers.delete(controller);
@@ -148,7 +165,8 @@ export function createModelServer(options = {}) {
         error.message?.includes('API Key') || error.message?.includes('Base URL') || error.message?.includes('HTTPS') ||
         error.message?.includes('模型') || error.message?.includes('请求体') ||
         error.message?.includes('权限模式') || error.message?.includes('会话 ID');
-      json(response, error.statusCode ?? (clientError ? 400 : 502), { error: error.message ?? '模型调用失败。' });
+      json(response, error.statusCode ?? (clientError ? 400 : 502),
+        { error: error.message ?? '模型调用失败。', ...(error.code ? { code: error.code } : {}) });
     } finally {
       if (counted) activeRequests--;
     }

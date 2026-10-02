@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using System.Globalization;
 using System.Net.Http;
 using System.Text.RegularExpressions;
 using Windows.Graphics;
@@ -113,6 +114,7 @@ public sealed partial class ModelManagementWindow : Window
         _discoveredModels = [];
         ModelSearchBox.Text = "";
         SetProtocol(preset.Protocol);
+        SetContextWindow(ModelApiClient.DefaultContextWindowTokens);
         EditorTitle.Text = "添加模型连接";
         NameBox.Text = preset.Id == "custom" ? "" : preset.Name;
         ProviderIdBox.IsReadOnly = false;
@@ -139,6 +141,7 @@ public sealed partial class ModelManagementWindow : Window
         _discoveredModels = provider.Models;
         ModelSearchBox.Text = "";
         SetProtocol(provider.Protocol);
+        SetContextWindow(provider.ContextWindowTokens);
         EditorTitle.Text = "编辑模型连接";
         PresetHint.Text = "修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。";
         NameBox.Text = provider.DisplayName;
@@ -204,6 +207,37 @@ public sealed partial class ModelManagementWindow : Window
 
     private void SetProtocol(string protocol) => ProtocolBox.SelectedItem = ProtocolBox.Items
         .OfType<ComboBoxItem>().FirstOrDefault(item => (string)item.Tag == protocol) ?? ProtocolBox.Items[0];
+
+    private void SetContextWindow(int value)
+    {
+        string tokens = value.ToString(CultureInfo.InvariantCulture);
+        CustomContextWindowBox.Text = tokens;
+        ContextWindowBox.SelectedItem = ContextWindowBox.Items.OfType<ComboBoxItem>()
+            .FirstOrDefault(item => (string)item.Tag == tokens)
+            ?? ContextWindowBox.Items.OfType<ComboBoxItem>().First(item => (string)item.Tag == "custom");
+        UpdateContextWindowVisibility();
+    }
+
+    private void ContextWindowBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateContextWindowVisibility();
+
+    private void UpdateContextWindowVisibility()
+    {
+        // SelectionChanged can fire while InitializeComponent is still creating the text box.
+        if (CustomContextWindowBox is null || ContextWindowBox.SelectedItem is not ComboBoxItem option) return;
+        bool custom = (string)option.Tag == "custom";
+        CustomContextWindowBox.Visibility = custom ? Visibility.Visible : Visibility.Collapsed;
+        if (!custom) CustomContextWindowBox.Text = (string)option.Tag;
+    }
+
+    private int ContextWindowTokens()
+    {
+        string value = ContextWindowBox.SelectedItem is ComboBoxItem { Tag: "custom" }
+            ? CustomContextWindowBox.Text.Trim()
+            : (ContextWindowBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens))
+            throw new InvalidOperationException("上下文窗口须为 2048–2000000 的整数（tokens）。");
+        return ModelApiClient.ValidateContextWindowTokens(tokens);
+    }
 
     private void ModelSearchBox_TextChanged(object sender, TextChangedEventArgs e) => RenderModelOptions();
 
@@ -276,7 +310,7 @@ public sealed partial class ModelManagementWindow : Window
         var models = ModelIds();
         if (requireModels && models.Length == 0) throw new InvalidOperationException("请先获取模型，或手动填写模型 ID。");
         return new(id, name, url, models, string.IsNullOrWhiteSpace(ApiKeyBox.Password) ? null : ApiKeyBox.Password.Trim(),
-            (string)((ComboBoxItem)ProtocolBox.SelectedItem).Tag);
+            (string)((ComboBoxItem)ProtocolBox.SelectedItem).Tag, ContextWindowTokens());
     }
 
     private void SetBusy(bool busy)
@@ -284,7 +318,7 @@ public sealed partial class ModelManagementWindow : Window
         EditorForm.IsHitTestVisible = ProviderPanel.IsHitTestVisible = !busy;
         PresetBox.IsEnabled = NameBox.IsEnabled = ApiKeyBox.IsEnabled = ModelsBox.IsEnabled =
             BaseUrlBox.IsEnabled = ProviderIdBox.IsEnabled = NewConnectionButton.IsEnabled = ProtocolBox.IsEnabled =
-            ModelSearchBox.IsEnabled = !busy;
+            ModelSearchBox.IsEnabled = ContextWindowBox.IsEnabled = CustomContextWindowBox.IsEnabled = !busy;
         foreach (var option in ModelOptions.Children.OfType<CheckBox>()) option.IsEnabled = !busy;
         foreach (var child in ProviderList.Children.OfType<Button>()) child.IsEnabled = !busy;
         ProbeButton.IsEnabled = SaveButton.IsEnabled = !busy;
