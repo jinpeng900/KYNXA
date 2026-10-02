@@ -33,33 +33,16 @@ try
 }
 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
 
-string dataRoot = Path.Combine(Path.GetTempPath(), "kynxa-chat-smoke-" + Guid.NewGuid().ToString("N"));
-Directory.CreateDirectory(dataRoot);
-var store = new ProjectStore(dataRoot);
 Guid legacyId = Guid.NewGuid();
-File.WriteAllText(Path.Combine(dataRoot, "chats.json"), JsonSerializer.Serialize(new[]
+var chats = JsonSerializer.Deserialize<List<ProjectChatState>>(JsonSerializer.Serialize(new[]
 {
     new { Id = legacyId, Title = "旧聊天", Messages = new[] { "原有问题" } }
-}));
-var chats = store.LoadChats();
+}))!;
 Check(chats[0].Messages[0].Role == "user" && chats[0].Messages[0].Content == "原有问题", "Legacy history was not preserved.");
 chats[0].Messages.Add(new ChatMessageState { Role = "assistant", Content = "你好" });
-store.SaveChats(chats);
-var restored = store.LoadChats()[0];
+var restored = JsonSerializer.Deserialize<List<ProjectChatState>>(JsonSerializer.Serialize(chats))![0];
 Check(restored.Id == legacyId && restored.Messages.Select(m => m.Role).SequenceEqual(["user", "assistant"]), "Message roles changed after reload.");
 Check(restored.Messages[1].Content == "你好", "Assistant reply was not persisted.");
 var empty = new ProjectChatState { Draft = "未发送草稿" };
-var project = new ProjectState { Name = "存储测试", Chats = [empty, restored] };
-store.Save([project]);
-store.SaveChats([empty, restored]);
-Check(store.Load()[0].Chats.Count == 1 && store.LoadChats().Count == 1, "Empty chats should not be persisted.");
-var folderless = new ProjectState
-{
-    Name = "不使用文件夹", IsFolderlessWorkspace = true,
-    Chats = [new ProjectChatState { Title = "工作任务", Messages = [new ChatMessageState { Content = "开始工作" }] }]
-};
-store.Save([project, folderless]);
-var loadedFolderless = store.Load().Single(item => item.IsFolderlessWorkspace);
-Check(loadedFolderless.FolderPath is null && loadedFolderless.Chats.Count == 1, "Folderless work must remain independent of linked folders.");
-Check(store.LoadChats().Count == 1 && store.LoadChats()[0].Id == legacyId, "Work tasks must not enter ordinary chat history.");
-Console.WriteLine("PASS: fixed HTTP reply, Unicode, concurrent conversation IDs, validation, cancellation, legacy migration, role persistence, and empty-chat exclusion.");
+Check(!empty.CanPersist && restored.CanPersist, "Empty chats should not be persisted.");
+Console.WriteLine("PASS: fixed HTTP reply, Unicode, concurrent conversation IDs, validation, cancellation, legacy conversion, role serialization, and empty-chat exclusion. Gateway persistence is covered by conversation-store-smoke.");

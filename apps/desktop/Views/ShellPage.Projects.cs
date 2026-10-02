@@ -19,79 +19,95 @@ public sealed partial class ShellPage
     public ObservableCollection<ProjectTreeEntry> ProjectEntries { get; } = [];
 
     private ProjectChatState? _activeProjectChat;
-    private Action? _undoSidebarChange;
+    private Func<Task>? _undoSidebarChange;
     private bool _projectsReady;
     private bool _projectActionPending;
+    private bool _savingOnClose;
+    private bool _closeApproved;
+    private bool _projectViewClosed;
+    private bool _projectLifetimeAttached;
+
+    private async void SaveBeforeClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
+    {
+        if (_closeApproved) return;
+        e.Cancel = true;
+        if (_savingOnClose || StoragePaths.IsMigrating) return;
+        if (_projectActionPending || _sendingPrompt)
+        {
+            ProjectNotice.Message = "正在保存聊天，请稍后再关闭。";
+            ProjectNotice.IsOpen = true;
+            return;
+        }
+        _savingOnClose = true;
+        IsEnabled = false;
+        try
+        {
+            CaptureProjectDraft();
+            CaptureStandaloneDraft();
+            await _projectStore.SaveAsync(_projects);
+            await _projectStore.SaveChatsAsync(_standaloneChats);
+            _closeApproved = true;
+            App.Window.Close();
+        }
+        catch (Exception error)
+        {
+            var choice = await new ContentDialog
+            {
+                XamlRoot = XamlRoot, Title = "草稿保存未完成", Content = error.Message + " 已提交的聊天由会话服务保存，尚未保存的草稿或排序可能丢失。",
+                PrimaryButtonText = "仍然关闭", CloseButtonText = "返回", DefaultButton = ContentDialogButton.Close
+            }.ShowAsync();
+            if (choice == ContentDialogResult.Primary) { _closeApproved = true; App.Window.Close(); }
+        }
+        finally { _savingOnClose = false; if (!_closeApproved) IsEnabled = true; }
+    }
+
+    private async void SaveProjectOrder()
+    {
+        try { await _projectStore.SaveAsync(_projects); }
+        catch (Exception error)
+        {
+            if (_projectViewClosed) return;
+            ProjectNotice.Message = "工作顺序暂未保存：" + error.Message;
+            ProjectNotice.IsOpen = true;
+        }
+    }
 
     private async Task InitializeProjectsAsync()
     {
         if (_projectsReady) return;
-        try
+        if (!_projectLifetimeAttached)
         {
-            if (_projectStore.Exists) _projects = _projectStore.Load();
-            else
-            {
-                _projects = ViewModel.Projects.Select(sample => new ProjectState
-                {
-                    Name = sample.Name,
-                    Chats = sample.Conversations.Select(title => new ProjectChatState { Title = title, IsSample = true }).ToList()
-                }).ToList();
-                _projectStore.Save(_projects);
-            }
-            // Migrate the previously shipped demo rows; discard legacy empty new chats.
-            foreach (var project in _projects)
-            {
-                var sample = ViewModel.Projects.FirstOrDefault(p => p.Name == project.Name);
-                foreach (var chat in project.Chats)
-                    if (sample?.Conversations.Contains(chat.Title) == true) chat.IsSample = true;
-                project.Chats.RemoveAll(chat => !chat.CanPersist);
-            }
-            InitializeStandaloneChats();
-            _projectsReady = true;
-            RenderProjects();
+            _projectLifetimeAttached = true;
             App.Window.Closed += (_, _) =>
             {
+                _projectViewClosed = true;
+                _pendingProjectExpansions.Clear();
+                _projectToReveal = null;
+                ClearProjectOrdering();
+                _hoveredProjectRows.Clear();
+                _orderRows.Clear();
+                _projectMenuRow = null;
                 StopReplies();
-                CaptureProjectDraft();
-                CaptureStandaloneDraft();
-                try { _projectStore.Save(_projects); _projectStore.SaveChats(_standaloneChats); }
-                catch (IOException) { /* Keep the previous complete catalog if the disk becomes unavailable. */ }
-                catch (UnauthorizedAccessException) { }
+                _projectStore.Dispose();
             };
+        }
+        try
+        {
+            var catalog = await _projectStore.LoadAsync();
+            if (_projectViewClosed) return;
+            _projects = catalog.Projects;
+            _standaloneChats = catalog.Chats;
+            RebuildStandaloneRows();
+            _projectsReady = true;
+            RenderProjects();
+            App.Window.AppWindow.Closing += SaveBeforeClosing;
         }
         catch (Exception error)
         {
+            if (_projectViewClosed) return;
             AddProjectButton.IsEnabled = false;
             await ShowProjectErrorAsync("无法读取项目", error.Message);
         }
-    }
-
-    private void RenderProjects(Guid? expandProject = null)
-    {
-        var expanded = ProjectEntries.Where(p => p.IsExpanded).Select(p => p.Project.Id).ToHashSet();
-        if (_activeProjectChat is not null)
-        {
-            var active = _projects.FirstOrDefault(p => p.Chats.Contains(_activeProjectChat));
-            if (active is not null && !_collapsedByUser.Contains(active.Id)) expanded.Add(active.Id);
-        }
-        if (expandProject is Guid id && !_collapsedByUser.Contains(id)) expanded.Add(id);
-        _renderingProjects = true;
-        ProjectEntries.Clear();
-        _hoveredProjectRows.Clear();
-        foreach (ProjectState project in _projects.Where(p => !p.IsArchived && !p.IsFolderlessWorkspace).OrderByDescending(p => p.IsPinned))
-        {
-            var entry = new ProjectTreeEntry(project) { IsExpanded = expanded.Contains(project.Id) };
-            foreach (ProjectChatState chat in project.Chats.Where(c => !c.IsArchived).OrderByDescending(c => c.IsPinned))
-                entry.Children.Add(new ProjectTreeEntry(project, chat));
-            ProjectEntries.Add(entry);
-        }
-        _renderingProjects = false;
-        RebuildWorkTasks();
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (_activeProjectChat is not null)
-                ProjectTree.SelectedItem = ProjectEntries.SelectMany(p => p.Children).FirstOrDefault(p => p.Chat?.Id == _activeProjectChat.Id);
-        });
     }
 
     private void ProjectMore_Click(object sender, RoutedEventArgs e)
@@ -107,7 +123,7 @@ public sealed partial class ShellPage
         if (row is not null) UpdateProjectRowActions(row);
         menu.Closed += (_, _) =>
         {
-            _projectMenuRow = null;
+            if (_projectMenuRow == row) _projectMenuRow = null;
             if (row is not null) UpdateProjectRowActions(row);
         };
         menu.ShowAt(button);
@@ -126,7 +142,6 @@ public sealed partial class ShellPage
             var chat = new ProjectChatState { Title = title };
             project.Chats.Insert(0, chat);
             ShowProjects();
-            RenderProjects(project.Id);
             SelectProjectChat(project, chat);
             return Task.CompletedTask;
         });
@@ -145,18 +160,17 @@ public sealed partial class ShellPage
             item.Click += async (_, _) => await RunProjectActionAsync(action);
             menu.Items.Add(item);
         }
-        Item(project.IsPinned ? "取消置顶" : "置顶项目", "\uE718", () =>
+        Item(project.IsPinned ? "取消置顶" : "置顶项目", "\uE718", async () =>
         {
             project.IsPinned = !project.IsPinned;
-            SaveProjectsAndRender();
-            return Task.CompletedTask;
+            await SaveProjectsAndRenderAsync();
         });
         Item("在文件资源管理器中打开", "\uE8B7", async () =>
         {
             if (string.IsNullOrEmpty(project.FolderPath))
             {
                 project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
-                _projectStore.Save(_projects);
+                await _projectStore.SaveAsync(_projects);
             }
             if (!Directory.Exists(project.FolderPath)) throw new DirectoryNotFoundException($"关联文件夹不存在：{project.FolderPath}");
             var folder = await StorageFolder.GetFolderFromPathAsync(project.FolderPath);
@@ -171,7 +185,7 @@ public sealed partial class ShellPage
             if (folder is null) return;
             var previous = project.FolderPath;
             project.FolderPath = folder.Path;
-            try { SaveProjectsAndRender(); }
+            try { await SaveProjectsAndRenderAsync(); }
             catch { project.FolderPath = previous; throw; }
             ProjectNotice.Message = $"“{project.Name}”已关联到 {folder.Path}，聊天和原文件夹内容保持不变。";
             ProjectNotice.IsOpen = true;
@@ -186,17 +200,22 @@ public sealed partial class ShellPage
                 _workConversationTitle = $"{project.Name} / {_activeProjectChat!.Title}";
                 UpdateConversationTitle();
             }
-            SaveProjectsAndRender();
+            else if (_selectedWorkProjectId == project.Id)
+            {
+                _workConversationTitle = project.Name;
+                UpdateConversationTitle();
+            }
+            await SaveProjectsAndRenderAsync();
         });
-        Item("归档", "\uE7B8", () =>
+        Item("归档", "\uE7B8", async () =>
         {
             CaptureProjectDraft();
             project.IsArchived = true;
-            _projectStore.Save(_projects);
-            _undoSidebarChange = () =>
+            await _projectStore.SaveAsync(_projects);
+            _undoSidebarChange = async () =>
             {
                 project.IsArchived = false;
-                SaveProjectsAndRender();
+                await SaveProjectsAndRenderAsync();
                 RevealProject(project);
             };
             if (project.Chats.Contains(_activeProjectChat!))
@@ -207,10 +226,17 @@ public sealed partial class ShellPage
                 UpdateConversationTitle();
                 UpdateConversationPresentation();
             }
+            if (_selectedWorkProjectId == project.Id)
+            {
+                _selectedWorkProjectId = null;
+                _workConversationTitle = _workDraft = string.Empty;
+                if (!ViewModel.IsChatMode) PromptTextBox.Text = ViewModel.Prompt = string.Empty;
+                UpdateConversationTitle();
+                UpdateWorkspacePickerVisibility();
+            }
             RenderProjects();
             ProjectNotice.Message = $"已归档“{project.Name}”";
             ProjectNotice.IsOpen = true;
-            return Task.CompletedTask;
         });
         return menu;
     }
@@ -219,6 +245,7 @@ public sealed partial class ShellPage
     {
         if (await CreateBlankProjectAsync() is not { } project) return;
         ShowProjects();
+        SelectWorkspaceProject(project);
         RevealProject(project);
     });
 
@@ -229,7 +256,7 @@ public sealed partial class ShellPage
         var project = new ProjectState { Name = name };
         project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
         _projects.Insert(0, project);
-        SaveProjectsAndRender();
+        await SaveProjectsAndRenderAsync();
         return project;
     }
 
@@ -237,6 +264,7 @@ public sealed partial class ShellPage
     {
         if (await PickProjectFolderAsync() is not { } project) return;
         ShowProjects();
+        SelectWorkspaceProject(project);
         RevealProject(project);
     });
 
@@ -255,22 +283,21 @@ public sealed partial class ShellPage
             _projects.Insert(0, project);
         }
         project.IsArchived = false;
-        SaveProjectsAndRender();
+        await SaveProjectsAndRenderAsync();
         return project;
     }
 
-    private async void UndoSidebarChange_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(() =>
+    private async void UndoSidebarChange_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
     {
-        _undoSidebarChange?.Invoke();
+        if (_undoSidebarChange is { } undo) await undo();
         ProjectNotice.IsOpen = false;
         _undoSidebarChange = null;
-        return Task.CompletedTask;
     });
 
-    private void SaveProjectsAndRender()
+    private async Task SaveProjectsAndRenderAsync()
     {
         CaptureProjectDraft();
-        _projectStore.Save(_projects);
+        await _projectStore.SaveAsync(_projects);
         RenderProjects();
     }
 
@@ -278,17 +305,14 @@ public sealed partial class ShellPage
     {
         ProjectTree.Visibility = Visibility.Visible;
         ProjectsChevron.Glyph = "\uE70D";
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
     }
 
-    private void RevealProject(ProjectState project) => DispatcherQueue.TryEnqueue(() =>
+    private void RevealProject(ProjectState project)
     {
-        var entry = ProjectEntries.FirstOrDefault(p => p.Project.Id == project.Id);
-        if (entry is not null)
-        {
-            ProjectTree.SelectedItem = entry;
-            if (ProjectTree.ContainerFromItem(entry) is FrameworkElement row) row.StartBringIntoView();
-        }
-    });
+        _projectToReveal = project.Id;
+        RenderProjects();
+    }
     private void CaptureProjectDraft()
     {
         if (!ViewModel.IsChatMode && _activeProjectChat is not null) _activeProjectChat.Draft = PromptTextBox.Text;
@@ -299,31 +323,24 @@ public sealed partial class ShellPage
         CaptureProjectDraft();
         DiscardEmptyProjectChats(chat.Id);
         _activeProjectChat = chat;
-        _collapsedByUser.Remove(project.Id);
-        bool reordered = ProjectOrdering.Activate(_projects, project);
-        RenderProjects(project.Id);
-        if (reordered)
-        {
-            try { _projectStore.Save(_projects); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            { ProjectNotice.Message = "工作顺序暂未保存：" + error.Message; ProjectNotice.IsOpen = true; }
-        }
+        _selectedWorkProjectId = project.IsFolderlessWorkspace ? null : project.Id;
+        _workChatToReveal = chat.Id;
+        _projectToReveal = project.IsFolderlessWorkspace ? null : project.Id;
+        RenderProjects();
         _workWithoutFolder = project.IsFolderlessWorkspace;
         _workConversationTitle = WorkChatTitle(project, chat);
         _workDraft = chat.Draft;
-        SetPrimaryMode(false);
+        SetPrimaryMode(false, updateConversation: false);
         PromptTextBox.Text = ViewModel.Prompt = chat.Draft;
         UpdateConversationTitle();
         UpdateConversationPresentation();
-        ProjectTree.SelectedItem = ProjectEntries.SelectMany(p => p.Children).FirstOrDefault(p => p.Chat?.Id == chat.Id);
-        WorkTaskHistory.SelectedItem = WorkTaskEntries.FirstOrDefault(task => task.Chat?.Id == chat.Id);
         PromptTextBox.Focus(FocusState.Programmatic);
     }
 
     private void ProjectTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
         if (args.InvokedItem is not ProjectTreeEntry entry) return;
-        if (entry.Chat is null) entry.IsExpanded = !entry.IsExpanded;
+        if (entry.Chat is null) SelectWorkspaceProject(entry.Project);
         else SelectProjectChat(entry.Project, entry.Chat);
     }
     private async Task<string?> AskProjectNameAsync(string title, string value, string primary)
@@ -350,8 +367,10 @@ public sealed partial class ShellPage
             // Roll back visible metadata to the last successfully saved catalog.
             try
             {
-                _projects = _projectStore.Load();
-                _standaloneChats = _projectStore.LoadChats();
+                var catalog = await _projectStore.LoadAsync();
+                PreservePendingPresentations(catalog);
+                _projects = catalog.Projects;
+                _standaloneChats = catalog.Chats;
                 _activeProjectChat = _activeStandaloneChat = null;
                 RenderProjects();
                 RebuildStandaloneRows();
@@ -367,4 +386,15 @@ public sealed partial class ShellPage
     {
         XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = "知道了"
     }.ShowAsync();
+
+    private void PreservePendingPresentations(ConversationCatalog catalog)
+    {
+        foreach (var chat in catalog.Chats.Concat(catalog.Projects.SelectMany(project => project.Chats)))
+        {
+            if (!_pendingReplies.TryGetValue(chat.Id, out var pending)) continue;
+            int index = chat.Messages.FindIndex(message => message.Id == pending.Message.Id);
+            if (index >= 0) chat.Messages[index] = pending.Message;
+            else chat.Messages.Add(pending.Message);
+        }
+    }
 }

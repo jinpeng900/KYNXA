@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/desktop/ViewModels/ProjectTreeEntry.cs" Link="ProjectTreeEntry.cs" />
+    <Compile Include="../../apps/desktop/ViewModels/ProjectTreeReconciler.cs" Link="ProjectTreeReconciler.cs" />
+    <Compile Include="../../apps/desktop/Services/WorkSidebarState.cs" Link="WorkSidebarState.cs" />
+    <Compile Include="../../apps/desktop/Services/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
+  </ItemGroup>
+</Project>

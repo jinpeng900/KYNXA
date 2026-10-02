@@ -21,12 +21,20 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromMilliseconds(40) };
     private readonly Dictionary<Guid, CachedHtml> _html = [];
+    private readonly LinkedList<Guid> _cacheOrder = [];
+    private readonly Dictionary<Guid, LinkedListNode<Guid>> _cacheNodes = [];
+    private const int MaximumCachedMessages = 1024;
+    private const long MaximumCacheCharacters = 8 * 1024 * 1024;
+    private long _cacheCharacters;
     private IReadOnlyList<ConversationMessageViewModel> _messages = [];
     private Guid? _conversationId;
     private Task? _initialization;
     private long _revision, _generation;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
-    private sealed record CachedHtml(string Content, string Reasoning, bool Streaming, string Html, string ReasoningHtml);
+    private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Html, string ReasoningHtml)
+    {
+        public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length;
+    }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string ReasoningTitle, bool Waiting, string Error, bool CanRetry);
 
@@ -58,12 +66,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _messages = messages.ToArray();
         foreach (var message in _messages) message.PropertyChanged += MessageChanged;
         _openAtBottom |= changed || openAtBottom;
-        if (changed) _html.Clear();
-        else
-            foreach (var id in _html.Keys.Where(id => !_messages.Any(message => message.Message.Id == id)).ToArray()) _html.Remove(id);
-        // Clear the previous conversation immediately, even while the next one is being parsed.
-        if (changed) Post(new { type = "render", conversationId = conversationId?.ToString() ?? "", openAtBottom = true, messages = Array.Empty<object>() });
+        // The browser can restore a recently visited conversation while updated content is parsed.
+        if (changed) Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
         QueueRefresh();
+        // A navigation should not wait for the 40 ms stream batching timer.
+        if (!_rendering && _ready.Task.IsCompletedSuccessfully) { _refresh.Stop(); _ = FlushAsync(); }
     }
 
     public void BeforeSend() => Post(new { type = "beforeSend" });
@@ -179,24 +186,38 @@ public sealed class ConversationTranscript : Grid, IDisposable
         var conversationId = _conversationId;
         var snapshots = _messages.Select(row => new Snapshot(row.Message.Id, row.Message.Role, row.Content, row.Message.Reasoning,
             row.IsStreaming, row.Message.Reasoning.Length > 0 ? row.ReasoningTitle : "", row.IsWaiting, row.ErrorText, row.RetryVisibility == Visibility.Visible)).ToArray();
-        var cache = new Dictionary<Guid, CachedHtml>(_html);
         try
         {
-            // Parsing and code highlighting must not hold up the shell or its pointer/keyboard input.
-            var rendered = await Task.Run(() => snapshots.Select(row =>
+            var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
+            var missing = new List<int>();
+            for (int index = 0; index < snapshots.Length; index++)
             {
-                if (cache.TryGetValue(row.Id, out var cached) && cached.Content == row.Content && cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming)
-                    return (Row: row, Cache: cached);
-                string html = row.Role == "user" ? "" : TranscriptMarkdown.Render(row.Content, row.Streaming);
-                string reasoning = TranscriptMarkdown.Render(row.Reasoning, row.Streaming);
-                return (Row: row, Cache: new CachedHtml(row.Content, row.Reasoning, row.Streaming, html, reasoning));
-            }).ToArray());
+                var row = snapshots[index];
+                _html.TryGetValue(row.Id, out var cached);
+                bool hit = cached is not null && cached.Role == row.Role && cached.Content == row.Content &&
+                    cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming;
+                rendered[index] = (row, hit ? cached : null);
+                if (!hit) missing.Add(index);
+            }
+            // Cached navigation can post immediately. Parse only changed messages off the UI thread.
+            if (missing.Count > 0) await Task.Run(() =>
+            {
+                foreach (int index in missing)
+                {
+                    // Rapid navigation can abandon a large transcript between messages.
+                    if (generation != Volatile.Read(ref _generation)) return;
+                    var row = snapshots[index];
+                    string html = row.Role == "user" ? "" : TranscriptMarkdown.Render(row.Content, row.Streaming);
+                    string reasoning = TranscriptMarkdown.Render(row.Reasoning, row.Streaming);
+                    rendered[index] = (row, new CachedHtml(row.Role, row.Content, row.Reasoning, row.Streaming, html, reasoning));
+                }
+            });
             if (_disposed || generation != _generation) return;
             // A newer stream tick is allowed to queue behind this snapshot; switching chats is not.
-            foreach (var item in rendered) _html[item.Row.Id] = item.Cache;
+            foreach (var item in rendered) CacheHtml(item.Row.Id, item.Cache!);
             Post(new { type = "render", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom = _openAtBottom,
                 messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
-                    html = item.Cache.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningTitle = item.Row.ReasoningTitle,
+                    html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningTitle = item.Row.ReasoningTitle,
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry }) });
             _openAtBottom = false;
             _notice.Visibility = Visibility.Collapsed;
@@ -214,6 +235,24 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
     }
 
+    private void CacheHtml(Guid id, CachedHtml value)
+    {
+        if (_html.Remove(id, out var previous)) _cacheCharacters -= previous.Size;
+        if (_cacheNodes.Remove(id, out var node)) _cacheOrder.Remove(node);
+        if (value.Size > MaximumCacheCharacters) return;
+        while (_html.Count > 0 && (_html.Count >= MaximumCachedMessages || _cacheCharacters + value.Size > MaximumCacheCharacters))
+        {
+            Guid oldest = _cacheOrder.First!.Value;
+            _cacheCharacters -= _html[oldest].Size;
+            _html.Remove(oldest);
+            _cacheNodes.Remove(oldest);
+            _cacheOrder.RemoveFirst();
+        }
+        _html.Add(id, value);
+        _cacheNodes.Add(id, _cacheOrder.AddLast(id));
+        _cacheCharacters += value.Size;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -222,6 +261,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
         _messages = [];
         _html.Clear();
+        _cacheOrder.Clear();
+        _cacheNodes.Clear();
+        _cacheCharacters = 0;
         _browser.Close();
     }
 }

@@ -36,30 +36,28 @@ public sealed partial class ShellPage
             menu.Items.Add(item);
         }
 
-        Item(chat.IsPinned ? "取消置顶" : "置顶", "\uE718", () =>
+        Item(chat.IsPinned ? "取消置顶" : "置顶", "\uE718", async () =>
         {
             chat.IsPinned = !chat.IsPinned;
-            SaveChatChanges(project);
-            return Task.CompletedTask;
+            await SaveChatChangesAsync(project);
         });
-        Item("删除", "\uE74D", () =>
+        Item("删除", "\uE74D", async () =>
         {
             CaptureProjectDraft();
             CaptureStandaloneDraft();
             var chats = project?.Chats ?? _standaloneChats;
             int index = chats.IndexOf(chat);
-            if (index < 0) return Task.CompletedTask;
+            if (index < 0) return;
             ClearActiveChat(chat);
             chats.RemoveAt(index);
-            SaveChatChanges(project);
             CancelPendingReply(chat.Id);
-            _undoSidebarChange = () =>
+            await SaveChatChangesAsync(project);
+            _undoSidebarChange = async () =>
             {
                 chats.Insert(Math.Min(index, chats.Count), chat);
-                SaveChatChanges(project);
+                await SaveChatChangesAsync(project);
             };
             ShowChatNotice($"已删除“{chat.Title}”");
-            return Task.CompletedTask;
         });
         Item("重命名", "\uE70F", async () =>
         {
@@ -68,40 +66,39 @@ public sealed partial class ShellPage
             chat.Title = name;
             if (_activeStandaloneChat == chat) _chatConversationTitle = name;
             if (_activeProjectChat == chat) _workConversationTitle = WorkChatTitle(project!, chat);
-            SaveChatChanges(project);
+            await SaveChatChangesAsync(project);
             UpdateConversationTitle();
         });
-        Item("归档", "\uE7B8", () =>
+        Item("归档", "\uE7B8", async () =>
         {
             CaptureProjectDraft();
             CaptureStandaloneDraft();
             ClearActiveChat(chat);
             chat.IsArchived = true;
-            SaveChatChanges(project);
-            _undoSidebarChange = () =>
+            await SaveChatChangesAsync(project);
+            _undoSidebarChange = async () =>
             {
                 chat.IsArchived = false;
-                SaveChatChanges(project);
+                await SaveChatChangesAsync(project);
             };
             ShowChatNotice($"已归档“{chat.Title}”");
-            return Task.CompletedTask;
         });
         return menu;
     }
 
-    private void SaveChatChanges(ProjectState? project)
+    private async Task SaveChatChangesAsync(ProjectState? project)
     {
         CaptureProjectDraft();
         CaptureStandaloneDraft();
         if (project is null)
         {
-            _projectStore.SaveChats(_standaloneChats);
+            await _projectStore.SaveChatsAsync(_standaloneChats);
             RebuildStandaloneRows();
         }
         else
         {
-            _projectStore.Save(_projects);
-            RenderProjects(project.Id);
+            await _projectStore.SaveAsync(_projects);
+            RenderProjects();
         }
     }
 
@@ -111,7 +108,9 @@ public sealed partial class ShellPage
         if (_activeProjectChat == chat)
         {
             _activeProjectChat = null;
-            _workDraft = _workConversationTitle = string.Empty;
+            _workDraft = string.Empty;
+            _workConversationTitle = KYNXA_Desktop.Services.WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId)?.Name
+                ?? string.Empty;
             clearComposer = !ViewModel.IsChatMode;
         }
         if (_activeStandaloneChat == chat)

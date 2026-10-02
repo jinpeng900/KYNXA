@@ -99,6 +99,7 @@ public sealed partial class ShellPage
             choose.IsEnabled = false;
             FileStream? maintenance = null;
             bool acquired = false;
+            bool moved = false;
             try
             {
                 if (StoragePaths.EnvironmentControlled) throw new InvalidOperationException("启动环境变量正在指定数据目录。");
@@ -123,7 +124,8 @@ public sealed partial class ShellPage
                 if (StoragePaths.DataRoot is string currentRoot && string.Equals(destination, Path.TrimEndingDirectorySeparator(currentRoot), StringComparison.OrdinalIgnoreCase))
                 { Message("已经在使用这个目录。", InfoBarSeverity.Success); return; }
                 CaptureProjectDraft(); CaptureStandaloneDraft();
-                _projectStore.Save(_projects); _projectStore.SaveChats(_standaloneChats);
+                await _projectStore.SaveAsync(_projects);
+                await _projectStore.SaveChatsAsync(_standaloneChats);
                 _layoutStateService.Save(_layout);
                 StoragePaths.IsMigrating = true;
                 IsEnabled = false;
@@ -149,9 +151,12 @@ public sealed partial class ShellPage
                 Message("正在迁移，请保持应用打开…");
                 string sourceDesktop = StoragePaths.DesktopDirectory, sourceModels = health.ModelDataHome!;
                 var updates = new Progress<string>(text => Message(text));
-                var result = await Task.Run(() => StorageMigrationService.MoveAsync(sourceDesktop, sourceModels, destination, StoragePaths.PointerPath, updates));
+                var result = await Task.Run(() => StorageMigrationService.MoveAsync(sourceDesktop, sourceModels, destination, StoragePaths.PointerPath,
+                    updates, initializeTarget: ModelGatewayService.InitializeStorageAsync));
                 StoragePaths.Reload();
+                _projectStore.Dispose();
                 _projectStore = new ProjectStore(StoragePaths.DesktopDirectory);
+                moved = true;
                 _modelSelectionStore = new ModelSelectionStore(StoragePaths.DesktopDirectory);
                 foreach (var project in _projects)
                     if (project.FolderPath is string oldPath && StorageMigrationService.IsWithin(oldPath, Path.Combine(sourceDesktop, "Projects")))
@@ -166,9 +171,27 @@ public sealed partial class ShellPage
                 maintenance?.Dispose();
                 if (acquired) { try { File.Delete(StoragePaths.MigrationLockPath); } catch (IOException) { } }
                 StoragePaths.IsMigrating = false;
-                IsEnabled = true;
+                IsEnabled = !moved;
                 choose.IsEnabled = !StoragePaths.EnvironmentControlled;
                 progress.IsActive = false; progress.Visibility = Visibility.Collapsed;
+            }
+            if (moved)
+            {
+                try
+                {
+                    // Release maintenance before asking the gateway to load its new root.
+                    Guid? activeWork = _activeProjectChat?.Id, activeChat = _activeStandaloneChat?.Id;
+                    var catalog = await _projectStore.LoadAsync();
+                    _projects = catalog.Projects;
+                    _standaloneChats = catalog.Chats;
+                    _activeProjectChat = _projects.SelectMany(project => project.Chats).FirstOrDefault(chat => chat.Id == activeWork);
+                    _activeStandaloneChat = _standaloneChats.FirstOrDefault(chat => chat.Id == activeChat);
+                    RenderProjects();
+                    RebuildStandaloneRows();
+                    UpdateConversationPresentation();
+                }
+                catch (Exception error) { Message("位置已更新，但会话目录加载失败：" + error.Message, InfoBarSeverity.Error); }
+                finally { IsEnabled = true; }
             }
         };
         window.Activate();

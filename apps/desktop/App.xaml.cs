@@ -27,6 +27,8 @@ public partial class App : Application
 
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
+            ? Services.StoragePaths.DesktopDirectory : null;
         Window = new MainWindow();
         Window.Activate();
         _ = WarmUpModelGatewayAsync();

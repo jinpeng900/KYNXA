@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { ModelStore } from '../store.mjs';
 import { ModelRuntime } from '../runtime.mjs';
 import { createModelServer } from '../server.mjs';
-import { readSse } from '../streaming.mjs';
+import { readModelStream, readSse } from '../streaming.mjs';
 import { chatRequest } from '../protocols.mjs';
 
 const frame = value => `data: ${typeof value === 'string' ? value : JSON.stringify(value)}\r\n\r\n`;
@@ -65,9 +65,22 @@ async function fragmented(response, text) {
   }
 }
 
-async function sessions(home) {
-  const names = await readdir(join(home, 'sessions')).catch(() => []);
-  return Promise.all(names.filter(x => x.endsWith('.json')).map(async name => JSON.parse(await readFile(join(home, 'sessions', name), 'utf8'))));
+async function completedSessions(runtime) {
+  const catalog = await runtime.conversations.catalog();
+  const chats = [...catalog.Chats, ...catalog.Projects.flatMap(project => project.Chats)];
+  return chats.map(chat => {
+    const result = [];
+    let user;
+    for (const message of chat.Messages) {
+      if (message.Role === 'user') user = message;
+      else if (message.Role === 'assistant' && message.Status === 'completed' && user) {
+        for (const entry of [user, message]) result.push({ role: entry.Role, content: entry.Content,
+          requestId: entry.Id, reasoning: entry.Reasoning });
+        user = undefined;
+      }
+    }
+    return result;
+  }).filter(messages => messages.length > 0);
 }
 
 test('Chat Completions streams before completion, separates reasoning, and replays committed IDs exactly once', async t => {
@@ -106,7 +119,7 @@ test('Chat Completions streams before completion, separates reasoning, and repla
   assert.deepEqual(f.seen[1].body.messages, [
     { role: 'user', content: '你好' }, { role: 'assistant', content: '你好' }, { role: 'user', content: '继续' }
   ]);
-  const saved = (await sessions(f.dataHome))[0];
+  const saved = (await completedSessions(f.modelRuntime))[0];
   assert.equal(saved.length, 4);
   assert.equal(saved[1].requestId, f.input.requestId);
   assert.equal(saved[1].reasoning, '先想一想');
@@ -129,7 +142,7 @@ test('Responses streams reasoning summaries and reconciles the final response sn
   assert.equal(f.seen[0].path, '/v1/responses');
   assert.equal(f.seen[0].body.reasoning, undefined);
   assert.equal(f.seen[0].body.store, false);
-  assert.equal((await sessions(f.dataHome))[0][1].content, '最终答案');
+  assert.equal((await completedSessions(f.modelRuntime))[0][1].content, '最终答案');
 });
 
 test('Anthropic streams visible thinking separately and ignores opaque signatures', async t => {
@@ -175,7 +188,7 @@ for (const [name, ending, type] of [
   ['provider error', frame({ error: { message: 'secret-not-for-events', code: 'test' } }), 'error'],
   ['invalid event JSON', 'data: invalid secret-not-for-events\n\n', 'error']
 ]) {
-  test(`${name}: preserves partials but never commits them or leaks provider errors`, async t => {
+  test(`${name}: persists partials without admitting them to context or leaking provider errors`, async t => {
     const f = await fixture(t, 'openai-completions', async response => {
       response.setHeader('Content-Type', 'text/event-stream');
       response.end(frame(chatDelta('', { reasoning_content: '想法' })) + frame(chatDelta('部分答案')) + ending);
@@ -185,7 +198,12 @@ for (const [name, ending, type] of [
     assert.equal(received.at(-1).content, '部分答案');
     assert.equal(received.at(-1).reasoning, '想法');
     assert.equal(JSON.stringify(received).includes('secret-not-for-events'), false);
-    assert.equal((await sessions(f.dataHome)).length, 0);
+    assert.equal((await completedSessions(f.modelRuntime)).length, 0);
+    const transcript = await f.modelRuntime.conversations.readMessages(f.input.conversationId);
+    assert.equal(transcript.length, 2);
+    assert.equal(transcript[1].Content, '部分答案');
+    assert.equal(transcript[1].Reasoning, '想法');
+    assert.equal(transcript[1].Status, type);
     assert.equal(f.seen.length, 1);
   });
 }
@@ -216,7 +234,7 @@ test('disconnect cancels the upstream and retry excludes unfinished context', as
     if (JSON.parse(event.data).type === 'text_delta') { controller.abort(); break; }
   }
   await Promise.race([closed.promise, delay(2000).then(() => { throw new Error('upstream not aborted'); })]);
-  assert.equal((await sessions(f.dataHome)).length, 0);
+  assert.equal((await completedSessions(f.modelRuntime)).length, 0);
   assert.equal((await events(await f.post())).at(-1).content, '重新回答');
   assert.deepEqual(f.seen[1].body.messages, [{ role: 'user', content: '你好' }]);
 });
@@ -233,7 +251,7 @@ test('idle timeout preserves text and aborts the stalled upstream body', async t
   assert.match(received.at(-1).error, /长时间/);
   assert.equal(received.at(-1).content, '已经生成');
   await Promise.race([closed.promise, delay(2000).then(() => { throw new Error('upstream not aborted'); })]);
-  assert.equal((await sessions(f.dataHome)).length, 0);
+  assert.equal((await completedSessions(f.modelRuntime)).length, 0);
 });
 
 test('overall timeout bounds a stream even while heartbeats keep resetting idle timeout', async t => {
@@ -246,10 +264,10 @@ test('overall timeout bounds a stream even while heartbeats keep resetting idle 
   const received = await events(await f.post());
   assert.equal(received.at(-1).type, 'interrupted');
   assert.match(received.at(-1).error, /时间超过上限/);
-  assert.equal((await sessions(f.dataHome)).length, 0);
+  assert.equal((await completedSessions(f.modelRuntime)).length, 0);
 });
 
-test('shutdown aborts generation and sends a terminal partial without committing history', async t => {
+test('shutdown persists an interrupted partial outside completed model context', async t => {
   const f = await fixture(t, 'openai-completions', async response => {
     response.setHeader('Content-Type', 'text/event-stream');
     response.write(frame(chatDelta('部分')));
@@ -261,18 +279,43 @@ test('shutdown aborts generation and sends a terminal partial without committing
   }
   assert.equal(received.at(-1).type, 'interrupted');
   assert.equal(received.at(-1).content, '部分');
-  assert.equal((await sessions(f.dataHome)).length, 0);
+  assert.equal((await completedSessions(f.modelRuntime)).length, 0);
 });
 
 test('only known OpenAI Responses reasoning models request summaries', () => {
   const request = (baseUrl, model) => chatRequest({ protocol: 'openai-responses', baseUrl }, model, [], { stream: true }).body;
   assert.deepEqual(request('https://api.openai.com/v1', 'gpt-5-mini').reasoning, { summary: 'auto' });
   assert.deepEqual(request('https://api.openai.com/v1', 'gpt-6-astra').reasoning, { summary: 'auto' });
+  assert.deepEqual(request('https://api.openai.com/v1', 'gpt-6.1-sol').reasoning, { summary: 'auto' });
+  assert.deepEqual(request('https://api.openai.com/v1', 'gpt-5.6-terra').reasoning, { summary: 'auto' });
   assert.equal(request('https://api.openai.com/v1', 'gpt-5-chat-latest').reasoning, undefined);
   assert.equal(request('https://api.openai.com/v1', 'o3-mini').reasoning, undefined);
   assert.equal(request('https://api.openai.com/v1', 'gpt-4.1').reasoning, undefined);
   assert.equal(request('https://custom.example/v1', 'gpt-5-mini').reasoning, undefined);
   assert.equal(request('http://127.0.0.1:8080/v1', 'qwen-8b').reasoning, undefined);
+});
+
+test('non-streaming OpenAI presets use JSON while the desktop still receives reply events', async () => {
+  const request = (baseUrl, model) => chatRequest({ protocol: 'openai-responses', baseUrl }, model,
+    [{ role: 'user', content: 'hello' }], { stream: true }).body;
+  for (const model of ['gpt-5.5-pro', 'gpt-5.5-pro-2026-04-23', 'o3-pro']) {
+    const body = request('https://api.openai.com/v1', model);
+    assert.equal(body.stream, false);
+    assert.equal(body.model, model);
+    assert.equal(body.store, false);
+    assert.deepEqual(body.input, [{ role: 'user', content: 'hello' }]);
+  }
+  assert.equal(request('https://api.openai.com/v1', 'gpt-5.4-pro').stream, true);
+  assert.equal(request('https://custom.example/v1', 'gpt-5.5-pro').stream, true);
+  assert.equal(request('https://api.openai.com.example/v1', 'o3-pro').stream, true);
+  const events = [];
+  const response = new Response(JSON.stringify({ status: 'completed', output: [
+    { type: 'reasoning', summary: [{ type: 'summary_text', text: 'summary' }] },
+    { type: 'message', content: [{ type: 'output_text', text: 'hello back' }] }
+  ] }), { headers: { 'Content-Type': 'application/json' } });
+  assert.deepEqual(await readModelStream(response, 'openai-responses', event => events.push(event), () => {}),
+    { content: 'hello back', reasoning: 'summary' });
+  assert.deepEqual(events.map(event => event.type), ['reasoning_delta', 'text_delta']);
 });
 
 test('streaming and full replies share ordering; cancelling a queued stream does not send it', async t => {
@@ -288,13 +331,13 @@ test('streaming and full replies share ordering; cancelling a queued stream does
   const skipped = f.modelRuntime.replyStream({ ...f.input, requestId: randomUUID(), message: '不发送' }, () => {}, cancel.signal);
   cancel.abort();
   await assert.rejects(Promise.race([skipped, delay(500).then(() => { throw new Error('cancel waited for queue'); })]), /已停止/);
-  const last = f.modelRuntime.reply({ ...f.input, message: '后续消息' });
+  const last = f.modelRuntime.reply({ ...f.input, requestId: randomUUID(), message: '后续消息' });
   assert.equal(f.seen.length, 1);
   release.resolve();
   await first; await last;
   assert.equal(f.seen.length, 2);
   assert.deepEqual(f.seen[1].body.messages.map(x => x.content), ['你好', '回答1', '后续消息']);
-  assert.equal((await sessions(f.dataHome))[0].length, 4);
+  assert.equal((await completedSessions(f.modelRuntime))[0].length, 4);
 });
 
 test('SSE decoder accepts multiline data, lone CR and comments', async () => {

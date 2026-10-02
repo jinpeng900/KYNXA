@@ -5,7 +5,6 @@ namespace KYNXA_Desktop.Services;
 public sealed record ModelChoice(string ProviderId, string ProviderName, string ModelId)
 {
     public string Name => ModelCatalog.Describe(ModelId).Name;
-    public string Description => ModelCatalog.Describe(ModelId).Description;
     public string Label => $"{Name} · {ProviderName}";
     public override string ToString() => Label;
 }

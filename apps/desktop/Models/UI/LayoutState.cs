@@ -9,6 +9,8 @@ public sealed class LayoutState
     public int LayoutVersion { get; set; } = CurrentVersion;
     public double SidebarWidth { get; set; } = ShellLayoutMetrics.SidebarDefault;
     public bool SidebarCollapsed { get; set; }
+    public bool WorkRecentExpanded { get; set; }
+    public List<Guid> RecentWorkChatIds { get; set; } = [];
     public double TopWorkspaceHeight { get; set; } = ShellLayoutMetrics.TopDefault;
     public bool PreviewVisible { get; set; } = true;
     // Zero keeps the right panel proportional until the user resizes it.

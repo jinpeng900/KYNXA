@@ -9,8 +9,58 @@ public static class ModelGatewayService
 {
     private static readonly SemaphoreSlim StartupLock = new(1, 1);
     private static readonly HttpClient Probe = new() { Timeout = TimeSpan.FromSeconds(1) };
+    public static string? LegacyDesktopDirectory { get; set; }
     public static Uri Address => new(Environment.GetEnvironmentVariable("KYNXA_MODEL_API_URL")
         ?? "http://127.0.0.1:5218");
+
+    /// <summary>Validate and prepare a migration copy before its pointer becomes active.</summary>
+    public static async Task InitializeStorageAsync(string target, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Path.IsPathFullyQualified(target)) throw new InvalidOperationException("数据目录必须使用绝对路径。");
+        string script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "initialize-storage.mjs");
+        if (!File.Exists(script)) throw new InvalidOperationException("缺少存储初始化文件，请重新构建或安装 KYNXA。");
+        var start = new ProcessStartInfo(FindNode())
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(script)!,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.ArgumentList.Add(script);
+        start.ArgumentList.Add(Path.GetFullPath(target));
+        try
+        {
+            using var process = Process.Start(start) ?? throw new InvalidOperationException("无法启动存储初始化程序。");
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromMinutes(2));
+            Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
+            try
+            {
+                await process.WaitForExitAsync(deadline.Token);
+                await Task.WhenAll(output, error).WaitAsync(deadline.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // This short-lived helper belongs to this migration. Never stop the shared gateway.
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { }
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new InvalidOperationException("存储初始化超时，原存储位置未改变。");
+            }
+            if (process.ExitCode != 0)
+            {
+                string detail = error.Result.Trim();
+                if (detail.Length > 1500) detail = detail[..1500];
+                throw new InvalidOperationException("存储初始化失败，原存储位置未改变。" + (detail.Length == 0 ? "" : "\n" + detail));
+            }
+        }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            throw new InvalidOperationException("无法启动存储初始化程序，请安装 Node.js 22.19 或更新版本。", error);
+        }
+    }
 
     public static async Task EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
@@ -30,6 +80,8 @@ public static class ModelGatewayService
             };
             start.ArgumentList.Add(script);
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
+            if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
+                start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;
             using var process = Process.Start(start)
                 ?? throw new InvalidOperationException("无法启动模型网关。");
             var deadline = Stopwatch.StartNew();
@@ -57,9 +109,15 @@ public static class ModelGatewayService
             using var response = await Probe.GetAsync(new Uri(address, "/health"), cancellationToken);
             if (!response.IsSuccessStatusCode) return false;
             using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken);
-            return body?.RootElement.TryGetProperty("service", out var service) == true
+            bool ready = body?.RootElement.TryGetProperty("service", out var service) == true
                 && service.GetString() == "kynxa-model-gateway"
                 && body.RootElement.TryGetProperty("status", out var status) && status.GetString() == "ok";
+            if (ready && (!body!.RootElement.TryGetProperty("conversationProtocol", out var protocol) ||
+                !protocol.TryGetInt32(out int version) || version < 1 ||
+                !body.RootElement.TryGetProperty("dataLayoutVersion", out var layout) ||
+                !layout.TryGetInt32(out int layoutVersion) || layoutVersion < 1))
+                throw new InvalidOperationException("正在运行的旧网关不支持当前数据存储结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。");
+            return ready;
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)
         {

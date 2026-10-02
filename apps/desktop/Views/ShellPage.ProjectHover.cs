@@ -25,7 +25,15 @@ public sealed partial class ShellPage
 
     private bool ContainsKeyboardFocus(DependencyObject parent)
     {
-        var child = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        if (_projectViewClosed || parent is not FrameworkElement { IsLoaded: true, XamlRoot: { Content: not null } root })
+            return false;
+        DependencyObject? child;
+        try { child = FocusManager.GetFocusedElement(root) as DependencyObject; }
+        catch (ArgumentException)
+        {
+            // PointerExited/LostFocus can arrive while XAML detaches this root.
+            return false;
+        }
         if (child is Control control && control.FocusState != FocusState.Keyboard) return false;
         while (child is not null)
         {
@@ -37,7 +45,7 @@ public sealed partial class ShellPage
 
     private void UpdateProjectRowActions(Grid row)
     {
-        if (row.Tag is not (ProjectTreeEntry or RecentConversation)) return;
+        if (_projectViewClosed || !row.IsLoaded || row.Tag is not (ProjectTreeEntry or RecentConversation)) return;
         bool show = _hoveredProjectRows.Contains(row) || row == _projectMenuRow || ContainsKeyboardFocus(row);
         if (row.FindName("ProjectRowActions") is StackPanel actions)
         {
@@ -50,7 +58,7 @@ public sealed partial class ShellPage
 
     private void ProjectRow_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is Grid row) { _hoveredProjectRows.Add(row); UpdateProjectRowActions(row); }
+        if (!_projectViewClosed && sender is Grid { IsLoaded: true } row) { _hoveredProjectRows.Add(row); UpdateProjectRowActions(row); }
     }
 
     private void ProjectRow_PointerExited(object sender, PointerRoutedEventArgs e)
@@ -68,8 +76,16 @@ public sealed partial class ShellPage
         if (sender is Grid row) DispatcherQueue.TryEnqueue(() => UpdateProjectRowActions(row));
     }
 
+    private void ProjectRow_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Grid row) return;
+        _hoveredProjectRows.Remove(row);
+        if (_projectMenuRow == row) _projectMenuRow = null;
+    }
+
     private void UpdateProjectHeaderActions()
     {
+        if (_projectViewClosed || !ProjectsHeader.IsLoaded) return;
         bool show = _projectHeaderHovered || _projectHeaderMenuOpen || ContainsKeyboardFocus(ProjectsHeader);
         AddProjectButton.Opacity = show ? 1 : 0;
         AddProjectButton.IsHitTestVisible = show;

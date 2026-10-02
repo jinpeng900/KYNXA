@@ -6,6 +6,7 @@ import { protocols } from './protocols.mjs';
 
 const providerPattern = /^[a-z][a-z0-9-]{1,39}$/;
 const modelPattern = /^[^\s\x00-\x1f]{1,160}$/;
+export const MAX_CONNECTION_MODELS = 10000;
 
 export function isLocalEndpoint(url) {
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -43,8 +44,8 @@ export function validateConnection(input, { requireModels = true } = {}) {
     throw new Error('Base URL 只能是 HTTP(S) 地址，不能包含账号、查询参数或片段。');
   if (url.protocol !== 'https:' && !isLocalEndpoint(url))
     throw new Error('公网连接必须使用 HTTPS；本机或局域网 IP 可使用 HTTP。');
-  if ((requireModels && !models.length) || models.length > 100 || models.some(model => !modelPattern.test(model)))
-    throw new Error('至少填写一个有效 Model ID，最多 100 个。');
+  if ((requireModels && !models.length) || models.length > MAX_CONNECTION_MODELS || models.some(model => !modelPattern.test(model)))
+    throw new Error(`至少填写一个有效 Model ID，最多 ${MAX_CONNECTION_MODELS} 个。`);
   if (apiKey !== undefined && (apiKey.length > 8192 || /[\r\n]/.test(apiKey)))
     throw new Error('API Key 格式无效。');
   return { providerId, displayName, baseUrl, apiKey, models, protocol };
