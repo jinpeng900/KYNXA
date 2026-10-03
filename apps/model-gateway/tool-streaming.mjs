@@ -1,4 +1,4 @@
-import { StreamFailure, readSse, textParts } from './streaming.mjs';
+import { StreamFailure, readSse, textParts, finalParts, checkFinish } from './streaming.mjs';
 import { decodeToolTurn } from './tool-protocols.mjs';
 
 /** Decode complete tool arguments before dispatch. A dropped stream never executes a call. */
@@ -12,7 +12,15 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
     emit({ type, delta });
   };
   const finish = result => {
-    const turn = decodeToolTurn(protocol, result, catalog);
+    let turn;
+    try { turn = decodeToolTurn(protocol, result, catalog); }
+    catch (error) {
+      // Local servers may ignore stream:true. Keep their returned draft without
+      // treating incomplete tool arguments as an executable call.
+      const parts = finalParts(protocol, result);
+      emit({ type: 'content_snapshot', content: parts.content || content, reasoning: parts.reasoning || reasoning });
+      throw error;
+    }
     if (turn.content.startsWith(content)) send('text_delta', turn.content.slice(content.length));
     // Final snapshots may revise a streamed draft. The completed event reconciles the UI.
     if (turn.reasoning.startsWith(reasoning)) send('reasoning_delta', turn.reasoning.slice(reasoning.length));
@@ -41,8 +49,10 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
       if (type === 'response.output_text.delta') send('text_delta', item.delta);
       if (['response.reasoning_summary_text.delta', 'response.reasoning_text.delta'].includes(type)) send('reasoning_delta', item.delta);
       if (type === 'response.completed') return finish(item.response ?? item);
-      if (['response.incomplete', 'response.failed', 'response.cancelled'].includes(type))
+      if (['response.incomplete', 'response.failed', 'response.cancelled'].includes(type)) {
+        if (item.response) return finish({ ...item.response, status: type.slice('response.'.length) });
         throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
+      }
     } else if (protocol === 'anthropic-messages') {
       if (type === 'content_block_start') {
         if (!Number.isSafeInteger(item.index) || item.index < 0 || item.index > 32 || blocks.has(item.index))
@@ -75,6 +85,7 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
       if (type === 'message_delta') stopReason = item.delta?.stop_reason;
       if (type === 'message_stop') {
         if (!stopReason) throw new StreamFailure('模型工具流缺少结束状态。');
+        if (stopReason !== 'tool_use') checkFinish(stopReason);
         const raw = [...blocks.entries()].sort((a,b) => a[0]-b[0]).map(([, block]) => {
           if (block.type !== 'tool_use') return block;
           const { partialInput, ...rest } = block;

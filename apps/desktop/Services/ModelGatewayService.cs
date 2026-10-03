@@ -119,12 +119,14 @@ public static class ModelGatewayService
                 !body.RootElement.TryGetProperty("memoryProtocol", out var memory) ||
                 !memory.TryGetInt32(out int memoryVersion) || memoryVersion < 1 ||
                 !body.RootElement.TryGetProperty("contextProtocol", out var context) ||
-                !context.TryGetInt32(out int contextVersion) || contextVersion < 1 ||
+                !context.TryGetInt32(out int contextVersion) || contextVersion < 3 ||
                 !body.RootElement.TryGetProperty("agentProtocol", out var agent) ||
-                !agent.TryGetInt32(out int agentVersion) || agentVersion < 1 ||
+                !agent.TryGetInt32(out int agentVersion) || agentVersion < 5 ||
+                !body.RootElement.TryGetProperty("extensionStorageProtocol", out var extensions) ||
+                !extensions.TryGetInt32(out int extensionVersion) || extensionVersion < 1 ||
                 !body.RootElement.TryGetProperty("toolStreamProtocol", out var toolStream) ||
-                !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 1))
-                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天记忆与上下文结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
+                !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 3))
+                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
             return ready;
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)

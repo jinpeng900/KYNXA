@@ -58,6 +58,57 @@ public static class ModelPresets
         foreach (var preset in All) preset.RefreshDisplayName();
     }
 
+    // Context-only UI defaults mirror the verified gateway capability snapshot.
+    // Enforcement and independent input/output ceilings belong to model-capabilities.mjs.
+    private static readonly IReadOnlyDictionary<string, Dictionary<string, int>> OfficialContextWindows = BuildContextWindows();
+
+    private static IReadOnlyDictionary<string, Dictionary<string, int>> BuildContextWindows()
+    {
+        var hosts = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        void Add(string host, int window, params string[] models)
+        {
+            if (!hosts.TryGetValue(host, out var entries)) hosts[host] = entries = new(StringComparer.Ordinal);
+            foreach (string model in models) entries[model] = window;
+        }
+        Add("api.deepseek.com", 1_048_576, "deepseek-flash", "deepseek-v4-pro");
+        Add("api.moonshot.cn", 1_048_576, "kimi-k3");
+        Add("api.moonshot.cn", 262_144, "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6");
+        Add("api.anthropic.com", 1_000_000, "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+            "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+            "claude-opus-4-6", "claude-sonnet-4-6");
+        Add("api.anthropic.com", 200_000, "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+            "claude-opus-4-5", "claude-opus-4-5-20251101", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929");
+        Add("api.openai.com", 1_050_000, "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-2026-04-23",
+            "gpt-5.5-pro", "gpt-5.5-pro-2026-04-23", "gpt-5.4", "gpt-5.4-2026-03-05",
+            "gpt-5.4-pro", "gpt-5.4-pro-2026-03-05");
+        Add("api.openai.com", 400_000, "gpt-5.4-mini", "gpt-5.4-mini-2026-03-17", "gpt-5.4-nano",
+            "gpt-5.4-nano-2026-03-17", "gpt-5.3-codex", "gpt-5.2", "gpt-5.2-2025-12-11",
+            "gpt-5.2-pro", "gpt-5.2-pro-2025-12-11", "gpt-5.1", "gpt-5.1-2025-11-13", "gpt-5",
+            "gpt-5-2025-08-07", "gpt-5-mini", "gpt-5-mini-2025-08-07", "gpt-5-nano",
+            "gpt-5-nano-2025-08-07", "gpt-5-pro", "gpt-5-pro-2025-10-06", "chat-latest");
+        Add("api.openai.com", 200_000, "o3", "o3-2025-04-16", "o3-pro", "o3-pro-2025-06-10");
+        Add("api.openai.com", 1_047_576, "gpt-4.1", "gpt-4.1-2025-04-14", "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14");
+        Add("api.openai.com", 128_000, "gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-mini", "gpt-4o-mini-2024-07-18");
+        return hosts;
+    }
+
+    /// <summary>A new draft uses the smallest verified window among its selected models.</summary>
+    public static int DefaultContextWindowTokens(string baseUrl, IEnumerable<string> selectedModels)
+    {
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
+            !uri.IsDefaultPort || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0 ||
+            uri.AbsolutePath is not ("/" or "/v1" or "/v1/") || !OfficialContextWindows.TryGetValue(uri.Host, out var limits))
+            return ModelApiClient.DefaultContextWindowTokens;
+        int smallest = int.MaxValue;
+        foreach (string model in selectedModels)
+        {
+            if (!limits.TryGetValue(model, out int window)) return ModelApiClient.DefaultContextWindowTokens;
+            smallest = Math.Min(smallest, window);
+        }
+        return smallest == int.MaxValue ? ModelApiClient.DefaultContextWindowTokens : smallest;
+    }
+
     public static bool IsLocalEndpoint(Uri uri)
     {
         if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;

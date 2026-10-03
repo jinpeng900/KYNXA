@@ -239,7 +239,8 @@ test('skill discovery isolates corrupt files, limits model headers and returns v
   await writeFile(corrupt, 'invalid metadata original'); await writeFile(oversized, 'x'.repeat(300000));
   const skills = await f.service.listSkills(ctx); assert.equal(skills.length, 42); assert.equal(skills.filter(value => value.status === 'unavailable').length, 2);
   const prompt = await f.service.systemPrompt(ctx);
-  assert.equal((prompt.match(/Application skill [a-f0-9]{24}:/g) ?? []).length, 12); assert.ok(estimateTokens(prompt) < 2500);
+  assert.equal((prompt.match(/Application skill [a-f0-9]{24}:/g) ?? []).length, 12);
+  assert.ok(estimateTokens(prompt) < 2500, `Tool system prompt exceeds its budget: ${estimateTokens(prompt)}`);
   assert.doesNotMatch(prompt, /PRIVATE BODY/); assert.match(prompt, /Some application skills are unavailable/);
   const first = parsed(await f.run(ctx, 'skill.list', { limit: 128 })); assert.ok(first.skills.length < 42); assert.equal(first.hasMore, true);
   const next = parsed(await f.run(ctx, 'skill.list', { offset: first.nextOffset, limit: 128 })); assert.equal(next.hasMore, false);
@@ -294,7 +295,7 @@ test('Smart terminal uses verified AppContainer runner only, with no unsupported
 
 test('agent configuration has server revisions, restart persistence, concurrent conflicts and preserves unsupported data', async t => {
   const f = await toolFixture(t), initial = await f.service.getConfig();
-  assert.deepEqual(initial, { version: 1, revision: 0, mcpServers: [], skillDirectories: [] });
+  assert.deepEqual(initial, { version: 1, revision: 0, mcpServers: [], skillDirectories: [], disabledSkills: [] });
   await assert.rejects(stat(join(f.conversations.root, 'Agent', 'config.json')), { code: 'ENOENT' });
   const update = { version: 1, expectedRevision: 0, mcpServers: [{ id: 'test', name: 'Synthetic server', command: process.execPath, args: [], enabled: false }], skillDirectories: [] };
   const results = await Promise.allSettled([f.service.updateConfig(update), f.service.updateConfig(update)]);

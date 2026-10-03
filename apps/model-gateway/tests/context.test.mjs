@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildContext, completedTurns, estimateTokens, estimateMessageTokens, ContextError } from '../context.mjs';
 import { chatRequest } from '../protocols.mjs';
+import { DEFAULT_MAX_OUTPUT_TOKENS, resolveOutputBudget } from '../output-budget.mjs';
 
 const conversationId = '10000000-0000-4000-8000-000000000001';
 const otherChat = '10000000-0000-4000-8000-000000000002';
@@ -26,7 +27,8 @@ test('short history stays complete, current input is exact, default budget reser
   const result = build({ history, currentMessage: '  preserve spaces \n and source code  ' });
   assert.deepEqual(result.messages.map(item => item.content), ['问题 1', '答案 1', '  preserve spaces \n and source code  ']);
   assert.equal(result.system, '');
-  assert.equal(result.maxOutputTokens, 2048);
+  assert.equal(result.maxOutputTokens, resolveOutputBudget({ contextWindowTokens: 8192 }).maxOutputTokens);
+  assert.equal(result.metrics.requestedOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
   assert.equal(result.metrics.contextWindowTokens, 8192);
   assert.equal(result.metrics.includedTurnCount, 1);
   assert.equal(result.metrics.omittedTurnCount, 0);
@@ -87,11 +89,11 @@ test('long history fits budget with intact recent turns and a bounded extractive
   assert.ok(result.metrics.includedTurnCount > 0);
   assert.ok(result.metrics.omittedTurnCount > 0);
   assert.ok(result.metrics.summaryUsed);
-  assert.equal(result.summaryUpdate.schemaVersion, 1);
-  assert.equal(result.summaryUpdate.algorithm, 'extractive-v1');
+  assert.equal(result.summaryUpdate.schemaVersion, 2);
+  assert.equal(result.summaryUpdate.algorithm, 'extractive-v2');
   assert.equal(result.summaryUpdate.coveredTurnCount, result.metrics.omittedTurnCount);
   assert.equal(result.summaryUpdate.coveredThroughAssistantId, `assistant-${result.metrics.omittedTurnCount - 1}`);
-  assert.ok(estimateTokens(result.summaryUpdate.content) < 768);
+  assert.ok(estimateTokens(result.summaryUpdate.content) <= result.summaryUpdate.excerptBudgetTokens);
   assert.match(result.summaryUpdate.content, /不是完整总结/);
   assert.doesNotMatch(result.summaryUpdate.content, /private reasoning/);
   assert.equal(result.messages.at(-2).content, history.at(-1).Content);
@@ -111,10 +113,11 @@ test('one-million-token window keeps a large conversation complete while 8K requ
   assert.ok(small.messages.length < history.length + 1);
   const large = build({ history, contextWindowTokens: 1000000 });
   assert.equal(large.metrics.contextWindowTokens, 1000000);
-  assert.equal(large.metrics.outputReserveTokens, 2048);
-  assert.equal(large.maxOutputTokens, 2048);
-  assert.equal(large.metrics.safetyMarginTokens, 100000);
-  assert.equal(large.metrics.inputBudgetTokens, 897952);
+  const largeBudget = resolveOutputBudget({ contextWindowTokens: 1000000 });
+  assert.equal(large.metrics.outputReserveTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+  assert.equal(large.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+  assert.equal(large.metrics.safetyMarginTokens, largeBudget.safetyMarginTokens);
+  assert.equal(large.metrics.inputBudgetTokens, largeBudget.inputBudgetTokens);
   assert.ok(large.metrics.estimatedInputTokens > 100000);
   assert.ok(large.metrics.estimatedInputTokens <= large.metrics.inputBudgetTokens);
   assert.equal(large.metrics.includedTurnCount, 250);
@@ -195,9 +198,9 @@ test('a long confirmed memory uses clearly marked source excerpts instead of dis
   assert.equal(result.metrics.warnings[0].code, 'MEMORY_EXCERPTED');
   assert.ok(result.metrics.estimatedInputTokens <= result.metrics.inputBudgetTokens);
   assert.deepEqual(memoryEntries, original);
-  const larger = build({ projectId, memoryEntries, contextWindowTokens: 32768 });
+  const larger = build({ projectId, memoryEntries, contextWindowTokens: 65536 });
   assert.deepEqual(larger.metrics.memoryTruncatedIds, []);
-  assert.deepEqual(larger.metrics.warnings, []);
+  assert.deepEqual(larger.metrics.warnings.map(warning => warning.code), ['OUTPUT_BUDGET_REDUCED']);
   assert.match(larger.system, /这是工作约定的详细背景与规则。/);
 });
 

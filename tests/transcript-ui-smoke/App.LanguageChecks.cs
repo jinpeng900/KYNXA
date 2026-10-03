@@ -18,7 +18,7 @@ public partial class App
             cached.Message.Error = "CACHED_PROVIDER_ERROR 原始错误";
             cached.SetRetryAllowed(true);
             _transcript.ShowConversation(cachedChat, [cached]);
-            await WaitAsync("!!(document.querySelector('.message-body')?.textContent.includes('CACHED_LANGUAGE_BODY') && document.querySelector('.reasoning summary')?.textContent === '思考过程 · 4 秒')", "cached language fixture renders in Chinese");
+            await WaitAsync("!!(document.querySelector('.message-body')?.textContent.includes('CACHED_LANGUAGE_BODY') && document.querySelector('.message-status')?.textContent.includes('已停止生成'))", "cached language fixture renders in Chinese");
             await EvalAsync<bool>("(() => { window.__languageCached = document.querySelector('#messages > article'); return true; })()");
 
             var chat = Guid.NewGuid();
@@ -40,8 +40,7 @@ public partial class App
             };
             string originalContent = stopped.Message.Content, originalReasoning = stopped.Message.Reasoning;
             _transcript.ShowConversation(chat, rows);
-            await WaitAsync("!!(document.querySelectorAll('#messages > article').length === 4 && document.querySelectorAll('.katex').length === 1 && [...document.querySelectorAll('.reasoning summary')].some(node => node.textContent === '正在思考…'))", "live language fixture has body, math, stopped, thinking and waiting states");
-            await EvalAsync<bool>("__transcriptSmoke.openReasoning(true)");
+            await WaitAsync("!!(document.querySelectorAll('#messages > article').length === 4 && document.querySelectorAll('.katex').length === 1 && !document.querySelector('.reasoning'))", "live language fixture has body, math, stopped, thinking and waiting states");
             await EvalAsync<bool>("__transcriptSmoke.scrollUp()");
             await Task.Delay(150);
             await EvalAsync<bool>("""
@@ -72,34 +71,34 @@ public partial class App
             await Task.Delay(100);
             Check(await EvalAsync<bool>("document.title === 'Conversation' && document.getElementById('messages').getAttribute('aria-label') === 'Chat history'"), "document title and transcript accessibility label change immediately");
             Check(await EvalAsync<bool>("[...document.querySelectorAll('.copy-message')].every(button => button.getAttribute('aria-label') === 'Copy entire message') && [...document.querySelectorAll('.retry')].every(button => button.textContent === 'Retry')"), "copy and retry controls change on existing messages");
-            Check(await EvalAsync<bool>("[...document.querySelectorAll('.reasoning summary')].some(node => node.textContent === 'Reasoning · 3 s') && [...document.querySelectorAll('.reasoning summary')].some(node => node.textContent === 'Thinking…')"), "finished and active reasoning titles use the new language");
+            Check(await EvalAsync<bool>("!document.querySelector('.reasoning') && !document.getElementById('messages').textContent.includes('ACTIVE_REASONING')"), "hidden reasoning source does not become repeated thinking cards");
             Check(await EvalAsync<bool>("[...document.querySelectorAll('.message-status')].some(node => node.textContent === 'Generation stopped · PROVIDER_ERROR 服务端原始错误') && [...document.querySelectorAll('.message-status')].some(node => node.textContent === 'Replying…') && [...document.querySelectorAll('.streaming-dot')].every(node => node.getAttribute('aria-label') === 'Generating')"), "status chrome changes while provider error text is preserved");
             Check(stopped.ReasoningTitle == "Reasoning · 3 s" && stopped.ErrorText == "Generation stopped · PROVIDER_ERROR 服务端原始错误", "view model UI getters use the current language");
             Check(stopped.Message.Content == originalContent && stopped.Message.Reasoning == originalReasoning, "language switching does not modify model content");
             Check(await EvalAsync<bool>("window.__languageProbe.renders === 0 && window.__languageProbe.document === document"), "language switch sends no transcript render and keeps the document");
             await CheckLanguageBodyPreservationAsync();
-            Check(await EvalAsync<bool>("!window.__languageCached.isConnected && window.__languageCached.querySelector('.reasoning summary').textContent === 'Reasoning · 4 s' && window.__languageCached.querySelector('.message-status').textContent === 'Generation stopped · CACHED_PROVIDER_ERROR 原始错误' && window.__languageCached.querySelector('.retry').textContent === 'Retry'"), "detached cached conversation controls and reasoning titles also switch");
+            Check(await EvalAsync<bool>("!window.__languageCached.isConnected && !window.__languageCached.querySelector('.reasoning') && window.__languageCached.querySelector('.message-status').textContent === 'Generation stopped · CACHED_PROVIDER_ERROR 原始错误' && window.__languageCached.querySelector('.retry').textContent === 'Retry'"), "detached cached conversation controls switch without process cards");
 
             // A queued stream update must remain deferred while UI labels switch.
-            thinking.Message.Reasoning += " PENDING_LANGUAGE_UPDATE";
+            thinking.Message.Content += " PENDING_LANGUAGE_UPDATE";
             thinking.Refresh(isThinking: true);
             await WaitAsync("!!(window.transcriptState().pending)", "selected transcript queues a model update before the next language switch");
             int rendersBefore = await EvalAsync<int>("window.__languageProbe.renders");
             UiText.Initialize("zh-CN");
-            await WaitAsync("!!(document.documentElement.lang === 'zh-CN' && [...document.querySelectorAll('.reasoning summary')].some(node => node.textContent === '思考过程 · 3 秒'))", "existing titles switch back to Chinese immediately");
+            await WaitAsync("!!(document.documentElement.lang === 'zh-CN' && [...document.querySelectorAll('.retry')].every(node=>node.textContent === '重试'))", "existing titles switch back to Chinese immediately");
             await Task.Delay(100);
             Check(await EvalAsync<int>("window.__languageProbe.renders") == rendersBefore, "switching back does not enqueue another transcript render");
             Check(await EvalAsync<bool>("window.transcriptState().pending && !document.getElementById('messages').textContent.includes('PENDING_LANGUAGE_UPDATE')"), "language switching preserves the deferred content update");
             await CheckLanguageBodyPreservationAsync();
-            Check(await EvalAsync<bool>("[...document.querySelectorAll('.retry')].every(node => node.textContent === '重试') && window.__languageCached.querySelector('.reasoning summary').textContent === '思考过程 · 4 秒'"), "active and cached UI return to Chinese");
+            Check(await EvalAsync<bool>("[...document.querySelectorAll('.retry')].every(node => node.textContent === '重试') && !window.__languageCached.querySelector('.reasoning')"), "active and cached UI return to Chinese");
 
             await StopLanguageProbeAsync();
             _transcript.ClearSelection();
             await WaitAsync("!!(!window.transcriptState().pending && document.getElementById('messages').textContent.includes('PENDING_LANGUAGE_UPDATE'))", "clearing selection applies the pending model content after localization");
-            Check(await EvalAsync<bool>("[...document.querySelectorAll('.reasoning summary')].some(node => node.textContent === '正在思考…')"), "deferred snapshots format UI titles in the current language");
+            Check(await EvalAsync<bool>("!document.querySelector('.reasoning') && document.getElementById('messages').textContent.includes('PENDING_LANGUAGE_UPDATE')"), "deferred snapshots format UI titles in the current language");
             _transcript.ShowConversation(cachedChat, [cached]);
             await WaitAsync("!!(document.querySelector('.message-body')?.textContent.includes('CACHED_LANGUAGE_BODY'))", "cached language fixture reopens");
-            Check(await EvalAsync<bool>("window.__languageCached === document.querySelector('#messages > article') && window.__languageCached.querySelector('.reasoning summary').textContent === '思考过程 · 4 秒'"), "cached conversation reuses its DOM with translated metadata");
+            Check(await EvalAsync<bool>("window.__languageCached === document.querySelector('#messages > article') && !window.__languageCached.querySelector('.reasoning')"), "cached conversation reuses its DOM with translated metadata");
             _metrics["liveLanguageSwitching"] = "passed: active/cached labels, no body mutations or render commands, selection/scroll, deferred updates";
         }
         finally
@@ -115,7 +114,7 @@ public partial class App
         Check(await EvalAsync<bool>("window.__languageProbe.mutations === 0 && window.__languageProbe.roots.every((root, index) => root.innerHTML === window.__languageProbe.html[index]) && window.__languageProbe.nodes.every(node => node.isConnected)"), "language change preserves message, code, reasoning and formula DOM");
         Check(await EvalAsync<bool>("(() => { const saved = window.__languageProbe, selection = getSelection(); return selection.anchorNode === saved.anchorNode && selection.anchorOffset === saved.anchorOffset && selection.focusNode === saved.focusNode && selection.focusOffset === saved.focusOffset && window.transcriptSelectionText() === saved.copy; })()"), "language change preserves cross-message selection endpoints and exact copied text");
         Check(await EvalAsync<bool>("Math.abs(scrollY - window.__languageProbe.top) < 2 && Math.abs(scrollX - window.__languageProbe.left) < 2"), "language change preserves the manual scroll position");
-        Check(await EvalAsync<bool>("document.querySelector('.reasoning:not([hidden])').open"), "language change preserves expanded reasoning");
+        Check(await EvalAsync<bool>("!document.querySelector('.reasoning')"), "language change does not resurrect removed thinking cards");
     }
 
     private Task<bool> StopLanguageProbeAsync() => EvalAsync<bool>("(() => { const saved = window.__languageProbe; if (saved) { saved.observer.disconnect(); window.chrome.webview.removeEventListener('message', saved.listener); delete window.__languageProbe; } return true; })()");

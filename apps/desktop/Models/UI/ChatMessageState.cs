@@ -16,7 +16,9 @@ public sealed class ChatMessageState
     public string Provider { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
+    public long DurationMs { get; set; }
     public List<ToolActivity> ToolActivities { get; set; } = [];
+    public List<AssistantSegment> AssistantSegments { get; set; } = [];
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
@@ -43,8 +45,11 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             Model = ReadString(value, "Model"),
             ToolActivities = value.TryGetProperty("ToolActivities", out var tools) || value.TryGetProperty("toolActivities", out tools)
                 ? tools.Deserialize<List<ToolActivity>>(ToolOptions) ?? [] : [],
+            AssistantSegments = value.TryGetProperty("AssistantSegments", out var segments) || value.TryGetProperty("assistantSegments", out segments)
+                ? ReadSegments(segments, status) : [],
             ReasoningDurationMs = value.TryGetProperty("ReasoningDurationMs", out var duration) &&
                 duration.TryGetInt64(out long milliseconds) ? Math.Max(0, milliseconds) : 0,
+            DurationMs = ReadDuration(value),
             CreatedAt = value.TryGetProperty("CreatedAt", out var createdAt) ? createdAt.GetDateTimeOffset() : DateTimeOffset.UtcNow
         };
     }
@@ -61,12 +66,35 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         writer.WriteString("Provider", value.Provider);
         writer.WriteString("Model", value.Model);
         writer.WriteNumber("ReasoningDurationMs", value.ReasoningDurationMs);
+        if (value.DurationMs is < 0 or > 9007199254740991) throw new JsonException("Invalid reply duration.");
+        writer.WriteNumber("DurationMs", value.DurationMs);
         writer.WritePropertyName("ToolActivities");
         JsonSerializer.Serialize(writer, value.ToolActivities, ToolOptions);
+        writer.WritePropertyName("AssistantSegments");
+        JsonSerializer.Serialize(writer, value.AssistantSegments, ToolOptions);
         writer.WriteString("CreatedAt", value.CreatedAt);
         writer.WriteEndObject();
     }
 
     private static string ReadString(JsonElement value, string name, string fallback = "") =>
         value.TryGetProperty(name, out var field) ? field.GetString() ?? fallback : fallback;
+
+    private static long ReadDuration(JsonElement value)
+    {
+        if (!value.TryGetProperty("DurationMs", out var duration) && !value.TryGetProperty("durationMs", out duration) || duration.ValueKind == JsonValueKind.Null)
+            return 0;
+        if (duration.ValueKind != JsonValueKind.Number || !duration.TryGetInt64(out long milliseconds) || milliseconds is < 0 or > 9007199254740991)
+            throw new JsonException("Invalid reply duration.");
+        return milliseconds;
+    }
+
+    private static List<AssistantSegment> ReadSegments(JsonElement value, string messageStatus)
+    {
+        var segments = value.Deserialize<List<AssistantSegment>>(ToolOptions) ?? [];
+        if (!AssistantSegmentRules.IsValidSequence(segments)) throw new JsonException("Invalid assistant segments.");
+        // A stopped process has no live stream even when its last durable round was still generating.
+        return messageStatus == "streaming"
+            ? segments.Select(segment => segment.Status == "streaming" ? segment with { Status = "interrupted" } : segment).ToList()
+            : segments;
+    }
 }

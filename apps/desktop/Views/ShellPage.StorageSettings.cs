@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -24,6 +25,9 @@ public sealed partial class ShellPage
             existing.Activate();
             return;
         }
+        Exception? extensionLocationError = null;
+        try { ExtensionPaths.Reload(); }
+        catch (Exception error) { extensionLocationError = error; }
         var window = new Window { Title = UiText.Get("KYNXA · 设置") };
         _storageSettingsWindow = window;
         var font = (FontFamily)Application.Current.Resources["KynxaUIFont"];
@@ -92,28 +96,17 @@ public sealed partial class ShellPage
         var section = LocalizedLabel("存储", 13);
         section.Opacity = 0.6;
         content.Children.Add(section);
-        var row = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 12, 14, 12), CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var label = LocalizedLabel("数据存储");
-        label.VerticalAlignment = VerticalAlignment.Center;
-        var current = Label(StoragePaths.DataRoot ?? StoragePaths.DesktopDirectory, 13);
-        current.TextWrapping = TextWrapping.NoWrap;
-        current.TextTrimming = TextTrimming.CharacterEllipsis;
-        current.VerticalAlignment = VerticalAlignment.Center;
-        current.Opacity = 0.7;
-        ToolTipService.SetToolTip(current, current.Text);
-        AutomationProperties.SetAutomationId(current, "StorageDirectoryPath");
-        var choose = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(10, 5, 10, 5), VerticalAlignment = VerticalAlignment.Center };
-        UiLocalization.Bind(choose, ContentControl.ContentProperty, "更改位置");
-        Grid.SetColumn(current, 1); Grid.SetColumn(choose, 2);
-        row.Children.Add(label); row.Children.Add(current); row.Children.Add(choose);
+        var row = new StorageLocationRow("数据存储", StoragePaths.DataRoot ?? StoragePaths.DesktopDirectory,
+            "StorageDirectoryPath", "StorageDirectoryChooseButton");
+        var choose = row.ChangeButton;
         content.Children.Add(row);
+        var extensionRow = new StorageLocationRow("工具与技能存储", ExtensionPaths.Root,
+            "ExtensionStorageDirectoryPath", "ExtensionStorageDirectoryChooseButton");
+        content.Children.Add(extensionRow);
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };
         var status = new InfoBar { IsOpen = false, IsClosable = false };
         content.Children.Add(progress); content.Children.Add(status);
+        var storageControls = new StorageSettingsControls(window, row, extensionRow, memoryButton, toolsButton, languagePicker, progress, status);
         var root = new Grid { RequestedTheme = ElementTheme.Light, Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -139,7 +132,8 @@ public sealed partial class ShellPage
             window.AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
         }
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
-        { status.Message = text; status.Severity = severity; status.IsOpen = true; }
+        { storageControls.Message(text, severity); }
+        if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);
         memoryButton.Click += (_, _) =>
         {
             if (_projectActionPending || _sendingPrompt)
@@ -163,8 +157,9 @@ public sealed partial class ShellPage
                 UiText.Initialize(selected);
             }
         };
-        choose.IsEnabled = !StoragePaths.EnvironmentControlled;
+        storageControls.SetBusy(false);
         if (StoragePaths.EnvironmentControlled) Message(UiText.Get("数据目录由启动环境变量指定，请移除 KYNXA_DATA_HOME / KYNXA_MODEL_HOME 后再通过设置修改。"), InfoBarSeverity.Warning);
+        else if (ExtensionPaths.EnvironmentControlled) Message(UiText.Get("工具与技能目录由启动环境变量指定，请移除 KYNXA_EXTENSION_HOME 后再通过设置修改。"), InfoBarSeverity.Warning);
         void PreventClose(Microsoft.UI.Windowing.AppWindow window, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
         { if (StoragePaths.IsMigrating) e.Cancel = true; }
         App.Window.AppWindow.Closing += PreventClose;
@@ -178,17 +173,18 @@ public sealed partial class ShellPage
             App.Window.AppWindow.Closing -= PreventClose;
             App.Window.Closed -= CloseSettings;
             UiText.LanguageChanged -= UpdateSettingsTitle;
+            storageControls.Close();
             _storageSettingsWindow = null;
         };
+        extensionRow.ChangeButton.Click += async (_, _) => await ChangeExtensionStorageAsync(storageControls);
         choose.Click += async (_, _) =>
         {
-            if (StoragePaths.IsMigrating) return;
-            choose.IsEnabled = false;
-            memoryButton.IsEnabled = false;
-            toolsButton.IsEnabled = false;
+            if (StoragePaths.IsMigrating || storageControls.IsBusy) return;
+            storageControls.SetBusy(true);
             FileStream? maintenance = null;
             bool acquired = false;
             bool moved = false;
+            bool migrationStarted = false;
             try
             {
                 if (StoragePaths.EnvironmentControlled) throw new InvalidOperationException(UiText.Get("启动环境变量正在指定数据目录。"));
@@ -223,6 +219,7 @@ public sealed partial class ShellPage
                 await _projectStore.SaveChatsAsync(_standaloneChats);
                 _layoutStateService.Save(_layout);
                 StoragePaths.IsMigrating = true;
+                migrationStarted = true;
                 languagePicker.IsEnabled = false;
                 IsEnabled = false;
                 progress.IsActive = true; progress.Visibility = Visibility.Visible;
@@ -248,8 +245,11 @@ public sealed partial class ShellPage
                 string sourceDesktop = StoragePaths.DesktopDirectory, sourceModels = health.ModelDataHome!;
                 var updates = new Progress<string>(text => Message(text));
                 var result = await Task.Run(() => StorageMigrationService.MoveAsync(sourceDesktop, sourceModels, destination, StoragePaths.PointerPath,
-                    updates, initializeTarget: ModelGatewayService.InitializeStorageAsync));
+                    updates, initializeTarget: ModelGatewayService.InitializeStorageAsync, migrateExtensions: ExtensionPaths.UsesLegacyRoot));
                 StoragePaths.Reload();
+                ExtensionPaths.LegacyRoot = result.DataRoot;
+                ExtensionPaths.Reload();
+                extensionRow.SetPath(ExtensionPaths.Root);
                 _projectStore.Dispose();
                 _projectStore = new ProjectStore(StoragePaths.DesktopDirectory);
                 moved = true;
@@ -257,21 +257,16 @@ public sealed partial class ShellPage
                 foreach (var project in _projects)
                     if (project.FolderPath is string oldPath && StorageMigrationService.IsWithin(oldPath, Path.Combine(sourceDesktop, "Projects")))
                         project.FolderPath = Path.Combine(StoragePaths.DesktopDirectory, Path.GetRelativePath(sourceDesktop, oldPath));
-                current.Text = result.DataRoot;
-                ToolTipService.SetToolTip(current, result.DataRoot);
+                row.SetPath(result.DataRoot);
                 Message(UiText.Get("存储位置已更新，原数据已保留。"), InfoBarSeverity.Success);
             }
             catch (Exception error) { Message(error.Message + UiText.Get(" 若目标目录已生成部分副本，请选择另一个空目录重试。"), InfoBarSeverity.Error); }
             finally
             {
                 maintenance?.Dispose();
-                if (acquired) { try { File.Delete(StoragePaths.MigrationLockPath); } catch (IOException) { } }
-                StoragePaths.IsMigrating = false;
-                IsEnabled = !moved;
-                choose.IsEnabled = !StoragePaths.EnvironmentControlled;
-                memoryButton.IsEnabled = true;
-                toolsButton.IsEnabled = true;
-                languagePicker.IsEnabled = true;
+                if (acquired) { try { File.Delete(StoragePaths.MigrationLockPath); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } }
+                if (migrationStarted) { StoragePaths.IsMigrating = false; IsEnabled = !moved; }
+                if (!moved) storageControls.SetBusy(false);
                 progress.IsActive = false; progress.Visibility = Visibility.Collapsed;
             }
             if (moved)
@@ -290,7 +285,7 @@ public sealed partial class ShellPage
                     UpdateConversationPresentation();
                 }
                 catch (Exception error) { Message(UiText.Get("位置已更新，但会话目录加载失败：") + error.Message, InfoBarSeverity.Error); }
-                finally { IsEnabled = true; }
+                finally { IsEnabled = true; storageControls.SetBusy(false); }
             }
         };
         window.Activate();

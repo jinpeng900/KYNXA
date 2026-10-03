@@ -25,6 +25,7 @@ internal static class Program
                     protocolVersion = 1, available = OperatingSystem.IsWindowsVersionAtLeast(6, 2),
                     sandbox = "appcontainer", commands = new[] { "node", "cmd" }, network = false,
                     workspaceCopy = true, failClosed = true, checksChildToken = true,
+                    skillExecution = new { manifestVersion = 1, readOnlyPackage = true, hashChecked = true },
                     limitations = new[] { "cmd is restricted compatibility: echo/type/redirection; DIR may be denied; use filesystem.list/search.", "node --test requires --test-isolation=none." }
                 }, JsonOptions));
                 return 0;
@@ -68,6 +69,7 @@ internal sealed record SandboxRequest
     public string[] ExcludedRoots { get; init; } = [];
     public int TimeoutMs { get; init; } = 30000;
     public bool TrustedManagedWorkspace { get; init; }
+    public SandboxSkill? Skill { get; init; }
 }
 
 internal sealed class SandboxException(string code, string message) : Exception(message)

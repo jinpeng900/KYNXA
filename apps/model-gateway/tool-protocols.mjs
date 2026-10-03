@@ -1,10 +1,36 @@
 import { createHash } from 'node:crypto';
 import { StreamFailure, finalParts, checkFinish } from './streaming.mjs';
+import { estimateMessageTokens, estimateTokens } from './context.mjs';
+
+function nativeValueTokens(value, field = '') {
+  if (typeof value === 'string') return estimateTokens(value);
+  if (value == null) return 1;
+  if (typeof value !== 'object') return estimateTokens(String(value));
+  // Native tool input objects represent business JSON. Function argument strings
+  // already contain that JSON source and were counted once in the string branch.
+  if (field === 'input' || field === 'arguments') return estimateTokens(JSON.stringify(value));
+  if (Array.isArray(value)) return 2 + value.reduce((sum, item) => sum + 1 + nativeValueTokens(item), 0);
+  return 2 + Object.entries(value).reduce((sum, [key, item]) =>
+    sum + estimateTokens(key) + 4 + nativeValueTokens(item, key), 0);
+}
+
+/** Match ordinary history accounting while retaining every native continuation field. */
+export function estimateToolMessageTokens(messages, system = '') {
+  return estimateMessageTokens([], system) + messages.reduce((sum, message) => {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return sum + 8 + nativeValueTokens(message);
+    let tokens = 8 + (Object.hasOwn(message, 'content') ? nativeValueTokens(message.content, 'content') : 0);
+    for (const [key, value] of Object.entries(message)) {
+      if (key !== 'role' && key !== 'content') tokens += estimateTokens(key) + 4 + nativeValueTokens(value, key);
+    }
+    return sum + tokens;
+  }, 0);
+}
 
 // Internal names identify policy-owned operations. Provider aliases only identify
 // declarations in this immutable request catalog; they never confer permission.
+export const MAX_MODEL_TOOLS = 96;
 export function wireCatalog(descriptors) {
-  if (!Array.isArray(descriptors) || descriptors.length > 96)
+  if (!Array.isArray(descriptors) || descriptors.length > MAX_MODEL_TOOLS)
     throw new StreamFailure('工具目录过大，请停用部分 MCP 服务后重试。');
   return descriptors.map(tool => ({ ...tool, wireName: 'k_' + tool.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 40)
     + '_' + createHash('sha256').update(tool.name).digest('hex').slice(0, 8) }));
@@ -54,6 +80,9 @@ export function decodeToolTurn(protocol, result, catalog) {
     continuation = [{ ...message, role: 'assistant' }];
     rawCalls = (message.tool_calls ?? []).map(x => ({ id: x.id, name: x.function?.name, arguments: x.function?.arguments }));
   }
+  // Check the stop status before parsing or dispatching any business arguments.
+  // A syntactically valid prefix is still unsafe when its generation was cut off.
+  if (!['tool_calls', 'tool_use'].includes(parts.finish)) checkFinish(parts.finish);
   if (rawCalls.length > 8) throw new StreamFailure('模型单次请求的工具数量超过上限。');
   const calls = rawCalls.map(call => decodeCall(call, catalog));
   if (new Set(calls.map(call => call.id)).size !== calls.length) throw new StreamFailure('模型重复了工具调用 ID。');
@@ -65,11 +94,12 @@ export function decodeToolTurn(protocol, result, catalog) {
   return { ...parts, calls, continuation };
 }
 
-export function appendToolResults(protocol, messages, turn, results) {
+export function appendToolResults(protocol, messages, turn, results, { onResult } = {}) {
+  const output = (entry, field, pair) => { onResult?.(entry, { ...pair, field }); return entry; };
   if (protocol === 'anthropic-messages') return [...messages, ...turn.continuation, { role: 'user', content:
-    results.map(({ call, result }) => ({ type: 'tool_result', tool_use_id: call.id, content: result.content, is_error: !!result.isError })) }];
+    results.map(pair => output({ type: 'tool_result', tool_use_id: pair.call.id, content: pair.result.content, is_error: !!pair.result.isError }, 'content', pair)) }];
   if (protocol === 'openai-responses') return [...messages, ...turn.continuation,
-    ...results.map(({ call, result }) => ({ type: 'function_call_output', call_id: call.id, output: result.content }))];
+    ...results.map(pair => output({ type: 'function_call_output', call_id: pair.call.id, output: pair.result.content }, 'output', pair))];
   return [...messages, ...turn.continuation,
-    ...results.map(({ call, result }) => ({ role: 'tool', tool_call_id: call.id, content: result.content }))];
+    ...results.map(pair => output({ role: 'tool', tool_call_id: pair.call.id, content: pair.result.content }, 'content', pair))];
 }

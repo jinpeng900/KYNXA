@@ -5,24 +5,36 @@ using KYNXA.Contracts;
 namespace KYNXA_Desktop.Services;
 
 public sealed record ModelProvider(string ProviderId, string DisplayName, string BaseUrl,
-    string[] Models, bool HasApiKey, string Protocol, int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens);
+    string[] Models, bool HasApiKey, string Protocol, int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens,
+    int MaxOutputTokens = ModelApiClient.DefaultMaxOutputTokens);
 public sealed record ModelListResponse(ModelProvider[] Providers);
 public sealed record ModelProbeResponse(bool Ok, int LatencyMs, string[] Models);
 public sealed record ModelSaveResponse(ModelProvider Provider);
 public sealed record ModelConnection(string ProviderId, string DisplayName, string BaseUrl,
     string[] Models, string? ApiKey = null, string Protocol = "openai-completions",
-    int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens);
+    int ContextWindowTokens = ModelApiClient.DefaultContextWindowTokens,
+    int MaxOutputTokens = ModelApiClient.DefaultMaxOutputTokens);
 
 public sealed class ModelApiClient : IDisposable
 {
     public const int DefaultContextWindowTokens = 8192;
     public const int MinimumContextWindowTokens = 2048;
     public const int MaximumContextWindowTokens = 2000000;
+    public const int DefaultMaxOutputTokens = 262144;
+    public const int MinimumMaxOutputTokens = 1024;
+    public const int MaximumMaxOutputTokens = 262144;
 
     public static int ValidateContextWindowTokens(int value)
     {
         if (value is < MinimumContextWindowTokens or > MaximumContextWindowTokens)
             throw new InvalidOperationException(UiText.Get("上下文窗口须为 2048–2000000 的整数（tokens）。"));
+        return value;
+    }
+
+    public static int ValidateMaxOutputTokens(int value)
+    {
+        if (value is < MinimumMaxOutputTokens or > MaximumMaxOutputTokens)
+            throw new InvalidOperationException(UiText.Get("最大输出须为 1024–262144 的整数（tokens）。"));
         return value;
     }
 
@@ -42,6 +54,7 @@ public sealed class ModelApiClient : IDisposable
     public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);
+        ValidateMaxOutputTokens(connection.MaxOutputTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         using var response = await _http.PostAsJsonAsync("/api/models", connection, cancellationToken);
         return (await ReadAsync<ModelSaveResponse>(response, cancellationToken)).Provider;
@@ -50,6 +63,7 @@ public sealed class ModelApiClient : IDisposable
     public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);
+        ValidateMaxOutputTokens(connection.MaxOutputTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         using var response = await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken);
         return await ReadAsync<ModelProbeResponse>(response, cancellationToken);
@@ -60,7 +74,8 @@ public sealed class ModelApiClient : IDisposable
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
         using var response = await _http.PostAsJsonAsync("/api/chat", request, cancellationToken);
         var reply = await ReadAsync<ChatReply>(response, cancellationToken);
-        if (reply.ConversationId != request.ConversationId || reply.Role != "assistant" || string.IsNullOrWhiteSpace(reply.Content))
+        if (reply.ConversationId != request.ConversationId || reply.Role != "assistant" || string.IsNullOrWhiteSpace(reply.Content) ||
+            !ChatDurationRules.IsValid(reply.DurationMs))
             throw new InvalidDataException(UiText.Get("模型接口返回了无效的回复。"));
         return reply;
     }

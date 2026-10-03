@@ -117,6 +117,139 @@ await using (var invalidSnapshot = new MemoryStream(System.Text.Encoding.UTF8.Ge
     }
     catch (InvalidDataException) { checks++; }
 }
+var reference = new ToolResultReference(Guid.Parse("a39f7d76-5239-4d02-b91e-b16af24b733b"), 40000, new string('a', 64));
+var resultCalls = new List<string>();
+using (var resultHttp = new HttpClient(new Handler((request, _) =>
+{
+    resultCalls.Add(request.RequestUri!.PathAndQuery);
+    object response = request.RequestUri.Query.Length == 0 ? new ToolResultResponse(JsonSerializer.SerializeToElement(new
+        { content = new[] { new { type = "resource_link", uri = "resource://fixture/report", mimeType = "text/plain" } } })) :
+        request.RequestUri.Query.Contains("offset=3") ? new ToolResultPage(reference.Id, "def", 6, 3, 6, false, reference) :
+        new ToolResultPage(reference.Id, "abc", 6, 0, 3, true, reference);
+    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) });
+})) { BaseAddress = http.BaseAddress })
+using (var results = new AgentApiClient(resultHttp))
+{
+    var first = await results.GetToolResultPageAsync(conversationId, reference, limit: 3);
+    var second = await results.GetToolResultPageAsync(conversationId, reference, first.NextOffset, limit: 3);
+    Check(first.Text + second.Text == "abcdef" && first.Truncated && !second.Truncated, "Explicit result pages must compose without truncation loss.");
+    Check(resultCalls[0] == $"/api/conversations/{conversationId:D}/tool-results/{reference.Id:D}?offset=0&limit=3" &&
+        resultCalls[1].EndsWith("?offset=3&limit=3"), "Result pages must retain conversation/reference identity and UTF16 offsets.");
+    var full = await results.GetToolResultAsync(conversationId, reference);
+    Check(full.Result.GetProperty("content")[0].GetProperty("uri").GetString() == "resource://fixture/report" &&
+        !resultCalls[^1].Contains('?'), "Media/resource details require an explicit full result read.");
+    try { await results.GetToolResultPageAsync(conversationId, reference, limit: 16001); throw new InvalidOperationException("Oversized page accepted."); }
+    catch (ArgumentOutOfRangeException) { checks++; }
+}
+foreach (var invalid in new[] { new ToolResultPage(Guid.NewGuid(), "abc", 6, 0, 3, true, reference),
+    new ToolResultPage(reference.Id, "abc", 6, 0, 5, true, reference),
+    new ToolResultPage(reference.Id, "abc", 6, 0, 3, false, reference),
+    new ToolResultPage(reference.Id, "abc", 6, 0, 3, true, reference with { Sha256 = new string('b', 64) }) })
+{
+    using var invalidHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = JsonContent.Create(invalid) }))) { BaseAddress = http.BaseAddress };
+    using var results = new AgentApiClient(invalidHttp);
+    try { await results.GetToolResultPageAsync(conversationId, reference); throw new InvalidOperationException("Invalid result page accepted."); }
+    catch (InvalidDataException) { checks++; }
+}
+using (var cancelSource = new CancellationTokenSource())
+using (var slowHttp = new HttpClient(new Handler(async (_, token) => { await Task.Delay(Timeout.Infinite, token); throw new InvalidOperationException(); })) { BaseAddress = http.BaseAddress })
+using (var results = new AgentApiClient(slowHttp))
+{
+    var pending = results.GetToolResultPageAsync(conversationId, reference, cancellationToken: cancelSource.Token);
+    cancelSource.Cancel();
+    try { await pending; throw new InvalidOperationException("Result cancellation missing."); }
+    catch (OperationCanceledException) { checks++; }
+}
+await client.SaveConfigAsync(new(1, 7, [config.McpServers[0] with { DisabledTools = ["raw.tool-name"] }], config.SkillDirectories));
+Check(calls[^1].Body!.Value.GetProperty("mcpServers")[0].GetProperty("disabledTools")[0].GetString() == "raw.tool-name",
+    "Individual MCP tool settings must use the raw name and scope revision.");
+using (var emojiHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    { Content = JsonContent.Create(new ToolResultPage(reference.Id, "😀", 2, 0, 2, false, reference)) }))) { BaseAddress = http.BaseAddress })
+using (var emoji = new AgentApiClient(emojiHttp))
+{
+    Check((await emoji.GetToolResultPageAsync(conversationId, reference, limit: 1)).Text == "😀",
+        "A one-character page may retain one complete UTF16 surrogate pair.");
+    Check((await emoji.GetToolResultPageAsync(conversationId, reference, offset: 1, limit: 2)).Offset == 0,
+        "Gateway offset alignment must preserve a complete Unicode character.");
+}
+var wrapped = JsonSerializer.SerializeToElement(new { arguments = new { path = "business.txt" }, policy = new { reason = "External trusted program" } });
+var archived = new ChatMessageState { Role = "assistant", ToolActivities = [activity with { Status = "unknown", Arguments = wrapped,
+    ResultRef = reference, Code = "MCP_REQUEST_CANCELLED" }] };
+var loaded = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(archived))!.ToolActivities.Single();
+Check(loaded.ResultRef == reference && loaded.Code == "MCP_REQUEST_CANCELLED" && loaded.Status == "unknown" &&
+    loaded.Arguments!.Value.GetRawText() == wrapped.GetRawText(), "Result references, unknown outcome and the complete approval wrapper must survive history.");
+var transportCalls = new List<(string Method, string Path, JsonElement? Body)>();
+var stdio = new McpServerConfig("stdio-fixture", "Local fixture", "fixture-program", [], false, Cwd: "C:\\FixtureWork",
+    EnvRefs: new() { ["THIRD_PARTY_TOKEN"] = "FIXTURE_TOKEN" }, StartupTimeoutMs: 60000);
+var remote = new McpServerConfig("http-fixture", "Remote fixture", "", [], false, Transport: "streamable-http",
+    Url: "https://mcp.test.invalid/service", HeaderEnv: new() { ["Authorization"] = "FIXTURE_AUTHORIZATION" },
+    Auth: new("oauth-client-credentials", ClientId: "fixture-client", ClientSecretEnv: "FIXTURE_CLIENT_SECRET", Issuer: "https://issuer.test.invalid"));
+var richer = new AgentConfig(1, 10, [stdio, remote], [], ["disabled-skill"]);
+var diagnostic = new McpConnectionDiagnostic(remote.Id, remote.Transport, "auth-required", "MCP_AUTH_REQUIRED", 0, new(true, true));
+var skillMetadata = new AgentSkill("imported-skill", "Imported fixture", "Literal package", "C:\\FixturePackage\\SKILL.md", false,
+    false, [new("SKILL_NAME_CONFLICT", "Different source has the same name", "warning", "name")],
+    Origin: "configured", Priority: 2, Conflict: new("preferred", ["preferred", "imported-skill"], false));
+using (var transportHttp = new HttpClient(new Handler(async (request, token) =>
+{
+    string path = request.RequestUri!.PathAndQuery;
+    var body = request.Content is null ? (JsonElement?)null : await request.Content.ReadFromJsonAsync<JsonElement>(token);
+    transportCalls.Add((request.Method.Method, path, body));
+    object response = path.Split('?')[0] switch
+    {
+        "/api/agent/config" or "/api/agent/mcp/catalog/browser/add" => richer,
+        "/api/agent/mcp/catalog" => new McpCatalogResponse([new("browser", "Browser fixture", "Pinned preset", stdio, false,
+            "https://source.test.invalid", ["browser"], Package: new("npm", "fixture-browser", "1.2.3"), License: "MIT",
+            Publisher: "vendor", Network: "local-and-remote", Requirements: [new("FIXTURE_REFERENCE", "environment", true, "Reference only")],
+            Notes: ["Disabled until configured"], ConfigurationTemplate: "dsn = \"${DSN}\"")], ["filesystem", "memory"]),
+        "/api/agent/mcp/disconnect" => new McpConnectionsResponse([diagnostic with { State = "disconnected" }]),
+        "/api/agent/mcp/reconnect" => new AgentToolsResponse([], ["http-fixture:MCP_AUTH_REQUIRED"], [diagnostic]),
+        "/api/agent/skills" => new AgentSkillsResponse([skillMetadata]),
+        "/api/agent/skills/import" => new AgentSkillImportResponse(false, true, skillMetadata),
+        _ => throw new InvalidOperationException("Unexpected transport route.")
+    };
+    return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
+})) { BaseAddress = http.BaseAddress })
+using (var transports = new AgentApiClient(transportHttp))
+{
+    var parsed = await transports.GetConfigAsync();
+    Check(parsed.McpServers[0].Cwd == stdio.Cwd && parsed.McpServers[0].EnvRefs!["THIRD_PARTY_TOKEN"] == "FIXTURE_TOKEN",
+        "Stdio cwd and environment references must survive configuration reads without resolving secrets.");
+    Check(parsed.McpServers[1].Transport == "streamable-http" && parsed.McpServers[1].Auth?.ClientSecretEnv == "FIXTURE_CLIENT_SECRET",
+        "HTTP and OAuth client credentials must retain environment reference names only.");
+    await transports.SaveConfigAsync(new(1, 10, richer.McpServers, [], richer.DisabledSkills));
+    var sent = transportCalls[^1].Body!.Value;
+    Check(sent.GetProperty("disabledSkills")[0].GetString() == "disabled-skill" &&
+        sent.GetProperty("mcpServers")[1].GetProperty("headerEnv").GetProperty("Authorization").GetString() == "FIXTURE_AUTHORIZATION",
+        "Saving server configuration preserves disabled skills and header references.");
+    Check(!sent.GetProperty("mcpServers")[0].TryGetProperty("headerEnv", out _) &&
+        !sent.GetProperty("mcpServers")[1].TryGetProperty("env", out _) &&
+        !sent.GetProperty("mcpServers")[1].GetProperty("auth").TryGetProperty("scope", out _),
+        "C# transport payloads omit optional null maps and authentication fields for gateway compatibility.");
+    Check(sent.GetProperty("mcpServers")[0].GetProperty("startupTimeoutMs").GetInt32() == 60000,
+        "Saving a preset preserves its configured cold-start allowance.");
+    var catalog = await transports.GetMcpCatalogAsync();
+    Check(catalog.Presets.Single().Server.Enabled == false && catalog.ReusedCapabilities.Contains("memory") &&
+        transportCalls[^1].Method == "GET", "Preset discovery must reuse existing capabilities without starting a server.");
+    var preset = catalog.Presets.Single();
+    Check(preset.Package?.Version == "1.2.3" && preset.License == "MIT" && preset.Publisher == "vendor" &&
+        preset.Requirements!.Single().Name == "FIXTURE_REFERENCE" && preset.ConfigurationTemplate == "dsn = \"${DSN}\"",
+        "Public preset metadata retains exact package versions and configuration references without resolving credentials.");
+    await transports.AddMcpPresetAsync("browser", 10);
+    Check(transportCalls[^1].Path == "/api/agent/mcp/catalog/browser/add" &&
+        transportCalls[^1].Body!.Value.GetProperty("expectedRevision").GetInt64() == 10, "Adding a pinned preset binds the configuration revision.");
+    Check((await transports.DisconnectMcpAsync(remote.Id)).Connections.Single().State == "disconnected" &&
+        transportCalls[^1].Body!.Value.GetProperty("serverId").GetString() == remote.Id, "Disconnect operates on the exact selected server.");
+    var connected = await transports.ReconnectMcpAsync(remote.Id, conversationId);
+    Check(connected.Connections!.Single().State == "auth-required" && connected.Errors!.Length == 1 &&
+        transportCalls[^1].Path.EndsWith("?conversationId=" + conversationId.ToString("D")), "Reconnect retains context and exposes authentication state without credentials.");
+    var skills = await transports.GetSkillsAsync();
+    Check(!skills.Single().Enabled && skills.Single().StandardCompliant == false && skills.Single().Diagnostics!.Single().Code == "SKILL_NAME_CONFLICT" &&
+        skills.Single().Conflict!.PreferredId == "preferred", "Skill status and source conflicts must remain visible even when disabled.");
+    var imported = await transports.ImportSkillAsync("C:\\FixturePackage");
+    Check(imported.Reused && !imported.Imported && transportCalls[^1].Body!.Value.GetProperty("directory").GetString() == "C:\\FixturePackage",
+        "Skill import sends the chosen package directory and preserves reuse status.");
+}
 Console.WriteLine($"Agent client smoke passed: {checks} checks.");
 
 internal sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler

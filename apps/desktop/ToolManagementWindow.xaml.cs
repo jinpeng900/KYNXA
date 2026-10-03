@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Net;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using KYNXA.Contracts;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Windowing;
@@ -21,12 +22,20 @@ public sealed partial class ToolManagementWindow : Window
     private AgentConfig? _config;
     private CancellationTokenSource? _preview;
     private int _previewGeneration;
+    private int _activeTabIndex;
     private string? _editingServerId;
     private bool _busy, _updating, _closed, _allowClose, _serverDirty, _directoriesDirty, _dialogOpen;
     private string? _noticeKey;
     private string _noticeDetails = string.Empty;
     private ServerEditorState? _savedEditor;
-    private sealed record ServerEditorState(string Id, string Name, string Command, string Arguments, bool Enabled);
+    private AgentTool? _editingTool;
+    private bool _toolDirty;
+    private AgentSkill? _editingSkill;
+    private bool _skillDirty;
+    private McpCatalogResponse _catalog = new([], []);
+    private McpConnectionDiagnostic[] _connections = [];
+    private sealed record ServerEditorState(string Id, string Name, string Command, string Arguments, bool Enabled,
+        string Transport, string Cwd, string EnvRefs, string Url, string HeaderEnv, string Auth);
 
     public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null)
     {
@@ -37,7 +46,6 @@ public sealed partial class ToolManagementWindow : Window
         AgentDirectoryList.ItemsSource = _directories;
         UiLocalization.Bind(AgentServersTab, PivotItem.HeaderProperty, "MCP 服务");
         UiLocalization.Bind(AgentSkillsTab, PivotItem.HeaderProperty, "技能");
-        UiLocalization.Bind(AgentToolsTab, PivotItem.HeaderProperty, "可用工具");
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AgentTitleBar);
         AppWindow.Resize(new Windows.Graphics.SizeInt32(940, 720));
@@ -55,7 +63,7 @@ public sealed partial class ToolManagementWindow : Window
         SetBusy(false);
     }
 
-    public bool HasPendingChanges => _busy || _serverDirty || _directoriesDirty;
+    public bool HasPendingChanges => _busy || _serverDirty || _directoriesDirty || _toolDirty || _skillDirty;
 
     public void CloseForOwner()
     {
@@ -71,6 +79,13 @@ public sealed partial class ToolManagementWindow : Window
         if (!DispatcherQueue.HasThreadAccess) { DispatcherQueue.TryEnqueue(() => Language_Changed(sender, e)); return; }
         Title = UiText.Get("KYNXA · 工具与技能");
         if (_noticeKey is not null) AgentStatusBar.Message = UiText.Get(_noticeKey) + _noticeDetails;
+        RefreshConnectionStatus();
+        RenderSkillDiagnostics(); Preset_SelectionChanged(this, null!);
+        int transportIndex = AgentServerTransportBox.SelectedIndex;
+        bool wasUpdating = _updating; _updating = true;
+        AgentServerTransportBox.SelectedIndex = -1;
+        AgentServerTransportBox.SelectedIndex = transportIndex;
+        _updating = wasUpdating;
     }
 
     private void Notice(string key, InfoBarSeverity severity = InfoBarSeverity.Warning, Exception? error = null)
@@ -91,7 +106,20 @@ public sealed partial class ToolManagementWindow : Window
         AgentServerEditor.IsEnabled = AgentServerList.IsEnabled = AgentNewServerButton.IsEnabled = !value && _config is not null;
         AgentAddDirectoryButton.IsEnabled = AgentRemoveDirectoryButton.IsEnabled = !value && _config is not null;
         AgentSaveDirectoriesButton.IsEnabled = !value && _config is not null && _directoriesDirty;
+        AgentImportSkillButton.IsEnabled = !value && _config is not null;
         AgentDeleteServerButton.IsEnabled = !value && _editingServerId is not null;
+        AgentToolList.IsEnabled = !value;
+        AgentToolEnabledBox.IsEnabled = !value && SelectedToolServer() is not null;
+        AgentSaveToolButton.IsEnabled = !value && _toolDirty && SelectedToolServer() is not null;
+        AgentPresetBox.IsEnabled = !value && _config is not null;
+        AgentAddPresetButton.IsEnabled = !value && _config is not null && AgentPresetBox.SelectedItem is McpPreset;
+        AgentReconnectButton.IsEnabled = !value && _editingServerId is not null && _config?.McpServers.Any(server => server.Id == _editingServerId && server.Enabled) == true;
+        AgentDisconnectButton.IsEnabled = !value && _editingServerId is not null;
+        AgentSkillEnabledBox.IsEnabled = !value && _config is not null && _editingSkill is not null;
+        AgentSaveSkillButton.IsEnabled = !value && _config is not null && _skillDirty && _editingSkill is not null;
+        AgentCancelServerButton.IsEnabled = AgentCancelSkillButton.IsEnabled = !value;
+        AgentCancelServerButton.Visibility = _serverDirty ? Visibility.Visible : Visibility.Collapsed;
+        AgentCancelSkillButton.Visibility = _skillDirty ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void AcceptConfig(AgentConfig config, bool replaceDirectories)
@@ -121,12 +149,16 @@ public sealed partial class ToolManagementWindow : Window
             var configTask = _api.GetConfigAsync(_lifetime.Token);
             var skillsTask = _api.GetSkillsAsync(_conversationId, _lifetime.Token);
             var toolsTask = _api.GetToolsAsync(_lifetime.Token);
-            await Task.WhenAll(configTask, skillsTask, toolsTask);
+            var catalogTask = _api.GetMcpCatalogAsync(_lifetime.Token);
+            await Task.WhenAll(configTask, skillsTask, toolsTask, catalogTask);
             if (_closed) return;
             AcceptConfig(await configTask, replaceDirectories: true);
-            AgentSkillList.ItemsSource = await skillsTask;
+            AcceptSkills(await skillsTask, discardDraft: true);
+            _catalog = await catalogTask;
+            AgentPresetBox.ItemsSource = _catalog.Presets;
             var tools = await toolsTask;
-            AgentToolList.ItemsSource = tools.Tools;
+            AcceptTools(tools.Tools);
+            AcceptConnections(tools.Connections);
             FillServer(_servers.FirstOrDefault(server => server.Id == _editingServerId));
             AgentStatusBar.IsOpen = false;
             _noticeKey = null;
@@ -137,14 +169,15 @@ public sealed partial class ToolManagementWindow : Window
         finally { if (!_closed) SetBusy(false); }
     }
 
-    private async Task<bool> SaveAsync(McpServerConfig[] servers, bool saveDirectories)
+    private async Task<bool> SaveAsync(McpServerConfig[] servers, bool saveDirectories, string[]? disabledSkills = null)
     {
         if (_config is null || _busy || _closed) return false;
         SetBusy(true);
         try
         {
             string[] directories = saveDirectories ? _directories.ToArray() : _config.SkillDirectories;
-            var saved = await _api.SaveConfigAsync(new(1, _config.Revision, servers, directories), _lifetime.Token);
+            var saved = await _api.SaveConfigAsync(new(1, _config.Revision, servers, directories,
+                disabledSkills ?? _config.DisabledSkills ?? []), _lifetime.Token);
             if (_closed) return false;
             AcceptConfig(saved, replaceDirectories: saveDirectories);
             Notice("工具配置已保存。", InfoBarSeverity.Success);
@@ -176,10 +209,19 @@ public sealed partial class ToolManagementWindow : Window
         AgentServerCommandBox.Text = server?.Command ?? string.Empty;
         AgentServerArgsBox.Text = JsonSerializer.Serialize(server?.Args ?? []);
         AgentServerEnabledBox.IsChecked = server?.Enabled ?? false;
+        AgentServerTransportBox.SelectedIndex = server?.Transport == "streamable-http" ? 1 : 0;
+        AgentServerCwdBox.Text = server?.Cwd ?? "";
+        AgentServerEnvRefsBox.Text = JsonSerializer.Serialize(server?.EnvRefs ?? []);
+        AgentServerUrlBox.Text = server?.Url ?? "";
+        AgentServerHeaderEnvBox.Text = JsonSerializer.Serialize(server?.HeaderEnv ?? []);
+        AgentServerAuthBox.Text = server?.Auth is { } auth ? JsonSerializer.Serialize(auth,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }) : "";
+        RefreshTransportFields();
         _savedEditor = ReadEditor();
         _serverDirty = false;
         _updating = false;
         AgentDeleteServerButton.IsEnabled = !_busy && server is not null;
+        RefreshConnectionStatus(); SetBusy(_busy);
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -190,15 +232,16 @@ public sealed partial class ToolManagementWindow : Window
     private async void Connect_Click(object sender, RoutedEventArgs e)
     {
         if (_busy || _closed) return;
+        if (_toolDirty && !await ConfirmDiscardAsync()) return;
         SetBusy(true);
         try
         {
             var tools = await _api.RefreshMcpAsync(_conversationId, _lifetime.Token);
             if (!_closed)
             {
-                AgentToolList.ItemsSource = tools.Tools;
-                if (tools.Errors is { Length: > 0 }) ConnectionErrors(tools.Errors);
-                else Notice("MCP 服务已连接。", InfoBarSeverity.Success);
+                AcceptTools(tools.Tools);
+                AcceptConnections(tools.Connections);
+                ReportConnectionOutcome(tools);
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
@@ -213,9 +256,131 @@ public sealed partial class ToolManagementWindow : Window
         AgentStatusBar.Message += _noticeDetails;
     }
 
+    private void ReportConnectionOutcome(AgentToolsResponse response, string? serverId = null)
+    {
+        if (response.Errors is { Length: > 0 }) ConnectionErrors(response.Errors);
+        else if (response.Connections?.Any(item => item.State == "ready" && (serverId is null || item.ServerId == serverId)) == true)
+            Notice("MCP 服务已连接。", InfoBarSeverity.Success);
+        else Notice("MCP 尚未连接，请查看连接状态。", InfoBarSeverity.Warning);
+    }
+
+    private void AcceptTools(AgentTool[] tools)
+    {
+        string? name = _editingTool?.Name;
+        _updating = true;
+        AgentToolList.ItemsSource = tools;
+        AgentToolList.SelectedItem = tools.FirstOrDefault(tool => tool.Name == name);
+        _updating = false;
+        FillTool(AgentToolList.SelectedItem as AgentTool);
+    }
+
+    private void AcceptSkills(AgentSkill[] skills, bool discardDraft)
+    {
+        string? id = _editingSkill?.Id;
+        _updating = true;
+        AgentSkillList.ItemsSource = skills;
+        AgentSkillList.SelectedItem = skills.FirstOrDefault(skill => skill.Id == id);
+        _editingSkill = AgentSkillList.SelectedItem as AgentSkill;
+        if (_editingSkill?.Id != id)
+        {
+            _previewGeneration++;
+            _preview?.Cancel();
+            AgentSkillSourceLabel.Text = AgentSkillPreviewBox.Text = string.Empty;
+        }
+        _updating = false;
+        if (discardDraft || _editingSkill is null) FillSkillState(_editingSkill);
+        else RenderSkillDiagnostics();
+    }
+
+    private void Preset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_api is null) return;
+        if (AgentPresetBox.SelectedItem is McpPreset preset)
+            AgentPresetDescriptionLabel.Text = preset.Description + "\n" + preset.SourceUrl + "\n" + UiText.Get("添加后默认停用；启用后才会连接。");
+        else AgentPresetDescriptionLabel.Text = _catalog.ReusedCapabilities.Length == 0 ? "" :
+            UiText.Get("已有能力可直接复用：") + " " + string.Join(" · ", _catalog.ReusedCapabilities);
+        SetBusy(_busy);
+    }
+
+    private async void AddPreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || _busy || AgentPresetBox.SelectedItem is not McpPreset preset) return;
+        if (_serverDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改")) return;
+        if (_closed) return;
+        if (preset.AlreadyConfigured && _config.McpServers.FirstOrDefault(server => server.Id == preset.ConfiguredServerId) is { } existing)
+        { FillServer(existing); AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == existing.Id); Notice("此预设已配置，已打开现有服务。", InfoBarSeverity.Informational); return; }
+        SetBusy(true);
+        try
+        {
+            var config = await _api.AddMcpPresetAsync(preset.Id, _config.Revision, _lifetime.Token);
+            if (_closed) return;
+            AcceptConfig(config, replaceDirectories: false);
+            FillServer(config.McpServers.FirstOrDefault(server => server.Id == preset.Server.Id));
+            _updating = true; AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == _editingServerId); _updating = false;
+            Notice("预设已添加，当前保持停用。", InfoBarSeverity.Success);
+            var refreshed = await _api.GetMcpCatalogAsync(_lifetime.Token);
+            if (_closed) return;
+            _catalog = refreshed; AgentPresetBox.ItemsSource = refreshed.Presets;
+            AgentPresetBox.SelectedItem = refreshed.Presets.FirstOrDefault(item => item.Id == preset.Id);
+        }
+        catch (GatewayApiException error) when (error.StatusCode == HttpStatusCode.Conflict)
+        {
+            try { var current = await _api.GetConfigAsync(_lifetime.Token); if (!_closed) AcceptConfig(current, false); }
+            catch (Exception) { if (!_closed) _config = null; }
+            if (!_closed) Notice("配置已更新。编辑已保留，请核对列表后再次保存。", error: error);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { if (!_closed) Notice("预设添加失败，请刷新后重试。", InfoBarSeverity.Error, error); }
+        finally { if (!_closed) SetBusy(false); }
+    }
+
+    private void AcceptConnections(McpConnectionDiagnostic[]? connections)
+    { _connections = connections ?? []; RefreshConnectionStatus(); }
+
+    private void RefreshConnectionStatus()
+    {
+        var state = _connections.FirstOrDefault(item => item.ServerId == _editingServerId);
+        string key = state?.State switch { "ready" => "已连接", "connecting" => "正在连接", "error" => "连接失败",
+            "auth-required" => "需要认证", _ => "未连接" };
+        AgentConnectionStatusLabel.Text = string.Format(UiText.Get("连接状态：{0} · 工具：{1}"), UiText.Get(key), state?.ToolCount ?? 0) +
+            (state?.Code is { } code ? " · " + code : "");
+    }
+
+    private async void Reconnect_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _closed || _editingServerId is not { } id) return;
+        if (_serverDirty) { Notice("请先保存当前服务编辑，再连接。", InfoBarSeverity.Warning); return; }
+        SetBusy(true);
+        try
+        {
+            var response = await _api.ReconnectMcpAsync(id, _conversationId, _lifetime.Token);
+            if (_closed) return;
+            AcceptTools(response.Tools); AcceptConnections(response.Connections);
+            ReportConnectionOutcome(response, id);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { if (!_closed) Notice("MCP 连接失败，请核对程序和参数。", InfoBarSeverity.Error, error); }
+        finally { if (!_closed) SetBusy(false); }
+    }
+
+    private async void Disconnect_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _closed || _editingServerId is not { } id) return;
+        SetBusy(true);
+        try
+        {
+            var response = await _api.DisconnectMcpAsync(id, _lifetime.Token);
+            if (!_closed) { AcceptConnections(response.Connections); Notice("MCP 服务已断开。", InfoBarSeverity.Success); }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { if (!_closed) Notice("MCP 断开失败，请重试。", InfoBarSeverity.Error, error); }
+        finally { if (!_closed) SetBusy(false); }
+    }
+
     private async void Server_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updating || _closed || AgentServerList.SelectedItem is not McpServerConfig selected) return;
+        if (_updating || _closed) return;
+        var selected = AgentServerList.SelectedItem as McpServerConfig;
         if (_serverDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
         {
             _updating = true;
@@ -234,24 +399,39 @@ public sealed partial class ToolManagementWindow : Window
         FillServer(null);
     }
 
+    private void CancelServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _closed) return;
+        FillServer(_config?.McpServers.FirstOrDefault(server => server.Id == _editingServerId));
+    }
+
     private async void SaveServer_Click(object sender, RoutedEventArgs e)
     {
         if (_config is null) return;
         McpServerConfig edited;
         try
         {
-            var args = JsonSerializer.Deserialize<string[]>(AgentServerArgsBox.Text) ?? throw new JsonException();
+            bool http = ServerTransport == "streamable-http";
+            var args = http ? [] : JsonSerializer.Deserialize<string[]>(AgentServerArgsBox.Text) ?? throw new JsonException();
             if (args.Any(argument => argument is null || argument.Contains('\0')) || string.IsNullOrWhiteSpace(AgentServerIdBox.Text) ||
-                string.IsNullOrWhiteSpace(AgentServerNameBox.Text) || string.IsNullOrWhiteSpace(AgentServerCommandBox.Text) ||
+                string.IsNullOrWhiteSpace(AgentServerNameBox.Text) || (!http && string.IsNullOrWhiteSpace(AgentServerCommandBox.Text)) ||
                 AgentServerIdBox.Text.Contains('\0') || AgentServerNameBox.Text.Contains('\0') || AgentServerCommandBox.Text.Contains('\0')) throw new JsonException();
             var previous = _config.McpServers.FirstOrDefault(server => server.Id == _editingServerId);
-            edited = new(AgentServerIdBox.Text.Trim(), AgentServerNameBox.Text.Trim(), AgentServerCommandBox.Text.Trim(), args,
-                AgentServerEnabledBox.IsChecked == true, previous?.ProtocolVersion);
+            string? cwd = string.IsNullOrWhiteSpace(AgentServerCwdBox.Text) ? null : AgentServerCwdBox.Text.Trim();
+            if (!http && cwd is not null && (!Path.IsPathFullyQualified(cwd) || cwd.Contains('\0'))) throw new JsonException();
+            string? url = http ? AgentServerUrlBox.Text.Trim() : null;
+            if (http && (!Uri.TryCreate(url, UriKind.Absolute, out var address) || address.UserInfo.Length > 0 ||
+                address.Query.Length > 0 || address.Fragment.Length > 0 || (address.Scheme != "https" && !(address.Scheme == "http" && address.IsLoopback)))) throw new JsonException();
+            edited = new(AgentServerIdBox.Text.Trim(), AgentServerNameBox.Text.Trim(), http ? "" : AgentServerCommandBox.Text.Trim(), args,
+                AgentServerEnabledBox.IsChecked == true, previous?.ProtocolVersion, previous?.DisabledTools ?? [], ServerTransport,
+                http ? null : cwd, previous?.Env, http ? null : ReadReferences(AgentServerEnvRefsBox.Text, headers: false),
+                url, http ? ReadReferences(AgentServerHeaderEnvBox.Text, headers: true) : null,
+                http ? ReadAuthentication(AgentServerAuthBox.Text) : previous?.Auth, previous?.StartupTimeoutMs);
             if (_editingServerId is null && _config.McpServers.Any(server => server.Id == edited.Id))
                 throw new JsonException();
         }
         catch (Exception error) when (error is JsonException or ArgumentException)
-        { Notice("请填写服务信息，并提供有效的 JSON 字符串数组参数。", InfoBarSeverity.Error); return; }
+        { Notice("请核对服务信息、URL、绝对路径及 JSON 环境变量引用。", InfoBarSeverity.Error); return; }
         var servers = _config.McpServers.Where(server => server.Id != _editingServerId).Append(edited).ToArray();
         if (await SaveAsync(servers, saveDirectories: false) && !_closed)
         {
@@ -269,10 +449,43 @@ public sealed partial class ToolManagementWindow : Window
     }
 
     private ServerEditorState ReadEditor() => new(AgentServerIdBox.Text, AgentServerNameBox.Text, AgentServerCommandBox.Text,
-        AgentServerArgsBox.Text, AgentServerEnabledBox.IsChecked == true);
+        AgentServerArgsBox.Text, AgentServerEnabledBox.IsChecked == true, ServerTransport, AgentServerCwdBox.Text,
+        AgentServerEnvRefsBox.Text, AgentServerUrlBox.Text, AgentServerHeaderEnvBox.Text, AgentServerAuthBox.Text);
 
-    private void Server_TextChanged(object sender, TextChangedEventArgs e) { if (!_updating && _api is not null) _serverDirty = ReadEditor() != _savedEditor; }
-    private void Server_EnabledChanged(object sender, RoutedEventArgs e) { if (!_updating && _api is not null) _serverDirty = ReadEditor() != _savedEditor; }
+    private string ServerTransport => AgentServerTransportBox.SelectedIndex == 1 ? "streamable-http" : "stdio";
+    private void RefreshTransportFields()
+    { AgentStdioFields.Visibility = ServerTransport == "stdio" ? Visibility.Visible : Visibility.Collapsed;
+        AgentHttpFields.Visibility = ServerTransport == "stdio" ? Visibility.Collapsed : Visibility.Visible;
+        AgentStdioAdvancedFields.Visibility = AgentStdioFields.Visibility;
+        AgentHttpAdvancedFields.Visibility = AgentHttpFields.Visibility; }
+    private void Transport_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    { if (_api is null) return; RefreshTransportFields(); if (!_updating) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
+
+    private static Dictionary<string, string> ReadReferences(string text, bool headers)
+    {
+        var references = JsonSerializer.Deserialize<Dictionary<string, string>>(text) ?? throw new JsonException();
+        foreach (var pair in references)
+            if (!Regex.IsMatch(pair.Key, headers ? "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$" : "^[A-Za-z_][A-Za-z0-9_]*$") ||
+                pair.Value is null || !Regex.IsMatch(pair.Value, "^[A-Za-z_][A-Za-z0-9_]*$")) throw new JsonException();
+        return references;
+    }
+
+    private static McpAuthentication? ReadAuthentication(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var auth = JsonSerializer.Deserialize<McpAuthentication>(text, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? throw new JsonException();
+        bool environmentName(string? value) => value is not null && Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]*$");
+        if (auth.Type == "bearer-env" && environmentName(auth.TokenEnv)) return auth;
+        if (auth.Type == "oauth-client-credentials" && !string.IsNullOrWhiteSpace(auth.ClientId) && environmentName(auth.ClientSecretEnv) &&
+            Uri.TryCreate(auth.Issuer, UriKind.Absolute, out var issuer) && issuer.Scheme == "https" && issuer.UserInfo.Length == 0 &&
+            issuer.Query.Length == 0 && issuer.Fragment.Length == 0) return auth;
+        throw new JsonException();
+    }
+
+    private void Server_TextChanged(object sender, TextChangedEventArgs e)
+    { if (!_updating && _api is not null) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
+    private void Server_EnabledChanged(object sender, RoutedEventArgs e)
+    { if (!_updating && _api is not null) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
 
     private async void AddDirectory_Click(object sender, RoutedEventArgs e)
     {
@@ -302,7 +515,7 @@ public sealed partial class ToolManagementWindow : Window
             try
             {
                 var skills = await _api.GetSkillsAsync(_conversationId, _lifetime.Token);
-                if (!_closed) AgentSkillList.ItemsSource = skills;
+                if (!_closed) AcceptSkills(skills, discardDraft: false);
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
             catch (Exception error) { if (!_closed) Notice("工具列表读取失败，请重试。", InfoBarSeverity.Error, error); }
@@ -312,11 +525,39 @@ public sealed partial class ToolManagementWindow : Window
 
     private async void Skill_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_updating || _closed) return;
+        if (_skillDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
+        { _updating = true; AgentSkillList.SelectedItem = _editingSkill; _updating = false; return; }
         _previewGeneration++;
         _preview?.Cancel();
         AgentSkillSourceLabel.Text = AgentSkillPreviewBox.Text = string.Empty;
-        if (AgentSkillList.SelectedItem is not AgentSkill skill || _closed) return;
-        int generation = _previewGeneration;
+        _editingSkill = AgentSkillList.SelectedItem as AgentSkill;
+        FillSkillState(_editingSkill);
+        if (_editingSkill is not { } skill) return;
+        AgentSkillSourceLabel.Text = skill.Source;
+        if (skill.Status == "unavailable" || AgentTabs.SelectedIndex != 1) return;
+        await LoadSkillPreviewAsync(skill);
+    }
+
+    private async void Tabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_api is null || _closed || _activeTabIndex == AgentTabs.SelectedIndex) return;
+        _activeTabIndex = AgentTabs.SelectedIndex;
+        if (AgentTabs.SelectedIndex != 1)
+        {
+            _previewGeneration++;
+            _preview?.Cancel();
+        }
+        else if (_editingSkill is { Status: not "unavailable" } skill && AgentSkillPreviewBox.Text.Length == 0)
+        {
+            await LoadSkillPreviewAsync(skill);
+        }
+    }
+
+    private async Task LoadSkillPreviewAsync(AgentSkill skill)
+    {
+        _preview?.Cancel();
+        int generation = ++_previewGeneration;
         using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _preview = source;
         try
@@ -331,13 +572,106 @@ public sealed partial class ToolManagementWindow : Window
         finally { if (ReferenceEquals(_preview, source)) _preview = null; }
     }
 
-    private void Tool_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void FillSkillState(AgentSkill? skill)
     {
-        if (AgentToolList.SelectedItem is AgentTool tool)
-            AgentToolPreviewBox.Text = tool.Name + "\n\n" + tool.Description + "\n\n" + tool.InputSchema.GetRawText();
+        _updating = true; _skillDirty = false;
+        AgentSkillNameLabel.Text = skill?.Name ?? string.Empty;
+        AgentSkillEnabledBox.IsChecked = skill is not null && !(_config?.DisabledSkills ?? []).Contains(skill.Id, StringComparer.Ordinal);
+        RenderSkillDiagnostics();
+        _updating = false; SetBusy(_busy);
     }
 
-    private Task<bool> ConfirmDiscardAsync() => !_serverDirty && !_directoriesDirty ? Task.FromResult(!_dialogOpen) :
+    private void RenderSkillDiagnostics()
+    {
+        var skill = _editingSkill;
+        AgentSkillDiagnosticsLabel.Text = skill is null ? "" : string.Join("\n", (skill.Diagnostics ?? []).Select(item => item.Code + ": " + item.Message));
+        if (skill?.Conflict is { } conflict) AgentSkillDiagnosticsLabel.Text += "\n" + UiText.Get(conflict.Preferred ?
+            "此技能是同名技能的优先来源。" : "存在更高优先级的同名技能，请核对来源。");
+    }
+
+    private async void ImportSkill_Click(object sender, RoutedEventArgs e)
+    {
+        if (_closed || _busy || _config is null) return;
+        var picker = new FolderPicker(); picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        if (_closed || folder is null) return;
+        SetBusy(true);
+        try
+        {
+            var imported = await _api.ImportSkillAsync(folder.Path, _lifetime.Token);
+            var skills = await _api.GetSkillsAsync(_conversationId, _lifetime.Token);
+            if (_closed) return;
+            AcceptSkills(skills, discardDraft: false);
+            Notice(imported.Reused ? "相同技能包已存在，已复用。" : "技能包已导入。", InfoBarSeverity.Success);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { if (!_closed) Notice("技能包导入失败，请核对目录与诊断。", InfoBarSeverity.Error, error); }
+        finally { if (!_closed) SetBusy(false); }
+    }
+
+    private void Skill_EnabledChanged(object sender, RoutedEventArgs e)
+    {
+        if (_updating || _api is null || _editingSkill is not { } skill || _config is null) return;
+        _skillDirty = AgentSkillEnabledBox.IsChecked != !(_config.DisabledSkills ?? []).Contains(skill.Id, StringComparer.Ordinal);
+        SetBusy(_busy);
+    }
+
+    private async void SaveSkill_Click(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || _busy || _editingSkill is not { } skill) return;
+        var disabled = (_config.DisabledSkills ?? []).Where(id => id != skill.Id).ToList();
+        if (AgentSkillEnabledBox.IsChecked != true) disabled.Add(skill.Id);
+        if (await SaveAsync(_config.McpServers, false, disabled.ToArray()) && !_closed) FillSkillState(skill);
+    }
+
+    private void CancelSkill_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_busy && !_closed) FillSkillState(_editingSkill);
+    }
+
+    private async void Tool_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updating || _closed) return;
+        if (_toolDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
+        { _updating = true; AgentToolList.SelectedItem = _editingTool; _updating = false; return; }
+        FillTool(AgentToolList.SelectedItem as AgentTool);
+    }
+
+    private McpServerConfig? SelectedToolServer() => _editingTool is { Source: { } source, RawName: { } raw } &&
+        source.StartsWith("mcp:", StringComparison.Ordinal) && !string.IsNullOrEmpty(raw)
+        ? _config?.McpServers.FirstOrDefault(server => server.Id == source[4..]) : null;
+
+    private void FillTool(AgentTool? tool)
+    {
+        _updating = true; _editingTool = tool; _toolDirty = false;
+        AgentToolPreviewBox.Text = tool is null ? "" : tool.Name + "\n\n" + tool.Description + "\n\n" + tool.InputSchema.GetRawText();
+        var server = SelectedToolServer();
+        AgentToolEnabledBox.IsChecked = server is not null && !(server.DisabledTools ?? []).Contains(tool!.RawName, StringComparer.Ordinal);
+        AgentExternalProgramLabel.Visibility = server is null ? Visibility.Collapsed : Visibility.Visible;
+        _updating = false; SetBusy(_busy);
+    }
+
+    private void Tool_EnabledChanged(object sender, RoutedEventArgs e)
+    {
+        if (_updating || _api is null || SelectedToolServer() is not { } server) return;
+        bool enabled = !(server.DisabledTools ?? []).Contains(_editingTool!.RawName, StringComparer.Ordinal);
+        _toolDirty = AgentToolEnabledBox.IsChecked != enabled; SetBusy(_busy);
+    }
+
+    private async void SaveTool_Click(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || _busy || SelectedToolServer() is not { } server || _editingTool?.RawName is not { } name) return;
+        bool enabled = AgentToolEnabledBox.IsChecked == true;
+        var disabled = (server.DisabledTools ?? []).Where(item => item != name).ToList();
+        if (!enabled) disabled.Add(name);
+        var replacement = server with { DisabledTools = disabled.ToArray() };
+        var servers = _config.McpServers.Select(item => item.Id == server.Id ? replacement : item).ToArray();
+        if (await SaveAsync(servers, saveDirectories: false) && !_closed) FillTool(_editingTool);
+        // A conflict preserves this checkbox draft. An explicit second save uses the freshly loaded revision.
+    }
+
+    private Task<bool> ConfirmDiscardAsync() => !_serverDirty && !_directoriesDirty && !_toolDirty && !_skillDirty ? Task.FromResult(!_dialogOpen) :
         ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改");
 
     private async Task<bool> ConfirmAsync(string title, string content, string action)
@@ -357,7 +691,7 @@ public sealed partial class ToolManagementWindow : Window
 
     private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs e)
     {
-        if (_allowClose || (!_serverDirty && !_directoriesDirty)) return;
+        if (_allowClose || (!_serverDirty && !_directoriesDirty && !_toolDirty && !_skillDirty)) return;
         e.Cancel = true;
         if (await ConfirmDiscardAsync() && !_closed) { _allowClose = true; Close(); }
     }

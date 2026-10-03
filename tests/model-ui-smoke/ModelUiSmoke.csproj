@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <Compile Include="../../apps/desktop/ModelManagementWindow.xaml.cs" Link="ModelManagementWindow.xaml.cs" />
+    <Page Include="../../apps/desktop/ModelManagementWindow.xaml" Link="ModelManagementWindow.xaml" />
+    <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/ModelApiClient.cs" Link="Services/ModelApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelPresets.cs" Link="Services/ModelPresets.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelCatalog.cs" Link="Services/ModelCatalog.cs" />
+    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/ChatStreamReader.cs" Link="Services/ChatStreamReader.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/UiLocalization.cs" Link="Services/UiLocalization.cs" />
+    <Compile Include="../../apps/shared/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
+    <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
+    <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

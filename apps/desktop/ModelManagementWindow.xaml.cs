@@ -23,6 +23,10 @@ public sealed partial class ModelManagementWindow : Window
     private bool _closed;
     private bool _loaded;
     private bool _updatingModelList;
+    private bool _automaticContextWindow;
+    private bool _settingTokenChoice;
+    private bool _applyingPreset;
+    private ComboBoxItem? _automaticContextOption;
     private string[] _discoveredModels = [];
     private Func<string> _statusMessage = () => UiText.Get("选好服务商，填写密钥后保存。");
     private bool _statusIsError;
@@ -70,6 +74,14 @@ public sealed partial class ModelManagementWindow : Window
         _changingPreset = true;
         try { ModelPresets.RefreshDisplayNames(); }
         finally { _changingPreset = wasChangingPreset; }
+        _settingTokenChoice = true;
+        try
+        {
+            RefreshSelectedCaption(ContextWindowBox);
+            RefreshSelectedCaption(MaxOutputTokensBox);
+        }
+        finally { _settingTokenChoice = false; }
+        RefreshSelectedCaption(ProtocolBox);
         EditorTitle.Text = UiText.Get(_editing is null ? "添加模型连接" : "编辑模型连接");
         PresetHint.Text = _editing is not null
             ? UiText.Get("修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。")
@@ -79,6 +91,15 @@ public sealed partial class ModelManagementWindow : Window
         UpdateModelCount();
         UpdateModelLabels();
         RenderStatus();
+    }
+
+    private static void RefreshSelectedCaption(ComboBox choice)
+    {
+        // WinUI caches the selected caption when a ComboBoxItem's localized
+        // content changes. Retain the same item and drafts while refreshing it.
+        if (choice.SelectedItem is not { } selected) return;
+        choice.SelectedItem = null;
+        choice.SelectedItem = selected;
     }
 
     private void SizeAndCenterWindow()
@@ -161,20 +182,27 @@ public sealed partial class ModelManagementWindow : Window
 
     private void ApplyPreset(ModelPreset preset)
     {
-        _changingPreset = true;
-        PresetBox.SelectedItem = preset;
-        _changingPreset = false;
-        _editing = null;
-        _discoveredModels = [];
-        ModelSearchBox.Text = "";
-        SetProtocol(preset.Protocol);
-        SetContextWindow(ModelApiClient.DefaultContextWindowTokens);
-        EditorTitle.Text = UiText.Get("添加模型连接");
-        NameBox.Text = preset.Id == "custom" ? "" : UiText.Get(preset.Name);
-        ProviderIdBox.IsReadOnly = false;
-        ProviderIdBox.Text = NewId(preset.Id);
-        BaseUrlBox.Text = preset.BaseUrl;
-        ModelsBox.Text = string.Join(Environment.NewLine, preset.Models);
+        _applyingPreset = true;
+        _automaticContextWindow = true;
+        try
+        {
+            _changingPreset = true;
+            PresetBox.SelectedItem = preset;
+            _changingPreset = false;
+            _editing = null;
+            _discoveredModels = [];
+            ModelSearchBox.Text = "";
+            SetProtocol(preset.Protocol);
+            SetMaxOutputTokens(ModelApiClient.DefaultMaxOutputTokens);
+            EditorTitle.Text = UiText.Get("添加模型连接");
+            NameBox.Text = preset.Id == "custom" ? "" : UiText.Get(preset.Name);
+            ProviderIdBox.IsReadOnly = false;
+            ProviderIdBox.Text = NewId(preset.Id);
+            BaseUrlBox.Text = preset.BaseUrl;
+            ModelsBox.Text = string.Join(Environment.NewLine, preset.Models);
+        }
+        finally { _applyingPreset = false; _changingPreset = false; }
+        UpdateAutomaticContextWindow();
         ApiKeyBox.Password = "";
         UpdateEndpointHints();
         PresetHint.Text = UiText.Get(preset.Hint);
@@ -187,6 +215,7 @@ public sealed partial class ModelManagementWindow : Window
 
     private void SelectProvider(ModelProvider provider)
     {
+        _automaticContextWindow = false;
         _editing = provider;
         _changingPreset = true;
         PresetBox.SelectedItem = ModelPresets.All.FirstOrDefault(p =>
@@ -196,6 +225,7 @@ public sealed partial class ModelManagementWindow : Window
         ModelSearchBox.Text = "";
         SetProtocol(provider.Protocol);
         SetContextWindow(provider.ContextWindowTokens);
+        SetMaxOutputTokens(provider.MaxOutputTokens);
         EditorTitle.Text = UiText.Get("编辑模型连接");
         PresetHint.Text = UiText.Get("修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。");
         NameBox.Text = provider.DisplayName;
@@ -219,7 +249,11 @@ public sealed partial class ModelManagementWindow : Window
 
     private void NewConnectionButton_Click(object sender, RoutedEventArgs e) => ApplyPreset(ModelPresets.All[0]);
 
-    private void BaseUrlBox_TextChanged(object sender, TextChangedEventArgs e) => UpdateEndpointHints();
+    private void BaseUrlBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        UpdateEndpointHints();
+        UpdateAutomaticContextWindow();
+    }
 
     private void UpdateEndpointHints()
     {
@@ -257,41 +291,88 @@ public sealed partial class ModelManagementWindow : Window
     {
         if (_updatingModelList) UpdateModelCount();
         else RenderModelOptions();
+        UpdateAutomaticContextWindow();
+    }
+
+    private void UpdateAutomaticContextWindow()
+    {
+        if (!_automaticContextWindow || _applyingPreset || _editing is not null ||
+            ContextWindowBox is null || CustomContextWindowBox is null || BaseUrlBox is null || ModelsBox is null) return;
+        int window = ModelPresets.DefaultContextWindowTokens(BaseUrlBox.Text.Trim(), ModelIds());
+        string tokens = window.ToString(CultureInfo.InvariantCulture);
+        if (ContextWindowBox.SelectedItem is ComboBoxItem selected && (string)selected.Tag == tokens) return;
+        _settingTokenChoice = true;
+        try
+        {
+            if (_automaticContextOption is not null) ContextWindowBox.Items.Remove(_automaticContextOption);
+            _automaticContextOption = null;
+            if (!ContextWindowBox.Items.OfType<ComboBoxItem>().Any(item => (string)item.Tag == tokens))
+            {
+                // One exact model-derived value avoids filling the selector with similar 1M variants.
+                _automaticContextOption = new ComboBoxItem { Tag = tokens,
+                    Content = window.ToString("N0", CultureInfo.InvariantCulture) };
+                ContextWindowBox.Items.Insert(ContextWindowBox.Items.Count - 1, _automaticContextOption);
+            }
+            SetContextWindow(window);
+        }
+        finally { _settingTokenChoice = false; }
     }
 
     private void SetProtocol(string protocol) => ProtocolBox.SelectedItem = ProtocolBox.Items
         .OfType<ComboBoxItem>().FirstOrDefault(item => (string)item.Tag == protocol) ?? ProtocolBox.Items[0];
 
-    private void SetContextWindow(int value)
+    private void SetContextWindow(int value) => SetTokenChoice(ContextWindowBox, CustomContextWindowBox, value);
+
+    private void SetMaxOutputTokens(int value) => SetTokenChoice(MaxOutputTokensBox, CustomMaxOutputTokensBox, value);
+
+    private void SetTokenChoice(ComboBox choice, TextBox customValue, int value)
     {
-        string tokens = value.ToString(CultureInfo.InvariantCulture);
-        CustomContextWindowBox.Text = tokens;
-        ContextWindowBox.SelectedItem = ContextWindowBox.Items.OfType<ComboBoxItem>()
-            .FirstOrDefault(item => (string)item.Tag == tokens)
-            ?? ContextWindowBox.Items.OfType<ComboBoxItem>().First(item => (string)item.Tag == "custom");
-        UpdateContextWindowVisibility();
+        bool wasSettingTokenChoice = _settingTokenChoice;
+        _settingTokenChoice = true;
+        try
+        {
+            string tokens = value.ToString(CultureInfo.InvariantCulture);
+            customValue.Text = tokens;
+            choice.SelectedItem = choice.Items.OfType<ComboBoxItem>()
+                .FirstOrDefault(item => (string)item.Tag == tokens)
+                ?? choice.Items.OfType<ComboBoxItem>().First(item => (string)item.Tag == "custom");
+            UpdateTokenChoiceVisibility(choice, customValue);
+        }
+        finally { _settingTokenChoice = wasSettingTokenChoice; }
     }
 
-    private void ContextWindowBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateContextWindowVisibility();
+    private void ContextWindowBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_settingTokenChoice) _automaticContextWindow = false;
+        UpdateTokenChoiceVisibility(ContextWindowBox, CustomContextWindowBox);
+    }
 
-    private void UpdateContextWindowVisibility()
+    private void MaxOutputTokensBox_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        UpdateTokenChoiceVisibility(MaxOutputTokensBox, CustomMaxOutputTokensBox);
+
+    private static void UpdateTokenChoiceVisibility(ComboBox choice, TextBox? customValue)
     {
         // SelectionChanged can fire while InitializeComponent is still creating the text box.
-        if (CustomContextWindowBox is null || ContextWindowBox.SelectedItem is not ComboBoxItem option) return;
+        if (customValue is null || choice.SelectedItem is not ComboBoxItem option) return;
         bool custom = (string)option.Tag == "custom";
-        CustomContextWindowBox.Visibility = custom ? Visibility.Visible : Visibility.Collapsed;
-        if (!custom) CustomContextWindowBox.Text = (string)option.Tag;
+        customValue.Visibility = custom ? Visibility.Visible : Visibility.Collapsed;
+        if (!custom) customValue.Text = (string)option.Tag;
     }
 
-    private int ContextWindowTokens()
+    private int ContextWindowTokens() => ReadTokenChoice(ContextWindowBox, CustomContextWindowBox,
+        ModelApiClient.ValidateContextWindowTokens, "上下文窗口须为 2048–2000000 的整数（tokens）。");
+
+    private int MaxOutputTokens() => ReadTokenChoice(MaxOutputTokensBox, CustomMaxOutputTokensBox,
+        ModelApiClient.ValidateMaxOutputTokens, "最大输出须为 1024–262144 的整数（tokens）。");
+
+    private static int ReadTokenChoice(ComboBox choice, TextBox customValue, Func<int, int> validate, string errorKey)
     {
-        string value = ContextWindowBox.SelectedItem is ComboBoxItem { Tag: "custom" }
-            ? CustomContextWindowBox.Text.Trim()
-            : (ContextWindowBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
-        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens) ||
-            tokens is < ModelApiClient.MinimumContextWindowTokens or > ModelApiClient.MaximumContextWindowTokens)
-            throw new InvalidOperationException("上下文窗口须为 2048–2000000 的整数（tokens）。");
-        return tokens;
+        string value = choice.SelectedItem is ComboBoxItem { Tag: "custom" }
+            ? customValue.Text.Trim()
+            : (choice.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens))
+            throw new InvalidOperationException(UiText.Get(errorKey));
+        return validate(tokens);
     }
 
     private void ModelSearchBox_TextChanged(object sender, TextChangedEventArgs e) => RenderModelOptions();
@@ -351,6 +432,8 @@ public sealed partial class ModelManagementWindow : Window
         ModelsBox.Text = string.Join(Environment.NewLine, ids);
         UpdateModelCount();
         _updatingModelList = false;
+        // A collapsed manual editor may defer TextChanged; checkbox selection is authoritative now.
+        UpdateAutomaticContextWindow();
     }
 
     private ModelConnection Form(bool requireModels)
@@ -374,7 +457,7 @@ public sealed partial class ModelManagementWindow : Window
         var models = ModelIds();
         if (requireModels && models.Length == 0) throw new InvalidOperationException("请先获取模型，或手动填写模型 ID。");
         return new(id, name, url, models, string.IsNullOrWhiteSpace(ApiKeyBox.Password) ? null : ApiKeyBox.Password.Trim(),
-            (string)((ComboBoxItem)ProtocolBox.SelectedItem).Tag, ContextWindowTokens());
+            (string)((ComboBoxItem)ProtocolBox.SelectedItem).Tag, ContextWindowTokens(), MaxOutputTokens());
     }
 
     private void SetBusy(bool busy)
@@ -382,7 +465,8 @@ public sealed partial class ModelManagementWindow : Window
         EditorForm.IsHitTestVisible = ProviderPanel.IsHitTestVisible = !busy;
         PresetBox.IsEnabled = NameBox.IsEnabled = ApiKeyBox.IsEnabled = ModelsBox.IsEnabled =
             BaseUrlBox.IsEnabled = ProviderIdBox.IsEnabled = NewConnectionButton.IsEnabled = ProtocolBox.IsEnabled =
-            ModelSearchBox.IsEnabled = ContextWindowBox.IsEnabled = CustomContextWindowBox.IsEnabled = !busy;
+            ModelSearchBox.IsEnabled = ContextWindowBox.IsEnabled = CustomContextWindowBox.IsEnabled =
+            MaxOutputTokensBox.IsEnabled = CustomMaxOutputTokensBox.IsEnabled = !busy;
         foreach (var option in ModelOptions.Children.OfType<CheckBox>()) option.IsEnabled = !busy;
         foreach (var child in ProviderList.Children.OfType<Button>()) child.IsEnabled = !busy;
         ProbeButton.IsEnabled = SaveButton.IsEnabled = !busy;

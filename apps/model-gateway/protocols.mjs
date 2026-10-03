@@ -1,3 +1,5 @@
+import { finalParts, checkFinish } from './streaming.mjs';
+
 export const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 
 // Opt in only for known Responses reasoning models on the official endpoint.
@@ -42,13 +44,8 @@ export function chatRequest(connection, model, messages, { stream = false, syste
 }
 
 export function responseText(protocol, result) {
-  if (protocol === 'anthropic-messages')
-    return result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n');
-  if (protocol === 'openai-responses') {
-    if (result.status === 'incomplete' || result.status === 'failed') throw new Error('模型未完成回复，请重试。');
-    return result.output?.filter(item => item.type === 'message')
-      .flatMap(item => item.content ?? []).filter(block => block.type === 'output_text')
-      .map(block => block.text).join('\n');
-  }
-  return result.choices?.[0]?.message?.content;
+  const parts = finalParts(protocol, result);
+  try { checkFinish(parts.finish); }
+  catch (error) { error.content = parts.content; error.reasoning = parts.reasoning; throw error; }
+  return parts.content;
 }

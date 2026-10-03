@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { atomicJson } from './store.mjs';
 import { ensureLocalDirectory, inspectLocalPath, objectInput, toolFailure } from './tool-paths.mjs';
+import { mcpEndpointIdentity, normalizeMcpConnection } from './mcp-config.mjs';
+export { mcpEndpointIdentity, sameMcpEndpoint } from './mcp-config.mjs';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 const configQueues = new Map();
@@ -14,34 +16,44 @@ function string(value, label, max = 4096) {
   return value.trim();
 }
 
-function validateConfig(value) {
+function validateConfig(value, { rejectDuplicateEndpoints = true } = {}) {
   objectInput(value);
   if (value.version !== 1) throw toolFailure('工具配置版本不受支持，原文件已保留。', 'UNSUPPORTED_AGENT_CONFIG', 409);
   if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.mcpServers) ||
       value.mcpServers.length > 32 || !Array.isArray(value.skillDirectories) || value.skillDirectories.length > 32)
     throw toolFailure('工具配置格式无效。', 'INVALID_AGENT_CONFIG');
   const ids = new Set();
+  const endpoints = new Set();
   const mcpServers = value.mcpServers.map(server => {
     objectInput(server);
     const id = string(server.id, 'MCP ID', 40);
     if (!/^[a-z][a-z0-9-]{1,39}$/.test(id) || ids.has(id)) throw toolFailure('MCP ID 无效或重复。', 'INVALID_AGENT_CONFIG');
     ids.add(id);
-    const command = string(server.command, 'MCP command');
-    if (!Array.isArray(server.args) || server.args.length > 64 || server.args.some(arg =>
-        typeof arg !== 'string' || arg.length > 16384 || arg.includes('\0')))
-      throw toolFailure('MCP args 须为有效字符串数组。', 'INVALID_AGENT_CONFIG');
+    const connection = normalizeMcpConnection(server);
+    const identity = mcpEndpointIdentity(connection);
+    if (rejectDuplicateEndpoints && endpoints.has(identity)) throw toolFailure('同一个 MCP 连接已配置，请编辑原连接。', 'DUPLICATE_MCP_ENDPOINT', 409);
+    endpoints.add(identity);
     if (typeof server.enabled !== 'boolean') throw toolFailure('请明确是否启用 MCP 服务。', 'INVALID_AGENT_CONFIG');
     const protocolVersion = server.protocolVersion ?? LEGACY_MCP_PROTOCOL;
     if (![LEGACY_MCP_PROTOCOL, MODERN_MCP_PROTOCOL].includes(protocolVersion))
       throw toolFailure('MCP 协议须明确为 2025-11-25 兼容或 2026-07-28。', 'INVALID_AGENT_CONFIG');
-    return { id, name: string(server.name, 'MCP name', 100), command, args: [...server.args], enabled: server.enabled, protocolVersion };
+    const disabledTools = server.disabledTools ?? [];
+    if (!Array.isArray(disabledTools) || disabledTools.length > 4096 || disabledTools.some(name =>
+        typeof name !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(name)))
+      throw toolFailure('MCP 禁用工具列表无效。', 'INVALID_AGENT_CONFIG');
+    return { id, name: string(server.name, 'MCP name', 100), ...connection, enabled: server.enabled, protocolVersion,
+      disabledTools: [...new Set(disabledTools)] };
   });
   const skillDirectories = [...new Set(value.skillDirectories.map(path => {
     path = string(path, '技能目录');
     if (!isAbsolute(path)) throw toolFailure('技能目录须为绝对路径。', 'INVALID_AGENT_CONFIG');
     return resolve(path);
   }))];
-  return { version: 1, revision: value.revision, mcpServers, skillDirectories };
+  const disabledSkills = value.disabledSkills ?? [];
+  if (!Array.isArray(disabledSkills) || disabledSkills.length > 4096 || disabledSkills.some(id =>
+      typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id)))
+    throw toolFailure('禁用技能列表无效。', 'INVALID_AGENT_CONFIG');
+  return { version: 1, revision: value.revision, mcpServers, skillDirectories, disabledSkills: [...new Set(disabledSkills)] };
 }
 
 export class AgentConfigRepository {
@@ -49,7 +61,7 @@ export class AgentConfigRepository {
 
   async read() {
     const info = await inspectLocalPath(this.file, { allowMissing: true });
-    if (!info) return { version: 1, revision: 0, mcpServers: [], skillDirectories: [] };
+    if (!info) return { version: 1, revision: 0, mcpServers: [], skillDirectories: [], disabledSkills: [] };
     if (!info.isFile() || info.size > MAX_CONFIG_BYTES) throw toolFailure('工具配置文件损坏，原文件已保留。', 'CORRUPT_AGENT_CONFIG', 500);
     let value;
     try { value = JSON.parse((await readFile(this.file, 'utf8')).replace(/^\uFEFF/, '')); }
@@ -57,7 +69,7 @@ export class AgentConfigRepository {
       if (error instanceof SyntaxError) throw toolFailure('工具配置文件损坏，原文件已保留。', 'CORRUPT_AGENT_CONFIG', 500);
       throw error;
     }
-    try { return validateConfig(value); }
+    try { return validateConfig(value, { rejectDuplicateEndpoints: false }); }
     catch (error) {
       if (error.code === 'UNSUPPORTED_AGENT_CONFIG') throw error;
       throw toolFailure('工具配置文件损坏，原文件已保留。', 'CORRUPT_AGENT_CONFIG', 500);

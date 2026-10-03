@@ -9,7 +9,11 @@ $agentFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('kynxa-agent-transcrip
 New-Item -ItemType Directory -Path $agentFixtureRoot | Out-Null
 $agentScriptPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../apps/desktop/Resources/Transcript/transcript.js'))
 $agentScriptUri = [Uri]::new($agentScriptPath).AbsoluteUri
-$agentHtml = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixture.html')).Replace('__TRANSCRIPT_SCRIPT__', $agentScriptUri)
+$agentStylePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../apps/desktop/Resources/Transcript/transcript.css'))
+$agentLinksPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../apps/desktop/Resources/Transcript/tool-web-links.js'))
+$agentPresentationPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../apps/desktop/Resources/Transcript/tool-presentation.js'))
+$agentMessagePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../apps/desktop/Resources/Transcript/message-presentation.js'))
+$agentHtml = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixture.html')).Replace('__TRANSCRIPT_SCRIPT__', $agentScriptUri).Replace('__WEB_LINKS_SCRIPT__', [Uri]::new($agentLinksPath).AbsoluteUri).Replace('__TOOL_PRESENTATION_SCRIPT__', [Uri]::new($agentPresentationPath).AbsoluteUri).Replace('__MESSAGE_PRESENTATION_SCRIPT__', [Uri]::new($agentMessagePath).AbsoluteUri).Replace('__TRANSCRIPT_STYLE__', [Uri]::new($agentStylePath).AbsoluteUri)
 $agentFixturePath = Join-Path $agentFixtureRoot 'fixture.html'
 [IO.File]::WriteAllText($agentFixturePath, $agentHtml, [Text.UTF8Encoding]::new($false))
 $agentOutputPath = Join-Path $agentFixtureRoot 'dom.txt'

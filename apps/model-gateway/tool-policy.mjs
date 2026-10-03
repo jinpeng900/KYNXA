@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { toolFailure } from './tool-paths.mjs';
 
-const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read']);
+const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read',
+  'tool.search', 'tool.load', 'tool.result.read', 'skill.resource.read', 'skill.inspect', 'skill.check',
+  'conversation.history.search', 'conversation.history.read']);
 const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
 
 export function needsToolApproval(context, name, { outsideWorkspace = false, verifiedSandbox = false } = {}) {
   if (context.permissionMode === 'full') return false;
   if (outsideWorkspace) return true;
   if (READ_TOOLS.has(name)) return false;
-  if (context.permissionMode === 'smart' && (REVERSIBLE_TOOLS.has(name) || (name === 'terminal.run' && verifiedSandbox))) return false;
+  if (context.permissionMode === 'smart' && (REVERSIBLE_TOOLS.has(name) || (['terminal.run', 'skill.run'].includes(name) && verifiedSandbox))) return false;
   // Unknown MCP annotations never grant authority. Deletion always requires approval in Ask/Smart.
   return true;
 }
@@ -36,7 +38,8 @@ export class ToolApprovalRegistry {
       try {
         emit({ type: 'approval_required', tool: { toolCallId: call.id, name: call.name,
           arguments: structuredClone(call.arguments), status: 'approval-required', summary: call.name,
-          approvalId, workspaceRoot: context.workspaceRoot, outsideWorkspace, reason: call.arguments.reason ?? null } });
+          approvalId, workspaceRoot: context.workspaceRoot, outsideWorkspace,
+          reason: call.arguments.policy?.reason ?? call.arguments.reason ?? null } });
       } catch (error) { finish(false, error); }
     });
   }

@@ -7,7 +7,17 @@
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
-    toolDenied: '已拒绝', toolApproval: '等待批准'
+    toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '结果未知',
+    toolSearchWeb: '搜索资料', toolReadWeb: '阅读网页', toolReadFile: '读取文件', toolInspectFile: '查看文件',
+    toolListFiles: '查看文件夹', toolSearchFiles: '查找文件', toolEditFile: '修改文件', toolDeleteFile: '删除文件',
+    toolCreateFolder: '创建文件夹', toolRunCommand: '运行命令', toolUseSkill: '使用技能', toolReadSkill: '读取技能',
+    toolFindSkill: '查找技能', toolInspectSkill: '检查技能', toolFindTools: '查找工具', toolReadResult: '读取工具记录',
+    toolFindHistory: '查找聊天记录', toolReadHistory: '读取聊天记录', toolExecute: '执行操作',
+    toolOutcomeUncertain: '操作已中断，执行结果尚未确定。', toolTimedOut: '操作超时。',
+    toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
+    toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
+    toolMoreWebLinks: '另{0}个链接',
+    elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
   const conversations = new Map();
@@ -17,14 +27,15 @@
   let conversationId = null, pending = null, following = true, applying = false;
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
+  let anchoringScroll = false, anchorFrame = 0;
   const send = value => window.chrome?.webview?.postMessage(value);
-  const reasoningTitle = message => message.reasoningState === 'thinking' ? uiStrings.thinking
-    : message.reasoningState === 'finished' ? uiStrings.reasoningDuration.replace('{0}', String(message.reasoningSeconds))
-    : message.reasoningTitle || uiStrings.reasoning;
-  function statusText(message) {
+  const presentationFor = message => window.KynxaMessagePresentation.selectMessagePresentation(message);
+  function statusText(message, presentation = presentationFor(message)) {
+    if (presentation.mode === 'incomplete') return uiStrings.interrupted;
     if (message.status === 'interrupted')
       return uiStrings.stopped + (typeof message.error === 'string' && message.error ? ' · ' + message.error : '');
     if (message.error) return typeof message.error === 'string' ? message.error : uiStrings.interrupted;
+    if (presentation.mode === 'active' && message.reasoningState === 'thinking') return uiStrings.thinking;
     return message.waiting && !message.content ? uiStrings.replying : '';
   }
   function setStatusText(entry, text) {
@@ -39,13 +50,15 @@
     entry.copy.setAttribute('aria-label', uiStrings.copyMessage);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
-      const title = reasoningTitle(entry.message);
-      if (entry.summary.textContent !== title) entry.summary.textContent = title;
       setStatusText(entry, statusText(entry.message));
+      setToolText(entry.elapsed, entry.presentation?.mode === 'final'
+        ? window.KynxaMessagePresentation.elapsedText(entry.message.durationMs, uiStrings) : '');
     }
     entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
-    if (entry.toolsSummary) entry.toolsSummary.textContent = uiStrings.toolActivities;
     for (const row of entry.toolRows?.values() || []) localizeToolRow(row);
+    for (const row of entry.segmentRows?.values() || []) {
+      for (const tool of row.toolRows.values()) localizeToolRow(tool);
+    }
   }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
@@ -149,11 +162,7 @@
     const article = document.createElement('article');
     article.className = 'message'; article.dataset.messageId = String(message.id);
     const content = document.createElement('div'); content.className = 'message-content';
-    const reasoning = document.createElement('details'); reasoning.className = 'reasoning';
-    const summary = document.createElement('summary'); summary.dataset.copyIgnore = '';
-    const thought = document.createElement('div'); thought.className = 'reasoning-body';
-    reasoning.append(summary, thought); reasoning.open = !!message.reasoningExpanded;
-    reasoning.addEventListener('toggle', followBottom);
+    const elapsed = document.createElement('div'); elapsed.className = 'message-elapsed'; elapsed.dataset.copyIgnore = ''; elapsed.hidden = true;
     const body = document.createElement('div'); body.className = 'message-body';
     const status = document.createElement('div'); status.className = 'message-status'; status.dataset.copyIgnore = '';
     const actions = document.createElement('div'); actions.className = 'message-actions'; actions.dataset.copyIgnore = '';
@@ -161,34 +170,38 @@
     copy.title = uiStrings.copy; copy.setAttribute('aria-label', uiStrings.copyMessage);
     copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
-    const tools = document.createElement('details'); tools.className = 'tool-activities'; tools.hidden = true;
-    const toolsSummary = document.createElement('summary'); toolsSummary.dataset.copyIgnore = '';
-    toolsSummary.textContent = uiStrings.toolActivities; tools.append(toolsSummary);
-    tools.addEventListener('toggle', followBottom);
-    const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry,
-      tools, toolsSummary, toolRows: new Map(), message: null };
-    copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: entry.message.content || '' }));
+    const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
+    const timeline = document.createElement('div'); timeline.className = 'assistant-timeline'; timeline.hidden = true;
+    const entry = { article, content, elapsed, body, status, actions, copy, retry,
+      tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null };
+    copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: copiedMessage(entry.message) }));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
-    actions.append(copy, retry); content.append(reasoning, tools, body, status); article.append(content, actions);
+    actions.append(copy, retry); content.append(elapsed, timeline, body, status); article.append(content, actions);
     return entry;
   }
   function updateMessage(entry, message) {
     const old = entry.message;
-    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry']
-      .every(key => old[key] === message[key]) && JSON.stringify(old.toolActivities || []) === JSON.stringify(message.toolActivities || [])) return;
+    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'presentationMode']
+      .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
+      !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
+    const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
     entry.article.dataset.role = role;
+    entry.article.dataset.presentationMode = presentation.mode;
     if (role === 'assistant' && !entry.avatar) {
       entry.avatar = document.createElement('img'); entry.avatar.className = 'message-avatar';
       entry.avatar.src = '../UI/Brand/kynxa-logo.png'; entry.avatar.alt = ''; entry.avatar.draggable = false; entry.avatar.dataset.copyIgnore = '';
       entry.article.prepend(entry.avatar);
     } else if (role === 'user' && entry.avatar) { entry.avatar.remove(); entry.avatar = null; }
-    entry.reasoning.hidden = !message.reasoningHtml && !message.reasoningTitle && !message.reasoningState;
-    entry.summary.textContent = reasoningTitle(message);
-    patchBlocks(entry.thought, message.reasoningHtml || '');
-    updateTools(entry, message.toolActivities || []);
+    const segmented = role === 'assistant' && presentation.segments.length > 0;
+    entry.timeline.hidden = !segmented; entry.body.hidden = segmented;
+    updateAssistantSegments(entry, message, presentation);
+    updateTools(entry, presentation.tools.filter(tool => !presentation.segments.some(segment => segment.round === tool.round)));
+    if (!entry.tools.hidden && entry.tools.nextSibling !== entry.status) entry.content.insertBefore(entry.tools, entry.status);
+    const elapsed = presentation.mode === 'final' ? window.KynxaMessagePresentation.elapsedText(message.durationMs, uiStrings) : '';
+    setToolText(entry.elapsed, elapsed); entry.elapsed.hidden = !elapsed;
     if (role === 'user') {
       const text = message.content || '';
       if (entry.body._plainContent !== text || !entry.body.hasAttribute('data-copy-plain')) {
@@ -197,50 +210,154 @@
         entry.body._plainContent = text;
         delete entry.body._sourceHtml; delete entry.body._blockKeys;
       }
-    } else {
+    } else if (!segmented) {
       if (entry.body.hasAttribute('data-copy-plain')) {
         entry.body.removeAttribute('data-copy-plain'); entry.body.replaceChildren();
         delete entry.body._sourceHtml; delete entry.body._blockKeys;
       }
       patchBlocks(entry.body, message.html || '');
     }
-    entry.status.replaceChildren();
-    setStatusText(entry, statusText(message));
-    if (message.streaming) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot); }
+    setStatusText(entry, statusText(message, presentation));
+    const existingDot = entry.status.querySelector('.streaming-dot');
+    if (message.streaming && !existingDot) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot); }
+    else if (!message.streaming) existingDot?.remove();
     entry.retry.hidden = !message.canRetry;
-    entry.copy.hidden = !message.content;
+    entry.copy.hidden = !copiedMessage(message);
+  }
+  function copiedMessage(message) {
+    return presentationFor(message).content;
+  }
+  function createSegmentRow(entry, id) {
+    const root = document.createElement('section'); root.className = 'assistant-segment'; root.dataset.segmentId = id;
+    const body = document.createElement('div'); body.className = 'message-body';
+    const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
+    root.append(body);
+    return { root, body, tools, toolRows: new Map(), copy: entry.copy, message: entry.message, segment: null };
+  }
+  function updateAssistantSegments(entry, message, presentation) {
+    const segments = presentation.segments;
+    const ids = new Set(segments.map(segment => String(segment.id)));
+    for (const [id, row] of entry.segmentRows) if (!ids.has(id)) { row.root.remove(); entry.segmentRows.delete(id); }
+    let previous = null;
+    for (const segment of segments) {
+      const id = String(segment.id);
+      let row = entry.segmentRows.get(id);
+      if (!row) { row = createSegmentRow(entry, id); entry.segmentRows.set(id, row); }
+      const expected = previous ? previous.nextSibling : entry.timeline.firstChild;
+      if (expected !== row.root) entry.timeline.insertBefore(row.root, expected);
+      previous = row.root;
+      row.message = message; row.segment = segment;
+      const final = presentation.mode === 'final';
+      const className = 'assistant-segment' + (final ? ' final-answer' : ' commentary');
+      if (row.root.className !== className) row.root.className = className;
+      if (row.root.dataset.phase !== segment.phase) row.root.dataset.phase = segment.phase;
+      if (row.root.dataset.status !== segment.status) row.root.dataset.status = segment.status;
+      if (row.root.dataset.round !== String(segment.round)) row.root.dataset.round = String(segment.round);
+      patchBlocks(row.body, segment.html || '');
+      const activities = presentation.tools.filter(tool => tool.round === segment.round)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      updateTools(row, activities);
+      if (!row.tools.hidden && row.tools.parentNode !== row.root) row.root.append(row.tools);
+    }
   }
   function localizeToolRow(row) {
     const labels = { running: uiStrings.toolRunning, completed: uiStrings.toolCompleted,
-      error: uiStrings.toolError, denied: uiStrings.toolDenied, 'approval-required': uiStrings.toolApproval };
-    row.title.textContent = row.tool.name + ' · ' + (labels[row.tool.status] || row.tool.status);
+      error: uiStrings.toolError, denied: uiStrings.toolDenied, cancelled: uiStrings.toolCancelled,
+      unknown: uiStrings.toolUnknown, 'approval-required': uiStrings.toolApproval };
+    const title = uiStrings[row.presentation.titleKey] || uiStrings.toolExecute;
+    setToolText(row.title, title + (row.count > 1 ? ' ×' + row.count : ''));
+    setToolText(row.state, labels[row.tool.status] || uiStrings.toolUnknown);
+    row.state.dataset.status = row.tool.status;
+    const error = uiStrings[row.presentation.errorKey] || row.presentation.errorText;
+    setToolText(row.error, error); row.error.hidden = !error;
+    if (row.more) {
+      setToolText(row.more, row.moreCount > 0 ? uiStrings.toolMoreWebLinks.replace('{0}', String(row.moreCount)) : '');
+      row.more.hidden = !row.moreCount;
+    }
+  }
+  function setToolText(node, value) {
+    if (node.textContent !== value) node.textContent = value;
+  }
+  function createToolRow(entry, id, website) {
+    const root = document.createElement('div'); root.className = 'tool-activity'; root.dataset.toolCallId = id; root.dataset.copyIgnore = '';
+    root.classList.toggle('tool-web-activity', website);
+    const header = document.createElement('div'); header.className = 'tool-header';
+    const title = document.createElement('span'); title.className = 'tool-title';
+    const command = document.createElement('code'); command.className = 'tool-command';
+    const state = document.createElement('span'); state.className = 'tool-state';
+    const heading = document.createElement('span'); heading.className = 'tool-heading'; heading.append(title, state);
+    header.append(heading, command);
+    const error = document.createElement('div'); error.className = 'tool-error'; error.dataset.copyPlain = '';
+    const links = document.createElement('div'); links.className = 'tool-web-links';
+    const more = document.createElement('span'); more.className = 'tool-web-more'; more.hidden = true;
+    root.append(header, ...(website ? [links, more] : []), error);
+    const row = { root, title, state, command, error, links, more, moreCount: 0, website, tool: null, presentation: null, signature: null, count: 1 };
+    return row;
+  }
+  function toolGroups(entry, activities) {
+    entry.toolSourceCache ??= new Map();
+    const active = new Set(), groups = [];
+    for (const tool of activities) {
+      const id = String(tool.toolCallId); active.add(id);
+      const signature = Number.isSafeInteger(tool.uiRevision) ? tool.uiRevision : JSON.stringify(tool);
+      let view = entry.toolSourceCache.get(id);
+      if (!view || view.signature !== signature) {
+        const presentation = window.KynxaToolPresentation.describe(tool);
+        view = { signature, tool, presentation, urls: presentation.website ? window.KynxaToolWebLinks.extract(tool) || [] : [] };
+        entry.toolSourceCache.set(id, view);
+      }
+      const previous = groups.at(-1);
+      const key = view.presentation.titleKey + ':' + view.presentation.website + ':' + tool.status;
+      // Approval requests retain an individual, visible identity. Execution records are never merged.
+      if (previous && previous.key === key && ['completed', 'running'].includes(tool.status)) previous.views.push(view);
+      else groups.push({ id, key, views: [view] });
+    }
+    for (const id of entry.toolSourceCache.keys()) if (!active.has(id)) entry.toolSourceCache.delete(id);
+    return groups;
   }
   function updateTools(entry, activities) {
     entry.tools.hidden = activities.length === 0;
-    const ids = new Set(activities.map(tool => String(tool.toolCallId)));
+    const groups = toolGroups(entry, activities), ids = new Set(groups.map(group => group.id));
     for (const [id, row] of entry.toolRows) if (!ids.has(id)) { row.root.remove(); entry.toolRows.delete(id); }
-    for (const tool of activities) {
-      const id = String(tool.toolCallId);
+    if (!activities.length) { entry.tools.remove(); return; }
+    let previous = null;
+    for (const group of groups) {
+      const id = group.id, first = group.views[0];
       let row = entry.toolRows.get(id);
       if (!row) {
-        const root = document.createElement('div'); root.className = 'tool-activity'; root.dataset.toolCallId = id;
-        const title = document.createElement('div'); title.className = 'tool-title'; title.dataset.copyIgnore = '';
-        const text = document.createElement('div'); text.className = 'tool-summary';
-        const parameters = document.createElement('pre'); parameters.className = 'tool-arguments';
-        const result = document.createElement('pre'); result.className = 'tool-result';
-        root.append(title, text, parameters, result); entry.tools.append(root);
-        row = { root, title, text, parameters, result, tool: null }; entry.toolRows.set(id, row);
+        row = createToolRow(entry, id, first.presentation.website); entry.toolRows.set(id, row);
       }
-      row.tool = tool;
+      const expected = previous ? previous.nextSibling : entry.tools.firstChild;
+      if (expected !== row.root) entry.tools.insertBefore(row.root, expected);
+      previous = row.root;
+      // Immutable source records get a lightweight display revision from the desktop.
+      // Historical/standalone clients fall back to a signature without changing formal events.
+      const signature = JSON.stringify(group.views.map(view => view.signature));
+      if (row.signature === signature) continue;
+      row.signature = signature;
+      row.tool = first.tool; row.presentation = first.presentation; row.count = group.views.length;
+      row.root.dataset.toolCount = String(row.count);
       localizeToolRow(row);
-      const summary = typeof tool.summary === 'string' ? tool.summary : '';
-      if (row.text.textContent !== summary) row.text.textContent = summary;
-      const args = tool.arguments == null ? '' : JSON.stringify(tool.arguments, null, 2);
-      if (row.parameters.textContent !== args) row.parameters.textContent = args;
-      row.parameters.hidden = !args;
-      const result = typeof tool.result === 'string' ? tool.result : '';
-      if (row.result.textContent !== result) row.result.textContent = result;
-      row.result.hidden = !result;
+      if (row.website) {
+        const allUrls = [...new Set(group.views.flatMap(view => view.urls))], urls = allUrls.slice(0, 4);
+        row.moreCount = allUrls.length - urls.length;
+        setToolText(row.more, row.moreCount > 0 ? uiStrings.toolMoreWebLinks.replace('{0}', String(row.moreCount)) : '');
+        row.more.hidden = !row.moreCount;
+        const linksSignature = JSON.stringify(urls);
+        if (row.linksSignature !== linksSignature) {
+          row.linksSignature = linksSignature;
+          row.links.replaceChildren(...urls.map(url => {
+            const link = document.createElement('a'); link.className = 'tool-web-link';
+            link.href = url; link.textContent = url; link.title = url; link.rel = 'noopener noreferrer';
+            return link;
+          }));
+        }
+        const action = urls.length ? '' : [...new Set(group.views.map(view => window.KynxaToolWebLinks.query(view.tool)).filter(Boolean))].join(' · ');
+        setToolText(row.command, action); row.command.hidden = !action; row.command.title = action;
+        continue;
+      }
+      const action = [...new Set(group.views.map(view => view.presentation.action).filter(Boolean))].join('\n');
+      setToolText(row.command, action); row.command.hidden = !action; row.command.title = action;
     }
   }
   function removeCached(id) {
@@ -260,6 +377,7 @@
       for (const entry of entries.values()) {
         for (const key of ['content', 'html', 'reasoningHtml']) characters += entry.message?.[key]?.length || 0;
         characters += JSON.stringify(entry.message?.toolActivities || []).length;
+        characters += JSON.stringify(entry.message?.assistantSegments || []).length;
       }
       const nodes = messages.querySelectorAll('*').length;
       if (entries.size <= 400 && characters <= maxCachedCharacters && nodes <= maxCachedNodes) {
@@ -284,6 +402,7 @@
     if (changedConversation || snapshot.openAtBottom) {
       pending = null; clearSelection(); following = true;
     } else if (activeSelection()) { pending = snapshot; return; }
+    const anchors = following ? [] : scrollAnchors();
     applying = true;
     const ids = new Set(snapshot.messages.map(message => String(message.id)));
     for (const [id, entry] of entries) if (!ids.has(id)) { entry.article.remove(); entries.delete(id); }
@@ -297,9 +416,40 @@
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
       previous = entry.article;
     }
+    restoreScrollAnchor(anchors);
     applying = false;
     followBottom();
     document.fonts.ready.then(followBottom);
+  }
+  function scrollAnchors() {
+    const anchors = [], fallbacks = [];
+    // Prefer a surviving paragraph in view; keep message-level fallbacks when transient steps disappear.
+    for (const entry of entries.values()) {
+      const bounds = entry.article.getBoundingClientRect();
+      if (bounds.bottom <= 0 || bounds.top >= innerHeight) continue;
+      for (const node of entry.article.querySelectorAll('.message-body > *, .tool-activity')) {
+        const rect = node.getBoundingClientRect();
+        if (rect.height && rect.bottom > 0 && rect.top < innerHeight) anchors.push({ node, top: rect.top });
+        if (anchors.length >= 12) break;
+      }
+      fallbacks.push({ node: entry.article, top: bounds.top });
+      if (anchors.length >= 12) break;
+    }
+    return [...anchors, ...fallbacks];
+  }
+  function restoreScrollAnchor(anchors) {
+    for (const anchor of anchors) {
+      if (!anchor.node.isConnected) continue;
+      const bounds = anchor.node.getBoundingClientRect();
+      if (!bounds.height) continue;
+      const delta = bounds.top - anchor.top;
+      if (Math.abs(delta) > .5) {
+        anchoringScroll = true; cancelAnimationFrame(anchorFrame);
+        scrollTo({ top: scrollY + delta, left: scrollX, behavior: 'instant' });
+        anchorFrame = requestAnimationFrame(() => { anchoringScroll = false; });
+      }
+      return;
+    }
   }
 
   function visibleMathRange(math) {
@@ -397,7 +547,7 @@
   document.addEventListener('pointermove', event => { if (!(event.buttons & 1)) releasePointer(); });
   window.addEventListener('blur', () => { clearSelection(); });
   window.addEventListener('scroll', () => {
-    if (!applying && !localizingUi) following = !activeSelection() && !pointerSelecting && atBottom();
+    if (!applying && !localizingUi && !anchoringScroll) following = !activeSelection() && !pointerSelecting && atBottom();
   }, { passive: true });
   window.addEventListener('wheel', event => { if (event.deltaY < 0) following = false; }, { passive: true });
   window.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false; });

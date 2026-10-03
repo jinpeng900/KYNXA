@@ -14,10 +14,16 @@ public sealed partial class ShellPage
     {
         if (tool.ApprovalId is not { } approvalId) throw new InvalidDataException(UiText.Get("工具审批缺少请求标识。"));
         bool approved = false;
+        // A new approval takes the dialog surface from a history preview, without deciding for the user.
+        if (_toolResultClosed is { } preview)
+        {
+            _toolResultCancellation?.Cancel();
+            await preview.Task;
+        }
         if (IsCurrentApproval(pending) && XamlRoot is not null)
         {
             var dialog = ToolApprovalDialog.Create(XamlRoot, tool);
-            using var cancellation = pending.Cancellation.Token.Register(() => DispatcherQueue.TryEnqueue(dialog.Hide));
+            using var cancellation = pending.Cancellation.Token.Register(() => DispatcherQueue.TryEnqueue(() => dialog.Hide()));
             try { approved = await dialog.ShowAsync() == ContentDialogResult.Primary && IsCurrentApproval(pending); }
             catch (InvalidOperationException) { approved = false; }
         }

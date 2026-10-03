@@ -19,7 +19,7 @@ var enteredFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuati
 var releaseFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var handlers = new ConcurrentBag<Task>();
 int revision = 10, oldProtocol = 0, forceConflict = 0;
-var storedChat = new ProjectChatState { Title = "已有记录", Messages = [new() { Content = "已有问题" }, new() { Role = "assistant", Content = "正式回复" }] };
+var storedChat = new ProjectChatState { Title = "已有记录", Messages = [new() { Content = "已有问题" }, new() { Role = "assistant", Content = "正式回复", DurationMs = 5678 }] };
 var canonical = new ConversationCatalog(revision, [], [storedChat]);
 var server = Task.Run(async () =>
 {
@@ -35,7 +35,7 @@ async Task Handle(HttpListenerContext context)
     {
         object result;
         if (context.Request.Url!.AbsolutePath == "/health")
-            result = new { service = "kynxa-model-gateway", status = "ok", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 1, agentProtocol = 1, toolStreamProtocol = 1, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
+            result = new { service = "kynxa-model-gateway", status = "ok", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, extensionStorageProtocol = 1, toolStreamProtocol = 3, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
         else if (context.Request.HttpMethod == "PUT")
         {
             using var document = await JsonDocument.ParseAsync(context.Request.InputStream);
@@ -73,6 +73,7 @@ try
     using var store = new ProjectStore(dataPath);
     var loaded = await store.LoadAsync();
     Check(loaded.Chats[0].Messages[1].Content == "正式回复", "Did not read authoritative transcript.");
+    Check(loaded.Chats[0].Messages[1].DurationMs == 5678, "Did not read authoritative generation duration.");
     var chat = loaded.Chats[0];
     var user = new ChatMessageState { Content = "新问题" }; chat.Messages.Add(user);
     chat.Messages.Add(new() { Role = "assistant", Content = "UI must not persist this", Status = "streaming" });
@@ -97,6 +98,7 @@ try
     Check(!Directory.Exists(dataPath), "Desktop wrote an independent chat store.");
     var reloaded = await store.LoadAsync();
     Check(reloaded.Chats[0].Messages[1].Content == "正式回复" && reloaded.Chats[0].Messages.All(message => message.Content != "UI must not persist this"), "UI overwrote authoritative reply.");
+    Check(reloaded.Chats[0].Messages[1].DurationMs == 5678, "Reopening changed generation duration.");
     forceConflict = 1;
     try { await store.SaveChatsAsync([chat]); throw new Exception("Conflict ignored."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Conflict was not actionable."); }

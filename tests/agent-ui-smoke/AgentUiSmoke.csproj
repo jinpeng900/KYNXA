@@ -20,6 +20,8 @@
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/AgentApiClient.cs" Link="AgentApiClient.cs" />
     <Compile Include="../../apps/desktop/Services/ToolApprovalDialog.cs" Link="ToolApprovalDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
+    <Compile Include="../../apps/desktop/Controls/StorageLocationRow.cs" Link="StorageLocationRow.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
     <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />

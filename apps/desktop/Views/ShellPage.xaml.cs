@@ -36,6 +36,7 @@ public sealed partial class ShellPage : Page
         InitializeComponent();
         Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
+        ConversationMessages.ToolResultRequested += ToolResultRequested;
         // A click in native chrome/input is outside the browser document too.
         AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
         {

@@ -543,8 +543,8 @@ test('bounded session summary uses only this chat, excludes failures/reasoning/m
   assert.ok(updatedLog.subarray(0, originalLog.length).equals(originalLog), 'existing JSONL bytes must stay unchanged');
   const summaryPath = join(f.root, 'Projects', f.project.Id, 'Sessions', f.chatB.Id, 'context.json');
   const summary = JSON.parse(await readFile(summaryPath, 'utf8'));
-  assert.equal(summary.schemaVersion, 1);
-  assert.ok(estimateTokens(summary.content) <= 768, 'summary must stay within its own budget');
+  assert.equal(summary.schemaVersion, 2);
+  assert.ok(estimateTokens(summary.content) <= summary.excerptBudgetTokens, 'summary must stay within its own budget');
   assert.ok(!JSON.stringify(summary).includes(fact), 'long-term memory must not be copied into session summaries');
   assert.ok(!JSON.stringify(summary).includes('FOREIGN_HISTORY_SHOULD_NOT_BE_CONTEXT'));
   await writeFile(summaryPath, JSON.stringify({ ...summary, content: 'FORGED_SUMMARY_SCOPE_ESCAPE' }));
