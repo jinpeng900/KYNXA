@@ -10,7 +10,7 @@ public sealed record StorageMigrationResult(string DataRoot, int VerifiedFiles);
 public static class StorageMigrationService
 {
     private static readonly string[] ConversationEntries =
-        ["Projects", "Chats", "Trash", "Backups", "Memory", "Index", "settings.json", "catalog.json", ".conversations-v1.json", ".catalog-transaction.json"];
+        ["Projects", "Chats", "Trash", "Backups", "Memory", "Index", "Agent", "Skills", "settings.json", "catalog.json", ".conversations-v1.json", ".catalog-transaction.json"];
 
     private sealed record CopyRoot(string Source, string Name, string[]? Include = null, string[]? Exclude = null);
 

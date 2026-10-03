@@ -25,6 +25,7 @@ public static partial class UiText
             || ModelTranslations.TryGetValue(chinese, out translated)
             || RuntimeTranslations.TryGetValue(chinese, out translated)
             || MemoryTranslations.TryGetValue(chinese, out translated)
+            || AgentTranslations.TryGetValue(chinese, out translated)
                 ? translated : chinese;
     }
 }

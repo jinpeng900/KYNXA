@@ -42,7 +42,7 @@ var server = Task.Run(async () =>
                 string path = context.Request.Url!.AbsolutePath;
                 if (path == "/health")
                     result = new { service = "kynxa-model-gateway", status = "ok", storageProtocol = 1,
-                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 1, dataLayoutVersion = 1 };
+                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 1, agentProtocol = 1, toolStreamProtocol = 1, dataLayoutVersion = 1 };
                 else if (path == "/api/models" && context.Request.HttpMethod == "GET")
                 {
                     // Older gateways do not include contextWindowTokens. Reading

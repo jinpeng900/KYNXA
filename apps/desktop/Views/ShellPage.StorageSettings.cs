@@ -75,6 +75,20 @@ public sealed partial class ShellPage
         memoryRow.Children.Add(memoryLabel);
         memoryRow.Children.Add(memoryButton);
         content.Children.Add(memoryRow);
+        var toolsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+        toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var toolsLabel = LocalizedLabel("工具与技能");
+        toolsLabel.VerticalAlignment = VerticalAlignment.Center;
+        var toolsButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6), CornerRadius = new CornerRadius(8),
+            Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
+        UiLocalization.Bind(toolsButton, Button.ContentProperty, "打开");
+        AutomationProperties.SetAutomationId(toolsButton, "AgentToolsSettingsButton");
+        Grid.SetColumn(toolsButton, 1);
+        toolsRow.Children.Add(toolsLabel); toolsRow.Children.Add(toolsButton);
+        content.Children.Add(toolsRow);
+        toolsButton.Click += (_, _) => { if (!StoragePaths.IsMigrating) OpenAgentTools(); };
         var section = LocalizedLabel("存储", 13);
         section.Opacity = 0.6;
         content.Children.Add(section);
@@ -171,6 +185,7 @@ public sealed partial class ShellPage
             if (StoragePaths.IsMigrating) return;
             choose.IsEnabled = false;
             memoryButton.IsEnabled = false;
+            toolsButton.IsEnabled = false;
             FileStream? maintenance = null;
             bool acquired = false;
             bool moved = false;
@@ -180,6 +195,9 @@ public sealed partial class ShellPage
                 if (_memoryManagementWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成记忆编辑，再更改数据存储位置。"));
                 _memoryManagementWindow?.CloseForOwner();
+                if (_toolManagementWindow is { HasPendingChanges: true })
+                    throw new InvalidOperationException(UiText.Get("请先完成工具配置，再更改数据存储位置。"));
+                _toolManagementWindow?.CloseForOwner();
                 if (_sendingPrompt || _pendingReplies.Values.Any(reply => reply.Error is null)) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
                 using (var self = System.Diagnostics.Process.GetCurrentProcess())
                 {
@@ -252,6 +270,7 @@ public sealed partial class ShellPage
                 IsEnabled = !moved;
                 choose.IsEnabled = !StoragePaths.EnvironmentControlled;
                 memoryButton.IsEnabled = true;
+                toolsButton.IsEnabled = true;
                 languagePicker.IsEnabled = true;
                 progress.IsActive = false; progress.Visibility = Visibility.Collapsed;
             }

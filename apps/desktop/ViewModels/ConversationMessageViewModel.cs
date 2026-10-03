@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
+using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.ViewModels;
 
@@ -13,10 +14,11 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
     private bool _isReasoningExpanded;
     private bool _canRetry;
     public string Content => Message.Content;
+    public IReadOnlyList<ToolActivity> ToolActivities => Message.ToolActivities;
     public string ReasoningText => _isReasoningExpanded ? Message.Reasoning : string.Empty;
     public bool IsStreaming => Message.Status == "streaming";
     public bool IsThinking => IsStreaming && _isThinking;
-    public bool IsWaiting => IsStreaming && Content.Length == 0 && Message.Reasoning.Length == 0;
+    public bool IsWaiting => IsStreaming && Content.Length == 0 && Message.Reasoning.Length == 0 && ToolActivities.Count == 0;
     public long ReasoningSeconds => Math.Max(1, (long)Math.Ceiling(Message.ReasoningDurationMs / 1000d));
     public string ErrorText => Message.Status == "interrupted" ? UiText.Get("已停止生成") + (Message.Error.Length > 0 ? " · " + Message.Error : "") : Message.Error;
     public string ReasoningTitle => IsThinking ? UiText.Get("正在思考…") : string.Format(UiText.Get("思考过程 · {0} 秒"), ReasoningSeconds);
@@ -29,7 +31,7 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
     public Visibility ReasoningVisibility => Message.Reasoning.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ReasoningBodyVisibility => _isReasoningExpanded ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ErrorVisibility => Message.Status is "error" or "interrupted" || Message.Error.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility RetryVisibility => _canRetry && Message.Status is "error" or "interrupted" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RetryVisibility => _canRetry && ToolActivities.Count == 0 && Message.Status is "error" or "interrupted" ? Visibility.Visible : Visibility.Collapsed;
 
     public void SetRetryAllowed(bool allowed)
     {

@@ -20,9 +20,9 @@ public sealed partial class ShellPage
 
     private readonly PermissionOption[] PermissionOptions =
     [
-        new(ChatPermissionModes.Ask, "请求批准", "编辑外部文件和使用互联网时始终询问", "IconPermissionAsk"),
-        new(ChatPermissionModes.Smart, "帮我批准", "仅对检测到的风险操作请求批准", "IconPermissionSmart"),
-        new(ChatPermissionModes.Full, "完全访问权限", "可不受限制地访问互联网和你电脑上的任何文件", "IconPermissionFull")
+        new(ChatPermissionModes.Ask, "请求批准", "读取挂载目录；修改、终端及外部工具需批准", "IconPermissionAsk"),
+        new(ChatPermissionModes.Smart, "帮我批准", "自动处理挂载内可逆操作；删除及外部访问需批准", "IconPermissionSmart"),
+        new(ChatPermissionModes.Full, "完全访问权限", "可访问系统允许的文件；优先挂载目录，终端仍受沙箱限制", "IconPermissionFull")
     ];
 
     private void InitializePermissionPicker()

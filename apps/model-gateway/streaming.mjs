@@ -52,7 +52,7 @@ export async function* readSse(body, onActivity = () => {}) {
   }
 }
 
-function textParts(value) {
+export function textParts(value) {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.filter(x => x?.type === 'text').map(x => x.text ?? '').join('');
   return '';

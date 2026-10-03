@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Isolated tool transcript checks</title></head><body>
+<div id="messages"></div><pre id="result">RUNNING</pre>
+<script>
+window.chrome = window.chrome || {};
+window.chrome.webview = { postMessage() {}, addEventListener(type, callback) { window.hostMessage = callback; } };
+</script>
+<script src="__TRANSCRIPT_SCRIPT__"></script>
+<script>
+try {
+  let checks = 0;
+  const assert = (condition, text) => { if (!condition) throw new Error(text); checks++; };
+  const tool = { toolCallId: 'call-fixture', name: 'file.read', arguments: {path:'fixture.txt'}, status: 'running', summary: 'Reading fixture', result: null };
+  const message = { id:'message-fixture', role:'assistant', content:'Assistant original', html:'<p id="stable">Assistant original</p>', status:'streaming', streaming:true, toolActivities:[tool] };
+  const snapshot = message => ({ conversationId:'chat-fixture', messages:[message] });
+  applyTranscript(snapshot(message));
+  const article = document.querySelector('article');
+  const paragraph = document.getElementById('stable');
+  const root = document.querySelector('.tool-activity');
+  const panel = document.querySelector('.tool-activities');
+  assert(root && !panel.hidden, 'tool activity renders');
+  panel.open = true;
+  const completed = {...tool, status:'completed', result:'literal <script>window.fixtureExecuted=true<\/script>'};
+  applyTranscript(snapshot({...message, toolActivities:[completed]}));
+  assert(document.getElementById('stable') === paragraph, 'tool result preserves message body node');
+  assert(document.querySelector('.tool-activity') === root, 'tool result preserves call row');
+  assert(document.querySelector('.tool-result').textContent === completed.result && !root.querySelector('script') && !window.fixtureExecuted, 'tool result is literal, never executable HTML');
+  assert(panel.open, 'tool result preserves expanded state');
+  const range = document.createRange();
+  range.setStart(paragraph.firstChild, 10); range.setEnd(paragraph.firstChild, 18);
+  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  const selectedNode = selection.anchorNode;
+  const queued = {...completed, result:'Later result'};
+  applyTranscript(snapshot({...message, toolActivities:[queued]}));
+  assert(transcriptState().pending && document.querySelector('.tool-result').textContent === completed.result, 'selected content defers tool updates');
+  assert(selection.anchorNode === selectedNode && selection.toString() === 'original' && transcriptSelectionText() === 'original', 'tool update preserves exact selected text');
+  hostMessage({data:{type:'initializeUi', language:'en', strings:{toolActivities:'Tool activity',toolCompleted:'Completed',toolRunning:'Running'}}});
+  assert(document.querySelector('.tool-activities > summary').textContent === 'Tool activity' && root.querySelector('.tool-title').textContent === 'file.read · Completed', 'existing tool labels localize');
+  assert(selection.anchorNode === selectedNode && selection.toString() === 'original' && document.getElementById('stable') === paragraph, 'localization preserves body and selection');
+  hostMessage({data:{type:'clearSelection'}});
+  // Applying explicitly after clearing avoids timing assumptions about animation-frame scheduling.
+  applyTranscript(snapshot({...message, toolActivities:[queued]}));
+  assert(document.querySelector('.tool-result').textContent === 'Later result' && document.getElementById('stable') === paragraph, 'clearing selection allows deferred update without body replacement');
+  applyTranscript({conversationId:'other-chat',messages:[{id:'other-message',role:'user',content:'Other chat'}]});
+  assert(!article.isConnected, 'navigation detaches old tree');
+  hostMessage({data:{type:'initializeUi',language:'zh-CN',strings:{toolActivities:'工具活动',toolCompleted:'已完成'}}});
+  applyTranscript(snapshot({...message,toolActivities:[queued]}));
+  assert(document.querySelector('article') === article && document.getElementById('stable') === paragraph && panel.open, 'cached navigation retains body, tool rows and expansion');
+  assert(root.querySelector('.tool-title').textContent === 'file.read · 已完成' && panel.firstChild.textContent === '工具活动', 'cached tool labels change language');
+  const revisionRange = document.createRange();
+  revisionRange.setStart(paragraph.firstChild, 0); revisionRange.setEnd(paragraph.firstChild, 9);
+  selection.removeAllRanges(); selection.addRange(revisionRange);
+  const revised = {...message, content:'Revised completed round', html:'<p id="stable">Revised completed round</p>', toolActivities:[queued]};
+  applyTranscript(snapshot(revised));
+  assert(transcriptState().pending && document.getElementById('stable') === paragraph && selection.toString() === 'Assistant', 'replacement snapshots preserve active text selection');
+  hostMessage({data:{type:'clearSelection'}});
+  applyTranscript(snapshot(revised));
+  assert(document.querySelector('article') === article && document.querySelector('.tool-activity') === root && panel.open && document.getElementById('stable').textContent === 'Revised completed round', 'replacement snapshots reconcile revised text and retain tool state after selection clears');
+  document.getElementById('result').textContent = 'PASS: ' + checks + ' tool transcript DOM checks';
+} catch (error) { document.getElementById('result').textContent = 'FAIL: ' + error.stack; }
+</script></body></html>

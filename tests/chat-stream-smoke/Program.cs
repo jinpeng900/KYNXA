@@ -53,6 +53,28 @@ using (var stream = new WaitingStream())
     }, "Cancellation did not interrupt a pending read");
 }
 
+using (var argsJson = JsonDocument.Parse("{\"path\":\"hello.txt\"}"))
+{
+    var tool = new ToolActivity("call_1", "filesystem.write", argsJson.RootElement.Clone(), "running", "Write hello.txt");
+    ChatStreamEvent ToolEvent(string type, ToolActivity value) => Event(type) with { Tool = value };
+    var approval = tool with { Status = "approval-required", ApprovalId = Guid.NewGuid() };
+    var toolResult = tool with { Status = "completed", Result = "{\"written\":true}" };
+    var toolEvents = await Read(prefix + Frame(ToolEvent("tool_call", tool)) + Frame(ToolEvent("approval_required", approval))
+        + Frame(ToolEvent("tool_result", toolResult)) + Frame(Event("completed", content: "done")));
+    Check(toolEvents.Count == 5 && toolEvents[2].Tool?.ApprovalId == approval.ApprovalId, "Tool/approval SSE lost identity");
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(ToolEvent("approval_required", approval))), "Unannounced approval accepted");
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(ToolEvent("tool_call", tool))
+        + Frame(ToolEvent("tool_result", toolResult with { Name = "other" }))), "Tool result changed operation");
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(ToolEvent("tool_call", tool))
+        + Frame(ToolEvent("tool_call", tool))), "Duplicate tool call accepted");
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(ToolEvent("tool_call", tool))
+        + Frame(ToolEvent("approval_required", approval with { ApprovalId = Guid.Empty }))), "Empty approval ID accepted");
+}
+
+Check((await Read(prefix + Frame(Event("content_snapshot", content: "修订正文", reasoning: "修订摘要"))
+    + Frame(Event("interrupted", content: "修订正文"))))[1].Content == "修订正文", "Round snapshot was not accepted");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("content_snapshot", content: "缺摘要"))), "Incomplete snapshot accepted");
+
 var legacyText = JsonSerializer.Deserialize<ChatMessageState>("\"原有问题\"")!;
 Check(legacyText.Content == "原有问题" && legacyText.Role == "user" && legacyText.Status == "completed", "Legacy plain text failed");
 var legacyObject = JsonSerializer.Deserialize<ChatMessageState>("{\"Role\":\"assistant\",\"Content\":\"旧回复\"}")!;
@@ -103,7 +125,7 @@ async Task Handle(HttpListenerContext context)
         if (context.Request.Url!.AbsolutePath == "/health")
         {
             context.Response.ContentType = "application/json";
-            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":1}"));
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":1,\"agentProtocol\":1,\"toolStreamProtocol\":1}"));
             return;
         }
         var incoming = await JsonSerializer.DeserializeAsync<ChatRequest>(context.Request.InputStream, json)

@@ -116,7 +116,7 @@ test('Chat Completions streams before completion, separates reasoning, and repla
   assert.equal(mismatched.at(-1).type, 'error');
   assert.equal(f.seen.length, 1);
   await events(await f.post({ ...f.input, requestId: randomUUID(), message: '继续' }));
-  assert.deepEqual(f.seen[1].body.messages, [
+  assert.deepEqual(f.seen[1].body.messages.filter(x => x.role !== 'system'), [
     { role: 'user', content: '你好' }, { role: 'assistant', content: '你好' }, { role: 'user', content: '继续' }
   ]);
   const saved = (await completedSessions(f.modelRuntime))[0];
@@ -236,7 +236,7 @@ test('disconnect cancels the upstream and retry excludes unfinished context', as
   await Promise.race([closed.promise, delay(2000).then(() => { throw new Error('upstream not aborted'); })]);
   assert.equal((await completedSessions(f.modelRuntime)).length, 0);
   assert.equal((await events(await f.post())).at(-1).content, '重新回答');
-  assert.deepEqual(f.seen[1].body.messages, [{ role: 'user', content: '你好' }]);
+  assert.deepEqual(f.seen[1].body.messages.filter(x => x.role !== 'system'), [{ role: 'user', content: '你好' }]);
 });
 
 test('idle timeout preserves text and aborts the stalled upstream body', async t => {
@@ -336,7 +336,7 @@ test('streaming and full replies share ordering; cancelling a queued stream does
   release.resolve();
   await first; await last;
   assert.equal(f.seen.length, 2);
-  assert.deepEqual(f.seen[1].body.messages.map(x => x.content), ['你好', '回答1', '后续消息']);
+  assert.deepEqual(f.seen[1].body.messages.filter(x => x.role !== 'system').map(x => x.content), ['你好', '回答1', '后续消息']);
   assert.equal((await completedSessions(f.modelRuntime))[0].length, 4);
 });
 

@@ -36,3 +36,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Node.js dependencies are restored from the lockfile.
+node_modules/
