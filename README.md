@@ -15,7 +15,7 @@ KYNXA is currently under active development. Many features described in the desi
 
 ## Current Implementation
 
-Updated 2026-10-02. The pushed code baseline is `3226527`; this snapshot also records verified sidebar fixes in the current working tree, which are not part of that commit.
+Updated 2026-10-03. This section describes implemented behavior; the larger runtime design remains a plan.
 
 * Windows desktop: C# / WinUI 3 / XAML, with WebView2 for selectable Markdown, code highlighting and KaTeX math.
 * A bundled Node.js gateway connects cloud and local HTTP model services using Chat Completions, Responses or Claude Messages. Streaming, cancellation and visible reasoning are supported.
@@ -23,17 +23,24 @@ Updated 2026-10-02. The pushed code baseline is `3226527`; this snapshot also re
 * The work sidebar has Recent, Projects and Tasks. Both project and task add buttons show a temporary new chat. Reselecting its project preserves input; switching projects discards an unsent draft. Sending commits the chat and updates recent activity.
 * Confirmed memory has chat, project/work and user scopes. Sibling chats share confirmed work memory while their original histories remain separate. Archive, delete, undo and moving chats preserve the intended scope rules.
 * A configurable Data root contains records, memory, attachments and settings. Initialization and verified migration preserve stable IDs; SQLite is currently a rebuildable metadata index.
-* Each model connection can select 8K, 32K, 128K, 256K, 1M or a custom context budget. The service must support that window. Output remains limited to at most 2048 tokens and is not independently configurable yet.
+* Context and output limits are independent connection settings. Output defaults to a 256K (262144) ceiling, with 4K/8K/16K/32K/64K/128K/256K and custom choices; context offers 8K/32K/128K/256K/1M and custom budgets. Both must match the model service. Small context windows reduce the effective output reserve.
+* Chats retain all original messages; restart and retrieval are tested beyond 200 messages. Bounded requests preserve recent complete turns and relevant older constraints/code excerpts. Models can page through the current chat's original messages; tool loops compact saved-result previews without deleting records.
 
-The `3226527` gateway baseline has 151 passing automated tests. The current sidebar fix separately passed 55 state checks and a Windows desktop build with zero warnings/errors. Actual UI checks covered both add actions, draft replacement, same-project input preservation and cleanup on project changes; the formal catalog revision stayed unchanged. The gateway suite was not rerun for this update. This evidence does not certify every provider, a real 1M model or all UI performance scenarios.
+Settings includes memory management for chat, work and user scopes. Gateway regressions use temporary data and simulated upstreams; desktop tests cover transport, actual DOM and isolated native windows. Current results are in the [gateway guide](apps/model-gateway/README.md#当前验证与后续接口). They do not certify every provider or a real 1M model.
 
-Model-controlled file tools, per-request approvals, stdio MCP, application skills and a Windows AppContainer terminal are implemented. Settings opens the Tools and skills window; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints, automatic semantic memory and full-text/vector search remain planned. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
+Model-controlled file tools, per-request approvals, stdio / Streamable HTTP MCP, application skills and a Windows AppContainer terminal are implemented. Tools and skills settings support official service presets, environment-variable authentication references, skill import and enable switches; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints, automatic semantic memory and full-text/vector search remain planned. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
+
+Large MCP catalogs are discovered separately from the bounded model tool declarations. Individual tools can be disabled or loaded on demand. Typed and structured results are saved with chat-scoped references and paged previews; private MCP metadata stays out of model and viewer projections. Approval reasons are separate from third-party arguments, skill headers use bounded YAML 1.2 parsing, and cancellation records returned execution outcomes before stopping.
+
+Skill resources resolve from their package root, with standard validation, dependency diagnostics and read-only package snapshots for isolated Node scripts. Official Playwright and GitHub MCP presets and an Apache-2.0 communication-writing skill are reused without adding duplicate filesystem or memory services. Presets start disabled and repeated additions reuse existing configurations. Python/Bash skill scripts and interactive browser OAuth login are not supported; unverified runtime dependencies block execution.
+
+Settings provide separate Data and Tools/skills storage rows. MCP configuration, imported skills and managed npm/browser caches can move to an independent folder through a verified copy and atomic pointer switch. Old files remain available; changing Data keeps an explicitly configured extension folder in place. Built-in tools remain bundled with the application.
 
 Start with the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
 
 ## Next Steps
 
-1. Settings now opens memory management for chat, project and global scopes, with source status, manual creation, editing, single-entry deletion and revision conflict handling. Add independent output configuration next. Expose context decisions afterward; bulk clearing needs its own backend contract and consistency checks.
+1. Memory management, independent output configuration and retrievable context excerpts are implemented. Expose context decisions next, then evaluate verifiable semantic summaries. Bulk clearing still needs a separate backend contract and consistency checks.
 2. Separate conversation lists from message loading; load the selected chat on demand and measure long-history scrolling, copying and switching.
 3. Extend the implemented workspace/tool loop with patch previews, explicit multi-file transactions and durable execution checkpoints. Keep the existing conversation store as the single authority until an explicit migration replaces it.
 4. Add local-service discovery/startup and model download management after the corresponding lifecycle and failure handling are defined.
@@ -267,7 +274,8 @@ KYNXA/
 ├── apps/
 │   ├── desktop/              # Production Windows WinUI 3 frontend
 │   ├── model-gateway/        # Current Node.js model, conversation and memory service
-│   ├── shared/               # Current C# chat contracts
+│   ├── shared/               # Current C# chat, memory and tool contracts
+│   ├── tool-host/            # Native Windows AppContainer terminal and skill helper
 │   ├── desktop-preview/      # Earlier visual and interaction preview
 │   └── mock-backend/         # Earlier mock service
 ├── docs/

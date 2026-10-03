@@ -36,7 +36,9 @@ foreach (string file in canonicalFiles)
 {
     string path = Path.Combine(oldRoot, file);
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    await File.WriteAllTextAsync(path, file.StartsWith("Backups") ? catalog : "{\"type\":\"message\",\"content\":\"你好\"}\n");
+    await File.WriteAllTextAsync(path, file.StartsWith("Backups") ? catalog : file == "Agent/config.json"
+        ? "{\"version\":1,\"revision\":0,\"mcpServers\":[],\"skillDirectories\":[],\"disabledSkills\":[]}"
+        : "{\"type\":\"message\",\"content\":\"你好\"}\n");
 }
 foreach (var item in new[] { (Id: "one", Folder: managed), (Id: "two", Folder: external) })
 {
@@ -74,7 +76,8 @@ Check(JsonNode.Parse(File.ReadAllText(Path.Combine(target, "Projects", "two", "p
 Check(JsonNode.Parse(File.ReadAllText(Path.Combine(target, ".catalog-transaction.json")))!["catalog"]!["Projects"]![0]!["FolderPath"]!.GetValue<string>() == Path.Combine(target, "Desktop", "Projects", "one"), "pending catalog paths remapped");
 Check(File.ReadAllText(Path.Combine(oldRoot, "catalog.json")) == catalog, "source catalog unchanged");
 foreach (string file in canonicalFiles)
-    Check(File.ReadAllText(Path.Combine(target, file)) == File.ReadAllText(Path.Combine(oldRoot, file)), "canonical history and backups copied intact: " + file);
+    if (file != "Agent/config.json") Check(File.ReadAllText(Path.Combine(target, file)) == File.ReadAllText(Path.Combine(oldRoot, file)), "canonical history and backups copied intact: " + file);
+Check(JsonNode.Parse(File.ReadAllText(Path.Combine(target, "Agent", "config.json")))!["revision"]!.GetValue<int>() == 1, "agent revision updated for migration");
 Check(File.ReadAllText(Path.Combine(external, "untouched.txt")) == "keep", "external files untouched");
 Check(File.ReadAllText(Path.Combine(target, "storage-pointer.previous.json")) == originalPointer, "old pointer backed up");
 Check(JsonNode.Parse(File.ReadAllText(pointer))!["dataRoot"]!.GetValue<string>() == target, "pointer switched last");
@@ -107,6 +110,20 @@ string failedInitializationTarget = Path.Combine(root, "failed-initialization");
 await Reject(() => StorageMigrationService.MoveAsync(desktop, models, failedInitializationTarget, pointer,
     initializeTarget: (destination, token) => throw new InvalidOperationException("test initialization failure")), "target initialization fails");
 Check(File.ReadAllText(pointer) == committedPointer, "initialization failure preserves pointer");
+string credentialsChangedTarget = Path.Combine(root, "initializer-tampered-credentials");
+await Reject(() => StorageMigrationService.MoveAsync(desktop, models, credentialsChangedTarget, pointer,
+    initializeTarget: (destination, token) => File.WriteAllTextAsync(Path.Combine(destination, "Models", "connections.json"), "{}", token)), "initializer changed copied credentials");
+Check(File.ReadAllText(pointer) == committedPointer, "credential integrity failure preserves pointer");
+string emptyDeletedTarget = Path.Combine(root, "empty-copy-deleted");
+await Reject(() => StorageMigrationService.MoveAsync(desktop, models, emptyDeletedTarget, pointer,
+    new ImmediateProgress(message => { if (message.StartsWith("正在核对")) Directory.Delete(Path.Combine(emptyDeletedTarget, "Desktop", "Projects", "one", "empty")); })), "copied empty directory removed");
+Check(File.ReadAllText(pointer) == committedPointer, "directory integrity failure preserves pointer");
+string originalModelConnections = File.ReadAllText(Path.Combine(models, "connections.json"));
+string lateSourceTarget = Path.Combine(root, "source-changed-during-initialization");
+await Reject(() => StorageMigrationService.MoveAsync(desktop, models, lateSourceTarget, pointer,
+    initializeTarget: (destination, token) => File.AppendAllTextAsync(Path.Combine(models, "connections.json"), " ", token)), "source changed after first verification");
+Check(File.ReadAllText(pointer) == committedPointer, "late source mutation preserves pointer");
+await File.WriteAllTextAsync(Path.Combine(models, "connections.json"), originalModelConnections);
 string changedSettingsTarget = Path.Combine(root, "initializer-invalid-settings");
 await Reject(() => StorageMigrationService.MoveAsync(desktop, models, changedSettingsTarget, pointer,
     initializeTarget: (destination, token) => File.WriteAllTextAsync(Path.Combine(destination, "settings.json"), "{\"Storage\":{\"LayoutVersion\":99}}", token)), "initializer produces invalid layout");

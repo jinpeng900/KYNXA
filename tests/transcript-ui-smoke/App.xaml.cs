@@ -17,6 +17,7 @@ public partial class App : Application
 
     public App()
     {
+        Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", Path.Combine(Path.GetTempPath(), "kynxa-transcript-data-" + Guid.NewGuid().ToString("N")));
         InitializeComponent();
         UnhandledException += (_, e) => File.WriteAllText(_result, "FAIL: " + e.Exception);
     }
@@ -87,6 +88,12 @@ public partial class App : Application
             await WaitAsync("__transcriptSmoke.bodyText().includes('FOLLOW_APPEND') && __transcriptSmoke.bottomDistance() < 4", "send from bottom follows appended output");
 
             await CheckConversationSwitchingAsync(longChat, longRows);
+            await CheckToolActivitiesAsync();
+            await CheckWebsiteActivitiesAsync();
+            CheckPresentationSources();
+            await CheckAssistantTimelineAsync();
+            await CheckPartialProgressAsync();
+            await CheckProgressScrollAnchorAsync();
             await CheckWrappingAndResizeAsync();
             await CaptureVisualPreviewAsync();
             bool pointerRequested = Environment.GetCommandLineArgs().Contains("--pointer");
@@ -141,9 +148,7 @@ public partial class App : Application
         Check(!forward.Contains("THINKING_PRIVATE_FIXTURE") && !forward.Contains("思考过程"), "closed reasoning and action labels stay out of cross-message copy");
         Check(await EvalAsync<string>("__transcriptSmoke.copyUserWhitespace()") == "内容\n  第二行", "partial user copy preserves newlines and indentation");
         Check(await EvalAsync<string>("__transcriptSmoke.copyCodeIndent()") == "    ", "partial code text node preserves indentation");
-        await EvalAsync<bool>("__transcriptSmoke.openReasoning(true)");
-        Check((await EvalAsync<string>("__transcriptSmoke.copyAcross(false)")).Contains("THINKING_PRIVATE_FIXTURE"), "expanded reasoning body participates in continuous copy");
-        await EvalAsync<bool>("__transcriptSmoke.openReasoning(false)");
+        Check(await EvalAsync<bool>("!document.querySelector('.reasoning') && !document.getElementById('messages').textContent.includes('THINKING_PRIVATE_FIXTURE')"), "completed process source is absent from final-only DOM and cross-message selection");
         string fullMath = await EvalAsync<string>("__transcriptSmoke.copyFormula(false)");
         Check(fullMath.Contains(@"\omega=2\pi f") && fullMath.Split(@"\omega=2\pi f").Length == 2, "full formula copy contains one original TeX source");
         string partialMath = await EvalAsync<string>("__transcriptSmoke.copyFormula(true)");

@@ -53,7 +53,7 @@ for (const protocol of ['anthropic-messages', 'openai-responses']) {
       assert.equal(sent.headers['x-api-key'], 'test-key');
       assert.equal(seen[0].headers['x-api-key'], 'test-key');
       assert.equal(sent.headers.authorization, undefined);
-      assert.equal(sent.body.max_tokens, 2048);
+      assert.ok(sent.body.max_tokens > 2048 && sent.body.max_tokens <= 16384);
       assert.deepEqual(sent.body.messages.map(m => m.content), ['one', '真实接口格式', 'two']);
     } else {
       assert.equal(sent.path, '/v1/responses');

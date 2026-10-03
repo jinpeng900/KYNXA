@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
 import { isIP } from 'node:net';
 import { protocols } from './protocols.mjs';
+import { DEFAULT_MAX_OUTPUT_TOKENS, validateOutputTokens } from './output-budget.mjs';
 
 const providerPattern = /^[a-z][a-z0-9-]{1,39}$/;
 const modelPattern = /^[^\s\x00-\x1f]{1,160}$/;
@@ -35,6 +36,8 @@ export function validateConnection(input, { requireModels = true } = {}) {
   const apiKey = input.apiKey == null ? undefined : String(input.apiKey);
   const protocol = input.protocol ?? 'openai-completions';
   const contextWindowTokens = input.contextWindowTokens;
+  const maxOutputTokens = input.maxOutputTokens;
+  if (maxOutputTokens !== undefined) validateOutputTokens(maxOutputTokens);
   if (contextWindowTokens !== undefined && (!Number.isSafeInteger(contextWindowTokens) ||
       contextWindowTokens < 2048 || contextWindowTokens > 2000000))
     throw new Error('模型上下文预算须为 2048–2000000 的整数。');
@@ -53,7 +56,8 @@ export function validateConnection(input, { requireModels = true } = {}) {
   if (apiKey !== undefined && (apiKey.length > 8192 || /[\r\n]/.test(apiKey)))
     throw new Error('API Key 格式无效。');
   return { providerId, displayName, baseUrl, apiKey, models, protocol,
-    ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }) };
+    ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) };
 }
 
 export async function readJson(filename, fallback) {
@@ -71,7 +75,8 @@ export async function atomicJson(filename, value) {
 }
 
 function publicProvider({ apiKey, ...provider }) {
-  return { ...provider, hasApiKey: Boolean(apiKey), protocol: provider.protocol ?? 'openai-completions' };
+  return { ...provider, hasApiKey: Boolean(apiKey), protocol: provider.protocol ?? 'openai-completions',
+    maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS };
 }
 
 export class ModelStore {
@@ -110,7 +115,8 @@ export class ModelStore {
         throw new Error('此连接需要 API Key。');
       const provider = { ...connection, apiKey,
         ...(connection.contextWindowTokens === undefined && previous?.contextWindowTokens !== undefined
-          ? { contextWindowTokens: previous.contextWindowTokens } : {}) };
+          ? { contextWindowTokens: previous.contextWindowTokens } : {}),
+        maxOutputTokens: connection.maxOutputTokens ?? previous?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS };
       document.providers = document.providers.filter(item => item.providerId !== connection.providerId);
       document.providers.push(provider);
       await atomicJson(this.settingsPath, document);

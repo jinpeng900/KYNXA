@@ -5,16 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { ModelStore, validateConnection } from './store.mjs';
 import { ModelRuntime } from './runtime.mjs';
 import { discoverModels } from './model-discovery.mjs';
-import { modelHome } from './storage.mjs';
+import { conversationDataRoot, modelHome } from './storage.mjs';
+import { extensionHome, EXTENSION_STORAGE_PROTOCOL } from './extension-storage.mjs';
 import { storageMigrationActive } from './storage-maintenance.mjs';
 import { StreamFailure } from './streaming.mjs';
 import { DATA_LAYOUT_VERSION } from './data-layout.mjs';
 import { readJsonBody, sendJson, openEventStream } from './http-transport.mjs';
+import { handleAgentRoute } from './agent-http-routes.mjs';
+import { toolRunLimits } from './tool-run.mjs';
 
-const dataHome = modelHome();
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
-const store = new ModelStore({ dataHome });
-const runtime = new ModelRuntime({ modelStore: store, dataHome });
 
 async function probe(input, modelStore) {
   const connection = validateConnection(input, { requireModels: false });
@@ -26,21 +26,55 @@ async function probe(input, modelStore) {
 }
 
 export function createModelServer(options = {}) {
-  let modelStore = options.modelStore ?? store, modelRuntime = options.modelRuntime ?? runtime;
   const managed = !options.modelStore && !options.modelRuntime;
+  let modelStore = options.modelStore ?? options.modelRuntime?.store ?? new ModelStore({ dataHome: modelHome() });
+  let modelRuntime = options.modelRuntime ?? new ModelRuntime({ modelStore, dataHome: modelStore.dataHome,
+    extensionRoot: options.extensionRoot ?? (managed ? extensionHome(modelStore.dataHome) : conversationDataRoot(modelStore.dataHome)) });
   let activeRequests = 0;
   const streamControllers = new Set();
-  const retiringRuntimes = new Set();
+  const runtimeClosures = new WeakMap();
+  let storageTransition;
+  let runtimeRetired = false;
   let runtimeCleanupError;
-  const retireRuntime = previous => {
-    const cleanup = Promise.resolve().then(() => previous.close?.()).catch(() => {
-      // Keep cleanup failures observable without exposing paths, tool arguments,
-      // or private upstream errors, and without terminating the replacement.
+  let storageConfigError;
+  const closeRuntime = previous => {
+    if (runtimeClosures.has(previous)) return runtimeClosures.get(previous);
+    const cleanup = Promise.resolve().then(() => previous.close?.()).then(() => true, () => {
+      // A failed teardown cannot start a second MCP process world or accept writes on the retired runtime.
       runtimeCleanupError = 'RUNTIME_CLEANUP_FAILED';
       console.error(runtimeCleanupError);
+      return false;
     });
-    retiringRuntimes.add(cleanup);
-    void cleanup.then(() => retiringRuntimes.delete(cleanup));
+    runtimeClosures.set(previous, cleanup);
+    return cleanup;
+  };
+  const currentExtensionRoot = () => modelRuntime.extensionRoot ?? modelRuntime.tools?.extensionRoot ??
+    conversationDataRoot(modelStore.dataHome);
+  const refreshStorage = async () => {
+    if (!managed || runtimeCleanupError) return;
+    if (storageTransition) { await storageTransition; return; }
+    if (activeRequests || storageMigrationActive()) return;
+    let nextDataHome, nextExtensionRoot;
+    try { nextDataHome = modelHome(); nextExtensionRoot = extensionHome(nextDataHome); storageConfigError = null; }
+    catch (error) {
+      storageConfigError = ['INVALID_EXTENSION_STORAGE', 'UNSUPPORTED_EXTENSION_STORAGE'].includes(error.code) ? error.code : 'INVALID_STORAGE_CONFIGURATION';
+      return; // Keep the previously valid runtime until the native owner repairs its pointer.
+    }
+    if (!runtimeRetired && modelStore.dataHome === nextDataHome && currentExtensionRoot() === nextExtensionRoot) return;
+    const transition = Promise.resolve().then(async () => {
+      if (!await closeRuntime(modelRuntime)) return;
+      runtimeRetired = true;
+      // Maintenance may have started while the last owned MCP processes were being closed.
+      if (storageMigrationActive()) return;
+      const dataHome = modelHome(), extensionRoot = extensionHome(dataHome);
+      const replacementStore = new ModelStore({ dataHome });
+      const replacementRuntime = new ModelRuntime({ modelStore: replacementStore, dataHome, extensionRoot });
+      modelStore = replacementStore; modelRuntime = replacementRuntime;
+      runtimeRetired = false;
+    });
+    storageTransition = transition;
+    try { await transition; }
+    finally { if (storageTransition === transition) storageTransition = null; }
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -50,44 +84,48 @@ export function createModelServer(options = {}) {
       // Native clients do not send Origin. Block browser-origin access to this local
       // execution/configuration surface, including same-loopback malicious pages.
       if (request.headers.origin) return sendJson(response, 403, { error: '浏览器不能直接调用本机模型与工具服务。', code: 'BROWSER_ORIGIN_DENIED' });
-      const migrating = managed && storageMigrationActive();
-      if (managed && !migrating && activeRequests === 0 && modelStore.dataHome !== modelHome()) {
-        // No requests are active here; swap synchronously so simultaneous first
-        // requests after a migration cannot install separate stores/queues.
-        retireRuntime(modelRuntime);
-        modelStore = new ModelStore({ dataHome: modelHome() });
-        modelRuntime = new ModelRuntime({ modelStore, dataHome: modelStore.dataHome });
+      await refreshStorage();
+      let migrating = managed && storageMigrationActive();
+      if (!migrating && !runtimeCleanupError && !runtimeRetired && !storageConfigError) {
+        // Native migration polls activeRequests; initialization is an owned writer too.
+        activeRequests++;
+        try { await modelRuntime.initializeExtensionStorage?.({ maintenanceActive: () => managed && storageMigrationActive() }); }
+        catch (error) {
+          if (error.code !== 'STORAGE_MAINTENANCE_ACTIVE') storageConfigError = error.code ?? 'INVALID_EXTENSION_LAYOUT';
+        }
+        finally { activeRequests--; }
+        migrating = managed && storageMigrationActive();
       }
       if (request.method === 'GET' && pathname === '/health')
         return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          agentProtocol: 1, toolStreamProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
-          activeRequests, migrating, modelDataHome: modelStore.dataHome,
+          agentProtocol: 5, extensionStorageProtocol: EXTENSION_STORAGE_PROTOCOL,
+          toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 3, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          activeRequests, migrating, modelDataHome: modelStore.dataHome, extensionRoot: currentExtensionRoot(),
+          ...(storageConfigError ? { storageConfigError } : {}),
           ...(runtimeCleanupError ? { runtimeCleanupError } : {}) });
       if (migrating) return sendJson(response, 503, { error: '正在迁移数据，请完成后再试。' });
+      if (runtimeCleanupError || runtimeRetired)
+        return sendJson(response, 503, { error: '旧运行时未安全关闭，请重新启动模型服务。', code: runtimeCleanupError ?? 'RUNTIME_STORAGE_TRANSITION' });
+      if (storageConfigError) return sendJson(response, 503, { error: '存储位置配置无效，请在设置中修复。', code: storageConfigError });
       activeRequests++;
       counted = true;
-      if (pathname === '/api/agent/config') {
-        if (request.method === 'GET') return sendJson(response, 200, await modelRuntime.tools.getConfig());
-        if (request.method === 'PUT') return sendJson(response, 200, await modelRuntime.tools.updateConfig(await readJsonBody(request)));
-        return sendJson(response, 405, { error: '工具配置接口不支持此操作。' });
+      if (await handleAgentRoute(request, response, url, modelRuntime.tools)) return;
+      const runRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/runs\/([0-9a-f-]{36})$/i.exec(pathname);
+      if (request.method === 'GET' && runRoute) {
+        const message = (await modelRuntime.conversations.readMessages(runRoute[1]))
+          .find(item => item.Role === 'assistant' && item.Id.toLowerCase() === runRoute[2].toLowerCase());
+        if (!message?.ToolRun) return sendJson(response, 404, { error: '此请求没有连续执行记录。', code: 'TOOL_RUN_NOT_FOUND' });
+        return sendJson(response, 200, { conversationId: runRoute[1], requestId: message.Id,
+          status: message.Status, run: message.ToolRun });
       }
-      if (pathname === '/api/agent/approvals' && request.method === 'POST')
-        return sendJson(response, 200, modelRuntime.tools.approve(await readJsonBody(request)));
-      if (pathname.startsWith('/api/agent/')) {
-        const conversationId = url.searchParams.get('conversationId');
-        const context = conversationId ? await modelRuntime.tools.createContext(conversationId,
-          { requestId: randomUUID(), permissionMode: 'ask', message: '用户查看工具设置' }) : undefined;
-        if (request.method === 'GET' && pathname === '/api/agent/skills')
-          return sendJson(response, 200, { skills: await modelRuntime.tools.listSkills(context) });
-        const skillRoute = /^\/api\/agent\/skills\/([a-zA-Z0-9_-]+)$/.exec(pathname);
-        if (request.method === 'GET' && skillRoute)
-          return sendJson(response, 200, { skill: await modelRuntime.tools.readSkill(skillRoute[1], context) });
-        if (request.method === 'GET' && pathname === '/api/agent/tools')
-          return sendJson(response, 200, { tools: await modelRuntime.tools.catalog(context, { connectMcp: false }),
-            errors: [...modelRuntime.tools.mcp.errors].map(([id, code]) => `${id}: ${code}`) });
-        if (request.method === 'POST' && pathname === '/api/agent/mcp/refresh')
-          return sendJson(response, 200, { tools: await modelRuntime.tools.refreshMcp(context),
-            errors: [...modelRuntime.tools.mcp.errors].map(([id, code]) => `${id}: ${code}`) });
+      const toolResultRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/tool-results\/([0-9a-f-]{36})$/i.exec(pathname);
+      if (request.method === 'GET' && toolResultRoute) {
+        const resultContext = { conversationId: toolResultRoute[1] };
+        if (url.searchParams.has('offset') || url.searchParams.has('limit'))
+          return sendJson(response, 200, await modelRuntime.tools.results.read(resultContext, toolResultRoute[2], {
+            offset: url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0,
+            limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 16000, allowArchived: true }));
+        return sendJson(response, 200, { result: await modelRuntime.tools.results.get(resultContext, toolResultRoute[2]) });
       }
       const userMemoryRoute = /^\/api\/memory\/user(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
       const projectMemoryRoute = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/memory(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
@@ -150,6 +188,7 @@ export function createModelServer(options = {}) {
           throw new Error('用户消息 ID 无效。');
         if (body.userMessageId && body.requestId && body.userMessageId.toLowerCase() === body.requestId.toLowerCase())
           throw new Error('用户消息 ID 与请求 ID 不能相同。');
+        const runLimits = toolRunLimits(body.runLimits);
         if (pathname === '/api/chat/stream') {
           const controller = new AbortController();
           streamControllers.add(controller);
@@ -161,12 +200,14 @@ export function createModelServer(options = {}) {
           try {
             const result = await modelRuntime.replyStream({ conversationId: body.conversationId,
               message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId,
-              userMessageId: body.userMessageId, permissionMode: body.permissionMode }, emit, controller.signal);
+              userMessageId: body.userMessageId, permissionMode: body.permissionMode, runLimits }, emit, controller.signal);
             emit({ type: 'completed', ...result });
           } catch (error) {
             emit({ type: error instanceof StreamFailure ? error.type : 'error',
               content: error.content ?? '', reasoning: error.reasoning ?? '',
+              durationMs: error.durationMs ?? 0,
               error: error instanceof StreamFailure ? error.message : '模型调用失败，已保留生成的内容。',
+              ...(error.assistantSegments ? { assistantSegments: error.assistantSegments, toolStreamProtocol: 3 } : {}),
               ...(error instanceof StreamFailure && error.code ? { code: error.code } : {}) });
           } finally {
             streamControllers.delete(controller);
@@ -175,11 +216,11 @@ export function createModelServer(options = {}) {
           return;
         }
         const requestId = body.requestId ?? randomUUID();
-        const content = await modelRuntime.reply({ conversationId: body.conversationId,
+        const result = await modelRuntime.replyResult({ conversationId: body.conversationId,
           message: body.message, provider: body.provider, model: body.model,
-          requestId, userMessageId: body.userMessageId, permissionMode: body.permissionMode });
+          requestId, userMessageId: body.userMessageId, permissionMode: body.permissionMode, runLimits });
         return sendJson(response, 200, { conversationId: body.conversationId,
-          requestId, role: 'assistant', content, createdAt: new Date().toISOString() });
+          requestId, role: 'assistant', ...result, createdAt: new Date().toISOString() });
       }
       sendJson(response, 404, { error: '接口不存在。' });
     } catch (error) {
@@ -197,7 +238,8 @@ export function createModelServer(options = {}) {
   // Shutdown aborts upstream generations before waiting for open HTTP streams.
   server.shutdownModelRuntime = async () => {
     for (const controller of streamControllers) controller.abort();
-    await Promise.all([...retiringRuntimes, Promise.resolve().then(() => modelRuntime.close?.())]);
+    if (storageTransition) await storageTransition;
+    await closeRuntime(modelRuntime);
   };
   return server;
 }

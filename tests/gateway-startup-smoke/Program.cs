@@ -12,6 +12,33 @@ Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", $"http://127.0.0.1:{po
 Environment.SetEnvironmentVariable("KYNXA_STARTUP_TEST_LOG", log);
 try
 {
+    foreach (var (legacyAgentVersion, legacyContextVersion, legacyToolVersion) in new[]
+    { (1, 3, 3), (4, 3, 3), (5, 1, 3), (5, 2, 3), (5, 3, 2) })
+    using (var legacyReservation = new TcpListener(IPAddress.Loopback, 0))
+    {
+        legacyReservation.Start();
+        int legacyPort = ((IPEndPoint)legacyReservation.LocalEndpoint).Port;
+        legacyReservation.Stop();
+        using var legacy = new HttpListener();
+        legacy.Prefixes.Add($"http://127.0.0.1:{legacyPort}/"); legacy.Start();
+        var respond = Task.Run(async () =>
+        {
+            var request = await legacy.GetContextAsync();
+            byte[] bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                status = "ok", service = "kynxa-model-gateway", conversationProtocol = 1,
+                dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = legacyContextVersion,
+                agentProtocol = legacyAgentVersion, extensionStorageProtocol = 1, toolStreamProtocol = legacyToolVersion
+            });
+            request.Response.ContentType = "application/json";
+            await request.Response.OutputStream.WriteAsync(bytes); request.Response.Close();
+        });
+        Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", $"http://127.0.0.1:{legacyPort}");
+        try { await ModelGatewayService.EnsureReadyAsync(); throw new Exception("Legacy agent gateway was reused."); }
+        catch (InvalidOperationException error) when (error.Message.Contains("旧网关")) { }
+        finally { Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", $"http://127.0.0.1:{port}"); }
+        await respond;
+    }
     string initializedRoot = Path.Combine(Path.GetTempPath(), "kynxa-storage-helper-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(initializedRoot);
     await ModelGatewayService.InitializeStorageAsync(initializedRoot);

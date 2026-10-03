@@ -156,7 +156,7 @@ test('moving a source chat preserves its own memory and summary but stops sharin
   const f = await fixture(t);
   await f.capture('a1', 'project-memory', '记住：属于原项目');
   await f.capture('a1', 'chat-memory', '聊天记住：跟随此聊天');
-  const summary = { schemaVersion: 1, conversationId: 'a1', algorithm: 'extractive-v1', content: '聊天摘要', sourceHash: 'hash' };
+  const summary = { schemaVersion: 2, conversationId: 'a1', algorithm: 'extractive-v2', content: '聊天摘要', sourceHash: 'hash' };
   await f.memory.repository.writeSummary('a1', summary);
   const catalog = await f.conversations.catalog();
   const moving = catalog.Projects[0].Chats.shift();
@@ -174,7 +174,7 @@ test('restart and data-root copy preserve memory; writing memory and summary nev
   const eventsFile = join(f.root, 'Projects', 'p-a', 'Sessions', 'a1', 'events.jsonl');
   const original = await readFile(eventsFile);
   await f.memory.create('a1', { scope: 'project', content: '跨重启记忆' });
-  await f.memory.repository.writeSummary('a1', { schemaVersion: 1, conversationId: 'a1', algorithm: 'extractive-v1', content: '摘要' });
+  await f.memory.repository.writeSummary('a1', { schemaVersion: 2, conversationId: 'a1', algorithm: 'extractive-v2', content: '摘要' });
   assert.deepEqual(await readFile(eventsFile), original);
   const reopened = new ConversationStore({ dataHome: join(f.root, 'Models'), legacyDesktopDirectory: null });
   const memory = new MemoryService({ conversationStore: reopened });
@@ -211,10 +211,10 @@ test('unsupported or corrupt memory and summary versions are preserved and never
   assert.equal(await readFile(memoryFile, 'utf8'), '{broken');
   const summaryFile = join(f.root, 'Chats', 'plain1', 'context.json');
   await writeFile(summaryFile, '{"schemaVersion":99}');
-  await assert.rejects(f.memory.repository.writeSummary('plain1', { schemaVersion: 1, conversationId: 'plain1', content: 'old' }),
+  await assert.rejects(f.memory.repository.writeSummary('plain1', { schemaVersion: 2, conversationId: 'plain1', content: 'old' }),
     { code: 'UNSUPPORTED_SUMMARY_VERSION' });
   assert.equal(await readFile(summaryFile, 'utf8'), '{"schemaVersion":99}');
-  await assert.rejects(f.memory.repository.writeSummary('plain1', { schemaVersion: 1, conversationId: 'plain2', content: 'wrong chat' }), /归属无效/);
+  await assert.rejects(f.memory.repository.writeSummary('plain1', { schemaVersion: 2, conversationId: 'plain2', content: 'wrong chat' }), /归属无效/);
 });
 
 test('linked memory directories and unsafe IDs are rejected before writing', async t => {
@@ -260,9 +260,9 @@ test('memory capacity measures written indented UTF-8 bytes; a refused large app
 });
 
 test('summary size uses its actual written bytes and retains the old summary on overflow', async t => {
-  const f = await fixture(t), old = { schemaVersion: 1, conversationId: 'a1', content: '原摘要' };
+  const f = await fixture(t), old = { schemaVersion: 2, conversationId: 'a1', content: '原摘要' };
   await f.memory.repository.writeSummary('a1', old);
-  const oversized = { schemaVersion: 1, conversationId: 'a1', content: 'x'.repeat(8 * 1024 * 1024 - 70000),
+  const oversized = { schemaVersion: 2, conversationId: 'a1', content: 'x'.repeat(8 * 1024 * 1024 - 70000),
     diagnostic: Array.from({ length: 10000 }, () => 'x') };
   assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < 8 * 1024 * 1024);
   assert.ok(Buffer.byteLength(JSON.stringify(oversized, null, 2)) > 8 * 1024 * 1024);
@@ -290,7 +290,7 @@ test('many remembered-source revocations remain bounded by byte capacity without
 
 test('summary reads and writes reject a linked session parent and preserve its external target', async t => {
   const f = await fixture(t), folder = join(f.root, 'Projects', 'p-a', 'Sessions', 'a1'), original = `${folder}-original`;
-  const summary = { schemaVersion: 1, conversationId: 'a1', content: '外部内容不能改' };
+  const summary = { schemaVersion: 2, conversationId: 'a1', content: '外部内容不能改' };
   await f.memory.repository.writeSummary('a1', summary);
   await rename(folder, original);
   try { await symlink(original, folder, process.platform === 'win32' ? 'junction' : 'dir'); }
@@ -306,7 +306,7 @@ test('summary reads and writes reject a linked session parent and preserve its e
 
 test('summary reads and writes reject a linked file itself', async t => {
   const f = await fixture(t), file = join(f.root, 'Projects', 'p-a', 'Sessions', 'a1', 'context.json'), target = join(f.root, 'summary-target.json');
-  const original = JSON.stringify({ schemaVersion: 1, conversationId: 'a1', content: '链接目标保留' });
+  const original = JSON.stringify({ schemaVersion: 2, conversationId: 'a1', content: '链接目标保留' });
   await writeFile(target, original);
   try { await symlink(target, file, 'file'); }
   catch (error) {
@@ -314,7 +314,7 @@ test('summary reads and writes reject a linked file itself', async t => {
     throw error;
   }
   await assert.rejects(f.memory.repository.readSummary('a1'), /包含链接/);
-  await assert.rejects(f.memory.repository.writeSummary('a1', { schemaVersion: 1, conversationId: 'a1', content: '不能写入' }), /包含链接/);
+  await assert.rejects(f.memory.repository.writeSummary('a1', { schemaVersion: 2, conversationId: 'a1', content: '不能写入' }), /包含链接/);
   assert.equal(await readFile(target, 'utf8'), original);
 });
 
@@ -328,7 +328,7 @@ test('corrupt derived summary is backed up exactly once and can be rebuilt from 
   const backups = (await readdir(folder)).filter(name => /^context\.corrupt-.*\.json$/.test(name));
   assert.equal(backups.length, 1, 'per-file queue allows only one corrupt canonical-file recovery');
   assert.deepEqual(await readFile(join(folder, backups[0])), corrupt);
-  const rebuilt = { schemaVersion: 1, conversationId: 'a1', algorithm: 'extractive-v1', content: '从原始日志重建' };
+  const rebuilt = { schemaVersion: 2, conversationId: 'a1', algorithm: 'extractive-v2', content: '从原始日志重建' };
   await f.memory.repository.writeSummary('a1', rebuilt);
   assert.deepEqual(await f.memory.repository.readSummary('a1'), rebuilt);
   assert.deepEqual(await readFile(join(folder, 'events.jsonl')), originalEvents);
@@ -341,7 +341,7 @@ test('a failed corrupt-summary diagnostic backup propagates without removing or 
   t.mock.method(f.memory.repository, '_preserveCorruptSummary', async () => { throw Object.assign(new Error('backup storage full'), { code: 'ENOSPC' }); });
   await assert.rejects(f.memory.repository.readSummary('a1'), { code: 'ENOSPC' });
   assert.equal(await readFile(file, 'utf8'), corrupt);
-  await assert.rejects(f.memory.repository.writeSummary('a1', { schemaVersion: 1, conversationId: 'a1', content: '不得覆盖' }),
+  await assert.rejects(f.memory.repository.writeSummary('a1', { schemaVersion: 2, conversationId: 'a1', content: '不得覆盖' }),
     { code: 'CORRUPT_SUMMARY' });
   assert.equal(await readFile(file, 'utf8'), corrupt);
   assert.deepEqual((await readdir(folder)).filter(name => name.startsWith('context.corrupt-')), []);
@@ -421,7 +421,7 @@ test('a pending summary write shares the same catalog guard and follows a subseq
     }
     return originalSafe(file, options);
   });
-  const summary = { schemaVersion: 1, conversationId: 'a1', content: '跟随聊天的摘要' };
+  const summary = { schemaVersion: 2, conversationId: 'a1', content: '跟随聊天的摘要' };
   const writing = f.memory.repository.writeSummary('a1', summary);
   await entered;
   let moved = false;

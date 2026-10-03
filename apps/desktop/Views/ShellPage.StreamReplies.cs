@@ -27,6 +27,8 @@ public sealed partial class ShellPage
         public ConversationMessageViewModel Presentation { get; set; } = null!;
         public StringBuilder Content { get; } = new();
         public StringBuilder Reasoning { get; } = new();
+        public Dictionary<string, (StringBuilder Content, StringBuilder Reasoning)> SegmentText { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> DirtySegments { get; } = new(StringComparer.Ordinal);
         public Stopwatch ThinkingTime { get; } = new();
         public bool Dirty { get; set; }
         public string? Error => Message.Status == "streaming" ? null : Message.Error;
@@ -89,6 +91,14 @@ public sealed partial class ShellPage
     private void FlushReply(PendingChatReply pending, bool final = false)
     {
         if (!pending.Dirty && !final) return;
+        foreach (string id in pending.DirtySegments)
+        {
+            int index = pending.Message.AssistantSegments.FindIndex(segment => segment.Id == id);
+            if (index >= 0 && pending.SegmentText.TryGetValue(id, out var text))
+                pending.Message.AssistantSegments[index] = pending.Message.AssistantSegments[index] with
+                { Content = text.Content.ToString(), Reasoning = text.Reasoning.ToString() };
+        }
+        pending.DirtySegments.Clear();
         pending.Message.Content = pending.Content.ToString();
         pending.Message.Reasoning = pending.Reasoning.ToString();
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
@@ -121,10 +131,15 @@ public sealed partial class ShellPage
                     case "reasoning_delta":
                         pending.ThinkingTime.Start();
                         pending.Reasoning.Append(update.Delta);
+                        AppendSegmentDelta(pending, update, reasoning: true);
                         break;
                     case "text_delta":
                         pending.ThinkingTime.Stop();
                         pending.Content.Append(update.Delta);
+                        AppendSegmentDelta(pending, update, reasoning: false);
+                        break;
+                    case "assistant_segment":
+                        if (update.Segment is { } segment) AcceptAssistantSegment(pending, segment);
                         break;
                     case "content_snapshot":
                         pending.Content.Clear();
@@ -138,8 +153,16 @@ public sealed partial class ShellPage
                         pending.ThinkingTime.Stop();
                         if (update.Content is not null) { pending.Content.Clear(); pending.Content.Append(update.Content); }
                         if (update.Reasoning is not null) { pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning); }
+                        if (update.AssistantSegments is { } segments)
+                        {
+                            pending.Message.AssistantSegments.Clear();
+                            pending.Message.AssistantSegments.AddRange(segments);
+                            pending.SegmentText.Clear();
+                            pending.DirtySegments.Clear();
+                        }
                         pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
                         pending.Message.Error = update.Error ?? string.Empty;
+                        pending.Message.DurationMs = update.DurationMs;
                         break;
                 }
                 pending.Dirty = true;
@@ -162,6 +185,12 @@ public sealed partial class ShellPage
         finally
         {
             pending.ThinkingTime.Stop();
+            if (pending.Message.Status != "completed")
+            {
+                var segments = pending.Message.AssistantSegments;
+                for (int index = 0; index < segments.Count; index++)
+                    if (segments[index].Status == "streaming") segments[index] = segments[index] with { Status = "interrupted" };
+            }
             if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
             {
                 FlushReply(pending, final: true);
@@ -175,6 +204,26 @@ public sealed partial class ShellPage
                 RenderProjects();
             }
         }
+    }
+
+    private static void AcceptAssistantSegment(PendingChatReply pending, AssistantSegment segment)
+    {
+        var segments = pending.Message.AssistantSegments;
+        int index = segments.FindIndex(value => value.Id == segment.Id);
+        if (index < 0) segments.Add(segment);
+        else segments[index] = segment;
+        pending.SegmentText[segment.Id] = (new StringBuilder(segment.Content), new StringBuilder(segment.Reasoning));
+        pending.DirtySegments.Remove(segment.Id);
+        if (segment.Status != "streaming") pending.ThinkingTime.Stop();
+        pending.Dirty = true;
+    }
+
+    private static void AppendSegmentDelta(PendingChatReply pending, ChatStreamEvent update, bool reasoning)
+    {
+        if (update.SegmentId is null) return;
+        if (!pending.SegmentText.TryGetValue(update.SegmentId, out var text)) return;
+        (reasoning ? text.Reasoning : text.Content).Append(update.Delta);
+        pending.DirtySegments.Add(update.SegmentId);
     }
 
     private async void Transcript_RetryRequested(object? sender, Guid messageId)

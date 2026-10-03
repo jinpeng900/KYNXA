@@ -14,6 +14,15 @@ public static class ToolApprovalDialog
         var content = new StackPanel { Spacing = 10 };
         content.Children.Add(new TextBlock { Name = "ToolApprovalName", Text = tool.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         content.Children.Add(new TextBlock { Text = tool.Summary, TextWrapping = TextWrapping.Wrap });
+        if (tool.Name.StartsWith("mcp.", StringComparison.Ordinal))
+            AddLabel(content, "MCP 服务是受信任的外部程序，不属于终端沙箱。", "ToolApprovalExternalProgram");
+        if (tool.Arguments is { ValueKind: JsonValueKind.Object } wrapped &&
+            wrapped.TryGetProperty("policy", out var policy) && policy.ValueKind == JsonValueKind.Object &&
+            policy.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String)
+        {
+            AddLabel(content, "审批原因");
+            content.Children.Add(new TextBlock { Name = "ToolApprovalReason", Text = reason.GetString(), TextWrapping = TextWrapping.Wrap });
+        }
         AddLabel(content, "工作范围");
         if (tool.WorkspaceRoot is { } workspace)
             content.Children.Add(new TextBlock { Name = "ToolApprovalWorkspace", Text = workspace, TextWrapping = TextWrapping.Wrap });

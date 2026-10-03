@@ -5,6 +5,7 @@ import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
+import { supportsSkillExecution, verifiesSkillExecution } from './sandbox-skill.mjs';
 
 const gatewayDirectory = dirname(fileURLToPath(import.meta.url));
 const maximumHostOutputBytes = 2 * 1024 * 1024;
@@ -22,6 +23,7 @@ export class SandboxRunner {
   #toolHostPath;
   #excludedRoots;
   #verifiedAppContainer = false;
+  #verifiedSkillExecution = false;
   #stagingDirectories = new Set();
   #onStarted;
 
@@ -55,6 +57,7 @@ export class SandboxRunner {
 
   async capabilities() {
     this.#verifiedAppContainer = false;
+    this.#verifiedSkillExecution = false;
     try {
       const host = await this.#findToolHost();
       const status = await this.#invoke(host, { operation: 'capabilities' }, null, 10000);
@@ -62,6 +65,7 @@ export class SandboxRunner {
         status.sandbox === 'appcontainer' && status.failClosed === true && status.checksChildToken === true &&
         status.network === false && status.workspaceCopy === true;
       if (!this.#verifiedAppContainer) throw failure('SANDBOX_UNAVAILABLE', 'The native helper does not support the required fail-closed AppContainer protocol.');
+      this.#verifiedSkillExecution = supportsSkillExecution(status);
       return status;
     } catch (error) {
       return { protocolVersion: 1, available: false, sandbox: 'appcontainer', commands: [], network: false,
@@ -69,7 +73,7 @@ export class SandboxRunner {
     }
   }
 
-  async run({ workspaceRoot, command, args, timeoutMs = 30000, trustedManagedWorkspace = false }, signal) {
+  async run({ workspaceRoot, command, args, timeoutMs = 30000, trustedManagedWorkspace = false, skill }, signal) {
     if (signal?.aborted) throw abortError();
     if (!['node', 'node.exe', 'cmd', 'cmd.exe'].includes(command))
       throw failure('SANDBOX_COMMAND_UNSUPPORTED', 'Only node and cmd are currently supported in the isolated terminal.');
@@ -89,7 +93,7 @@ export class SandboxRunner {
     try {
       result = await this.#invoke(host, { operation: 'run', workspaceRoot: resolve(workspaceRoot), command,
         args, timeoutMs, nodeExecutable: process.execPath, excludedRoots: this.#excludedRoots,
-        trustedManagedWorkspace: trustedManagedWorkspace === true }, signal, timeoutMs + 30000);
+        trustedManagedWorkspace: trustedManagedWorkspace === true, ...(skill ? { skill } : {}) }, signal, timeoutMs + 30000);
     } catch (error) {
       const completed = error.sandboxResult;
       // A cancellation can arrive between native completion and pipe close. Its retained copy must still be owned and cleaned.
@@ -105,6 +109,25 @@ export class SandboxRunner {
         result.workspaceCopy !== true || result.activeProcessesAfterExit !== 0)
       throw failure('SANDBOX_START_FAILED', 'The native helper did not verify isolated execution and process cleanup.');
     if (!result.cancelled) this.#stagingDirectories.add(result.stagingDirectory);
+    return result;
+  }
+
+  async runSkill({ package: prepared, workspaceRoot, args = [], timeoutMs, trustedManagedWorkspace }, signal) {
+    if (!prepared || !Array.isArray(prepared.files) || prepared.files.length > 128 ||
+        typeof prepared.skillRoot !== 'string' || typeof prepared.scriptRelativePath !== 'string')
+      throw failure('SANDBOX_INVALID_SKILL', 'A verified skill package manifest is required.');
+    signal?.throwIfAborted();
+    await this.capabilities();
+    if (!this.#verifiedSkillExecution)
+      throw failure('SANDBOX_SKILL_UNSUPPORTED', 'The native helper does not advertise hash-checked read-only skill packages.');
+    const result = await this.run({ workspaceRoot, command: 'node', args, timeoutMs, trustedManagedWorkspace,
+      skill: { root: prepared.skillRoot, script: prepared.scriptRelativePath,
+        files: prepared.files.map(file => ({ path: file.relativePath, size: file.size, sha256: file.sha256 })) } }, signal);
+    if (!verifiesSkillExecution(result, prepared)) {
+      if (typeof result.stagingDirectory === 'string' && this.#stagingDirectories.has(result.stagingDirectory))
+        await this.cleanup(result.stagingDirectory);
+      throw failure('SANDBOX_INVALID_RESULT', 'The native helper did not prove execution of the selected skill package.');
+    }
     return result;
   }
 

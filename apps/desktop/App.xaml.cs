@@ -31,6 +31,16 @@ public partial class App : Application
         Services.UiText.Initialize(new Services.LayoutStateService().Load().InterfaceLanguage);
         Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
             ? Services.StoragePaths.DesktopDirectory : null;
+        string? configuredModelHome = Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME");
+        if (!string.IsNullOrWhiteSpace(configuredModelHome))
+        {
+            string modelHome = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configuredModelHome));
+            Services.ExtensionPaths.LegacyRoot = string.Equals(Path.GetFileName(modelHome), "Models", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(modelHome)! : Path.Combine(modelHome, "Conversations");
+        }
+        else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.DataRoot
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa");
+        Services.ExtensionPaths.Reload();
         Window = new MainWindow();
         Window.Activate();
         _ = WarmUpModelGatewayAsync();

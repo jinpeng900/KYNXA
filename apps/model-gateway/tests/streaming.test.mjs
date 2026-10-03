@@ -161,7 +161,8 @@ test('Anthropic streams visible thinking separately and ignores opaque signature
   assert.equal(JSON.stringify(received).includes('opaque-private-signature'), false);
   assert.equal(f.seen[0].path, '/v1/messages');
   assert.equal(f.seen[0].headers['x-api-key'], 'secret-not-for-events');
-  assert.equal(f.seen[0].body.max_tokens, 2048);
+  assert.equal(f.seen[0].body.max_tokens, received.at(-1).contextUsage.outputReserveTokens);
+  assert.ok(f.seen[0].body.max_tokens > 2048);
 });
 
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
@@ -214,7 +215,11 @@ test('HTTP failure is a sanitized SSE terminal event after started', async t => 
     response.end(JSON.stringify({ error: 'secret-not-for-events' }));
   });
   const received = await events(await f.post());
-  assert.deepEqual(received.map(x => x.type), ['started', 'error']);
+  assert.deepEqual(received.map(x => x.type), ['started', 'assistant_segment', 'assistant_segment', 'error']);
+  assert.equal(received[1].segment.status, 'streaming');
+  assert.equal(received[2].segment.status, 'interrupted');
+  assert.equal(received[2].segment.id, received[1].segment.id);
+  assert.equal(received.at(-1).assistantSegments[0].content, '');
   assert.match(received.at(-1).error, /HTTP 401/);
   assert.equal(JSON.stringify(received).includes('secret-not-for-events'), false);
 });

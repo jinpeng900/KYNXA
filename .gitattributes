@@ -1,0 +1,2 @@
+# Preserve the original whitespace in vendored upstream skill examples.
+apps/model-gateway/skills/internal-comms/examples/** whitespace=-blank-at-eol

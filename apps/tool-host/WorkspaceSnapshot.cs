@@ -10,7 +10,7 @@ internal sealed class WorkspaceSnapshot
     {
         "Data", "Models", "Backups", "Trash", "Index", "Chats", "Memory", ".kynxa", ".codex", ".ssh", ".aws", ".azure", ".docker", ".kube", ".config",
         ".git", ".svn", ".hg", "node_modules", "bin", "obj", "dist", "build", ".vs", ".venv", "venv",
-        ".sandbox-runtime", ".sandbox-temp"
+        ".sandbox-runtime", ".sandbox-temp", ".sandbox-skill"
     };
     private readonly string[] _excludedRoots;
     private string _sourceRoot = "";
@@ -113,7 +113,7 @@ internal sealed class WorkspaceSnapshot
         return path.Equals(root, StringComparison.OrdinalIgnoreCase) || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsSensitiveFile(string name)
+    internal static bool IsSensitiveFile(string name)
     {
         string lower = name.ToLowerInvariant();
         string extension = Path.GetExtension(lower);

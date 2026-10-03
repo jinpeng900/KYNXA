@@ -6,7 +6,7 @@ export class StreamFailure extends Error {
 
 export function checkFinish(reason) {
   if (!reason || ['stop', 'end_turn', 'stop_sequence'].includes(reason)) return;
-  throw new StreamFailure(reason === 'length' || reason === 'max_tokens'
+  throw new StreamFailure(['length', 'max_tokens', 'max_output_tokens', 'model_context_window_exceeded'].includes(reason)
     ? '回复达到模型输出上限，已保留生成的内容。'
     : reason === 'tool_calls' || reason === 'tool_use'
       ? '模型请求使用工具，当前聊天尚未执行该工具，已保留生成的内容。'
@@ -70,7 +70,8 @@ export function finalParts(protocol, result) {
       .filter(x => x.type === 'output_text').map(x => x.text ?? '').join('\n') ?? result.output_text ?? '',
     reasoning: result.output?.filter(x => x.type === 'reasoning').flatMap(x => x.summary ?? [])
       .filter(x => x.type === 'summary_text').map(x => x.text ?? '').join('\n') ?? '',
-    finish: ['incomplete', 'failed', 'cancelled'].includes(result.status) ? result.status : null
+    finish: result.status === 'incomplete' ? result.incomplete_details?.reason || 'incomplete'
+      : result.status && result.status !== 'completed' ? result.status : null
   };
   const choice = result.choices?.[0];
   return { content: textParts(choice?.message?.content),
@@ -125,10 +126,17 @@ export async function readModelStream(response, protocol, emit, onActivity) {
         if (event.response?.output) {
           const parts = finalParts(protocol, event.response);
           content = parts.content; reasoning = parts.reasoning || reasoning;
+          emit({ type: 'content_snapshot', content, reasoning });
           checkFinish(parts.finish);
         }
         finished = true; break;
       } else if (['response.incomplete', 'response.failed', 'response.cancelled'].includes(type)) {
+        if (event.response?.output) {
+          const parts = finalParts(protocol, event.response);
+          content = parts.content || content; reasoning = parts.reasoning || reasoning;
+          emit({ type: 'content_snapshot', content, reasoning });
+          checkFinish(parts.finish);
+        }
         throw new StreamFailure('模型未完整生成回复，已保留生成的内容。', 'interrupted');
       }
     } else {

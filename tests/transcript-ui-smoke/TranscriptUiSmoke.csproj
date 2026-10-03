@@ -19,6 +19,7 @@
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/ConversationTranscript.cs" Link="ConversationTranscript.cs" />
     <Compile Include="../../apps/desktop/Services/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
     <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />

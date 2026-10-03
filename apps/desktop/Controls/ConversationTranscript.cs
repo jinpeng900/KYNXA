@@ -24,6 +24,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private readonly Dictionary<Guid, CachedHtml> _html = [];
     private readonly LinkedList<Guid> _cacheOrder = [];
     private readonly Dictionary<Guid, LinkedListNode<Guid>> _cacheNodes = [];
+    private readonly Dictionary<(Guid MessageId, string CallId), ToolDisplayRevision> _toolRevisions = [];
+    private readonly Queue<(Guid MessageId, string CallId)> _toolRevisionOrder = [];
+    private const int MaximumToolDisplayRevisions = 2048;
+    private long _nextToolRevision;
     private const int MaximumCachedMessages = 1024;
     private const long MaximumCacheCharacters = 8 * 1024 * 1024;
     private long _cacheCharacters;
@@ -33,17 +37,25 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private string _noticeKey = "正在加载聊天…";
     private long _revision, _generation;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
-    private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Html, string ReasoningHtml)
+    private sealed record CachedSegmentHtml(AssistantSegment Source, string Html, string ReasoningHtml)
     {
-        public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length;
+        public long Size => (long)Source.Content.Length + Source.Reasoning.Length + Html.Length + ReasoningHtml.Length;
+    }
+    private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Mode, string Html, string ReasoningHtml,
+        CachedSegmentHtml[] Segments)
+    {
+        public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length + Segments.Sum(segment => segment.Size);
     }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
-        ToolActivity[] ToolActivities);
+        ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs);
+    private sealed record ToolDisplayRevision(WeakReference<ToolActivity> Source, long Revision);
 
     public Task Ready => _ready.Task;
     internal WebView2 Browser => _browser;
     public event EventHandler<Guid>? RetryRequested;
+    public event EventHandler<ToolResultRequest>? ToolResultRequested;
+    public event EventHandler? ConversationChanged;
 
     public ConversationTranscript()
     {
@@ -66,6 +78,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
         bool changed = _conversationId != conversationId;
         _conversationId = conversationId;
+        if (changed) ConversationChanged?.Invoke(this, EventArgs.Empty);
         _generation++;
         _messages = messages.ToArray();
         foreach (var message in _messages) message.PropertyChanged += MessageChanged;
@@ -104,8 +117,23 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 interrupted = UiText.Get("回复中断，请重试。"),
                 replying = UiText.Get("正在回复…"), generating = UiText.Get("正在生成"),
                 toolActivities = UiText.Get("工具活动"), toolRunning = UiText.Get("执行中"),
+                toolMoreWebLinks = UiText.Get("另{0}个链接"),
+                elapsedSeconds = UiText.Get("用时 {0}秒"), elapsedMinutesSeconds = UiText.Get("用时 {0}分钟{1}秒"),
+                elapsedHoursMinutesSeconds = UiText.Get("用时 {0}小时{1}分钟{2}秒"),
                 toolCompleted = UiText.Get("已完成"), toolError = UiText.Get("工具失败"),
-                toolDenied = UiText.Get("已拒绝"), toolApproval = UiText.Get("等待批准")
+                toolDenied = UiText.Get("已拒绝"), toolApproval = UiText.Get("等待批准"),
+                toolCancelled = UiText.Get("已取消"), toolUnknown = UiText.Get("结果未知"),
+                toolSearchWeb = UiText.Get("搜索资料"), toolReadWeb = UiText.Get("阅读网页"), toolReadFile = UiText.Get("读取文件"),
+                toolInspectFile = UiText.Get("查看文件"), toolListFiles = UiText.Get("查看文件夹"), toolSearchFiles = UiText.Get("查找文件"),
+                toolEditFile = UiText.Get("修改文件"), toolDeleteFile = UiText.Get("删除文件"), toolCreateFolder = UiText.Get("创建文件夹"),
+                toolRunCommand = UiText.Get("运行命令"), toolUseSkill = UiText.Get("使用技能"), toolReadSkill = UiText.Get("读取技能"),
+                toolFindSkill = UiText.Get("查找技能"), toolInspectSkill = UiText.Get("检查技能"), toolFindTools = UiText.Get("查找工具"),
+                toolReadResult = UiText.Get("读取工具记录"), toolFindHistory = UiText.Get("查找聊天记录"), toolReadHistory = UiText.Get("读取聊天记录"),
+                toolExecute = UiText.Get("执行操作"), toolOutcomeUncertain = UiText.Get("操作已中断，执行结果尚未确定。"),
+                toolTimedOut = UiText.Get("操作超时。"), toolSandboxUnavailable = UiText.Get("沙箱暂不可用。"),
+                toolSkillUnavailable = UiText.Get("技能运行环境尚未满足。"), toolApprovalExpired = UiText.Get("批准已过期。"),
+                toolCommandUnavailable = UiText.Get("此命令暂不支持。"), toolConnectionUnavailable = UiText.Get("工具连接不可用。"),
+                toolAuthRequired = UiText.Get("工具需要认证。")
             }
         });
     }
@@ -198,6 +226,17 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     if (MatchesConversation(message) && message.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var uri)
                         && uri.Scheme is "http" or "https" or "mailto") await Launcher.LaunchUriAsync(uri);
                     break;
+                case "toolResult":
+                    if (MatchesConversation(message) && _conversationId is { } conversation &&
+                        message.TryGetProperty("messageId", out var messageId) && Guid.TryParse(messageId.GetString(), out var assistantId) &&
+                        message.TryGetProperty("toolCallId", out var callId) && callId.ValueKind == JsonValueKind.String &&
+                        message.TryGetProperty("resultId", out var resultId) && Guid.TryParse(resultId.GetString(), out var resultGuid))
+                    {
+                        var tool = _messages.FirstOrDefault(row => row.Message.Id == assistantId)?.ToolActivities
+                            .FirstOrDefault(item => item.ToolCallId == callId.GetString() && item.ResultRef?.Id == resultGuid);
+                        if (tool is not null) ToolResultRequested?.Invoke(this, new(conversation, assistantId, tool));
+                    }
+                    break;
                 case "copy":
                     if (MatchesConversation(message) && message.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
                     {
@@ -229,10 +268,17 @@ public sealed class ConversationTranscript : Grid, IDisposable
         long revision = _revision;
         long generation = _generation;
         var conversationId = _conversationId;
-        var snapshots = _messages.Select(row => new Snapshot(row.Message.Id, row.Message.Role, row.Content, row.Message.Reasoning,
-            row.IsStreaming, row.Message.Reasoning.Length > 0 ? (row.IsThinking ? "thinking" : "finished") : null,
-            row.ReasoningSeconds, row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
-            row.ToolActivities.ToArray())).ToArray();
+        var snapshots = _messages.Select(row =>
+        {
+            var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
+                row.Message.AssistantSegments, row.ToolActivities);
+            // Public process records belong to the gateway. Hidden phases need no HTML or browser payload.
+            var segments = visible.Segments.Select(segment => segment with { Reasoning = "", ReasoningDurationMs = 0 }).ToArray();
+            return new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
+                visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
+                row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
+                visible.Tools, segments, visible.Mode, row.Message.DurationMs);
+        }).ToArray();
         try
         {
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
@@ -242,7 +288,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 var row = snapshots[index];
                 _html.TryGetValue(row.Id, out var cached);
                 bool hit = cached is not null && cached.Role == row.Role && cached.Content == row.Content &&
-                    cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming;
+                    cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming && cached.Mode == row.Mode &&
+                    cached.Segments.Select(segment => segment.Source).SequenceEqual(row.AssistantSegments);
                 rendered[index] = (row, hit ? cached : null);
                 if (!hit) missing.Add(index);
             }
@@ -254,9 +301,16 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     // Rapid navigation can abandon a large transcript between messages.
                     if (generation != Volatile.Read(ref _generation)) return;
                     var row = snapshots[index];
-                    string html = row.Role == "user" ? "" : TranscriptMarkdown.Render(row.Content, row.Streaming);
-                    string reasoning = TranscriptMarkdown.Render(row.Reasoning, row.Streaming);
-                    rendered[index] = (row, new CachedHtml(row.Role, row.Content, row.Reasoning, row.Streaming, html, reasoning));
+                    _html.TryGetValue(row.Id, out var previous);
+                    var segmentHtml = row.AssistantSegments.Select(segment =>
+                    {
+                        var match = previous?.Segments.FirstOrDefault(value => value.Source == segment);
+                        return match ?? new CachedSegmentHtml(segment,
+                            TranscriptMarkdown.Render(segment.Content, segment.Status == "streaming"),
+                            "");
+                    }).ToArray();
+                    string html = row.Role == "user" || segmentHtml.Length > 0 ? "" : TranscriptMarkdown.Render(row.Content, row.Streaming);
+                    rendered[index] = (row, new CachedHtml(row.Role, row.Content, row.Reasoning, row.Streaming, row.Mode, html, "", segmentHtml));
                 }
             });
             if (_disposed || generation != _generation) return;
@@ -266,11 +320,19 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
                     html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                     reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
+                    presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
-                    toolActivities = item.Row.ToolActivities.Select(tool => new { toolCallId = tool.ToolCallId, name = tool.Name,
+                    assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
+                        round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
+                        status = segment.Source.Status, content = segment.Source.Content, html = segment.Html,
+                        reasoningHtml = segment.ReasoningHtml,
+                        reasoningState = segment.Source.Status == "streaming" && item.Row.ReasoningState == "thinking" ? "thinking" : null,
+                        reasoningSeconds = 0 }),
+                    toolActivities = item.Row.ToolActivities.Select(tool => new { uiRevision = GetToolDisplayRevision(item.Row.Id, tool), toolCallId = tool.ToolCallId, name = tool.Name,
                         arguments = tool.Arguments, status = tool.Status, summary = tool.Summary, result = tool.Result,
                         approvalId = tool.ApprovalId, outsideWorkspace = tool.OutsideWorkspace, sandbox = tool.Sandbox,
-                        workspaceRoot = tool.WorkspaceRoot }) }) });
+                        workspaceRoot = tool.WorkspaceRoot, code = tool.Code, round = tool.Round, order = tool.Order,
+                        resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }) }) });
             _openAtBottom = false;
             _notice.Visibility = Visibility.Collapsed;
         }
@@ -285,6 +347,23 @@ public sealed class ConversationTranscript : Grid, IDisposable
             _rendering = false;
             if (_dirty && !_disposed) _refresh.Start();
         }
+    }
+
+    private long GetToolDisplayRevision(Guid messageId, ToolActivity tool)
+    {
+        var key = (messageId, tool.ToolCallId);
+        if (_toolRevisions.TryGetValue(key, out var previous) && previous.Source.TryGetTarget(out var source) && ReferenceEquals(source, tool))
+            return previous.Revision;
+        if (!_toolRevisions.ContainsKey(key))
+        {
+            while (_toolRevisions.Count >= MaximumToolDisplayRevisions) _toolRevisions.Remove(_toolRevisionOrder.Dequeue());
+            _toolRevisionOrder.Enqueue(key);
+        }
+        // Events are immutable records. A weak source avoids retaining full tool results
+        // merely to skip unchanged DOM rows during streaming and cached navigation.
+        long revision = ++_nextToolRevision;
+        _toolRevisions[key] = new(new WeakReference<ToolActivity>(tool), revision);
+        return revision;
     }
 
     private void CacheHtml(Guid id, CachedHtml value)
@@ -309,6 +388,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        ConversationChanged?.Invoke(this, EventArgs.Empty);
         UiText.LanguageChanged -= LanguageChanged;
         _refresh.Stop();
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
@@ -316,7 +396,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _html.Clear();
         _cacheOrder.Clear();
         _cacheNodes.Clear();
+        _toolRevisions.Clear();
+        _toolRevisionOrder.Clear();
         _cacheCharacters = 0;
         _browser.Close();
     }
 }
+
+public sealed record ToolResultRequest(Guid ConversationId, Guid MessageId, ToolActivity Tool);

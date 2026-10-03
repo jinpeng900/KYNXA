@@ -3,6 +3,10 @@ import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, truncate,
 import { basename, dirname, join, resolve } from 'node:path';
 import { atomicJson, readJson } from './store.mjs';
 import { ensureDataLayout, inspectDataLayout } from './data-layout.mjs';
+import { conversationDataRoot } from './storage.mjs';
+import { validateAssistantSegments } from './assistant-segments.mjs';
+import { validateModelTranscript, publicConversationMessage } from './model-transcript.mjs';
+import { storedReplyDurationMs } from './reply-timing.mjs';
 
 const idPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 const clone = value => structuredClone(value);
@@ -37,13 +41,16 @@ function message(value, { legacy = false, seed = '' } = {}) {
   record(value, '消息');
   const id = validateId(value.Id ?? (legacy ? createHash('sha256').update(seed).digest('hex').slice(0, 32) : undefined));
   if (!['user', 'assistant', 'system', 'tool'].includes(value.Role)) throw failure('消息角色格式无效，原文件已保留。');
+  if (value.ModelTranscript !== undefined && value.Role !== 'assistant') throw failure('模型转录只能由助手请求记录。', 'INVALID_MODEL_TRANSCRIPT');
   const createdAt = value.CreatedAt ?? new Date(0).toISOString();
   if (typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))) throw failure('消息时间格式无效。');
   const duration = value.ReasoningDurationMs ?? 0;
   if (!Number.isFinite(duration) || duration < 0) throw failure('思考耗时格式无效。');
   return { ...value, Id: id, Role: value.Role, Content: text(value.Content), Reasoning: text(value.Reasoning),
     Status: text(value.Status, 'completed'), Error: text(value.Error), Provider: text(value.Provider),
-    Model: text(value.Model), ReasoningDurationMs: duration, CreatedAt: createdAt };
+    Model: text(value.Model), ReasoningDurationMs: duration, DurationMs: storedReplyDurationMs(value), CreatedAt: createdAt,
+    ...(value.ModelTranscript === undefined ? {} : { ModelTranscript: validateModelTranscript(value.ModelTranscript) }),
+    ...(value.AssistantSegments === undefined ? {} : { AssistantSegments: validateAssistantSegments(value.AssistantSegments) }) };
 }
 
 function chat(value, options = {}) {
@@ -107,7 +114,7 @@ export class ConversationStore {
     if (!dataHome) throw failure('缺少模型数据目录。');
     this.dataHome = resolve(dataHome);
     const standardLayout = basename(this.dataHome).toLowerCase() === 'models';
-    this.root = resolve(root ?? (standardLayout ? dirname(this.dataHome) : join(this.dataHome, 'Conversations')));
+    this.root = resolve(root ?? conversationDataRoot(this.dataHome));
     this.legacyDesktopDirectory = legacyDesktopDirectory === null ? null :
       (legacyDesktopDirectory ? resolve(legacyDesktopDirectory) : standardLayout ? join(this.root, 'Desktop') : null);
     this.catalogPath = join(this.root, 'catalog.json');
@@ -233,17 +240,28 @@ export class ConversationStore {
 
   async _fullCatalog() {
     const result = { Revision: this.document.Revision, Projects: clone(this.document.Projects), Chats: clone(this.document.Chats) };
-    for (const location of locations(result)) location.Chat.Messages = clone(await this._readLog(location));
+    for (const location of locations(result)) location.Chat.Messages = clone((await this._readLog(location)).map(publicConversationMessage));
     return result;
   }
 
   catalog() { return this._run(() => this._fullCatalog()); }
 
   readMessages(conversationId) {
+    return this._readMessages(conversationId, false);
+  }
+
+  /** Gateway-only model projection source. Public APIs always use readMessages/catalog. */
+  readModelMessages(conversationId) {
+    return this._readMessages(conversationId, true);
+  }
+
+  _readMessages(conversationId, includeModelTranscript) {
     return this._run(async () => {
       this._notDeleted(conversationId);
       const location = this._find(conversationId);
-      return location ? clone(await this._readLog(location)) : [];
+      if (!location) return [];
+      const messages = await this._readLog(location);
+      return clone(includeModelTranscript ? messages : messages.map(publicConversationMessage));
     });
   }
 

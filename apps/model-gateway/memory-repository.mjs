@@ -243,7 +243,10 @@ export class MemoryRepository {
         }
         throw error;
       }
-      if (!value || value.schemaVersion !== 1)
+      // v1 was request-independent first/last excerpts. Leave it intact until a v2
+      // projection is rebuilt from authoritative history; never use its cached text.
+      if (value?.schemaVersion === 1) return null;
+      if (!value || value.schemaVersion !== 2)
         throw memoryFailure('聊天摘要版本不受当前程序支持，原文件已保留。', 'UNSUPPORTED_SUMMARY_VERSION', 409);
       return value;
     });
@@ -259,7 +262,7 @@ export class MemoryRepository {
   }
 
   async writeSummary(conversationId, summary) {
-    if (!summary || summary.schemaVersion !== 1 || memoryId(summary.conversationId) !== memoryId(conversationId))
+    if (!summary || summary.schemaVersion !== 2 || memoryId(summary.conversationId) !== memoryId(conversationId))
       throw memoryFailure('聊天摘要版本或归属无效。');
     if (Buffer.byteLength(JSON.stringify(summary, null, 2)) > MAX_MEMORY_FILE_BYTES) throw memoryFailure('聊天摘要过大。');
     return this._withSummary(conversationId, async file => {
@@ -271,7 +274,7 @@ export class MemoryRepository {
           if (error instanceof SyntaxError) throw memoryFailure('聊天摘要格式无效，原文件已保留。', 'CORRUPT_SUMMARY', 500);
           throw error;
         }
-        if (previous?.schemaVersion !== 1)
+        if (![1, 2].includes(previous?.schemaVersion))
           throw memoryFailure('聊天摘要版本不受当前程序支持，原文件已保留。', 'UNSUPPORTED_SUMMARY_VERSION', 409);
       }
       await this._safe(dirname(file), { create: true });

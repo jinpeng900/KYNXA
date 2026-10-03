@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, stat, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { storageMigrationActive } from '../storage-maintenance.mjs';
+import { EXTENSION_LAYOUT_DIRECTORIES } from '../extension-storage.mjs';
 
 test('gateway pauses writes during migration and reloads committed data root', async t => {
   const home = await mkdtemp(join(tmpdir(), 'kynxa-maintenance-'));
@@ -20,7 +21,8 @@ test('gateway pauses writes during migration and reloads committed data root', a
   const port = socket.address().port;
   await new Promise(resolve => socket.close(resolve));
   const child = spawn(process.execPath, [fileURLToPath(new URL('../server.mjs', import.meta.url))], {
-    env: { ...process.env, USERPROFILE: home, HOME: home, KYNXA_MODEL_API_PORT: String(port), KYNXA_DATA_HOME: '', KYNXA_MODEL_HOME: '' },
+    env: { ...process.env, USERPROFILE: home, HOME: home, KYNXA_MODEL_API_PORT: String(port), KYNXA_DATA_HOME: '', KYNXA_MODEL_HOME: '',
+      KYNXA_EXTENSION_HOME: '', KYNXA_EXTENSION_POINTER: '' },
     windowsHide: true, stdio: 'ignore'
   });
   t.after(async () => { child.kill(); await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve)); });
@@ -45,7 +47,52 @@ test('gateway pauses writes during migration and reloads committed data root', a
   assert.equal((await fetch(`${url}/api/models`)).status, 200);
 });
 
-test('a retired runtime cleanup failure is handled, redacted and does not stop the migrated gateway', { timeout: 20000 }, async t => {
+test('gateway initial health respects migration and builds extensions only after release, with repairable layout errors', { timeout: 20000 }, async t => {
+  const home = await mkdtemp(join(tmpdir(), 'kynxa-framework-activation-')), profile = join(home, '.kynxa');
+  await mkdir(profile);
+  const dataRoot = join(home, 'Data'), first = join(home, 'Extensions'), second = join(home, 'FutureExtensions');
+  await writeFile(join(profile, 'storage.json'), JSON.stringify({ version: 1, dataRoot }));
+  const pointer = join(profile, 'extensions.json'), lock = join(profile, 'storage-migration.lock');
+  await writeFile(pointer, JSON.stringify({ version: 1, extensionRoot: first }));
+  await writeFile(lock, JSON.stringify({ pid: process.pid }));
+  const socket = createServer(); await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
+  const port = socket.address().port; await new Promise(resolve => socket.close(resolve));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../server.mjs', import.meta.url))], {
+    env: { ...process.env, USERPROFILE: home, HOME: home, KYNXA_MODEL_API_PORT: String(port), KYNXA_DATA_HOME: '', KYNXA_MODEL_HOME: '',
+      KYNXA_EXTENSION_HOME: '', KYNXA_EXTENSION_POINTER: '' }, windowsHide: true, stdio: 'ignore'
+  });
+  t.after(async () => {
+    child.kill(); await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve));
+    const suffix = relative(resolve(tmpdir()), home); assert.ok(suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`));
+    await rm(home, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${port}`;
+  let health;
+  for (let i = 0; i < 100; i++) {
+    try { health = await (await fetch(`${url}/health`)).json(); break; } catch { await new Promise(resolve => setTimeout(resolve, 50)); }
+  }
+  assert.equal(health?.migrating, true); assert.equal(health.activeRequests, 0);
+  await assert.rejects(access(first), { code: 'ENOENT' });
+  await rm(lock);
+  health = await (await fetch(`${url}/health`)).json();
+  assert.equal(health.migrating, false); assert.equal(health.extensionRoot, first); assert.equal(health.storageConfigError, undefined);
+  for (const name of EXTENSION_LAYOUT_DIRECTORIES) assert.equal((await stat(join(first, name))).isDirectory(), true, name);
+  assert.deepEqual(JSON.parse(await readFile(join(first, 'extension-layout.json'), 'utf8')), { version: 1 });
+  await mkdir(second); await writeFile(join(second, 'extension-layout.json'), '{"version":99}');
+  await writeFile(pointer, JSON.stringify({ version: 1, extensionRoot: second }));
+  health = await (await fetch(`${url}/health`)).json();
+  assert.equal(health.storageConfigError, 'UNSUPPORTED_EXTENSION_LAYOUT');
+  assert.equal((await fetch(`${url}/api/agent/config`)).status, 503);
+  await assert.rejects(access(join(second, 'Agent')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(second, 'extension-layout.json'), 'utf8'), '{"version":99}');
+  await writeFile(join(second, 'extension-layout.json'), '{"version":1,"extra":"kept"}');
+  health = await (await fetch(`${url}/health`)).json();
+  assert.equal(health.storageConfigError, undefined); assert.equal(health.extensionRoot, second);
+  assert.equal((await fetch(`${url}/api/agent/config`)).status, 200);
+  assert.equal(await readFile(join(second, 'extension-layout.json'), 'utf8'), '{"version":1,"extra":"kept"}');
+});
+
+test('a retired runtime cleanup failure is redacted and prevents a second runtime or any further writes', { timeout: 20000 }, async t => {
   for (const mode of ['rejected-promise', 'synchronous-throw']) await t.test(mode, async childTest => {
     const home = await mkdtemp(join(tmpdir(), 'kynxa-runtime-retirement-'));
     childTest.after(async () => {
@@ -95,7 +142,7 @@ test('a retired runtime cleanup failure is handled, redacted and does not stop t
           if (after.runtimeCleanupError) break;
           await new Promise(ready => setTimeout(ready, 10));
         }
-        assert.equal(after.modelDataHome, join(second, 'Models'));
+        assert.equal(after.modelDataHome, join(first, 'Models'));
         assert.equal(after.runtimeCleanupError, 'RUNTIME_CLEANUP_FAILED');
         const modelsResponse = await fetch(base + '/api/models');
         const models = await modelsResponse.json();
@@ -103,7 +150,7 @@ test('a retired runtime cleanup failure is handled, redacted and does not stop t
         await new Promise(ready => setImmediate(ready));
         process.stdout.write(JSON.stringify({ beforeHome: before.modelDataHome, afterHome: after.modelDataHome,
           cleanupCode: after.runtimeCleanupError, modelsStatus: modelsResponse.status,
-          providerIds: models.providers.map(provider => provider.providerId), oldCloseCount, unhandledCount }));
+          errorCode: models.code, oldCloseCount, unhandledCount }));
       } finally {
         server.closeAllConnections();
         await new Promise((ready, reject) => server.close(error => error ? reject(error) : ready()));
@@ -113,7 +160,8 @@ test('a retired runtime cleanup failure is handled, redacted and does not stop t
     const child = spawn(process.execPath, ['--no-warnings', '--unhandled-rejections=strict', '--input-type=module', '-e', source,
       first, second, mode, new URL('../server.mjs', import.meta.url).href, new URL('../runtime.mjs', import.meta.url).href, privateFailure], {
       env: { ...process.env, USERPROFILE: home, HOME: home, APPDATA: join(home, 'AppData'), LOCALAPPDATA: join(home, 'LocalAppData'),
-        KYNXA_DATA_HOME: first, KYNXA_MODEL_HOME: '', KYNXA_LEGACY_DESKTOP_HOME: join(home, 'LegacyDesktop') },
+        KYNXA_DATA_HOME: first, KYNXA_MODEL_HOME: '', KYNXA_EXTENSION_HOME: '', KYNXA_EXTENSION_POINTER: '',
+        KYNXA_LEGACY_DESKTOP_HOME: join(home, 'LegacyDesktop') },
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '', stderr = '';
@@ -129,8 +177,8 @@ test('a retired runtime cleanup failure is handled, redacted and does not stop t
     assert.equal(result.code, 0, `isolated gateway exits normally: ${stderr}`);
     assert.equal(result.signal, null);
     const report = JSON.parse(stdout);
-    assert.deepEqual(report, { beforeHome: join(first, 'Models'), afterHome: join(second, 'Models'),
-      cleanupCode: 'RUNTIME_CLEANUP_FAILED', modelsStatus: 200, providerIds: ['moved-synthetic'], oldCloseCount: 1, unhandledCount: 0 });
+    assert.deepEqual(report, { beforeHome: join(first, 'Models'), afterHome: join(first, 'Models'),
+      cleanupCode: 'RUNTIME_CLEANUP_FAILED', modelsStatus: 503, errorCode: 'RUNTIME_CLEANUP_FAILED', oldCloseCount: 1, unhandledCount: 0 });
     assert.deepEqual(stderr.trim().split(/\r?\n/), ['RUNTIME_CLEANUP_FAILED'], 'cleanup logs contain only the stable error code');
     assert.equal((stdout + stderr).includes(privateFailure), false, 'private cleanup details never reach health or logs');
   });

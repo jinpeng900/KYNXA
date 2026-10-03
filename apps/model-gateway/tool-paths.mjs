@@ -11,7 +11,11 @@ export function within(root, path) {
 }
 
 export function isModelCredentialPath(path, dataHome, appDataRoot) {
-  return (within(dataHome, path) || (appDataRoot && within(join(appDataRoot, 'Backups'), path))) && /^connections(?:[.\-_]|$)/i.test(basename(path));
+  const modelConnection = (within(dataHome, path) || (appDataRoot && within(join(appDataRoot, 'Backups'), path))) &&
+    /^connections(?:[.\-_]|$)/i.test(basename(path));
+  const agentConfig = appDataRoot && [join(appDataRoot, 'Agent'), join(appDataRoot, 'Backups')].some(root => within(root, path)) &&
+    /^config(?:[.\-_]|$)/i.test(basename(path));
+  return Boolean(modelConnection || agentConfig);
 }
 
 /** Reject links/reparse directories at every existing component, including parents outside the work root. */

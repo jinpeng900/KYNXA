@@ -46,7 +46,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
   const workspace = join(root, 'Work'); await mkdir(workspace);
   const marker = `FILE_${randomUUID()}`; await writeFile(join(workspace, 'note.txt'), marker);
   const seen = [], dataHome = join(root, 'Data', 'Models');
-  let replayResponse = false, revisionFailure = false;
+  let replayResponse = false, revisionFailure = false, plan;
   const upstream = createServer(async (request, response) => {
     try {
       let raw = ''; for await (const chunk of request) raw += chunk;
@@ -57,7 +57,8 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
           : history.findLast(x => x.role === 'tool')?.content;
       let result;
       if (toolResult != null && revisionFailure) { response.writeHead(503); response.end(); return; }
-      if (toolResult != null && !replayResponse) {
+      if (plan) result = await plan(body, marker, seen.length);
+      else if (toolResult != null && !replayResponse) {
         if (protocol === 'anthropic-messages') assert.equal(history.at(-2).content[0].signature, 'private-fixture-signature');
         if (protocol === 'openai-responses') assert.ok(history.some(x => x.encrypted_content === 'private-fixture-reasoning'));
         result = nativeText(protocol, `Observed tool result: ${toolResult}`);
@@ -66,7 +67,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
         assert.ok(descriptor, 'model actually receives declared tool');
         result = nativeTool(protocol, descriptor.name ?? descriptor.function.name,
           operation === 'filesystem.write' ? { path: 'made.txt', content: 'via-tool', expectedHash: null }
-            : operation === 'mcp.synthetic.echo' ? { value: marker, reason: 'Use the explicitly configured synthetic MCP service' }
+            : operation === 'mcp.synthetic.echo' ? { arguments: { value: marker }, policy: { reason: 'Use the explicitly configured synthetic MCP service' } }
               : { path: 'note.txt' });
       }
       if (revisionFailure && protocol === 'openai-responses') {
@@ -80,7 +81,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
   const baseUrl = await listen(upstream); t.after(() => close(upstream));
   const models = new ModelStore({ dataHome });
   await models.save({ providerId: 'fixture-tools', displayName: 'Tools fixture', baseUrl: baseUrl + '/v1', protocol,
-    models: ['tool-fixture'], contextWindowTokens: 32768 });
+    models: ['tool-fixture'], contextWindowTokens: 32768, maxOutputTokens: 2048 });
   const conversations = new ConversationStore({ dataHome });
   const id = randomUUID(), projectId = randomUUID();
   await conversations.saveCatalog({ Revision: (await conversations.catalog()).Revision, Projects: [{ Id: projectId, Name: 'Work', FolderPath: workspace,
@@ -93,10 +94,56 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
   });
   const input = { conversationId: id, requestId: randomUUID(), userMessageId: randomUUID(), provider: 'fixture-tools',
     model: 'tool-fixture', message: 'Read the mounted file', permissionMode: 'ask' };
-  return { root, runtime, conversations, seen, input, marker, workspace, address, setRepeat: value => { replayResponse = value; }, setRevisionFailure: value => { revisionFailure = value; } };
+  return { root, runtime, conversations, seen, input, marker, workspace, address, setPlan: value => { plan = value; },
+    setRepeat: value => { replayResponse = value; }, setRevisionFailure: value => { revisionFailure = value; } };
 }
 
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  test(`${protocol} displays final-only Content while preserving paired stages and observations in the next model context`, async t => {
+    const f = await fixture(t, protocol);
+    f.setPlan((body, _marker, round) => {
+      if (round >= 3) return nativeText(protocol, 'Short final answer.');
+      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      const result = nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' });
+      if (protocol === 'anthropic-messages') {
+        result.content.unshift({ type: 'text', text: `Stage ${round}.` });
+        result.content.find(item => item.type === 'tool_use').id = `call_${round}`;
+      } else if (protocol === 'openai-responses') {
+        result.output.push({ type: 'message', content: [{ type: 'output_text', text: `Stage ${round}.` }] });
+        result.output.find(item => item.type === 'function_call').call_id = `call_${round}`;
+      } else {
+        result.choices[0].message.content = `Stage ${round}.`;
+        result.choices[0].message.tool_calls[0].id = `call_${round}`;
+      }
+      return result;
+    });
+    const response = await fetch(f.address + '/api/chat/stream', { method: 'POST', body: JSON.stringify(f.input) });
+    const events = [];
+    for await (const raw of readSse(response.body)) events.push(JSON.parse(raw.data));
+    assert.equal(events.at(-1).type, 'completed');
+    assert.equal(events.at(-1).content, 'Short final answer.');
+    assert.equal(events.at(-1).toolStreamProtocol, 3);
+    const segments = events.at(-1).assistantSegments;
+    assert.deepEqual(segments.map(item => [item.round, item.order, item.phase]),
+      [[1, 0, 'commentary'], [2, 2, 'commentary'], [3, 4, 'final_answer']]);
+    assert.deepEqual(events.filter(item => item.type === 'tool_result').map(item => [item.tool.round, item.tool.order]), [[1, 1], [2, 3]]);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.deepEqual(saved.AssistantSegments, segments);
+    assert.equal(saved.Content, 'Short final answer.');
+    assert.ok(!JSON.stringify(saved.AssistantSegments).includes('private-fixture'));
+    const reloaded = new ConversationStore({ dataHome: join(f.root, 'Data', 'Models') });
+    assert.deepEqual((await reloaded.readMessages(f.input.conversationId)).at(-1).AssistantSegments, segments);
+    const turn = await f.runtime.prepare({ ...f.input, requestId: randomUUID(), userMessageId: randomUUID(), message: 'Next question.' }, f.input.conversationId);
+    assert.ok(JSON.stringify(turn.messages).includes('Short final answer.'));
+    assert.ok(JSON.stringify(turn.messages).includes('Stage 1.'));
+    assert.ok(JSON.stringify(turn.messages).includes(f.marker));
+    assert.ok(!JSON.stringify(turn.messages).includes('private-fixture'));
+    assert.equal(saved.ModelTranscript, undefined);
+    assert.equal((await reloaded.readModelMessages(f.input.conversationId)).find(item => item.Id === f.input.requestId).ModelTranscript.rounds.length, 3);
+    await f.runtime.tools.releaseContext(turn.toolContext);
+    assert.equal(f.seen.length, 3);
+  });
+
   test(`actual mounted filesystem result is continued through ${protocol}, persisted and replayed without execution`, async t => {
     const f = await fixture(t, protocol);
     const content = await f.runtime.reply(f.input);
@@ -104,10 +151,53 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
     assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
     assert.equal(saved.ToolActivities[0].status, 'completed');
+    assert.equal(saved.ToolRun.phase, 'completed');
+    assert.equal(saved.ToolRun.rounds, 2);
+    assert.equal(saved.ToolRun.toolCalls, 1);
+    const runResponse = await fetch(f.address + '/api/conversations/' + f.input.conversationId + '/runs/' + f.input.requestId);
+    assert.equal(runResponse.status, 200);
+    assert.equal((await runResponse.json()).run.phase, 'completed');
     assert.ok(saved.ToolActivities[0].result.includes(f.marker));
     assert.ok(!JSON.stringify(saved).includes('private-fixture'));
     assert.equal(await f.runtime.reply(f.input), content); assert.equal(f.seen.length, 2);
     await assert.rejects(f.runtime.reply({ ...f.input, permissionMode: 'full' }), /权限/);
+  });
+}
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  test(`real runtime ${protocol} continues its first large archived result through HTTP without replay`, async t => {
+    const f = await fixture(t, protocol);
+    const original = 'PUBLIC_CODE_SOURCE_' + 'A'.repeat(65000);
+    await writeFile(join(f.workspace, 'large.txt'), original);
+    let reference;
+    f.setPlan(async (body, marker, round) => {
+      const messages = body.messages ?? body.input;
+      if (round === 1) {
+        const descriptor = body.tools.find(tool => (tool.description ?? tool.function?.description).startsWith('filesystem.read:'));
+        return nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'large.txt', maxChars: 64000 });
+      }
+      assert.equal(round, 2);
+      const text = protocol === 'anthropic-messages' ? messages.at(-1).content.find(item => item.type === 'tool_result').content
+        : protocol === 'openai-responses' ? messages.findLast(item => item.type === 'function_call_output').output
+          : messages.findLast(item => item.role === 'tool').content;
+      const compacted = JSON.parse(text);
+      assert.equal(compacted.contextCompacted, true); reference = compacted.resultRef;
+      assert.equal(compacted.navigation.tool, 'tool.result.read');
+      if (protocol === 'anthropic-messages') assert.equal(messages.at(-2).content[0].signature, 'private-fixture-signature');
+      if (protocol === 'openai-responses') assert.ok(messages.some(item => item.encrypted_content === 'private-fixture-reasoning'));
+      let offset = 0, source = '';
+      do {
+        const page = await f.runtime.tools.results.read({ conversationId: f.input.conversationId }, reference.id, { offset, limit: 4096 });
+        source += page.text; offset = page.nextOffset; if (!page.truncated) break;
+      } while (true);
+      assert.equal(JSON.parse(source).structuredContent.content, original.slice(0, 64000));
+      return nativeText(protocol, 'Continued from the complete archived public result.');
+    });
+    assert.equal(await f.runtime.reply(f.input), 'Continued from the complete archived public result.');
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.ToolActivities.length, 1); assert.equal(saved.ToolActivities[0].resultRef.id, reference.id);
+    assert.equal(saved.ToolActivities[0].status, 'completed'); assert.ok(!JSON.stringify(saved).includes('private-fixture'));
+    assert.equal(await f.runtime.reply(f.input), saved.Content); assert.equal(f.seen.length, 2);
   });
 }
 
@@ -142,6 +232,47 @@ test('connection edits during preparation cannot mix protocol, tool schema and c
     assert.equal(f.seen.length, 2);
     assert.ok(f.seen.every(body => body.tools[0].type === 'function' && body.tools[0].function.parameters));
   }
+});
+
+test('a real model HTTP loop discovers, loads and executes a deferred tool from a 100-tool MCP server', async t => {
+  const f = await fixture(t);
+  const target = 'mcp.synthetic.large_099';
+  await f.runtime.tools.updateConfig({ version: 1, expectedRevision: 0, skillDirectories: [],
+    mcpServers: [{ id: 'synthetic', name: 'Synthetic large catalog', command: process.execPath,
+      args: [fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url)), join(f.root, 'many-events.jsonl'), 'many'], enabled: true }] });
+  f.setPlan((body, marker, round) => {
+    assert.ok(body.tools.length <= 96);
+    const name = round === 1 ? 'tool.search' : round === 2 ? 'tool.load' : target;
+    if (round === 4) return nativeText('openai-completions', body.messages.at(-1).content);
+    if (round === 1) assert.ok(!body.tools.some(tool => tool.function.description.startsWith(target + ':')));
+    const descriptor = body.tools.find(tool => tool.function.description.startsWith(name + ':'));
+    assert.ok(descriptor, 'model receives the selected declaration in round ' + round);
+    const args = round === 1 ? { query: 'large_099' } : round === 2 ? { names: [target] }
+      : { arguments: { value: marker }, policy: { reason: 'Call the requested user-enabled synthetic tool' } };
+    const result = nativeTool('openai-completions', descriptor.function.name, args);
+    result.choices[0].message.tool_calls[0].id = 'call_' + round;
+    return result;
+  });
+  const response = await fetch(f.address + '/api/chat/stream', { method: 'POST', body: JSON.stringify({ ...f.input, permissionMode: 'full' }) });
+  const events = []; for await (const raw of readSse(response.body)) events.push(JSON.parse(raw.data));
+  assert.equal(events.at(-1).type, 'completed'); assert.ok(events.at(-1).content.includes('large_099:' + f.marker));
+  assert.equal(f.seen.length, 4);
+  assert.deepEqual(events.filter(item => item.type === 'tool_result').map(item => item.tool.name), ['tool.search', 'tool.load', target]);
+  const tool = events.find(item => item.type === 'tool_result' && item.tool.name === target).tool;
+  assert.ok(tool.resultRef);
+  const detail = await fetch(f.address + '/api/conversations/' + f.input.conversationId + '/tool-results/' + tool.resultRef.id);
+  assert.equal(detail.status, 200); assert.ok((await detail.json()).result.content[0].text.includes(f.marker));
+  const page = await fetch(f.address + '/api/conversations/' + f.input.conversationId + '/tool-results/' + tool.resultRef.id + '?offset=0&limit=32');
+  assert.equal(page.status, 200); assert.equal((await page.json()).text.length, 32);
+});
+
+test('tight model budgets preserve plain chat when tool definitions cannot fit', async t => {
+  const f = await fixture(t);
+  const configured = await f.runtime.store.connectionFor(f.input.provider);
+  f.runtime.store.connectionFor = async () => ({ ...configured, contextWindowTokens: 2048 });
+  f.setPlan(body => { assert.equal(body.tools, undefined); return nativeText('openai-completions', 'Text fallback stays usable'); });
+  const answer = await f.runtime.reply({ ...f.input, message: 'x'.repeat(1000) });
+  assert.equal(answer, 'Text fallback stays usable'); assert.equal(f.seen.length, 1);
 });
 
 test('streamed Ask write waits for single-use bound approval; idle model timeout does not expire approval', async t => {

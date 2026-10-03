@@ -29,6 +29,8 @@ internal static class AppContainerRunner
             Directory.CreateDirectory(stage);
             var snapshot = new WorkspaceSnapshot(request.ExcludedRoots, request.TrustedManagedWorkspace);
             snapshot.Copy(workspace, stage);
+            string skillDirectory = Path.Combine(stage, ".sandbox-skill");
+            if (request.Skill is not null) SkillSnapshot.Copy(request.Skill, skillDirectory);
             string runtimeDirectory = Path.Combine(stage, ".sandbox-runtime");
             string temporaryDirectory = Path.Combine(stage, ".sandbox-temp");
             Directory.CreateDirectory(runtimeDirectory);
@@ -51,6 +53,7 @@ internal static class AppContainerRunner
             if (hr < 0) throw new SandboxException("SANDBOX_START_FAILED", $"CreateAppContainerProfile failed (0x{hr:X8}).");
             profileCreated = true;
             SetWorkspaceSecurity(stage, sid);
+            if (request.Skill is not null) SetReadOnlySkillSecurity(skillDirectory, sid);
             job = CreateJobObjectW(IntPtr.Zero, null);
             Check(job != IntPtr.Zero, "CreateJobObject");
             var limits = new JobExtendedLimitInformation
@@ -69,7 +72,8 @@ internal static class AppContainerRunner
             var output = new BoundedOutput(job, isCmd);
             // Node resolves module paths by probing every host ancestor unless symlink preservation is enabled.
             // Preserve paths inside the already link-free snapshot instead of granting access to host ancestors.
-            string[] effectiveArgs = isCmd ? request.Args : ["--preserve-symlinks", "--preserve-symlinks-main", .. request.Args];
+            string[] commandArgs = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
+            string[] effectiveArgs = isCmd ? commandArgs : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArgs];
             var (stdout, stderr) = Start(executable, effectiveArgs, stage, temporaryDirectory, sid, job, ref process, output, isCmd);
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -109,6 +113,12 @@ internal static class AppContainerRunner
                 limits = new { timeoutMs = request.TimeoutMs, outputBytes = MaximumOutputBytes,
                     processCount = MaximumProcessCount, processMemoryBytes = MaximumProcessMemoryBytes, jobMemoryBytes = MaximumJobMemoryBytes },
                 network = false, tokenVerified = true, elapsedMs = elapsed.ElapsedMilliseconds,
+                skillExecution = request.Skill is null ? null : new
+                {
+                    manifestVersion = 1, readOnlyPackage = true, hashChecked = true,
+                    script = request.Skill.Script, fileCount = request.Skill.Files.Length,
+                    scriptSha256 = request.Skill.Files.Single(file => file.Path == request.Skill.Script).Sha256
+                },
                 runtimeArguments = isCmd ? new[] { "/d", "/u", "/s", "/c" } : new[] { "--preserve-symlinks", "--preserve-symlinks-main" }
             };
         }
@@ -130,6 +140,8 @@ internal static class AppContainerRunner
         if (!OperatingSystem.IsWindowsVersionAtLeast(6, 2)) throw new SandboxException("SANDBOX_UNAVAILABLE", "AppContainer requires Windows 8 or later.");
         if (request.Command is not ("node" or "node.exe" or "cmd" or "cmd.exe"))
             throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Only isolated Node and cmd commands are supported.");
+        if (request.Skill is not null && request.Command is not ("node" or "node.exe"))
+            throw new SandboxException("APP_SKILL_SCRIPT_UNSUPPORTED", "Skill scripts use the verified Node.js runtime.");
         if (string.IsNullOrWhiteSpace(request.WorkspaceRoot) || string.IsNullOrWhiteSpace(request.NodeExecutable))
             throw new SandboxException("SANDBOX_INVALID_REQUEST", "Workspace and trusted Node runtime are required.");
         if (!Path.IsPathFullyQualified(request.WorkspaceRoot) || request.WorkspaceRoot.StartsWith("\\\\", StringComparison.Ordinal) ||
@@ -171,6 +183,26 @@ internal static class AppContainerRunner
                 // Existing snapshot descendants must receive the same ACL and integrity label.
                 foreach (string path in Directory.EnumerateFileSystemEntries(stage, "*", SearchOption.AllDirectories))
                     Check(SetFileSecurityW(path, 0x80000004 | 0x10, security), "SetFileSecurity sandbox content");
+            }
+            finally { LocalFree(security); }
+        }
+        finally { LocalFree(sidText); }
+    }
+
+    private static void SetReadOnlySkillSecurity(string folder, IntPtr sid)
+    {
+        Check(ConvertSidToStringSidW(sid, out IntPtr sidText), "ConvertSidToStringSid skill");
+        try
+        {
+            string appSid = Marshal.PtrToStringUni(sidText)!;
+            string userSid = WindowsIdentity.GetCurrent().User!.Value;
+            string descriptor = $"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{userSid})(A;OICI;0x1200a9;;;{appSid})S:(ML;OICI;NW;;;LW)";
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor, 1, out IntPtr security, out _), "ConvertSkillSecurityDescriptor");
+            try
+            {
+                Check(SetFileSecurityW(folder, 0x80000004 | 0x10, security), "SetFileSecurity skill package");
+                foreach (string path in Directory.EnumerateFileSystemEntries(folder, "*", SearchOption.AllDirectories))
+                    Check(SetFileSecurityW(path, 0x80000004 | 0x10, security), "SetFileSecurity skill resource");
             }
             finally { LocalFree(security); }
         }

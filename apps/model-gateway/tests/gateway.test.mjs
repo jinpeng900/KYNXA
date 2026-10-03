@@ -23,7 +23,7 @@ test('stores a redacted route and uses the configured model for chat', async t =
   let invocation;
   const gateway = createModelServer({
     modelStore: new ModelStore({ dataHome: home }),
-    modelRuntime: { reply: async input => { invocation = input; return '模型回复'; } }
+    modelRuntime: { replyResult: async input => { invocation = input; return { content: '模型回复', durationMs: 1234 }; } }
   });
   const url = await listening(gateway);
   t.after(() => gateway.close());
@@ -49,7 +49,8 @@ test('stores a redacted route and uses the configured model for chat', async t =
     conversationId, message: '你好', provider: 'local-test', model: 'test-model', permissionMode: 'ask'
   }) });
   assert.equal(reply.status, 200);
-  assert.equal((await reply.json()).content, '模型回复');
+  const payload = await reply.json();
+  assert.equal(payload.content, '模型回复'); assert.equal(payload.durationMs, 1234);
   assert.equal(invocation.provider, 'local-test');
   assert.equal(invocation.model, 'test-model');
 });
@@ -58,7 +59,7 @@ test('rejects non-local HTTP routes and never includes an API key in model listi
   const home = await mkdtemp(join(tmpdir(), 'kynxa-model-security-'));
   const gateway = createModelServer({
     modelStore: new ModelStore({ dataHome: home }),
-    modelRuntime: { reply: async () => 'unused' }
+    modelRuntime: { replyResult: async () => ({ content: 'unused', durationMs: 0 }) }
   });
   const url = await listening(gateway);
   t.after(() => gateway.close());
@@ -82,7 +83,7 @@ test('keeps JSON headers, validation errors and explicit runtime status codes', 
   let invoked = 0;
   const gateway = createModelServer({
     modelStore: new ModelStore({ dataHome: home }),
-    modelRuntime: { reply: async input => {
+    modelRuntime: { replyResult: async input => {
       invoked++;
       if (input.message === 'conflict') throw Object.assign(new Error('记录已更新。'),
         { statusCode: 409, code: 'CATALOG_CONFLICT' });
@@ -134,7 +135,7 @@ test('preserves byte limits for chat, memory, model connections and catalog requ
   const gateway = createModelServer({
     modelStore: new ModelStore({ dataHome: home }),
     modelRuntime: {
-      reply: async () => { invocations++; return '回复'; },
+      replyResult: async () => { invocations++; return { content: '回复', durationMs: 0 }; },
       replyStream: async () => { invocations++; return { content: '回复', reasoning: '' }; },
       memory: { create: accept, update: accept, delete: accept },
       conversations: { saveCatalog: accept }
