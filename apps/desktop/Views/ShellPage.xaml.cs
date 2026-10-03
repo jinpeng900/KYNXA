@@ -21,6 +21,8 @@ public sealed partial class ShellPage : Page
     private double _autoComposerHeight = ComposerHeightDefault;
     private bool _composerExpanded;
     private bool _applyingLayout;
+    private bool _compactSidebarOpen;
+    private Guid? _presentedChatId;
     private string _workDraft = string.Empty;
     private string _chatDraft = string.Empty;
     private string _workConversationTitle = string.Empty;
@@ -34,6 +36,7 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        KeyDown += ShellPage_KeyDown;
         PromptTextBox.AddHandler(UIElement.KeyDownEvent,
             new KeyEventHandler(PromptTextBox_KeyDown), handledEventsToo: true);
         PromptTextBox.AddHandler(UIElement.KeyUpEvent,
@@ -56,13 +59,29 @@ public sealed partial class ShellPage : Page
         _applyingLayout = true;
         try
         {
-            double sidebar = _layout.SidebarCollapsed
+            bool narrowWindow = ShellGrid.ActualWidth is > 0 and < 960;
+            if (!narrowWindow) _compactSidebarOpen = false;
+            bool overlaySidebar = narrowWindow && _compactSidebarOpen;
+            bool compactSidebar = !overlaySidebar && (_layout.SidebarCollapsed || narrowWindow);
+            double sidebar = compactSidebar
                 ? SidebarCollapsed
                 : Math.Clamp(_layout.SidebarWidth, SidebarMin, SidebarMax);
 
-            SidebarColumn.Width = new GridLength(sidebar);
-            RecentArea.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
-            ChatWorkSwitcher.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            SidebarColumn.Width = new GridLength(narrowWindow ? SidebarCollapsed : sidebar);
+            Grid.SetColumnSpan(SidebarSurface, overlaySidebar ? 3 : 1);
+            Canvas.SetZIndex(SidebarSurface, overlaySidebar ? 20 : 0);
+            SidebarSurface.Width = overlaySidebar ? Math.Min(280, Math.Max(56, ShellGrid.ActualWidth - 48)) : double.NaN;
+            SidebarSurface.HorizontalAlignment = overlaySidebar ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+            SidebarDismissLayer.Visibility = overlaySidebar ? Visibility.Visible : Visibility.Collapsed;
+            SidebarGrip.Visibility = narrowWindow ? Visibility.Collapsed : Visibility.Visible;
+            RecentArea.Visibility = compactSidebar ? Visibility.Collapsed : Visibility.Visible;
+            ChatWorkSwitcher.Visibility = compactSidebar ? Visibility.Collapsed : Visibility.Visible;
+            CompactSidebarButton.Visibility = compactSidebar ? Visibility.Visible : Visibility.Collapsed;
+            GlobalNavigationArea.Visibility = compactSidebar ? Visibility.Collapsed : Visibility.Visible;
+            SidebarNavigationScroll.Visibility = compactSidebar ? Visibility.Collapsed : Visibility.Visible;
+            SidebarNavigationScroll.MaxHeight = Math.Max(80, ShellGrid.ActualHeight - 264);
+            GatewayStatusHost.Visibility = compactSidebar ? Visibility.Collapsed : Visibility.Visible;
+            SidebarStatusColumn.Width = new GridLength(compactSidebar ? 0 : 32);
             TopWorkspaceRow.Height = new GridLength(0);
             TopWorkspaceGrip.Visibility = Visibility.Collapsed;
             UpdateWorkspacePickerVisibility();
@@ -80,7 +99,8 @@ public sealed partial class ShellPage : Page
                 ? maximumComposerHeight
                 : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
             ComposerHost.EditorHeight = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
-            ModelPickerButton.MaxWidth = Math.Max(64, ComposerHost.Width - 250);
+            SelectedPermissionLabel.Visibility = ComposerHost.Width < 520 ? Visibility.Collapsed : Visibility.Visible;
+            ModelPickerButton.MaxWidth = Math.Max(48, ComposerHost.Width - (ComposerHost.Width < 520 ? 154 : 250));
             UpdateAdaptiveContentLayout(available);
         }
         finally { _applyingLayout = false; }
@@ -96,18 +116,27 @@ public sealed partial class ShellPage : Page
         }
 
         // Scale gently around the reference layout while keeping compact windows usable.
-        double scale = Math.Clamp(Math.Min(width / 1100, height / 720), 0.76, 1.12);
-        LogoHost.Width = 176 * scale;
-        LogoHost.Height = 132 * scale;
-        KynxaLogo.Width = 353 * scale;
-        KynxaLogo.Height = 235 * scale;
-        MainContentHost.Spacing = Math.Clamp(22 + ((height - 520) * 0.04), 22, 42);
+        bool hasMessages = ActiveMessages.Count > 0;
+        LogoHost.Visibility = !hasMessages && height >= 560 ? Visibility.Visible : Visibility.Collapsed;
+        HomeIntro.Visibility = hasMessages ? Visibility.Collapsed : Visibility.Visible;
+        HomeActions.Visibility = height >= 360 ? Visibility.Visible : Visibility.Collapsed;
+        HomeDescription.Visibility = height >= 320 ? Visibility.Visible : Visibility.Collapsed;
+        HomeExamples.Visibility = !hasMessages && height >= 460 && width >= 440 ? Visibility.Visible : Visibility.Collapsed;
+        HomeIntro.Width = Math.Max(0, ComposerHost.Width - 8);
+        ModelStatusBar.Width = ComposerHost.Width;
+        LogoHost.Width = 112;
+        LogoHost.Height = 76;
+        KynxaLogo.Width = 168;
+        KynxaLogo.Height = 112;
+        MainContentHost.Spacing = hasMessages ? 6 : height >= 560 ? 18 : 10;
 
-        double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
+        double upwardOffset = height >= 560 ? 12 : 0;
 
         MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
         ConversationMessages.Width = Math.Min(ConversationWidthMax, Math.Max(0, width - 48));
-        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 40);
+        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight +
+            (ModelStatusBar.Visibility == Visibility.Visible ? ModelStatusBar.ActualHeight + 12 : 0) + 32);
+        JumpToLatestButton.Margin = new Thickness(0, 0, 0, ConversationMessages.Margin.Bottom + 6);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
         AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
@@ -115,8 +144,15 @@ public sealed partial class ShellPage : Page
         AmbientSoftWave.Height = AmbientLargeWave.Height * 0.8;
     }
 
-    private double GetComposerHeightMaximum() =>
-        ShellLayoutMetrics.GetComposerHeightMaximum(PrimaryContentSlot.ActualHeight, ComposerHost.FooterHeight);
+    private double GetComposerHeightMaximum()
+    {
+        double height = PrimaryContentSlot.ActualHeight;
+        if (height <= 0) return ComposerHeightMax;
+        double reserve = ActiveMessages.Count > 0 ? 64 : height >= 560 ? 320 : height >= 460 ? 210 : height >= 360 ? 160 : 98;
+        // MainWindow supplies a minimum viewport; never shrink the editor below one text line plus its tool row.
+        return Math.Max(ComposerHeightMin, height <= reserve ? 0 :
+            ShellLayoutMetrics.GetComposerHeightMaximum(height - reserve, ComposerHost.FooterHeight));
+    }
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
 
@@ -129,6 +165,12 @@ public sealed partial class ShellPage : Page
 
     private void SidebarToggle_Click(object sender, RoutedEventArgs e)
     {
+        if (ShellGrid.ActualWidth is > 0 and < 960)
+        {
+            _compactSidebarOpen = !_compactSidebarOpen;
+            ApplyLayout();
+            return;
+        }
         _layout.SidebarCollapsed = !_layout.SidebarCollapsed;
         ApplyLayout();
         SaveLayout();
@@ -272,6 +314,7 @@ public sealed partial class ShellPage : Page
 
     private void SetPrimaryMode(bool chat)
     {
+        _compactSidebarOpen = false;
         bool changed = ViewModel.IsChatMode != chat;
         if (changed)
         {
@@ -289,13 +332,14 @@ public sealed partial class ShellPage : Page
             }
         }
         ViewModel.IsChatMode = chat;
+        SynchronizeHistorySearchMode();
         _layout.LastPrimaryContent = chat ? "chat" : "work";
         UpdateModeSelection();
         WorkModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.Medium;
         ChatModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Medium : Microsoft.UI.Text.FontWeights.Normal;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WorkModeButton, chat ? "未选中" : "已选中");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(ChatModeButton, chat ? "已选中" : "未选中");
-        WorkSidebarContent.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
+        WorkSidebarScrollViewer.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
         ChatSidebarContent.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
         ChatAmbientLayer.Visibility = Visibility.Visible;
         MainContentHost.Visibility = Visibility.Visible;
@@ -362,8 +406,8 @@ public sealed partial class ShellPage : Page
     private void WorkSidebarContent_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (ProjectTree is null) return;
-        // Keep tasks below the projects, with space before the footer even when expanded.
-        UpdateWorkSidebarHeights(e.NewSize.Height);
+        // Use the bounded viewport; scrollable content measures itself with unlimited height.
+        UpdateWorkSidebarHeights(WorkSidebarScrollViewer.ActualHeight);
     }
 
     private void ChatHistoryList_ItemClick(object sender, ItemClickEventArgs e)

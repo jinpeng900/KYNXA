@@ -6,6 +6,7 @@ namespace KYNXA_Desktop.ViewModels;
 public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessageState? message = null, string? error = null)
 {
     public Guid ConversationId { get; } = conversationId;
+    public Guid? MessageId => message?.Id;
     public string Content => message?.Content ?? string.Empty;
     public string ErrorText => error ?? string.Empty;
     public bool IsWaiting => message is null && error is null;

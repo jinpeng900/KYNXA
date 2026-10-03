@@ -17,6 +17,20 @@ public sealed partial class ShellPage
         public string PermissionMode { get; } = permissionMode;
         public CancellationTokenSource Cancellation { get; } = new();
         public string? Error { get; set; }
+        public bool Stopped { get; set; }
+        private bool _cancellationDisposed;
+
+        public void Cancel()
+        {
+            if (!_cancellationDisposed) Cancellation.Cancel();
+        }
+
+        public void DisposeCancellation()
+        {
+            if (_cancellationDisposed) return;
+            Cancellation.Dispose();
+            _cancellationDisposed = true;
+        }
     }
 
     private readonly Dictionary<Guid, PendingChatReply> _pendingReplies = [];
@@ -54,7 +68,7 @@ public sealed partial class ShellPage
         {
             var reply = await _modelApiClient.ReplyAsync(
                 new ChatRequest(pending.ConversationId, pending.Question, pending.Model, pending.PermissionMode, pending.Provider), pending.Cancellation.Token);
-            if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
+            if (_chatClosing || pending.Stopped || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
 
             // Resolve by conversation ID after the request finishes; changing views must not redirect the reply.
             var (chat, project) = FindChat(pending.ConversationId);
@@ -72,22 +86,37 @@ public sealed partial class ShellPage
                 throw;
             }
             _pendingReplies.Remove(pending.ConversationId);
+            if (project is null) RebuildStandaloneRows();
+            else RenderProjects();
         }
         catch (OperationCanceledException) when (_chatClosing || pending.Cancellation.IsCancellationRequested) { }
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException or
             System.Text.Json.JsonException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            pending.Error = error is IOException or UnauthorizedAccessException
-                ? "回复未能保存，请重试。" : error is InvalidOperationException
-                ? error.Message : "暂时没有收到回复，请确认模型服务已启动后重试。";
+            if (!pending.Stopped)
+                pending.Error = error is IOException or UnauthorizedAccessException
+                    ? "回复未能保存，请重试。" : error is InvalidOperationException
+                    ? error.Message : error is OperationCanceledException
+                    ? "等待模型回复超时，请重试。"
+                    : "暂时没有收到回复，请确认模型服务已启动后重试。";
         }
         finally
         {
             if (!_chatClosing && ActiveChatId == pending.ConversationId) UpdateConversationPresentation();
             // Keep failed requests for the retry button; completed requests no longer need a token source.
-            if (!_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending)
-                pending.Cancellation.Dispose();
+            if (pending.Stopped || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending)
+                pending.DisposeCancellation();
         }
+    }
+
+    private void StopReply_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: Guid chatId } || !_pendingReplies.TryGetValue(chatId, out var pending) || pending.Error is not null) return;
+        pending.Stopped = true;
+        pending.Error = "已停止本次请求。你的消息已保留，可以重试。";
+        // Closing this HTTP wait also propagates cancellation through the gateway.
+        pending.Cancel();
+        if (ActiveChatId == chatId) UpdateConversationPresentation();
     }
 
     private async void RetryReply_Click(object sender, RoutedEventArgs e)
@@ -102,13 +131,14 @@ public sealed partial class ShellPage
     private void CancelPendingReply(Guid chatId)
     {
         if (!_pendingReplies.Remove(chatId, out var pending)) return;
-        pending.Cancellation.Cancel();
-        pending.Cancellation.Dispose();
+        pending.Cancel();
+        pending.DisposeCancellation();
     }
 
     private void StopMockReplies()
     {
         _chatClosing = true;
+        CancelWorkFilesRead();
         foreach (Guid chatId in _pendingReplies.Keys.ToArray()) CancelPendingReply(chatId);
         _modelApiClient.Dispose();
     }

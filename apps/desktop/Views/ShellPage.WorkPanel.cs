@@ -1,5 +1,6 @@
 using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using KYNXA_Desktop.Layout;
 using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 
@@ -12,22 +13,27 @@ public sealed partial class ShellPage
     private double UpdateWorkPanelLayout()
     {
         double available = MainRegion.ActualWidth;
-        bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
+        bool canOpen = !ViewModel.IsChatMode && _activeProjectChat is not null;
         bool hasSpace = CanShowWorkPanel(available, MainRegion.ActualHeight);
-        bool canOpen = isWorkConversation && hasSpace;
         bool visible = canOpen && _layout.PreviewVisible;
-        double panelWidth = visible ? GetWorkPanelWidth(available, _layout.PreviewWidth) : 0;
-        double gap = visible ? WorkPanelGap : 0;
+        bool overlay = visible && !hasSpace;
+        double panelWidth = visible ? (overlay ? GetWorkPanelOverlayWidth(available) : GetWorkPanelWidth(available, _layout.PreviewWidth)) : 0;
+        double gap = visible && !overlay ? WorkPanelGap : 0;
 
-        PreviewColumn.Width = new GridLength(panelWidth);
+        PreviewColumn.Width = new GridLength(overlay ? 0 : panelWidth);
         PreviewGripColumn.Width = new GridLength(gap);
+        Grid.SetColumn(WorkContextPanel, overlay ? 0 : 2);
+        Grid.SetColumnSpan(WorkContextPanel, overlay ? 3 : 1);
+        WorkContextPanel.HorizontalAlignment = overlay ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        WorkContextPanel.Width = overlay ? panelWidth : double.NaN;
         WorkContextPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        WorkPanelGrip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        WorkPanelGrip.Visibility = visible && !overlay ? Visibility.Visible : Visibility.Collapsed;
         OpenWorkPanelButton.Visibility = canOpen && !visible ? Visibility.Visible : Visibility.Collapsed;
-        ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 56 : 24, 0);
+        ConversationTitle.Margin = new Thickness(24, 16, 96, 0);
+        UpdateWorkDetailPresentation();
 
         // Automatic hiding never changes the user's explicit open/closed preference.
-        return Math.Max(0, available - panelWidth - gap);
+        return Math.Max(0, available - (overlay ? 0 : panelWidth) - gap);
     }
 
     private double GetWorkPanelMaximumWidth() => ShellLayoutMetrics.GetWorkPanelMaximumWidth(MainRegion.ActualWidth);

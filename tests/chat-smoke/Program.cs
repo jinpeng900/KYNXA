@@ -48,11 +48,23 @@ store.SaveChats(chats);
 var restored = store.LoadChats()[0];
 Check(restored.Id == legacyId && restored.Messages.Select(m => m.Role).SequenceEqual(["user", "assistant"]), "Message roles changed after reload.");
 Check(restored.Messages[1].Content == "你好", "Assistant reply was not persisted.");
-var empty = new ProjectChatState { Draft = "未发送草稿" };
-var project = new ProjectState { Name = "存储测试", Chats = [empty, restored] };
+var draftOnly = new ProjectChatState { Draft = "草稿保留测试-枫叶99\n尚未发送 😀" };
+var empty = new ProjectChatState();
+var whitespaceOnly = new ProjectChatState { Draft = " \t\r\n " };
+var project = new ProjectState { Name = "存储测试", Chats = [draftOnly, empty, whitespaceOnly, restored] };
 store.Save([project]);
-store.SaveChats([empty, restored]);
-Check(store.Load()[0].Chats.Count == 1 && store.LoadChats().Count == 1, "Empty chats should not be persisted.");
+store.SaveChats([draftOnly, empty, whitespaceOnly, restored]);
+var reloadedWorkChats = store.Load()[0].Chats;
+var reloadedStandaloneChats = store.LoadChats();
+Check(reloadedWorkChats.Select(chat => chat.Id).SequenceEqual([draftOnly.Id, restored.Id]),
+    "Work history must retain typed drafts and existing order while excluding blank new chats.");
+Check(reloadedStandaloneChats.Select(chat => chat.Id).SequenceEqual([draftOnly.Id, restored.Id]),
+    "Standalone history must retain typed drafts and existing order while excluding blank new chats.");
+Check(reloadedWorkChats[0].Draft == draftOnly.Draft && reloadedStandaloneChats[0].Draft == draftOnly.Draft,
+    "An unsent Unicode draft must survive save and reload without text loss.");
+Check(reloadedWorkChats[0].CanPersist && reloadedStandaloneChats[0].CanPersist
+    && reloadedWorkChats[0].Messages.Count == 0 && reloadedStandaloneChats[0].Messages.Count == 0,
+    "Startup filtering must keep a restored typed draft without turning it into a submitted message.");
 var folderless = new ProjectState
 {
     Name = "不使用文件夹", IsFolderlessWorkspace = true,
@@ -61,5 +73,5 @@ var folderless = new ProjectState
 store.Save([project, folderless]);
 var loadedFolderless = store.Load().Single(item => item.IsFolderlessWorkspace);
 Check(loadedFolderless.FolderPath is null && loadedFolderless.Chats.Count == 1, "Folderless work must remain independent of linked folders.");
-Check(store.LoadChats().Count == 1 && store.LoadChats()[0].Id == legacyId, "Work tasks must not enter ordinary chat history.");
-Console.WriteLine("PASS: fixed HTTP reply, Unicode, concurrent conversation IDs, validation, cancellation, legacy migration, role persistence, and empty-chat exclusion.");
+Check(store.LoadChats().Select(chat => chat.Id).SequenceEqual([draftOnly.Id, legacyId]), "Work tasks must not enter ordinary chat history.");
+Console.WriteLine("PASS: fixed HTTP reply, Unicode, concurrent conversation IDs, validation, cancellation, legacy migration, role persistence, typed-draft retention, and blank-chat exclusion.");

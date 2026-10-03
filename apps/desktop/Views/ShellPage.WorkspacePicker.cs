@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
 using KYNXA_Desktop.Models.UI;
+using KYNXA_Desktop.Services;
+using KYNXA_Desktop.Layout;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
@@ -94,9 +96,10 @@ public sealed partial class ShellPage
         menu.ShowAt(WorkspacePickerButton);
     }
 
-    private void StartWorkspaceProject(ProjectState project)
+    private void StartWorkspaceProject(ProjectState project, bool carryDraft = true)
     {
-        string draft = PromptTextBox.Text;
+        ResetCurrentHistorySearch();
+        string draft = carryDraft ? PromptTextBox.Text : string.Empty;
         CaptureProjectDraft();
         DiscardEmptyProjectChats();
         var chat = new ProjectChatState { Draft = draft };
@@ -120,21 +123,23 @@ public sealed partial class ShellPage
     {
         WorkTaskEntries.Clear();
         foreach (var project in _projects.Where(project => project.IsFolderlessWorkspace && !project.IsArchived))
-            foreach (var chat in project.Chats.Where(chat => chat.CanPersist && !chat.IsArchived).OrderByDescending(chat => chat.IsPinned))
+            foreach (var chat in project.Chats.Where(chat => chat.CanPersist && ConversationSearch.MatchesChat(chat, _workHistoryQuery)).OrderByDescending(chat => chat.IsPinned))
                 WorkTaskEntries.Add(new ProjectTreeEntry(project, chat));
         bool hasTasks = WorkTaskEntries.Count > 0;
         WorkTaskHistory.Visibility = hasTasks ? Visibility.Visible : Visibility.Collapsed;
         WorkTasksPlaceholder.Visibility = hasTasks ? Visibility.Collapsed : Visibility.Visible;
         WorkTaskHistory.SelectedItem = WorkTaskEntries.FirstOrDefault(task => task.Chat == _activeProjectChat);
-        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        UpdateWorkSidebarHeights(WorkSidebarScrollViewer.ActualHeight);
     }
 
     private void UpdateWorkSidebarHeights(double available)
     {
-        double taskHeight = Math.Max(0, Math.Min(160, available * 0.25));
-        WorkTaskHistory.MaxHeight = taskHeight;
-        double reserved = WorkTaskEntries.Count > 0 ? taskHeight + 96 : 136;
-        ProjectTree.MaxHeight = Math.Max(0, Math.Min(320, Math.Min(available * 0.65, available - reserved)));
+        bool hasTasks = WorkTaskEntries.Count > 0;
+        WorkSidebarContent.MinHeight = ShellLayoutMetrics.GetWorkSidebarMinimumHeight(hasTasks);
+        var heights = ShellLayoutMetrics.GetWorkSidebarHeights(available, hasTasks);
+        WorkTaskHistory.MaxHeight = heights.TaskHeight;
+        TasksSection.Visibility = heights.TasksVisible ? Visibility.Visible : Visibility.Collapsed;
+        ProjectTree.MaxHeight = heights.ProjectHeight;
     }
 
     private void WorkTaskHistory_ItemClick(object sender, ItemClickEventArgs e)

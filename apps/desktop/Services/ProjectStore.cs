@@ -28,7 +28,7 @@ public sealed class ProjectStore(string dataDirectory)
 
     public void Save(IReadOnlyList<ProjectState> projects)
     {
-        // A draft or a newly-created empty thread is never a saved conversation.
+        // Preserve typed drafts; only untouched or whitespace-only new threads are omitted.
         var saved = projects.Select(project => new ProjectState
         {
             Id = project.Id, Name = project.Name, FolderPath = project.FolderPath,

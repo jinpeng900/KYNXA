@@ -31,11 +31,7 @@ public sealed partial class ShellPage
             if (_projectStore.Exists) _projects = _projectStore.Load();
             else
             {
-                _projects = ViewModel.Projects.Select(sample => new ProjectState
-                {
-                    Name = sample.Name,
-                    Chats = sample.Conversations.Select(title => new ProjectChatState { Title = title, IsSample = true }).ToList()
-                }).ToList();
+                _projects = [];
                 _projectStore.Save(_projects);
             }
             // Migrate the previously shipped demo rows; discard legacy empty new chats.
@@ -78,15 +74,16 @@ public sealed partial class ShellPage
         _renderingProjects = true;
         ProjectEntries.Clear();
         _hoveredProjectRows.Clear();
-        foreach (ProjectState project in _projects.Where(p => !p.IsArchived && !p.IsFolderlessWorkspace).OrderByDescending(p => p.IsPinned))
+        foreach (ProjectState project in _projects.Where(p => !p.IsFolderlessWorkspace && ConversationSearch.MatchesProject(p, _workHistoryQuery)).OrderByDescending(p => p.IsPinned))
         {
-            var entry = new ProjectTreeEntry(project) { IsExpanded = expanded.Contains(project.Id) };
-            foreach (ProjectChatState chat in project.Chats.Where(c => !c.IsArchived).OrderByDescending(c => c.IsPinned))
+            var entry = new ProjectTreeEntry(project) { IsExpanded = _workHistoryQuery.Length > 0 || expanded.Contains(project.Id) };
+            foreach (ProjectChatState chat in project.Chats.Where(c => ConversationSearch.MatchesChat(c, _workHistoryQuery, project.Name)).OrderByDescending(c => c.IsPinned))
                 entry.Children.Add(new ProjectTreeEntry(project, chat));
             ProjectEntries.Add(entry);
         }
         _renderingProjects = false;
         RebuildWorkTasks();
+        UpdateHistoryEmptyStates();
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_activeProjectChat is not null)
@@ -121,6 +118,7 @@ public sealed partial class ShellPage
             CaptureProjectDraft();
             DiscardEmptyProjectChats();
             var project = entry.Project;
+            ResetCurrentHistorySearch();
             string title = "新聊天";
             for (int number = 2; project.Chats.Any(c => c.Title == title); number++) title = $"新聊天 {number}";
             var chat = new ProjectChatState { Title = title };
@@ -218,6 +216,7 @@ public sealed partial class ShellPage
     private async void NewBlankProject_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
     {
         if (await CreateBlankProjectAsync() is not { } project) return;
+        ResetCurrentHistorySearch();
         ShowProjects();
         RevealProject(project);
     });
@@ -236,6 +235,7 @@ public sealed partial class ShellPage
     private async void UseExistingProjectFolder_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
     {
         if (await PickProjectFolderAsync() is not { } project) return;
+        ResetCurrentHistorySearch();
         ShowProjects();
         RevealProject(project);
     });

@@ -31,6 +31,7 @@
                 HorizontalAlignment="Left"
                 VerticalAlignment="Center"
                 AutomationProperties.Name="更多功能"
+                Click="NavigationMenu_Click"
                 Background="Transparent"
                 BorderThickness="0"
                 CornerRadius="8"

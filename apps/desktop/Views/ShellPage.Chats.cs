@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.ViewModels;
+using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -59,7 +60,7 @@ public sealed partial class ShellPage
     {
         _standaloneChats = _projectStore.ChatsExist
             ? _projectStore.LoadChats().Where(chat => chat.CanPersist).ToList()
-            : ViewModel.RecentConversations.Select(chat => new ProjectChatState { Id = chat.Id, Title = chat.Title, IsSample = true }).ToList();
+            : [];
         _projectStore.SaveChats(_standaloneChats);
         RebuildStandaloneRows();
     }
@@ -67,9 +68,10 @@ public sealed partial class ShellPage
     private void RebuildStandaloneRows()
     {
         ViewModel.RecentConversations.Clear();
-        foreach (var chat in _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned))
+        foreach (var chat in _standaloneChats.Where(chat => ConversationSearch.MatchesChat(chat, _chatHistoryQuery)).OrderByDescending(chat => chat.IsPinned))
             ViewModel.RecentConversations.Add(new RecentConversation(chat.Title, chat.IsSample ? "示例对话" : "刚刚") { Id = chat.Id });
         ChatHistoryList.SelectedItem = ViewModel.RecentConversations.FirstOrDefault(chat => chat.Id == _activeStandaloneChat?.Id);
+        UpdateHistoryEmptyStates();
     }
 
     private void CaptureStandaloneDraft()
@@ -103,6 +105,7 @@ public sealed partial class ShellPage
 
     private void NewStandaloneChat_Click(object sender, RoutedEventArgs e)
     {
+        ResetCurrentHistorySearch();
         CaptureStandaloneDraft();
         DiscardEmptyStandaloneChats();
         var chat = new ProjectChatState();
@@ -136,30 +139,43 @@ public sealed partial class ShellPage
     {
         if (ConversationMessages is null) return;
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
-        ActiveMessages.Clear();
+        bool changedConversation = _presentedChatId != chat?.Id;
+        var scroll = PrepareConversationScroll(chat?.Id);
+        var previousMessageIds = ActiveMessages.Where(item => item.MessageId is not null).Select(item => item.MessageId).ToHashSet();
+        var desired = new List<ConversationMessageViewModel>();
         if (chat is not null)
         {
-            foreach (var message in chat.Messages) ActiveMessages.Add(new ConversationMessageViewModel(chat.Id, message));
+            foreach (var message in chat.Messages)
+            {
+                var old = desired.Count < ActiveMessages.Count ? ActiveMessages[desired.Count] : null;
+                desired.Add(old?.ConversationId == chat.Id && old.MessageId == message.Id && old.Content == message.Content
+                    ? old : new ConversationMessageViewModel(chat.Id, message));
+            }
             if (_pendingReplies.TryGetValue(chat.Id, out var pending))
-                ActiveMessages.Add(new ConversationMessageViewModel(chat.Id, error: pending.Error));
+            {
+                var old = desired.Count < ActiveMessages.Count ? ActiveMessages[desired.Count] : null;
+                desired.Add(old?.ConversationId == chat.Id && old.MessageId is null && old.ErrorText == (pending.Error ?? string.Empty)
+                    && old.IsWaiting == (pending.Error is null) ? old : new ConversationMessageViewModel(chat.Id, error: pending.Error));
+            }
+            if (!changedConversation && !scroll.Follow && chat.Messages.LastOrDefault() is { Role: "assistant" } latest
+                && !previousMessageIds.Contains(latest.Id)) _hasUnreadReply = true;
         }
+        SynchronizeConversationMessages(desired);
         bool hasMessages = ActiveMessages.Count > 0;
+        if (_presentedChatId != chat?.Id) _compactSidebarOpen = false;
+        _presentedChatId = chat?.Id;
+        ConversationActionsButton.Visibility = hasMessages ? Visibility.Visible : Visibility.Collapsed;
+        HomeTitle.Text = ViewModel.IsChatMode ? "有什么想聊的？" : "从一个想法开始";
+        HomeDescription.Text = ViewModel.IsChatMode ? "选择模型，开始一段对话。" : "选择工作，描述需求，让工作有条理地开始。";
         ConversationMessages.Visibility = hasMessages ? Visibility.Visible : Visibility.Collapsed;
         LogoHost.Visibility = hasMessages ? Visibility.Collapsed : Visibility.Visible;
         ChatAmbientLayer.Visibility = hasMessages ? Visibility.Collapsed : Visibility.Visible;
         MainContentHost.VerticalAlignment = hasMessages ? VerticalAlignment.Bottom : VerticalAlignment.Center;
         MainContentHost.Margin = hasMessages ? new Thickness(0, 0, 0, 16) : new Thickness(0);
         ApplyLayout();
+        UpdateModelStatusPresentation();
         UpdateSendButtonState();
-        if (hasMessages)
-        {
-            var lastMessage = ActiveMessages.Last();
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (!_chatClosing && ConversationMessages.Visibility == Visibility.Visible && ActiveMessages.Contains(lastMessage))
-                    ConversationMessages.ScrollIntoView(lastMessage);
-            });
-        }
+        FinishConversationScroll(chat?.Id, scroll.Follow, scroll.RestoreOffset);
     }
 
     private async void SendButton_Click(object sender, RoutedEventArgs e) => await SendPromptAsync();
@@ -169,6 +185,7 @@ public sealed partial class ShellPage
         if (_sendingPrompt || IsReplyInProgress(ActiveChatId)) return;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0) { PromptTextBox.Focus(FocusState.Programmatic); return; }
+        if (!EnsureModelReadyForSend()) return;
         _sendingPrompt = true;
         UpdateSendButtonState();
         PendingChatReply? preparedReply = null;
@@ -198,14 +215,14 @@ public sealed partial class ShellPage
                     }
                     chat = _activeProjectChat;
                 }
-                if (!chat.CanPersist)
+                if (!chat.IsSample && chat.Messages.Count == 0)
                 {
                     string title = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
                     chat.Title = title.Length > 24 ? title[..24] + "…" : title;
                 }
                 chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
                 chat.Draft = string.Empty;
-                // First submitted message is the commit boundary; draft-only chats are filtered by the store.
+                // Keep submitted messages and typed drafts in the same local catalog.
                 if (ViewModel.IsChatMode)
                 {
                     _projectStore.SaveChats(_standaloneChats);
@@ -222,18 +239,21 @@ public sealed partial class ShellPage
                     RenderProjects(project.Id);
                 }
                 PromptTextBox.Text = ViewModel.Prompt = string.Empty;
+                _followLatest = true;
+                _hasUnreadReply = false;
                 preparedReply = BeginPendingReply(chat.Id, text, _selectedModel?.ProviderId, _selectedModel?.ModelId);
                 UpdateConversationTitle();
                 UpdateConversationPresentation();
                 return Task.CompletedTask;
             });
-            if (preparedReply is not null) await ReceiveMockReplyAsync(preparedReply);
         }
         finally
         {
             _sendingPrompt = false;
             UpdateSendButtonState();
         }
+        // Preparation is global; waiting belongs to the originating conversation.
+        if (preparedReply is not null) await ReceiveMockReplyAsync(preparedReply);
     }
 
     private void ChatHeader_PointerEntered(object sender, PointerRoutedEventArgs e)

@@ -55,11 +55,14 @@ export async function readJson(filename, fallback) {
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
 
-export async function atomicJson(filename, value) {
+export async function atomicJson(filename, value, { signal } = {}) {
+  signal?.throwIfAborted();
   await mkdir(dirname(filename), { recursive: true, mode: 0o700 });
+  signal?.throwIfAborted();
   const temp = `${filename}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
+    await writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx', signal });
+    signal?.throwIfAborted();
     await rename(temp, filename);
   } finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
 }

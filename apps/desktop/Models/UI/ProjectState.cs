@@ -21,5 +21,5 @@ public sealed class ProjectChatState
     public bool IsArchived { get; set; }
     public List<ChatMessageState> Messages { get; set; } = [];
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool CanPersist => IsSample || Messages.Count > 0;
+    public bool CanPersist => IsSample || Messages.Count > 0 || !string.IsNullOrWhiteSpace(Draft);
 }

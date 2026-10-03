@@ -7,96 +7,111 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="window" aria-label="KYNXA Linux UI 预览">
+    <main class="window" aria-label="KYNXA 桌面视觉预览">
       <header class="titlebar">
-        <strong>KYNXA</strong>
-        <button class="icon-button title-more" title="更多功能" aria-label="更多功能">•••</button>
+        <button class="icon-button" id="sidebarToggle" title="展开或收起侧栏" aria-label="展开或收起侧栏" aria-expanded="true" aria-controls="sidebar"><img src="/desktop-assets/Icons/sidebar-toggle.svg" alt="" /></button>
+        <strong>KYNXA</strong><span class="preview-label">界面预览</span>
         <div class="window-controls" aria-hidden="true"><span>―</span><span>□</span><span>×</span></div>
       </header>
-
       <div class="shell">
-        <aside class="sidebar">
+        <button class="sidebar-backdrop hidden" id="sidebarBackdrop" aria-label="收起侧栏"></button>
+        <aside class="sidebar" id="sidebar">
           <div class="mode-switch" role="tablist" aria-label="主模式">
             <span class="mode-pill"></span>
-            <button class="mode active" data-mode="work" role="tab" aria-selected="true">
-              <span class="mode-glyph">▣</span>工作
-            </button>
-            <button class="mode" data-mode="chat" role="tab" aria-selected="false">
-              <span class="mode-glyph">◯</span>聊天
-            </button>
+            <button class="mode active" data-mode="work" role="tab" aria-selected="true"><span class="mode-glyph">▣</span>工作</button>
+            <button class="mode" data-mode="chat" role="tab" aria-selected="false"><span class="mode-glyph">◯</span>聊天</button>
           </div>
-
           <nav class="global-nav" aria-label="全局导航">
-            <button><img src="/desktop-assets/Icons/knowledge.svg" alt="" />知识库</button>
-            <button><img src="/desktop-assets/Icons/connect.svg" alt="" />连接</button>
-            <button><img src="/desktop-assets/Icons/scheduled-task.svg" alt="" />定时任务</button>
-            <button><img src="/desktop-assets/Icons/skills.svg" alt="" />技能</button>
+            <button data-planned="知识库"><img src="/desktop-assets/Icons/knowledge.svg" alt="" />知识库<span class="planned-mark">规划中</span></button>
+            <button data-planned="连接"><img src="/desktop-assets/Icons/connect.svg" alt="" />连接<span class="planned-mark">规划中</span></button>
+            <button data-planned="定时任务"><img src="/desktop-assets/Icons/scheduled-task.svg" alt="" />定时任务<span class="planned-mark">规划中</span></button>
+            <button data-planned="技能"><img src="/desktop-assets/Icons/skills.svg" alt="" />技能<span class="planned-mark">规划中</span></button>
             <button id="manageModels"><img src="/desktop-assets/Icons/model-management.svg" alt="" />模型管理</button>
           </nav>
-
           <section class="recents">
             <div class="section-title">
-              <button id="treeToggle" aria-expanded="true"><span class="chevron">⌄</span><span id="sectionLabel">项目</span></button>
-              <button class="section-action" id="newItem" title="添加项目" aria-label="添加项目">
-                <img src="/desktop-assets/Icons/folder-add.svg" alt="" />
-              </button>
+              <button id="treeToggle" aria-expanded="true"><span class="chevron">⌄</span><span id="sectionLabel">示例项目</span></button>
+              <button class="section-action" id="newItem" title="新建工作 · Ctrl + N" aria-label="新建工作" aria-keyshortcuts="Control+n"><img src="/desktop-assets/Icons/chat-add.svg" alt="" /></button>
             </div>
+            <div class="sidebar-search" role="search" aria-label="查找当前模式的项目和会话">
+              <input id="sidebarSearch" type="search" placeholder="搜索项目和会话" aria-label="搜索项目和会话" aria-keyshortcuts="Control+f" autocomplete="off" />
+              <button id="clearSearch" class="hidden" type="button" title="清除搜索" aria-label="清除搜索">×</button>
+            </div>
+            <p class="list-note" id="listNote">示例用于了解布局，不读取本机文件。</p>
+            <p class="search-status hidden" id="searchStatus" role="status" aria-live="polite"></p>
             <div id="recentList" class="recent-list"></div>
           </section>
-
           <footer class="sidebar-footer">
-            <button class="icon-button" title="设置"><img src="/desktop-assets/Icons/settings.svg" alt="" /></button>
-            <span class="device" title="设备在线">
-              <img src="/desktop-assets/Icons/device-status.svg" alt="" /><i></i>
-            </span>
+            <button class="icon-button" id="settingsButton" title="预览说明" aria-label="预览说明"><img src="/desktop-assets/Icons/settings.svg" alt="" /></button>
+            <span class="local-note">会话仅保留在本页</span>
           </footer>
         </aside>
-
-        <section class="main-region">
-          <div class="ambient" aria-hidden="true"><i></i><i></i></div>
-          <div class="empty-state" id="emptyState">
-            <div class="logo-wrap"><img src="/desktop-assets/Brand/kynxa-logo.png" alt="KYNXA" /></div>
-            <div class="composer-block">
-              <div class="composer">
-                <textarea id="prompt" rows="2" placeholder="向 KYNXA 提问任何问题..." aria-label="消息输入"></textarea>
-                <button class="expand" id="expandComposer" title="展开输入区" aria-label="展开输入区">⌗</button>
-                <div class="composer-actions">
-                  <div class="left-actions">
-                    <button class="round-action" title="添加"><img src="/desktop-assets/Icons/add.svg" alt="" /></button>
-                    <button class="text-action" id="permissionButton"><img src="/desktop-assets/Icons/permission-ask.svg" alt="" /><span>请求批准</span></button>
+        <div class="content-layout" id="contentLayout">
+          <section class="content">
+            <header class="content-toolbar">
+              <div class="service-status" id="serviceStatus" role="status"><i class="status-dot"></i><span id="serviceLabel">正在连接模型网关…</span></div>
+              <div class="toolbar-actions">
+                <button class="subtle-button" id="refreshStatus" title="刷新模型服务状态">刷新</button>
+                <button class="subtle-button" id="configureStatus">配置模型</button>
+                <button class="subtle-button" id="detailsToggle" aria-expanded="false" aria-controls="workDetails">工作详情</button>
+              </div>
+            </header>
+            <section class="main-region">
+              <div class="empty-state" id="emptyState">
+                <div class="welcome" id="welcome">
+                  <img class="welcome-logo" src="/desktop-assets/Brand/kynxa-logo.png" alt="KYNXA" />
+                  <h1 id="welcomeTitle">从一件事开始</h1>
+                  <p id="welcomeDescription">描述你的目标，再选择模型开始对话。</p>
+                  <div class="starter-actions"><button data-prompt="帮我将这个课程设计拆成可以逐步完成的任务，并列出每一步的验收标准。">拆解一个任务</button><button data-prompt="帮我解释这段代码的功能、输入输出和可能需要改进的地方。">理解一段代码</button></div>
+                </div>
+                <div class="composer-block">
+                  <button class="latest-action hidden" id="jumpToLatest" type="button" title="滚动到最新消息">↓ 回到最新</button>
+                  <div class="composer">
+                    <textarea id="prompt" rows="2" placeholder="描述你的目标，或提出一个问题…" aria-label="消息输入" aria-keyshortcuts="Control+l"></textarea>
+                    <button class="expand" id="expandComposer" title="展开输入区" aria-label="展开输入区" aria-expanded="false">⌗</button>
+                    <div class="composer-actions">
+                      <div class="left-actions">
+                        <button class="round-action" id="attachmentButton" title="文件功能说明" aria-label="文件功能说明"><img src="/desktop-assets/Icons/add.svg" alt="" /></button>
+                        <button class="text-action" id="permissionButton" title="当前能力：文本对话"><img src="/desktop-assets/Icons/permission-ask.svg" alt="" /><span>文本对话</span></button>
+                      </div>
+                      <div class="right-actions">
+                        <button class="text-action model-button" id="modelButton"><span>模型选择</span><b>⌄</b></button>
+                        <button class="send" id="sendButton" title="发送" aria-label="发送"><img src="/desktop-assets/Icons/send-arrow.svg" alt="" /></button>
+                      </div>
+                    </div>
                   </div>
-                  <div class="right-actions">
-                    <button class="text-action model-button" id="modelButton"><span>模型选择</span><b>⌄</b></button>
-                    <button class="send" id="sendButton" title="发送" aria-label="发送"><img src="/desktop-assets/Icons/send-arrow.svg" alt="" /></button>
-                  </div>
+                  <div class="composer-footer"><button class="workspace-chip" id="workspaceButton"><img src="/desktop-assets/Icons/work-folder.svg" alt="" /><span>选择示例项目</span><b>⌄</b></button><span class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行</span></div>
                 </div>
               </div>
-              <button class="workspace-chip" id="workspaceButton"><img src="/desktop-assets/Icons/work-folder.svg" alt="" /><span>选择项目</span><b>⌄</b></button>
-            </div>
-          </div>
-
-          <section class="conversation hidden" id="conversation" aria-live="polite">
-            <div class="conversation-title" id="conversationTitle">新工作</div>
-            <div class="messages" id="messages"></div>
+              <section class="conversation hidden" id="conversation" aria-label="当前对话"><div class="conversation-title" id="conversationTitle">新的工作</div><div class="messages" id="messages"></div></section>
+              <div class="toast hidden" id="toast" role="status"></div>
+            </section>
           </section>
-
-          <div class="popover hidden" id="popover" role="menu"></div>
-          <div class="toast hidden" id="toast" role="status"></div>
-        </section>
+          <aside class="work-details" id="workDetails" aria-label="工作详情" hidden>
+            <div class="details-heading"><h2>工作详情</h2><button class="icon-button" id="closeDetails" aria-label="关闭工作详情">×</button></div>
+            <div class="work-context"><strong id="detailWorkspace">未选择项目</strong><span id="detailModel">尚未选择模型</span></div>
+            <div class="details-tabs" role="tablist" aria-label="工作详情类别"><button data-detail="tasks" role="tab" aria-selected="true" class="active">任务</button><button data-detail="files" role="tab" aria-selected="false">文件</button><button data-detail="results" role="tab" aria-selected="false">结果</button></div>
+            <div class="details-body" id="detailBody" role="tabpanel"></div>
+          </aside>
+        </div>
       </div>
     </main>
+    <div class="popover hidden" id="popover" role="menu" aria-label="选择菜单"></div>
+    <dialog id="infoDialog" class="info-dialog" aria-labelledby="infoTitle"><div class="info-heading"><h2 id="infoTitle"></h2><button type="button" id="closeInfo" aria-label="关闭">×</button></div><p id="infoDescription"></p><button type="button" class="primary-button" id="confirmInfo">知道了</button></dialog>
     <dialog id="modelDialog" class="model-dialog" aria-label="模型管理">
       <form id="modelForm" class="model-form">
-        <div class="model-heading"><div><h2>模型管理</h2><p>连接你常用的模型，让 KYNXA 帮你完成工作。</p></div><button type="button" id="closeModels" aria-label="关闭">×</button></div>
+        <div class="model-heading"><div><h2>模型管理</h2><p>添加连接后，在输入框选择模型。</p></div><button type="button" id="closeModels" aria-label="关闭">×</button></div>
         <div class="model-layout"><aside><h3>模型连接</h3><div id="providerList"></div><button type="button" id="newProvider">＋ 新建连接</button></aside>
           <div class="model-fields"><div class="presets"><button type="button" id="ollamaPreset">Ollama 本机预设</button><button type="button" id="customPreset">自定义 API</button></div>
             <label>连接名称<input name="displayName" required placeholder="例如 Ollama / DeepSeek API" /></label>
-            <label>Provider ID<input name="providerId" required pattern="[a-z][a-z0-9-]{1,39}" placeholder="例如 ollama" /></label>
             <label>Base URL<input name="baseUrl" type="url" required placeholder="https://api.example.com/v1" /></label>
             <label>API Key <small>留空可保留已保存的 Key；本机服务可留空</small><input name="apiKey" type="password" autocomplete="off" /></label>
             <label>Model ID <small>每行一个；无法探测时可手动填写</small><textarea name="models" rows="4" placeholder="例如 deepseek-chat"></textarea></label>
-            <div class="model-actions"><button type="button" id="probeModels">测试并获取模型</button><button type="submit">保存连接</button></div>
-            <p id="modelStatus" role="status">先填写连接，再测试或保存。</p></div></div>
+            <details class="advanced-settings"><summary>高级设置</summary><label>Provider ID<input name="providerId" required pattern="[a-z][a-z0-9-]{1,39}" placeholder="例如 ollama" /></label><label>接口协议<select name="protocol"><option value="openai-completions">Chat Completions</option><option value="openai-responses">Responses</option><option value="anthropic-messages">Messages</option></select></label></details>
+            <div class="model-actions"><button type="button" id="probeModels">测试并获取模型</button><button type="submit" id="saveModels">保存连接</button></div>
+            <p id="modelStatus" role="status">先填写连接，再测试或保存。</p>
+          </div>
+        </div>
       </form>
     </dialog>
     <script type="module" src="./app.js"></script>
