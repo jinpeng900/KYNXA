@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Services;
 using System.Diagnostics;
 using System.Text;
 using KYNXA.Contracts;
@@ -44,16 +45,16 @@ public sealed partial class ShellPage
         SendButton.IsEnabled = active || !_sendingPrompt;
         SendArrow.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        AutomationProperties.SetName(SendButton, active ? "停止生成" : "发送");
-        ToolTipService.SetToolTip(SendButton, active ? "停止生成" : "发送");
+        AutomationProperties.SetName(SendButton, active ? UiText.Get("停止生成") : UiText.Get("发送"));
+        ToolTipService.SetToolTip(SendButton, active ? UiText.Get("停止生成") : UiText.Get("发送"));
     }
 
     private PendingChatReply BeginPendingReply(Guid chatId, string question, string? provider, string? model, string? permissionMode = null, Guid? requestId = null)
     {
         var (chat, _) = FindChat(chatId);
-        if (chat is null || _pendingReplies.ContainsKey(chatId)) throw new InvalidOperationException("当前聊天正在生成回复。");
+        if (chat is null || _pendingReplies.ContainsKey(chatId)) throw new InvalidOperationException(UiText.Get("当前聊天正在生成回复。"));
         var user = chat.Messages.LastOrDefault(message => message.Role == "user")
-            ?? throw new InvalidOperationException("找不到要回复的用户消息。");
+            ?? throw new InvalidOperationException(UiText.Get("找不到要回复的用户消息。"));
         var pending = new PendingChatReply(chatId, user.Id, question, provider, model, permissionMode ?? _layout.PermissionMode);
         if (requestId is Guid existingId) pending.Message.Id = existingId;
         pending.Presentation = new ConversationMessageViewModel(chatId, pending.Message);
@@ -128,7 +129,7 @@ public sealed partial class ShellPage
             if (pending.Message.Status == "streaming")
             {
                 pending.Message.Status = "interrupted";
-                pending.Message.Error = "连接已结束，回复尚未完成。";
+                pending.Message.Error = UiText.Get("连接已结束，回复尚未完成。");
             }
         }
         catch (OperationCanceledException) when (pending.Cancellation.IsCancellationRequested || _chatClosing)
@@ -138,7 +139,7 @@ public sealed partial class ShellPage
         {
             pending.Message.Status = "error";
             pending.Message.Error = error is InvalidOperationException or InvalidDataException ? error.Message :
-                "连接中断，已保留收到的内容。请检查模型服务后重试。";
+                UiText.Get("连接中断，已保留收到的内容。请检查模型服务后重试。");
         }
         finally
         {

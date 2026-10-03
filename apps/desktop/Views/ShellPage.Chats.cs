@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Services;
 using System.Collections.ObjectModel;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.ViewModels;
@@ -59,7 +60,7 @@ public sealed partial class ShellPage
     {
         ViewModel.RecentConversations.Clear();
         foreach (var chat in _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned))
-            ViewModel.RecentConversations.Add(new RecentConversation(chat.Title, chat.IsSample ? "示例对话" : "刚刚") { Id = chat.Id });
+            ViewModel.RecentConversations.Add(new RecentConversation(chat.Title, chat.IsSample ? UiText.Get("示例对话") : UiText.Get("刚刚")) { Id = chat.Id });
         ChatHistoryList.SelectedItem = ViewModel.RecentConversations.FirstOrDefault(chat => chat.Id == _activeStandaloneChat?.Id);
     }
 
@@ -96,7 +97,7 @@ public sealed partial class ShellPage
     {
         CaptureStandaloneDraft();
         DiscardEmptyStandaloneChats();
-        var chat = new ProjectChatState();
+        var chat = new ProjectChatState { Title = UiText.Get("新聊天") };
         _standaloneChats.Insert(0, chat);
         _activeStandaloneChat = chat;
         _chatConversationTitle = chat.Title;

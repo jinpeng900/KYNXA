@@ -197,4 +197,104 @@ Check(navigationProjects.Select(value => value.Id).SequenceEqual(afterSubmission
       !navigationTree.Single(value => value.Project == targetProject).IsExpanded,
     "Viewing an older chat after submission selects it without undoing the submitted order or opening its tree.");
 
+// A task-only draft remains transient until an actual message is submitted.
+var draftSavedOlder = Chat("Draft project's older chat");
+var draftSavedPinned = Chat("Draft project's pinned chat", true);
+var draftSavedNewer = Chat("Draft project's newer chat");
+var activeDraft = new ProjectChatState();
+var inactiveDraft = new ProjectChatState { Draft = "Typed, but not submitted" };
+var archivedDraft = new ProjectChatState { IsArchived = true };
+var draftProject = new ProjectState
+{
+    Name = "Draft project", Chats = [draftSavedOlder, draftSavedPinned, draftSavedNewer, activeDraft, inactiveDraft, archivedDraft]
+};
+var otherSavedChat = Chat("Other project's saved chat");
+var otherDraft = new ProjectChatState();
+var otherDraftProject = new ProjectState { Name = "Other draft project", Chats = [otherSavedChat, otherDraft] };
+var draftFolderless = new ProjectState
+{
+    Name = "Folderless drafts", IsFolderlessWorkspace = true, Chats = [Chat("Folderless saved"), new()]
+};
+var archivedDraftProject = new ProjectState { IsArchived = true, Chats = [new()] };
+var draftProjects = new List<ProjectState> { otherDraftProject, draftProject, draftFolderless, archivedDraftProject };
+var draftProjectOrder = draftProjects.Select(value => value.Id).ToArray();
+var draftChatOrder = draftProject.Chats.Select(value => value.Id).ToArray();
+var draftRecentOrder = new List<Guid> { draftSavedNewer.Id, otherSavedChat.Id, draftSavedOlder.Id };
+var draftRecentIds = WorkSidebarState.RecentChats(draftProjects, draftRecentOrder).Select(value => value.Chat.Id).ToArray();
+
+Check(!activeDraft.CanPersist && activeDraft.Title == "新聊天" &&
+      WorkSidebarState.ProjectChats(draftProject, activeDraft.Id).Select(value => value.Chat)
+          .SequenceEqual([draftSavedPinned, draftSavedOlder, draftSavedNewer, activeDraft]),
+    "Tasks immediately include only the selected empty new chat together with saved project chats, without making it persistent.");
+Check(WorkSidebarState.ProjectChats(draftProject).All(value => value.Chat.CanPersist) &&
+      WorkSidebarState.ProjectChats(draftProject, Guid.NewGuid()).All(value => value.Chat.CanPersist) &&
+      WorkSidebarState.ProjectChats(draftProject, otherDraft.Id).All(value => value.Chat.CanPersist),
+    "Default views, unknown IDs and another project's draft ID cannot expose an empty chat.");
+Check(WorkSidebarState.ProjectChats(draftProject, inactiveDraft.Id).Select(value => value.Chat)
+          .SequenceEqual([draftSavedPinned, draftSavedOlder, draftSavedNewer, inactiveDraft]) && !inactiveDraft.CanPersist,
+    "A newly selected draft replaces the previous task-only draft, and unsent input still does not become history.");
+Check(WorkSidebarState.ProjectChats(draftProject, archivedDraft.Id).All(value => value.Chat.CanPersist) &&
+      !WorkSidebarState.ProjectChats(draftFolderless, draftFolderless.Chats[1].Id).Any(value => !value.Chat.CanPersist) &&
+      !WorkSidebarState.ProjectChats(archivedDraftProject, archivedDraftProject.Chats[0].Id).Any() &&
+      !WorkSidebarState.ProjectChats(null, activeDraft.Id).Any(),
+    "Archived chats, archived projects, folderless work and no selected project cannot expose task drafts.");
+Check(WorkSidebarState.RecentChats(draftProjects, [activeDraft.Id, .. draftRecentOrder])
+          .Select(value => value.Chat.Id).SequenceEqual(draftRecentIds),
+    "An active task draft stays out of Recent even when its ID appears in the recent order.");
+var draftTree = new ObservableCollection<ProjectTreeEntry>();
+ProjectTreeReconciler.Update(draftTree, draftProjects, activeDraft.Id, new HashSet<Guid>(), new HashSet<Guid>(), draftProject.Id);
+Check(draftTree.Single(value => value.Project == draftProject).Children.All(value => value.Chat!.CanPersist) &&
+      !draftTree.Single(value => value.Project == draftProject).IsExpanded,
+    "The project tree continues to exclude every empty chat and does not expand for a task draft.");
+Check(draftProjects.Select(value => value.Id).SequenceEqual(draftProjectOrder) &&
+      draftProject.Chats.Select(value => value.Id).SequenceEqual(draftChatOrder) &&
+      draftRecentOrder.SequenceEqual([draftSavedNewer.Id, otherSavedChat.Id, draftSavedOlder.Id]) &&
+      !WorkSidebarState.ActivateChat(draftProject, activeDraft),
+    "Creating or viewing a draft never promotes its project, chat or Recent position, and submission ordering rejects an empty draft.");
+
+var draftTasks = new ObservableCollection<ProjectTreeEntry>();
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(draftProject, activeDraft.Id), activeDraft.Id, noReplies);
+var activeDraftRow = draftTasks.Single(value => value.Chat == activeDraft);
+Check(activeDraftRow.Title == "新聊天" && activeDraftRow.IsActive,
+    "The new task row displays its temporary title and selection immediately.");
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(otherDraftProject, activeDraft.Id), null, noReplies);
+Check(draftTasks.Count == 1 && draftTasks[0].Chat == otherSavedChat &&
+      draftTasks.All(value => value.Project == otherDraftProject),
+    "Changing the selected project removes the previous task draft and does not reveal the other project's inactive draft.");
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(draftProject), null, noReplies);
+Check(draftTasks.All(value => value.Chat!.CanPersist) && !draftTasks.Contains(activeDraftRow),
+    "Returning without the active draft ID does not restore a transient task row.");
+draftProject.Chats.Remove(activeDraft);
+Check(!WorkSidebarState.ProjectChats(draftProject, activeDraft.Id).Any(value => value.Chat == activeDraft),
+    "A draft discarded by navigation cannot be shown again through a stale active ID.");
+
+var submittedDraft = new ProjectChatState();
+draftProject.Chats.Add(submittedDraft);
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(draftProject, submittedDraft.Id), submittedDraft.Id, noReplies);
+var submittedDraftRow = draftTasks.Single(value => value.Chat == submittedDraft);
+var beforeDraftSubmitOrder = draftProject.Chats.Select(value => value.Id).ToArray();
+submittedDraft.Messages.Add(new() { Content = "The first submitted message" });
+Check(submittedDraft.CanPersist && WorkSidebarState.ProjectChats(draftProject).Any(value => value.Chat == submittedDraft) &&
+      draftProject.Chats.Select(value => value.Id).SequenceEqual(beforeDraftSubmitOrder),
+    "The first real message makes the chat permanent without a view query independently changing its order.");
+Check(ProjectOrdering.Activate(draftProjects, draftProject) && WorkSidebarState.ActivateChat(draftProject, submittedDraft),
+    "Only an explicit submitted message can promote the new project chat through the existing ordering services.");
+draftRecentOrder.Remove(submittedDraft.Id);
+draftRecentOrder.Insert(0, submittedDraft.Id);
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(draftProject), submittedDraft.Id, noReplies);
+ProjectTreeReconciler.Update(draftTree, draftProjects, submittedDraft.Id, new HashSet<Guid>(), new HashSet<Guid>(), draftProject.Id);
+Check(draftTasks.Select(value => value.Chat).SequenceEqual([draftSavedPinned, submittedDraft, draftSavedOlder, draftSavedNewer]) &&
+      draftTasks.Single(value => value.Chat == submittedDraft) == submittedDraftRow && submittedDraftRow.IsActive,
+    "A sent draft remains visible beneath pins with the same task row identity and active selection.");
+Check(draftProjects[0] == draftProject &&
+      WorkSidebarState.RecentChats(draftProjects, draftRecentOrder).Select(value => value.Chat)
+          .Take(2).SequenceEqual([draftSavedPinned, submittedDraft]) &&
+      draftTree.Single(value => value.Project == draftProject).Children.Any(value => value.Chat == submittedDraft),
+    "After submission the permanent chat appears in Recent and the project tree, and explicit ordering puts it below pins.");
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(otherDraftProject), otherSavedChat.Id, noReplies);
+WorkSidebarState.ReconcileChats(draftTasks, WorkSidebarState.ProjectChats(draftProject), null, noReplies);
+Check(draftTasks.Any(value => value.Chat == submittedDraft) &&
+      draftTasks.All(value => value.Chat!.CanPersist),
+    "Leaving and returning after submission keeps the permanent chat while all other empty drafts remain excluded.");
+
 Console.WriteLine($"PASS: {checks} work sidebar state checks; no native window or user data accessed.");

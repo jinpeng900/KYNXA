@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.ViewModels;
@@ -22,9 +23,9 @@ public sealed partial class ShellPage
         WorkspacePickerButton.Visibility = ComposerHost.IsFooterVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkspacePickerButton.IsEnabled = _projectsReady;
         var project = KYNXA_Desktop.Services.WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
-        WorkspacePickerLabel.Text = project?.Name ?? (_workWithoutFolder ? "不使用文件夹" : "选择项目");
-        AutomationProperties.SetName(WorkspacePickerButton, project is not null ? $"工作区：{project.Name}" :
-            _workWithoutFolder ? "工作区：不使用文件夹" : "选择工作区");
+        WorkspacePickerLabel.Text = project?.Name ?? (_workWithoutFolder ? UiText.Get("不使用文件夹") : UiText.Get("选择项目"));
+        AutomationProperties.SetName(WorkspacePickerButton, project is not null ? string.Format(UiText.Get("工作区：{0}"), project.Name) :
+            _workWithoutFolder ? UiText.Get("工作区：不使用文件夹") : UiText.Get("选择工作区"));
     }
 
     private void WorkspacePickerButton_Click(object sender, RoutedEventArgs e) => ShowWorkspacePicker();
@@ -35,7 +36,7 @@ public sealed partial class ShellPage
         var menu = PickerMenu.Create(FlyoutPlacementMode.BottomEdgeAlignedLeft, "KynxaWorkspaceFlyoutPresenterStyle");
         var choices = _projects.Where(project => !project.IsArchived && !project.IsFolderlessWorkspace)
             .OrderByDescending(project => project.IsPinned).ToList();
-        var projects = PickerMenu.CreateList("WorkspaceProjectList", "已有项目", "KynxaWorkspaceListItemStyle", ListViewSelectionMode.None);
+        var projects = PickerMenu.CreateList("WorkspaceProjectList", UiText.Get("已有项目"), "KynxaWorkspaceListItemStyle", ListViewSelectionMode.None);
         double rowHeight = PickerMenu.Dimension("KynxaMenuRowHeight");
         projects.Height = Math.Min(Math.Max(rowHeight * 2, Math.Min(rowHeight * 6, XamlRoot.Size.Height - 200)), Math.Max(rowHeight, choices.Count * rowHeight));
         foreach (var project in choices)
@@ -52,7 +53,7 @@ public sealed partial class ShellPage
         {
             projects.Items.Add(new ListViewItem
             {
-                Content = new TextBlock { Text = "暂无项目", FontSize = PickerMenu.Dimension("KynxaBodyFontSize"),
+                Content = new TextBlock { Text = UiText.Get("暂无项目"), FontSize = PickerMenu.Dimension("KynxaBodyFontSize"),
                     Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] }, IsEnabled = false
             });
         }
@@ -75,15 +76,15 @@ public sealed partial class ShellPage
             };
             actions.Children.Add(button);
         }
-        AddAction("新建空白项目", "\uE710", "WorkspaceNewProject", async () =>
+        AddAction(UiText.Get("新建空白项目"), "\uE710", "WorkspaceNewProject", async () =>
         {
             if (await CreateBlankProjectAsync() is { } project) StartWorkspaceProject(project);
         });
-        AddAction("使用现有文件夹", "\uE8F4", "WorkspaceExistingFolder", async () =>
+        AddAction(UiText.Get("使用现有文件夹"), "\uE8F4", "WorkspaceExistingFolder", async () =>
         {
             if (await PickProjectFolderAsync() is { } project) StartWorkspaceProject(project);
         });
-        AddAction("不使用文件夹", "\uE8B7", "WorkspaceWithoutFolder", () =>
+        AddAction(UiText.Get("不使用文件夹"), "\uE8B7", "WorkspaceWithoutFolder", () =>
         {
             _selectedWorkProjectId = null;
             _workWithoutFolder = true;

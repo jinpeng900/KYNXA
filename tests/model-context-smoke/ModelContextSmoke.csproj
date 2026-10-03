@@ -9,6 +9,15 @@
     <Compile Include="../../apps/shared/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
     <Compile Include="../../apps/desktop/Services/ChatStreamReader.cs" Link="ChatStreamReader.cs" />
     <Compile Include="../../apps/desktop/Services/ModelApiClient.cs" Link="ModelApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
     <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
   </ItemGroup>
 </Project>

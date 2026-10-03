@@ -23,19 +23,19 @@ public static class StorageMigrationService
         Func<string, CancellationToken, Task>? initializeTarget = null)
     {
         if (!Path.IsPathFullyQualified(target) || target.StartsWith(@"\\"))
-            throw new InvalidOperationException("请选择本机磁盘上的绝对路径。");
+            throw new InvalidOperationException(UiText.Get("请选择本机磁盘上的绝对路径。"));
         target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
-        if (target == Path.GetPathRoot(target)) throw new InvalidOperationException("不能直接使用磁盘根目录，请选择一个空文件夹。");
+        if (target == Path.GetPathRoot(target)) throw new InvalidOperationException(UiText.Get("不能直接使用磁盘根目录，请选择一个空文件夹。"));
         models = Path.TrimEndingDirectorySeparator(Path.GetFullPath(models));
         desktop = Path.TrimEndingDirectorySeparator(Path.GetFullPath(desktop));
         bool standardModelsDirectory = string.Equals(Path.GetFileName(models), "Models", StringComparison.OrdinalIgnoreCase);
         string conversationRoot = standardModelsDirectory ? Path.GetDirectoryName(models)! : Path.Combine(models, "Conversations");
         foreach (var source in new[] { desktop, models }.Concat(ConversationEntries.Select(name => Path.Combine(conversationRoot, name))))
             if (IsWithin(target, source) || IsWithin(source, target))
-                throw new InvalidOperationException("新目录不能与原数据目录相同、包含原目录或位于原目录内部。");
+                throw new InvalidOperationException(UiText.Get("新目录不能与原数据目录相同、包含原目录或位于原目录内部。"));
         RejectLinks(target);
         if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any())
-            throw new InvalidOperationException("目标文件夹不是空的，请选择空文件夹，避免覆盖已有数据。");
+            throw new InvalidOperationException(UiText.Get("目标文件夹不是空的，请选择空文件夹，避免覆盖已有数据。"));
         await ValidateLayoutSettingsAsync(conversationRoot, cancellationToken);
         byte[]? oldPointer = File.Exists(pointer) ? await File.ReadAllBytesAsync(pointer, cancellationToken) : null;
         // A custom model home keeps conversations below itself; move that subtree to
@@ -56,7 +56,7 @@ public static class StorageMigrationService
             foreach (var relative in root.Files)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                progress?.Report($"正在复制并校验文件（{verified.Count + 1}）…");
+                progress?.Report(string.Format(UiText.Get("正在复制并校验文件（{0}）…"), verified.Count + 1));
                 string source = Path.Combine(root.Root.Source, relative), destination = Path.Combine(target, root.Root.Name, relative);
                 RejectLinks(source);
                 byte[] digest = await HashAsync(source, cancellationToken);
@@ -65,25 +65,25 @@ public static class StorageMigrationService
                 await using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     await input.CopyToAsync(output, cancellationToken);
                 byte[] copiedDigest = await HashAsync(destination, cancellationToken);
-                if (!digest.SequenceEqual(copiedDigest)) throw new IOException("文件复制校验失败，原数据未改动。");
+                if (!digest.SequenceEqual(copiedDigest)) throw new IOException(UiText.Get("文件复制校验失败，原数据未改动。"));
                 verified.Add((source, digest));
             }
         }
-        progress?.Report("正在核对数据并更新内置项目路径…");
+        progress?.Report(UiText.Get("正在核对数据并更新内置项目路径…"));
         foreach (var root in snapshots)
             if (!root.Files.SequenceEqual(ListFiles(root.Root)) || !root.Directories.SequenceEqual(ListFiles(root.Root, true)))
-                throw new IOException("迁移期间原目录发生变化，请停止其他 KYNXA 实例后重试。");
+                throw new IOException(UiText.Get("迁移期间原目录发生变化，请停止其他 KYNXA 实例后重试。"));
         foreach (var file in verified)
         {
             byte[] currentDigest = await HashAsync(file.Source, cancellationToken);
-            if (!file.Hash.SequenceEqual(currentDigest)) throw new IOException("迁移期间文件被修改，尚未切换存储位置。");
+            if (!file.Hash.SequenceEqual(currentDigest)) throw new IOException(UiText.Get("迁移期间文件被修改，尚未切换存储位置。"));
         }
 
         string projectsPath = Path.Combine(target, "Desktop", "projects.json");
         if (File.Exists(projectsPath))
         {
             var projects = JsonNode.Parse(await File.ReadAllTextAsync(projectsPath, cancellationToken))?.AsArray()
-                ?? throw new InvalidDataException("项目数据无效。");
+                ?? throw new InvalidDataException(UiText.Get("项目数据无效。"));
             foreach (var project in projects)
                 if (project?["FolderPath"]?.GetValue<string>() is string folder && IsWithin(folder, Path.Combine(desktop, "Projects")))
                     project["FolderPath"] = Path.Combine(target, "Desktop", Path.GetRelativePath(desktop, folder));
@@ -94,7 +94,7 @@ public static class StorageMigrationService
             string path = Path.Combine(target, metadata);
             if (!File.Exists(path)) continue;
             var document = JsonNode.Parse(await File.ReadAllTextAsync(path, cancellationToken))
-                ?? throw new InvalidDataException("会话目录数据无效。");
+                ?? throw new InvalidDataException(UiText.Get("会话目录数据无效。"));
             RelocateProjectFolders(document, desktop, target);
             await File.WriteAllTextAsync(path, document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
         }
@@ -107,7 +107,7 @@ public static class StorageMigrationService
                 string path = Path.Combine(directory, "project.json");
                 if (!File.Exists(path)) continue;
                 var document = JsonNode.Parse(await File.ReadAllTextAsync(path, cancellationToken))
-                    ?? throw new InvalidDataException("项目清单数据无效。");
+                    ?? throw new InvalidDataException(UiText.Get("项目清单数据无效。"));
                 RelocateProjectFolders(document, desktop, target);
                 await File.WriteAllTextAsync(path, document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
             }
@@ -115,7 +115,7 @@ public static class StorageMigrationService
         if (File.Exists(localServerPath))
         {
             var local = JsonNode.Parse(await File.ReadAllTextAsync(localServerPath, cancellationToken))?.AsObject()
-                ?? throw new InvalidDataException("本地模型配置无效。");
+                ?? throw new InvalidDataException(UiText.Get("本地模型配置无效。"));
             foreach (string key in new[] { "modelPath", "serverPath", "backendPath" })
                 if (local[key]?.GetValue<string>() is string path)
                     foreach (var root in roots.Where(root => root.Name.Length > 0))
@@ -126,13 +126,13 @@ public static class StorageMigrationService
         await ValidateLayoutSettingsAsync(target, cancellationToken);
         if (initializeTarget is not null)
         {
-            progress?.Report("正在初始化新目录并检查会话记录…");
+            progress?.Report(UiText.Get("正在初始化新目录并检查会话记录…"));
             await initializeTarget(target, cancellationToken);
             await ValidateLayoutSettingsAsync(target, cancellationToken);
         }
         cancellationToken.ThrowIfCancellationRequested();
         byte[]? currentPointer = File.Exists(pointer) ? await File.ReadAllBytesAsync(pointer, cancellationToken) : null;
-        if (!(oldPointer ?? []).SequenceEqual(currentPointer ?? [])) throw new IOException("存储配置被其他实例修改，请重新打开设置。");
+        if (!(oldPointer ?? []).SequenceEqual(currentPointer ?? [])) throw new IOException(UiText.Get("存储配置被其他实例修改，请重新打开设置。"));
         if (oldPointer is not null) await File.WriteAllBytesAsync(Path.Combine(target, "storage-pointer.previous.json"), oldPointer, cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(target, "migration-info.json"), JsonSerializer.Serialize(new
         { version = 1, completedAt = DateTimeOffset.UtcNow, verifiedFiles = verified.Count, originalFilesRetained = true }), cancellationToken);
@@ -153,21 +153,21 @@ public static class StorageMigrationService
         string path = Path.Combine(root, "settings.json");
         if (!File.Exists(path))
         {
-            if (Directory.Exists(path)) throw new InvalidDataException("存储设置文件路径被文件夹占用。");
+            if (Directory.Exists(path)) throw new InvalidDataException(UiText.Get("存储设置文件路径被文件夹占用。"));
             return;
         }
         RejectLinks(path);
         try
         {
             var settings = JsonNode.Parse(await File.ReadAllTextAsync(path, cancellationToken)) as JsonObject
-                ?? throw new InvalidDataException("存储设置文件格式无效，原文件已保留。");
+                ?? throw new InvalidDataException(UiText.Get("存储设置文件格式无效，原文件已保留。"));
             if (!settings.TryGetPropertyValue("Storage", out var storage)) return;
-            if (storage is not JsonObject storageObject) throw new InvalidDataException("存储版本设置格式无效。");
+            if (storage is not JsonObject storageObject) throw new InvalidDataException(UiText.Get("存储版本设置格式无效。"));
             if (storageObject.TryGetPropertyValue("LayoutVersion", out var version) &&
                 (version is not JsonValue value || !value.TryGetValue<int>(out int number) || number != 1))
-                throw new InvalidDataException("此数据目录的结构版本不受当前程序支持，请使用兼容版本打开。");
+                throw new InvalidDataException(UiText.Get("此数据目录的结构版本不受当前程序支持，请使用兼容版本打开。"));
         }
-        catch (JsonException error) { throw new InvalidDataException("存储设置文件格式无效，原文件已保留。", error); }
+        catch (JsonException error) { throw new InvalidDataException(UiText.Get("存储设置文件格式无效，原文件已保留。"), error); }
     }
 
     // Metadata may also be present in a pending catalog transaction. Rewrite only
@@ -202,7 +202,7 @@ public static class StorageMigrationService
                 if (directory == root && ((copy.Include is not null && !copy.Include.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
                     || (copy.Exclude is not null && copy.Exclude.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)))) continue;
                 var attributes = File.GetAttributes(path);
-                if (attributes.HasFlag(FileAttributes.ReparsePoint)) throw new IOException("数据目录中包含链接，请先移除链接或单独迁移。");
+                if (attributes.HasFlag(FileAttributes.ReparsePoint)) throw new IOException(UiText.Get("数据目录中包含链接，请先移除链接或单独迁移。"));
                 if (attributes.HasFlag(FileAttributes.Directory))
                 {
                     if (directories) files.Add(Path.GetRelativePath(root, path));
@@ -219,7 +219,7 @@ public static class StorageMigrationService
     {
         for (string? part = Path.GetFullPath(path); part is not null; part = Path.GetDirectoryName(part))
             if ((Directory.Exists(part) || File.Exists(part)) && File.GetAttributes(part).HasFlag(FileAttributes.ReparsePoint))
-                throw new IOException("迁移路径不能经过符号链接或目录联接。");
+                throw new IOException(UiText.Get("迁移路径不能经过符号链接或目录联接。"));
     }
 
     private static async Task<byte[]> HashAsync(string path, CancellationToken cancellationToken)

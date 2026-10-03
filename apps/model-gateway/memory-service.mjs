@@ -12,9 +12,44 @@ export class MemoryService {
     const snapshot = await this.repository.readFor(conversationId);
     const scopes = snapshot.scopes;
     const sources = new Map();
-    for (const scope of scopes) scope.entries = await Promise.all(scope.entries.map(async entry =>
-      ({ ...entry, ...await this._sourceStatus(entry, sources) })));
+    for (const scope of scopes) await this._withSourceStatus(scope, sources);
     return snapshot;
+  }
+
+  async _withSourceStatus(document, sources = new Map()) {
+    document.entries = await Promise.all(document.entries.map(async entry =>
+      ({ ...entry, ...await this._sourceStatus(entry, sources) })));
+    return document;
+  }
+
+  listScope(scope, scopeId) {
+    return this.repository.readScope(scope, scopeId).then(document => this._withSourceStatus(document));
+  }
+
+  _scopeInput(scope, input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw memoryFailure('记忆输入无效。');
+    memoryScope(scope);
+    if (scope === 'chat') throw memoryFailure('独立记忆管理仅支持工作和用户作用域。');
+    if (input.scope !== undefined && input.scope !== scope) throw memoryFailure('记忆作用域须与接口一致。');
+    return { ...input, scope };
+  }
+
+  async createScope(scope, scopeId, input) {
+    input = this._scopeInput(scope, input);
+    const source = validateMemorySource(input.source ?? { type: 'manual', role: 'user' });
+    // Saved-message sources remain on the conversation endpoint, which verifies the canonical user message.
+    if (source.type !== 'manual') throw memoryFailure('独立记忆管理只能创建手动确认记忆。');
+    return this._withSourceStatus(await this.repository.createScope(scope, scopeId, { ...input, source }));
+  }
+
+  async updateScope(scope, scopeId, memoryIdValue, input) {
+    input = this._scopeInput(scope, input);
+    return this._withSourceStatus(await this.repository.updateScope(scope, scopeId, memoryIdValue, input));
+  }
+
+  async deleteScope(scope, scopeId, memoryIdValue, input) {
+    input = this._scopeInput(scope, input);
+    return this._withSourceStatus(await this.repository.deleteScope(scope, scopeId, memoryIdValue, input));
   }
 
   async _sourceStatus(entry, sources) {
@@ -51,6 +86,7 @@ export class MemoryService {
   async _sourceFor(conversationId, input) {
     const id = memoryId(conversationId);
     const source = validateMemorySource(input.source ?? { type: 'manual', role: 'user', conversationId: id });
+    if (source.type === 'manual' && source.conversationId === undefined) source.conversationId = id;
     if (source.conversationId !== id) throw memoryFailure('记忆来源须属于当前聊天。');
     if (source.type === 'user-message') {
       const messages = await this.conversations.readMessages(id);

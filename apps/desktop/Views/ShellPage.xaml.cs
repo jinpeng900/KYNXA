@@ -34,6 +34,7 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
         // A click in native chrome/input is outside the browser document too.
         AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
@@ -50,6 +51,7 @@ public sealed partial class ShellPage : Page
 
     private async void PageRoot_Loaded(object sender, RoutedEventArgs e)
     {
+        AttachLanguageUpdates();
         _layout = _layoutStateService.Load();
         UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
@@ -306,8 +308,8 @@ public sealed partial class ShellPage : Page
         UpdateModeSelection();
         WorkModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.Medium;
         ChatModeButton.FontWeight = chat ? Microsoft.UI.Text.FontWeights.Medium : Microsoft.UI.Text.FontWeights.Normal;
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WorkModeButton, chat ? "未选中" : "已选中");
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(ChatModeButton, chat ? "已选中" : "未选中");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WorkModeButton, chat ? UiText.Get("未选中") : UiText.Get("已选中"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(ChatModeButton, chat ? UiText.Get("已选中") : UiText.Get("未选中"));
         WorkSidebarContent.Visibility = chat ? Visibility.Collapsed : Visibility.Visible;
         ChatSidebarContent.Visibility = chat ? Visibility.Visible : Visibility.Collapsed;
         ChatAmbientLayer.Visibility = Visibility.Visible;
@@ -324,7 +326,7 @@ public sealed partial class ShellPage : Page
             UpdateConversationTitle();
             UpdateConversationPresentation();
         }
-        PromptTextBox.PlaceholderText = chat ? "向 KYNXA 提问任何问题..." : "描述你想完成的工作...";
+        PromptTextBox.PlaceholderText = chat ? UiText.Get("向 KYNXA 提问任何问题...") : UiText.Get("描述你想完成的工作...");
         if (changed || preferenceChanged) SaveLayout();
     }
 
@@ -517,7 +519,7 @@ public sealed partial class ShellPage : Page
         ComposerExpandIcon.Glyph = _composerExpanded ? "\uE73F" : "\uE740";
         ToolTipService.SetToolTip(
             ComposerExpandButton,
-            _composerExpanded ? "收起输入区" : "展开输入区");
+            _composerExpanded ? UiText.Get("收起输入区") : UiText.Get("展开输入区"));
     }
 
     private void NewPrimaryAction_Click(object sender, RoutedEventArgs e)

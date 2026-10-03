@@ -17,10 +17,15 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
     public string ContextTitle => Chat is null || Project.IsFolderlessWorkspace ? Title : $"{Project.Name} / {Title}";
     public string Glyph => _glyph;
     public Visibility ProjectOnlyVisibility => Chat is null ? Visibility.Visible : Visibility.Collapsed;
-    public string MoreLabel => Chat is null ? "项目操作" : "聊天操作";
+    public string MoreLabel => Chat is null ? Services.UiText.Get("项目操作") : Services.UiText.Get("聊天操作");
     public string MoreId => Chat is null ? $"ProjectMore_{Project.Id:N}" : $"ChatMore_{Chat.Id:N}";
     public string AddChatId => $"ProjectChatAdd_{Project.Id:N}";
     public ObservableCollection<ProjectTreeEntry> Children { get; } = [];
+    public void RefreshLanguage()
+    {
+        OnPropertyChanged(nameof(MoreLabel));
+        foreach (var child in Children) child.RefreshLanguage();
+    }
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ReplyingVisibility => IsReplying ? Visibility.Visible : Visibility.Collapsed;
 

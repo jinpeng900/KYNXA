@@ -15,6 +15,8 @@ public sealed partial class ModelManagementWindow : Window
 {
     private readonly ModelApiClient _api = new();
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly List<(ModelProvider Provider, TextBlock Count, Button Button)> _providerLabels = [];
+    private readonly List<(string Id, string Name, CheckBox Option)> _modelLabels = [];
     private ModelProvider[] _providers = [];
     private ModelProvider? _editing;
     private bool _changingPreset;
@@ -22,6 +24,8 @@ public sealed partial class ModelManagementWindow : Window
     private bool _loaded;
     private bool _updatingModelList;
     private string[] _discoveredModels = [];
+    private Func<string> _statusMessage = () => UiText.Get("选好服务商，填写密钥后保存。");
+    private bool _statusIsError;
 
     public ModelManagementWindow()
     {
@@ -35,10 +39,46 @@ public sealed partial class ModelManagementWindow : Window
             AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
         }
         SizeAndCenterWindow();
-        Closed += (_, _) => { _closed = true; _lifetime.Cancel(); _api.Dispose(); };
+        Closed += (_, _) =>
+        {
+            _closed = true;
+            UiText.LanguageChanged -= UiText_LanguageChanged;
+            _lifetime.Cancel();
+            _api.Dispose();
+        };
         PresetBox.ItemsSource = ModelPresets.All;
         ApplyPreset(ModelPresets.All[0]);
+        UiText.LanguageChanged += UiText_LanguageChanged;
+        RefreshLanguage();
         _ = InitializeAsync();
+    }
+
+    private void UiText_LanguageChanged(object? sender, EventArgs e)
+    {
+        if (_closed) return;
+        if (DispatcherQueue.HasThreadAccess) RefreshLanguage();
+        else DispatcherQueue.TryEnqueue(RefreshLanguage);
+    }
+
+    private void RefreshLanguage()
+    {
+        if (_closed) return;
+        Title = UiText.Get("KYNXA 模型管理");
+        // Update presentation only. Reapplying a preset or rebuilding either list would
+        // discard unsaved form values, selection, focus, or the current scroll position.
+        bool wasChangingPreset = _changingPreset;
+        _changingPreset = true;
+        try { ModelPresets.RefreshDisplayNames(); }
+        finally { _changingPreset = wasChangingPreset; }
+        EditorTitle.Text = UiText.Get(_editing is null ? "添加模型连接" : "编辑模型连接");
+        PresetHint.Text = _editing is not null
+            ? UiText.Get("修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。")
+            : UiText.Get((PresetBox.SelectedItem as ModelPreset)?.Hint ?? "选好服务商，填写密钥后保存。");
+        UpdateProviderLabels();
+        UpdateEndpointHints();
+        UpdateModelCount();
+        UpdateModelLabels();
+        RenderStatus();
     }
 
     private void SizeAndCenterWindow()
@@ -63,7 +103,7 @@ public sealed partial class ModelManagementWindow : Window
             if (_editing is null && PresetBox.SelectedItem is ModelPreset preset)
                 ProviderIdBox.Text = NewId(preset.Id);
         }
-        catch (Exception error) { SetStatus(FriendlyError(error), true); }
+        catch (Exception error) { SetStatus(() => FriendlyError(error), true); }
         finally { if (!_closed) SetBusy(false); }
     }
 
@@ -79,15 +119,16 @@ public sealed partial class ModelManagementWindow : Window
     private void RenderProviders()
     {
         ProviderList.Children.Clear();
+        _providerLabels.Clear();
         EmptyConnections.Visibility = _providers.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ConnectionCount.Text = _providers.Length == 0 ? "配置后即可在聊天中选择" : $"{_providers.Length} 个已保存连接";
         foreach (var provider in _providers)
         {
             var content = new StackPanel { Spacing = 5 };
             content.Children.Add(new TextBlock { Text = provider.DisplayName, FontSize = 13,
                 TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-            content.Children.Add(new TextBlock { Text = $"{provider.Models.Length} 个模型", FontSize = 11,
-                Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] });
+            var count = new TextBlock { FontSize = 11,
+                Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] };
+            content.Children.Add(count);
             var button = new Button
             {
                 Content = content, HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -96,9 +137,22 @@ public sealed partial class ModelManagementWindow : Window
                     ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 234, 233))
                     : new SolidColorBrush(Microsoft.UI.Colors.Transparent)
             };
-            AutomationProperties.SetName(button, $"{provider.DisplayName}，{provider.Models.Length} 个模型");
+            _providerLabels.Add((provider, count, button));
             button.Click += (_, _) => SelectProvider(provider);
             ProviderList.Children.Add(button);
+        }
+        UpdateProviderLabels();
+    }
+
+    private void UpdateProviderLabels()
+    {
+        ConnectionCount.Text = _providers.Length == 0 ? UiText.Get("配置后即可在聊天中选择")
+            : string.Format(UiText.Get("{0} 个已保存连接"), _providers.Length);
+        foreach (var (provider, count, button) in _providerLabels)
+        {
+            count.Text = string.Format(UiText.Get("{0} 个模型"), provider.Models.Length);
+            AutomationProperties.SetName(button,
+                string.Format(UiText.Get("{0}，{1} 个模型"), provider.DisplayName, provider.Models.Length));
         }
     }
 
@@ -115,15 +169,15 @@ public sealed partial class ModelManagementWindow : Window
         ModelSearchBox.Text = "";
         SetProtocol(preset.Protocol);
         SetContextWindow(ModelApiClient.DefaultContextWindowTokens);
-        EditorTitle.Text = "添加模型连接";
-        NameBox.Text = preset.Id == "custom" ? "" : preset.Name;
+        EditorTitle.Text = UiText.Get("添加模型连接");
+        NameBox.Text = preset.Id == "custom" ? "" : UiText.Get(preset.Name);
         ProviderIdBox.IsReadOnly = false;
         ProviderIdBox.Text = NewId(preset.Id);
         BaseUrlBox.Text = preset.BaseUrl;
         ModelsBox.Text = string.Join(Environment.NewLine, preset.Models);
         ApiKeyBox.Password = "";
         UpdateEndpointHints();
-        PresetHint.Text = preset.Hint;
+        PresetHint.Text = UiText.Get(preset.Hint);
         AdvancedSettings.IsExpanded = preset.Id == "custom";
         EditorScroll.ChangeView(null, 0, null);
         SetStatus(preset.Hint);
@@ -142,8 +196,8 @@ public sealed partial class ModelManagementWindow : Window
         ModelSearchBox.Text = "";
         SetProtocol(provider.Protocol);
         SetContextWindow(provider.ContextWindowTokens);
-        EditorTitle.Text = "编辑模型连接";
-        PresetHint.Text = "修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。";
+        EditorTitle.Text = UiText.Get("编辑模型连接");
+        PresetHint.Text = UiText.Get("修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。");
         NameBox.Text = provider.DisplayName;
         ProviderIdBox.Text = provider.ProviderId;
         ProviderIdBox.IsReadOnly = true;
@@ -173,14 +227,14 @@ public sealed partial class ModelManagementWindow : Window
         bool local = Uri.TryCreate(BaseUrlBox.Text, UriKind.Absolute, out var uri) && ModelPresets.IsLocalEndpoint(uri);
         bool savedKey = _editing is { HasApiKey: true } &&
             _editing.BaseUrl.TrimEnd('/') == BaseUrlBox.Text.Trim().TrimEnd('/');
-        ApiKeyBox.Header = local ? "API Key（可选）" : "API Key";
-        ApiKeyBox.PlaceholderText = local ? "服务未启用认证时留空" : "粘贴服务商提供的密钥";
-        KeyHint.Text = savedKey ? "已保存密钥；地址不变时留空可继续使用。" : local
-            ? "直接连接指定服务；未启用认证时无需密钥。"
-            : "密钥仅保存在本机，用于向所选服务发送请求。";
+        ApiKeyBox.Header = local ? UiText.Get("API Key（可选）") : "API Key";
+        ApiKeyBox.PlaceholderText = local ? UiText.Get("服务未启用认证时留空") : UiText.Get("粘贴服务商提供的密钥");
+        KeyHint.Text = savedKey ? UiText.Get("已保存密钥；地址不变时留空可继续使用。") : local
+            ? UiText.Get("直接连接指定服务；未启用认证时无需密钥。")
+            : UiText.Get("密钥仅保存在本机，用于向所选服务发送请求。");
         ModelsHint.Text = local
-            ? "获取服务已加载的模型，或填写服务提供的模型 ID。不需要安装 Ollama。"
-            : "可编辑模型 ID，或获取账号支持的模型列表。";
+            ? UiText.Get("获取服务已加载的模型，或填写服务提供的模型 ID。不需要安装 Ollama。")
+            : UiText.Get("可编辑模型 ID，或获取账号支持的模型列表。");
     }
 
     private void NameBox_LostFocus(object sender, RoutedEventArgs e)
@@ -234,9 +288,10 @@ public sealed partial class ModelManagementWindow : Window
         string value = ContextWindowBox.SelectedItem is ComboBoxItem { Tag: "custom" }
             ? CustomContextWindowBox.Text.Trim()
             : (ContextWindowBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
-        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens))
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens) ||
+            tokens is < ModelApiClient.MinimumContextWindowTokens or > ModelApiClient.MaximumContextWindowTokens)
             throw new InvalidOperationException("上下文窗口须为 2048–2000000 的整数（tokens）。");
-        return ModelApiClient.ValidateContextWindowTokens(tokens);
+        return tokens;
     }
 
     private void ModelSearchBox_TextChanged(object sender, TextChangedEventArgs e) => RenderModelOptions();
@@ -246,13 +301,14 @@ public sealed partial class ModelManagementWindow : Window
 
     private void UpdateModelCount()
     {
-        if (ModelCount is not null) ModelCount.Text = $"共 {CandidateModelIds().Length} 个 · 已选 {ModelIds().Length} 个";
+        if (ModelCount is not null) ModelCount.Text = string.Format(UiText.Get("共 {0} 个 · 已选 {1} 个"), CandidateModelIds().Length, ModelIds().Length);
     }
 
     private void RenderModelOptions()
     {
         if (ModelOptions is null || ModelsBox is null || ModelSearchBox is null || EmptyModelsHint is null) return;
         ModelOptions.Children.Clear();
+        _modelLabels.Clear();
         var selected = ModelIds().ToHashSet();
         UpdateModelCount();
         var ids = CandidateModelIds();
@@ -270,13 +326,21 @@ public sealed partial class ModelManagementWindow : Window
             var option = new CheckBox { Content = content, IsChecked = selected.Contains(id),
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new Thickness(10, 8, 10, 8), CornerRadius = new CornerRadius(8) };
-            AutomationProperties.SetName(option, detail.Name == id ? id : $"{detail.Name}，{id}");
+            _modelLabels.Add((id, detail.Name, option));
             option.Checked += (_, _) => ToggleModel(id, true);
             option.Unchecked += (_, _) => ToggleModel(id, false);
             ModelOptions.Children.Add(option);
         }
-        EmptyModelsHint.Text = search.Length > 0 ? "没有匹配的模型。" : "暂时没有模型。可获取服务模型列表，或展开下方手动添加。";
+        UpdateModelLabels();
         EmptyModelsHint.Visibility = ModelOptions.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void UpdateModelLabels()
+    {
+        foreach (var (id, name, option) in _modelLabels)
+            AutomationProperties.SetName(option, name == id ? id : string.Format(UiText.Get("{0}，{1}"), name, id));
+        string search = ModelSearchBox.Text.Trim();
+        EmptyModelsHint.Text = search.Length > 0 ? UiText.Get("没有匹配的模型。") : UiText.Get("暂时没有模型。可获取服务模型列表，或展开下方手动添加。");
     }
 
     private void ToggleModel(string id, bool enabled)
@@ -325,20 +389,30 @@ public sealed partial class ModelManagementWindow : Window
         BusyIndicator.IsActive = busy;
     }
 
-    private void SetStatus(string text, bool error = false)
+    private void SetStatus(string key, bool error = false) => SetStatus(() => UiText.Get(key), error);
+
+    private void SetStatus(Func<string> message, bool error = false)
+    {
+        _statusMessage = message;
+        _statusIsError = error;
+        RenderStatus();
+    }
+
+    private void RenderStatus()
     {
         if (_closed) return;
+        string text = _statusMessage();
         StatusText.Text = text;
         ToolTipService.SetToolTip(StatusText, text);
-        StatusText.Foreground = error ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 168, 57, 45))
+        StatusText.Foreground = _statusIsError ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 168, 57, 45))
             : (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"];
     }
 
     private static string FriendlyError(Exception error) => error switch
     {
-        HttpRequestException => "暂时无法连接 KYNXA 模型服务，请确认本机服务已启动后重试。",
-        OperationCanceledException => "请求超时，请检查网络或服务地址后重试。",
-        _ => error.Message
+        HttpRequestException => UiText.Get("暂时无法连接 KYNXA 模型服务，请确认本机服务已启动后重试。"),
+        OperationCanceledException => UiText.Get("请求超时，请检查网络或服务地址后重试。"),
+        _ => UiText.Get(error.Message)
     };
 
     private async void TestConnectionButton_Click(object sender, RoutedEventArgs e)
@@ -359,11 +433,11 @@ public sealed partial class ModelManagementWindow : Window
                 ModelsBox.Text = string.Join(Environment.NewLine, enabled);
                 RenderModelOptions();
             }
-            SetStatus(result.Models.Length > 0
-                ? $"已获取 {result.Models.Length} 个模型 · {result.LatencyMs} ms。勾选需要的模型后保存。"
-                : "服务已连接，未返回模型列表；已保留现有 ID，可手动填写后保存。");
+            SetStatus(() => result.Models.Length > 0
+                ? string.Format(UiText.Get("已获取 {0} 个模型 · {1} ms。勾选需要的模型后保存。"), result.Models.Length, result.LatencyMs)
+                : UiText.Get("服务已连接，未返回模型列表；已保留现有 ID，可手动填写后保存。"));
         }
-        catch (Exception error) { SetStatus($"获取失败：{FriendlyError(error)} 可保留预设 ID 直接保存。", true); }
+        catch (Exception error) { SetStatus(() => string.Format(UiText.Get("获取失败：{0} 可保留预设 ID 直接保存。"), FriendlyError(error)), true); }
         finally { if (!_closed) SetBusy(false); }
     }
 
@@ -380,9 +454,9 @@ public sealed partial class ModelManagementWindow : Window
             // Save has succeeded even if reloading the list subsequently fails.
             _providers = _providers.Where(p => p.ProviderId != provider.ProviderId).Append(provider).ToArray();
             RenderProviders();
-            SetStatus($"已保存 {provider.DisplayName}。返回聊天页，选择模型即可使用。");
+            SetStatus(() => string.Format(UiText.Get("已保存 {0}。返回聊天页，选择模型即可使用。"), provider.DisplayName));
         }
-        catch (Exception error) { SetStatus($"保存失败：{FriendlyError(error)}", true); }
+        catch (Exception error) { SetStatus(() => string.Format(UiText.Get("保存失败：{0}"), FriendlyError(error)), true); }
         finally { if (!_closed) SetBusy(false); }
     }
 }

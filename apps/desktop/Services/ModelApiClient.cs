@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
@@ -23,7 +22,7 @@ public sealed class ModelApiClient : IDisposable
     public static int ValidateContextWindowTokens(int value)
     {
         if (value is < MinimumContextWindowTokens or > MaximumContextWindowTokens)
-            throw new InvalidOperationException("上下文窗口须为 2048–2000000 的整数（tokens）。");
+            throw new InvalidOperationException(UiText.Get("上下文窗口须为 2048–2000000 的整数（tokens）。"));
         return value;
     }
 
@@ -36,29 +35,33 @@ public sealed class ModelApiClient : IDisposable
     public async Task<ModelProvider[]> ListAsync(CancellationToken cancellationToken = default)
     {
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
-        return (await ReadAsync<ModelListResponse>(await _http.GetAsync("/api/models", cancellationToken), cancellationToken)).Providers;
+        using var response = await _http.GetAsync("/api/models", cancellationToken);
+        return (await ReadAsync<ModelListResponse>(response, cancellationToken)).Providers;
     }
 
     public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
-        return (await ReadAsync<ModelSaveResponse>(await _http.PostAsJsonAsync("/api/models", connection, cancellationToken), cancellationToken)).Provider;
+        using var response = await _http.PostAsJsonAsync("/api/models", connection, cancellationToken);
+        return (await ReadAsync<ModelSaveResponse>(response, cancellationToken)).Provider;
     }
 
     public async Task<ModelProbeResponse> TestAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
-        return await ReadAsync<ModelProbeResponse>(await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken), cancellationToken);
+        using var response = await _http.PostAsJsonAsync("/api/models/test", connection, cancellationToken);
+        return await ReadAsync<ModelProbeResponse>(response, cancellationToken);
     }
 
     public async Task<ChatReply> ReplyAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
         await ModelGatewayService.EnsureReadyAsync(cancellationToken);
-        var reply = await ReadAsync<ChatReply>(await _http.PostAsJsonAsync("/api/chat", request, cancellationToken), cancellationToken);
+        using var response = await _http.PostAsJsonAsync("/api/chat", request, cancellationToken);
+        var reply = await ReadAsync<ChatReply>(response, cancellationToken);
         if (reply.ConversationId != request.ConversationId || reply.Role != "assistant" || string.IsNullOrWhiteSpace(reply.Content))
-            throw new InvalidDataException("模型接口返回了无效的回复。");
+            throw new InvalidDataException(UiText.Get("模型接口返回了无效的回复。"));
         return reply;
     }
 
@@ -73,36 +76,17 @@ public sealed class ModelApiClient : IDisposable
         };
         message.Headers.Accept.ParseAdd("text/event-stream");
         using var response = await _http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
+        await GatewayResponseReader.EnsureSuccessAsync(response, UiText.Get("模型接口返回 HTTP {0}。"), cancellationToken);
         if (!string.Equals(response.Content.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("模型接口没有返回流式响应，请重启本地网关后重试。");
+            throw new InvalidDataException(UiText.Get("模型接口没有返回流式响应，请重启本地网关后重试。"));
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         await foreach (var item in ChatStreamReader.ReadAsync(stream, request.ConversationId, request.RequestId.Value, cancellationToken))
             yield return item;
     }
 
-    private static async Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        using (response)
-        {
-            await EnsureSuccessAsync(response, cancellationToken);
-            return await response.Content.ReadFromJsonAsync<T>(cancellationToken) ??
-                throw new InvalidDataException("模型接口返回了空响应。");
-        }
-    }
-
-    private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        if (response.IsSuccessStatusCode) return;
-        try
-        {
-            using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken);
-            string? message = body is not null && body.RootElement.TryGetProperty("error", out var field) &&
-                field.ValueKind == JsonValueKind.String ? field.GetString() : null;
-            throw new InvalidOperationException(message ?? $"模型接口返回 HTTP {(int)response.StatusCode}。");
-        }
-        catch (JsonException) { throw new InvalidOperationException($"模型接口返回 HTTP {(int)response.StatusCode}。"); }
-    }
+    private static Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken) =>
+        GatewayResponseReader.ReadAsync<T>(response, UiText.Get("模型接口返回了空响应。"),
+            UiText.Get("模型接口返回 HTTP {0}。"), cancellationToken);
 
     public void Dispose() => _http.Dispose();
 }

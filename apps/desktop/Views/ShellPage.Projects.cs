@@ -34,7 +34,7 @@ public sealed partial class ShellPage
         if (_savingOnClose || StoragePaths.IsMigrating) return;
         if (_projectActionPending || _sendingPrompt)
         {
-            ProjectNotice.Message = "正在保存聊天，请稍后再关闭。";
+            ProjectNotice.Message = UiText.Get("正在保存聊天，请稍后再关闭。");
             ProjectNotice.IsOpen = true;
             return;
         }
@@ -53,8 +53,8 @@ public sealed partial class ShellPage
         {
             var choice = await new ContentDialog
             {
-                XamlRoot = XamlRoot, Title = "草稿保存未完成", Content = error.Message + " 已提交的聊天由会话服务保存，尚未保存的草稿或排序可能丢失。",
-                PrimaryButtonText = "仍然关闭", CloseButtonText = "返回", DefaultButton = ContentDialogButton.Close
+                XamlRoot = XamlRoot, Title = UiText.Get("草稿保存未完成"), Content = error.Message + UiText.Get(" 已提交的聊天由会话服务保存，尚未保存的草稿或排序可能丢失。"),
+                PrimaryButtonText = UiText.Get("仍然关闭"), CloseButtonText = UiText.Get("返回"), DefaultButton = ContentDialogButton.Close
             }.ShowAsync();
             if (choice == ContentDialogResult.Primary) { _closeApproved = true; App.Window.Close(); }
         }
@@ -67,7 +67,7 @@ public sealed partial class ShellPage
         catch (Exception error)
         {
             if (_projectViewClosed) return;
-            ProjectNotice.Message = "工作顺序暂未保存：" + error.Message;
+            ProjectNotice.Message = UiText.Get("工作顺序暂未保存：") + error.Message;
             ProjectNotice.IsOpen = true;
         }
     }
@@ -106,7 +106,7 @@ public sealed partial class ShellPage
         {
             if (_projectViewClosed) return;
             AddProjectButton.IsEnabled = false;
-            await ShowProjectErrorAsync("无法读取项目", error.Message);
+            await ShowProjectErrorAsync(UiText.Get("无法读取项目"), error.Message);
         }
     }
 
@@ -134,17 +134,22 @@ public sealed partial class ShellPage
         if (sender is not Button { Tag: ProjectTreeEntry entry }) return;
         await RunProjectActionAsync(() =>
         {
-            CaptureProjectDraft();
-            DiscardEmptyProjectChats();
-            var project = entry.Project;
-            string title = "新聊天";
-            for (int number = 2; project.Chats.Any(c => c.Title == title); number++) title = $"新聊天 {number}";
-            var chat = new ProjectChatState { Title = title };
-            project.Chats.Insert(0, chat);
-            ShowProjects();
-            SelectProjectChat(project, chat);
+            StartNewProjectChat(entry.Project);
             return Task.CompletedTask;
         });
+    }
+
+    // Both sidebar add actions create the same RAM-only draft; the first user message commits it.
+    private void StartNewProjectChat(ProjectState project)
+    {
+        if (project.IsArchived || project.IsFolderlessWorkspace || !_projects.Contains(project)) return;
+        CaptureProjectDraft();
+        DiscardEmptyProjectChats();
+        string title = UiText.Get("新聊天");
+        for (int number = 2; project.Chats.Any(chat => chat.Title == title); number++) title = string.Format(UiText.Get("新聊天 {0}"), number);
+        var chat = new ProjectChatState { Title = title };
+        project.Chats.Insert(0, chat);
+        SelectProjectChat(project, chat);
     }
     private MenuFlyout CreateProjectMenu(ProjectState project)
     {
@@ -160,23 +165,23 @@ public sealed partial class ShellPage
             item.Click += async (_, _) => await RunProjectActionAsync(action);
             menu.Items.Add(item);
         }
-        Item(project.IsPinned ? "取消置顶" : "置顶项目", "\uE718", async () =>
+        Item(project.IsPinned ? UiText.Get("取消置顶") : UiText.Get("置顶项目"), "\uE718", async () =>
         {
             project.IsPinned = !project.IsPinned;
             await SaveProjectsAndRenderAsync();
         });
-        Item("在文件资源管理器中打开", "\uE8B7", async () =>
+        Item(UiText.Get("在文件资源管理器中打开"), "\uE8B7", async () =>
         {
             if (string.IsNullOrEmpty(project.FolderPath))
             {
                 project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
                 await _projectStore.SaveAsync(_projects);
             }
-            if (!Directory.Exists(project.FolderPath)) throw new DirectoryNotFoundException($"关联文件夹不存在：{project.FolderPath}");
+            if (!Directory.Exists(project.FolderPath)) throw new DirectoryNotFoundException(string.Format(UiText.Get("关联文件夹不存在：{0}"), project.FolderPath));
             var folder = await StorageFolder.GetFolderFromPathAsync(project.FolderPath);
-            if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException("无法打开文件资源管理器。");
+            if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
         });
-        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? "关联工作文件夹" : "重新关联文件夹", "\uE8F4", async () =>
+        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", async () =>
         {
             var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
             picker.FileTypeFilter.Add("*");
@@ -187,12 +192,12 @@ public sealed partial class ShellPage
             project.FolderPath = folder.Path;
             try { await SaveProjectsAndRenderAsync(); }
             catch { project.FolderPath = previous; throw; }
-            ProjectNotice.Message = $"“{project.Name}”已关联到 {folder.Path}，聊天和原文件夹内容保持不变。";
+            ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
             ProjectNotice.IsOpen = true;
         });
-        Item("重命名项目", "\uE70F", async () =>
+        Item(UiText.Get("重命名项目"), "\uE70F", async () =>
         {
-            string? name = await AskProjectNameAsync("重命名项目", project.Name, "保存");
+            string? name = await AskProjectNameAsync(UiText.Get("重命名项目"), project.Name, UiText.Get("保存"));
             if (name is null) return;
             project.Name = name;
             if (project.Chats.Contains(_activeProjectChat!))
@@ -207,7 +212,7 @@ public sealed partial class ShellPage
             }
             await SaveProjectsAndRenderAsync();
         });
-        Item("归档", "\uE7B8", async () =>
+        Item(UiText.Get("归档"), "\uE7B8", async () =>
         {
             CaptureProjectDraft();
             project.IsArchived = true;
@@ -235,7 +240,7 @@ public sealed partial class ShellPage
                 UpdateWorkspacePickerVisibility();
             }
             RenderProjects();
-            ProjectNotice.Message = $"已归档“{project.Name}”";
+            ProjectNotice.Message = string.Format(UiText.Get("已归档“{0}”"), project.Name);
             ProjectNotice.IsOpen = true;
         });
         return menu;
@@ -251,7 +256,7 @@ public sealed partial class ShellPage
 
     private async Task<ProjectState?> CreateBlankProjectAsync()
     {
-        string? name = await AskProjectNameAsync("新建空白项目", "", "创建");
+        string? name = await AskProjectNameAsync(UiText.Get("新建空白项目"), "", UiText.Get("创建"));
         if (name is null) return null;
         var project = new ProjectState { Name = name };
         project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
@@ -345,10 +350,10 @@ public sealed partial class ShellPage
     }
     private async Task<string?> AskProjectNameAsync(string title, string value, string primary)
     {
-        var input = new TextBox { FontFamily = (FontFamily)Application.Current.Resources["KynxaUIFont"], Text = value, PlaceholderText = "输入项目名称", MaxLength = 80, MinWidth = 300 };
+        var input = new TextBox { FontFamily = (FontFamily)Application.Current.Resources["KynxaUIFont"], Text = value, PlaceholderText = UiText.Get("输入项目名称"), MaxLength = 80, MinWidth = 300 };
         AutomationProperties.SetAutomationId(input, "ProjectNameInput");
         var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = title, Content = input,
-            PrimaryButtonText = primary, CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary,
+            PrimaryButtonText = primary, CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Primary,
             IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(value) };
         input.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(input.Text);
         dialog.Opened += (_, _) => { input.Focus(FocusState.Programmatic); input.SelectAll(); };
@@ -377,14 +382,14 @@ public sealed partial class ShellPage
                 UpdateConversationPresentation();
             }
             catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. */ }
-            await ShowProjectErrorAsync("项目操作未完成", error.Message);
+            await ShowProjectErrorAsync(UiText.Get("项目操作未完成"), error.Message);
         }
         finally { _projectActionPending = false; }
     }
 
     private async Task ShowProjectErrorAsync(string title, string message) => await new ContentDialog
     {
-        XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = "知道了"
+        XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = UiText.Get("知道了")
     }.ShowAsync();
 
     private void PreservePendingPresentations(ConversationCatalog catalog)

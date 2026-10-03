@@ -35,6 +35,7 @@
     <Manifest Include="$(ApplicationManifest)" />
     <Content Include="..\model-gateway\*.mjs" Exclude="..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
+    <Compile Include="..\shared\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
   </ItemGroup>
 
   <!--

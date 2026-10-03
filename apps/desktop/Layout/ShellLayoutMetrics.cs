@@ -22,6 +22,21 @@ public static class ShellLayoutMetrics
     public const double WorkPanelGap = 10;
     public const double WorkChatMinimumWidth = 420;
 
+    public static (double Minimum, double Maximum) GetWorkNavigationHeightRange(double availableHeight, bool bothExpanded = false)
+    {
+        // Keep the outer grip and tasks usable before allocating navigation space.
+        double maximum = double.IsFinite(availableHeight) ? Math.Max(0, availableHeight - 8 - 96) : 0;
+        double minimum = Math.Min(bothExpanded ? 208 : 136, maximum);
+        return (minimum, maximum);
+    }
+
+    public static (double Minimum, double Maximum) GetWorkRecentHeightRange(double contentBudget)
+    {
+        double budget = double.IsFinite(contentBudget) ? Math.Max(0, contentBudget) : 0;
+        double minimum = Math.Min(64, budget * 0.5);
+        return (minimum, Math.Max(minimum, budget - minimum));
+    }
+
     public static (double Minimum, double Maximum) GetComposerWidthRange(double availableWidth)
     {
         double padding = availableWidth switch { >= 1200 => 144, >= 800 => 96, >= 520 => 56, _ => 24 };

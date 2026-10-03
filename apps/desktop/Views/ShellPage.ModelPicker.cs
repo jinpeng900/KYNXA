@@ -44,16 +44,16 @@ public sealed partial class ShellPage
 
     private void UpdateModelPickerLabel()
     {
-        SelectedModelLabel.Text = _selectedModel?.Name ?? "模型选择";
-        AutomationProperties.SetName(ModelPickerButton, _selectedModel?.Label ?? "模型选择");
-        ToolTipService.SetToolTip(ModelPickerButton, _selectedModel?.Label ?? "模型选择");
+        SelectedModelLabel.Text = _selectedModel?.Name ?? UiText.Get("模型选择");
+        AutomationProperties.SetName(ModelPickerButton, _selectedModel?.Label ?? UiText.Get("模型选择"));
+        ToolTipService.SetToolTip(ModelPickerButton, _selectedModel?.Label ?? UiText.Get("模型选择"));
     }
 
     private async void ModelPickerButton_Click(object sender, RoutedEventArgs e)
     {
         await RefreshModelPickerAsync();
         var menu = PickerMenu.Create(FlyoutPlacementMode.TopEdgeAlignedRight);
-        var models = PickerMenu.CreateList("ModelPickerList", "模型列表");
+        var models = PickerMenu.CreateList("ModelPickerList", UiText.Get("模型列表"));
         models.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
                 <StackPanel Spacing="3" Padding="0,5">
@@ -85,7 +85,7 @@ public sealed partial class ShellPage
                 args.Handled = true;
             }
         };
-        var configure = PickerMenu.Action("配置模型连接", "ConfigureCustomModelsButton");
+        var configure = PickerMenu.Action(UiText.Get("配置模型连接"), "ConfigureCustomModelsButton");
         configure.Click += (_, _) =>
         {
             menu.Hide();
@@ -93,7 +93,7 @@ public sealed partial class ShellPage
         };
         var body = new Grid();
         body.Children.Add(models);
-        if (_availableModels.Length == 0) body.Children.Add(new TextBlock { Text = "尚无已配置模型", Margin = new Thickness(12), FontSize = 13 });
+        if (_availableModels.Length == 0) body.Children.Add(new TextBlock { Text = UiText.Get("尚无已配置模型"), Margin = new Thickness(12), FontSize = 13 });
         var menuContent = PickerMenu.WithFixedFooter(body, configure,
             Math.Max(120, Math.Min(360, XamlRoot.Size.Height - 32)));
         menuContent.Width = Math.Min(340, Math.Max(240, XamlRoot.Size.Width - 32));

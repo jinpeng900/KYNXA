@@ -4,4 +4,11 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup><Compile Include="../../apps/desktop/Services/StorageMigrationService.cs" Link="StorageMigrationService.cs" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
+  </ItemGroup>
 </Project>

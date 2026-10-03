@@ -4,8 +4,11 @@
 - `Controls/PickerMenu.cs`：模型、项目和权限菜单共用的创建入口。`CreateList` 统一列表滚动和选中指示；`WithFixedFooter` 将滚动列表与固定底部操作分开。选择、保存和打开窗口仍由对应的 `ShellPage.*.cs` 处理。
 - `Styles/Dimensions.xaml`：字号、行高、按钮尺寸、菜单行高、底栏高度和圆角。`Styles/Controls.xaml` 通过基础按钮样式派生图标、选择器、侧栏操作和发送按钮。
 - `Layout/ShellLayoutMetrics.cs`：侧栏、输入框、聊天正文和右栏的默认尺寸及约束。持久化布局的默认值也来自这里；窗口临时变窄时只约束显示宽度，不覆盖用户保存的宽度。
+- `Layout/WorkSidebarLayout.cs`：不依赖 WinUI 的最近/项目行高度分配和两组分隔拖动快照。页面只传测量值、转换 `GridLength`、接线和保存偏好；折叠、取消、复位及内部拖动不改变任务边界的规则集中在此，纯布局回归由 `ui-layout-smoke` 验证。
 
 增加 UI 时优先使用现有组件与样式。新的数据保存和业务行为放在页面对应功能文件或服务中，避免写入通用控件。
+
+桌面通信：`Services/GatewayResponseReader.cs` 共用 JSON 响应读取及错误解码，保留调用方的 JSON 选项、空响应提示和目录 409 恢复提示。`GatewayApiException` 继承现有 `InvalidOperationException` 并携带 HTTP 状态及可用错误码。模型/会话客户端继续拥有请求、超时和响应释放，SSE 的成功响应不经过 JSON 读取；正式存储仍归网关。`dotnet run --project tests/gateway-response-smoke/GatewayResponseSmoke.csproj` 检查格式兼容、错误降级、取消与响应所有权。
 
 流式回复：`Views/ShellPage.StreamReplies.cs` 按会话 ID 维护生成任务，40ms 合并刷新当前消息；`ModelApiClient.StreamReplyAsync` 与 `ChatStreamReader` 读取网关 SSE，区分正文、思考和终止事件。思考默认收起，可展开渲染 Markdown；发送按钮在生成期间变成停止。消息保存 `Reasoning`、`ReasoningDurationMs`、`Status`、`Error` 和原模型信息，旧记录兼容；启动时把未完成生成恢复为中断。生成开始、定期快照和完成时由网关保存到统一会话日志，页面不再每 1.5 秒重写整个聊天目录；重试复用请求 ID 与用户消息 ID，避免重复上下文。
 
@@ -34,6 +37,10 @@
 模型管理：`ModelManagementWindow.xaml` 使用固定底部操作区、独立滚动表单和折叠的高级设置；服务地址直接显示在主表单，连接 ID 位于高级设置。`Services/ModelPresets.cs` 集中维护服务地址、默认模型 ID、名称识别及本机/局域网地址判定。「本地 API（直接连接）」不依赖 Ollama，直接连接兼容接口，密钥提示随地址更新。新连接自动避开已有 ID，编辑连接固定 ID；切换服务商建立新配置，不修改已有连接。测试只读取模型列表，保存后通过聊天模型菜单选择。
 
 上下文窗口按连接保存，可选择 8K、32K、128K、256K、1M（1000000）或自定义 2048–2000000；旧连接缺少字段时默认 8192。窗口读取已保存值，保存/测试请求前校验。该配置不改变服务端模型能力，本地服务须配套设置启动窗口。`dotnet run --project tests/model-context-smoke/ModelContextSmoke.csproj` 使用模拟网关验证旧响应兼容、1M 往返与非法输入。聊天/工作/用户记忆由网关分层管理，详见 [记忆架构](../../docs/architecture/chat-work-memory.md)。
+
+设置中的「记忆管理 → 打开」创建独立原生窗口，可最小化、最大化和关闭。`MemoryManagementWindow` 负责展示与确认，`MemoryManagementViewModel` 管理编辑、版本冲突和取消，`MemoryApiClient` 负责范围 HTTP 接口，`apps/shared/MemoryApiContracts.cs` 定义共享 DTO 与内容校验。窗口分别选择聊天、工作、全局记忆，支持内容筛选、手动新增、编辑、单条删除，显示来源与有效状态；加载失败明确提示，写入和 409 后重新 GET，保留冲突编辑。未发送草稿不纳入聊天目标，全局/工作管理不创建聊天。中英界面即时切换，用户内容原样保留，窄窗口上下排列列表与编辑器。更改 Data 位置前须完成编辑，迁移关闭干净的记忆窗口。
+
+验证入口：`tests/memory-management-smoke` 覆盖模拟 HTTP 与状态，`tests/memory-ui-smoke` 用隔离临时目录、模拟 API 和真实 WinUI 控件检查窗口。上下文取舍诊断与独立输出上限设置仍待实现，网关输出仍最多 2048 tokens。聊天展示保持现有 Markdown DOM、稳定消息 ID 与跨消息选择行为，验收安排见 [B：桌面前端](../../docs/team/B-桌面前端.md)。
 
 预设来源（2026-10-01 核对）：共 151 个云端聊天模型 ID。数字是本应用纳入的预设数，包含可输出文本的视觉模型；不重复计算兼容别名，不代表账号已开通全部模型。精确 ID 和显示名称仅维护在 `Services/ModelCatalog.cs`，`ModelPresets` 从同一目录生成预设。
 
@@ -70,7 +77,9 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 
 `KatexFormulaRenderer`、`MarkdownReply.Math` 的图片路径及 `MathFormulaRenderer` 的 CSharpMath/SkiaSharp 降级仍保留给原生控件。它们的公式长度、图像尺寸限制和 TeX 兼容改写属于原生渲染实现，不应套用到浏览器主聊天。浏览器渲染始终接收原始 TeX，避免为较小的解析器改写公式含义。
 
-工作侧栏分为最近、项目、任务。点击项目名称选择工作区，旁边的原生箭头独立展开聊天；选择项目、打开聊天、发送消息和三点操作均不自动展开项目。`ShellPage.WorkSidebar.cs` 按项目 ID 维护工作区选择，空白输入页也能直接向该项目创建会话。任务显示选中项目全部已提交且未归档的聊天，未选择项目时不显示占位内容；任务区使用剩余高度，超过底部固定栏上缘才滚动，不设像素高度上限。
+工作侧栏分为最近、项目、任务。点击项目名称选择工作区，旁边的原生箭头独立展开聊天；选择项目、打开聊天、发送消息和三点操作均不自动展开项目。`ShellPage.WorkSidebar.cs` 按项目 ID 维护工作区选择，空白输入页也能直接向该项目创建会话。任务显示选中项目全部已提交且未归档的聊天，并可临时显示该项目当前活动的未发送草稿；未选择项目时不显示占位内容。任务区使用剩余高度，超过底部固定栏上缘才滚动，不设像素高度上限。
+
+项目行右侧的新增聊天按钮与任务标题旁的新增按钮共用 `StartNewProjectChat`，创建初始标题为“新聊天”（重名时编号）的内存草稿，立即选中并显示在任务列表中；任务标题按钮只在选中有效项目且鼠标或键盘焦点进入标题时显示。全界面只保留一个活动项目空稿，再次新增替换前一空稿；重新选择同一项目保留草稿及输入，切换到其他项目丢弃未发送草稿。`WorkSidebarState.ProjectChats(project, activeDraftId)` 只为当前真实、未归档项目开放这一个临时任务行，最近、项目树与正式存储仍仅收录已提交聊天，folderless 或归档项目不显示临时任务行。首条消息提交后才正式保存并更新最近及未置顶顺序；创建、重选或打开草稿不更新 MRU。
 
 最近收录全部已提交且未归档的工作聊天，包括项目内和 `IsFolderlessWorkspace` 下的会话；普通聊天模式独立。最近在项目上方，默认收起，展开选择写入 `LayoutState.WorkRecentExpanded`，刷新不改变偏好。打开项目内的最近聊天自动选中对应工作区与任务聊天，保留项目的手动展开状态。`LayoutState.RecentWorkChatIds` 保存跨项目的最近发送顺序，过滤无效 ID，置顶始终在前。项目树和最近各自滚动、各自收起，共享随窗口变化的高度预算，保证任务区始终可用并保留列表虚拟化。最近与任务复用 `WorkChatRowTemplate`，由行数据控制灰色选中背景，原生 ListView 选择关闭以避免蓝色标记；三点菜单与项目内聊天相同，鼠标或键盘焦点进入时显示。
 
@@ -79,3 +88,5 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 项目树刷新由 `ShellPage.ProjectRendering.cs` 在当前输入事件结束后合并执行，`ProjectTreeReconciler` 按项目与聊天 ID 保留行对象并增量更新。不要在点击回调中清空整棵树，也不要重新加入 `TreeView.SelectedItem` 赋值；当前聊天的灰色背景由 `IsActive` 控制。重排使用移除/插入相同行对象，避免 WinRT 集合对 `ObservableCollection.Move` 的显示不同步。行卸载和窗口关闭后丢弃悬停、焦点及排队刷新操作。`dotnet run --project tests/project-tree-smoke/ProjectTreeSmoke.csproj` 使用独立原生窗口检查节点更新与生命周期，不访问用户数据。
 
 原生兼容检查：`dotnet run --project tests/math-project-smoke/MathProjectSmoke.csproj` 检查 CSharpMath 降级；`dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj -- --math` 预览原生公式。旧的 `--delimiter-math`、`--physics-math`、`--table-math` 与选择脚本继续用于原生控件回归，主聊天公式、表格和复制应在新的 Transcript 页面检查。
+
+记忆管理已从设置打开独立窗口，具有记忆 HTTP 客户端和聊天/工作/全局范围的查看、来源状态及单条新增/编辑/删除。实现遵循 [接口与验收切分](../../docs/architecture/chat-work-memory.md#下一轮实施切分)，使用范围文档版本检测冲突、写入后重新获取来源状态。未发送空稿不因打开记忆入口而正式保存；快速切换聊天时，晚到列表和写入结果只能更新其所属会话。独立输出配置可并行开发，批量清除及预算诊断等待对应后端/协议实现。

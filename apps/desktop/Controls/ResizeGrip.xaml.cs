@@ -82,6 +82,7 @@ public sealed partial class ResizeGrip : UserControl
         if (Axis == ResizeAxis.Horizontal)
         {
             Width = 8;
+            Height = double.NaN;
             Indicator.Width = 1;
             Indicator.Height = double.NaN;
             Indicator.HorizontalAlignment = HorizontalAlignment.Center;
@@ -90,6 +91,7 @@ public sealed partial class ResizeGrip : UserControl
         else
         {
             Height = 8;
+            Width = double.NaN;
             Indicator.Height = 1;
             Indicator.Width = double.NaN;
             Indicator.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -143,6 +145,9 @@ public sealed partial class ResizeGrip : UserControl
 
     private void Grip_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
+        _dragging = false;
+        ReleasePointerCaptures();
+        UpdateIndicator();
         ResetRequested?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }

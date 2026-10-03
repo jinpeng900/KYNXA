@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Services;
 using KYNXA.Contracts;
 using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
@@ -11,9 +12,13 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private sealed record PermissionOption(string Mode, string Label, string Description, string Icon);
+    private sealed record PermissionOption(string Mode, string LabelKey, string DescriptionKey, string Icon)
+    {
+        public string Label => UiText.Get(LabelKey);
+        public string Description => UiText.Get(DescriptionKey);
+    }
 
-    private static readonly PermissionOption[] PermissionOptions =
+    private readonly PermissionOption[] PermissionOptions =
     [
         new(ChatPermissionModes.Ask, "请求批准", "编辑外部文件和使用互联网时始终询问", "IconPermissionAsk"),
         new(ChatPermissionModes.Smart, "帮我批准", "仅对检测到的风险操作请求批准", "IconPermissionSmart"),
@@ -32,7 +37,7 @@ public sealed partial class ShellPage
         SelectedPermissionLabel.Text = option.Label;
         SelectedPermissionLabel.Foreground = PermissionBrush(option.Mode);
         SelectedPermissionIcon.Source = (ImageSource)Application.Current.Resources[option.Icon];
-        AutomationProperties.SetName(PermissionPickerButton, $"权限：{option.Label}");
+        AutomationProperties.SetName(PermissionPickerButton, string.Format(UiText.Get("权限：{0}"), option.Label));
         ToolTipService.SetToolTip(PermissionPickerButton, option.Description);
     }
 
@@ -83,7 +88,7 @@ public sealed partial class ShellPage
             };
             AutomationProperties.SetAutomationId(button, $"PermissionOption_{option.Mode}");
             AutomationProperties.SetName(button, option.Label);
-            AutomationProperties.SetHelpText(button, $"{(selected ? "已选中。" : "")}{option.Description}");
+            AutomationProperties.SetHelpText(button, (selected ? UiText.Get("已选中。") : "") + option.Description);
             button.Click += (_, _) =>
             {
                 _layout.PermissionMode = option.Mode;

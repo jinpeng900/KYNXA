@@ -1,10 +1,12 @@
 using System.Collections.ObjectModel;
+using KYNXA_Desktop.Layout;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 
 namespace KYNXA_Desktop.Views;
 
@@ -12,6 +14,8 @@ public sealed partial class ShellPage
 {
     private Guid? _selectedWorkProjectId;
     private Guid? _workChatToReveal;
+    private bool _workTaskHeaderHovered;
+    private readonly WorkSidebarLayout _workSidebarLayout = new();
     public ObservableCollection<ProjectTreeEntry> WorkRecentEntries { get; } = [];
     public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
 
@@ -19,6 +23,11 @@ public sealed partial class ShellPage
     private void SelectWorkspaceProject(ProjectState project)
     {
         if (!_projectsReady || project.IsArchived || project.IsFolderlessWorkspace) return;
+        if (_selectedWorkProjectId == project.Id && _activeProjectChat is { CanPersist: false } draft && project.Chats.Contains(draft))
+        {
+            SelectProjectChat(project, draft);
+            return;
+        }
         CaptureProjectDraft();
         DiscardEmptyProjectChats();
         _activeProjectChat = null;
@@ -40,10 +49,13 @@ public sealed partial class ShellPage
         if (project is null) _selectedWorkProjectId = null;
         var replying = _pendingReplies.Keys.ToHashSet();
         WorkSidebarState.ReconcileChats(WorkRecentEntries, WorkSidebarState.RecentChats(_projects, _layout.RecentWorkChatIds), _activeProjectChat?.Id, replying);
-        WorkSidebarState.ReconcileChats(WorkTaskEntries, WorkSidebarState.ProjectChats(project), _activeProjectChat?.Id, replying);
+        WorkSidebarState.ReconcileChats(WorkTaskEntries, WorkSidebarState.ProjectChats(project, _activeProjectChat?.Id), _activeProjectChat?.Id, replying);
         WorkTaskProjectLabel.Text = project?.Name ?? string.Empty;
         WorkTaskProjectLabel.Visibility = project is null ? Visibility.Collapsed : Visibility.Visible;
-        AutomationProperties.SetName(WorkTaskHistory, project is null ? "当前项目的聊天" : $"{project.Name}的聊天");
+        WorkTaskAddChatButton.Visibility = project is null ? Visibility.Collapsed : Visibility.Visible;
+        WorkTaskAddChatButton.IsEnabled = project is not null;
+        UpdateWorkTaskLanguage();
+        UpdateWorkTaskHeaderActions();
         WorkRecentCount.Text = WorkRecentEntries.Count.ToString();
         WorkRecentCount.Visibility = WorkRecentEntries.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         UpdateWorkRecentVisibility();
@@ -64,6 +76,46 @@ public sealed partial class ShellPage
         }
     }
 
+    private async void WorkTaskAddChat_Click(object sender, RoutedEventArgs e)
+    {
+        var project = WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+        if (project is null) return;
+        await RunProjectActionAsync(() =>
+        {
+            StartNewProjectChat(project);
+            return Task.CompletedTask;
+        });
+    }
+
+    private void UpdateWorkTaskLanguage()
+    {
+        var project = WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+        AutomationProperties.SetName(WorkTaskAddChatButton, project is null ? UiText.Get("在当前项目中添加聊天") : string.Format(UiText.Get("在{0}中添加聊天"), project.Name));
+        AutomationProperties.SetName(WorkTaskHistory, project is null ? UiText.Get("当前项目的聊天") : string.Format(UiText.Get("{0}的聊天"), project.Name));
+    }
+
+    private void WorkTaskHeader_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        _workTaskHeaderHovered = true;
+        UpdateWorkTaskHeaderActions();
+    }
+
+    private void WorkTaskHeader_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _workTaskHeaderHovered = false;
+        UpdateWorkTaskHeaderActions();
+    }
+
+    private void WorkTaskHeader_FocusChanged(object sender, RoutedEventArgs e) => UpdateWorkTaskHeaderActions();
+
+    private void UpdateWorkTaskHeaderActions()
+    {
+        if (WorkTaskAddChatButton is null || WorkTaskHeader is null) return;
+        bool visible = WorkTaskAddChatButton.IsEnabled && (_workTaskHeaderHovered || ContainsKeyboardFocus(WorkTaskHeader));
+        WorkTaskAddChatButton.Opacity = visible ? 1 : 0;
+        WorkTaskAddChatButton.IsHitTestVisible = visible;
+    }
+
     private void WorkRecentToggle_Click(object sender, RoutedEventArgs e)
     {
         _layout.WorkRecentExpanded = !_layout.WorkRecentExpanded;
@@ -75,20 +127,76 @@ public sealed partial class ShellPage
     {
         WorkRecentHistory.Visibility = _layout.WorkRecentExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkRecentChevron.Glyph = _layout.WorkRecentExpanded ? "\uE70D" : "\uE76C";
-        AutomationProperties.SetName(WorkRecentToggle, _layout.WorkRecentExpanded ? "收起最近的工作聊天" : "展开最近的工作聊天");
+        AutomationProperties.SetName(WorkRecentToggle, _layout.WorkRecentExpanded ? UiText.Get("收起最近的工作聊天") : UiText.Get("展开最近的工作聊天"));
         UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
     }
 
     private void UpdateWorkSidebarHeights(double available)
     {
-        if (!double.IsFinite(available) || available <= 0) return;
-        // Recent and projects scroll independently and leave at least half the
-        // sidebar for tasks. Their limits follow window height, not fixed pixels.
-        double navigationBudget = Math.Max(0, available * 0.5 - 76);
-        bool recent = _layout.WorkRecentExpanded;
-        bool projects = ProjectTree.Visibility == Visibility.Visible;
-        WorkRecentHistory.MaxHeight = recent && projects ? navigationBudget * 0.5 : navigationBudget;
-        ProjectTree.MaxHeight = recent && projects ? navigationBudget * 0.5 : navigationBudget;
+        var geometry = WorkSidebarLayout.Calculate(available, _layout.WorkRecentExpanded,
+            ProjectTree.Visibility == Visibility.Visible, _layout.WorkNavigationRatio, _layout.WorkRecentRatio);
+        if (geometry is null) return;
+        WorkNavigationGrip.Visibility = geometry.NavigationGripHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
+        WorkNavigationGripRow.Height = new GridLength(geometry.NavigationGripHeight);
+        WorkRecentGrip.Visibility = geometry.RecentGripHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
+        WorkRecentGripRow.Height = new GridLength(geometry.RecentGripHeight);
+        WorkNavigationRow.Height = SidebarGridLength(geometry.NavigationRow);
+        WorkRecentRow.Height = SidebarGridLength(geometry.RecentRow);
+        WorkProjectsRow.Height = SidebarGridLength(geometry.ProjectsRow);
+        WorkRecentHistory.MaxHeight = geometry.RecentMaximumHeight;
+        ProjectTree.MaxHeight = geometry.ProjectsMaximumHeight;
+    }
+
+    private static GridLength SidebarGridLength(WorkSidebarRowHeight height) => height.Sizing switch
+    {
+        WorkSidebarRowSizing.Pixels => new GridLength(height.Value),
+        WorkSidebarRowSizing.Star => new GridLength(height.Value, GridUnitType.Star),
+        _ => GridLength.Auto
+    };
+
+    private void WorkNavigationGrip_DragStarted(object? sender, EventArgs e) =>
+        _workSidebarLayout.BeginNavigationDrag(WorkNavigationRow.ActualHeight, _layout);
+
+    private void WorkNavigationGrip_DragDelta(object? sender, Controls.ResizeDeltaEventArgs e)
+    {
+        double available = WorkSidebarContent.ActualHeight;
+        if (_workSidebarLayout.ResizeNavigation(_layout, available, _layout.WorkRecentExpanded,
+            ProjectTree.Visibility == Visibility.Visible, e.Delta)) UpdateWorkSidebarHeights(available);
+    }
+
+    private void WorkNavigationGrip_CancelRequested(object? sender, EventArgs e)
+    {
+        _workSidebarLayout.CancelNavigationDrag(_layout);
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+    }
+
+    private void WorkNavigationGrip_ResetRequested(object? sender, EventArgs e)
+    {
+        _workSidebarLayout.ResetNavigation(_layout);
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        SaveLayout();
+    }
+
+    private void WorkRecentGrip_DragStarted(object? sender, EventArgs e) =>
+        _workSidebarLayout.BeginRecentDrag(WorkRecentRow.ActualHeight, WorkNavigationRow.ActualHeight, _layout);
+
+    private void WorkRecentGrip_DragDelta(object? sender, Controls.ResizeDeltaEventArgs e)
+    {
+        if (_workSidebarLayout.ResizeRecent(_layout, WorkSidebarContent.ActualHeight, e.Delta))
+            UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+    }
+
+    private void WorkRecentGrip_CancelRequested(object? sender, EventArgs e)
+    {
+        _workSidebarLayout.CancelRecentDrag(_layout);
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+    }
+
+    private void WorkRecentGrip_ResetRequested(object? sender, EventArgs e)
+    {
+        _workSidebarLayout.ResetRecent(_layout);
+        UpdateWorkSidebarHeights(WorkSidebarContent.ActualHeight);
+        SaveLayout();
     }
 
     private void RecordWorkChatActivity(ProjectChatState chat)

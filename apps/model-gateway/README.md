@@ -2,6 +2,8 @@
 
 KYNXA 自有的本机模型 API 服务，使用 Node.js 内置 HTTP、fetch 和文件接口直接连接云端或本地服务。支持 OpenAI Chat Completions、OpenAI Responses 和 Claude Messages 三种协议；协议适配集中在 `protocols.mjs`，无需额外 SDK、外部源码目录或 npm 依赖。
 
+`server.mjs` 负责路由、校验、业务调用及网关关闭；`http-transport.mjs` 负责 JSON 响应、按字节限额读取请求、SSE 帧和响应生命周期。传输模块管理心跳、背压和断开订阅，生成控制器集合、终止状态及持久化仍由服务端与 runtime 管理。提取不改变端点、字段、状态码、请求限额或本机绑定；相关边界由 `gateway.test.mjs`、`http-transport.test.mjs` 及现有流式集成测试验证。
+
 需要 Node.js 22.19+。桌面应用启动时会自动在后台启动本机网关，已有健康网关时直接复用；请求前也会检查并在网关退出后重新启动。网关脚本随桌面构建和发布复制，Node.js 可安装在系统中，或由发行包提供 `runtime/node.exe`。关闭桌面不会停止共享网关。显式配置的远程地址不会在本机自动启动服务。本地模型推理进程仍需单独启动。
 
 开发调试也可以在项目根目录手动运行：
@@ -43,7 +45,16 @@ node apps/model-gateway/server.mjs
 - `PATCH /api/conversations/:chatId/memory/:memoryId`：`{scope,expectedRevision,content?,kind?}`。
 - `DELETE /api/conversations/:chatId/memory/:memoryId`：`{scope,expectedRevision}`。修改/删除必须提供范围文档当前版本，冲突返回 409。
 
-记忆来源归档后仍可用；来源聊天删除或移出原工作后暂停注入，撤销删除后恢复。手动确认的记忆不依赖来源消息存活。删除明确记忆后，重试原请求不会将它重新创建。记忆文件损坏、未知版本、容量超限或不安全路径均拒绝覆盖，并返回明确错误。`GET /health` 通过 `memoryProtocol:1`、`contextProtocol:1` 标识本轮能力，桌面拒绝复用旧协议网关。
+设置中的记忆管理窗口已接入三个范围。聊天接口仍以正式聊天 ID 为入口；全局与工作有独立管理接口，不创建空聊天：
+
+- `GET/POST /api/memory/user`；`PATCH/DELETE /api/memory/user/:memoryId`。
+- `GET/POST /api/projects/:projectId/memory`；`PATCH/DELETE /api/projects/:projectId/memory/:memoryId`。
+
+独立接口返回单个范围文档 `{schemaVersion,scope,scopeId,revision,entries,dismissedSources}`；写入参数和版本约定与上述聊天接口一致，若提供 `scope` 必须匹配 URL。仅创建用户手动确认的记忆，来源可没有聊天 ID；消息来源仍经聊天接口严格验证。真实归档工作可查看和编辑，归档工作记忆仍不注入上下文。隐藏无文件夹、未知、已删除工作拒绝访问。
+
+`expectedRevision` 使用范围文档 `revision`（聊天 GET 为 `scopes[].revision`），不能使用条目版本。桌面每次提交已读版本，成功与 409 后重新 GET 来源状态；冲突保留编辑，不自动覆盖。新接口返回 `active/sourceAvailable/sourceArchived`，旧聊天写响应保持兼容。未发送草稿不会提前保存。当前没有范围批量清除接口。
+
+记忆来源归档后仍可用；来源聊天删除后暂停注入，撤销删除后恢复。聊天移出原工作时，仅暂停从该聊天确认的原工作记忆；聊天记忆随会话移动，全局记忆继续按其明确范围生效。手动确认的记忆不依赖来源消息存活。删除明确记忆后，重试原请求不会将它重新创建。记忆文件损坏、未知版本、容量超限或不安全路径均拒绝覆盖，并返回明确错误。`GET /health` 通过 `memoryProtocol:1`、`contextProtocol:1` 标识记忆及上下文能力，`memoryManagementProtocol:1` 标识独立范围管理，桌面拒绝复用旧协议网关。
 
 ## 统一会话存储
 
@@ -126,3 +137,13 @@ node --test apps/model-gateway/tests/*.test.mjs
 ```
 
 测试使用独立临时目录和本地模拟模型服务，覆盖真实 HTTP 调用链路、模型 ID 和密钥传递、多轮上下文、并发顺序、失败重试以及配置脱敏，无需云端密钥。流式测试还覆盖三种协议、分片 UTF-8 / SSE、思考与正文分离、最终快照、JSON 回退、取消与超时、半途出错、停止后的上下文和请求去重。
+
+## 当前验证与后续接口
+
+2026-10-02 实现基线 `3226527`：151 项网关自动测试通过；桌面构建零警告、零错误。记忆测试覆盖三层隔离、来源生命周期、版本冲突、迁移、摘要损坏恢复，以及记忆读写与会话移动/删除的并发顺序。该记录是此次基线结果，不是对未来提交、所有真实模型或 1M 推理能力的保证。
+
+2026-10-03 工作区重构：HTTP 传输职责从路由中提取，完整网关回归 157 项通过、0 失败（原 151 项与新增 6 项）。新增检查覆盖 JSON 响应合同、请求体字节限额、分块 UTF-8、SSE 心跳、背压和订阅清理；正式日志、记忆范围和队列实现保持不变。
+
+后续先接入桌面记忆列表与单条管理。并行独立配置输出上限：`context.mjs` 目前输出为 `min(2048, floor(window × 0.25))`，提高输入窗口不会增加输出长度。随后将当前内部 `context.metrics` 中的摘录/省略信息以受限诊断返回前端；当前运行时未将这些指标传入 HTTP/SSE，桌面读取器也不接受未知事件，必须同时更新协议、DTO 和读取逻辑。再把目录元信息与正文读取分开，支持分页/按需加载；现有 catalog 接口仍带全部消息，新接口要与桌面同步兼容。
+
+本地服务自动发现/启动、工具调用与 Host 接入均待实现。后续 Host 先复用网关的正式聊天/记忆服务，不增加第二套可独立写入的聊天历史。职责和验收见 [团队计划](../../docs/team/README.md)。

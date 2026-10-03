@@ -22,6 +22,7 @@ public sealed class LayoutStateService
                 if (state is not null && state.LayoutVersion <= LayoutState.CurrentVersion)
                 {
                     state.RecentWorkChatIds ??= [];
+                    state.InterfaceLanguage = UiText.NormalizeLanguage(state.InterfaceLanguage);
                     if (state.LayoutVersion < 3)
                     {
                         state.SidebarWidth = Layout.ShellLayoutMetrics.SidebarDefault;
@@ -45,17 +46,19 @@ public sealed class LayoutStateService
         return LayoutState.CreateDefault();
     }
 
-    public void Save(LayoutState state)
+    public bool Save(LayoutState state)
     {
-        if (StoragePaths.IsMigrating) return;
+        if (StoragePaths.IsMigrating) return false;
         try
         {
             File.WriteAllText(SettingsPath + ".tmp", JsonSerializer.Serialize(state));
             File.Move(SettingsPath + ".tmp", SettingsPath, overwrite: true);
+            return true;
         }
         catch
         {
             // Layout persistence is best-effort; the in-memory layout remains usable.
+            return false;
         }
     }
 }

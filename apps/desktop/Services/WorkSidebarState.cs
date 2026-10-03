@@ -4,7 +4,7 @@ using KYNXA_Desktop.ViewModels;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Views over saved work chats; sidebar navigation never changes their storage ownership.</summary>
+/// <summary>Views over work chats; sidebar navigation never changes their storage ownership.</summary>
 public static class WorkSidebarState
 {
     public static ProjectState? FindSelectedProject(IEnumerable<ProjectState> projects, Guid? projectId) =>
@@ -24,10 +24,13 @@ public static class WorkSidebarState
             .ThenBy(entry => !entry.Chat.IsPinned && ranks.TryGetValue(entry.Chat.Id, out int rank) ? rank : int.MaxValue);
     }
 
-    public static IEnumerable<(ProjectState Project, ProjectChatState Chat)> ProjectChats(ProjectState? project) =>
+    /// <summary>Tasks may show the selected project's active draft. Other views omit drafts by default.</summary>
+    public static IEnumerable<(ProjectState Project, ProjectChatState Chat)> ProjectChats(
+        ProjectState? project, Guid? activeDraftId = null) =>
         project is null || project.IsArchived
             ? []
-            : project.Chats.Where(chat => chat.CanPersist && !chat.IsArchived)
+            : project.Chats.Where(chat => !chat.IsArchived &&
+                (chat.CanPersist || (!project.IsFolderlessWorkspace && chat.Id == activeDraftId)))
                 .OrderByDescending(chat => chat.IsPinned)
                 .Select(chat => (project, chat));
 

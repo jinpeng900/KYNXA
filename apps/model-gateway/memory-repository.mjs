@@ -86,6 +86,10 @@ export class MemoryRepository {
     return this._withScope(conversationId, scope, location => this._read(location));
   }
 
+  readScope(scope, scopeId) {
+    return this._withManagedScope(scope, scopeId, location => this._read(location));
+  }
+
   readFor(conversationId) {
     return this.conversations.withConversationStorage(memoryId(conversationId), async relationship => {
       const scopeNames = ['chat', ...(!relationship.isFolderlessWorkspace && !relationship.projectArchived && relationship.projectId ? ['project'] : []), 'user'];
@@ -110,29 +114,58 @@ export class MemoryRepository {
     });
   }
 
+  _withManagedScope(scope, scopeId, operation) {
+    scope = memoryScope(scope);
+    const run = relationship => {
+      if (scope === 'project' && relationship.isFolderlessWorkspace)
+        throw memoryFailure('无文件夹工作不提供共享记忆。');
+      // Archived real work remains manageable; only conversation context suppresses its injection.
+      const location = this._location(scope === 'project' ? { projectId: relationship.projectId } : {}, scope);
+      return this._run(location.file, () => operation(location));
+    };
+    // Preserve catalog/conversation queue -> memory file queue ordering for every management operation.
+    if (scope === 'user') return this.conversations.withCatalogStorage(() => run({}));
+    if (scope === 'project') return this.conversations.withProjectStorage(memoryId(scopeId), run);
+    throw memoryFailure('独立记忆管理仅支持工作和用户作用域。');
+  }
+
   async mutate(conversationId, scope, expectedRevision, operation) {
-    return this._withScope(conversationId, scope, async location => {
-      const document = await this._read(location);
-      if (expectedRevision !== undefined && document.revision !== expectedMemoryRevision(expectedRevision))
-        throw memoryFailure('记忆已更新，请重新读取后重试。', 'MEMORY_CONFLICT', 409);
-      const changed = await operation(document);
-      if (changed === false) return structuredClone(document);
-      document.revision++;
-      const validated = validateMemoryDocument(document, location);
-      // atomicJson writes indented JSON; enforce the size of those exact bytes so a successful write always remains readable.
-      if (Buffer.byteLength(JSON.stringify(validated, null, 2)) > MAX_MEMORY_FILE_BYTES)
-        throw memoryFailure('此作用域记忆文件已达容量上限，无法追加；已有记忆已保留。', 'MEMORY_CAPACITY_EXCEEDED', 409);
-      await this._safe(location.folder, { create: true });
-      await this._safe(location.file, { file: true });
-      await atomicJson(location.file, validated);
-      return structuredClone(validated);
-    });
+    return this._withScope(conversationId, scope, location => this._mutate(location, expectedRevision, operation));
+  }
+
+  mutateScope(scope, scopeId, expectedRevision, operation) {
+    return this._withManagedScope(scope, scopeId, location => this._mutate(location, expectedRevision, operation));
+  }
+
+  async _mutate(location, expectedRevision, operation) {
+    const document = await this._read(location);
+    if (expectedRevision !== undefined && document.revision !== expectedMemoryRevision(expectedRevision))
+      throw memoryFailure('记忆已更新，请重新读取后重试。', 'MEMORY_CONFLICT', 409);
+    const changed = await operation(document);
+    if (changed === false) return structuredClone(document);
+    document.revision++;
+    const validated = validateMemoryDocument(document, location);
+    // atomicJson writes indented JSON; enforce the size of those exact bytes so a successful write always remains readable.
+    if (Buffer.byteLength(JSON.stringify(validated, null, 2)) > MAX_MEMORY_FILE_BYTES)
+      throw memoryFailure('此作用域记忆文件已达容量上限，无法追加；已有记忆已保留。', 'MEMORY_CAPACITY_EXCEEDED', 409);
+    await this._safe(location.folder, { create: true });
+    await this._safe(location.file, { file: true });
+    await atomicJson(location.file, validated);
+    return structuredClone(validated);
   }
 
   create(conversationId, input) {
+    return this._create(input, (scope, expected, operation) => this.mutate(conversationId, scope, expected, operation));
+  }
+
+  createScope(scope, scopeId, input) {
+    return this._create({ ...input, scope }, (_, expected, operation) => this.mutateScope(scope, scopeId, expected, operation));
+  }
+
+  _create(input, mutate) {
     const scope = memoryScope(input.scope), content = memoryContent(input.content), kind = memoryKind(input.kind, scope);
     const source = validateMemorySource(input.source);
-    return this.mutate(conversationId, scope, expectedMemoryRevision(input.expectedRevision), document => {
+    return mutate(scope, expectedMemoryRevision(input.expectedRevision), document => {
       // A failed/retried model turn must not create the same explicit memory twice.
       if (source.type === 'user-message' && document.dismissedSources.some(item =>
           item.conversationId === source.conversationId && item.messageId === source.messageId)) return false;
@@ -146,12 +179,20 @@ export class MemoryRepository {
   }
 
   update(conversationId, memoryIdValue, input) {
+    return this._update(memoryIdValue, input, (scope, expected, operation) => this.mutate(conversationId, scope, expected, operation));
+  }
+
+  updateScope(scope, scopeId, memoryIdValue, input) {
+    return this._update(memoryIdValue, { ...input, scope }, (_, expected, operation) => this.mutateScope(scope, scopeId, expected, operation));
+  }
+
+  _update(memoryIdValue, input, mutate) {
     const id = memoryId(memoryIdValue), scope = memoryScope(input.scope);
     const expected = expectedMemoryRevision(input.expectedRevision, true);
     const content = input.content === undefined ? undefined : memoryContent(input.content);
     const kind = input.kind === undefined ? undefined : memoryKind(input.kind, scope);
     if (content === undefined && kind === undefined) throw memoryFailure('请提供要更新的记忆内容或类型。');
-    return this.mutate(conversationId, scope, expected, document => {
+    return mutate(scope, expected, document => {
       const entry = document.entries.find(item => item.id === id);
       if (!entry) throw memoryFailure('记忆不存在。', 'MEMORY_NOT_FOUND', 404);
       if (content !== undefined) entry.content = content;
@@ -161,8 +202,16 @@ export class MemoryRepository {
   }
 
   delete(conversationId, memoryIdValue, input) {
+    return this._delete(memoryIdValue, input, (scope, expected, operation) => this.mutate(conversationId, scope, expected, operation));
+  }
+
+  deleteScope(scope, scopeId, memoryIdValue, input) {
+    return this._delete(memoryIdValue, { ...input, scope }, (_, expected, operation) => this.mutateScope(scope, scopeId, expected, operation));
+  }
+
+  _delete(memoryIdValue, input, mutate) {
     const id = memoryId(memoryIdValue), scope = memoryScope(input.scope);
-    return this.mutate(conversationId, scope, expectedMemoryRevision(input.expectedRevision, true), document => {
+    return mutate(scope, expectedMemoryRevision(input.expectedRevision, true), document => {
       const index = document.entries.findIndex(item => item.id === id);
       if (index < 0) throw memoryFailure('记忆不存在。', 'MEMORY_NOT_FOUND', 404);
       const entry = document.entries[index];

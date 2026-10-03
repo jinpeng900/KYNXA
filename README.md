@@ -7,10 +7,38 @@
 **KYNXA** is a local-first personal agent runtime for Windows, designed for durable tasks, model-independent state, governed capabilities, and adaptive execution.
 
 > **Status:** Early Development
-> **Current Milestone:** `v0.1.0 — CodeRepair Vertical Slice`
+> **Implemented Baseline:** streamed chat, portable conversation storage, scoped confirmed memory
+> **Next Runtime Milestone (planned):** `v0.1.0 — CodeRepair Vertical Slice`
 > **Design Specification:** `v1.4.2`
 
 KYNXA is currently under active development. Many features described in the design documents are planned architecture and are not yet implemented.
+
+## Current Implementation
+
+Updated 2026-10-02. The pushed code baseline is `3226527`; this snapshot also records verified sidebar fixes in the current working tree, which are not part of that commit.
+
+* Windows desktop: C# / WinUI 3 / XAML, with WebView2 for selectable Markdown, code highlighting and KaTeX math.
+* A bundled Node.js gateway connects cloud and local HTTP model services using Chat Completions, Responses or Claude Messages. Streaming, cancellation and visible reasoning are supported.
+* Complete conversations use stable chat IDs and append-only JSONL events. Switching providers or models retains the same history.
+* The work sidebar has Recent, Projects and Tasks. Both project and task add buttons show a temporary new chat. Reselecting its project preserves input; switching projects discards an unsent draft. Sending commits the chat and updates recent activity.
+* Confirmed memory has chat, project/work and user scopes. Sibling chats share confirmed work memory while their original histories remain separate. Archive, delete, undo and moving chats preserve the intended scope rules.
+* A configurable Data root contains records, memory, attachments and settings. Initialization and verified migration preserve stable IDs; SQLite is currently a rebuildable metadata index.
+* Each model connection can select 8K, 32K, 128K, 256K, 1M or a custom context budget. The service must support that window. Output remains limited to at most 2048 tokens and is not independently configurable yet.
+
+The `3226527` gateway baseline has 151 passing automated tests. The current sidebar fix separately passed 55 state checks and a Windows desktop build with zero warnings/errors. Actual UI checks covered both add actions, draft replacement, same-project input preservation and cleanup on project changes; the formal catalog revision stayed unchanged. The gateway suite was not rerun for this update. This evidence does not certify every provider, a real 1M model or all UI performance scenarios.
+
+Host orchestration, model-controlled file tools, enforceable approvals, task checkpoints, automatic semantic memory and full-text/vector search are planned. The current permission menu is UI/request metadata.
+
+Start with the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
+
+## Next Steps
+
+1. Settings now opens memory management for chat, project and global scopes, with source status, manual creation, editing, single-entry deletion and revision conflict handling. Add independent output configuration next. Expose context decisions afterward; bulk clearing needs its own backend contract and consistency checks.
+2. Separate conversation lists from message loading; load the selected chat on demand and measure long-history scrolling, copying and switching.
+3. Add a bounded workspace reading flow, then a small Host/tool execution slice with explicit patch review, fixed test commands and recorded evidence. Keep the existing conversation store as the single authority until an explicit migration replaces it.
+4. Add local-service discovery/startup and model download management after the corresponding lifecycle and failure handling are defined.
+
+Memory management is implemented; the remaining items are proposals. Owners and acceptance criteria are in the [team plan](docs/team/README.md); the [memory implementation breakdown](docs/architecture/chat-work-memory.md#下一轮实施切分) names the existing interfaces and next deliverables.
 
 ## Vision
 
@@ -32,6 +60,8 @@ The goal is to build a personal agent that can:
 * remain usable without requiring users to understand agent infrastructure.
 
 ## Core Principles
+
+These principles describe the target runtime. Current confirmed chat/work memory does not yet provide durable execution state, task graphs or checkpoints.
 
 ### Durable Work
 
@@ -94,6 +124,21 @@ The long-term research goal is to maximize useful agent capability under consume
 
 ## Architecture
 
+The running implementation is:
+
+```text
+WinUI Desktop + WebView2
+          │ local HTTP / SSE
+          ▼
+Node.js model gateway ───► cloud API / local HTTP model server
+          │
+          ▼
+Data: catalog + JSONL records + scoped memory
+      derived context excerpts + SQLite metadata index
+```
+
+The following diagram is a future runtime design. Host language is not frozen: the team proposes .NET 10; the older Rust Host route is historical. Neither Host nor Authority is currently implemented.
+
 ```text
                  KYNXA Desktop
               C# + WinUI 3 + XAML
@@ -101,7 +146,7 @@ The long-term research goal is to maximize useful agent capability under consume
                        │ IPC
                        ▼
                kynxa-host.exe
-              Rust Orchestrator
+           Host (language pending decision)
                        │
           ┌────────────┼────────────┐
           │            │            │
@@ -126,7 +171,7 @@ The long-term research goal is to maximize useful agent capability under consume
 
 The desktop client is intentionally separated from the runtime.
 
-The UI must not directly:
+The planned execution boundary requires that the UI must not directly:
 
 * access privileged files;
 * execute host shell commands;
@@ -203,15 +248,15 @@ Initial platform scope:
 * **Desktop:** Windows
 * **Mobile:** Android
 
-Primary implementation technologies:
+Current technologies:
 
-* **Desktop UI:** C# + WinUI 3 + XAML
-* **Core Runtime:** Rust
-* **Trusted Authority Core:** Rust
-* **AI Services:** Python
-* **Local Model Runtime:** llama.cpp-compatible runtimes and other supported local backends
-* **Persistence:** SQLite
-* **Local IPC:** Windows Named Pipes
+* **Desktop UI:** C# + WinUI 3 + XAML; WebView2 / KaTeX for transcripts.
+* **Model gateway:** Node.js built-in HTTP, fetch and file APIs; no Python service is required.
+* **Local model connection:** HTTP services such as llama.cpp, Ollama and LM Studio; model inference remains a separate process.
+* **Persistence:** versioned JSON metadata, JSONL conversation events and scoped memory files; SQLite metadata index.
+* **Desktop communication:** local HTTP / SSE to the gateway.
+
+Future Host (.NET 10 proposed), Rust Authority, execution storage and Named Pipes require separate decisions and implementation. A Python AI service remains an optional design direction rather than a current dependency.
 
 macOS, Linux, and iOS are not part of the initial product scope.
 
@@ -221,27 +266,18 @@ macOS, Linux, and iOS are not part of the initial product scope.
 KYNXA/
 ├── apps/
 │   ├── desktop/              # Production Windows WinUI 3 frontend
-│   └── desktop-preview/      # Ubuntu/Linux visual and interaction preview
-├── crates/
-│   ├── kynxa-core/
-│   ├── kynxa-protocol/
-│   ├── kynxa-host/
-│   ├── kynxa-authority/
-│   └── kynxa-storage/
-├── services/
-│   └── ai-service/
+│   ├── model-gateway/        # Current Node.js model, conversation and memory service
+│   ├── shared/               # Current C# chat contracts
+│   ├── desktop-preview/      # Earlier visual and interaction preview
+│   └── mock-backend/         # Earlier mock service
 ├── docs/
-│   ├── en/
-│   ├── zh-CN/
-│   └── adr/
-├── tests/
-│   ├── integration/
-│   ├── security/
-│   └── benchmarks/
-└── tools/
+│   ├── architecture/         # Implemented chat/work memory design
+│   ├── team/                 # Owners, current status and future plan
+│   └── design/               # Broader design references
+└── tests/                    # Desktop, storage, protocol and interaction smoke projects
 ```
 
-The structure may evolve during early development.
+Gateway unit/integration tests are in `apps/model-gateway/tests/`. Future `apps/host/`, `crates/` and other design directories are not part of the current repository.
 
 ## Security Model
 
@@ -257,7 +293,7 @@ KYNXA assumes that the following components may be untrusted or compromised:
 
 Security decisions must therefore not rely on natural-language compliance.
 
-The trusted authority layer is responsible for:
+The planned trusted authority layer will be responsible for:
 
 * policy evaluation;
 * capability authorization;
@@ -285,7 +321,7 @@ Authority Policy
 
 ```
 
-A local model such as DeepSeek, Qwen, Llama, or another supported model may use KYNXA Web Search without directly owning network access.
+In the future design, local models may use a governed Web Search capability. Search and capability-level network controls are not implemented yet.
 
 KYNXA is designed to support:
 
@@ -304,6 +340,13 @@ The project maintains two levels of documentation:
 ### Developer Documentation
 
 Concise Markdown documentation for contributors and users.
+
+* [Model gateway and local startup](apps/model-gateway/README.md)
+* [Chat/work memory and Data folders](docs/architecture/chat-work-memory.md)
+* [UI components](apps/desktop/UI-COMPONENTS.md)
+* [Team plan and next steps](docs/team/README.md)
+* [Captain overview](docs/team/队长总览.md)
+* [R3 design reference](docs/design/r3-refined/README.md)
 
 ### Full Technical Design Specification
 

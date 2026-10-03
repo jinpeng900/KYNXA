@@ -7,10 +7,38 @@
 **KYNXA** 是一个面向 Windows 的 local-first 个人 Agent Runtime，重点关注长期任务、模型无关状态、受控能力执行以及自适应运行。
 
 > **当前状态：** 早期开发阶段
-> **当前里程碑：** `v0.1.0 — CodeRepair Vertical Slice`
+> **已实现基线：** 流式聊天、可迁移的会话存储、分层确认记忆
+> **下一运行时里程碑（计划）：** `v0.1.0 — CodeRepair Vertical Slice`
 > **设计规范版本：** `v1.4.2`
 
 KYNXA 当前仍处于积极开发阶段。完整设计文档中描述的很多能力属于规划架构，并不代表目前已经完成实现。
+
+## 当前实现
+
+更新日期：2026-10-02；已推送代码基线 `3226527`。以下同时记录当前工作区已验证的侧栏修复，该修复不在上述提交中。
+
+* Windows 桌面使用 C# / WinUI 3 / XAML，WebView2 展示可选择复制的 Markdown、代码高亮与 KaTeX 公式。
+* 自有 Node.js 网关连接云端或本地 HTTP 模型服务，支持 Chat Completions、Responses、Claude Messages，以及流式、取消和接口实际返回的可见思考。
+* 正式聊天按稳定聊天 ID 保存完整 JSONL 事件；切换服务商或模型继续使用同一历史。
+* 工作侧栏包含最近、项目和任务。项目旁及任务旁的新增按钮会显示临时“新聊天”；重选同一项目保留输入，切换其他项目丢弃未发送草稿，发送后才正式保存并更新最近顺序。
+* 已确认记忆分为聊天、工作、用户三层。同一工作共享确认约定，各聊天原始历史独立；归档、删除、撤销与移动聊天有对应来源和范围规则。
+* 用户可以选择 Data 根目录，自动初始化及校验迁移保留稳定 ID、记录、记忆、附件和设置；SQLite 当前是可重建的元数据索引。
+* 每个模型连接可选 8K、32K、128K、256K、1M 或自定义上下文预算，须匹配服务端实际能力。当前单次输出最多 2048 tokens，尚未提供独立输出上限配置。
+
+`3226527` 基线网关自动测试 151 项通过。本次侧栏修复另通过 55 项状态检查和 Windows 桌面编译（零警告、零错误）；实际界面检查了两个新增入口、草稿替换、同项目保留输入及切项目清理，正式聊天目录版本未改变。本轮没有重跑上述网关测试；这些证据不代表所有服务商、真实 1M 模型或全部 UI 性能场景已经验收。
+
+Host 编排、模型文件工具、实际审批约束、任务检查点、自动语义记忆和全文/向量检索仍属计划。当前权限菜单只是界面与请求元数据。
+
+使用与开发入口：[模型网关](apps/model-gateway/README.md)、[聊天与工作记忆](docs/architecture/chat-work-memory.md)、[UI 组件](apps/desktop/UI-COMPONENTS.md)、[五人计划](docs/team/README.md)。
+
+## 下一步建议
+
+1. 设置中的记忆管理已实现三范围列表、来源状态、手动新增、编辑、单条删除和版本冲突处理。下一步补独立输出长度配置。上下文取舍提示随后接入，批量清除单独补后端接口与一致性验证。
+2. 将聊天列表与正文加载拆开，按需加载当前聊天，量测长历史的切换、滚动与复制。
+3. 接入有限范围的工作文件读取，再推进小型 Host/工具闭环：审阅补丁、执行固定测试、保存验证证据。正式聊天存储沿用现有单一来源，替换前须有明确迁移方案。
+4. 明确服务生命周期与失败处理后，补本地服务发现/启停及模型下载管理。
+
+除已落地的记忆管理外，以上为后续建议；负责人和验收标准见 [团队计划](docs/team/README.md)，记忆界面的接口与实施切分见 [下一轮实施](docs/architecture/chat-work-memory.md#下一轮实施切分)。
 
 ## 项目愿景
 
@@ -32,6 +60,8 @@ KYNXA 的目标是构建一个能够：
 * 让普通用户无需理解复杂 Agent 基础设施也能直接使用。
 
 ## 核心原则
+
+以下原则描述目标运行时。当前聊天/工作确认记忆尚不包含持久执行状态、任务图或执行检查点。
 
 ### Durable Work
 
@@ -94,6 +124,21 @@ KYNXA 的长期目标是根据任务状态和本地硬件情况动态协调：
 
 ## 总体架构
 
+当前实际运行结构：
+
+```text
+WinUI 桌面 + WebView2
+          │ 本机 HTTP / SSE
+          ▼
+Node.js 模型网关 ───► 云端 API / 本地 HTTP 模型服务
+          │
+          ▼
+Data：目录元信息 + JSONL 正式记录 + 分层确认记忆
+      可重建的历史摘录 + SQLite 元数据索引
+```
+
+下图是后续运行时设计。Host 语言尚未冻结，团队建议 .NET 10；旧版 Rust Host 属于历史路线。Host 与 Authority 当前均未实现。
+
 ```text
                  KYNXA Desktop
               C# + WinUI 3 + XAML
@@ -101,7 +146,7 @@ KYNXA 的长期目标是根据任务状态和本地硬件情况动态协调：
                        │ IPC
                        ▼
                kynxa-host.exe
-               Rust Orchestrator
+            Host（语言待决策）
                        │
           ┌────────────┼────────────┐
           │            │            │
@@ -126,7 +171,7 @@ KYNXA 的长期目标是根据任务状态和本地硬件情况动态协调：
 
 桌面 GUI 与 Runtime 强制分离。
 
-Desktop Client 不应直接：
+后续执行边界要求 Desktop Client 不应直接：
 
 * 操作高权限文件；
 * 执行宿主机 Shell；
@@ -203,15 +248,15 @@ Resume Work
 * **桌面端：Windows**
 * **移动端：Android**
 
-主要技术栈：
+当前技术栈：
 
-* **桌面 UI：** C# + WinUI 3 + XAML
-* **核心 Runtime：** Rust
-* **Trusted Authority Core：** Rust
-* **AI Service：** Python
-* **本地模型 Runtime：** llama.cpp 兼容 Runtime 及其他本地 Backend
-* **持久化：** SQLite
-* **本地 IPC：** Windows Named Pipe
+* **桌面 UI：** C# + WinUI 3 + XAML；WebView2 / KaTeX 展示会话。
+* **模型网关：** Node.js 内置 HTTP、fetch 与文件接口，目前不依赖 Python 服务。
+* **本地模型连接：** llama.cpp、Ollama、LM Studio 等 HTTP 服务；推理进程独立运行。
+* **持久化：** 带版本的 JSON 元信息、JSONL 会话事件、分层记忆文件；SQLite 元数据索引。
+* **桌面通信：** 与网关通过本机 HTTP / SSE 通信。
+
+后续 Host（建议 .NET 10）、Rust Authority、执行存储和 Named Pipe 仍需单独决策与实现。Python AI Service 是可选设计方向，不是当前运行依赖。
 
 macOS、Linux 和 iOS 暂不属于首版目标范围。
 
@@ -221,27 +266,18 @@ macOS、Linux 和 iOS 暂不属于首版目标范围。
 KYNXA/
 ├── apps/
 │   ├── desktop/              # Windows WinUI 3 正式前端
-│   └── desktop-preview/      # Ubuntu/Linux 视觉与交互预览
-├── crates/
-│   ├── kynxa-core/
-│   ├── kynxa-protocol/
-│   ├── kynxa-host/
-│   ├── kynxa-authority/
-│   └── kynxa-storage/
-├── services/
-│   └── ai-service/
+│   ├── model-gateway/        # 当前 Node 模型、会话与记忆服务
+│   ├── shared/               # 当前 C# 聊天契约
+│   ├── desktop-preview/      # 早期视觉与交互预览
+│   └── mock-backend/         # 早期模拟服务
 ├── docs/
-│   ├── en/
-│   ├── zh-CN/
-│   └── adr/
-├── tests/
-│   ├── integration/
-│   ├── security/
-│   └── benchmarks/
-└── tools/
+│   ├── architecture/        # 已实现的聊天/工作记忆架构
+│   ├── team/                # 分工、当前状态及后续计划
+│   └── design/              # 更完整的设计参考
+└── tests/                   # 桌面、存储、协议与交互 smoke 项目
 ```
 
-早期开发阶段仓库结构仍可能根据实现情况调整。
+网关单元/集成测试位于 `apps/model-gateway/tests/`。设计中的 `apps/host/`、`crates/` 等目录当前尚未建立。
 
 ## 安全模型
 
@@ -257,7 +293,7 @@ KYNXA 默认假设下列内容可能是不可信的：
 
 因此安全系统不能依赖自然语言模型“主动遵守规则”。
 
-Trusted Authority Layer 负责：
+计划中的 Trusted Authority Layer 将负责：
 
 * Policy Evaluation；
 * Capability Authorization；
@@ -286,7 +322,7 @@ Network Route
 Authority Policy
 ```
 
-本地 DeepSeek、Qwen、Llama 等模型可以通过 KYNXA Web Search 获取网络信息，而模型本身不直接拥有任意网络权限。
+后续设计允许本地模型通过受控的 Web Search 能力获取网络信息；当前尚未实现搜索工具和能力级网络控制。
 
 计划支持：
 
@@ -305,6 +341,13 @@ KYNXA 维护两个层级的文档。
 ### Developer Documentation
 
 面向用户和 Contributor 的精简 Markdown 文档。
+
+* [模型网关与本地启动](apps/model-gateway/README.md)
+* [聊天/工作记忆与 Data 目录](docs/architecture/chat-work-memory.md)
+* [UI 组件](apps/desktop/UI-COMPONENTS.md)
+* [五人分工与下一步](docs/team/README.md)
+* [队长总览](docs/team/队长总览.md)
+* [R3 设计参考](docs/design/r3-refined/README.md)
 
 ### Full Technical Design Specification
 

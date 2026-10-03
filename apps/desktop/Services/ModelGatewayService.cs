@@ -17,9 +17,9 @@ public static class ModelGatewayService
     public static async Task InitializeStorageAsync(string target, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!Path.IsPathFullyQualified(target)) throw new InvalidOperationException("数据目录必须使用绝对路径。");
+        if (!Path.IsPathFullyQualified(target)) throw new InvalidOperationException(UiText.Get("数据目录必须使用绝对路径。"));
         string script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "initialize-storage.mjs");
-        if (!File.Exists(script)) throw new InvalidOperationException("缺少存储初始化文件，请重新构建或安装 KYNXA。");
+        if (!File.Exists(script)) throw new InvalidOperationException(UiText.Get("缺少存储初始化文件，请重新构建或安装 KYNXA。"));
         var start = new ProcessStartInfo(FindNode())
         {
             UseShellExecute = false, CreateNoWindow = true,
@@ -30,7 +30,7 @@ public static class ModelGatewayService
         start.ArgumentList.Add(Path.GetFullPath(target));
         try
         {
-            using var process = Process.Start(start) ?? throw new InvalidOperationException("无法启动存储初始化程序。");
+            using var process = Process.Start(start) ?? throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序。"));
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(TimeSpan.FromMinutes(2));
             Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
@@ -47,18 +47,18 @@ public static class ModelGatewayService
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
                 await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
                 cancellationToken.ThrowIfCancellationRequested();
-                throw new InvalidOperationException("存储初始化超时，原存储位置未改变。");
+                throw new InvalidOperationException(UiText.Get("存储初始化超时，原存储位置未改变。"));
             }
             if (process.ExitCode != 0)
             {
                 string detail = error.Result.Trim();
                 if (detail.Length > 1500) detail = detail[..1500];
-                throw new InvalidOperationException("存储初始化失败，原存储位置未改变。" + (detail.Length == 0 ? "" : "\n" + detail));
+                throw new InvalidOperationException(UiText.Get("存储初始化失败，原存储位置未改变。") + (detail.Length == 0 ? "" : "\n" + detail));
             }
         }
         catch (System.ComponentModel.Win32Exception error)
         {
-            throw new InvalidOperationException("无法启动存储初始化程序，请安装 Node.js 22.19 或更新版本。", error);
+            throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序，请安装 Node.js 22.19 或更新版本。"), error);
         }
     }
 
@@ -72,7 +72,7 @@ public static class ModelGatewayService
             if (await IsReadyAsync(address, cancellationToken)) return;
             var script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "server.mjs");
             if (!File.Exists(script))
-                throw new InvalidOperationException("缺少模型网关文件，请重新构建或安装 KYNXA。");
+                throw new InvalidOperationException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"));
             var start = new ProcessStartInfo(FindNode())
             {
                 UseShellExecute = false, CreateNoWindow = true,
@@ -83,21 +83,21 @@ public static class ModelGatewayService
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
                 start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;
             using var process = Process.Start(start)
-                ?? throw new InvalidOperationException("无法启动模型网关。");
+                ?? throw new InvalidOperationException(UiText.Get("无法启动模型网关。"));
             var deadline = Stopwatch.StartNew();
             while (deadline.Elapsed < TimeSpan.FromSeconds(15))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (await IsReadyAsync(address, cancellationToken)) return;
                 if (process.HasExited)
-                    throw new InvalidOperationException("模型网关启动失败，请检查端口是否被占用及数据目录是否可访问。");
+                    throw new InvalidOperationException(UiText.Get("模型网关启动失败，请检查端口是否被占用及数据目录是否可访问。"));
                 await Task.Delay(200, cancellationToken);
             }
-            throw new InvalidOperationException("模型网关启动超时，请稍后重试。");
+            throw new InvalidOperationException(UiText.Get("模型网关启动超时，请稍后重试。"));
         }
         catch (System.ComponentModel.Win32Exception error)
         {
-            throw new InvalidOperationException("无法启动模型网关，请安装 Node.js 22.19 或更新版本后重新打开 KYNXA。", error);
+            throw new InvalidOperationException(UiText.Get("无法启动模型网关，请安装 Node.js 22.19 或更新版本后重新打开 KYNXA。"), error);
         }
         finally { StartupLock.Release(); }
     }
@@ -120,7 +120,7 @@ public static class ModelGatewayService
                 !memory.TryGetInt32(out int memoryVersion) || memoryVersion < 1 ||
                 !body.RootElement.TryGetProperty("contextProtocol", out var context) ||
                 !context.TryGetInt32(out int contextVersion) || contextVersion < 1))
-                throw new InvalidOperationException("正在运行的旧网关不支持当前聊天记忆与上下文结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。");
+                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天记忆与上下文结构。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
             return ready;
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)
