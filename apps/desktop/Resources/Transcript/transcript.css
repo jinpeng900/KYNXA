@@ -17,8 +17,6 @@ body { margin: 0; padding: 12px 20px 24px; line-height: 1.7; overflow-wrap: anyw
 .message-body { min-width: 0; }
 .assistant-segment { min-width: 0; }
 .assistant-segment + .assistant-segment { margin-top: 8px; }
-.assistant-segment.commentary { font-size: 14px; }
-.assistant-segment.commentary:not(:last-child) { color: #707070; }
 .assistant-segment > .tool-activities { margin: 5px 0 0; }
 .message-elapsed { margin-bottom: 7px; font-size: 12px; color: #888; }
 .message-elapsed[hidden] { display: none; }

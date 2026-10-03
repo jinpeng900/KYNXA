@@ -55,13 +55,20 @@ try {
  const stages={id:'stage-message',role:'assistant',content:'legacy aggregate',status:'streaming',streaming:true,assistantSegments:segments,toolActivities:[]};
  const stageSnapshot=value=>({conversationId:'stages-chat',messages:[{id:'stage-user',role:'user',content:'inspect'},value]});
  applyTranscript(stageSnapshot(stages));
- assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='4,5,6','active chronology displays exactly recent three actual stages');
- assert(!document.querySelector('.assistant-segment .reasoning')&&!document.getElementById('messages').textContent.includes('PUBLIC_PROVIDER_SUMMARY'),'recent progress does not accumulate repeated thinking cards');
+ assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='1,2,3,4,5,6','active chronology retains every received prose stage in order');
+ assert(!document.querySelector('.assistant-segment .reasoning')&&!document.getElementById('messages').textContent.includes('PUBLIC_PROVIDER_SUMMARY'),'prose stages do not accumulate repeated thinking cards');
+ const activeStyle=getComputedStyle(document.getElementById('stage-1')),activeProseStyle={fontSize:activeStyle.fontSize,color:activeStyle.color};
+ assert(activeProseStyle.fontSize==='15px'&&activeProseStyle.color==='rgb(35, 35, 35)','intermediate prose keeps ordinary final-answer type size and dark color');
+ document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===segments.map(segment=>segment.content).join('\n\n'),'active copy retains all displayed prose rather than a recent window');
  const oldApproval={...approval,round:1,order:1};
  applyTranscript(stageSnapshot({...stages,toolActivities:[oldApproval]}));
- assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='1,4,5,6'&&document.querySelector('[data-tool-call-id=approval-old]'),'pending approval stage is preserved outside recent window');
+ assert([...document.querySelectorAll('.assistant-segment')].map(node=>node.dataset.round).join(',')==='1,2,3,4,5,6'&&document.querySelector('[data-tool-call-id=approval-old]')&&getComputedStyle(document.querySelector('.tool-title')).fontSize==='12px','all prose and older approval remain visible while tool text stays small');
+ const finalSegments=segments.map((segment,index)=>index===5?{...segment,phase:'final_answer',status:'completed',content:'FINAL **verified**',html:'<p id="final-body">FINAL <strong>verified</strong></p>'}:segment);
+ const awaiting={...stages,assistantSegments:finalSegments.map((segment,index)=>index===5?{...segment,html:'<p id="awaiting-final">FINAL <strong>verified</strong></p>'}:segment)};
+ applyTranscript(stageSnapshot(awaiting));
+ assert(document.querySelectorAll('.assistant-segment').length===6&&document.getElementById('stage-1')&&document.getElementById('awaiting-final')&&!document.querySelector('.final-answer')&&document.querySelector('.assistant .message-elapsed').hidden,'a completed final phase retains earlier prose until the enclosing request actually completes');
+ document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===awaiting.assistantSegments.map(segment=>segment.content).join('\n\n'),'active copy includes all prose even after the final phase is decoded');
  const body=document.getElementById('stage-4'),stageRange=document.createRange();stageRange.selectNodeContents(body);selection.removeAllRanges();selection.addRange(stageRange);
- const finalSegments=segments.map((segment,index)=>index===5?{...segment,phase:'final_answer',status:'completed',content:'FINAL **verified**',html:'<p id="final-body">FINAL verified</p>'}:segment);
  const final={...stages,status:'completed',streaming:false,content:'FINAL **verified**',durationMs:17000,assistantSegments:finalSegments,toolActivities:[]};
  applyTranscript(stageSnapshot(final));
  assert(transcriptState().pending&&selection.toString()==='STAGE_4'&&document.getElementById('stage-4')===body,'successful convergence waits while progress text is selected');
@@ -69,6 +76,8 @@ try {
  assert(document.querySelectorAll('.assistant-segment').length===1&&document.querySelector('.final-answer')&&document.getElementById('final-body'),'completed typed reply converges to one final section');
  assert(!document.querySelector('.tool-activity,.tool-activities,.reasoning')&&!document.getElementById('messages').textContent.includes('STAGE_'),'final DOM contains no discarded process');
  assert(document.querySelector('.assistant .message-elapsed').textContent.includes('17')&&getComputedStyle(document.querySelector('.assistant .message-elapsed')).fontSize==='12px','final duration uses actual milliseconds and small gray display');
+ const finalStyle=getComputedStyle(document.getElementById('final-body'));
+ assert(finalStyle.fontSize===activeProseStyle.fontSize&&finalStyle.color===activeProseStyle.color&&document.getElementById('final-body').querySelector('strong'),'rendered final Markdown retains the same text size and color as intermediate prose');
  document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text==='FINAL **verified**','whole reply copy matches only visible final source Markdown');
  assert(final.assistantSegments.length===6&&final.assistantSegments[0].content==='STAGE_1','converged UI retains complete formal source stages');
  const finalNode=document.getElementById('final-body');
@@ -79,13 +88,14 @@ try {
  for(const status of ['interrupted','error']){
   const partial={...final,status,error:'Actual fixture interruption',assistantSegments:segments.map((segment,index)=>index===5?{...segment,status:'interrupted',content:'PARTIAL_VISIBLE',html:'<p>PARTIAL_VISIBLE</p>'}:segment)};
   applyTranscript(stageSnapshot(partial));
-  assert(document.querySelectorAll('.assistant-segment').length===1&&document.getElementById('messages').textContent.includes('PARTIAL_VISIBLE')&&!document.querySelector('.final-answer'),'failed terminal keeps latest partial without false completed final');
+  assert(document.querySelectorAll('.assistant-segment').length===6&&document.getElementById('messages').textContent.includes('STAGE_1')&&document.getElementById('messages').textContent.includes('PARTIAL_VISIBLE')&&!document.querySelector('.final-answer'),'failed terminal retains earlier prose and latest partial without false completed final');
   assert(document.querySelector('.assistant .message-status').textContent.includes('Actual fixture interruption'),'failed terminal has concise actual reason');
-  document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text==='PARTIAL_VISIBLE','partial copy equals displayed content');
+  document.querySelector('.assistant .copy-message').click();assert(sentMessages.at(-1).text===partial.assistantSegments.map(segment=>segment.content).join('\n\n'),'partial copy equals all displayed prose');
  }
  const incomplete={...stages,status:'completed',streaming:false,durationMs:17000};
  applyTranscript(stageSnapshot(incomplete));
  assert(!document.querySelector('.final-answer')&&document.querySelector('.assistant .message-status').textContent.trim(),'completed status without valid final stays incomplete with reason');
+ assert(document.querySelectorAll('.assistant-segment').length===6&&select(incomplete).content===segments.map(segment=>segment.content).join('\n\n'),'missing final phase preserves every received prose stage');
  assert(select({role:'assistant',status:'completed',content:'   '}).mode==='incomplete','empty legacy completed text is not a successful final');
  assert(select({...final,status:'streaming'}).mode==='active','final-looking segment does not complete an active enclosing request');
  const args=value=>({arguments:value,policy:{reason:'https://policy.invalid/private'}}),result=text=>JSON.stringify({content:[{type:'text',text}],_meta:{url:'https://metadata.invalid/private'}});

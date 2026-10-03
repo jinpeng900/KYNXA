@@ -9,10 +9,9 @@
     .map(item => item.value);
   const approval = tool => tool.status === 'approval-required';
 
-  function selectTools(tools, rounds = null) {
-    const available = tools.filter(tool => approval(tool) || !rounds || tool.round == null || rounds.has(tool.round));
-    const recent = new Set(available.filter(tool => !approval(tool)).slice(-8));
-    return available.filter(tool => approval(tool) || recent.has(tool));
+  function selectTools(tools) {
+    const recent = new Set(tools.filter(tool => !approval(tool)).slice(-8));
+    return tools.filter(tool => approval(tool) || recent.has(tool));
   }
 
   function selectMessagePresentation(message) {
@@ -27,24 +26,16 @@
       if (final) return { mode: 'final', segments: [final], tools: [], content: final.content };
       if (!segments.length && hasText(content)) return { mode: 'final', segments: [], tools: [], content };
     }
-    if (status !== 'streaming') {
-      const partial = segments.filter(segment => hasText(segment.content)).at(-1);
-      return { mode: status === 'completed' ? 'incomplete' : 'partial',
-        segments: partial ? [partial] : [], tools: tools.filter(approval), content: partial?.content || (segments.length ? '' : content) };
-    }
-    if (!segments.length) return { mode: 'active', segments: [], tools: selectTools(tools), content };
-    const last = segments.at(-1), lastStreaming = last?.status === 'streaming' ? last : null;
-    const requiredRounds = new Set(tools.filter(approval).map(tool => tool.round));
-    const candidates = segments.filter(segment => hasText(segment.content)
-      || tools.some(tool => tool.round === segment.round) || segment === lastStreaming);
-    const recent = new Set(candidates.slice(-3));
-    const visible = segments.filter(segment => recent.has(segment) || requiredRounds.has(segment.round));
-    const selectedTools = selectTools(tools, new Set(visible.map(segment => segment.round)));
-    // A round that held only an old observation need not leave an empty spacer after tool budgeting.
-    const selectedSegments = visible.filter(segment => hasText(segment.content)
-      || selectedTools.some(tool => tool.round === segment.round) || segment === lastStreaming);
-    return { mode: 'active', segments: selectedSegments, tools: selectedTools,
-      content: selectedSegments.map(segment => segment.content || '').filter(Boolean).join('\n\n') };
+    const mode = status === 'streaming' ? 'active' : status === 'completed' ? 'incomplete' : 'partial';
+    const selectedTools = selectTools(tools);
+    if (!segments.length) return { mode, segments: [], tools: selectedTools, content };
+    const last = segments.at(-1), lastStreaming = mode === 'active' && last?.status === 'streaming' ? last : null;
+    const toolRounds = new Set(selectedTools.map(tool => tool.round));
+    // Keep every spoken stage until the request has a completed final answer.
+    const selectedSegments = segments.filter(segment => hasText(segment.content)
+      || toolRounds.has(segment.round) || segment === lastStreaming);
+    return { mode, segments: selectedSegments, tools: selectedTools,
+      content: selectedSegments.map(segment => segment.content || '').filter(hasText).join('\n\n') };
   }
 
   function elapsedText(durationMs, strings) {
