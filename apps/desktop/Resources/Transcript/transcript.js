@@ -237,7 +237,6 @@
   function updateAssistantSegments(entry, message, presentation) {
     const segments = presentation.segments;
     const ids = new Set(segments.map(segment => String(segment.id)));
-    for (const [id, row] of entry.segmentRows) if (!ids.has(id)) { row.root.remove(); entry.segmentRows.delete(id); }
     let previous = null;
     for (const segment of segments) {
       const id = String(segment.id);
@@ -259,6 +258,8 @@
       updateTools(row, activities);
       if (!row.tools.hidden && row.tools.parentNode !== row.root) row.root.append(row.tools);
     }
+    // Render the replacement body (including math) before removing earlier progress.
+    for (const [id, row] of entry.segmentRows) if (!ids.has(id)) { row.root.remove(); entry.segmentRows.delete(id); }
   }
   function localizeToolRow(row) {
     const labels = { running: uiStrings.toolRunning, completed: uiStrings.toolCompleted,

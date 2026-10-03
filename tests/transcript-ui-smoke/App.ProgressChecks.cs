@@ -17,22 +17,27 @@ public partial class App
             "approval-required", "Pending source", Round: 1, Order: 4));
         string before = JsonSerializer.Serialize(new { segments, tools });
         var active = TranscriptPresentation.Select("assistant", "streaming", "legacy body", segments, tools);
-        Check(active.Mode == "active" && active.Segments.Select(segment => segment.Round).SequenceEqual([1, 4, 5, 6]), "C# presentation keeps recent three stages and old pending approval stage");
+        Check(active.Mode == "active" && active.Segments.Select(segment => segment.Round).SequenceEqual([1, 2, 3, 4, 5, 6]), "C# active presentation retains every prose stage and the old pending approval stage");
         Check(active.Tools.Length == 9 && active.Tools[0].ToolCallId == "approval-old" && active.Tools[^1].ToolCallId == "source-tool-209", "C# presentation caps ordinary actions at eight and preserves approval");
-        Check(active.Content.Contains("BODY_1") && active.Content.Contains("BODY_6") && !active.Content.Contains("BODY_2"), "active copy projection equals visible stage text");
+        Check(active.Content == string.Join("\n\n", segments.Select(segment => segment.Content)), "active copy contains all visible prose in its original order");
         segments[^1] = segments[^1] with { Phase = "final_answer", Status = "completed", Content = "FINAL_EXACT" };
         tools[0] = tools[0] with { Status = "completed" };
+        var awaitingCompletion = TranscriptPresentation.Select("assistant", "streaming", "legacy accumulated stages", segments, tools);
+        Check(awaitingCompletion.Mode == "active" && awaitingCompletion.Segments.Length == 6
+            && awaitingCompletion.Content == string.Join("\n\n", segments.Select(segment => segment.Content)), "a completed final phase cannot remove earlier prose before the enclosing request completes");
         var final = TranscriptPresentation.Select("assistant", "completed", "legacy accumulated stages", segments, tools);
         Check(final.Mode == "final" && final.Content == "FINAL_EXACT" && final.Segments.Length == 1 && final.Tools.Length == 0, "C# final projection contains only actual completed final text");
         var incomplete = TranscriptPresentation.Select("assistant", "completed", "unverified fallback", segments.Take(5).ToArray(), tools);
-        Check(incomplete.Mode == "incomplete" && incomplete.Content == "BODY_5", "completed status without final phase does not become a successful final answer");
+        Check(incomplete.Mode == "incomplete" && incomplete.Segments.Length == 5
+            && incomplete.Content == string.Join("\n\n", segments.Take(5).Select(segment => segment.Content)), "missing final phase retains all prose without becoming a successful answer");
         Check(TranscriptPresentation.Select("assistant", "completed", " \n ", [], []).Mode == "incomplete", "empty legacy completed content cannot invent a finished answer");
         Check(TranscriptPresentation.Select("assistant", "completed", "legacy completed text", [], []).Mode == "final", "valid legacy final content remains compatible");
         Check(TranscriptPresentation.Select("assistant", "interrupted", "legacy partial", [], []).Content == "legacy partial", "legacy interrupted body remains visible");
         var partial = TranscriptPresentation.Select("assistant", "interrupted", "old aggregate", segments, tools);
-        Check(partial.Mode == "partial" && partial.Content == "FINAL_EXACT" && partial.Segments.Length == 1, "interrupted status keeps the latest partial body despite a completed-looking segment");
+        Check(partial.Mode == "partial" && partial.Segments.Length == 6
+            && partial.Content == string.Join("\n\n", segments.Select(segment => segment.Content)), "interrupted request retains all received prose despite a completed-looking final segment");
         // Selection creates arrays; it never removes the authoritative source collection.
-        Check(segments.Count == 6 && tools.Count == 211 && before.Contains("BODY_2"), "all source stages and actions survive bounded projection");
+        Check(segments.Count == 6 && tools.Count == 211 && before.Contains("BODY_2"), "all source stages and actions survive display projection");
         string after = JsonSerializer.Serialize(new { segments, tools });
         _ = TranscriptPresentation.Select("assistant", "streaming", "legacy body", segments, tools);
         Check(after == JsonSerializer.Serialize(new { segments, tools }), "C# Select never mutates source events");
@@ -45,7 +50,7 @@ public partial class App
         var reply = Message(chat, "assistant", "FINAL_DRAFT", "streaming");
         reply.Message.AssistantSegments =
         [
-            new("round-1", 1, 0, "commentary", "completed", "STAGE_ONE\n\nChecked the first source.", "PUBLIC_SUMMARY", 1000),
+            new("round-1", 1, 0, "commentary", "completed", "STAGE_ONE\n\nChecked the **first** source.\n\n```python\nprint('ready')\n```", "PUBLIC_SUMMARY", 1000),
             new("round-2", 2, 2, "commentary", "completed", "STAGE_TWO\n\nChecked the second source.", "SECOND_PUBLIC_SUMMARY", 2000),
             new("round-3", 3, 4, "commentary", "streaming", "FINAL_DRAFT", "")
         ];
@@ -55,8 +60,9 @@ public partial class App
             new("timeline-2", "filesystem.read", JsonSerializer.SerializeToElement(new { path = "second.txt" }), "completed", "Read second source", "SECOND_RECEIPT", Round: 2, Order: 3)
         ];
         _transcript.ShowConversation(chat, [user, reply]);
-        await WaitAsync("document.querySelectorAll('.assistant-segment').length === 3 && document.querySelector('[data-segment-id=round-3] .message-body').textContent === 'FINAL_DRAFT'", "real DTO shows recent true prose/tool stages");
+        await WaitAsync("document.querySelectorAll('.assistant-segment').length === 3 && document.querySelector('[data-segment-id=round-3] .message-body').textContent === 'FINAL_DRAFT'", "real DTO shows all true prose/tool stages");
         Check(await EvalAsync<bool>("[...document.querySelectorAll('.assistant-segment')].map(row=>row.dataset.round).join(',') === '1,2,3' && !document.querySelector('.assistant-segment .reasoning')"), "active stages remain in real order without repeated thinking cards");
+        Check(await EvalAsync<bool>("(() => { const body=document.querySelector('[data-segment-id=round-1] .message-body'); const style=getComputedStyle(body); window.__activeProseStyle={fontSize:style.fontSize,color:style.color}; return style.fontSize==='15px' && style.color==='rgb(35, 35, 35)' && !!body.querySelector('strong') && !!body.querySelector('pre code') && getComputedStyle(document.querySelector('.tool-title')).fontSize==='12px'; })()"), "intermediate prose uses normal 15px dark Markdown while tool labels stay small");
         Check(await EvalAsync<bool>("document.querySelector('[data-segment-id=round-1] [data-tool-call-id=timeline-1]') !== null && document.querySelector('[data-segment-id=round-2] [data-tool-call-id=timeline-2]') !== null && !!(document.querySelector('[data-segment-id=round-1] .message-body').compareDocumentPosition(document.querySelector('[data-tool-call-id=timeline-1]')) & Node.DOCUMENT_POSITION_FOLLOWING)"), "compact tool events still follow their actual stage body");
         await EvalAsync<bool>("(() => { window.__timelineFirst=document.querySelector('[data-segment-id=round-1] .message-body').firstChild; const range=document.createRange(); range.selectNodeContents(window.__timelineFirst); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()");
         reply.Message.AssistantSegments[^1] = reply.Message.AssistantSegments[^1] with { Status = "completed", Content = "STAGE_THREE" };
@@ -65,24 +71,32 @@ public partial class App
         reply.Message.ToolActivities.Add(new("timeline-3", "filesystem.read", JsonSerializer.SerializeToElement(new { path = "third.txt" }), "completed", "Third source", Round: 3, Order: 5));
         reply.Message.ToolActivities.Add(new("timeline-4", "filesystem.read", JsonSerializer.SerializeToElement(new { path = "fourth.txt" }), "completed", "Fourth source", Round: 4, Order: 7));
         reply.Refresh();
-        await WaitAsync("transcriptState().pending", "stage-window eviction waits for an active text selection");
-        Check(await EvalAsync<bool>("getSelection().toString() === 'STAGE_ONE' && document.querySelector('[data-segment-id=round-1] .message-body').firstChild === window.__timelineFirst"), "bounded progress does not remove currently selected text");
+        await WaitAsync("transcriptState().pending", "new progress updates wait for an active text selection");
+        Check(await EvalAsync<bool>("getSelection().toString() === 'STAGE_ONE' && document.querySelector('[data-segment-id=round-1] .message-body').firstChild === window.__timelineFirst"), "new progress does not remove currently selected text");
         _transcript.ClearSelection();
-        await WaitAsync("[...document.querySelectorAll('.assistant-segment')].map(row=>row.dataset.round).join(',') === '3,4,5'", "clearing selection applies exactly the latest three actual stages");
+        await WaitAsync("[...document.querySelectorAll('.assistant-segment')].map(row=>row.dataset.round).join(',') === '1,2,3,4,5'", "clearing selection appends new stages while preserving every earlier prose stage");
+        Check(await EvalAsync<bool>("document.querySelector('[data-segment-id=round-1] .message-body').firstChild === window.__timelineFirst"), "earlier prose DOM survives later model rounds");
         _metrics["compactActivePreview"] = Path.Combine(Path.GetTempPath(), "kynxa-transcript-compact-active.png");
         await CaptureViewportAsync((string)_metrics["compactActivePreview"]);
-        await EvalAsync<bool>("(() => { const range=document.createRange(); range.selectNodeContents(document.querySelector('[data-segment-id=round-4] .message-body').firstChild); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()");
         reply.Message.AssistantSegments[^1] = reply.Message.AssistantSegments[^1] with
         { Phase = "final_answer", Status = "completed", Content = "FINAL_VERIFIED\n\n$\\omega=2\\pi f$" };
         reply.Message.Content = reply.Message.AssistantSegments[^1].Content;
+        reply.Refresh();
+        await WaitAsync("document.querySelectorAll('.assistant-segment').length === 5 && document.querySelector('[data-segment-id=round-5]').dataset.phase === 'final_answer' && document.querySelector('[data-segment-id=round-5] .katex') !== null", "decoded final phase remains alongside earlier prose while the request is still streaming");
+        Check(await EvalAsync<bool>("document.getElementById('messages').textContent.includes('STAGE_ONE') && document.getElementById('messages').textContent.includes('STAGE_FOUR') && !document.querySelector('.final-answer') && document.querySelector('.assistant .message-elapsed').hidden"), "final phase alone does not erase progress or present a successful elapsed answer");
+        await EvalAsync<bool>("(() => { document.querySelector('.assistant .copy-message').click(); return true; })()");
+        await Task.Delay(100);
+        Check(await Clipboard.GetContent().GetTextAsync() == string.Join("\n\n", reply.Message.AssistantSegments.Select(segment => segment.Content)), "active clipboard includes all received prose until successful convergence");
+        await EvalAsync<bool>("(() => { const range=document.createRange(); range.selectNodeContents(document.querySelector('[data-segment-id=round-4] .message-body').firstChild); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()");
         reply.Message.Status = "completed";
         reply.Message.DurationMs = 17000;
         reply.Refresh();
         await WaitAsync("transcriptState().pending", "final convergence waits while a stage body is selected");
-        Check(await EvalAsync<bool>("getSelection().toString() === 'STAGE_FOUR' && document.querySelectorAll('.assistant-segment').length === 3"), "selected progress survives the terminal final event");
+        Check(await EvalAsync<bool>("getSelection().toString() === 'STAGE_FOUR' && document.querySelectorAll('.assistant-segment').length === 5"), "selected progress survives the terminal final event");
         _transcript.ClearSelection();
         await WaitAsync("document.querySelectorAll('.assistant-segment').length === 1 && document.querySelector('[data-segment-id=round-5] .katex') !== null && document.querySelector('.assistant .message-elapsed').textContent.includes('17')", "success converges to complete rendered final body and actual duration");
         Check(await EvalAsync<bool>("!document.querySelector('.assistant .reasoning,.assistant .tool-activities,.assistant .tool-activity') && !!(document.querySelector('.assistant .message-elapsed').compareDocumentPosition(document.querySelector('.final-answer')) & Node.DOCUMENT_POSITION_FOLLOWING)"), "terminal success removes process DOM and puts elapsed text above final answer");
+        Check(await EvalAsync<bool>("(() => { const style=getComputedStyle(document.querySelector('.final-answer .message-body')); return style.fontSize===window.__activeProseStyle.fontSize && style.color===window.__activeProseStyle.color; })()"), "successful final prose keeps the same type size and color as the intermediate prose");
         Check(reply.Message.AssistantSegments.Count == 5 && reply.Message.ToolActivities.Count == 4 && reply.Message.AssistantSegments[0].Content.Contains("STAGE_ONE"), "successful UI convergence preserves every formal stage and tool");
         await EvalAsync<bool>("(() => { document.querySelector('.assistant .message-actions > .copy-message').click(); return true; })()");
         await Task.Delay(100);
@@ -113,18 +127,18 @@ public partial class App
             string body = "PARTIAL_" + status + "\n\n```python\n    print('unfinished task')\n```";
             reply.Message.AssistantSegments =
             [
-                new("partial-old", 1, 0, "commentary", "completed", "EARLIER_PROCESS_MUST_DISAPPEAR", "PUBLIC_OLD_THOUGHT"),
+                new("partial-old", 1, 0, "commentary", "completed", "EARLIER_PROSE_MUST_REMAIN", "PUBLIC_OLD_THOUGHT"),
                 new("partial-last", 2, 2, "commentary", "interrupted", body, "")
             ];
             reply.Message.Error = status == "completed" ? "" : "模拟执行中断，请重试。";
             reply.SetRetryAllowed(true);
             _transcript.ShowConversation(chat, [reply]);
-            await WaitAsync("!!document.querySelector('.assistant-segment .message-body') && document.querySelector('.assistant-segment .message-body').textContent.includes('PARTIAL_" + status + "') && document.querySelectorAll('.assistant-segment').length === 1", "failed or incomplete request keeps latest readable body rather than old process");
-            Check(await EvalAsync<bool>("!document.getElementById('messages').textContent.includes('EARLIER_PROCESS_MUST_DISAPPEAR') && !document.querySelector('.final-answer') && !document.querySelector('.reasoning,.tool-activity')"), "partial state does not claim completed final or resurrect discarded process");
+            await WaitAsync("!!document.querySelector('[data-segment-id=partial-last] .message-body') && document.querySelector('[data-segment-id=partial-last] .message-body').textContent.includes('PARTIAL_" + status + "') && document.querySelectorAll('.assistant-segment').length === 2", "failed or incomplete request keeps all received prose and its latest partial body");
+            Check(await EvalAsync<bool>("document.getElementById('messages').textContent.includes('EARLIER_PROSE_MUST_REMAIN') && !document.querySelector('.final-answer') && !document.querySelector('.reasoning,.tool-activity')"), "partial state retains earlier prose without claiming successful completion");
             Check(await EvalAsync<bool>("document.querySelector('.message-status').textContent.trim().length > 0"), "interruption or missing final phase has a concise visible reason");
             await EvalAsync<bool>("(() => { document.querySelector('.assistant .copy-message').click(); return true; })()");
             await Task.Delay(80);
-            Check(await Clipboard.GetContent().GetTextAsync() == body, "partial copy matches the visible source Markdown exactly");
+            Check(await Clipboard.GetContent().GetTextAsync() == "EARLIER_PROSE_MUST_REMAIN\n\n" + body, "partial copy matches all visible source Markdown exactly");
             Check(reply.Message.AssistantSegments.Count == 2 && reply.Message.Content == "OLD_AGGREGATE", "partial presentation preserves all underlying source text");
         }
     }
