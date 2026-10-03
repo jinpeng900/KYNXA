@@ -5,7 +5,9 @@
   const uiStrings = {
     conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
-    interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成'
+    interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
+    toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
+    toolDenied: '已拒绝', toolApproval: '等待批准'
   };
   let entries = new Map();
   const conversations = new Map();
@@ -42,6 +44,8 @@
       setStatusText(entry, statusText(entry.message));
     }
     entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
+    if (entry.toolsSummary) entry.toolsSummary.textContent = uiStrings.toolActivities;
+    for (const row of entry.toolRows?.values() || []) localizeToolRow(row);
   }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
@@ -157,16 +161,21 @@
     copy.title = uiStrings.copy; copy.setAttribute('aria-label', uiStrings.copyMessage);
     copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
-    const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry, message: null };
+    const tools = document.createElement('details'); tools.className = 'tool-activities'; tools.hidden = true;
+    const toolsSummary = document.createElement('summary'); toolsSummary.dataset.copyIgnore = '';
+    toolsSummary.textContent = uiStrings.toolActivities; tools.append(toolsSummary);
+    tools.addEventListener('toggle', followBottom);
+    const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry,
+      tools, toolsSummary, toolRows: new Map(), message: null };
     copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: entry.message.content || '' }));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
-    actions.append(copy, retry); content.append(reasoning, body, status); article.append(content, actions);
+    actions.append(copy, retry); content.append(reasoning, tools, body, status); article.append(content, actions);
     return entry;
   }
   function updateMessage(entry, message) {
     const old = entry.message;
     if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry']
-      .every(key => old[key] === message[key])) return;
+      .every(key => old[key] === message[key]) && JSON.stringify(old.toolActivities || []) === JSON.stringify(message.toolActivities || [])) return;
     entry.message = message;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -179,6 +188,7 @@
     entry.reasoning.hidden = !message.reasoningHtml && !message.reasoningTitle && !message.reasoningState;
     entry.summary.textContent = reasoningTitle(message);
     patchBlocks(entry.thought, message.reasoningHtml || '');
+    updateTools(entry, message.toolActivities || []);
     if (role === 'user') {
       const text = message.content || '';
       if (entry.body._plainContent !== text || !entry.body.hasAttribute('data-copy-plain')) {
@@ -200,6 +210,39 @@
     entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !message.content;
   }
+  function localizeToolRow(row) {
+    const labels = { running: uiStrings.toolRunning, completed: uiStrings.toolCompleted,
+      error: uiStrings.toolError, denied: uiStrings.toolDenied, 'approval-required': uiStrings.toolApproval };
+    row.title.textContent = row.tool.name + ' · ' + (labels[row.tool.status] || row.tool.status);
+  }
+  function updateTools(entry, activities) {
+    entry.tools.hidden = activities.length === 0;
+    const ids = new Set(activities.map(tool => String(tool.toolCallId)));
+    for (const [id, row] of entry.toolRows) if (!ids.has(id)) { row.root.remove(); entry.toolRows.delete(id); }
+    for (const tool of activities) {
+      const id = String(tool.toolCallId);
+      let row = entry.toolRows.get(id);
+      if (!row) {
+        const root = document.createElement('div'); root.className = 'tool-activity'; root.dataset.toolCallId = id;
+        const title = document.createElement('div'); title.className = 'tool-title'; title.dataset.copyIgnore = '';
+        const text = document.createElement('div'); text.className = 'tool-summary';
+        const parameters = document.createElement('pre'); parameters.className = 'tool-arguments';
+        const result = document.createElement('pre'); result.className = 'tool-result';
+        root.append(title, text, parameters, result); entry.tools.append(root);
+        row = { root, title, text, parameters, result, tool: null }; entry.toolRows.set(id, row);
+      }
+      row.tool = tool;
+      localizeToolRow(row);
+      const summary = typeof tool.summary === 'string' ? tool.summary : '';
+      if (row.text.textContent !== summary) row.text.textContent = summary;
+      const args = tool.arguments == null ? '' : JSON.stringify(tool.arguments, null, 2);
+      if (row.parameters.textContent !== args) row.parameters.textContent = args;
+      row.parameters.hidden = !args;
+      const result = typeof tool.result === 'string' ? tool.result : '';
+      if (row.result.textContent !== result) row.result.textContent = result;
+      row.result.hidden = !result;
+    }
+  }
   function removeCached(id) {
     const saved = conversations.get(id);
     if (!saved) return null;
@@ -214,8 +257,10 @@
     const restored = removeCached(id);
     if (conversationId && entries.size) {
       let characters = 0;
-      for (const entry of entries.values()) for (const key of ['content', 'html', 'reasoningHtml'])
-        characters += entry.message?.[key]?.length || 0;
+      for (const entry of entries.values()) {
+        for (const key of ['content', 'html', 'reasoningHtml']) characters += entry.message?.[key]?.length || 0;
+        characters += JSON.stringify(entry.message?.toolActivities || []).length;
+      }
       const nodes = messages.querySelectorAll('*').length;
       if (entries.size <= 400 && characters <= maxCachedCharacters && nodes <= maxCachedNodes) {
         const fragment = document.createDocumentFragment();

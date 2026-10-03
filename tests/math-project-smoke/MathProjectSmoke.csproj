@@ -13,4 +13,7 @@
     <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+  </ItemGroup>
 </Project>

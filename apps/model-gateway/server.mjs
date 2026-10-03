@@ -30,25 +30,65 @@ export function createModelServer(options = {}) {
   const managed = !options.modelStore && !options.modelRuntime;
   let activeRequests = 0;
   const streamControllers = new Set();
+  const retiringRuntimes = new Set();
+  let runtimeCleanupError;
+  const retireRuntime = previous => {
+    const cleanup = Promise.resolve().then(() => previous.close?.()).catch(() => {
+      // Keep cleanup failures observable without exposing paths, tool arguments,
+      // or private upstream errors, and without terminating the replacement.
+      runtimeCleanupError = 'RUNTIME_CLEANUP_FAILED';
+      console.error(runtimeCleanupError);
+    });
+    retiringRuntimes.add(cleanup);
+    void cleanup.then(() => retiringRuntimes.delete(cleanup));
+  };
   const server = createServer(async (request, response) => {
-    const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const pathname = url.pathname;
     let counted = false;
     try {
+      // Native clients do not send Origin. Block browser-origin access to this local
+      // execution/configuration surface, including same-loopback malicious pages.
+      if (request.headers.origin) return sendJson(response, 403, { error: '浏览器不能直接调用本机模型与工具服务。', code: 'BROWSER_ORIGIN_DENIED' });
       const migrating = managed && storageMigrationActive();
       if (managed && !migrating && activeRequests === 0 && modelStore.dataHome !== modelHome()) {
         // No requests are active here; swap synchronously so simultaneous first
         // requests after a migration cannot install separate stores/queues.
-        void modelRuntime.close?.();
+        retireRuntime(modelRuntime);
         modelStore = new ModelStore({ dataHome: modelHome() });
         modelRuntime = new ModelRuntime({ modelStore, dataHome: modelStore.dataHome });
       }
       if (request.method === 'GET' && pathname === '/health')
         return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
-          activeRequests, migrating, modelDataHome: modelStore.dataHome });
+          agentProtocol: 1, toolStreamProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          activeRequests, migrating, modelDataHome: modelStore.dataHome,
+          ...(runtimeCleanupError ? { runtimeCleanupError } : {}) });
       if (migrating) return sendJson(response, 503, { error: '正在迁移数据，请完成后再试。' });
       activeRequests++;
       counted = true;
+      if (pathname === '/api/agent/config') {
+        if (request.method === 'GET') return sendJson(response, 200, await modelRuntime.tools.getConfig());
+        if (request.method === 'PUT') return sendJson(response, 200, await modelRuntime.tools.updateConfig(await readJsonBody(request)));
+        return sendJson(response, 405, { error: '工具配置接口不支持此操作。' });
+      }
+      if (pathname === '/api/agent/approvals' && request.method === 'POST')
+        return sendJson(response, 200, modelRuntime.tools.approve(await readJsonBody(request)));
+      if (pathname.startsWith('/api/agent/')) {
+        const conversationId = url.searchParams.get('conversationId');
+        const context = conversationId ? await modelRuntime.tools.createContext(conversationId,
+          { requestId: randomUUID(), permissionMode: 'ask', message: '用户查看工具设置' }) : undefined;
+        if (request.method === 'GET' && pathname === '/api/agent/skills')
+          return sendJson(response, 200, { skills: await modelRuntime.tools.listSkills(context) });
+        const skillRoute = /^\/api\/agent\/skills\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+        if (request.method === 'GET' && skillRoute)
+          return sendJson(response, 200, { skill: await modelRuntime.tools.readSkill(skillRoute[1], context) });
+        if (request.method === 'GET' && pathname === '/api/agent/tools')
+          return sendJson(response, 200, { tools: await modelRuntime.tools.catalog(context, { connectMcp: false }),
+            errors: [...modelRuntime.tools.mcp.errors].map(([id, code]) => `${id}: ${code}`) });
+        if (request.method === 'POST' && pathname === '/api/agent/mcp/refresh')
+          return sendJson(response, 200, { tools: await modelRuntime.tools.refreshMcp(context),
+            errors: [...modelRuntime.tools.mcp.errors].map(([id, code]) => `${id}: ${code}`) });
+      }
       const userMemoryRoute = /^\/api\/memory\/user(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
       const projectMemoryRoute = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/memory(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
       if (userMemoryRoute || projectMemoryRoute) {
@@ -100,7 +140,7 @@ export function createModelServer(options = {}) {
         if (!body || typeof body.message !== 'string' || !body.message.trim() ||
             typeof body.conversationId !== 'string' || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.conversationId))
           throw new Error('会话 ID 或消息无效。');
-        if (body.permissionMode && !['ask', 'smart', 'full'].includes(body.permissionMode))
+        if (body.permissionMode != null && !['ask', 'smart', 'full'].includes(body.permissionMode))
           throw new Error('权限模式无效。');
         if (body.requestId != null && (typeof body.requestId !== 'string' ||
             !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.requestId)))
@@ -121,7 +161,7 @@ export function createModelServer(options = {}) {
           try {
             const result = await modelRuntime.replyStream({ conversationId: body.conversationId,
               message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId,
-              userMessageId: body.userMessageId }, emit, controller.signal);
+              userMessageId: body.userMessageId, permissionMode: body.permissionMode }, emit, controller.signal);
             emit({ type: 'completed', ...result });
           } catch (error) {
             emit({ type: error instanceof StreamFailure ? error.type : 'error',
@@ -137,7 +177,7 @@ export function createModelServer(options = {}) {
         const requestId = body.requestId ?? randomUUID();
         const content = await modelRuntime.reply({ conversationId: body.conversationId,
           message: body.message, provider: body.provider, model: body.model,
-          requestId, userMessageId: body.userMessageId });
+          requestId, userMessageId: body.userMessageId, permissionMode: body.permissionMode });
         return sendJson(response, 200, { conversationId: body.conversationId,
           requestId, role: 'assistant', content, createdAt: new Date().toISOString() });
       }
@@ -157,7 +197,7 @@ export function createModelServer(options = {}) {
   // Shutdown aborts upstream generations before waiting for open HTTP streams.
   server.shutdownModelRuntime = async () => {
     for (const controller of streamControllers) controller.abort();
-    await modelRuntime.close?.();
+    await Promise.all([...retiringRuntimes, Promise.resolve().then(() => modelRuntime.close?.())]);
   };
   return server;
 }
@@ -165,7 +205,13 @@ export function createModelServer(options = {}) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = createModelServer();
   server.listen(port, '127.0.0.1', () => console.log(`KYNXA model gateway: http://127.0.0.1:${port}`));
-  const shutdown = async () => { server.close(); await server.shutdownModelRuntime(); };
+  const shutdown = () => {
+    server.close();
+    void server.shutdownModelRuntime().catch(() => {
+      console.error('RUNTIME_CLEANUP_FAILED');
+      process.exitCode = 1;
+    });
+  };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }

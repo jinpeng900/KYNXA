@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using KYNXA.Contracts;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI;
@@ -37,7 +38,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
         public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length;
     }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
-        string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry);
+        string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
+        ToolActivity[] ToolActivities);
 
     public Task Ready => _ready.Task;
     internal WebView2 Browser => _browser;
@@ -100,7 +102,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 reasoning = UiText.Get("思考过程"), thinking = UiText.Get("正在思考…"),
                 reasoningDuration = UiText.Get("思考过程 · {0} 秒"), stopped = UiText.Get("已停止生成"),
                 interrupted = UiText.Get("回复中断，请重试。"),
-                replying = UiText.Get("正在回复…"), generating = UiText.Get("正在生成")
+                replying = UiText.Get("正在回复…"), generating = UiText.Get("正在生成"),
+                toolActivities = UiText.Get("工具活动"), toolRunning = UiText.Get("执行中"),
+                toolCompleted = UiText.Get("已完成"), toolError = UiText.Get("工具失败"),
+                toolDenied = UiText.Get("已拒绝"), toolApproval = UiText.Get("等待批准")
             }
         });
     }
@@ -226,7 +231,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
         var conversationId = _conversationId;
         var snapshots = _messages.Select(row => new Snapshot(row.Message.Id, row.Message.Role, row.Content, row.Message.Reasoning,
             row.IsStreaming, row.Message.Reasoning.Length > 0 ? (row.IsThinking ? "thinking" : "finished") : null,
-            row.ReasoningSeconds, row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible)).ToArray();
+            row.ReasoningSeconds, row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
+            row.ToolActivities.ToArray())).ToArray();
         try
         {
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
@@ -260,7 +266,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
                     html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                     reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
-                    streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry }) });
+                    streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
+                    toolActivities = item.Row.ToolActivities.Select(tool => new { toolCallId = tool.ToolCallId, name = tool.Name,
+                        arguments = tool.Arguments, status = tool.Status, summary = tool.Summary, result = tool.Result,
+                        approvalId = tool.ApprovalId, outsideWorkspace = tool.OutsideWorkspace, sandbox = tool.Sandbox,
+                        workspaceRoot = tool.WorkspaceRoot }) }) });
             _openAtBottom = false;
             _notice.Visibility = Visibility.Collapsed;
         }

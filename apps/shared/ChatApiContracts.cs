@@ -13,4 +13,4 @@ public sealed record ChatRequest(Guid ConversationId, string Message, string? Mo
 public sealed record ChatReply(Guid ConversationId, Guid RequestId, string Role, string Content, DateTimeOffset CreatedAt);
 
 public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid RequestId, DateTimeOffset CreatedAt,
-    string? Delta = null, string? Content = null, string? Reasoning = null, string? Error = null);
+    string? Delta = null, string? Content = null, string? Reasoning = null, string? Error = null, ToolActivity? Tool = null);

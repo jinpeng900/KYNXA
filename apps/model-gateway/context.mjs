@@ -160,14 +160,18 @@ function systemText(memoryLines, summaryContent = '') {
 
 /** Builds one bounded request projection. Never mutates history or promotes excerpts into memory. */
 export function buildContext({ conversationId, projectId = null, history = [], currentMessage, beforeUserId,
-  memoryEntries = [], summary, contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS }) {
+  memoryEntries = [], summary, contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS,
+  additionalSystem = '', reservedInputTokens = 0 }) {
   if (typeof conversationId !== 'string' || !conversationId || typeof currentMessage !== 'string' || !currentMessage.trim())
     throw new ContextError('会话 ID 或当前消息无效。', 'INVALID_CONTEXT');
   if (!Number.isSafeInteger(contextWindowTokens) || contextWindowTokens < 2048 || contextWindowTokens > 2000000)
     throw new ContextError('模型上下文窗口须为 2048–2000000 个 tokens。', 'INVALID_CONTEXT_WINDOW');
   const maxOutputTokens = Math.min(2048, Math.floor(contextWindowTokens * .25));
   const safetyMarginTokens = Math.max(256, Math.ceil(contextWindowTokens * .10));
-  const inputBudgetTokens = contextWindowTokens - maxOutputTokens - safetyMarginTokens;
+  const fullInputBudgetTokens = contextWindowTokens - maxOutputTokens - safetyMarginTokens;
+  if (!Number.isSafeInteger(reservedInputTokens) || reservedInputTokens < 0 || typeof additionalSystem !== 'string')
+    throw new ContextError('工具上下文预算无效。', 'INVALID_CONTEXT');
+  const inputBudgetTokens = fullInputBudgetTokens - reservedInputTokens - estimateMessageTokens([], additionalSystem);
   const current = { role: 'user', content: currentMessage };
   const currentCost = estimateMessageTokens([current]);
   if (currentCost > inputBudgetTokens)
@@ -222,15 +226,15 @@ export function buildContext({ conversationId, projectId = null, history = [], c
       used += cost; firstIncluded = index;
     }
   }
-  const system = systemText(memoryLines, extracted.value?.content);
+  const system = [systemText(memoryLines, extracted.value?.content), additionalSystem].filter(Boolean).join('\n');
   const messages = turns.slice(firstIncluded).flatMap(turn => [
     { role: 'user', content: turn.user.Content }, { role: 'assistant', content: turn.assistant.Content }
   ]).concat(current);
   const estimatedInputTokens = estimateMessageTokens(messages, system);
-  if (estimatedInputTokens > inputBudgetTokens)
+  if (estimatedInputTokens + reservedInputTokens > fullInputBudgetTokens)
     throw new ContextError('当前消息与参考资料超过模型输入预算，请缩短消息后重试。');
   return { messages, system, maxOutputTokens, metrics: {
-    estimatedInputTokens, inputBudgetTokens, contextWindowTokens, outputReserveTokens: maxOutputTokens,
+    estimatedInputTokens, inputBudgetTokens: fullInputBudgetTokens, reservedToolTokens: reservedInputTokens, contextWindowTokens, outputReserveTokens: maxOutputTokens,
     safetyMarginTokens, includedTurnCount: turns.length - firstIncluded, omittedTurnCount: firstIncluded,
     memoryIncludedIds: includedMemoryIds, memoryOmittedCount: memoryEntries.length - includedMemoryIds.length,
     memoryBudgetTokens: memoryBudget, memoryTruncatedIds: truncatedMemoryIds, memoryOmittedIds: omittedMemoryIds, warnings,

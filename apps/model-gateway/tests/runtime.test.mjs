@@ -50,7 +50,7 @@ test('direct API chat carries the selected ID, auth and persisted history withou
     body: JSON.stringify({ ...input, message: '第二条', permissionMode: 'ask' }) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).content, '你好');
-  assert.deepEqual(requests.at(-1).messages.map(m => m.content), ['第一条', '你好', '第二条']);
+  assert.deepEqual(requests.at(-1).messages.filter(m => m.role !== 'system').map(m => m.content), ['第一条', '你好', '第二条']);
   await runtime.reply({ ...input, conversationId: 'another-chat', message: '独立会话' });
   assert.equal(requests.at(-1).messages.length, 1);
 });

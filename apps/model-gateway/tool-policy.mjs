@@ -1,0 +1,65 @@
+import { randomUUID } from 'node:crypto';
+import { toolFailure } from './tool-paths.mjs';
+
+const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read']);
+const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
+
+export function needsToolApproval(context, name, { outsideWorkspace = false, verifiedSandbox = false } = {}) {
+  if (context.permissionMode === 'full') return false;
+  if (outsideWorkspace) return true;
+  if (READ_TOOLS.has(name)) return false;
+  if (context.permissionMode === 'smart' && (REVERSIBLE_TOOLS.has(name) || (name === 'terminal.run' && verifiedSandbox))) return false;
+  // Unknown MCP annotations never grant authority. Deletion always requires approval in Ask/Smart.
+  return true;
+}
+
+export class ToolApprovalRegistry {
+  constructor({ timeoutMs = 5 * 60 * 1000 } = {}) { this.pending = new Map(); this.timeoutMs = timeoutMs; this.closed = false; }
+
+  wait(context, call, { signal, emit, outsideWorkspace = false }) {
+    if (this.closed) return Promise.reject(toolFailure('工具服务已关闭。', 'TOOL_SERVICE_CLOSED', 409));
+    if (this.pending.size >= 128) return Promise.reject(toolFailure('待审批工具已达上限。', 'TOOL_APPROVAL_CAPACITY', 409));
+    const approvalId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const finish = (approved, error) => {
+        if (!this.pending.has(approvalId)) return;
+        this.pending.delete(approvalId);
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', aborted);
+        if (error) reject(error); else resolve(approved);
+      };
+      const aborted = () => finish(false, toolFailure('工具审批已取消。', 'TOOL_CANCELLED', 409));
+      const timer = setTimeout(() => finish(false, toolFailure('工具审批已过期。', 'TOOL_APPROVAL_EXPIRED', 409)), this.timeoutMs);
+      this.pending.set(approvalId, { conversationId: context.conversationId, requestId: context.requestId, toolCallId: call.id, finish });
+      if (signal?.aborted) return aborted();
+      signal?.addEventListener('abort', aborted, { once: true });
+      try {
+        emit({ type: 'approval_required', tool: { toolCallId: call.id, name: call.name,
+          arguments: structuredClone(call.arguments), status: 'approval-required', summary: call.name,
+          approvalId, workspaceRoot: context.workspaceRoot, outsideWorkspace, reason: call.arguments.reason ?? null } });
+      } catch (error) { finish(false, error); }
+    });
+  }
+
+  approve(input) {
+    const approvalId = typeof input?.approvalId === 'string' ? input.approvalId.toLowerCase() : '';
+    const value = this.pending.get(approvalId);
+    if (!value) throw toolFailure('此工具审批不存在、已消费或已过期。', 'TOOL_APPROVAL_NOT_FOUND', 404);
+    if (typeof input.approved !== 'boolean' || typeof input.conversationId !== 'string' || typeof input.requestId !== 'string' ||
+        input.conversationId.toLowerCase() !== value.conversationId || input.requestId.toLowerCase() !== value.requestId || input.toolCallId !== value.toolCallId)
+      throw toolFailure('审批身份不匹配，不能改变原工具调用。', 'TOOL_APPROVAL_MISMATCH', 409);
+    value.finish(input.approved);
+    return { approved: input.approved, approvalId, toolCallId: input.toolCallId };
+  }
+
+  close() {
+    this.closed = true;
+    for (const value of [...this.pending.values()]) value.finish(false, toolFailure('工具服务已关闭。', 'TOOL_SERVICE_CLOSED', 409));
+  }
+
+  cancelContext(context) {
+    for (const value of [...this.pending.values()])
+      if (value.conversationId === context?.conversationId && value.requestId === context?.requestId)
+        value.finish(false, toolFailure('工具请求上下文已结束。', 'TOOL_CANCELLED', 409));
+  }
+}

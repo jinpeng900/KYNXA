@@ -31,7 +31,7 @@ await File.WriteAllTextAsync(Path.Combine(oldRoot, ".conversations-v1.json"), "{
 string settings = "{\"Appearance\":{\"Theme\":\"system\"},\"Storage\":{\"LayoutVersion\":1,\"StoreId\":\"stable-store\",\"CreatedAt\":\"2026-01-01T00:00:00.000Z\"}}";
 await File.WriteAllTextAsync(Path.Combine(oldRoot, "settings.json"), settings);
 string[] canonicalFiles = ["Projects/one/Sessions/chat-one/events.jsonl", "Chats/chat-two/events.jsonl", "Trash/chat-three/events.jsonl", "Backups/conversations-v1/Desktop/projects.json",
-    "Projects/one/Sessions/chat-one/attachments/drawing.txt", "Projects/one/Memory/preferences.md", "Chats/chat-two/attachments/notes.txt", "Memory/preferences.md", "Index/search.sqlite"];
+    "Projects/one/Sessions/chat-one/attachments/drawing.txt", "Projects/one/Memory/preferences.md", "Chats/chat-two/attachments/notes.txt", "Memory/preferences.md", "Index/search.sqlite", "Agent/config.json", "Skills/example/SKILL.md"];
 foreach (string file in canonicalFiles)
 {
     string path = Path.Combine(oldRoot, file);
@@ -59,7 +59,7 @@ var result = await StorageMigrationService.MoveAsync(desktop, models, target, po
     initialized = true;
 });
 Check(initialized, "target initializer awaited");
-Check(result.VerifiedFiles == 19, "legacy and canonical files verified");
+Check(result.VerifiedFiles == 21, "legacy and canonical files verified");
 Check(File.ReadAllText(Path.Combine(target, "Models", "connections.json")) == File.ReadAllText(Path.Combine(models, "connections.json")), "credentials copied intact");
 Check(Directory.Exists(Path.Combine(target, "Desktop", "Projects", "one", "empty")), "empty folders preserved");
 var projects = JsonNode.Parse(File.ReadAllText(Path.Combine(target, "Desktop", "projects.json")))!.AsArray();

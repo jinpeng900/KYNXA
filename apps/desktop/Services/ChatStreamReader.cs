@@ -18,6 +18,7 @@ public static class ChatStreamReader
             detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
         var data = new StringBuilder();
         bool started = false;
+        var tools = new Dictionary<string, string>(StringComparer.Ordinal);
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -52,9 +53,27 @@ public static class ChatStreamReader
                         case "reasoning_delta":
                             if (item.Delta is null) throw new InvalidDataException(UiText.Get("模型流缺少增量内容。"));
                             break;
+                        case "tool_call":
+                        case "tool_result":
+                        case "approval_required":
+                            ValidateToolEvent(item);
+                            string callId = item.Tool!.ToolCallId;
+                            string name = item.Tool.Name;
+                            if (item.Type == "tool_call")
+                            {
+                                if (!tools.TryAdd(callId, name)) throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            }
+                            else if (!tools.TryGetValue(callId, out string? originalName) || originalName != name)
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            if (item.Type == "tool_result") tools.Remove(callId);
+                            break;
                         case "completed":
                             if (item.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             terminal = true;
+                            break;
+                        case "content_snapshot":
+                            if (item.Content is null || item.Reasoning is null)
+                                throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             break;
                         case "interrupted":
                         case "error":
@@ -80,4 +99,23 @@ public static class ChatStreamReader
             data.Append(value).Append('\n');
         }
     }
+    private static void ValidateToolEvent(ChatStreamEvent item)
+    {
+        ToolActivity? tool = item.Tool;
+        if (tool is null || string.IsNullOrWhiteSpace(tool.ToolCallId) || tool.ToolCallId.Length > 200
+            || string.IsNullOrWhiteSpace(tool.Name) || tool.Name.Length > 200 || tool.Arguments is not { ValueKind: JsonValueKind.Object }
+            || tool.Arguments.Value.GetRawText().Length > 65536
+            || string.IsNullOrWhiteSpace(tool.Summary) || tool.Summary.Length > 4096
+            || tool.Result?.Length > 65536)
+            throw new InvalidDataException(UiText.Get("工具事件无效。"));
+        bool validStatus = item.Type switch
+        {
+            "tool_call" => tool.Status == "running" && tool.ApprovalId is null,
+            "tool_result" => (tool.Status is "completed" or "error") && tool.Result is not null && tool.ApprovalId is null,
+            "approval_required" => tool.Status == "approval-required" && tool.ApprovalId is { } id && id != Guid.Empty,
+            _ => false
+        };
+        if (!validStatus) throw new InvalidDataException(UiText.Get("工具事件无效。"));
+    }
+
 }

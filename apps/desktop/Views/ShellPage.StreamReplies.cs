@@ -106,6 +106,18 @@ public sealed partial class ShellPage
                 if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
                 switch (update.Type)
                 {
+                    case "tool_call":
+                    case "tool_result":
+                        if (update.Tool is { } activity) AcceptToolActivity(pending, activity);
+                        break;
+                    case "approval_required":
+                        if (update.Tool is { } approval)
+                        {
+                            AcceptToolActivity(pending, approval);
+                            FlushReply(pending);
+                            await RequestToolApprovalAsync(pending, approval);
+                        }
+                        break;
                     case "reasoning_delta":
                         pending.ThinkingTime.Start();
                         pending.Reasoning.Append(update.Delta);
@@ -113,6 +125,12 @@ public sealed partial class ShellPage
                     case "text_delta":
                         pending.ThinkingTime.Stop();
                         pending.Content.Append(update.Delta);
+                        break;
+                    case "content_snapshot":
+                        pending.Content.Clear();
+                        pending.Content.Append(update.Content);
+                        pending.Reasoning.Clear();
+                        pending.Reasoning.Append(update.Reasoning);
                         break;
                     case "completed":
                     case "interrupted":
@@ -162,7 +180,7 @@ public sealed partial class ShellPage
     private async void Transcript_RetryRequested(object? sender, Guid messageId)
     {
         var failed = ActiveMessages.FirstOrDefault(row => row.Message.Id == messageId);
-        if (failed is null || IsReplyInProgress(failed.ConversationId)) return;
+        if (failed is null || failed.ToolActivities.Count > 0 || IsReplyInProgress(failed.ConversationId)) return;
         var (chat, _) = FindChat(failed.ConversationId);
         if (chat is null || chat.Messages.LastOrDefault() != failed.Message) return;
         string? question = chat.Messages.Take(chat.Messages.Count - 1).LastOrDefault(message => message.Role == "user")?.Content;
@@ -211,6 +229,7 @@ public sealed partial class ShellPage
             FlushReply(pending, final: true);
         }
         _modelApiClient.Dispose();
+        _agentApiClient.Dispose();
         ConversationMessages.Dispose();
     }
 }

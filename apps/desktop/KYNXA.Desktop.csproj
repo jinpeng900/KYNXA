@@ -34,6 +34,8 @@
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
     <Content Include="..\model-gateway\*.mjs" Exclude="..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\skills\**\*" Link="model-gateway\skills\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Compile Include="..\shared\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
     <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
     <Compile Include="..\shared\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
   </ItemGroup>
@@ -82,4 +84,30 @@
     <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
   </PropertyGroup>
+  <Target Name="EnsureGatewayDependencies" BeforeTargets="PrepareForBuild"
+          Inputs="..\model-gateway\package-lock.json" Outputs="..\model-gateway\node_modules\.package-lock.json">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway" Command="npm ci --no-audit --no-fund" />
+  </Target>
+  <!-- Dependencies may not exist during initial project evaluation on a clean
+       checkout. Populate content after npm restore, with qualified metadata to
+       avoid batching against unrelated Content items. -->
+  <Target Name="IncludeGatewayRuntimeDependencies" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
+    <ItemGroup>
+      <_KynxaGatewayDependencyFiles Include="..\model-gateway\node_modules\**\*"
+          Exclude="..\model-gateway\node_modules\**\*.map;..\model-gateway\node_modules\.package-lock.json;..\model-gateway\node_modules\**\src\**\*;..\model-gateway\node_modules\**\tests\**\*;..\model-gateway\node_modules\**\test\**\*" />
+      <Content Include="@(_KynxaGatewayDependencyFiles)"
+          Link="model-gateway\node_modules\%(_KynxaGatewayDependencyFiles.RecursiveDir)%(_KynxaGatewayDependencyFiles.Filename)%(_KynxaGatewayDependencyFiles.Extension)"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths">
+    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="Restore;Build"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
+    <ItemGroup>
+      <_KynxaToolHostFiles Include="..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*" />
+      <Content Include="@(_KynxaToolHostFiles)"
+               Link="ToolHost\%(_KynxaToolHostFiles.RecursiveDir)%(_KynxaToolHostFiles.Filename)%(_KynxaToolHostFiles.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 </Project>

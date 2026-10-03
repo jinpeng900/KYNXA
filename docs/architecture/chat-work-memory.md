@@ -34,6 +34,8 @@ Data/
 ├─ Desktop/                             界面偏好、模型选择、内置工作文件夹
 ├─ Models/
 │  └─ connections.json                  连接、密钥、模型 ID、上下文窗口配置
+├─ Agent/config.json                   MCP 与应用技能配置
+├─ Skills/                             用户应用技能
 ├─ Memory/
 │  └─ entries.json                      已确认的用户全局记忆
 ├─ Projects/
@@ -157,3 +159,7 @@ Data/
 第一批交付只包含列表和单条操作。按范围清除目前没有专用 API，需要另行定义原子提交、撤销来源保留及并发冲突行为；不能将逐条 DELETE 描述为一次原子清除。上下文诊断也尚未贯通 HTTP/SSE；现有 `context.metrics` 不等于桌面已经拿到诊断。
 
 回归重点是三范围隔离、兄弟聊天共享刷新、来源归档/删除/撤销/移动、版本冲突、切换聊天时的晚到结果和空稿不持久化。记忆列表可以先交付；批量操作、检索、自动语义总结和执行检查点继续保持独立任务。
+
+## 工具记录与应用技能
+
+基础工具现已接入同一 Runtime，assistant 消息的 ToolActivities 由现有 events.jsonl 保存，没有另建可独立写入的聊天历史。记忆注入仍按原三层范围处理，MCP/Skill 与文件内容不能改变记忆来源或作用域。执行与恢复边界见 [基础工具、MCP 与应用技能](agent-tools.md)。

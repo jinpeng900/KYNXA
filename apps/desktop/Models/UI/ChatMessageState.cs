@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Models.UI;
 
@@ -15,12 +16,14 @@ public sealed class ChatMessageState
     public string Provider { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
+    public List<ToolActivity> ToolActivities { get; set; } = [];
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 /// <summary>Older previews stored each user message as a plain string. Preserve them when loading new transcripts.</summary>
 public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
 {
+    private static readonly JsonSerializerOptions ToolOptions = new(JsonSerializerDefaults.Web);
     public override ChatMessageState Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         if (reader.TokenType == JsonTokenType.String) return new ChatMessageState { Content = reader.GetString() ?? string.Empty };
@@ -38,6 +41,8 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             Error = ReadString(value, "Error"),
             Provider = ReadString(value, "Provider"),
             Model = ReadString(value, "Model"),
+            ToolActivities = value.TryGetProperty("ToolActivities", out var tools) || value.TryGetProperty("toolActivities", out tools)
+                ? tools.Deserialize<List<ToolActivity>>(ToolOptions) ?? [] : [],
             ReasoningDurationMs = value.TryGetProperty("ReasoningDurationMs", out var duration) &&
                 duration.TryGetInt64(out long milliseconds) ? Math.Max(0, milliseconds) : 0,
             CreatedAt = value.TryGetProperty("CreatedAt", out var createdAt) ? createdAt.GetDateTimeOffset() : DateTimeOffset.UtcNow
@@ -56,6 +61,8 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         writer.WriteString("Provider", value.Provider);
         writer.WriteString("Model", value.Model);
         writer.WriteNumber("ReasoningDurationMs", value.ReasoningDurationMs);
+        writer.WritePropertyName("ToolActivities");
+        JsonSerializer.Serialize(writer, value.ToolActivities, ToolOptions);
         writer.WriteString("CreatedAt", value.CreatedAt);
         writer.WriteEndObject();
     }

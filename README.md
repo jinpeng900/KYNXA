@@ -27,7 +27,7 @@ Updated 2026-10-02. The pushed code baseline is `3226527`; this snapshot also re
 
 The `3226527` gateway baseline has 151 passing automated tests. The current sidebar fix separately passed 55 state checks and a Windows desktop build with zero warnings/errors. Actual UI checks covered both add actions, draft replacement, same-project input preservation and cleanup on project changes; the formal catalog revision stayed unchanged. The gateway suite was not rerun for this update. This evidence does not certify every provider, a real 1M model or all UI performance scenarios.
 
-Host orchestration, model-controlled file tools, enforceable approvals, task checkpoints, automatic semantic memory and full-text/vector search are planned. The current permission menu is UI/request metadata.
+Model-controlled file tools, per-request approvals, stdio MCP, application skills and a Windows AppContainer terminal are implemented. Settings opens the Tools and skills window; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints, automatic semantic memory and full-text/vector search remain planned. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
 
 Start with the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
 
@@ -35,7 +35,7 @@ Start with the [gateway guide](apps/model-gateway/README.md), [chat/work memory 
 
 1. Settings now opens memory management for chat, project and global scopes, with source status, manual creation, editing, single-entry deletion and revision conflict handling. Add independent output configuration next. Expose context decisions afterward; bulk clearing needs its own backend contract and consistency checks.
 2. Separate conversation lists from message loading; load the selected chat on demand and measure long-history scrolling, copying and switching.
-3. Add a bounded workspace reading flow, then a small Host/tool execution slice with explicit patch review, fixed test commands and recorded evidence. Keep the existing conversation store as the single authority until an explicit migration replaces it.
+3. Extend the implemented workspace/tool loop with patch previews, explicit multi-file transactions and durable execution checkpoints. Keep the existing conversation store as the single authority until an explicit migration replaces it.
 4. Add local-service discovery/startup and model download management after the corresponding lifecycle and failure handling are defined.
 
 Memory management is implemented; the remaining items are proposals. Owners and acceptance criteria are in the [team plan](docs/team/README.md); the [memory implementation breakdown](docs/architecture/chat-work-memory.md#下一轮实施切分) names the existing interfaces and next deliverables.

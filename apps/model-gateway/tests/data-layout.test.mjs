@@ -15,7 +15,7 @@ const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
 test('first startup creates a versioned complete root and repeat startup preserves identity/settings', async () => {
   const { root, options, store } = await fixture();
   await store.initialize();
-  for (const folder of ['Projects', 'Chats', 'Memory', 'Index', 'Trash', 'Backups'])
+  for (const folder of ['Projects', 'Chats', 'Memory', 'Index', 'Trash', 'Backups', 'Agent', 'Skills'])
     assert.equal((await stat(join(root, folder))).isDirectory(), true);
   const settings = await readJson(join(root, 'settings.json'));
   assert.equal(settings.Storage.LayoutVersion, 1);
