@@ -53,7 +53,9 @@ export function validateMemorySource(value) {
   const role = value.role ?? 'user';
   if (!['user-message', 'manual'].includes(type) || role !== 'user')
     throw memoryFailure('记忆须由用户明确确认，来源格式无效。');
-  const source = { type, role: 'user', conversationId: memoryId(value.conversationId) };
+  const source = { type, role: 'user' };
+  // Manual confirmation can belong directly to a work/global scope without creating a conversation.
+  if (type === 'user-message' || value.conversationId != null) source.conversationId = memoryId(value.conversationId);
   if (type === 'user-message') source.messageId = memoryId(value.messageId);
   else if (value.messageId != null) throw memoryFailure('手动记忆不能伪造消息来源。');
   return source;

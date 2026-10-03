@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
@@ -36,12 +37,12 @@ public sealed partial class ShellPage
             menu.Items.Add(item);
         }
 
-        Item(chat.IsPinned ? "取消置顶" : "置顶", "\uE718", async () =>
+        Item(chat.IsPinned ? UiText.Get("取消置顶") : UiText.Get("置顶"), "\uE718", async () =>
         {
             chat.IsPinned = !chat.IsPinned;
             await SaveChatChangesAsync(project);
         });
-        Item("删除", "\uE74D", async () =>
+        Item(UiText.Get("删除"), "\uE74D", async () =>
         {
             CaptureProjectDraft();
             CaptureStandaloneDraft();
@@ -57,9 +58,9 @@ public sealed partial class ShellPage
                 chats.Insert(Math.Min(index, chats.Count), chat);
                 await SaveChatChangesAsync(project);
             };
-            ShowChatNotice($"已删除“{chat.Title}”");
+            ShowChatNotice(string.Format(UiText.Get("已删除“{0}”"), chat.Title));
         });
-        Item("重命名", "\uE70F", async () =>
+        Item(UiText.Get("重命名"), "\uE70F", async () =>
         {
             string? name = await AskChatNameAsync(chat.Title);
             if (name is null) return;
@@ -69,7 +70,7 @@ public sealed partial class ShellPage
             await SaveChatChangesAsync(project);
             UpdateConversationTitle();
         });
-        Item("归档", "\uE7B8", async () =>
+        Item(UiText.Get("归档"), "\uE7B8", async () =>
         {
             CaptureProjectDraft();
             CaptureStandaloneDraft();
@@ -81,7 +82,7 @@ public sealed partial class ShellPage
                 chat.IsArchived = false;
                 await SaveChatChangesAsync(project);
             };
-            ShowChatNotice($"已归档“{chat.Title}”");
+            ShowChatNotice(string.Format(UiText.Get("已归档“{0}”"), chat.Title));
         });
         return menu;
     }
@@ -135,13 +136,13 @@ public sealed partial class ShellPage
         var input = new TextBox
         {
             FontFamily = (FontFamily)Application.Current.Resources["KynxaUIFont"], FontSize = 14,
-            Text = value, PlaceholderText = "输入聊天名称", MaxLength = 80, MinWidth = 300
+            Text = value, PlaceholderText = UiText.Get("输入聊天名称"), MaxLength = 80, MinWidth = 300
         };
         AutomationProperties.SetAutomationId(input, "ChatNameInput");
         var dialog = new ContentDialog
         {
-            XamlRoot = XamlRoot, Title = "重命名聊天", Content = input,
-            PrimaryButtonText = "保存", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot, Title = UiText.Get("重命名聊天"), Content = input,
+            PrimaryButtonText = UiText.Get("保存"), CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Primary,
             IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(value)
         };
         input.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(input.Text);

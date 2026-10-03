@@ -1,12 +1,18 @@
+using System.ComponentModel;
 using System.Net;
 using System.Net.Sockets;
 
 namespace KYNXA_Desktop.Services;
 
 public sealed record ModelPreset(string Id, string Name, string BaseUrl, string[] Models, string Hint,
-    string Protocol = "openai-completions")
+    string Protocol = "openai-completions") : INotifyPropertyChanged
 {
-    public override string ToString() => Name;
+    public string DisplayName => UiText.Get(Name);
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    internal void RefreshDisplayName() => PropertyChanged?.Invoke(this, new(nameof(DisplayName)));
+
+    public override string ToString() => DisplayName;
 }
 
 public static class ModelPresets
@@ -46,6 +52,12 @@ public static class ModelPresets
             "填写服务地址和模型 ID，接入其他兼容 OpenAI 的服务。")
     };
 
+    // Notify existing items so the open selector keeps its selection and container state.
+    public static void RefreshDisplayNames()
+    {
+        foreach (var preset in All) preset.RefreshDisplayName();
+    }
+
     public static bool IsLocalEndpoint(Uri uri)
     {
         if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
@@ -62,7 +74,9 @@ public static class ModelPresets
     public static ModelPreset? Recognize(string name) => All.FirstOrDefault(p => p.Id != "custom" &&
         (string.Equals(name.Trim(), p.Id, StringComparison.OrdinalIgnoreCase) ||
          string.Equals(name.Trim(), p.Name, StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name.Trim(), $"{p.Name} API", StringComparison.OrdinalIgnoreCase)));
+         string.Equals(name.Trim(), $"{p.Name} API", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), UiText.Get(p.Name, "en"), StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), $"{UiText.Get(p.Name, "en")} API", StringComparison.OrdinalIgnoreCase)));
 
     public static string UniqueId(string prefix, IEnumerable<string> existing)
     {

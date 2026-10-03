@@ -17,7 +17,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private const string HostName = "kynxa-transcript.local";
     private const string PageUrl = "https://" + HostName + "/Transcript/index.html";
     private readonly WebView2 _browser = new() { DefaultBackgroundColor = Colors.White };
-    private readonly TextBlock _notice = new() { Text = "正在加载聊天…", Margin = new Thickness(12), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _notice = new() { Text = UiText.Get("正在加载聊天…"), Margin = new Thickness(12), TextWrapping = TextWrapping.Wrap };
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromMilliseconds(40) };
     private readonly Dictionary<Guid, CachedHtml> _html = [];
@@ -29,6 +29,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private IReadOnlyList<ConversationMessageViewModel> _messages = [];
     private Guid? _conversationId;
     private Task? _initialization;
+    private string _noticeKey = "正在加载聊天…";
     private long _revision, _generation;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
     private sealed record CachedHtml(string Role, string Content, string Reasoning, bool Streaming, string Html, string ReasoningHtml)
@@ -36,7 +37,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         public long Size => (long)Content.Length + Reasoning.Length + Html.Length + ReasoningHtml.Length;
     }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
-        string ReasoningTitle, bool Waiting, string Error, bool CanRetry);
+        string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry);
 
     public Task Ready => _ready.Task;
     internal WebView2 Browser => _browser;
@@ -48,6 +49,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         Children.Add(_notice);
         Loaded += (_, _) => Preload();
         _refresh.Tick += async (_, _) => { _refresh.Stop(); await FlushAsync(); };
+        UiText.LanguageChanged += LanguageChanged;
     }
 
     public void Preload()
@@ -75,6 +77,40 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     public void BeforeSend() => Post(new { type = "beforeSend" });
     public void ClearSelection() => Post(new { type = "clearSelection" });
+    private void LanguageChanged(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        if (DispatcherQueue.HasThreadAccess) RefreshLanguage();
+        else DispatcherQueue.TryEnqueue(RefreshLanguage);
+    }
+
+    private void RefreshLanguage()
+    {
+        if (_disposed) return;
+        _notice.Text = UiText.Get(_noticeKey);
+        // The browser retains language-neutral metadata for active and cached rows.
+        // Do not queue a transcript render: that would also touch selection and scrolling.
+        Post(new
+        {
+            type = "initializeUi", language = UiText.Language,
+            strings = new
+            {
+                conversation = UiText.Get("对话"), transcript = UiText.Get("聊天记录"),
+                copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
+                reasoning = UiText.Get("思考过程"), thinking = UiText.Get("正在思考…"),
+                reasoningDuration = UiText.Get("思考过程 · {0} 秒"), stopped = UiText.Get("已停止生成"),
+                interrupted = UiText.Get("回复中断，请重试。"),
+                replying = UiText.Get("正在回复…"), generating = UiText.Get("正在生成")
+            }
+        });
+    }
+
+    private void SetNotice(string key)
+    {
+        _noticeKey = key;
+        _notice.Text = UiText.Get(key);
+    }
+
     private void MessageChanged(object? sender, PropertyChangedEventArgs e) => QueueRefresh();
     private void QueueRefresh()
     {
@@ -89,7 +125,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         try
         {
             string resources = Path.Combine(AppContext.BaseDirectory, "Resources");
-            if (!File.Exists(Path.Combine(resources, "Transcript", "index.html"))) throw new FileNotFoundException("聊天显示资源缺失。");
+            if (!File.Exists(Path.Combine(resources, "Transcript", "index.html"))) throw new FileNotFoundException(UiText.Get("聊天显示资源缺失。"));
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Cache", "TranscriptWebView2");
             var environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, cache, null).AsTask().WaitAsync(TimeSpan.FromSeconds(15));
             if (_disposed) return;
@@ -128,7 +164,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         catch (Exception error)
         {
             if (_disposed) return;
-            _notice.Text = "聊天显示未能加载，请重新打开应用。";
+            SetNotice("聊天显示未能加载，请重新打开应用。");
             _notice.Visibility = Visibility.Visible;
             _ready.TrySetException(error);
         }
@@ -144,7 +180,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
             if (!message.TryGetProperty("type", out var kind)) return;
             switch (kind.GetString())
             {
-                case "ready": _ready.TrySetResult(); QueueRefresh(); break;
+                case "ready":
+                    _ready.TrySetResult();
+                    RefreshLanguage();
+                    QueueRefresh();
+                    break;
                 case "retry":
                     if (MatchesConversation(message) && message.TryGetProperty("id", out var id) && Guid.TryParse(id.GetString(), out var parsed)
                         && _messages.Any(row => row.Message.Id == parsed && row.RetryVisibility == Visibility.Visible)) RetryRequested?.Invoke(this, parsed);
@@ -185,7 +225,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
         long generation = _generation;
         var conversationId = _conversationId;
         var snapshots = _messages.Select(row => new Snapshot(row.Message.Id, row.Message.Role, row.Content, row.Message.Reasoning,
-            row.IsStreaming, row.Message.Reasoning.Length > 0 ? row.ReasoningTitle : "", row.IsWaiting, row.ErrorText, row.RetryVisibility == Visibility.Visible)).ToArray();
+            row.IsStreaming, row.Message.Reasoning.Length > 0 ? (row.IsThinking ? "thinking" : "finished") : null,
+            row.ReasoningSeconds, row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible)).ToArray();
         try
         {
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
@@ -217,7 +258,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
             foreach (var item in rendered) CacheHtml(item.Row.Id, item.Cache!);
             Post(new { type = "render", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom = _openAtBottom,
                 messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
-                    html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningTitle = item.Row.ReasoningTitle,
+                    html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
+                    reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry }) });
             _openAtBottom = false;
             _notice.Visibility = Visibility.Collapsed;
@@ -225,7 +267,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.Text.RegularExpressions.RegexMatchTimeoutException)
         {
             if (_disposed || generation != _generation) return;
-            _notice.Text = "聊天内容暂时无法显示，请重新打开此聊天。";
+            SetNotice("聊天内容暂时无法显示，请重新打开此聊天。");
             _notice.Visibility = Visibility.Visible;
         }
         finally
@@ -257,6 +299,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        UiText.LanguageChanged -= LanguageChanged;
         _refresh.Stop();
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
         _messages = [];

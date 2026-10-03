@@ -67,6 +67,7 @@ public partial class App : Application
             _metrics["warmAppend150Ms"] = warm.ElapsedMilliseconds;
 
             await CheckSelectionAndCopyAsync();
+            await CheckLiveLanguageAsync();
             _transcript.ShowConversation(longChat, longRows);
             await WaitAsync("document.querySelectorAll('.katex').length === 150 && __transcriptSmoke.bottomDistance() < 4", "reopening a chat returns to bottom");
             await EvalAsync<bool>("__transcriptSmoke.scrollUp()");
@@ -99,7 +100,7 @@ public partial class App : Application
             _metrics["checks"] = _checks;
             _metrics["finalState"] = await EvalAsync<JsonElement>("window.transcriptState()");
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
-            File.WriteAllText(_result, $"PASS: {_checks} DOM transcript checks; cold150={_metrics["cold150IncludingInitializationMs"]}ms, warmAppend={_metrics["warmAppend150Ms"]}ms. Native tables/math, exact code copy, 480/980/1600 wrapping and width, selected-content preservation, deferred final updates, opening/following scroll. Pointer diagnostic: {(pointerRequested ? "passed" : "not requested (--pointer)")}. Preview: kynxa-transcript-preview.png.");
+            File.WriteAllText(_result, $"PASS: {_checks} DOM transcript checks; cold150={_metrics["cold150IncludingInitializationMs"]}ms, warmAppend={_metrics["warmAppend150Ms"]}ms. Native tables/math, exact code copy, live language switching, 480/980/1600 wrapping and width, selected-content preservation, deferred final updates, opening/following scroll. Pointer diagnostic: {(pointerRequested ? "passed" : "not requested (--pointer)")}. Preview: kynxa-transcript-preview.png.");
         }
         catch (Exception error)
         {

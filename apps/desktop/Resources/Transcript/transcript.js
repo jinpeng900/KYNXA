@@ -2,6 +2,11 @@
 (() => {
   'use strict';
   const messages = document.getElementById('messages');
+  const uiStrings = {
+    conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
+    reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
+    interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成'
+  };
   let entries = new Map();
   const conversations = new Map();
   let cachedCharacters = 0, cachedNodes = 0;
@@ -9,8 +14,57 @@
   const mathCache = new Map();
   let conversationId = null, pending = null, following = true, applying = false;
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
-  let pointerSelecting = false;
+  let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   const send = value => window.chrome?.webview?.postMessage(value);
+  const reasoningTitle = message => message.reasoningState === 'thinking' ? uiStrings.thinking
+    : message.reasoningState === 'finished' ? uiStrings.reasoningDuration.replace('{0}', String(message.reasoningSeconds))
+    : message.reasoningTitle || uiStrings.reasoning;
+  function statusText(message) {
+    if (message.status === 'interrupted')
+      return uiStrings.stopped + (typeof message.error === 'string' && message.error ? ' · ' + message.error : '');
+    if (message.error) return typeof message.error === 'string' ? message.error : uiStrings.interrupted;
+    return message.waiting && !message.content ? uiStrings.replying : '';
+  }
+  function setStatusText(entry, text) {
+    const node = entry.status.firstChild;
+    if (node?.nodeType === Node.TEXT_NODE) {
+      if (text) { if (node.data !== text) node.data = text; }
+      else node.remove();
+    } else if (text) entry.status.prepend(document.createTextNode(text));
+  }
+  function localizeEntry(entry) {
+    entry.copy.title = uiStrings.copy;
+    entry.copy.setAttribute('aria-label', uiStrings.copyMessage);
+    entry.retry.textContent = uiStrings.retry;
+    if (entry.message) {
+      const title = reasoningTitle(entry.message);
+      if (entry.summary.textContent !== title) entry.summary.textContent = title;
+      setStatusText(entry, statusText(entry.message));
+    }
+    entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
+  }
+  function initializeUi(command) {
+    const left = scrollX, top = scrollY;
+    // Startup has no content to preserve; let its first render follow the bottom.
+    localizingUi = entries.size > 0;
+    if (localizingUi) cancelAnimationFrame(scrollFrame);
+    cancelAnimationFrame(languageFrame);
+    for (const key of Object.keys(uiStrings))
+      if (typeof command.strings?.[key] === 'string') uiStrings[key] = command.strings[key];
+    document.documentElement.lang = command.language === 'en' ? 'en' : 'zh-CN';
+    document.title = uiStrings.conversation;
+    messages.setAttribute('aria-label', uiStrings.transcript);
+    // Localize only application controls; message DOM and browser selections stay intact.
+    for (const entry of entries.values()) localizeEntry(entry);
+    for (const saved of conversations.values()) for (const entry of saved.entries.values()) localizeEntry(entry);
+    if (!localizingUi) return;
+    // Labels may wrap differently. Keep the user's scroll position and suppress only
+    // the automatic bottom-follow triggered by this layout, without touching ranges.
+    if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
+    languageFrame = requestAnimationFrame(() => {
+      languageFrame = requestAnimationFrame(() => { localizingUi = false; });
+    });
+  }
   const atBottom = () => document.documentElement.scrollHeight - innerHeight - scrollY <= 36;
   const activeSelection = () => {
     const selection = getSelection();
@@ -18,10 +72,10 @@
     try { return selection.getRangeAt(0).intersectsNode(messages); } catch { return false; }
   };
   function followBottom() {
-    if (!following || activeSelection() || pointerSelecting) return;
+    if (localizingUi || !following || activeSelection() || pointerSelecting) return;
     cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
-      if (following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      if (!localizingUi && following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
     });
   }
   function clearSelection() {
@@ -100,9 +154,9 @@
     const status = document.createElement('div'); status.className = 'message-status'; status.dataset.copyIgnore = '';
     const actions = document.createElement('div'); actions.className = 'message-actions'; actions.dataset.copyIgnore = '';
     const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-message';
-    copy.title = '复制'; copy.setAttribute('aria-label', '复制整条消息');
+    copy.title = uiStrings.copy; copy.setAttribute('aria-label', uiStrings.copyMessage);
     copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
-    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = '重试';
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
     const entry = { article, content, reasoning, summary, thought, body, status, actions, copy, retry, message: null };
     copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: entry.message.content || '' }));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
@@ -111,7 +165,7 @@
   }
   function updateMessage(entry, message) {
     const old = entry.message;
-    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'waiting', 'streaming', 'error', 'canRetry']
+    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry']
       .every(key => old[key] === message[key])) return;
     entry.message = message;
     const role = message.role === 'user' ? 'user' : 'assistant';
@@ -122,8 +176,8 @@
       entry.avatar.src = '../UI/Brand/kynxa-logo.png'; entry.avatar.alt = ''; entry.avatar.draggable = false; entry.avatar.dataset.copyIgnore = '';
       entry.article.prepend(entry.avatar);
     } else if (role === 'user' && entry.avatar) { entry.avatar.remove(); entry.avatar = null; }
-    entry.reasoning.hidden = !message.reasoningHtml && !message.reasoningTitle;
-    entry.summary.textContent = message.reasoningTitle || '思考过程';
+    entry.reasoning.hidden = !message.reasoningHtml && !message.reasoningTitle && !message.reasoningState;
+    entry.summary.textContent = reasoningTitle(message);
     patchBlocks(entry.thought, message.reasoningHtml || '');
     if (role === 'user') {
       const text = message.content || '';
@@ -141,9 +195,8 @@
       patchBlocks(entry.body, message.html || '');
     }
     entry.status.replaceChildren();
-    if (message.error) entry.status.textContent = typeof message.error === 'string' ? message.error : '回复中断，请重试。';
-    else if (message.waiting && !message.content) entry.status.textContent = '正在回复…';
-    if (message.streaming) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', '正在生成'); entry.status.append(dot); }
+    setStatusText(entry, statusText(message));
+    if (message.streaming) { const dot = document.createElement('span'); dot.className = 'streaming-dot'; dot.setAttribute('aria-label', uiStrings.generating); entry.status.append(dot); }
     entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !message.content;
   }
@@ -299,7 +352,7 @@
   document.addEventListener('pointermove', event => { if (!(event.buttons & 1)) releasePointer(); });
   window.addEventListener('blur', () => { clearSelection(); });
   window.addEventListener('scroll', () => {
-    if (!applying) following = !activeSelection() && !pointerSelecting && atBottom();
+    if (!applying && !localizingUi) following = !activeSelection() && !pointerSelecting && atBottom();
   }, { passive: true });
   window.addEventListener('wheel', event => { if (event.deltaY < 0) following = false; }, { passive: true });
   window.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false; });
@@ -312,7 +365,8 @@
   new ResizeObserver(followBottom).observe(messages);
   window.chrome?.webview?.addEventListener('message', event => {
     const command = event.data;
-    if (command?.type === 'render') applyTranscript(command);
+    if (command?.type === 'initializeUi') initializeUi(command);
+    else if (command?.type === 'render') applyTranscript(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
     else if (command?.type === 'beforeSend') { following = atBottom() && !activeSelection(); followBottom(); }

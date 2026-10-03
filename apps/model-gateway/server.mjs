@@ -9,28 +9,12 @@ import { modelHome } from './storage.mjs';
 import { storageMigrationActive } from './storage-maintenance.mjs';
 import { StreamFailure } from './streaming.mjs';
 import { DATA_LAYOUT_VERSION } from './data-layout.mjs';
+import { readJsonBody, sendJson, openEventStream } from './http-transport.mjs';
 
 const dataHome = modelHome();
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
 const store = new ModelStore({ dataHome });
 const runtime = new ModelRuntime({ modelStore: store, dataHome });
-
-function json(response, status, value) {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  response.end(JSON.stringify(value));
-}
-
-async function bodyOf(request, limit = 64 * 1024) {
-  const chunks = [];
-  let bytes = 0;
-  for await (const chunk of request) {
-    bytes += chunk.length;
-    if (bytes > limit) throw new Error('请求体过大。');
-    chunks.push(chunk);
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-  catch { throw new Error('请求体不是有效 JSON。'); }
-}
 
 async function probe(input, modelStore) {
   const connection = validateConnection(input, { requireModels: false });
@@ -59,44 +43,60 @@ export function createModelServer(options = {}) {
         modelRuntime = new ModelRuntime({ modelStore, dataHome: modelStore.dataHome });
       }
       if (request.method === 'GET' && pathname === '/health')
-        return json(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+        return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
+          streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
           activeRequests, migrating, modelDataHome: modelStore.dataHome });
-      if (migrating) return json(response, 503, { error: '正在迁移数据，请完成后再试。' });
+      if (migrating) return sendJson(response, 503, { error: '正在迁移数据，请完成后再试。' });
       activeRequests++;
       counted = true;
+      const userMemoryRoute = /^\/api\/memory\/user(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
+      const projectMemoryRoute = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/memory(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
+      if (userMemoryRoute || projectMemoryRoute) {
+        const scope = userMemoryRoute ? 'user' : 'project';
+        const scopeId = userMemoryRoute ? 'user' : projectMemoryRoute[1];
+        const entryId = userMemoryRoute ? userMemoryRoute[1] : projectMemoryRoute[2];
+        if (request.method === 'GET' && !entryId)
+          return sendJson(response, 200, await modelRuntime.memory.listScope(scope, scopeId));
+        if (request.method === 'POST' && !entryId)
+          return sendJson(response, 201, await modelRuntime.memory.createScope(scope, scopeId, await readJsonBody(request)));
+        if (request.method === 'PATCH' && entryId)
+          return sendJson(response, 200, await modelRuntime.memory.updateScope(scope, scopeId, entryId, await readJsonBody(request)));
+        if (request.method === 'DELETE' && entryId)
+          return sendJson(response, 200, await modelRuntime.memory.deleteScope(scope, scopeId, entryId, await readJsonBody(request)));
+        return sendJson(response, 405, { error: '此记忆接口不支持该操作。' });
+      }
       const memoryRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/memory(?:\/([a-zA-Z0-9_-]+))?$/i.exec(pathname);
       if (memoryRoute) {
         const [, conversationId, memoryId] = memoryRoute;
         if (request.method === 'GET' && !memoryId)
-          return json(response, 200, await modelRuntime.memory.listFor(conversationId));
+          return sendJson(response, 200, await modelRuntime.memory.listFor(conversationId));
         if (request.method === 'POST' && !memoryId)
-          return json(response, 201, await modelRuntime.memory.create(conversationId, await bodyOf(request)));
+          return sendJson(response, 201, await modelRuntime.memory.create(conversationId, await readJsonBody(request)));
         if (request.method === 'PATCH' && memoryId)
-          return json(response, 200, await modelRuntime.memory.update(conversationId, memoryId, await bodyOf(request)));
+          return sendJson(response, 200, await modelRuntime.memory.update(conversationId, memoryId, await readJsonBody(request)));
         if (request.method === 'DELETE' && memoryId)
-          return json(response, 200, await modelRuntime.memory.delete(conversationId, memoryId, await bodyOf(request)));
-        return json(response, 405, { error: '此记忆接口不支持该操作。' });
+          return sendJson(response, 200, await modelRuntime.memory.delete(conversationId, memoryId, await readJsonBody(request)));
+        return sendJson(response, 405, { error: '此记忆接口不支持该操作。' });
       }
       const relationshipRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/relationships$/i.exec(pathname);
       if (request.method === 'GET' && relationshipRoute)
-        return json(response, 200, await modelRuntime.conversations.relationships(relationshipRoute[1]));
+        return sendJson(response, 200, await modelRuntime.conversations.relationships(relationshipRoute[1]));
       if (pathname === '/api/conversations/catalog') {
-        if (request.method === 'GET') return json(response, 200, await modelRuntime.conversations.catalog());
-        if (request.method === 'PUT') return json(response, 200,
-          await modelRuntime.conversations.saveCatalog(await bodyOf(request, 32 * 1024 * 1024)));
+        if (request.method === 'GET') return sendJson(response, 200, await modelRuntime.conversations.catalog());
+        if (request.method === 'PUT') return sendJson(response, 200,
+          await modelRuntime.conversations.saveCatalog(await readJsonBody(request, 32 * 1024 * 1024)));
       }
       if (request.method === 'GET' && pathname === '/api/models')
-        return json(response, 200, { providers: await modelStore.list() });
+        return sendJson(response, 200, { providers: await modelStore.list() });
       if (request.method === 'POST' && pathname === '/api/models') {
-        const provider = await modelStore.save(await bodyOf(request, 8 * 1024 * 1024));
+        const provider = await modelStore.save(await readJsonBody(request, 8 * 1024 * 1024));
         await modelRuntime.invalidate?.(provider.providerId);
-        return json(response, 200, { provider });
+        return sendJson(response, 200, { provider });
       }
       if (request.method === 'POST' && pathname === '/api/models/test')
-        return json(response, 200, await probe(await bodyOf(request, 8 * 1024 * 1024), modelStore));
+        return sendJson(response, 200, await probe(await readJsonBody(request, 8 * 1024 * 1024), modelStore));
       if (request.method === 'POST' && ['/api/chat', '/api/chat/stream'].includes(pathname)) {
-        const body = await bodyOf(request);
+        const body = await readJsonBody(request);
         if (!body || typeof body.message !== 'string' || !body.message.trim() ||
             typeof body.conversationId !== 'string' || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.conversationId))
           throw new Error('会话 ID 或消息无效。');
@@ -113,26 +113,11 @@ export function createModelServer(options = {}) {
         if (pathname === '/api/chat/stream') {
           const controller = new AbortController();
           streamControllers.add(controller);
-          const cancel = () => { if (!response.writableEnded) controller.abort(); };
-          response.on('close', cancel);
-          response.on('error', cancel);
           const identity = { conversationId: body.conversationId,
             requestId: body.requestId ?? randomUUID(), createdAt: new Date().toISOString() };
-          const emit = event => {
-            if (response.destroyed || response.writableEnded) return;
-            if (response.writableLength > 1024 * 1024) {
-              controller.abort(); response.destroy(); return;
-            }
-            response.write(`event: ${event.type}\ndata: ${JSON.stringify({ ...identity, ...event })}\n\n`);
-          };
-          response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
-          response.flushHeaders();
+          const stream = openEventStream(response, identity, controller);
+          const { emit } = stream;
           emit({ type: 'started' });
-          const heartbeat = setInterval(() => {
-            if (!response.destroyed && !response.writableEnded) response.write(': keep-alive\n\n');
-          }, 15000);
-          heartbeat.unref();
           try {
             const result = await modelRuntime.replyStream({ conversationId: body.conversationId,
               message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId,
@@ -144,10 +129,8 @@ export function createModelServer(options = {}) {
               error: error instanceof StreamFailure ? error.message : '模型调用失败，已保留生成的内容。',
               ...(error instanceof StreamFailure && error.code ? { code: error.code } : {}) });
           } finally {
-            clearInterval(heartbeat);
             streamControllers.delete(controller);
-            response.off('close', cancel); response.off('error', cancel);
-            response.end();
+            stream.end();
           }
           return;
         }
@@ -155,17 +138,17 @@ export function createModelServer(options = {}) {
         const content = await modelRuntime.reply({ conversationId: body.conversationId,
           message: body.message, provider: body.provider, model: body.model,
           requestId, userMessageId: body.userMessageId });
-        return json(response, 200, { conversationId: body.conversationId,
+        return sendJson(response, 200, { conversationId: body.conversationId,
           requestId, role: 'assistant', content, createdAt: new Date().toISOString() });
       }
-      json(response, 404, { error: '接口不存在。' });
+      sendJson(response, 404, { error: '接口不存在。' });
     } catch (error) {
       const clientError = error.message?.includes('无效') || error.message?.includes('填写') ||
         error.message?.includes('Provider ID') || error.message?.includes('连接名称') ||
         error.message?.includes('API Key') || error.message?.includes('Base URL') || error.message?.includes('HTTPS') ||
         error.message?.includes('模型') || error.message?.includes('请求体') ||
         error.message?.includes('权限模式') || error.message?.includes('会话 ID');
-      json(response, error.statusCode ?? (clientError ? 400 : 502),
+      sendJson(response, error.statusCode ?? (clientError ? 400 : 502),
         { error: error.message ?? '模型调用失败。', ...(error.code ? { code: error.code } : {}) });
     } finally {
       if (counted) activeRequests--;

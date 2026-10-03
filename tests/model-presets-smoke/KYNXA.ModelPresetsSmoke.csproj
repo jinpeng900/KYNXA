@@ -9,4 +9,11 @@
     <Compile Include="../../apps/desktop/Services/ModelPresets.cs" Link="ModelPresets.cs" />
     <Compile Include="../../apps/desktop/Services/ModelCatalog.cs" Link="ModelCatalog.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
+  </ItemGroup>
 </Project>

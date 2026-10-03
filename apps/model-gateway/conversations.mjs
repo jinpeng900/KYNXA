@@ -261,13 +261,20 @@ export class ConversationStore {
     });
   }
 
-  describeProject(projectId) {
-    return this._run(() => {
-      const project = this.document.Projects.find(value => key(value.Id) === key(projectId));
-      if (!project) throw failure('工作不存在。', 'PROJECT_NOT_FOUND', 404);
-      return { projectId: project.Id, name: project.Name,
-        isFolderlessWorkspace: Boolean(project.IsFolderlessWorkspace), isArchived: Boolean(project.IsArchived) };
-    });
+  _projectRelationship(projectId) {
+    const project = this.document.Projects.find(value => key(value.Id) === key(projectId));
+    if (!project) throw failure('工作不存在。', 'PROJECT_NOT_FOUND', 404);
+    return { projectId: project.Id, name: project.Name,
+      isFolderlessWorkspace: Boolean(project.IsFolderlessWorkspace), isArchived: Boolean(project.IsArchived) };
+  }
+
+  describeProject(projectId) { return this._run(() => this._projectRelationship(projectId)); }
+
+  /** Scope IO holds the same catalog guard as session IO, including work removal and global memory initialization. */
+  withCatalogStorage(operation) { return this._run(operation); }
+
+  withProjectStorage(projectId, operation) {
+    return this._run(() => operation(this._projectRelationship(projectId)));
   }
 
   resolveSessionDirectory(conversationId) {

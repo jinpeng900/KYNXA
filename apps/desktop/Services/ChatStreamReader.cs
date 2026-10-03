@@ -30,30 +30,30 @@ public static class ChatStreamReader
                     try
                     {
                         item = JsonSerializer.Deserialize<ChatStreamEvent>(data.ToString(), JsonOptions)
-                            ?? throw new InvalidDataException("模型流返回了空事件。");
+                            ?? throw new InvalidDataException(UiText.Get("模型流返回了空事件。"));
                     }
                     catch (JsonException exception)
                     {
-                        throw new InvalidDataException("模型流返回了无法识别的数据。", exception);
+                        throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"), exception);
                     }
                     data.Clear();
                     if (item.ConversationId != conversationId || item.RequestId != requestId || item.CreatedAt == default)
-                        throw new InvalidDataException("模型流返回的会话或请求信息不匹配。");
+                        throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
                     if (!started && item.Type != "started")
-                        throw new InvalidDataException("模型流缺少开始事件。");
+                        throw new InvalidDataException(UiText.Get("模型流缺少开始事件。"));
                     bool terminal = false;
                     switch (item.Type)
                     {
                         case "started":
-                            if (started) throw new InvalidDataException("模型流重复开始了同一条回复。");
+                            if (started) throw new InvalidDataException(UiText.Get("模型流重复开始了同一条回复。"));
                             started = true;
                             break;
                         case "text_delta":
                         case "reasoning_delta":
-                            if (item.Delta is null) throw new InvalidDataException("模型流缺少增量内容。");
+                            if (item.Delta is null) throw new InvalidDataException(UiText.Get("模型流缺少增量内容。"));
                             break;
                         case "completed":
-                            if (item.Content is null) throw new InvalidDataException("模型流缺少最终回复。");
+                            if (item.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             terminal = true;
                             break;
                         case "interrupted":
@@ -61,12 +61,12 @@ public static class ChatStreamReader
                             terminal = true;
                             break;
                         default:
-                            throw new InvalidDataException("模型流返回了未知的事件类型。");
+                            throw new InvalidDataException(UiText.Get("模型流返回了未知的事件类型。"));
                     }
                     yield return item;
                     if (terminal) yield break;
                 }
-                if (line is null) throw new EndOfStreamException("模型连接已断开，已保留收到的内容。");
+                if (line is null) throw new EndOfStreamException(UiText.Get("模型连接已断开，已保留收到的内容。"));
                 continue;
             }
             // Ignore comments/heartbeats and optional SSE event/id/retry fields.
@@ -76,7 +76,7 @@ public static class ChatStreamReader
             string value = separator < 0 ? string.Empty : line[(separator + 1)..];
             if (value.StartsWith(' ')) value = value[1..];
             if (data.Length + value.Length + 1 > MaximumEventCharacters)
-                throw new InvalidDataException("模型流的单条事件过大。");
+                throw new InvalidDataException(UiText.Get("模型流的单条事件过大。"));
             data.Append(value).Append('\n');
         }
     }

@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using KYNXA_Desktop.Models.UI;
@@ -70,7 +69,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         try
         {
             await ModelGatewayService.EnsureReadyAsync();
-            if (_revision is null) throw new InvalidOperationException("会话目录尚未加载，请重新打开 KYNXA。");
+            if (_revision is null) throw new InvalidOperationException(UiText.Get("会话目录尚未加载，请重新打开 KYNXA。"));
             var payload = new Dictionary<string, object> { ["Revision"] = _revision.Value };
             if (projects is { } projectData) payload["Projects"] = projectData;
             if (chats is { } chatData) payload["Chats"] = chatData;
@@ -81,24 +80,10 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         finally { _requests.Release(); }
     }
 
-    private static async Task<ConversationCatalog> ReadAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        if (!response.IsSuccessStatusCode)
-        {
-            if (response.StatusCode == HttpStatusCode.Conflict)
-                throw new InvalidOperationException("聊天目录已在其他窗口中更新，请重新打开 KYNXA 后重试。");
-            string? error = null;
-            try
-            {
-                using var body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken);
-                if (body?.RootElement.TryGetProperty("error", out var field) == true) error = field.GetString();
-            }
-            catch (JsonException) { }
-            throw new InvalidOperationException(error ?? $"会话存储接口返回 HTTP {(int)response.StatusCode}。");
-        }
-        return await response.Content.ReadFromJsonAsync<ConversationCatalog>(JsonOptions, cancellationToken)
-            ?? throw new InvalidDataException("会话存储接口返回了空目录。");
-    }
+    private static Task<ConversationCatalog> ReadAsync(HttpResponseMessage response, CancellationToken cancellationToken) =>
+        GatewayResponseReader.ReadAsync<ConversationCatalog>(response, UiText.Get("会话存储接口返回了空目录。"),
+            UiText.Get("会话存储接口返回 HTTP {0}。"), cancellationToken, JsonOptions,
+            UiText.Get("聊天目录已在其他窗口中更新，请重新打开 KYNXA 后重试。"));
 
     public string CreateManagedFolder(Guid projectId)
     {

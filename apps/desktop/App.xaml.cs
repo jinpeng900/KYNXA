@@ -27,6 +27,8 @@ public partial class App : Application
 
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        // Restore interface language before creating controls; settings can change it live.
+        Services.UiText.Initialize(new Services.LayoutStateService().Load().InterfaceLanguage);
         Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
             ? Services.StoragePaths.DesktopDirectory : null;
         Window = new MainWindow();

@@ -1,5 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using KYNXA_Desktop.Models.UI;
+using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 
 namespace KYNXA_Desktop.ViewModels;
@@ -16,8 +17,9 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
     public bool IsStreaming => Message.Status == "streaming";
     public bool IsThinking => IsStreaming && _isThinking;
     public bool IsWaiting => IsStreaming && Content.Length == 0 && Message.Reasoning.Length == 0;
-    public string ErrorText => Message.Status == "interrupted" ? "已停止生成" + (Message.Error.Length > 0 ? " · " + Message.Error : "") : Message.Error;
-    public string ReasoningTitle => IsThinking ? "正在思考…" : $"思考过程 · {Math.Max(1, (long)Math.Ceiling(Message.ReasoningDurationMs / 1000d))} 秒";
+    public long ReasoningSeconds => Math.Max(1, (long)Math.Ceiling(Message.ReasoningDurationMs / 1000d));
+    public string ErrorText => Message.Status == "interrupted" ? UiText.Get("已停止生成") + (Message.Error.Length > 0 ? " · " + Message.Error : "") : Message.Error;
+    public string ReasoningTitle => IsThinking ? UiText.Get("正在思考…") : string.Format(UiText.Get("思考过程 · {0} 秒"), ReasoningSeconds);
     public string ReasoningGlyph => _isReasoningExpanded ? "\uE70D" : "\uE76C";
     public Visibility UserVisibility => Message.Role == "user" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility AssistantVisibility => Message.Role == "user" ? Visibility.Collapsed : Visibility.Visible;

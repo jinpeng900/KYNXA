@@ -30,10 +30,14 @@ internal sealed class TextSelectionAutoScroll
         text.Unloaded += (_, _) => { _session?.Remove(text); _session = null; };
         text.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Pressed), true);
         var menu = new MenuFlyout();
-        var copy = new MenuFlyoutItem { Text = "复制" };
+        var copy = new MenuFlyoutItem { Text = KYNXA_Desktop.Services.UiText.Get("复制") };
         copy.Click += (_, _) => _session?.Copy(text);
         menu.Items.Add(copy);
-        menu.Opening += (_, _) => copy.IsEnabled = (_session?.SelectedText.Length ?? 0) > 0 || text.SelectedText.Length > 0;
+        menu.Opening += (_, _) =>
+        {
+            copy.Text = KYNXA_Desktop.Services.UiText.Get("复制");
+            copy.IsEnabled = (_session?.SelectedText.Length ?? 0) > 0 || text.SelectedText.Length > 0;
+        };
         text.ContextFlyout = menu;
     }
 
