@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { ModelStore, validateConnection } from '../store.mjs';
 import { ModelRuntime } from '../runtime.mjs';
 import { createModelServer } from '../server.mjs';
+import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 async function listen(server, t) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -31,6 +32,7 @@ test('direct API chat carries the selected ID, auth and persisted history withou
   await store.save({ providerId: 'test-api', displayName: 'Test', baseUrl,
     models: ['deepseek-flash'], apiKey: 'local-test-key' });
   let runtime = new ModelRuntime({ modelStore: store, dataHome });
+  isolateFixtureMcpCatalog(runtime.tools);
   t.after(() => runtime.close());
   const input = { conversationId: '8cb45842-7b8a-44d1-b621-3188d1f5d4d0',
     message: '第一条', provider: 'test-api', model: 'deepseek-flash' };
@@ -42,6 +44,7 @@ test('direct API chat carries the selected ID, auth and persisted history withou
   assert.equal(requests[0].tools, undefined);
   await runtime.close();
   runtime = new ModelRuntime({ modelStore: store, dataHome });
+  isolateFixtureMcpCatalog(runtime.tools);
   fail = true;
   await assert.rejects(runtime.reply({ ...input, message: '失败消息' }), /HTTP 401/);
   fail = false;
@@ -86,6 +89,7 @@ test('serializes simultaneous turns in one conversation', async t => {
   const store = new ModelStore({ dataHome });
   await store.save({ providerId: 'local', displayName: 'Local', baseUrl: url, models: ['test'] });
   const runtime = new ModelRuntime({ modelStore: store, dataHome });
+  isolateFixtureMcpCatalog(runtime.tools);
   t.after(() => runtime.close());
   const input = { conversationId: 'test', provider: 'local', model: 'test' };
   await Promise.all([runtime.reply({ ...input, message: 'one' }), runtime.reply({ ...input, message: 'two' })]);
@@ -108,6 +112,7 @@ test('generic local API discovers, saves and chats directly without credentials 
   const dataHome = await mkdtemp(join(tmpdir(), 'kynxa-local-direct-'));
   const modelStore = new ModelStore({ dataHome });
   const modelRuntime = new ModelRuntime({ modelStore, dataHome });
+  isolateFixtureMcpCatalog(modelRuntime.tools);
   t.after(() => modelRuntime.close());
   const gateway = await listen(createModelServer({ modelStore, modelRuntime }), t);
   const post = (path, body) => fetch(`${gateway}${path}`, { method: 'POST', body: JSON.stringify(body) });

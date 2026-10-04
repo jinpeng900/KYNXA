@@ -9,6 +9,7 @@ import { ModelStore } from '../store.mjs';
 import { ModelRuntime, completedContext } from '../runtime.mjs';
 import { responseText } from '../protocols.mjs';
 import { decodeToolTurn, wireCatalog } from '../tool-protocols.mjs';
+import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 function nativeReply(protocol, content, truncated) {
   if (protocol === 'anthropic-messages') return { content: [{ type: 'thinking', thinking: 'visible-thought' }, { type: 'text', text: content }], stop_reason: truncated ? 'max_tokens' : 'end_turn' };
@@ -35,6 +36,7 @@ async function fixture(t, protocol) {
   await store.save({ providerId: 'output-model', displayName: 'Output model', protocol,
     baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, models: ['model'], contextWindowTokens: 128_000, maxOutputTokens: 32_768 });
   const runtime = new ModelRuntime({ modelStore: store, dataHome: root });
+  isolateFixtureMcpCatalog(runtime.tools);
   t.after(async () => { await runtime.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const input = { conversationId: randomUUID(), requestId: randomUUID(), userMessageId: randomUUID(), provider: 'output-model', model: 'model', message: '现在写代码' };
   return { runtime, seen, input, setTruncated: value => { truncated = value; } };

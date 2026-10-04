@@ -12,7 +12,7 @@ test('public MCP catalog has pinned publisher packages, clear setup requirements
   assert.deepEqual(catalog.reusedCapabilities, ['filesystem', 'chat-memory', 'work-memory', 'tool-results', 'sandbox-terminal',
     'host-terminal', 'desktop-control', 'public-web-fetch']);
   for (const preset of catalog.presets) {
-    assert.equal(preset.server.enabled, false);
+    assert.equal(preset.server.enabled, true);
     assert.equal(preset.alreadyConfigured, false);
     assert.match(preset.sourceUrl, /^https:\/\/github\.com\//);
     assert.ok(preset.license && ['reference', 'vendor', 'community'].includes(preset.publisher));
@@ -59,11 +59,11 @@ test('database and desktop presets restrict capabilities explicitly rather than 
   assert.ok(desktop.requirements.some(item => item.description.includes('3.14')));
 });
 
-test('preset adds persist all eleven disabled services exactly once and never connect public processes', async t => {
+test('preset adds persist all eleven enabled services exactly once without starting public connections', async t => {
   const f = await toolFixture(t);
   let config = await f.service.getConfig();
   for (const preset of mcpPresetCatalog(config).presets) config = await addMcpPreset(f.service, preset.id, { expectedRevision: config.revision });
-  assert.equal(config.mcpServers.length, 11); assert.ok(config.mcpServers.every(server => !server.enabled));
+  assert.equal(config.mcpServers.length, 11); assert.ok(config.mcpServers.every(server => server.enabled));
   const revision = config.revision;
   for (const preset of mcpPresetCatalog(config).presets) {
     assert.equal(preset.alreadyConfigured, true);

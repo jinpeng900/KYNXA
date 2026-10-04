@@ -22,7 +22,7 @@ GUI 启动用 `CreateProcessW` 且禁止继承句柄。网关不等应用退出�
 
 ## 官方工具包与用户工具
 
-官方内容只有一份，位于安装包内的 `model-gateway/official-tools/`；源码对应 `apps/model-gateway/official-tools/`。当前包版本 `0.4.0`，集中提供 **35 个工具声明、11 个 MCP 连接预设、7 个技能**及其资源、来源和许可证。核心执行仍经过原 `ToolService`、文件服务、网页读取服务和沙箱，不新增另一套执行链；MCP 实现由固定版本外部发行包或远程服务提供，不把其运行环境重复塞进官方目录。
+官方内容只有一份，位于安装包内的 `model-gateway/official-tools/`；源码对应 `apps/model-gateway/official-tools/`。当前包版本 `0.4.1`，集中提供 **35 个工具声明、11 个 MCP 连接预设、7 个技能**及其资源、来源和许可证。核心执行仍经过原 `ToolService`、文件服务、网页读取服务和沙箱，不新增另一套执行链；MCP 实现由固定版本外部发行包或远程服务提供，不把其运行环境重复塞进官方目录。
 
 | 用户能力 | 官方执行入口 | 运行条件 |
 |---|---|---|
@@ -30,7 +30,7 @@ GUI 启动用 `CreateProcessW` 且禁止继承句柄。网关不等应用退出�
 | 软件启动、窗口调整、截图、UIA 阅读与鼠键输入 | `computer.*`，`desktop-workflow` | 随包原生 ToolHost；交互式 Windows 桌面 |
 | 本机 CMD / PowerShell / Conda，或隔离 Node / cmd | `terminal.host.run` / `terminal.run`，`terminal-workflow` | 宿主程序需已安装；沙箱先验证；无需额外 Python 启动工具链 |
 | 公开网页正文与链接 | `web.fetch`，`web-research` | 随包 Node 与 `html-to-text`；需联网，无浏览器登录或脚本执行 |
-| 浏览器结构、表单、导航、页面截图与调试 | Playwright / Chrome DevTools，`browser-workflow` | 用户启用对应 MCP；首次下载固定 npm 包；对应浏览器需可用 |
+| 浏览器结构、表单、导航、页面截图与调试 | Playwright / Chrome DevTools，`browser-workflow` | 官方预设默认启用；首次连接使用固定 npm 包，对应浏览器需可用；缺启动程序或配置时显示未就绪 |
 
 七个官方技能为 `workspace-inspect`、`safe-file-edit`、`browser-workflow`、`desktop-workflow`、`terminal-workflow`、`web-research`、`internal-comms`。新增工作流不安装软件，也不授予权限。已有文件、终端和本机桌面实现均复用，不重复内置另一个 Filesystem 或 Windows MCP。Python Fetch、Git、MarkItDown 和 Windows Screenshot 仍是可选预设，其额外环境不属于基础工具要求。只有 Edge 的 Windows 用户可在浏览器设置选 `msedge`；预设存在不等于已经启动或连接成功。
 
@@ -65,7 +65,11 @@ KYNXA 安装目录/
 
 设置中的路径行显示“用户工具”，只迁移下面这一层。官方路径在工具窗口中只读显示，由应用位置计算；不写死盘符或用户名，也不随用户目录迁移。官方目录整体受已有文件代理的写保护，官方身份不授予额外工具权限。发布按明确资源类型选择官方文件，ToolHost 输出排除 PDB/TMP；用户工具、配置和聊天不在官方文件清单中。
 
-`GET /api/agent/config` 返回合并后的可用配置：官方默认加用户自定义服务，服务器标明 `origin:official|user`，官方项附 `presetId`、`overridden`，根对象附官方/用户目录和官方包版本。11 个 MCP 默认关闭；打开设置、保存开关和显示清单不会启动服务。已有用户连接保留 ID、版本、参数和认证引用；同发布者或相同连接优先复用已有配置，避免另外启动重复默认服务。
+`GET /api/agent/config` 返回合并后的有效配置：官方默认加用户自定义服务，服务器标明 `origin:official|user`，官方项附 `presetId`、`overridden`，根对象附官方/用户目录和官方包版本。11 个官方 MCP 默认启用；启用表示允许按现有连接流程使用，不代表已经连接或运行环境齐全。打开设置、保存开关和显示清单不会启动服务。已有用户连接保留 ID、版本、参数和认证引用，明确关闭或隐藏的选择继续生效；同发布者或相同连接优先复用已有配置，避免另外启动重复默认服务。
+
+连接前检查所需账号环境变量和必填配置路径占位符；缺启动程序、认证变量或必填路径时保留启用选择，显示未就绪。Python/uv、浏览器等依赖仍按预设要求准备，浏览器工具目录发现成功不代表浏览器已安装或登录。连接失败保留脱敏诊断，不把未就绪服务或旧目录当成模型可用能力。实际发现且启用的工具仍经过原有按需声明预算和工具级禁用规则，默认启用不扩大模型上下文或执行权限。
+
+每次目录发现最多并行连接 4 个独立服务，返回工具顺序保持配置顺序；不同聊天仍按各自工作范围建连，总连接上限保持 32。配置重置会立即使旧目录发现失效，停止后续批次，并在清理完成前拒绝新建连接；重叠重置共用同一清理过程，避免后启动的进程丢失所有者。首次下载、慢服务及超时仍可能增加准备时间，尚未实现所有服务完全按需冷启动。
 
 保存仍使用 `expectedRevision` 和完整有效 `mcpServers` 数组，程序仅将新增用户项与官方参数差异写入用户 `Agent/config.json`：`officialMcpOverrides:[{presetId,id,changes}]`。只改启停不会复制或冻结整份默认定义；官方升级后未修改字段使用新默认，明确修改的参数继续保留。`disabledOfficialMcpServers` 保存显式隐藏的默认项，旧版本缺少新字段时按兼容默认读取；未知/暂时不可用的官方覆盖保留为未激活配置。来源字段由后端重建，客户端不能用标签改变授权。
 
@@ -149,7 +153,7 @@ AppContainer 是终端的系统隔离边界，Job Object 负责资源和生命�
 
 `ConversationWorkspaces` 管理这部分生成文件；正式 JSONL、Memory 和连接配置由原服务管理。Data 迁移复制并校验整个 Models 树，带走目录和归属记录；用户工具路径迁移不移动这些文件。终端仍只对授权目录做 AppContainer 快照，没有网络和自动回写，正式代码修改使用带哈希的文件工具。自定义旧模型根通过网关固定的 `conversationWorkspaceHome` 角色校验；模型参数无法改变该根，不能把任意 Data/Extensions 子树声明成可执行目录。
 
-本机控制复用随包的 `KYNXA.ToolHost` 原生 Windows 窗口、UI Automation、PNG 和 SendInput 实现，**无需 Python**。桌面打包将助手及自包含 .NET/WindowsDesktop 依赖纳入 `ToolHost/`，Node 网关同样随包提供。用户额外添加的第三方 MCP 可能依赖 Python、uv、账号或浏览器运行时；这些依赖只属于所选扩展，默认禁用的 Windows Screenshot MCP 不是内置截图的执行依赖。
+本机控制复用随包的 `KYNXA.ToolHost` 原生 Windows 窗口、UI Automation、PNG 和 SendInput 实现，**无需 Python**。桌面打包将助手及自包含 .NET/WindowsDesktop 依赖纳入 `ToolHost/`，Node 网关同样随包提供。第三方 MCP 可能依赖 Python、uv、账号或浏览器运行时；这些依赖只属于对应扩展，默认启用但可能未就绪的 Windows Screenshot MCP 不是内置截图的执行依赖。
 
 桌面构建从 `apps/desktop/Build/node-runtime.json` 读取分平台固定版本与官方 SHA-256，校验完整 ZIP 及其中的 Node/npm/npx 文件后放入安装包 `runtime/`。x64、ARM64 使用 Node 24.14.0，仍保留的 x86 目标使用支持该架构的 Node 22.22.0；版本不在构建文件里另设一份。首次构建需下载，后续可复用校验后的 `obj` 缓存，运行用户不需自行安装 Node。网关启动优先使用随包 `node.exe` 并将该运行目录加入子进程 PATH，随包文件缺失时拒绝静默换用其它 Node。
 
@@ -177,11 +181,11 @@ AppContainer 是终端的系统隔离边界，Job Object 负责资源和生命�
 
 使用官方 TypeScript SDK 2.3.0 的 stdio 与 Streamable HTTP 客户端，默认固定 `2025-11-25` 兼容协议；明确配置为 `2026-07-28` 时使用新版发现与协商。stdio 支持用户配置 `cwd`、非敏感常量 `env` 和秘密环境变量引用 `envRefs`；HTTP 支持 `url`、`headerEnv`、Bearer 环境变量认证及 OAuth client credentials。凭据在连接时解析，不进入模型或诊断；HTTP 只允许 HTTPS 或本机 loopback HTTP，拒绝 URL 内嵌凭据和重定向。OAuth 绑定明示 issuer，令牌只在当前客户端内存保存；浏览器交互式 OAuth 登录尚未实现。
 
-只运行用户保存并启用的程序和参数。打开窗口和普通列表查询不会启动服务；带工具权限的聊天准备目录时，或用户连接、刷新时才连接。配置禁用、删除、刷新和服务关闭会结束对应客户端。Windows stdio 清理限定 SDK 自有 PID，结束整个子进程树，避免 npx 超时后留下占用目录的进程。`startupTimeoutMs` 默认 15 秒、可配置 1–120 秒，Playwright 预设使用 60 秒。服务工具目录通知会刷新发现目录；执行前核对原始工具 schema 与操作，变化则拒绝旧调用并要求重新准备。模型本轮目录保持快照，新工具进入下一次消息准备的目录。断线更新状态并移除过期工具，用户可断开、重连；下次有明确连接需求也可新建连接，不重放上次工具调用。连接、认证与目录刷新失败只显示服务 ID 和安全错误码，其他工具仍保留。
+只运行当前有效配置中启用且通过连接前检查的程序和参数，用户明确关闭的官方项不会被默认值重新打开。打开窗口和普通列表查询不会启动服务；带工具权限的聊天准备目录时，或用户连接、刷新时才连接，缺启动程序、认证变量或必填路径时显示未就绪。配置禁用、删除、刷新和服务关闭会结束对应客户端。Windows stdio 清理限定 SDK 自有 PID，结束整个子进程树，避免 npx 超时后留下占用目录的进程。`startupTimeoutMs` 默认 15 秒、可配置 1–120 秒，Playwright 预设使用 60 秒。服务工具目录通知会刷新发现目录；执行前核对原始工具 schema 与操作，变化则拒绝旧调用并要求重新准备。模型本轮目录保持快照，新工具进入下一次消息准备的目录。断线更新状态并移除过期工具，用户可断开、重连；下次有明确连接需求也可新建连接，不重放上次工具调用。连接、认证与目录刷新失败只显示服务 ID 和安全错误码，其他工具仍保留。
 
 单工具开关使用服务的原始工具名保存在 `disabledTools`，不改服务自身配置。窗口保存同样检查 revision；冲突保留当前编辑。管理目录展示禁用项，执行目录排除禁用项。声明 resources 能力的服务额外暴露 `mcp.<serverId>.kynxa_resources_list`、`mcp.<serverId>.kynxa_resources_templates_list`、`mcp.<serverId>.kynxa_resources_read` 包装，资源 URI 只转发指定服务，不在宿主自行 fetch。包装遵循相同的外部调用理由、审批、结果保存和工具启停规则；与服务同名工具冲突时保留原工具。
 
-官方预设目录来自网关单一来源。Playwright 使用固定版本 `@playwright/mcp@0.0.83`、headless 和 isolated 模式；GitHub 使用官方 hosted MCP，Authorization 通过环境变量引用提供。添加默认禁用，不启动进程、不访问服务；再次添加复用现有配置与工具开关。已有文件操作、聊天/工作记忆和终端能力继续使用原服务，没有安装功能重叠的 filesystem/memory MCP。第三方服务器由其发行方式安装或按固定版本启动，浏览器运行时和用户凭据不会自动下载、填写或复制。
+官方预设目录来自网关单一来源。Playwright 使用固定版本 `@playwright/mcp@0.0.83`、headless 和 isolated 模式；GitHub 使用官方 hosted MCP，Authorization 通过环境变量引用提供。官方预设默认启用；添加或读取配置本身不启动进程、不访问服务，再次添加复用现有配置与工具开关。缺启动程序、认证变量或必填路径的预设显示未就绪；其他运行环境按预设要求准备。已有文件操作、聊天/工作记忆和终端能力继续使用原服务，没有安装功能重叠的 filesystem/memory MCP。第三方服务器由其发行方式安装或按固定版本启动，浏览器运行时和用户凭据不会自动下载、填写或复制。
 
 应用技能来自打包的基础技能、`Extensions/Skills`（未单独配置时为 `Data/Skills`）、用户配置的技能目录，以及当前工作 `.kynxa/skills`。先提供有限的名字和用途，通过 `skill.list/read` 按需读取 SKILL.md；`skill.resource.read` 从所选技能根目录解析资源路径，支持 UTF-8 分页和二进制元数据，拒绝越界、链接、硬链接及敏感文件。`skill.inspect/check` 展示资源清单、格式、运行器和依赖诊断，检查不会执行宿主命令或安装包。来源顺序和同名冲突明确；规范化后的实际路径去重，Windows 忽略大小写并合并长短路径别名，保留优先来源 ID。`disabledSkills` 禁用项不进入模型目录，也不能绕过开关读取、运行。
 
@@ -205,7 +209,7 @@ SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支
 
 扩展目录保存 MCP 连接配置、导入技能、npm 下载缓存、浏览器缓存及 uv/Python 运行环境；默认 stdio 缓存环境变量指向该目录，用户显式环境映射优先。内置技能和核心工具随应用发布，用户指定的外部技能目录或第三方可执行程序保持原位置。远程 MCP 本身运行在其服务端；改变本机目录不会迁移远端服务。聊天、记忆和完整工具结果继续属于 Data。
 
-在设置中打开“工具与技能”，默认列表已有官方 MCP 预设，选择后配置需要的环境变量引用、启用服务、点击连接；添加操作用于恢复被隐藏的预设。GitHub 预设的 `KYNXA_GITHUB_AUTHORIZATION` 值是完整的 `Bearer <token>`；直接选择 Bearer 认证时，`tokenEnv` 引用的变量只放 token。变量应在启动 KYNXA 前设置，已运行的网关不会自动取得另一个终端中新设置的变量。Playwright 首次连接需要可用的 Node/npm 和浏览器运行时；添加预设不会提前安装浏览器或启动服务。
+在设置中打开“工具与技能”，默认列表已有启用的官方 MCP 预设；先补齐显示未就绪项目需要的环境变量引用、运行时或配置，再点击连接。用户可关闭任意预设，已有明确关闭的项需要用户重新打开；添加操作用于恢复被隐藏的预设。GitHub 预设的 `KYNXA_GITHUB_AUTHORIZATION` 值是完整的 `Bearer <token>`；直接选择 Bearer 认证时，`tokenEnv` 引用的变量只放 token。变量应在启动 KYNXA 前设置，已运行的网关不会自动取得另一个终端中新设置的变量。Playwright 首次连接需要可用的 Node/npm 和浏览器运行时；添加预设不会提前安装浏览器或启动服务。
 
 技能页可选择包含 SKILL.md 的文件夹导入，查看格式、来源、同名冲突、资源和运行环境，并切换启停。标准包目录见下方 Skills；导入成功仅表示文件包已校验保存，脚本执行仍检查依赖和当前聊天权限。内置浏览器工作流使用已有的 Playwright 工具，沟通写作技能使用已有的文件和资源工具。
 
@@ -388,7 +392,7 @@ Chrome DevTools 1.10.1 可能仅以 `Unable to navigate…` 文本报告已捕�
 
 2026-10-04 中间正文保留与排版修正：隔离浏览器 DOM **57**、原生 WinUI/WebView2 **195** 项通过。中间正文采用最终正文相同的字号、颜色及 Markdown 样式；运行中、失败或缺少最终答案时保留全部已有正文，最终阶段先完成但请求仍运行时也不收束。最终正文与公式完成渲染后才移除过程，覆盖全正文复制、选区冻结、历史重开与滚动锚点。本轮使用临时数据和模拟记录，仅重跑相关展示检查，未调用付费模型。
 
-MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools、Exa、Brave Search、DBHub、MarkItDown 与 Windows Screenshot 共 11 个预设。直接连接上游服务，不另写同类实现；原有文件、记忆、结果分页和终端继续复用。包版本、许可证、依赖、网络要求及数据库只读模板由 `mcp-preset-catalog.mjs` 提供。预设默认禁用，连接完成不等于所有操作均已验证；DBHub 需要用户 DSN，GitHub/Brave 需要账号变量，Windows Screenshot 需要 Python 3.14 且尚未验真。
+MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools、Exa、Brave Search、DBHub、MarkItDown 与 Windows Screenshot 共 11 个预设。直接连接上游服务，不另写同类实现；原有文件、记忆、结果分页和终端继续复用。包版本、许可证、依赖、网络要求及数据库只读模板由 `mcp-preset-catalog.mjs` 提供。该阶段预设默认禁用，现行规则为默认启用且检查连接条件，见上方官方工具包说明；连接完成不等于所有操作均已验证。DBHub 需要用户 DSN，GitHub/Brave 需要账号变量，Windows Screenshot 需要 Python 3.14 且该阶段尚未验真，不能据预设存在或开关启用声称这些条件已满足。
 
 当前本机扩展根内已导入 29 个完整上游技能包，保留原文、资源、许可证、固定 commit 和文件 SHA-256；11 个指令型包启用，其余因脚本、网络、账号或办公运行环境尚未满足而禁用。来源是 OpenAI skills、Anthropic 开放技能、Kimi CLI、DeepSeek Harness 的 MIT Office 包、pi-skills、Superpowers 和 codex-research。Anthropic 四个非开放办公包未纳入。Office 仅修正共同检查脚本的包内引用，完整原始内容和适配记录保留于 UPSTREAM。
 

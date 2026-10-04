@@ -15,11 +15,11 @@ const save = (config, changes = {}) => ({ ...config, expectedRevision: config.re
 const server = (config, presetId) => config.mcpServers.find(item => item.origin === 'official' && item.presetId === presetId);
 const replace = (config, selected, changes) => config.mcpServers.map(item => item.id === selected.id ? { ...item, ...changes } : item);
 
-test('fresh official defaults are visible but disabled and a no-op save persists no default copies', async t => {
+test('fresh official defaults are visible and enabled while a no-op save persists no default copies', async t => {
   const f = await toolFixture(t, { officialTools: true });
   const initial = await f.service.getConfig();
   assert.equal(initial.mcpServers.length, 11);
-  assert.ok(initial.mcpServers.every(item => item.origin === 'official' && !item.enabled && !item.overridden));
+  assert.ok(initial.mcpServers.every(item => item.origin === 'official' && item.enabled && !item.overridden));
   assert.equal(initial.officialToolsRoot, OFFICIAL_TOOLS_ROOT);
   assert.equal(initial.userToolsRoot, f.conversations.root);
   assert.match(initial.officialPackageVersion, /^\d+\.\d+\.\d+$/);
@@ -40,21 +40,21 @@ test('user choices persist as deltas; official reset removes the override withou
   const manifestBefore = await readFile(join(OFFICIAL_TOOLS_ROOT, 'manifest.json'));
   let config = await f.service.getConfig(), selected = server(config, 'context7');
   config = await f.service.updateConfig(save(config, { mcpServers: replace(config, selected,
-    { enabled: true, name: 'My documentation', envRefs: { CONTEXT7_API_KEY: 'SYNTHETIC_DOCUMENTATION_TOKEN' } }) }));
+    { enabled: false, name: 'My documentation', envRefs: { CONTEXT7_API_KEY: 'SYNTHETIC_DOCUMENTATION_TOKEN' } }) }));
   const disk = JSON.parse(await readFile(f.service.config.file, 'utf8'));
   assert.deepEqual(disk.mcpServers, []);
   assert.deepEqual(disk.officialMcpOverrides, [{ presetId: 'context7', id: selected.id,
-    changes: { name: 'My documentation', envRefs: { CONTEXT7_API_KEY: 'SYNTHETIC_DOCUMENTATION_TOKEN' }, enabled: true } }]);
+    changes: { name: 'My documentation', envRefs: { CONTEXT7_API_KEY: 'SYNTHETIC_DOCUMENTATION_TOKEN' }, enabled: false } }]);
   assert.equal(server(config, 'context7').overridden, true);
   const restarted = new AgentConfigRepository(f.conversations.root, { officialPresets: curatedMcpPresets });
   const restored = await restarted.read();
-  assert.equal(server(restored, 'context7').enabled, true);
+  assert.equal(server(restored, 'context7').enabled, false);
   assert.equal(server(restored, 'context7').name, 'My documentation');
   const preset = curatedMcpPresets.find(item => item.id === 'context7');
   config = await f.service.updateConfig(save(config, { mcpServers: config.mcpServers.map(item => item.id === selected.id
     ? { ...preset.server, id: selected.id } : item) }));
   assert.equal(server(config, 'context7').overridden, false);
-  assert.equal(server(config, 'context7').enabled, false);
+  assert.equal(server(config, 'context7').enabled, true);
   assert.deepEqual(JSON.parse(await readFile(f.service.config.file, 'utf8')).officialMcpOverrides, []);
   assert.deepEqual(await readFile(join(OFFICIAL_TOOLS_ROOT, 'manifest.json')), manifestBefore);
 });
@@ -62,17 +62,43 @@ test('user choices persist as deltas; official reset removes the override withou
 test('official package updates preserve explicit choices and update untouched defaults', async t => {
   const f = await toolFixture(t, { officialTools: true });
   let config = await f.service.getConfig();
-  config = await f.service.updateConfig(save(config, { mcpServers: replace(config, server(config, 'playwright'), { enabled: true }) }));
+  config = await f.service.updateConfig(save(config, { mcpServers: replace(config, server(config, 'playwright'), { enabled: false }) }));
   const upgraded = structuredClone(curatedMcpPresets);
   upgraded.find(item => item.id === 'playwright').server.args = ['-y', '@playwright/mcp@99.0.0', '--headless', '--isolated', '--synthetic-new-default'];
   const updatedRepository = new AgentConfigRepository(f.conversations.root, { officialPresets: upgraded });
   const updated = await updatedRepository.read();
-  assert.equal(server(updated, 'playwright').enabled, true);
+  assert.equal(server(updated, 'playwright').enabled, false);
   assert.ok(server(updated, 'playwright').args.includes('@playwright/mcp@99.0.0'));
   assert.ok(server(updated, 'playwright').args.includes('--synthetic-new-default'));
   const originalArgs = ['-y', '@playwright/mcp@0.0.83', '--headless', '--custom-profile'];
   config = await f.service.updateConfig(save(config, { mcpServers: replace(config, server(config, 'playwright'), { args: originalArgs }) }));
   assert.deepEqual(server(await updatedRepository.read(), 'playwright').args, originalArgs, 'explicit custom arguments retain their chosen version');
+});
+
+test('enabling previously disabled package defaults preserves recorded user disablement', async t => {
+  const f = await toolFixture(t, { officialTools: true });
+  const previousPresets = structuredClone(curatedMcpPresets);
+  for (const preset of previousPresets) preset.server.enabled = false;
+  const previous = new AgentConfigRepository(f.conversations.root, { officialPresets: previousPresets });
+  const initial = await previous.read();
+  assert.ok(initial.mcpServers.every(item => !item.enabled));
+  await previous.update(save(initial));
+  const recorded = JSON.parse(await readFile(previous.file, 'utf8'));
+  recorded.officialMcpOverrides.push({ presetId: 'fetch', id: server(initial, 'fetch').id, changes: { enabled: false } });
+  await writeFile(previous.file, JSON.stringify(recorded));
+
+  const upgraded = new AgentConfigRepository(f.conversations.root, { officialPresets: curatedMcpPresets });
+  let config = await upgraded.read();
+  assert.equal(server(config, 'fetch').enabled, false, 'an explicit recorded off choice overrides the new enabled default');
+  assert.equal(server(config, 'fetch').overridden, true);
+  assert.equal(server(config, 'playwright').enabled, true, 'an untouched disabled package default follows the new package');
+  config = await upgraded.update(save(config, { disabledSkills: ['a'.repeat(24)] }));
+  assert.equal(server(config, 'fetch').enabled, false);
+  const restarted = new AgentConfigRepository(f.conversations.root, { officialPresets: curatedMcpPresets });
+  assert.equal(server(await restarted.read(), 'fetch').enabled, false);
+  assert.deepEqual(JSON.parse(await readFile(upgraded.file, 'utf8')).officialMcpOverrides,
+    [{ presetId: 'fetch', id: server(initial, 'fetch').id, changes: { enabled: false } }]);
+  assert.equal(f.service.mcp.connections.size, 0);
 });
 
 test('legacy user MCP keeps its ID/version/credentials and shadows its matching official default', async t => {
@@ -87,15 +113,16 @@ test('legacy user MCP keeps its ID/version/credentials and shadows its matching 
   assert.equal(config.mcpServers[0].id, 'my-docs');
   assert.equal(config.mcpServers[0].origin, 'user');
   assert.equal(config.mcpServers[0].presetId, 'context7');
+  assert.equal(config.mcpServers[0].enabled, false, 'the legacy user disable choice remains unchanged');
   assert.equal(server(config, 'context7'), undefined);
   const before = JSON.parse(await readFile(rawRepository.file, 'utf8'));
   config = await f.service.updateConfig(save(config));
   assert.deepEqual(JSON.parse(await readFile(rawRepository.file, 'utf8')).mcpServers, before.mcpServers);
   config = await f.service.updateConfig(save(config, { mcpServers: config.mcpServers.filter(item => item.id !== 'my-docs') }));
-  assert.equal(server(config, 'context7').enabled, false, 'removing the custom installation restores a disabled default');
+  assert.equal(server(config, 'context7').enabled, true, 'removing the custom installation restores the enabled official default');
 });
 
-test('hidden official entries remain hidden on unrelated saves/restart and explicit add restores a disabled default', async t => {
+test('hidden official entries remain hidden on unrelated saves/restart and explicit add restores the enabled default', async t => {
   const f = await toolFixture(t, { officialTools: true });
   let config = await f.service.getConfig();
   config = await f.service.updateConfig(save(config, { mcpServers: config.mcpServers.filter(item => item.presetId !== 'fetch') }));
@@ -104,7 +131,7 @@ test('hidden official entries remain hidden on unrelated saves/restart and expli
   config = await f.service.updateConfig(save(config, { disabledSkills: ['a'.repeat(24)] }));
   assert.equal(server(await f.service.getConfig(), 'fetch'), undefined);
   const restored = await addMcpPreset(f.service, 'fetch', { expectedRevision: config.revision });
-  assert.equal(server(restored, 'fetch').enabled, false);
+  assert.equal(server(restored, 'fetch').enabled, true);
   assert.equal(restored.disabledOfficialMcpServers.includes('fetch'), false);
   assert.equal(f.service.mcp.connections.size, 0);
 });

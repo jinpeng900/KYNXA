@@ -134,7 +134,10 @@ try {
     Assert-Runtime ($health.modelDataHome.StartsWith($runtimeTestRoot, [StringComparison]::OrdinalIgnoreCase) -and
         $health.extensionRoot -eq (Join-Path $runtimeTestRoot 'UserTools')) 'The packaged gateway uses only isolated temporary data and user-tools paths.'
     $config = Invoke-RestMethod -Uri "http://127.0.0.1:$runtimePort/api/agent/config" -TimeoutSec 3
-    Assert-Runtime ($config.mcpServers.Count -eq 11 -and @($config.mcpServers | Where-Object enabled).Count -eq 0) 'Fresh official MCP presets remain disabled; no real MCP processes or model calls are triggered.'
+    Assert-Runtime ($config.mcpServers.Count -eq 11 -and @($config.mcpServers | Where-Object enabled).Count -eq 11) 'Fresh official MCP presets are enabled; reading configuration does not trigger MCP or model calls.'
+    $toolCatalog = Invoke-RestMethod -Uri "http://127.0.0.1:$runtimePort/api/agent/tools" -TimeoutSec 3
+    Assert-Runtime (@($toolCatalog.connections | Where-Object { $_.state -ne 'disconnected' }).Count -eq 0 -and
+        @($toolCatalog.tools | Where-Object { $_.name.StartsWith('mcp.') }).Count -eq 0) 'Reading an enabled tool catalog keeps external services disconnected.'
 }
 finally {
     if (-not $gateway.HasExited) { $gateway.Kill(); $gateway.WaitForExit() }

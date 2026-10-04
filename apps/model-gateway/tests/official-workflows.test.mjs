@@ -14,6 +14,7 @@ import { SandboxRunner } from '../sandbox-runner.mjs';
 import { createModelServer } from '../server.mjs';
 import { readSse } from '../streaming.mjs';
 import { curatedMcpPresets } from '../official-tools.mjs';
+import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const sourceUrls = ['https://sources.example.test/release', 'https://sources.example.test/changelog'];
@@ -102,6 +103,7 @@ async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure
     baseUrl: upstreamUrl + '/v1', models: ['fixture-model'], contextWindowTokens: 65536, maxOutputTokens: 4096 });
   const start = async () => {
     service = new ToolService({ conversationStore: conversations, dataHome, extensionRoot, sandboxRunner, bundledDirectory: null, officialTools: true });
+    isolateFixtureMcpCatalog(service);
     const runtime = new ModelRuntime({ modelStore: models, dataHome, extensionRoot, conversationStore: conversations, toolService: service });
     gateway = createModelServer({ modelStore: models, modelRuntime: runtime }); address = await listen(gateway);
   };
@@ -113,6 +115,12 @@ async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure
     await rm(root, { recursive: true, force: true });
   });
   await start(); if (configure) await configure({ service, root, workspace, extensionRoot });
+  // A new package may add enabled publisher defaults. This workflow only owns its explicitly replaced Node fixtures.
+  const config = await service.getConfig();
+  if (config.mcpServers.some(server => server.origin === 'official' && server.enabled && server.command !== process.execPath))
+    await service.updateConfig({ ...config, expectedRevision: config.revision,
+      mcpServers: config.mcpServers.map(server => server.origin === 'official' && server.command !== process.execPath
+        ? { ...server, enabled: false } : server) });
   const input = message => ({ conversationId, requestId: randomUUID(), userMessageId: randomUUID(), provider: 'workflow-fixture',
     model: 'fixture-model', message, permissionMode: 'full' });
   const post = (path, payload) => fetch(address + path, { method: 'POST', body: JSON.stringify(payload) });
@@ -135,13 +143,13 @@ for (const protocol of protocols) test(protocol + ': search, read two returned s
       const config = await service.getConfig();
       assert.ok(curatedMcpPresets.length > 0);
       assert.equal(config.mcpServers.length, curatedMcpPresets.length);
-      assert.ok(config.mcpServers.every(item => item.enabled === false), 'Official defaults cannot start processes');
+      assert.ok(config.mcpServers.every(item => item.enabled === true), 'Fresh official defaults follow the enabled package configuration');
       const mcpServers = config.mcpServers.map(server => {
         if (server.id === 'official-exa') return { id: server.id, name: 'Fixture multi-source search', command: process.execPath,
           args: [mcpFixture, 'search', join(extensionRoot, 'search.jsonl')], enabled: true };
         if (server.id === 'official-fetch') return { id: server.id, name: 'Fixture source reader', command: process.execPath,
           args: [mcpFixture, 'fetch', join(extensionRoot, 'fetch.jsonl')], enabled: true };
-        return server;
+        return { ...server, enabled: false };
       });
       assert.equal(mcpServers.filter(server => server.enabled).length, 2);
       await service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers });

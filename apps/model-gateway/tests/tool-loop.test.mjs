@@ -12,6 +12,7 @@ import { ModelRuntime } from '../runtime.mjs';
 import { readSse } from '../streaming.mjs';
 import { readToolStream } from '../tool-streaming.mjs';
 import { wireCatalog } from '../tool-protocols.mjs';
+import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-tool-import-'));
 const originalHome = process.env.KYNXA_DATA_HOME;
@@ -87,6 +88,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
   await conversations.saveCatalog({ Revision: (await conversations.catalog()).Revision, Projects: [{ Id: projectId, Name: 'Work', FolderPath: workspace,
     Chats: [{ Id: id, Title: 'Tools', Messages: [{ Id: randomUUID(), Role: 'user', Content: 'Synthetic initial message', Status: 'completed' }] }] }], Chats: [] });
   const runtime = new ModelRuntime({ modelStore: models, dataHome, conversationStore: conversations });
+  isolateFixtureMcpCatalog(runtime.tools);
   const gateway = createModelServer({ modelStore: models, modelRuntime: runtime }); const address = await listen(gateway);
   t.after(async () => {
     try { await gateway.shutdownModelRuntime(); }

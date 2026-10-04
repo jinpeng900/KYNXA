@@ -23,11 +23,43 @@ test('browser prompt belongs to the captured catalog and preserves current capab
   const f = await toolFixture(t), config = await f.service.getConfig();
   await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [
     server('fixture-browser', ['chrome-devtools-mcp@1.10.1', '--autoConnect'])] });
+  const disconnected = await f.context();
+  await f.service.catalog(disconnected); // A configured service without a discovered directory is not a ready capability.
+  assert.doesNotMatch(await f.service.systemPrompt(disconnected), /Browser MCP fixture-browser:/);
+  assert.equal(f.service.mcp.connections.size, 0, 'Passive discovery never starts a real browser or account connection');
+  let remote = [{ name: 'mcp.fixture-browser.list_pages', description: 'List only synthetic fixture pages.',
+    source: 'mcp:fixture-browser', serverId: 'fixture-browser', toolName: 'list_pages',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } }];
+  // Model a discovered directory explicitly; no process or browser action is performed by this test.
+  f.service.mcp.catalog = async () => remote;
   const context = await f.context();
-  await f.service.catalog(context); // Discovery only: never start a real browser or account connection.
+  await f.service.catalog(context);
   const prompt = await f.service.systemPrompt(context);
   assert.match(prompt, /fixture-browser: Connects to a local existing browser/);
   assert.match(prompt, /Current capabilities override historical unavailable reports/);
   assert.match(prompt, /signed-in browsing.*allowed/);
+  remote = [];
+  const next = await f.context();
+  await f.service.catalog(next);
+  assert.doesNotMatch(await f.service.systemPrompt(next), /Browser MCP fixture-browser:/,
+    'A subsequent empty directory cannot advertise the configured browser as ready');
+  assert.match(await f.service.systemPrompt(context), /fixture-browser: Connects to a local existing browser/,
+    'The previous context retains its own captured capability snapshot');
+  await f.service.releaseContext(disconnected);
+  await f.service.releaseContext(next);
+  await f.service.releaseContext(context);
+});
+
+test('a discovered browser with all tools disabled is not advertised as an available browser', async t => {
+  const f = await toolFixture(t), config = await f.service.getConfig();
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [
+    server('fixture-browser', ['chrome-devtools-mcp@1.10.1', '--autoConnect'], { disabledTools: ['list_pages'] })] });
+  f.service.mcp.catalog = async () => [{ name: 'mcp.fixture-browser.list_pages', description: 'Synthetic pages.',
+    source: 'mcp:fixture-browser', serverId: 'fixture-browser', toolName: 'list_pages',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } }];
+  const context = await f.context();
+  const catalog = await f.service.catalog(context);
+  assert.ok(catalog.every(tool => tool.name !== 'mcp.fixture-browser.list_pages'));
+  assert.doesNotMatch(await f.service.systemPrompt(context), /Browser MCP fixture-browser:/);
   await f.service.releaseContext(context);
 });

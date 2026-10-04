@@ -40,7 +40,8 @@ class OwnedWindowsStdioTransport extends StdioClientTransport {
 const StdioTransport = process.platform === 'win32' ? OwnedWindowsStdioTransport : StdioClientTransport;
 class PinnedModernStdioTransport extends StdioTransport {}
 const LOCAL_CODES = new Set(['MCP_ENV_MISSING', 'MCP_AUTH_ORIGIN_REJECTED', 'MCP_INVALID_CATALOG', 'MCP_PROTOCOL_MISMATCH',
-  'MCP_INPUT_REQUIRED', 'MCP_CONNECTION_CAPACITY', 'MCP_NOT_CONNECTED', 'MCP_NOT_ENABLED', 'MCP_CATALOG_CHANGED', 'MCP_PROCESS_CLEANUP_FAILED']);
+  'MCP_INPUT_REQUIRED', 'MCP_CONNECTION_CAPACITY', 'MCP_NOT_CONNECTED', 'MCP_NOT_ENABLED', 'MCP_CATALOG_CHANGED', 'MCP_PROCESS_CLEANUP_FAILED',
+  'MCP_CONFIG_REQUIRED', 'MCP_COMMAND_NOT_FOUND']);
 
 function environment(name) {
   const value = process.env[name];
@@ -57,6 +58,7 @@ export function mcpFailure(error, fallback = 'MCP_CONNECTION_FAILED') {
   if (error instanceof UnauthorizedError || ['CLIENT_HTTP_AUTHENTICATION', 'CLIENT_HTTP_AUTHORIZATION', 'invalid_client', 'invalid_token', 'insufficient_scope'].includes(code))
     return toolFailure('MCP 服务需要有效认证，请检查环境变量引用。', 'MCP_AUTH_REQUIRED', 401);
   if (['REQUEST_TIMEOUT', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) return toolFailure('MCP 请求超时；未自动重试。', 'MCP_TIMEOUT', 504);
+  if (code === 'ENOENT') return toolFailure('MCP 启动程序或运行目录不存在，请检查依赖与配置。', 'MCP_COMMAND_NOT_FOUND', 409);
   if (['CONNECTION_CLOSED', 'NOT_CONNECTED', 'SEND_FAILED', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'ENOTFOUND'].includes(code))
     return toolFailure('MCP 连接已中断，请手动重新连接；调用未自动重放。', 'MCP_CONNECTION_LOST', 409);
   return toolFailure('MCP 连接或请求失败；调用未自动重试。', fallback, 502);
@@ -65,6 +67,9 @@ export function mcpFailure(error, fallback = 'MCP_CONNECTION_FAILED') {
 export async function createMcpTransport(server, context, { fetch: fetchImpl = globalThis.fetch, extensionRoot = context?.extensionRoot } = {}) {
   const value = normalizeMcpConnection(server);
   if (value.transport === 'stdio') {
+    // A shipped configuration template is enabled but cannot execute until its path is supplied.
+    if (value.args.some(argument => argument.includes('<absolute-path-to-')))
+      throw toolFailure('MCP 配置模板中的文件路径尚未填写。', 'MCP_CONFIG_REQUIRED', 409);
     const env = { ...getDefaultEnvironment(), ...value.env };
     for (const [name, reference] of Object.entries(value.envRefs)) env[name] = environment(reference);
     if (extensionRoot) {

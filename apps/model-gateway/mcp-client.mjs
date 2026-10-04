@@ -153,8 +153,16 @@ export class McpToolClients {
     this.states = new Map(); this.servers = new Map(); this.fetch = fetch;
     this.extensionRoot = extensionRoot;
     this.failedClosures = new Map();
+    this.connectionGeneration = 0;
+    this.resetOperation = null;
     this.browserSessions = new BrowserSessionRegistry();
     this.browserApprovals = new WeakMap();
+  }
+
+  _assertConnectionGeneration(generation) {
+    if (this.closed) throw toolFailure('MCP 客户端已关闭。', 'TOOL_SERVICE_CLOSED', 409);
+    if (this.resetOperation || generation !== this.connectionGeneration)
+      throw toolFailure('MCP 连接在发现期间已重置，请开始新请求。', 'AGENT_CONFIG_CHANGED', 409);
   }
 
   _cleanupFailure() {
@@ -188,7 +196,7 @@ export class McpToolClients {
   }
 
   async _connect(server, context) {
-    if (this.closed) throw toolFailure('MCP 客户端已关闭。', 'TOOL_SERVICE_CLOSED', 409);
+    this._assertConnectionGeneration(this.connectionGeneration);
     if (this.failedClosures.size) throw this._cleanupFailure();
     const key = this._key(server, context);
     if (this.connections.has(key)) return this.connections.get(key);
@@ -228,6 +236,13 @@ export class McpToolClients {
         listChanged: { tools: { autoRefresh: false, debounceMs: 100, onChanged: () => { void changed().catch(() => {}); } },
           resources: { autoRefresh: false, debounceMs: 100, onChanged: () => { if (state.state === 'ready') state.generation++; } } } });
       let transport;
+      let startupFailure;
+      // The SDK may reject connect with a closed-pipe error after reporting the
+      // underlying spawn failure. Retain only its sanitized readiness diagnosis.
+      client.onerror = error => {
+        const failure = mcpFailure(error);
+        if (failure.code === 'MCP_COMMAND_NOT_FOUND') startupFailure = failure;
+      };
       try {
         transport = await createMcpTransport(server, context, { fetch: this.fetch, extensionRoot: this.extensionRoot ?? context?.extensionRoot });
         await client.connect(transport, { timeout: server.startupTimeoutMs ?? CONNECT_TIMEOUT_MS });
@@ -256,7 +271,7 @@ export class McpToolClients {
         return connection;
       } catch (error) {
         await this._closeConnection(key, connection ?? { client, transport, serverId: server.id, closed: true }, { startup: true });
-        throw mcpFailure(error);
+        throw mcpFailure(startupFailure ?? error);
       }
     })();
     this.connections.set(key, operation);
@@ -270,19 +285,37 @@ export class McpToolClients {
   }
 
   async catalog(config, context, { connect = false, refresh = false } = {}) {
+    const generation = this.connectionGeneration;
+    this._assertConnectionGeneration(generation);
     const tools = [];
-    for (const server of config.mcpServers.filter(server => server.enabled)) {
+    const servers = config.mcpServers.filter(server => server.enabled);
+    const discover = async server => {
+      this._assertConnectionGeneration(generation);
       this.servers.set(server.id, structuredClone(server));
       if (!this.states.has(server.id)) this.states.set(server.id, { serverId: server.id, transport: server.transport ?? 'stdio', state: 'disconnected',
         toolCount: 0, resourceCapabilities: { resources: false, templates: false }, generation: 0 });
       const key = this._key(server, context);
       const existing = this.connections.has(key);
-      if (!connect && !existing) continue;
+      if (!connect && !existing) return [];
       try {
         const connection = await this._connect(server, context);
+        this._assertConnectionGeneration(generation);
         if (refresh && existing && !connection.closed) await connection.refreshCatalog();
-        if (!connection.closed) tools.push(...connection.tools);
-      } catch (error) { this.errors.set(server.id, error.code ?? 'MCP_CONNECTION_FAILED'); }
+        this._assertConnectionGeneration(generation);
+        if (!connection.closed) return connection.tools;
+      } catch (error) {
+        this._assertConnectionGeneration(generation);
+        this.errors.set(server.id, error.code ?? 'MCP_CONNECTION_FAILED');
+      }
+      return [];
+    };
+    // Each catalog overlaps at most four handshakes, preserving configured order.
+    // Reading settings/catalog without connect still starts no external process or network request.
+    for (let offset = 0; offset < servers.length; offset += 4) {
+      this._assertConnectionGeneration(generation);
+      const batch = await Promise.all(servers.slice(offset, offset + 4).map(discover));
+      this._assertConnectionGeneration(generation);
+      tools.push(...batch.flat());
     }
     return tools;
   }
@@ -303,10 +336,14 @@ export class McpToolClients {
   }
 
   async reconnect(serverOrId, context) {
+    const generation = this.connectionGeneration;
+    this._assertConnectionGeneration(generation);
     const server = typeof serverOrId === 'string' ? this.servers.get(serverOrId) : serverOrId;
     if (!server?.enabled) throw toolFailure('MCP 服务未配置或未启用。', 'MCP_NOT_ENABLED', 409);
     await this.disconnect(server.id);
+    this._assertConnectionGeneration(generation);
     await this._connect(server, context);
+    this._assertConnectionGeneration(generation);
     return this.diagnostics().find(state => state.serverId === server.id);
   }
 
@@ -428,16 +465,28 @@ export class McpToolClients {
       outsideWorkspace: true, canonical };
   }
 
-  async reset() {
+  reset() {
+    if (this.resetOperation) return this.resetOperation;
+    // Revoke discovery before awaiting startup/teardown. Otherwise a later
+    // discovery batch can start outside this owner's cleanup snapshot.
+    this.connectionGeneration++;
     const pending = [...this.connections.entries()];
-    const settled = await Promise.allSettled(pending.map(async ([key, operation]) => {
-      let connection;
-      try { connection = await operation; }
-      catch { return; } // Startup failures already perform and retain their own bounded cleanup.
-      await this._closeConnection(key, connection);
-    }));
-    if (settled.some(result => result.status === 'rejected') || this.failedClosures.size) throw this._cleanupFailure();
-    this.connections.clear(); this.errors.clear(); this.states.clear(); this.servers.clear();
+    let operation;
+    operation = Promise.resolve().then(async () => {
+      const settled = await Promise.allSettled(pending.map(async ([key, startup]) => {
+        let connection;
+        try { connection = await startup; }
+        catch { return; } // Startup failures retain their own bounded cleanup.
+        await this._closeConnection(key, connection);
+      }));
+      if (settled.some(result => result.status === 'rejected') || this.failedClosures.size) throw this._cleanupFailure();
+      // Only release references owned by this reset, even if a future caller
+      // changes connection scheduling. New work is barred until this completes.
+      for (const [key, startup] of pending) if (this.connections.get(key) === startup) this.connections.delete(key);
+      this.errors.clear(); this.states.clear(); this.servers.clear();
+    }).finally(() => { if (this.resetOperation === operation) this.resetOperation = null; });
+    this.resetOperation = operation;
+    return operation;
   }
 
   async close() { this.closed = true; await this.reset(); }

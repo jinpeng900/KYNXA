@@ -33,11 +33,23 @@ public partial class App
         Check(NativeUi.ByName<TextBlock>(row, "AgentServerListSourceLabel").Text == "官方工具",
             "the realized official list row identifies its source");
         var enabled = Element<CheckBox>("AgentServerEnabledBox");
-        Check(enabled.IsEnabled && enabled.IsChecked == false && Element<TextBox>("AgentServerIdBox").IsReadOnly,
-            "official preset activation remains an explicit editable switch with stable identity");
+        Check(enabled.IsEnabled && enabled.IsChecked == true && Element<TextBox>("AgentServerIdBox").IsReadOnly,
+            "an official preset starts enabled and keeps an editable switch with stable identity");
+        Check(Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("未就绪") &&
+            Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("MCP_COMMAND_NOT_FOUND") &&
+            Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("工具：0") && _api.Connections == 0 && _api.Reconnects == 0,
+            "an enabled official preset with a missing command remains not ready without starting a connection");
         var command = Element<TextBox>("AgentServerCommandBox");
         Check(!command.IsReadOnly && command.Text == _api.OfficialBrowserDefault.Command,
             "official connection fields can be customized without modifying the read-only package path");
+        UiText.Initialize("en"); await SettleAsync();
+        Check(Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("Not ready") &&
+            Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("MCP_COMMAND_NOT_FOUND") && enabled.IsChecked == true &&
+            _api.Saves == 0 && _api.Connections == 0 && _api.Reconnects == 0,
+            "the not-ready status translates to English without disabling or connecting the official preset");
+        UiText.Initialize("zh-CN"); await SettleAsync();
+        Check(Element<TextBlock>("AgentConnectionStatusLabel").Text.Contains("未就绪") && enabled.IsChecked == true,
+            "the Chinese not-ready status restores while the official default remains enabled");
         source.SelectedIndex = 2;
         await SettleAsync();
         Check(list.Items.Count == 1 && ((McpServerConfig)list.Items[0]).Origin == "user" && _api.Saves == 0,
@@ -51,15 +63,16 @@ public partial class App
         Check(list.Items.Count == 1 && ((McpServerConfig)list.Items[0]).Origin == "official",
             "official filtering excludes custom user servers");
         list.SelectedItem = list.Items[0]; await SettleAsync();
-        enabled.IsChecked = true;
-        var customized = _api.OfficialBrowserDefault with { Enabled = true, Overridden = true };
+        enabled.IsChecked = false;
+        var customized = _api.OfficialBrowserDefault with { Enabled = false, Overridden = true };
         _api.NextSaveResponse = _api.Config with { Revision = _api.Config.Revision + 1,
             McpServers = [customized, _api.Config.McpServers[1]] };
         NativeUi.Invoke(Button("AgentSaveServerButton"));
-        await WaitAsync(() => _api.Saves == 1 && !_window!.HasPendingChanges, "official activation accepts the server-provided customization metadata");
-        Check(_api.LastSaveRequest is { } first && first.McpServers.Length == 2 && first.McpServers.First(item => item.Id == official.Id).Enabled &&
+        await WaitAsync(() => _api.Saves == 1 && !_window!.HasPendingChanges, "an explicit official disable accepts the server-provided customization metadata");
+        Check(_api.LastSaveRequest is { } first && first.McpServers.Length == 2 && !first.McpServers.First(item => item.Id == official.Id).Enabled &&
+            enabled.IsChecked == false &&
             first.DisabledOfficialMcpServers?.SequenceEqual(["hidden-fixture"]) == true && first.SkillDirectories.SequenceEqual(_api.Config.SkillDirectories),
-            "an official switch saves the full effective server array and preserves existing hidden presets and skill directories");
+            "an explicit user disable saves the full effective array and preserves hidden presets and skill directories");
         Check(Element<TextBlock>("AgentServerSourceLabel").Text.Contains("官方 · 已自定义") &&
             Button("AgentRestoreServerButton").Visibility == Visibility.Visible && Button("AgentDeleteServerButton").Visibility == Visibility.Collapsed && _api.Connections == 0,
             "a saved official override stays official, offers restore, and does not auto-start a process");
@@ -72,8 +85,9 @@ public partial class App
         NativeUi.Invoke(Button("AgentSaveServerButton"));
         await WaitAsync(() => _api.Saves == 2 && !_window!.HasPendingChanges, "official program customization finishes an explicit save");
         Check(_api.LastSaveRequest?.McpServers.First(item => item.Id == official.Id).Command == "fixture-browser-user-edit" &&
+            _api.LastSaveRequest?.McpServers.First(item => item.Id == official.Id).Enabled == false && enabled.IsChecked == false &&
             _api.Config.OfficialToolsRoot == officialPath.Text && _api.Connections == 0,
-            "connection edits target the effective user override without changing or executing the official package");
+            "connection edits preserve the explicit user disable without changing or executing the official package");
         UiText.Initialize("en"); await SettleAsync();
         Check(Element<TextBlock>("AgentServerSourceLabel").Text.Contains("Official · Customized") &&
             Element<TextBlock>("AgentUserRootLabel").Text == "User tools" && ((ComboBoxItem)source.Items[1]).Content?.ToString() == "Official tools" &&
@@ -94,9 +108,10 @@ public partial class App
         await WaitAsync(() => _api.Saves == 3 && !_window!.HasPendingChanges, "accepted restore receives the unchanged official default");
         Check(_api.LastSaveRequest is { } restored && restored.McpServers.Length == 2 &&
             restored.McpServers.First(item => item.Id == official.Id).Command == _api.OfficialBrowserDefault.Command &&
-            !restored.McpServers.First(item => item.Id == official.Id).Enabled && command.Text == _api.OfficialBrowserDefault.Command &&
-            Button("AgentRestoreServerButton").Visibility == Visibility.Collapsed && _api.Connections == 0,
-            "restore sends the official preset under its stable ID, keeps other servers, and leaves it disabled");
+            restored.McpServers.First(item => item.Id == official.Id).Enabled && enabled.IsChecked == true &&
+            command.Text == _api.OfficialBrowserDefault.Command && Button("AgentRestoreServerButton").Visibility == Visibility.Collapsed &&
+            _api.Connections == 0 && _api.Reconnects == 0,
+            "restore sends the enabled official default under its stable ID, keeps other servers, and does not connect");
         Element<Pivot>("AgentTabs").SelectedIndex = 1; await SettleAsync();
         var skills = Element<ListView>("AgentSkillList");
         string[] labels = ["Official tools", "User tools", "Project tools"];
