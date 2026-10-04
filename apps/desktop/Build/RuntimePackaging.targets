@@ -1,0 +1,75 @@
+<Project>
+  <Target Name="EnsureGatewayDependencies" BeforeTargets="PrepareForBuild"
+          Inputs="..\model-gateway\package-lock.json" Outputs="..\model-gateway\node_modules\.package-lock.json">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway" Command="npm ci --no-audit --no-fund" />
+  </Target>
+  <Target Name="IncludeGatewayNodeRuntime" BeforeTargets="AssignTargetPaths">
+    <PropertyGroup>
+      <_KynxaNodeCacheDirectory>$([System.IO.Path]::GetFullPath('$(BaseIntermediateOutputPath)node-runtime\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaNodeCacheDirectory>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-node-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaNodeCacheDirectory)&quot; -ManifestPath &quot;$(MSBuildProjectDirectory)\Build\node-runtime.json&quot;" />
+    <ReadLinesFromFile File="$(_KynxaNodeCacheDirectory)\runtime-path.txt">
+      <Output TaskParameter="Lines" PropertyName="_KynxaNodeRuntimeDirectory" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_KynxaNodeRuntimeFiles Include="$(_KynxaNodeRuntimeDirectory)\**\*" />
+      <Content Include="@(_KynxaNodeRuntimeFiles)"
+               Link="runtime\%(_KynxaNodeRuntimeFiles.RecursiveDir)%(_KynxaNodeRuntimeFiles.Filename)%(_KynxaNodeRuntimeFiles.Extension)"
+               CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    </ItemGroup>
+  </Target>
+  <!-- Dependencies may not exist during initial project evaluation on a clean
+       checkout. Populate content after npm restore, with qualified metadata to
+       avoid batching against unrelated Content items. -->
+  <Target Name="IncludeGatewayRuntimeDependencies" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
+    <ItemGroup>
+      <_KynxaGatewayDependencyFiles Include="..\model-gateway\node_modules\**\*"
+          Exclude="..\model-gateway\node_modules\**\*.map;..\model-gateway\node_modules\.package-lock.json;..\model-gateway\node_modules\**\src\**\*;..\model-gateway\node_modules\**\tests\**\*;..\model-gateway\node_modules\**\test\**\*" />
+      <Content Include="@(_KynxaGatewayDependencyFiles)"
+          Link="model-gateway\node_modules\%(_KynxaGatewayDependencyFiles.RecursiveDir)%(_KynxaGatewayDependencyFiles.Filename)%(_KynxaGatewayDependencyFiles.Extension)"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths">
+    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="Restore;Build"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
+    <PropertyGroup>
+      <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath('$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaToolHostNoticesDirectory>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-toolhost-notices.ps1&quot; -AssetsPath &quot;$(MSBuildProjectDirectory)\..\tool-host\obj\project.assets.json&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -OutputDirectory &quot;$(_KynxaToolHostNoticesDirectory)&quot;" />
+    <ItemGroup>
+      <_KynxaToolHostFiles Include="..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*"
+          Exclude="..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*.pdb;..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*.tmp" />
+      <Content Include="@(_KynxaToolHostFiles)"
+               Link="ToolHost\%(_KynxaToolHostFiles.RecursiveDir)%(_KynxaToolHostFiles.Filename)%(_KynxaToolHostFiles.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <_KynxaToolHostNotices Include="$(_KynxaToolHostNoticesDirectory)\**\*" />
+      <Content Include="@(_KynxaToolHostNotices)"
+               Link="ToolHost\licenses\%(_KynxaToolHostNotices.RecursiveDir)%(_KynxaToolHostNotices.Filename)%(_KynxaToolHostNotices.Extension)"
+               CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    </ItemGroup>
+  </Target>
+  <!-- The SDK extracts WinUI portable-library resources from PackagingOutputs.
+       ToolHost is a separate self-contained WPF process: keep its DLLs in the
+       payload while excluding them only from that PRI extraction step. -->
+  <Target Name="ExcludeToolHostLibrariesFromWinUiPri" BeforeTargets="_GeneratePrisForPortableLibraries">
+    <ItemGroup Condition="'@(_LibrariesUnfiltered)' == '' and '@(CreatedResWFiles)' == '' and '$(NetCoreGeneratePrisForPortableLibraries)' != 'true'">
+      <_LibrariesUnfiltered Include="@(PackagingOutputs)" Exclude="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" Condition="'%(Extension)' == '.dll'" />
+    </ItemGroup>
+    <ItemGroup>
+      <_LibrariesUnfiltered Remove="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" />
+    </ItemGroup>
+  </Target>
+  <!-- PRI's layout indexer also parses arbitrary content filenames as resource
+       qualifiers. Preserve these separate runtimes as unindexed main payloads,
+       without suppressing validation of the actual desktop UI resources. -->
+  <Target Name="KeepExecutableRuntimePayloadsOutsideWinUiPri"
+          AfterTargets="_GenerateProjectPriConfigurationFiles"
+          BeforeTargets="_GenerateProjectPriFileCore"
+          Condition="Exists('$(_FilteredLayoutResfilesPath)')">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\filter-runtime-pri-layout.ps1&quot; -LayoutPath &quot;$(_FilteredLayoutResfilesPath)&quot; -ExcludedLayoutPath &quot;$(_ExcludedLayoutResfilesPath)&quot;" />
+  </Target>
+</Project>

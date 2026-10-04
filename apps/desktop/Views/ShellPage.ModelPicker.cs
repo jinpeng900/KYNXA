@@ -15,6 +15,7 @@ public sealed partial class ShellPage
     private readonly ModelApiClient _modelApiClient = new();
     private ModelChoice? _selectedModel;
     private ModelChoice[] _availableModels = [];
+    private CancellationTokenSource? _modelPickerRefresh;
 
     private void InitializeModelPicker()
     {
@@ -24,11 +25,16 @@ public sealed partial class ShellPage
         _ = RefreshModelPickerAsync();
     }
 
-    private async Task RefreshModelPickerAsync()
+    private async Task<bool> RefreshModelPickerAsync()
     {
+        if (_chatClosing) return false;
+        CancelModelPickerRefresh();
+        using var cancellation = new CancellationTokenSource();
+        _modelPickerRefresh = cancellation;
         try
         {
-            var providers = await _modelApiClient.ListAsync();
+            var providers = await _modelApiClient.ListAsync(cancellation.Token);
+            if (_chatClosing || cancellation.IsCancellationRequested || !ReferenceEquals(_modelPickerRefresh, cancellation)) return false;
             _availableModels = providers.SelectMany(provider => provider.Models.Select(id =>
                 new ModelChoice(provider.ProviderId, provider.DisplayName, id))).ToArray();
             if (_selectedModel is not null && !_availableModels.Any(choice =>
@@ -37,9 +43,28 @@ public sealed partial class ShellPage
                 _selectedModel = null;
                 _modelSelectionStore.Save(null);
             }
+            UpdateModelPickerLabel();
+            return true;
         }
-        catch (Exception) { _availableModels = []; }
-        UpdateModelPickerLabel();
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return false; }
+        catch (Exception)
+        {
+            if (_chatClosing || cancellation.IsCancellationRequested || !ReferenceEquals(_modelPickerRefresh, cancellation)) return false;
+            _availableModels = [];
+            UpdateModelPickerLabel();
+            return true;
+        }
+        finally
+        {
+            if (ReferenceEquals(_modelPickerRefresh, cancellation)) _modelPickerRefresh = null;
+        }
+    }
+
+    private void CancelModelPickerRefresh()
+    {
+        var pending = _modelPickerRefresh;
+        _modelPickerRefresh = null;
+        pending?.Cancel();
     }
 
     private void UpdateModelPickerLabel()
@@ -51,7 +76,7 @@ public sealed partial class ShellPage
 
     private async void ModelPickerButton_Click(object sender, RoutedEventArgs e)
     {
-        await RefreshModelPickerAsync();
+        if (!await RefreshModelPickerAsync() || _chatClosing || XamlRoot is null) return;
         var menu = PickerMenu.Create(FlyoutPlacementMode.TopEdgeAlignedRight);
         var models = PickerMenu.CreateList("ModelPickerList", UiText.Get("模型列表"));
         models.ItemTemplate = (DataTemplate)XamlReader.Load("""
@@ -107,6 +132,8 @@ public sealed partial class ShellPage
 
     private void SelectModel(ModelChoice choice, Flyout menu)
     {
+        if (_chatClosing) return;
+        CancelModelPickerRefresh();
         _selectedModel = choice;
         UpdateModelPickerLabel();
         try { _modelSelectionStore.Save(choice); }

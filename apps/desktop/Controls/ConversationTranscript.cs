@@ -133,7 +133,15 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 toolTimedOut = UiText.Get("操作超时。"), toolSandboxUnavailable = UiText.Get("沙箱暂不可用。"),
                 toolSkillUnavailable = UiText.Get("技能运行环境尚未满足。"), toolApprovalExpired = UiText.Get("批准已过期。"),
                 toolCommandUnavailable = UiText.Get("此命令暂不支持。"), toolConnectionUnavailable = UiText.Get("工具连接不可用。"),
-                toolAuthRequired = UiText.Get("工具需要认证。")
+                toolAuthRequired = UiText.Get("工具需要认证。"),
+                toolInspectWindows = UiText.Get("查看窗口"), toolFindApps = UiText.Get("查找软件"), toolScreenshot = UiText.Get("截图"), toolReadWindow = UiText.Get("读取窗口"),
+                toolOpenApp = UiText.Get("打开软件"), toolActivateWindow = UiText.Get("切换窗口"), toolClick = UiText.Get("点击"),
+                toolMovePointer = UiText.Get("移动鼠标"), toolScroll = UiText.Get("滚动"), toolDrag = UiText.Get("拖动"),
+                toolTypeText = UiText.Get("输入文字"), toolPressKey = UiText.Get("按下按键"),
+                toolAdjustWindow = UiText.Get("调整窗口"), toolWindowResize = UiText.Get("调整大小"), toolWindowMaximize = UiText.Get("最大化"),
+                toolWindowMinimize = UiText.Get("最小化"), toolWindowRestore = UiText.Get("恢复窗口"), toolBackgroundLaunch = UiText.Get("后台启动"),
+                toolWindowUnresponsive = UiText.Get("窗口未响应"),
+                toolCharacterCount = UiText.Get("{0}字符"), toolScrollDelta = UiText.Get("滚动量 {0}"), toolViewScreenshot = UiText.Get("查看截图")
             }
         });
     }
@@ -268,25 +276,27 @@ public sealed class ConversationTranscript : Grid, IDisposable
         long revision = _revision;
         long generation = _generation;
         var conversationId = _conversationId;
-        var snapshots = _messages.Select(row =>
-        {
-            var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
-                row.Message.AssistantSegments, row.ToolActivities);
-            // Public process records belong to the gateway. Hidden phases need no HTML or browser payload.
-            var segments = visible.Segments.Select(segment => segment with { Reasoning = "", ReasoningDurationMs = 0 }).ToArray();
-            return new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
-                visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
-                row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
-                visible.Tools, segments, visible.Mode, row.Message.DurationMs);
-        }).ToArray();
         try
         {
+            var snapshots = _messages.Select(row =>
+            {
+                var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
+                    row.Message.AssistantSegments, row.ToolActivities);
+                // Public process records belong to the gateway. Hidden phases need no HTML or browser payload.
+                var segments = visible.Segments.Select(segment => segment with { Reasoning = "", ReasoningDurationMs = 0 }).ToArray();
+                return new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
+                    visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
+                    row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
+                    visible.Tools, segments, visible.Mode, row.Message.DurationMs);
+            }).ToArray();
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
+            var previousCaches = new CachedHtml?[snapshots.Length];
             var missing = new List<int>();
             for (int index = 0; index < snapshots.Length; index++)
             {
                 var row = snapshots[index];
                 _html.TryGetValue(row.Id, out var cached);
+                previousCaches[index] = cached;
                 bool hit = cached is not null && cached.Role == row.Role && cached.Content == row.Content &&
                     cached.Reasoning == row.Reasoning && cached.Streaming == row.Streaming && cached.Mode == row.Mode &&
                     cached.Segments.Select(segment => segment.Source).SequenceEqual(row.AssistantSegments);
@@ -301,7 +311,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     // Rapid navigation can abandon a large transcript between messages.
                     if (generation != Volatile.Read(ref _generation)) return;
                     var row = snapshots[index];
-                    _html.TryGetValue(row.Id, out var previous);
+                    // The UI owns _html and may dispose it while this worker is parsing.
+                    // Only immutable references captured before the await cross that boundary.
+                    var previous = previousCaches[index];
                     var segmentHtml = row.AssistantSegments.Select(segment =>
                     {
                         var match = previous?.Segments.FirstOrDefault(value => value.Source == segment);
@@ -388,6 +400,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _generation++;
+        _ready.TrySetCanceled();
         ConversationChanged?.Invoke(this, EventArgs.Empty);
         UiText.LanguageChanged -= LanguageChanged;
         _refresh.Stop();
@@ -402,5 +416,3 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _browser.Close();
     }
 }
-
-public sealed record ToolResultRequest(Guid ConversationId, Guid MessageId, ToolActivity Tool);

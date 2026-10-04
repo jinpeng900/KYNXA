@@ -145,6 +145,8 @@ public sealed partial class ShellPage
         ChatAmbientLayer.Visibility = hasMessages ? Visibility.Collapsed : Visibility.Visible;
         MainContentHost.VerticalAlignment = hasMessages ? VerticalAlignment.Bottom : VerticalAlignment.Center;
         MainContentHost.Margin = hasMessages ? new Thickness(0, 0, 0, 16) : new Thickness(0);
+        ScreenshotPanel.ShowConversation(chat?.Id, ActiveMessages.ToArray());
+        UpdateMountedWorkspacePresentation();
         ApplyLayout();
         UpdateSendButtonState();
         ConversationMessages.ShowConversation(chat?.Id, ActiveMessages.ToArray(), openAtBottom);

@@ -283,7 +283,21 @@
                                         <TextBlock x:Name="ProjectRowTitle" Grid.Column="1" Text="{x:Bind Title, Mode=OneWay}"
                                                    FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal" LineHeight="20"
                                                    LineStackingStrategy="BlockLineHeight"
-                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind Title, Mode=OneWay}" />
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
+                                            <ToolTipService.ToolTip>
+                                                <ToolTip>
+                                                    <StackPanel Spacing="6" MaxWidth="320">
+                                                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                                                        <StackPanel Orientation="Horizontal" Spacing="7" Visibility="{x:Bind MountedFolderVisibility, Mode=OneWay}"
+                                                                    AutomationProperties.HelpText="{x:Bind MountedFolderTooltip, Mode=OneWay}">
+                                                            <FontIcon Glyph="&#xE8B7;" FontSize="13" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                                            <TextBlock Text="{x:Bind MountedFolderName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                                                       Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                                                        </StackPanel>
+                                                    </StackPanel>
+                                                </ToolTip>
+                                            </ToolTipService.ToolTip>
+                                        </TextBlock>
                                         <StackPanel x:Name="ProjectRowActions" Grid.Column="1" Orientation="Horizontal" Spacing="4"
                                                     HorizontalAlignment="Right" Opacity="0" IsHitTestVisible="False"
                                                     VerticalAlignment="Center" Background="Transparent">
@@ -543,6 +557,21 @@
                 <Border x:Name="WorkContextPanel" Grid.Column="2" Visibility="Collapsed"
                         Background="{StaticResource KynxaSurfaceBrush}" services:UiLocalization.AutomationName="工作右侧栏">
                     <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <controls:MountedWorkspaceHeader x:Name="MountedWorkspace" Margin="10,3,40,0" />
+                        <Grid x:Name="WorkContextModulesHost" Grid.Row="1" Margin="14,10,14,14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <controls:ConversationWorkTabs x:Name="WorkTabs" />
+                            <Grid Grid.Row="1">
+                                <controls:ConversationScreenshotsPanel x:Name="ScreenshotPanel" />
+                                <TextBlock x:Name="WorkTabEmptyHint" Text="{services:UiText Key='没有打开的内容'}"
+                                           Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+                            </Grid>
+                        </Grid>
                         <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Top"
                                 Margin="0,7,7,0"
                                 Style="{StaticResource KynxaCompactIconButtonStyle}" Click="CloseWorkPanelButton_Click"

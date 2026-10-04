@@ -100,7 +100,7 @@ public sealed partial class ShellPage
             "StorageDirectoryPath", "StorageDirectoryChooseButton");
         var choose = row.ChangeButton;
         content.Children.Add(row);
-        var extensionRow = new StorageLocationRow("工具与技能存储", ExtensionPaths.Root,
+        var extensionRow = new StorageLocationRow("用户工具", ExtensionPaths.Root,
             "ExtensionStorageDirectoryPath", "ExtensionStorageDirectoryChooseButton");
         content.Children.Add(extensionRow);
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };

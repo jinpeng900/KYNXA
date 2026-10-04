@@ -1,6 +1,57 @@
 # 基础工具、MCP 与应用技能
 
-本页描述当前工具闭环。设置中的“工具与技能”打开独立窗口，管理 MCP 服务、单个工具启停、应用技能与参数；扩展文件可单独选择存储目录。聊天输入区的三种权限参与真实执行判定。工具结果可在聊天中展开，并按需打开详情。
+本页描述当前工具闭环。设置中的“工具与技能”打开独立窗口，管理 MCP 服务、单个工具启停、应用技能与参数；扩展文件可单独选择存储目录。聊天输入区的三种权限参与真实执行判定。运行中聊天只展示简洁动作和来源链接；窗口截图在右侧小模块查看，完整工具记录保留在正式日志。
+
+## 浏览器连接与启动回执
+
+工具窗口的浏览器字段映射到已固定版本的官方 MCP 参数，未编辑的高级配置原样保留。Chrome DevTools 可选现有 Chrome（`--autoConnect`）、独立窗口或无头实例（`--headless`）、CDP 地址（`--browserUrl`/`--wsEndpoint`）；Playwright 对应官方扩展（`--extension`）、独立配置、CDP（`--cdp-endpoint`）或已有 Playwright 协议（`--endpoint`）。配置文件或环境驱动的连接显示自定义，避免简单选择器无声改变实际协议。配置保存和连接仍分开，认证引用不进入模型提示。
+
+现有浏览器连接可以在用户授权下使用已登录网页，不导出 Cookie、密码或令牌。首次浏览器调试允许和站点验证由用户完成。独立本机浏览器与远程/云端浏览器没有隐含登录继承；服务端可用性、目标站点访问限制仍以实际回执为准。原生 `computer.read` 是 UI Automation 文字，页面 DOM 操作使用浏览器 MCP。
+
+`browser-sessions.mjs` 根据已配置的实现识别 Chrome/Playwright，记录连接、当前聊天、标签页及快照代次，不根据第三方工具名称猜测浏览器身份。后台参数在审批前规范化，执行时重新核验并按连接串行处理选页状态；不偷偷调用选页来修正错误目标。点击和表单填入使用新鲜 DOM/可访问性引用，导航或动作后重新读取；跨域 iframe 仍走浏览器引用。首次快照缺少标签页 ID 时保留文字但不虚构 ID，须显式发现标签页后重新获取可用引用。
+
+后台是默认浏览器偏好；用户明确禁止前台时，当前请求的原生激活和模拟输入也被拒绝。`computer.launch.background` 仅是最佳努力的启动提示，第三方应用可能覆盖，程序检查实际前台回执。GUI 非网页部分可使用有界 UIA 元素或区域，再按授权退回前台鼠标/键盘。密码控件不读名称、值或文本，但保留控件类型和定位；不把“不读密码”错误解释为“不能输入用户授权的密码”。文本模型没有截图视觉输入，不能声称仅凭图片就识别了画布中的控件。
+
+GUI 启动用 `CreateProcessW` 且禁止继承句柄。网关不等应用退出；只等待助手回执和有界管道排空，取消、超时有独立结束期限。已完成回执即使与取消竞争也先归档；未确认的启动/输入记录为 `unknown` 后停止模型循环。启动 PID 可向已有浏览器进程委派，必须重新列举窗口，不能把任意窗口当成本次打开的页面。
+
+只读操作没有写入结果待确认：UIA 默认 3 秒（可配置 500–5000ms）并提前拒绝未响应窗口，浏览器观察失败保留类型和工具配对后允许模型换连接或方法。同一读取目标连续三轮失败时禁用下一轮工具并生成阻碍说明，聊天不删除。导航、输入或脚本等可能产生副作用的超时/断连仍保存 `unknown` 并停止，恢复前核验已发生的操作；不通过重复执行验证。`computer.window` 支持调整客户区物理尺寸、最大化、最小化、恢复，报告实际状态；截图 `crop` 不重采样。
+
+截图链统一接收原生 PNG、标准 MCP 图片和已确认的本机截图输出路径；路径先检查链接、范围，再兼容 Windows 8.3 与长名称。Chrome 将 `.jpg` 输出为 `.jpeg` 时仅兼容同一受控目录、同文件名的已知截图回执。远程连接不读取本机同名文件。正式结果保留原始类型；桌面通过归档加载 PNG/JPEG，切换聊天和隐藏侧栏时遵守已有生命周期，不下载任意 Markdown 图片、不向文本模型发送像素。
+
+连接方式参考固定版本的 [Chrome DevTools MCP 配置](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/chrome-devtools-mcp-v1.10.1/docs/configuration.md) 与 [Playwright MCP](https://github.com/microsoft/playwright-mcp/tree/v0.0.83)。真实验收脚本为 `tests/native-desktop-smoke/browser-smoke.mjs`、`tests/screenshot-panel-ui-smoke/browser-artifacts-live-smoke.mjs`；`--remote-cdp` 使用隔离 loopback 端点验证远程协议，不代表某个商业云浏览器或用户登录账号已经验收。
+
+## 官方工具包与用户工具
+
+官方内容只有一份，位于安装包内的 `model-gateway/official-tools/`；源码对应 `apps/model-gateway/official-tools/`。包内集中提供 34 个工具声明（原 20 个核心工具、13 个本机桌面工具及独立本机终端）、11 个 MCP 连接预设、4 个技能及其资源、来源和许可证。核心执行仍经过原 `ToolService`、文件服务和沙箱，不新增另一套执行链；MCP 实现由固定版本外部发行包或远程服务提供，不把其运行环境重复塞进官方目录。
+
+```text
+KYNXA 安装目录/
+└─ model-gateway/
+   └─ official-tools/                 随版本发布，运行时不改写
+      ├─ manifest.json                包版本、来源、许可证与内容清单
+      ├─ LICENSE.txt
+      ├─ Tools/catalog.mjs            核心目录，引用 computer.mjs 本机工具声明
+      ├─ MCP/catalog.mjs              11 个固定版本或 hosted 预设
+      └─ Skills/技能名称/               SKILL.md、参考资源与许可证
+
+用户工具目录/                          设置中可选择和迁移
+├─ Agent/config.json                  用户服务、官方差量覆盖、技能目录与启停
+├─ Skills/                            用户导入的技能
+├─ MCP/                               用户工具缓存、浏览器及可选运行环境
+└─ Backups/Extensions/                用户配置迁移恢复记录
+```
+
+设置中的路径行显示“用户工具”，只迁移下面这一层。官方路径在工具窗口中只读显示，由应用位置计算；不写死盘符或用户名，也不随用户目录迁移。官方目录整体受已有文件代理的写保护，官方身份不授予额外工具权限。发布按明确资源类型选择官方文件，ToolHost 输出排除 PDB/TMP；用户工具、配置和聊天不在官方文件清单中。
+
+`GET /api/agent/config` 返回合并后的可用配置：官方默认加用户自定义服务，服务器标明 `origin:official|user`，官方项附 `presetId`、`overridden`，根对象附官方/用户目录和官方包版本。11 个 MCP 默认关闭；打开设置、保存开关和显示清单不会启动服务。已有用户连接保留 ID、版本、参数和认证引用；同发布者或相同连接优先复用已有配置，避免另外启动重复默认服务。
+
+保存仍使用 `expectedRevision` 和完整有效 `mcpServers` 数组，程序仅将新增用户项与官方参数差异写入用户 `Agent/config.json`：`officialMcpOverrides:[{presetId,id,changes}]`。只改启停不会复制或冻结整份默认定义；官方升级后未修改字段使用新默认，明确修改的参数继续保留。`disabledOfficialMcpServers` 保存显式隐藏的默认项，旧版本缺少新字段时按兼容默认读取；未知/暂时不可用的官方覆盖保留为未激活配置。来源字段由后端重建，客户端不能用标签改变授权。
+
+工具窗口可筛选官方或用户来源。官方项支持启停、参数覆盖和恢复默认；用户自定义项继续新增、编辑和删除。技能标明官方、用户或项目来源，按需加载及原有权限不变。官方技能 ID 由包 ID 与相对路径生成，升级或安装位置变化不改变 ID；本次搬迁兼容旧位置的禁用 ID，并在配置视图中归一为稳定 ID。用户目录技能继续沿用已有路径身份及迁移映射。
+
+分层借鉴本机参考项目的 profile 配置补丁与分范围技能发现，以及 [pi 的设置合并](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/settings-manager.ts)、[资源来源与去重](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/resource-loader.ts)、[OpenCode 配置来源](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/config/config.ts)。只使用适合现有加载器的设计，不依赖参考源码目录，也不复制整套框架。敏感工作文件读取策略按用户要求留到后续安全专项，本轮不把分层描述成已解决该问题。
+
+2026-10-04 上一阶段分层与任务链验收：完整网关 **507/507** 通过，原生工具窗口 **31** 项、客户端 **46** 项、用户工具迁移 **124** 项通过；聊天流、会话客户端、模型预算与网关冷启动检查通过，桌面构建零警告零错误。该阶段官方包 **14** 个明确发布资源与内容清单对应，技能原文字节和许可证保留。模型与网页资料使用隔离模拟，三协议均验证一次搜索、两个来源并行读取、直接来源链接、保存重开与完整工具配对；代码链使用真实 Windows AppContainer，验证失败测试、再次修复、通过测试、保存重开且不重放。另用隔离匿名 Exa 服务实际搜索公开 SDK 文档成功，未读取用户认证或调用付费模型；这些结果不能代替真实付费模型的任务成功率和耗时评估。
 
 ## 从模型请求到执行
 
@@ -10,27 +61,35 @@
 
 流式事件增加 `tool_call`、`approval_required`、`tool_result` 和 `content_snapshot`，聊天展示简洁动作、网页链接和公开阶段回复，完整工具数据由正式记录保留。每轮完成可修订流式草稿；后续工具或模型中断也会保留已修订的正文。Responses 的加密推理项及 Anthropic 的签名块使用受保护的原生续接档案，不进入公开聊天接口。
 
-工具组展开后，每项默认收起，只显示工具名、实际命令或动作及状态；再展开单项查看完整参数、结果、错误、审批与结果引用。标题和命令为 12px 中灰色，名称为 13px；命令可以换行和选中复制。增量更新复用未变化活动节点，不随正文 token 重绘整组。
+运行中展示公开阶段正文及紧凑动作、命令或网页链接，工具文字为 12px 中灰色，可换行；主聊天不展示参数与结果 JSON，也没有“查看截图”按钮。最终正文完成渲染后移除过程，只保留最终正文和整轮用时。完整活动仍保存于正式记录，截图在右侧栏的内容标签中查看。增量更新复用未变化活动节点，不随正文 token 重绘整组。
 
 连续执行保留现有模型→工具→模型闭环，默认每个请求最多 64 轮、256 次工具调用、估算生成 1048576 tokens 与 30 分钟，不要求用户在普通步骤间再次发送“继续”。`runLimits` 可在聊天 API 请求中设置受限预算；服务器的请求生命周期仍是外层硬限额。估算生成量包含可见正文、思考及工具参数，并非供应商精确计费或累计输入用量。`ToolRun` 进度与回执保存于该助手消息的正式 JSONL，`GET /api/conversations/:chatId/runs/:requestId` 返回阶段和计数。已完成结果先保存并发送，再更新进度；预算、取消或保存失败阻止下一次操作。
 
+`ToolRun.diagnostics` 补充每轮模型、工具与审批等待的单调时钟耗时、计数和最近 64 个模型/256 个工具计时记录。只保存数值、轮次及已有调用 ID，不记录参数、网址、结果或私有模型字段。`totalToolMs` 是各调用扣除审批等待后的累计处理耗时，并发时不能与模型耗时相加当作总墙钟时间；整轮实际用时仍取 `DurationMs`。诊断随既有进度保存和上述接口读取，不增加逐 token 写盘或主聊天卡片。
+
+`tool-observations.mjs` 管理同一请求的观察缓存与无进展检测。仅明确的无状态搜索和 HTTP(S) Fetch 可复用 15 秒内成功的小结果，最多 32 项、总计 256 KiB；文件、历史和结果分页仍重新读取。缓存不跨请求，绑定 MCP 连接实例，状态操作、配置变化、失效连接与结束请求使其失效。复用仍经过本次调用的参数、原因、权限、单次审批、归属与 MCP 目录校验，为当前调用重新保存归属正确的结果引用；记录复用标记及原观察时间，不伪装成再次联网。错误、保存失败、大结果及媒体结果不缓存，原始类型和私有元数据保留在原有归档边界。
+
+成功只读调用只有业务参数与公开观察都重复时才累计无进展轮次，随机结果引用和审批理由不制造新进展。同轮重复调用仅计一轮；新参数/分页、新内容、错误以及写入或未知操作重置连续计数。连续两轮无进展给模型一次改换策略的提示，第三轮后提供一次无工具的总结机会；模型仍要求调用工具时，在执行前以 `TOOL_RUN_NO_PROGRESS` 中断并保留已有回执。运行提示只进入请求上下文，正式用户消息和配对历史不被改写。该规则不代替语义验收，不据此宣称所有相似查询都会被识别或真实模型总能及时停止。
+
+2026-10-04 上一轮运行效率验收：完整后端 **485/485** 通过，桌面聊天流客户端检查通过，桌面构建零警告零错误。三协议实际本机模拟 HTTP 验证四次重复读取后第五次模型请求进入无工具总结；模型拒绝总结时不执行第五次工具，已完成回执和原生配对历史仍保留。覆盖缓存独立引用、每次审批、配置/连接/工作范围变化、取消、文件重新读取、分页、TTL/容量及诊断日志重读。重新启动后 **55** 个打包网关模块与源码哈希一致。测试未调用付费模型，未以模拟上游声称固定真实提速幅度；
+
 切换到其他聊天不取消正在生成的请求。关闭应用、网关中断或显式停止会保留已知结果；当前不提供后台子代理调度，也不自动重放中断任务或恢复供应商私有续接。进度记录用于准确说明已经执行到哪里，不能把它当作能安全重复副作用的恢复检查点。
 
-工具发现与发送给模型的目录分开：单个 MCP 服务仍最多发现 128 个远端工具，资源能力最多额外增加 3 个本机包装；每次模型请求统一最多声明 96 个，并受模型上下文中的 schema 预算约束。基础工具和 `tool.search/load/result.read` 优先进入目录，其余按相关性选择；模型用 `tool.search` 查询、用 `tool.load` 将选中的定义加入下一轮请求。禁用工具不会进入搜索或模型声明，也不能通过直接调用重新启用。若初始工具定义无法装入模型预算，保留原本有效的文本聊天，不因发现数量过多而失败。
+工具发现与发送给模型的目录分开：单个 MCP 服务仍最多发现 128 个远端工具，资源能力最多额外增加 3 个本机包装；每次模型请求统一最多声明 96 个，并受模型上下文中的 schema 预算约束。schema 预算不超过 24000 tokens、实际输入预算的 40%，并扣除当前消息、工具系统提示和安全预留。`tool.search/load/result.read` 优先，明确的桌面任务再优先选择本机工具，普通代码/网页请求默认不带桌面 schema。模型用 `tool.search` 查询，`tool.load` 保留发现工具及所请求的定义，在同一预算内替换普通核心或远端工具；加载失败保留原目录。禁用工具不会进入搜索或模型声明，也不能通过直接调用重新启用。若初始工具定义无法装入模型预算，保留原本有效的文本聊天，不因发现数量过多而失败。
 
 每轮输入同时估算工具 schema 与原生续接字段。接近预算先缩小旧结果，再压缩较早完整历史轮次；最新结果过大时也可转换成有 `resultRef` 的较大预览，完整公开结果仍在本地，按 `tool.result.read` 分页读取。只改输出/历史正文投影，不改变工具调用 ID、匹配结果、当前请求、权限、原生签名与加密续接字段，不重新执行已完成操作。没有可靠结果引用、必要字段仍过大则返回 `TOOL_CONTEXT_BUDGET_EXCEEDED`。
 
 `conversation.history.search({query?,offset?,limit?})` 与 `conversation.history.read({messageId,offset?,limit?})` 是免额外审批的当前聊天只读工具。查询最多返回 20 条带真实 ID 的公开消息片段；读取最多 16000 字符并返回下一页位置。仅当前有效聊天，读取前后检查归属与归档；不读取兄弟聊天、Reasoning、ToolActivities、连接配置或回收站，不绕过正式记录所有者。`extractive-v2` 的原文导航可通过它回源，不成为新的权限或确认记忆。
 
-`GET /health` 的 `agentProtocol` 为 `5`、`toolStreamProtocol` 为 `3`，`extensionStorageProtocol:1` 和 `extensionRoot` 表示扩展存储接口与当前实际目录。桌面拒绝复用缺少新连接配置、技能或自动存储初始化能力的旧版工具网关，防止它丢弃字段或仍然写入旧目录；升级应在当前回复结束后关闭旧网关再启动。
+`GET /health` 的 `agentProtocol` 为 `5`、`toolStreamProtocol` 为 `3`，`officialToolsProtocol:2` 表示官方/用户分层及本机工具和无挂载工作区接线，`extensionStorageProtocol:1` 和 `extensionRoot` 表示扩展存储接口与当前实际目录。桌面拒绝复用缺少当前接口的旧版工具网关，防止它丢弃字段或仍然写入旧目录；升级应在当前回复结束后关闭旧网关再启动。本机助手的实际可用性还须经过能力探测，health 版本不等于当前桌面已解锁或工具执行成功。
 
 ## 范围与权限
 
 | 模式 | 自动执行 | 需要批准 |
 |---|---|---|
-| 请求批准 | 当前挂载内读取、查询；已发现技能的按需读取 | 写入、修改、删除、终端、范围外访问、MCP 调用 |
-| 帮我批准 | 上述读取、挂载内可逆修改、已验证的 AppContainer 命令 | 删除、范围外访问、MCP 调用 |
-| 完全访问权限 | 系统权限允许的文件操作及已启用工具 | 不弹逐次批准；范围外文件与 MCP 仍必须提供具体原因 |
+| 请求批准 | 当前挂载或本聊天独立目录内读取、查询；已发现技能的按需读取 | 写入、修改、删除、终端、范围外访问、MCP、本机桌面操作 |
+| 帮我批准 | 上述读取、范围内可逆修改、已验证的 AppContainer 命令 | 删除、范围外访问、MCP、本机桌面操作 |
+| 完全访问权限 | 系统权限允许的文件操作及已启用工具 | 不弹逐次批准；范围外文件、MCP、本机桌面操作仍须说明原因 |
 
 默认使用挂载目录。完全访问不能提升为管理员，也不能关闭终端沙箱。文件工具不读取模型连接密钥、Agent 连接配置或其备份，不直接改写正式聊天、记忆、索引和应用配置。其他正式 Data 文本可在说明原因后只读访问；Ask/Smart 需要批准。应用创建的 `Data/Desktop/Projects/<所属项目ID>` 是用户工作文件夹，在正式归属和精确目录匹配时允许正常工作文件操作；任意挂载 `Data/Chats` 等目录不会获得相同例外。
 
@@ -47,6 +106,50 @@
 第一版支持 Node.js 及受限 `cmd` 内置命令。Node 脚本可使用内置模块，测试建议 `node --test --test-isolation=none`；默认子进程测试模式可能受沙箱限制。cmd 参数为 `['/d','/c','一条命令']`，已验证 `echo`、`type` 和副本内重定向；`dir` 的卷根探测可能被系统拒绝，目录和内容搜索请用文件工具。PowerShell、Python、任意可执行文件、调试端口、提权和安装流程尚不支持。启动或验证沙箱失败时返回错误，没有宿主执行回退。
 
 AppContainer 是终端的系统隔离边界，Job Object 负责资源和生命周期。文件 CRUD 是网关的权限代理操作。用户启用的 MCP 服务程序是受信任的外部依赖，会以当前用户身份启动，**不在这个终端沙箱中**；不要把 MCP 调用审批描述成对服务程序本身的系统隔离。
+
+## 无关联文件夹的聊天与本机控制
+
+`terminal.host.run` 是独立的本机执行通道，参数为 `shell`（cmd/powershell）、`script`、可选 `cwd`/`timeoutMs` 和必需的 `reason`。缺省 cwd 为当前有效工作目录，无挂载聊天同样可用。它继承当前用户环境，可调用用户已安装的 conda 等程序；缺少程序时明确报命令错误。Ask/Smart 始终单次批准，Full 不弹批准；原沙箱失败不会转到此通道。审批展示命令、终端、目录和理由。
+
+默认执行在后台，正式右侧栏不渲染终端或创建终端标签。原生 stdout/stderr 按既有编码策略分行解码，短时间突发合并为有序增量；SSE `terminal_output.terminal` 带工具调用身份、递增 sequence、stream、text 和 replace。桌面保留当前调用身份与增量顺序的协议校验，不把输出混入聊天正文。最终正式输出与退出状态仍由工具回执拥有，聊天沿用简洁工具活动及当前任务的取消操作，不宣称实现了持久交互 shell。
+
+右侧内容区当前只展示截图标签，一次启用一个查看器；新截图加入后台标签，不改变已有选择，没有打开内容时才自动显示。关闭标签只隐藏图片，打开列表可恢复，也不强制展开被用户收起的右侧栏。标签与图片随右侧宽度调整，标签栏支持横向滚动。关闭图片不取消后台任务，也不删除正式工具结果；附件查看器尚未接入。
+
+需要看见终端窗口时使用同一工具的 `visible:true`，网关发送独立原生操作 `host_terminal_visible`；即使助手在能力查询之后被换成旧版，旧版也会拒绝未知操作，不会忽略字段而后台执行。默认仍是后台管道捕获；可见模式由随包 ToolHost 伴随进程创建独立控制台，CMD/PowerShell 继承真实控制台输入输出。原生握手验证可见窗口和控制台句柄后才运行命令，窗口代理句柄不能当作可见证据。伴随进程通过当前用户私有 named pipe 传回回执，父进程核对连接者 PID；解释器及子进程仍受同一个 Job 管理。无需额外 Python，不开放通用桌面启动通道来代替终端执行。
+
+可见回执的 `consoleText` 是有界的控制台屏幕预览，`outputCapture:console-screen`、`transcriptComplete:false`、`streamsSeparated:false`；stdout/stderr 为空，不宣称获得精确全量流。运行中保留最近预览，取消及超时后继续保留已有信息。`keepOpenMs` 只用于可见模式，默认命令结束后保留 5 秒，范围 0–30 秒且包含在总超时中。命令已结束后取消窗口停留，仍保留真实退出码；命令未结束而窗口关闭/取消，结果为 `unknown`，不能自动重放。结束清理进程树，当前没有无限 `/k` 会话或后续输入工具。用户明确要求保持后台时不允许打开可见终端；默认后台模式不变。健康协议版本 3 保留实时输出事件的兼容判定，当前界面不将它显示到右侧；原生能力版本 2 单独声明 `visibleTerminal`，旧助手不支持时在执行前报错。
+
+本机终端固定系统 CMD/Windows PowerShell，使用 Job 控制最多 32 个进程并在结束时清理子树；网关同时最多启动 8 个助手。脚本最多 16,384 字符，超时 100–120,000 ms，原始 stdout/stderr 合计最多 256 KiB。正常非零退出表示命令结束但执行失败；取消、超时、超限及执行后缺失/无效回执保留 `unknown` 和已返回输出，循环先保存回执再中断后续调用，不能声称回滚或自动重做。Windows 短路径先规范化，防止正常执行被误判为目录身份不符。CMD 分行识别 UTF-8/OEM，同一行混合编码不保证无损；详见 `tests/native-host-terminal-smoke/README.md`。
+
+旧版精确匹配所属项目的 `Data/Desktop/Projects/<项目ID>` 若带有不安全链接祖先，当前聊天改用真实独立工作区。catalog 路径与旧文件保持原样，提示模型旧内容未迁移；外部挂载链接仍被拒绝。批准后再次检查正式路径和有效工作区，链接状态改变也会撤销旧审批。
+
+没有关联文件夹的工作聊天和普通聊天，首次准备工具请求时懒创建 `<模型数据目录>/Workspaces/<聊天ID>/`。标准布局为 `Data/Models/Workspaces/<聊天ID>/`，旧字母 ID 使用确定的 GUID 目录映射，正式 ID 不变。`.workspace-owner.json` 校验真实归属，文件工具不能读取或修改它；目录及父目录链接、身份冲突和改挂载后的过期审批会被拒绝。相同聊天重开沿用生成文件，不改 catalog 的关联文件夹或共享记忆关系。聊天移到另一工作后目录仍以稳定聊天 ID 保存；聊天删除暂不自动删除这些生成文件，避免把项目文件当聊天日志清理。
+
+`ConversationWorkspaces` 管理这部分生成文件；正式 JSONL、Memory 和连接配置由原服务管理。Data 迁移复制并校验整个 Models 树，带走目录和归属记录；用户工具路径迁移不移动这些文件。终端仍只对授权目录做 AppContainer 快照，没有网络和自动回写，正式代码修改使用带哈希的文件工具。自定义旧模型根通过网关固定的 `conversationWorkspaceHome` 角色校验；模型参数无法改变该根，不能把任意 Data/Extensions 子树声明成可执行目录。
+
+本机控制复用随包的 `KYNXA.ToolHost` 原生 Windows 窗口、UI Automation、PNG 和 SendInput 实现，**无需 Python**。桌面打包将助手及自包含 .NET/WindowsDesktop 依赖纳入 `ToolHost/`，Node 网关同样随包提供。用户额外添加的第三方 MCP 可能依赖 Python、uv、账号或浏览器运行时；这些依赖只属于所选扩展，默认禁用的 Windows Screenshot MCP 不是内置截图的执行依赖。
+
+桌面构建从 `apps/desktop/Build/node-runtime.json` 读取分平台固定版本与官方 SHA-256，校验完整 ZIP 及其中的 Node/npm/npx 文件后放入安装包 `runtime/`。x64、ARM64 使用 Node 24.14.0，仍保留的 x86 目标使用支持该架构的 Node 22.22.0；版本不在构建文件里另设一份。首次构建需下载，后续可复用校验后的 `obj` 缓存，运行用户不需自行安装 Node。网关启动优先使用随包 `node.exe` 并将该运行目录加入子进程 PATH，随包文件缺失时拒绝静默换用其它 Node。
+
+原始 Node/npm 许可证随运行时保留。ToolHost 的 .NET 与 WindowsDesktop 原始许可证和可用第三方声明从本次 restore 实际选择的 runtime pack 复制至 `ToolHost/licenses/`；其 PDB 不进入桌面工具载荷。构建还按明确清单复制官方扩展及网关依赖，不复制用户 Data、扩展配置或密钥。`tests/node-runtime-smoke/run.ps1 -BundleRoot <新构建输出>` 在带空格的临时目录复制真实载荷、清空 PATH、指定不存在的 DOTNET_ROOT，验证内置 Node/npm/npx、原生助手及隔离网关。
+
+| 工具 | 当前能力 |
+|---|---|
+| `computer.apps`、`computer.windows` | 从系统应用入口发现可启动软件，列出可见窗口、窗口 ID、PID、程序路径及客户区尺寸；不递归扫描磁盘 |
+| `computer.launch`、`computer.activate` | 打开明确的本地 GUI exe，或切换到已识别窗口；不接受命令解释器、控制台脚本或提权回退 |
+| `computer.read` | 按目标 HWND/PID 有界读取可访问的窗口文字、元素坐标和页面地址；密码控件跳过 |
+| `computer.screenshot` | 仅截图目标窗口客户区，最多 4 MiB PNG/16M 像素；不回退截取整桌面 |
+| `computer.move/click/scroll/drag/type/key` | 前台目标客户区内鼠标与受限键盘输入，中英文文本不经过剪贴板；坐标是客户区物理像素 |
+
+本机操作在 **宿主桌面** 执行，与 AppContainer 终端分开。Ask/Smart 需一次性审批，Full 不弹逐次批准但仍校验理由、配置、聊天范围、目标窗口与进程。输入前和每批操作重新核对前台、可见范围和 UIPI；锁屏、焦点丢失、高完整性进程或 Windows 拒绝激活时返回错误，不绕过系统限制。输入事件已发送仅证明发送完成，模型须再次读取验证应用结果；部分输入或无法确认的取消保存为 unknown，不当作成功或自动重放。
+
+截图以 typed image 保存到本聊天 `tool-results/`；模型请求只带元信息和引用，现阶段文本模型不会获得图片视觉能力。右侧截图小模块显示缩略图，点击图片复用已有本机结果预览；聊天中没有截图按钮、base64 或参数 JSON。桌面审批显示动作、目标与实际启动参数，输入文本只显示字数。成功后的过程仍从正文收起，正式记录继续保留。电脑工具声明按桌面意图或 `tool.search/load` 加载，普通代码/网页问题不默认占用额外 schema 预算。
+
+`computer.read` 适用于浏览器辅助功能暴露的当前可见内容，不能宣称读取完整 DOM、后台标签或所有浏览器内容。仓库 Playwright/Chrome DevTools 官方预设默认 `headless + isolated`，不连接用户日常浏览器；需要完整网页能力时使用该 MCP，接已有会话须显式配置其官方连接方式。实现参考 [Windows-MCP 的能力划分](https://github.com/CursorTouch/Windows-MCP)、[Microsoft UI Automation](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-overview)与 [SendInput/UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)；未引入其 Python 服务作为必需运行时。
+
+右栏 `ConversationScreenshotsPanel` 从当前聊天正式完成的截图回执投影查看器，不建立第二套截图记录。通过顶部标签选择图片，新截图不切走当前选中内容，点击图片放大。仅在侧栏可见且图片被选中时读取归档；切换聊天、折叠及关闭标签时取消请求并丢弃过期结果。预览按显示尺寸和 DPI 有界升级，最多缓存三张及 16M 解码像素，正文增量不会反复加载图片。已有截图的普通聊天也可打开右栏，沿用用户侧栏开关和窄窗口隐藏规则；重开聊天仍从正式记录恢复。
+
+2026-10-04 本机工具验收：完整网关 **531/531**，后续相关工具与官方资源 **20/20** 通过。原生助手 **26**、输入扩展 **7**、部分输入回执及释放 **24**、真实 Edge/Chrome 本机隔离页面 **29** 项通过。右栏独立 WinUI **49** 项覆盖迟到结果、同步开栏不重复读取、多图缓存、文本增量、错误重读、窄栏和语言切换；主聊天 DOM **74**、原生 Transcript **21**、共享审批/图片查看器 **27**、语言 **2340** 项通过。x64 桌面最终构建零警告、零错误，真实新构建载荷复制后在空 PATH、无有效 DOTNET_ROOT 环境中通过 **27** 项内置运行时、原生助手和隔离网关检查。全部使用临时数据和模拟模型；不代表发布安装包、ARM64 设备或付费模型已验收，改动未提交。
 
 ## MCP 与 Skill
 
@@ -74,13 +177,13 @@ SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支
 
 工具管理窗口只保留 MCP、技能两页。MCP 页直接提供名称、连接方式、程序或地址、启停与保存；服务 ID、JSON 参数、认证引用和可信进程说明在默认收起的高级设置内，单个工具开关放在可展开的工具列表。技能页直接提供导入、列表与启停，来源、内容、运行环境和外部目录按需展开。高级项只改变展示方式，已有配置、诊断和权限能力保留。
 
-设置的“存储”区域包含两行：数据存储、工具与技能存储。两行共用相同的灰色样式，显示当前路径和“更改位置”按钮；后者打开文件夹选择器，要求空的本机目录。更改扩展位置会暂停调用、复制并校验扩展文件、更新自有目录内的配置路径与技能禁用 ID，最后原子切换指针。原文件保留；成功后网关关闭旧工具客户端并加载新目录，后续更改位置无需重启应用。
+设置的“存储”区域包含两行：数据存储、用户工具。两行共用相同的灰色样式，显示当前路径和“更改位置”按钮；后者打开文件夹选择器，要求空的本机目录。更改扩展位置会暂停调用、复制并校验扩展文件、更新自有目录内的配置路径与技能禁用 ID，最后原子切换指针。原文件保留；成功后网关关闭旧工具客户端并加载新目录，后续更改位置无需重启应用。
 
 扩展位置由 `KYNXA_EXTENSION_HOME`、用户 `~/.kynxa/extensions.json` 的 `extensionRoot`、原正式 Data 根依次决定。未单独配置时保留已有 `Data/Agent` 和 `Data/Skills`，避免升级后旧配置消失。显式指定 Data/Model 环境变量且未指定扩展位置时使用对应 Data 根；测试可通过 `KYNXA_EXTENSION_POINTER` 指定隔离指针。环境控制路径的界面不覆盖启动配置。已单独配置扩展根时，更改 Data 不再移动这一套扩展；仍使用旧 Data 默认根时，Data 迁移同时处理 Agent、Skills 与 MCP 缓存。
 
 扩展目录保存 MCP 连接配置、导入技能、npm 下载缓存、浏览器缓存及 uv/Python 运行环境；默认 stdio 缓存环境变量指向该目录，用户显式环境映射优先。内置技能和核心工具随应用发布，用户指定的外部技能目录或第三方可执行程序保持原位置。远程 MCP 本身运行在其服务端；改变本机目录不会迁移远端服务。聊天、记忆和完整工具结果继续属于 Data。
 
-在设置中打开“工具与技能”，选择 MCP 服务预设并添加，再配置需要的环境变量引用、启用服务、点击连接。GitHub 预设的 `KYNXA_GITHUB_AUTHORIZATION` 值是完整的 `Bearer <token>`；直接选择 Bearer 认证时，`tokenEnv` 引用的变量只放 token。变量应在启动 KYNXA 前设置，已运行的网关不会自动取得另一个终端中新设置的变量。Playwright 首次连接需要可用的 Node/npm 和浏览器运行时；添加预设不会提前安装浏览器或启动服务。
+在设置中打开“工具与技能”，默认列表已有官方 MCP 预设，选择后配置需要的环境变量引用、启用服务、点击连接；添加操作用于恢复被隐藏的预设。GitHub 预设的 `KYNXA_GITHUB_AUTHORIZATION` 值是完整的 `Bearer <token>`；直接选择 Bearer 认证时，`tokenEnv` 引用的变量只放 token。变量应在启动 KYNXA 前设置，已运行的网关不会自动取得另一个终端中新设置的变量。Playwright 首次连接需要可用的 Node/npm 和浏览器运行时；添加预设不会提前安装浏览器或启动服务。
 
 技能页可选择包含 SKILL.md 的文件夹导入，查看格式、来源、同名冲突、资源和运行环境，并切换启停。标准包目录见下方 Skills；导入成功仅表示文件包已校验保存，脚本执行仍检查依赖和当前聊天权限。内置浏览器工作流使用已有的 Playwright 工具，沟通写作技能使用已有的文件和资源工具。
 
@@ -91,13 +194,23 @@ SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支
 | `apps/desktop/Controls/StorageLocationRow.cs`、`apps/desktop/Services/ExtensionPaths.cs`、`apps/desktop/Services/ExtensionStorageMigrationService.cs` | 共用存储行、扩展路径解析、校验迁移与指针提交 |
 | `apps/model-gateway/agent-http-routes.mjs` | 工具管理 HTTP 接线，不拥有模型授权 |
 | `extension-storage.mjs` | 扩展根解析；网关在维护完成后与 Data 根一起切换运行时 |
-| `agent-config.mjs`、`mcp-config.mjs`、`mcp-presets.mjs` | 配置持久化、连接校验、单一预设目录与去重 |
+| `agent-config.mjs`、`agent-config-layers.mjs`、`mcp-config.mjs`、`mcp-presets.mjs` | 用户配置持久化、官方差量合并、连接校验与预设去重 |
+| `official-tools.mjs`、`official-tools/manifest.json`、`official-tools/Tools/catalog.mjs`、`official-tools/MCP/catalog.mjs` | 安装包定位、官方清单、稳定技能身份及单一工具/预设定义 |
 | `mcp-client.mjs`、`mcp-transport.mjs` | SDK 发现/调用/资源包装、认证、连接与进程生命周期 |
 | `skill-service.mjs`、`skill-frontmatter.mjs`、`skill-resources.mjs`、`skill-package.mjs` | 发现与开关、YAML 格式、包内资源、导入和脚本清单 |
 | `tool-service.mjs`、`tool-policy.mjs`、`tool-catalog.mjs`、`tool-result-store.mjs` | 统一调用协调、权限与审批、模型目录预算、完整结果保存 |
+| `tool-storage-boundary.mjs`、`tool-system-prompt.mjs`、`desktop-launch-options.mjs` | 存储身份与保护策略、有界能力提示、审批前可观察的后台启动参数 |
+| `tool-loop.mjs`、`tool-run.mjs`、`tool-observations.mjs` | 模型与工具循环、受限耗时诊断、请求内观察复用及无进展控制 |
 | `sandbox-runner.mjs`、`sandbox-skill.mjs`、`apps/tool-host/SkillSnapshot.cs` | 原生沙箱通信、统一能力/回执判定、哈希核验及只读技能快照 |
+| `sandbox-workspaces.mjs`、`tool-host-path.mjs`、`desktop-runner.mjs`、`official-tools/Tools/computer.mjs` | 独立聊天工具目录、原生助手定位、本机协议与回执、桌面工具声明 |
+| `apps/tool-host/Desktop*.cs`、`apps/desktop/Services/ComputerToolPresentation.cs` | 原生窗口读取/输入与程序启动、无参数 JSON 的动作与审批展示 |
+| `apps/desktop/Controls/ConversationScreenshotsPanel.cs`、`apps/desktop/Services/ConversationScreenshot*.cs`、`ToolResultImageDecoder.cs` | 当前聊天截图投影、可取消的按需读取、有界图片解码与右栏缩略图 |
 
 上述短文件名均位于 `apps/model-gateway`。技能文本不新增运行器；第三方 MCP 通过原客户端连接，正式聊天和记忆仍由现有服务保存。
+
+代码职责和本轮生命周期修缮见 [代码组织](code-organization.md)。GUI 默认后台启动，原生助手观察自身窗口并放到当前前台窗口后面，窗口保持未最小化。独立可见终端也采用不激活启动，仍有真实控制台和正式结果，不进入右侧栏。窗口读写、截图及状态调整不要求先激活；物理输入仍须明确前台和目标身份。
+
+后台 Chrome/Edge 会在审批前显式加入 `--disable-backgrounding-occluded-windows`，与其他启动参数一并冻结、显示和保存。实际隔离浏览器验证发现，完全遮挡可能让 Chromium 暂停网页绘制并隐藏页面辅助功能树；这项开关恢复后台正文和目标截图。依据 [Chrome 启动工具参数说明](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md) 及 [ChromeDriver 默认参数变更](https://chromium.googlesource.com/chromium/src/+/23902d9051098fbc6a3a669fc0988c6899f38b65%5E%21/)。已有浏览器进程可能忽略后续参数；不能改动其既有启动状态或用前台激活掩盖失败。观察窗口有时限，第三方软件仍可能晚到或主动抢焦点，回执中的实际位置、焦点和截图结果才是依据。
 
 ## 数据与恢复
 
@@ -159,7 +272,7 @@ MCP 原始结果保留全部 content 类型、structuredContent 及私有 `_meta
 
 MCP 是工具通信协议，不要求访问互联网。stdio 在本机父子进程的输入输出上通信；HTTP 也可以只连接 localhost。具体服务是否联网由其功能决定：本地文件、数据库等可以离线，云端接口和访问外部网站需要网络。使用本地模型与已经安装好的本地工具可组成离线流程；通过 npx 初次下载依赖通常需要网络，要固定离线运行应配置已安装程序的路径。[官方连接说明](https://ts.sdk.modelcontextprotocol.io/v2/clients/connect)
 
-当前内置终端仅运行经验证的 AppContainer Node/cmd，不提供宿主桌面软件启动或全桌面截图。Playwright MCP 启用且浏览器依赖可用时能截取其控制的网页，不能据此声称已有全桌面截屏。图片工具结果可以在本机详情中预览，但模型续接目前只有文本、结构化数据和媒体引用，没有图像理解输入；截图保存功能本身不依赖视觉模型。[Playwright 截图说明](https://playwright.dev/mcp/tools/screenshots)
+内置终端运行经验证的 AppContainer Node/cmd；独立的 `computer.*` 通道在宿主桌面上启动 GUI 软件、读取窗口、截图和输入，不受终端 AppContainer 保护。原生截图限定目标窗口客户区，未实现全桌面截屏。Playwright MCP 启用且浏览器依赖可用时能截取其控制的网页。图片可以在本机详情中预览，模型续接目前只有文本、结构化数据和媒体引用，没有图像理解输入；截图保存本身不依赖视觉模型。[Playwright 截图说明](https://playwright.dev/mcp/tools/screenshots)
 
 ## 验证入口
 
@@ -167,6 +280,7 @@ MCP 是工具通信协议，不要求访问互联网。stdio 在本机父子进�
 - 客户端：`tests/agent-client-smoke`、`tests/chat-stream-smoke`、`tests/storage-migration-smoke`、`tests/gateway-startup-smoke`。
 - 界面：`tests/agent-ui-smoke` 的独立原生窗口与 `tests/agent-transcript-smoke` 的独立浏览器 DOM 验收；都不使用实际用户数据。
 - 系统沙箱：`tests/sandbox-smoke` 实际检查副本读写、外部文件拒绝、loopback 网络拒绝、父子进程取消、输出和内存限额。不是仅检查函数返回的 sandbox 字段。
+- 本机控制：`tests/native-desktop-smoke` 使用自建窗口和临时浏览器配置，实际检查窗口/PID、PNG、UIA、前台输入和按键清理；不读取日常窗口或浏览器资料。`sandbox-workspaces.test.mjs` 验证每聊天目录、真实 Data 迁移，以及标准/自定义模型根的实际 AppContainer 隔离。
 
 这些验证不保证所有模型会正确选择工具，也不代表所有系统版本、DPI 或终端命令已经兼容。
 

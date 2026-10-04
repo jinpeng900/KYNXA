@@ -3,6 +3,40 @@ import { Client, isInputRequiredResult } from '@modelcontextprotocol/client';
 import { LEGACY_MCP_PROTOCOL, MODERN_MCP_PROTOCOL } from './agent-config.mjs';
 import { createMcpTransport, mcpFailure } from './mcp-transport.mjs';
 import { objectInput, toolFailure } from './tool-paths.mjs';
+import { archiveBrowserScreenshot } from './browser-artifacts.mjs';
+import { BrowserSessionRegistry, browserOperation } from './browser-sessions.mjs';
+
+const executionNotDispatched = Symbol('mcp-execution-not-dispatched');
+
+/** Only the adapter's pre-RPC path can create this marker; server fields cannot. */
+export const isMcpExecutionNotDispatched = error => error?.[executionNotDispatched] === true;
+
+function markExecutionNotDispatched(error) {
+  // Abort reasons may be shared by already-dispatched calls. Never mark that
+  // shared object; only this queue's owned wrapper carries execution metadata.
+  const failure = new Error(typeof error?.message === 'string' ? error.message : 'MCP 调用尚未发出。', { cause: error });
+  if (typeof error?.name === 'string') failure.name = error.name;
+  if (typeof error?.code === 'string' || typeof error?.code === 'number') failure.code = error.code;
+  Object.defineProperty(failure, executionNotDispatched, { value: true });
+  return failure;
+}
+
+function waitForBrowserDispatch(operation, signal, hasDispatched) {
+  if (!signal) return operation;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true; signal.removeEventListener('abort', cancelled); settle(value);
+    };
+    const cancelled = () => {
+      if (!hasDispatched()) finish(reject, markExecutionNotDispatched(signal.reason));
+    };
+    signal.addEventListener('abort', cancelled, { once: true });
+    operation.then(value => finish(resolve, value), error => finish(reject, error));
+    if (signal.aborted) cancelled();
+  });
+}
 
 const MAX_CONNECTIONS = 32;
 const MAX_MCP_TOOLS = 128;
@@ -119,6 +153,8 @@ export class McpToolClients {
     this.states = new Map(); this.servers = new Map(); this.fetch = fetch;
     this.extensionRoot = extensionRoot;
     this.failedClosures = new Map();
+    this.browserSessions = new BrowserSessionRegistry();
+    this.browserApprovals = new WeakMap();
   }
 
   _cleanupFailure() {
@@ -129,6 +165,7 @@ export class McpToolClients {
     if (connection.closeOperation) return connection.closeOperation;
     const operation = this.connections.get(key);
     connection.closed = true; connection.closing = true;
+    this.browserSessions.remove(key);
     connection.closeOperation = Promise.resolve().then(async () => {
       let failed = false;
       try { await connection.client.close(); } catch { failed = true; }
@@ -174,6 +211,7 @@ export class McpToolClients {
                 ? await client.listTools({}, { timeout: CONNECT_TIMEOUT_MS, maxTotalTimeout: CONNECT_TIMEOUT_MS, cacheMode: 'refresh' }) : { tools: [] };
               if (connection.closed || this.connections.get(key) !== operation) return;
               connection.tools = descriptors(server, key, listing, connection.capabilities);
+              this.browserSessions.invalidate(key);
               state.toolCount = connection.tools.length; state.generation++;
               state.state = 'ready'; delete state.code; this.errors.delete(server.id);
             } while (connection.refreshAgain);
@@ -199,7 +237,8 @@ export class McpToolClients {
         const listing = capabilities.tools
           ? await client.listTools({}, { timeout: CONNECT_TIMEOUT_MS, maxTotalTimeout: CONNECT_TIMEOUT_MS }) : { tools: [] };
         connection = { client, transport, tools: descriptors(server, key, listing, capabilities), capabilities,
-          serverId: server.id, protocolVersion: version, closed: false, refreshCatalog: changed };
+          serverId: server.id, protocolVersion: version, closed: false, refreshCatalog: changed,
+          artifactContext: { server: structuredClone(server), context: { workspaceRoot: context?.workspaceRoot } } };
         state.state = 'ready'; state.toolCount = connection.tools.length; state.lastConnectedAt = new Date().toISOString();
         state.resourceCapabilities = { resources: !!capabilities.resources, templates: !!capabilities.resources };
         client.onclose = () => {
@@ -207,6 +246,7 @@ export class McpToolClients {
           if (connection.closing) return; // The explicit owner records success/failure before releasing its reference.
           if (this.connections.get(key) !== operation) return;
           this.connections.delete(key); state.state = 'disconnected'; state.toolCount = 0; state.code = 'MCP_CONNECTION_LOST';
+          this.browserSessions.remove(key);
           this.errors.set(server.id, state.code);
         };
         client.onerror = error => {
@@ -270,7 +310,8 @@ export class McpToolClients {
     return this.diagnostics().find(state => state.serverId === server.id);
   }
 
-  async execute(descriptor, input, signal) {
+  /** Revalidate an existing connection and call envelope without reconnecting or invoking the server. */
+  async validateExecution(descriptor, input) {
     if (this.failedClosures.size) throw this._cleanupFailure();
     const pending = this.connections.get(descriptor.key);
     if (!pending) throw toolFailure('MCP 工具尚未连接或配置已变化，请刷新。', 'MCP_NOT_CONNECTED', 409);
@@ -281,7 +322,52 @@ export class McpToolClients {
     if (connection.tools && (!current || current.operation !== descriptor.operation || current.toolName !== descriptor.toolName ||
         JSON.stringify(current.originalInputSchema) !== JSON.stringify(descriptor.originalInputSchema)))
       throw toolFailure('MCP 工具目录已变化，请重新准备调用和审批。', 'MCP_CATALOG_CHANGED', 409);
-    const options = { signal, timeout: 30000, maxTotalTimeout: 30000, cacheMode: 'refresh' };
+    return { connection, args };
+  }
+
+  /** Normalize browser defaults before approval; this performs no RPC or page action. */
+  async prepareBrowserExecution(descriptor, input, options = {}) {
+    const knownServer = this.servers.get(descriptor.serverId) ?? (await this.connections.get(descriptor.key))?.artifactContext?.server;
+    if (!browserOperation(descriptor, knownServer)) return structuredClone(input);
+    const { connection, args } = await this.validateExecution(descriptor, input);
+    const prepared = this.browserSessions.prepare(descriptor, args, connection.artifactContext?.server, options);
+    const envelope = { ...structuredClone(input), arguments: prepared.args };
+    this.browserApprovals.set(envelope, { connection, identity: this.browserSessions.approvalIdentity(prepared) });
+    return envelope;
+  }
+
+  browserDiagnostics(sessionId) { return this.browserSessions.diagnostics(sessionId); }
+
+  async execute(descriptor, input, signal, browserOptions = {}) {
+    const { connection, args } = await this.validateExecution(descriptor, input);
+    if (!browserOperation(descriptor, connection.artifactContext?.server))
+      return this._executePrepared(descriptor, args, connection, signal);
+    // A selected-page protocol shares state even across distinct conversations.
+    // Serialize its calls and revalidate after waiting; never switch tabs by a hidden RPC.
+    const previous = connection.browserQueue ?? Promise.resolve();
+    let dispatched = false;
+    const operation = previous.catch(() => {}).then(async () => {
+      let current, prepared;
+      try {
+        signal?.throwIfAborted();
+        current = await this.validateExecution(descriptor, input);
+        signal?.throwIfAborted();
+        const approval = this.browserApprovals.get(input);
+        if (approval && approval.connection !== current.connection)
+          throw toolFailure('审批期间浏览器连接已替换，请重新准备调用和审批。', 'BROWSER_CONNECTION_CHANGED', 409);
+        prepared = this.browserSessions.prepare(descriptor, current.args, current.connection.artifactContext?.server, browserOptions);
+        this.browserSessions.verifyApprovalIdentity(approval?.identity, prepared);
+      } catch (error) { throw markExecutionNotDispatched(error); }
+      dispatched = true;
+      return this._executePrepared(descriptor, prepared.args, current.connection, signal, prepared);
+    });
+    connection.browserQueue = operation.catch(() => {});
+    return waitForBrowserDispatch(operation, signal, () => dispatched);
+  }
+
+  async _executePrepared(descriptor, args, connection, signal, prepared) {
+    const timeoutMs = prepared?.browser?.timeoutMs ?? 30000;
+    const options = { signal, timeout: timeoutMs, maxTotalTimeout: timeoutMs, cacheMode: 'refresh' };
     let result;
     try {
       if (descriptor.operation === 'resources/list') {
@@ -294,15 +380,28 @@ export class McpToolClients {
         const resource = await connection.client.readResource(args, options);
         result = { content: resource.contents.map(item => ({ type: 'resource', resource: item })),
           ...(resource._meta ? { _meta: resource._meta } : {}) };
-      } else result = await connection.client.callTool({ name: descriptor.toolName, arguments: args }, { ...options, allowInputRequired: true });
+      } else {
+        if (prepared) this.browserSessions.dispatch(prepared);
+        result = await connection.client.callTool({ name: descriptor.toolName, arguments: args }, { ...options, allowInputRequired: true });
+      }
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') throw error;
-      const failure = mcpFailure(error, 'MCP_REQUEST_FAILED');
+      const cancelled = signal?.aborted || error?.name === 'AbortError';
+      if (cancelled && !prepared) throw error;
+      const failure = cancelled ? toolFailure('浏览器操作已取消；已发出的动作需要核验。', 'TOOL_CANCELLED', 409)
+        : mcpFailure(error, 'MCP_REQUEST_FAILED');
       if (failure.code === 'MCP_CONNECTION_LOST') await this.disconnect(descriptor.serverId);
       const state = this.states.get(descriptor.serverId);
       if (state) { state.code = failure.code; if (failure.code === 'MCP_AUTH_REQUIRED') state.state = 'auth-required';
         else if (failure.code === 'MCP_CONNECTION_LOST') state.state = 'error'; }
       this.errors.set(descriptor.serverId, failure.code);
+      if (prepared) {
+        const unknown = !prepared.browser.readOnly && ['MCP_TIMEOUT', 'MCP_CONNECTION_LOST', 'TOOL_CANCELLED'].includes(failure.code);
+        const browser = this.browserSessions.observe(prepared, { content: [] }, unknown ? 'unknown' : 'failed');
+        const status = unknown ? 'unknown' : cancelled ? 'cancelled' : 'error';
+        const canonical = { content: [{ type: 'text', text: failure.message }], isError: true,
+          structuredContent: { status, code: failure.code, browser } };
+        return { content: resultPreview(canonical), canonical, browser, status, code: failure.code, isError: true, outsideWorkspace: true };
+      }
       throw failure;
     }
     if (isInputRequiredResult(result))
@@ -311,9 +410,22 @@ export class McpToolClients {
     // Classify only its explicit navigation failure lines; preserve the raw result unchanged.
     const navigationFailed = descriptor.toolName === 'navigate_page' && (result.content ?? []).some(block =>
       block.type === 'text' && /^Unable to (?:navigate(?: back| forward)? in the selected page|reload the selected page): /m.test(block.text));
-    return { content: resultPreview(result), isError: result.isError === true || navigationFailed,
-      ...(navigationFailed ? { code: 'MCP_BROWSER_NAVIGATION_FAILED' } : {}),
-      outsideWorkspace: true, canonical: structuredClone(result) };
+    const browserTimedOut = prepared && (result.isError === true || navigationFailed) && (result.content ?? []).some(block =>
+      block.type === 'text' && /TimeoutError|(?:timed out|timeout).{0,40}(?:exceeded|after|ms)|Timeout \d+ms exceeded/i.test(block.text));
+    const outcomeUnknown = browserTimedOut && !prepared.browser.readOnly;
+    const browser = prepared ? this.browserSessions.observe(prepared, result,
+      outcomeUnknown ? 'unknown' : result.isError === true || navigationFailed ? 'failed' : 'completed') : undefined;
+    const artifact = await archiveBrowserScreenshot(result, { descriptor, ...connection.artifactContext, args, signal });
+    const screenshotNotice = artifact.screenshotStatus === 'available'
+      ? '\nScreenshot archived for the local sidebar. No image pixels were sent to this text model.'
+      : artifact.screenshotStatus === 'unavailable' ? `\nScreenshot preview unavailable (${artifact.screenshotCode}). The browser operation result is preserved; do not claim the screenshot was viewed.` : '';
+    const canonical = browser ? { ...artifact.canonical, _meta: { ...artifact.canonical._meta, kynxaBrowser: browser } } : artifact.canonical;
+    return { content: resultPreview(canonical) + screenshotNotice + (browser ? '\nBrowser receipt:\n' + JSON.stringify(browser) : ''),
+      isError: result.isError === true || navigationFailed || !!browserTimedOut,
+      ...(browser ? { browser } : {}), ...(outcomeUnknown ? { status: 'unknown' } : {}),
+      ...(browserTimedOut ? { code: 'MCP_TIMEOUT' } : navigationFailed ? { code: 'MCP_BROWSER_NAVIGATION_FAILED' } : {}),
+      ...(artifact.screenshotStatus ? { screenshotStatus: artifact.screenshotStatus, screenshotCode: artifact.screenshotCode } : {}),
+      outsideWorkspace: true, canonical };
   }
 
   async reset() {

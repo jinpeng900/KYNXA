@@ -118,8 +118,13 @@ public sealed partial class ShellPage
                 {
                     case "tool_call":
                     case "tool_result":
-                        if (update.Tool is { } activity) AcceptToolActivity(pending, activity);
+                        if (update.Tool is { } activity)
+                        {
+                            AcceptToolActivity(pending, activity);
+                        }
                         break;
+                    case "terminal_output":
+                        continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
                     case "approval_required":
                         if (update.Tool is { } approval)
                         {
@@ -246,6 +251,7 @@ public sealed partial class ShellPage
             {
                 ActiveMessages[index] = pending.Presentation;
                 ConversationMessages.ShowConversation(chat.Id, ActiveMessages.ToArray(), openAtBottom: false);
+                ScreenshotPanel.ShowConversation(chat.Id, ActiveMessages.ToArray());
             }
             else UpdateConversationPresentation();
         }
@@ -269,6 +275,7 @@ public sealed partial class ShellPage
     private void StopReplies()
     {
         _chatClosing = true;
+        CancelModelPickerRefresh();
         _replyRefreshTimer?.Stop();
         foreach (var pending in _pendingReplies.Values.ToArray())
         {
@@ -278,6 +285,10 @@ public sealed partial class ShellPage
             FlushReply(pending, final: true);
         }
         _modelApiClient.Dispose();
+        _toolResultCancellation?.Cancel();
+        ScreenshotPanel.Dispose();
+        WorkTabs.Dispose();
+        MountedWorkspace.Dispose();
         _agentApiClient.Dispose();
         ConversationMessages.Dispose();
     }

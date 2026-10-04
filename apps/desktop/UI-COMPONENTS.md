@@ -1,20 +1,22 @@
 # 前端 UI 维护入口
 
+挂载目录：项目标题悬停显示名称和“文件夹图标＋目录名”；项目三点菜单可更换、取消关联。选择已挂载项目时，`MountedWorkspaceHeader` 在右侧最上方显示紧凑一行，悬停显示完整路径。控件只发送带项目/路径身份的事件，由页面核验当前选择并通过原目录 API 保存；取消关联不删除文件、聊天或记忆。旧应用自动管理目录不显示为外部挂载。右侧截图模块排在目录行下方，继续使用正式工具结果中的 PNG、原有缩略图、切换、缩放和查看大图能力。
+
 - `Controls/ComposerSurface.xaml`：输入框外壳与可选底栏。`Body` 放编辑器和发送工具，`Footer` 放项目选择等操作；`EditorHeight` 只表示编辑器高度，`SurfaceHeight` 包含底栏。两部分共用组件宽度，底栏通过贯穿两行的背景与输入框相连。
 - `Controls/PickerMenu.cs`：模型、项目和权限菜单共用的创建入口。`CreateList` 统一列表滚动和选中指示；`WithFixedFooter` 将滚动列表与固定底部操作分开。选择、保存和打开窗口仍由对应的 `ShellPage.*.cs` 处理。
 - `Styles/Dimensions.xaml`：字号、行高、按钮尺寸、菜单行高、底栏高度和圆角。`Styles/Controls.xaml` 通过基础按钮样式派生图标、选择器、侧栏操作和发送按钮。
 - `Layout/ShellLayoutMetrics.cs`：侧栏、输入框、聊天正文和右栏的默认尺寸及约束。持久化布局的默认值也来自这里；窗口临时变窄时只约束显示宽度，不覆盖用户保存的宽度。
 - `Layout/WorkSidebarLayout.cs`：不依赖 WinUI 的最近/项目行高度分配和两组分隔拖动快照。页面只传测量值、转换 `GridLength`、接线和保存偏好；折叠、取消、复位及内部拖动不改变任务边界的规则集中在此，纯布局回归由 `ui-layout-smoke` 验证。
 
-增加 UI 时优先使用现有组件与样式。新的数据保存和业务行为放在页面对应功能文件或服务中，避免写入通用控件。
+增加 UI 时优先使用现有组件与样式。新的数据保存、协议解析和复杂业务放在负责对应流程的服务中，页面负责展示与事件接线，避免写入通用控件。现有 `ShellPage.*` 仍共享页面状态，不因拆成 partial 就等同于完整 MVVM。
 
 桌面通信：`Services/GatewayResponseReader.cs` 共用 JSON 响应读取及错误解码，保留调用方的 JSON 选项、空响应提示和目录 409 恢复提示。`GatewayApiException` 继承现有 `InvalidOperationException` 并携带 HTTP 状态及可用错误码。模型/会话客户端继续拥有请求、超时和响应释放，SSE 的成功响应不经过 JSON 读取；正式存储仍归网关。`dotnet run --project tests/gateway-response-smoke/GatewayResponseSmoke.csproj` 检查格式兼容、错误降级、取消与响应所有权。
 
-流式回复：`Views/ShellPage.StreamReplies.cs` 按会话 ID 维护生成任务，40ms 合并刷新当前消息；`ModelApiClient.StreamReplyAsync` 与 `ChatStreamReader` 读取网关 SSE，区分正文、思考和终止事件。思考默认收起，可展开渲染 Markdown；发送按钮在生成期间变成停止。消息保存 `Reasoning`、`ReasoningDurationMs`、`Status`、`Error` 和原模型信息，旧记录兼容；启动时把未完成生成恢复为中断。生成开始、定期快照和完成时由网关保存到统一会话日志，页面不再每 1.5 秒重写整个聊天目录；重试复用请求 ID 与用户消息 ID，避免重复上下文。
+流式回复：`Views/ShellPage.StreamReplies.cs` 按会话 ID 维护生成任务，40ms 合并刷新当前消息；`ModelApiClient.StreamReplyAsync` 与 `ChatStreamReader` 读取网关 SSE，区分正文、公开思考和终止事件。主聊天呈现正文阶段与紧凑工具活动，不为各轮创建独立思考折叠区；发送按钮在生成期间变成停止。消息保存 `Reasoning`、`ReasoningDurationMs`、`Status`、`Error` 和原模型信息，旧记录兼容；启动时把未完成生成恢复为中断。生成开始、定期快照和完成时由网关保存到统一会话日志，页面不再每 1.5 秒重写整个聊天目录；重试复用请求 ID 与用户消息 ID，避免重复上下文。
 
-会话展示：`Controls/ConversationTranscript.cs` 用一个 WebView2 承载整段会话，页面资源在 `Resources/Transcript`，所有用户消息、正文、思考和表格处于同一份 DOM。输入框、侧栏和模型菜单继续使用 WinUI。主聊天的公式直接由 KaTeX 排版，不经过截图、Skia 或原生文字上方的图片图层；浏览器负责文字、公式与表格的尺寸和换行。
+会话展示：`Controls/ConversationTranscript.cs` 用一个 WebView2 承载整段会话，页面资源在 `Resources/Transcript`，所有用户消息、可见正文阶段、工具活动和表格处于同一份 DOM。输入框、侧栏和模型菜单继续使用 WinUI。主聊天的公式直接由 KaTeX 排版，不经过截图、Skia 或原生文字上方的图片图层；浏览器负责文字、公式与表格的尺寸和换行。
 
-`ConversationTranscript` 按消息内容、思考内容和生成状态缓存 HTML，40ms 合并刷新；Markdig 解析和代码着色在后台任务中执行。切换聊天时清除前一会话，异步结果通过会话代际检查后才能发送给页面，避免旧任务覆盖新会话。聊天记录仍保存原始 Markdown，历史消息走相同的展示路径。
+`ConversationTranscript` 按可见正文、阶段内容和生成状态缓存 HTML，40ms 合并刷新；Markdig 解析和代码着色在后台任务中执行。后台仅使用跨越 `await` 前捕获的不可变消息和缓存引用，不读取 UI 拥有的可变字典；关闭控件使解析代次失效并结束尚未完成的 Ready 等待。切换聊天时清除前一会话，异步结果通过会话代际检查后才能发送给页面，避免旧任务覆盖新会话。聊天记录仍保存原始 Markdown，历史消息走相同的展示路径。
 
 `Services/TranscriptMarkdown.cs` 复用 Markdig 和 `MathMarkdown.Normalize`，输出顶层 HTML 块，支持标题、强调、列表、任务清单、引用、代码、链接与真实表格。单元格保留行内节点，公式不再经过纯文本投影。`Resources/Transcript/transcript.css` 统一管理视觉样式：正文 15px、行高 1.7，公式 1.08em，围栏代码 13px。代码长行按可用宽度软换行，保留原始换行和缩进供复制；普通表格随回复区调整宽度，长单词可断行，无法换行的长公式仍可横向滚动。会话视口填满聊天列，正文不再受固定最大宽度限制，右侧栏缩小或收起时同步扩展；滚动条位于聊天列右缘。
 
@@ -27,6 +29,18 @@
 主聊天采用运行中与终态分别投影。`TranscriptPresentation` 与浏览器 `message-presentation.js` 保留全部已有正文阶段，最终回答成功完成并渲染后才移除过程；失败、取消或没有有效最终答案时也保留已显示正文。阶段正文沿用最终正文相同的字体、字号、颜色与 Markdown 样式。可见阶段总计最多八个普通工具，待批准动作及所属阶段额外保留。连续同类工具合并为紧凑行，每组最多显示四个真实网页链接，余数仅作静态计数，完整来源保留于正式记录。动作、状态、命令及网站链接保持 12px 灰色文字，不再为每轮添加思考折叠标题和灰色整行卡。模型只在有实际发现的关键节点给简短阶段回复，不额外生成内部思维或伪造进度。
 
 整条消息成功完成且存在有效最终正文后，只展示最终 Markdown 和顶部的灰色用时；最终正文与公式先完成渲染，再移除主聊天 DOM 中的工具、思考和阶段播报。`DurationMs` 是网关保存的整次模型与工具执行耗时，HTTP/SSE 使用 `durationMs`；不是思考时间，也不在重开时重新计算。旧无段落边界消息沿用保存的 `Content`，有段却没有最终答案的异常消息不按成功展示。失败、取消和截断保留已有正文及简短状态。整条复制和重开使用同一投影，过程记录继续完整保存在正式日志中，后续模型配对历史不变，独立轨迹界面留待后续实现。
+
+截图放在挂载目录行下方的右侧 `ConversationScreenshotsPanel` 内容页，聊天正文和运行活动都不添加「查看截图」按钮。图库取当前聊天完成的 `computer.screenshot` 或明确的浏览器 MCP 截图正式回执，支持 PNG/JPEG，通过顶部标签选择图片，点击图片可放大。`ConversationScreenshotSources` 负责来源与身份检查，`ConversationScreenshotLoader` 读取并验证归档；面板拥有取消、过期结果和有界预览缓存，`ToolResultImageDecoder` 与原有结果查看器共用有界解码。只读取正式归档，不根据工具返回的路径或 Markdown 在界面访问磁盘和网络。侧栏隐藏时不读图片，切换聊天清除旧图；流式正文刷新不重复拉取相同回执。标题、说明和按钮复用既有灰色资源及紧凑样式，语言切换保留当前图片。
+
+挂载行下方使用可扩展的公共内容区；图库按剩余宽高等比增大，略向下居中，不占固定 230 高度。180ms 合并尺寸变化，按显示尺寸和 DPI 升级预览，复用原归档；缓存最多三张及 16M 解码像素。`Views/ScreenshotViewerWindow.cs` 是独立全屏原图查看器，提供适应窗口、100%、滚轮缩放、拖动和 Esc 关闭；100% 按物理像素映射，不放大缩略图冒充原图。长网页适应窗口只缩放布局，原归档像素不改变。当前聊天、消息和回执身份继续校验，聊天切换取消查看器，生产接线也支持自定义名称的浏览器 MCP 截图。
+
+终端不在正式右侧栏渲染，也不创建终端标签。聊天继续显示紧凑的真实工具活动，命令输出和退出状态由网关正式工具回执保存；独立可见控制台仅在 `visible:true` 时打开，不依赖 Python。实时输出事件与 `hostTerminalProtocol:3` 保留兼容，原生助手能力协议保持版本 2，但协议支持不等于当前界面展示。`ConversationTerminalPanel`、`TerminalOutputState` 及其独立验收保留，当前未挂接到正式 Shell。
+
+`ConversationWorkTabs` 是共用的横向标签栏，`ConversationWorkTabState` 保存各聊天的选择与关闭状态，`ShellPage.WorkTabs.cs` 将稳定的聊天／消息／调用身份映射到现有截图查看器。正式右侧栏目前只接入截图标签，仅选中页启用预览；隐藏页取消归档读取和解码。新截图自动添加为后台标签，已有选择不改变；没有打开内容时才自动显示第一项。标签可单独关闭，通过右端打开列表恢复，横向滚动位置在后台更新时保留，内容随右侧栏缩放。用户收起右侧栏后新截图不强制打开它。标签键不包含可变化的归档版本，避免更新后重新打开已关闭项。附件后续沿用这一入口，目前未新增附件查看器。
+
+`ToolManagementWindow.Browser.cs` 只协调浏览器设置展示与草稿；纯参数转换由 `BrowserConnectionSettings` 负责，兼容布尔值的等号与独立参数写法，直接可执行文件的配置也保留原选中配置目录。暂含无效 JSON 成员的编辑草稿不使窗口崩溃，正式保存仍拒绝无效成员。三种模式为独立本机、现有登录浏览器和远程地址，显示窗口选项只适用于独立模式。自定义配置、环境连接不被简单模式覆盖；切换 HTTP 服务隐藏本机参数。语言即时切换会刷新选中项但保留模式、地址及未保存状态，保存不自动启动 MCP。Chrome 现有浏览器提供打开浏览器连接设置入口，初次调试允许仍在浏览器完成。
+
+`McpConfigurationInput` 集中处理环境变量、HTTP 请求头引用与 Bearer/OAuth 编辑输入，只校验引用名和配置结构，不读取凭据值。工具管理窗口仅释放自己创建的 API 客户端；注入客户端的生命周期属于调用方，关闭窗口仍取消自己的列表与预览请求。右侧标签 UI 状态最多保留 16 个聊天，并保留每个聊天最近 256 个暂时缺席资源的关闭标记；空/部分历史投影不会直接撤销这些关闭选择，也不会显示已缺席资源，正式记录不受 UI 状态缓存淘汰影响。
 
 `tool-presentation.js` 提供本地化友好动作，未知工具显示「执行操作」。聊天不创建参数/结果 JSON、调用 ID、哈希、沙箱元信息和完整结果按钮；审批窗口与独立结果查看器继续保留。C# 只为可见阶段解析 Markdown/公式并复用未变 HTML 和 DOM，隐藏的思考不再解析，增量仍以 40ms 批处理。收束过程沿用选区冻结，用户上滚时补偿稳定阅读锚点，底部跟随只对原本正在跟随的用户生效。当前记录尚不能准确重放同轮正文与公开思考的任意多次交错，不根据文字猜额外阶段。验证入口为 `chat-stream-smoke`、`agent-transcript-smoke/run.ps1` 和真实 C# DTO→WebView2 的 `transcript-ui-smoke`。
 
@@ -83,7 +97,7 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 
 工具管理窗口使用 MCP、技能两页。常用操作和启停保留在主视图，服务 ID、JSON、认证和工具目录折叠到高级/详情区域；技能来源、内容、依赖诊断及外部目录同样按需展开。收起区域保留原编辑控件及草稿，不清除配置；灰色焦点和字体沿用现有资源。原生 UI fixture 验证折叠、切页、尺寸及原有保存/冲突/诊断流程。
 
-`Controls/StorageLocationRow.cs` 为数据存储、工具与技能存储共用的三列灰色行：名称、截断的路径及完整 tooltip、更改位置按钮。`ShellPage.StorageSettings.cs` 创建设置窗口，`ShellPage.ExtensionStorageSettings.cs` 处理文件夹选择、窗口生命周期、草稿检查、维护等待与成功后 health 核对；UI 不直接保存 MCP 配置。两行在迁移时一起停用，共用维护锁，先验证扩展存储协议与当前实际根，再调用 `ExtensionStorageMigrationService`。复制后指针原子激活，网关安全关闭旧客户端再加载新位置；状态只在操作后显示，中英文即时切换。
+`Controls/StorageLocationRow.cs` 为数据存储、用户工具共用的三列灰色行：名称、截断的路径及完整 tooltip、更改位置按钮。`ShellPage.StorageSettings.cs` 创建设置窗口，`ShellPage.ExtensionStorageSettings.cs` 处理文件夹选择、窗口生命周期、草稿检查、维护等待与成功后 health 核对；UI 不直接保存 MCP 配置。两行在迁移时一起停用，共用维护锁，先验证扩展存储协议与当前实际根，再调用 `ExtensionStorageMigrationService`。复制后指针原子激活，网关安全关闭旧客户端再加载新位置；状态只在操作后显示，中英文即时切换。
 
 `ExtensionPaths` 的纯解析器可独立测试；未设置独立扩展指针时使用 Data 的旧位置，Data 迁移与技能 ID/缓存路径同步，已独立配置时保持扩展根。`tests/extension-storage-smoke` 覆盖复制、校验、配置重写、并发、取消、链接和 Data 兼容；`tests/agent-ui-smoke` 用真实存储行和模拟文件夹选择检查灰色样式、路径与状态，未弹出系统文件夹选择器。
 
@@ -108,3 +122,5 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 原生兼容检查：`dotnet run --project tests/math-project-smoke/MathProjectSmoke.csproj` 检查 CSharpMath 降级；`dotnet run --project tests/markdown-ui-smoke/MarkdownUiSmoke.csproj -- --math` 预览原生公式。旧的 `--delimiter-math`、`--physics-math`、`--table-math` 与选择脚本继续用于原生控件回归，主聊天公式、表格和复制应在新的 Transcript 页面检查。
 
 记忆管理已从设置打开独立窗口，具有记忆 HTTP 客户端和聊天/工作/全局范围的查看、来源状态及单条新增/编辑/删除。实现遵循 [接口与验收切分](../../docs/architecture/chat-work-memory.md#下一轮实施切分)，使用范围文档版本检测冲突、写入后重新获取来源状态。未发送空稿不因打开记忆入口而正式保存；快速切换聊天时，晚到列表和写入结果只能更新其所属会话。独立输出配置可并行开发，批量清除及预算诊断等待对应后端/协议实现。
+
+工具管理窗口使用 API 提供的官方/用户来源和只读根目录，可筛选来源、保存官方覆盖或恢复默认；用户项保留增删改。官方文件在本体 `model-gateway/official-tools/`，配置路径只迁移用户扩展；官方技能稳定 ID 与用户路径 ID 分开。语言切换保留选择和草稿。

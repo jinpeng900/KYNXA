@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createModelServer } from '../server.mjs';
 import { mcpPresetCatalog, addMcpPreset } from '../mcp-presets.mjs';
 import { AppSkillService } from '../skill-service.mjs';
+import { OFFICIAL_SKILLS_DIRECTORY } from '../official-tools.mjs';
 import { toolFixture, parsed, pendingApproval, approve } from './tool-fixture.mjs';
 
 const verified = { available: true, commands: ['node'], sandbox: 'appcontainer', failClosed: true, checksChildToken: true, network: false,
@@ -60,7 +60,7 @@ test('skill tools resolve package resources, check dependencies and require veri
 
 test('new builtin skills are standard packages and resource reuse needs no host commands', async t => {
   const f = await toolFixture(t);
-  const bundledDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'skills');
+  const bundledDirectory = OFFICIAL_SKILLS_DIRECTORY;
   const service = new AppSkillService(f.conversations.root, { bundledDirectory });
   const config = await f.service.getConfig(), list = await service.list(undefined, config);
   assert.ok(list.every(skill => skill.standardCompliant));

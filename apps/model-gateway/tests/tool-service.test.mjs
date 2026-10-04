@@ -8,6 +8,20 @@ import { ToolService } from '../tool-service.mjs';
 import { estimateTokens } from '../context.mjs';
 import { approve, parsed, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
+test('malformed tool envelopes return a bounded validation receipt without dispatching', async t => {
+  const f = await toolFixture(t), context = await f.context('full');
+  f.service.mcp.execute = async () => assert.fail('invalid inputs must not dispatch');
+  for (const call of [null, {}, { id: 'malformed', name: 10, arguments: {} },
+    { id: 'malformed', name: 'filesystem.read', arguments: [] },
+    { id: 'malformed', name: 'filesystem.read', arguments: null }]) {
+    const result = await f.service.execute(context, call);
+    assert.equal(result.isError, true);
+    assert.equal(result.code, 'INVALID_TOOL_ARGUMENTS');
+    assert.equal(result.resultRef, undefined);
+    assert.equal(result.status, undefined);
+  }
+});
+
 test('scoped UTF-8 reads, atomic writes, unique edits and hashes preserve the formal catalog', async t => {
   const f = await toolFixture(t), ctx = await f.context('smart'), before = await f.conversations.catalog();
   const created = parsed(await f.run(ctx, 'filesystem.write', { path: 'note.txt', content: '\uFEFF你好\r\nonly needle\r\n', expectedHash: null }));
@@ -71,7 +85,8 @@ test('Smart deletion needs approval, is never recursive, and Full outside access
   assert.equal(parsed(await f.run(full, 'filesystem.read', { path: outside, reason: 'Read the requested sibling note' })).content, 'outside');
   assert.equal((await f.run(smart, 'filesystem.read', { path: outside, reason: 'Requested sibling' }, { interactive: false })).code, 'TOOL_APPROVAL_REQUIRED');
   const standalone = await f.context('full', f.standaloneId);
-  assert.equal((await f.run(standalone, 'filesystem.read', { path: 'invented.txt' })).code, 'WORKSPACE_REQUIRED');
+  assert.equal((await f.run(standalone, 'filesystem.read', { path: 'invented.txt' })).isError, true);
+  assert.ok(standalone.isolatedWorkspace && standalone.workspaceRoot);
 });
 
 test('file tools reject links, hardlinks, binary/oversized text and bounded results stay within UI limit', async t => {
@@ -285,7 +300,10 @@ test('Smart terminal uses verified AppContainer runner only, with no unsupported
   assert.equal((await f.run(smart, 'terminal.run', { command: 'powershell', args: [] })).isError, true); assert.equal(calls.length, 1);
   assert.equal((await f.run(smart, 'terminal.run', { command: 'cmd', args: ['/c', 'echo unbounded'] })).isError, true); assert.equal(calls.length, 1);
   assert.equal((await f.run(smart, 'terminal.run', { command: 'cmd.exe', args: ['/d', '/c', 'echo bounded'] })).isError, false); assert.equal(calls.length, 2);
-  const standalone = await f.context('full', f.standaloneId); assert.equal((await f.run(standalone, 'terminal.run', { command: 'node', args: [] })).code, 'WORKSPACE_REQUIRED');
+  const standalone = await f.context('full', f.standaloneId);
+  assert.equal((await f.run(standalone, 'terminal.run', { command: 'node', args: [] })).isError, false);
+  assert.equal(calls.at(-1).input.trustedManagedWorkspace, true);
+  assert.equal(calls.at(-1).input.workspaceRoot, standalone.workspaceRoot);
   const unavailable = await toolFixture(t, { sandboxRunner: { capabilities: async () => ({ available: true, sandbox: 'host' }), run: async () => assert.fail('no host execution') } });
   assert.equal((await unavailable.run(await unavailable.context('full'), 'terminal.run', { command: 'node', args: [] })).code, 'SANDBOX_UNAVAILABLE');
   assert.match(await f.service.systemPrompt(smart), /--test-isolation=none/);

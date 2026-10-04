@@ -46,6 +46,7 @@ public sealed partial class ShellPage
         foreach (var row in ProjectEntries) row.RefreshLanguage();
         foreach (var row in WorkRecentEntries) row.RefreshLanguage();
         foreach (var row in WorkTaskEntries) row.RefreshLanguage();
+        ApplyLayout();
         // Keep the current draft, active conversation, scroll position and reply stream intact.
     }
 }

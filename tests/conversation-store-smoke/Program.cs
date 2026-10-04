@@ -35,7 +35,7 @@ async Task Handle(HttpListenerContext context)
     {
         object result;
         if (context.Request.Url!.AbsolutePath == "/health")
-            result = new { service = "kynxa-model-gateway", status = "ok", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, extensionStorageProtocol = 1, toolStreamProtocol = 3, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
+            result = new { service = "kynxa-model-gateway", status = "ok", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
         else if (context.Request.HttpMethod == "PUT")
         {
             using var document = await JsonDocument.ParseAsync(context.Request.InputStream);

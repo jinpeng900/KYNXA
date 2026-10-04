@@ -13,6 +13,7 @@ internal sealed class WorkspaceSnapshot
         ".sandbox-runtime", ".sandbox-temp", ".sandbox-skill"
     };
     private readonly string[] _excludedRoots;
+    private readonly string? _conversationWorkspaceHome;
     private string _sourceRoot = "";
     private int _entries;
     private readonly bool _trustedManagedWorkspace;
@@ -21,10 +22,11 @@ internal sealed class WorkspaceSnapshot
     internal long Bytes { get; private set; }
     internal int Skipped { get; private set; }
 
-    internal WorkspaceSnapshot(IEnumerable<string> excludedRoots, bool trustedManagedWorkspace)
+    internal WorkspaceSnapshot(IEnumerable<string> excludedRoots, bool trustedManagedWorkspace, string? conversationWorkspaceHome = null)
     {
         _excludedRoots = excludedRoots.Select(Path.GetFullPath).ToArray();
         _trustedManagedWorkspace = trustedManagedWorkspace;
+        _conversationWorkspaceHome = conversationWorkspaceHome is null ? null : Path.GetFullPath(conversationWorkspaceHome);
     }
 
     internal void Copy(string source, string destination)
@@ -32,7 +34,7 @@ internal sealed class WorkspaceSnapshot
         _sourceRoot = Path.GetFullPath(source);
         _allowDataAncestor = _trustedManagedWorkspace && _excludedRoots.Any(IsManagedFolderBelow);
         if (_trustedManagedWorkspace && !_allowDataAncestor)
-            throw new SandboxException("SANDBOX_INVALID_WORKSPACE", "A trusted managed workspace must be a canonical Data/Desktop/Projects/<project-id> folder.");
+            throw new SandboxException("SANDBOX_INVALID_WORKSPACE", "A trusted managed workspace must be a canonical project or conversation workspace folder.");
         if (IsExcludedRoot(source)) throw new SandboxException("SANDBOX_INVALID_WORKSPACE", "The application data directory cannot be used as a terminal workspace.");
         if (!Directory.Exists(source)) throw new SandboxException("SANDBOX_INVALID_WORKSPACE", "Workspace directory does not exist.");
         EnsureNoReparseAncestors(source);
@@ -99,8 +101,17 @@ internal sealed class WorkspaceSnapshot
     {
         if (!IsWithin(root, _sourceRoot)) return false;
         string[] parts = Path.GetRelativePath(root, _sourceRoot).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return parts.Length == 3 && parts[0].Equals("Desktop", StringComparison.OrdinalIgnoreCase) &&
+        bool project = parts.Length == 3 && parts[0].Equals("Desktop", StringComparison.OrdinalIgnoreCase) &&
             parts[1].Equals("Projects", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[2], out _);
+        bool conversationBelowData = parts.Length == 3 && parts[0].Equals("Models", StringComparison.OrdinalIgnoreCase) &&
+            parts[1].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[2], out _);
+        bool conversationBelowModels = parts.Length == 2 && Path.GetFileName(Path.TrimEndingDirectorySeparator(root))
+            .Equals("Models", StringComparison.OrdinalIgnoreCase) && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) &&
+            Guid.TryParse(parts[1], out _);
+        // An arbitrary model-home name is accepted only as the configured root, never every excluded extension/data folder.
+        bool conversationBelowConfiguredHome = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
+            parts.Length == 2 && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
+        return project || conversationBelowData || conversationBelowModels || conversationBelowConfiguredHome;
     }
 
     private static bool PathEquals(string first, string second) =>
@@ -118,7 +129,7 @@ internal sealed class WorkspaceSnapshot
         string lower = name.ToLowerInvariant();
         string extension = Path.GetExtension(lower);
         return lower.StartsWith(".env", StringComparison.Ordinal) || lower.Contains("credential", StringComparison.Ordinal) ||
-            lower.Contains("secret", StringComparison.Ordinal) || lower is "id_rsa" or "id_ed25519" or "storage.json" or "settings.json" or "events.jsonl" or
+            lower.Contains("secret", StringComparison.Ordinal) || lower is "id_rsa" or "id_ed25519" or "storage.json" or "settings.json" or "events.jsonl" or ".workspace-owner.json" or
                 "auth.json" or ".npmrc" or ".pypirc" or ".netrc" or ".git-credentials" ||
             extension is ".pem" or ".key" or ".pfx" or ".p12" or ".keystore" or ".jks" or ".kdbx";
     }

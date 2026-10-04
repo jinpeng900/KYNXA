@@ -9,6 +9,29 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
 {
     public AgentConfig Config { get; private set; } = new(1, 4,
         [new("example", "Example MCP / 原样", "example-mcp", ["--stdio"], false)], [directory]);
+    public AgentConfigSaveRequest? LastSaveRequest { get; private set; }
+    public AgentConfig? NextSaveResponse { get; set; }
+    private bool _officialLayers;
+    public McpServerConfig OfficialBrowserDefault => BrowserPreset with { Id = "official-browser", Origin = "official", PresetId = "browser", Overridden = false };
+    public void InstallOfficialLayers()
+    {
+        _officialLayers = true;
+        Config = Config with { McpServers = [OfficialBrowserDefault,
+            new("user-fixture", "User fixture / 用户配置", "fixture-user", [], false, Origin: "user")],
+            DisabledOfficialMcpServers = ["hidden-fixture"], OfficialToolsRoot = Path.Combine(directory, "Official", "1.0.0"),
+            UserToolsRoot = Path.Combine(directory, "User"), OfficialPackageVersion = "1.0.0" };
+    }
+    public void InstallBrowserFixtures()
+    {
+        Config = Config with { McpServers = [
+            new("playwright-fixture", "Playwright / 浏览器", "npx", ["-y", "@playwright/mcp@0.0.83",
+                "--user-data-dir", Path.Combine(directory, "FixtureProfile"), "--profile-dir-name", "Profile 1", "--viewport-size", "1440,900"], false),
+            new("chrome-fixture", "Chrome DevTools / 浏览器", "npx", ["-y", "chrome-devtools-mcp@1.10.1", "--headless", "--isolated", "--no-usage-statistics"], false),
+            new("environment-fixture", "Environment configured / 环境配置", "npx", ["-y", "@playwright/mcp@0.0.83"], false,
+                EnvRefs: new() { ["PLAYWRIGHT_MCP_CDP_ENDPOINT"] = "FAKE_BROWSER_ENDPOINT_ENV" }),
+            new("config-fixture", "Advanced config / 配置文件", "npx", ["-y", "@playwright/mcp@0.0.83", "--config", "fixture-browser.json"], false)
+        ] };
+    }
     public int Reads { get; private set; }
     public int Saves { get; private set; }
     public int Connections { get; private set; }
@@ -29,6 +52,7 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public bool IncludeMcpTools { get; private set; }
     public int ResultPages { get; private set; }
     public int ResultReads { get; private set; }
+    public string? ScreenshotImagePath { get; set; }
     public int LastResultOffset { get; private set; }
     public CancellationToken LastResultToken { get; private set; }
     public TaskCompletionSource<ToolResultPage>? DelayedResult { get; set; }
@@ -45,18 +69,23 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public Task<AgentConfig> SaveConfigAsync(AgentConfigSaveRequest request, CancellationToken cancellationToken = default)
     {
         Saves++;
+        LastSaveRequest = request;
         if (ConflictNextSave) { ConflictNextSave = false; Config = Config with { Revision = Config.Revision + 1 }; throw new GatewayApiException("Example conflict", HttpStatusCode.Conflict, "AGENT_CONFIG_CONFLICT"); }
         if (request.ExpectedRevision != Config.Revision) throw new InvalidOperationException("Fixture scope revision mismatch.");
-        Config = new(1, Config.Revision + 1, request.McpServers, request.SkillDirectories, request.DisabledSkills);
+        Config = NextSaveResponse ?? Config with { Revision = Config.Revision + 1, McpServers = request.McpServers,
+            SkillDirectories = request.SkillDirectories, DisabledSkills = request.DisabledSkills,
+            DisabledOfficialMcpServers = request.DisabledOfficialMcpServers };
+        NextSaveResponse = null;
         return Task.FromResult(Config);
     }
     public Task<AgentSkill[]> GetSkillsAsync(Guid? conversationId = null, CancellationToken cancellationToken = default) =>
         Task.FromResult<AgentSkill[]>([new("skill-one", "Example skill", "Literal preview fixture", Path.Combine(directory, "SKILL.md"),
             Enabled: !(Config.DisabledSkills ?? []).Contains("skill-one"), StandardCompliant: !IncludeDiagnostics,
-            Diagnostics: IncludeDiagnostics ? [new("UNKNOWN_SKILL_FIELD", "Fixture author metadata", "warning", "author")] : null),
-            new("skill-two", "Second skill", "Second fixture", Path.Combine(directory, "other", "SKILL.md")),
+            Diagnostics: IncludeDiagnostics ? [new("UNKNOWN_SKILL_FIELD", "Fixture author metadata", "warning", "author")] : null,
+            Origin: _officialLayers ? "builtin" : null),
+            new("skill-two", "Second skill", "Second fixture", Path.Combine(directory, "other", "SKILL.md"), Origin: _officialLayers ? "configured" : null),
             new("skill-unavailable", "Unavailable fixture", "Fixture parse error", Path.Combine(directory, "broken", "SKILL.md"),
-                Diagnostics: [new("INVALID_APP_SKILL", "Fixture parse error")], Status: "unavailable")]);
+                Diagnostics: [new("INVALID_APP_SKILL", "Fixture parse error")], Status: "unavailable", Origin: _officialLayers ? "workspace" : null)]);
     public Task<AgentSkillDetail> GetSkillAsync(string id, Guid? conversationId = null, CancellationToken cancellationToken = default)
     { PreviewReads++; LastPreviewToken = cancellationToken; return DelayedPreview?.Task ?? Task.FromResult(new AgentSkillDetail(id, "Example skill", "Preview", Path.Combine(directory, "SKILL.md"), PreviewText)); }
     public Task<AgentToolsResponse> GetToolsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new AgentToolsResponse(Tools(), Connections: Diagnostics()));
@@ -65,9 +94,10 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public Task<McpCatalogResponse> GetMcpCatalogAsync(CancellationToken cancellationToken = default)
     {
         CatalogReads++;
-        bool exists = Config.McpServers.Any(server => server.Id == BrowserPreset.Id);
+        var configured = Config.McpServers.FirstOrDefault(server => server.Id == BrowserPreset.Id || server.PresetId == "browser");
+        bool exists = configured is not null;
         return Task.FromResult(new McpCatalogResponse([new("browser", "Browser fixture", "Pinned browser preset", BrowserPreset, exists,
-            "https://source.test.invalid/browser", ["browser"], exists ? BrowserPreset.Id : null)], ["filesystem", "memory"]));
+            "https://source.test.invalid/browser", ["browser"], configured?.Id)], ["filesystem", "memory"]));
     }
     public Task<AgentConfig> AddMcpPresetAsync(string id, long expectedRevision, CancellationToken cancellationToken = default)
     {
@@ -104,6 +134,11 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public Task<ToolResultResponse> GetToolResultAsync(Guid conversationId, ToolResultReference reference, CancellationToken cancellationToken = default)
     {
         ResultReads++;
+        if (reference != ResultReference || conversationId == Guid.Empty) throw new InvalidOperationException("Fixture media reference identity mismatch.");
+        if (ScreenshotImagePath is { } imagePath)
+            return Task.FromResult(new ToolResultResponse(JsonSerializer.SerializeToElement(new { content = new object[] {
+                new { type = "image", mimeType = "image/png", data = Convert.ToBase64String(File.ReadAllBytes(imagePath)) }
+            }, structuredContent = new { completed = true, boundary = "host-desktop", action = "screenshot" } })));
         return Task.FromResult(new ToolResultResponse(JsonSerializer.SerializeToElement(new { content = new object[] {
             new { type = "image", mimeType = "image/gif", data = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" },
             new { type = "resource_link", uri = "resource://fixture/report", mimeType = "text/plain", name = "Fixture resource" },

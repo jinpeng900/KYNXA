@@ -19,6 +19,9 @@ public partial class App : Application
     private FrameworkElement _root = null!;
     private FakeAgentApi _api = null!;
     private Exception? _unhandled;
+    private readonly bool _officialToolsOnly = Environment.GetCommandLineArgs().Contains("--official-tools-only", StringComparer.Ordinal);
+    private readonly bool _computerToolsOnly = Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal);
+    private readonly bool _browserOnly = Environment.GetCommandLineArgs().Contains("--browser-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -36,6 +39,8 @@ public partial class App : Application
         File.WriteAllText(ResultPath, "RUNNING: isolated production tool management window\n");
         UiText.Initialize("zh-CN");
         _api = new FakeAgentApi(Path.Combine(_directory, "Skills"));
+        if (_officialToolsOnly) _api.InstallOfficialLayers();
+        if (_browserOnly) _api.InstallBrowserFixtures();
         _anchor = new Window { Content = new Grid() };
         _anchor.AppWindow.Hide();
         _window = new ToolManagementWindow(_api, Guid.NewGuid());
@@ -68,6 +73,27 @@ public partial class App : Application
     {
         try
         {
+            if (_browserOnly)
+            {
+                await CheckBrowserSettingsAsync();
+                Check(_unhandled is null, "browser connection settings have no unhandled UI errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native browser settings UI checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_computerToolsOnly)
+            {
+                await CheckComputerToolsAsync();
+                Check(_unhandled is null, "computer tools have no unhandled UI errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native computer tool UI checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_officialToolsOnly)
+            {
+                await CheckOfficialToolsAsync();
+                Check(_unhandled is null, "official tools have no unhandled UI errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native tool UI checks.\nPreviews: {_directory}");
+                return;
+            }
             await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled, "production window loads injected configuration");
             Check(_window!.Title == "KYNXA · 工具与技能" && _window.ExtendsContentIntoTitleBar, "native localized caption uses the production title bar");
             Check(_window.AppWindow.Presenter is OverlappedPresenter { IsMinimizable: true, IsMaximizable: true, IsResizable: true }, "native minimize, maximize and resize remain enabled");
@@ -218,7 +244,7 @@ public partial class App : Application
             _window.CloseForOwner();
             closingPreview.SetResult(new("skill-two", "Second skill", "late close", "late source", "LATE CLOSED PREVIEW"));
             await SettleAsync();
-            Check(_api.Disposed && closingToken.IsCancellationRequested, "native closing cancels reads and disposes the injected API");
+            Check(!_api.Disposed && closingToken.IsCancellationRequested, "native closing cancels reads without disposing the caller-owned API");
             Check(_unhandled is null, "no unhandled UI errors occurred");
             File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native tool UI checks.\nPreviews: {_directory}");
         }
@@ -230,6 +256,7 @@ public partial class App : Application
         finally
         {
             _window?.CloseForOwner();
+            _api.Dispose();
             _anchor?.Close();
         }
     }

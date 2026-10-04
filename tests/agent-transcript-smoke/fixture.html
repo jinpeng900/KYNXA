@@ -132,6 +132,49 @@ try {
  assert(document.querySelectorAll('.tool-web-link').length===4&&document.querySelector('.tool-web-more').textContent.includes('28')&&!document.querySelector('.tool-web-more button'),'large source lists show four links and a truthful static remainder count');
  assert(sourceUrls.length===32&&largeWeb.result.includes(sourceUrls.at(-1)),'source display cap leaves all original URLs intact');
  assert(document.documentElement.scrollWidth<=innerWidth,'compact actions and links respect transcript width');
+ const desktopNames=['windows','apps','screenshot','read','launch','activate','click','move','scroll','drag','type','key'];
+ const desktopTitleKeys=['toolInspectWindows','toolFindApps','toolScreenshot','toolReadWindow','toolOpenApp','toolActivateWindow','toolClick','toolMovePointer','toolScroll','toolDrag','toolTypeText','toolPressKey'];
+ assert(desktopNames.every((name,index)=>KynxaToolPresentation.describe({name:'computer.'+name,arguments:{reason:'Fixture'},status:'running'}).titleKey===desktopTitleKeys[index]),'all native desktop actions including discovery map to human labels');
+ const privateInput='PRIVATE_DOM_INPUT_中文',target={windowId:'123456',processId:789};
+ const desktopTools=[
+  {toolCallId:'desktop-type',name:'computer.type',arguments:{...target,text:privateInput,reason:privateInput},summary:privateInput,status:'approval-required',approvalId:'approval-fixture'},
+  {toolCallId:'desktop-launch',name:'computer.launch',arguments:{appPath:'C:\\Fixture Editor\\editor.exe',args:['a file.txt','--literal=<fixture>'],reason:'Open local app'},status:'running'},
+  {toolCallId:'desktop-scroll',name:'computer.scroll',arguments:{...target,x:12,y:34,delta:-120,reason:'Read next section'},status:'completed'},
+  {toolCallId:'desktop-shot-a',name:'computer.screenshot',arguments:{...target,reason:'Capture target'},status:'completed',resultRef:{id:'result-a'}},
+  {toolCallId:'desktop-shot-b',name:'computer.screenshot',arguments:{...target,reason:'Capture latest target'},status:'completed',resultRef:{id:'result-b'}}
+ ];
+ const desktopReply={id:'desktop-message',role:'assistant',content:'Desktop progress.',html:'<p>Desktop progress.</p>',status:'streaming',streaming:true,toolActivities:desktopTools};
+ applyTranscript({conversationId:'desktop-chat',messages:[desktopReply]});
+ assert(document.querySelectorAll('.tool-activity').length===4&&document.querySelector('[data-tool-call-id=desktop-shot-a]').dataset.toolCount==='2'&&!document.querySelector('.tool-preview,.screenshot-result,.message-attachments'),'consecutive completed screenshot events merge into compact process without chat preview buttons');
+ assert(!Object.hasOwn(KynxaToolPresentation.describe(desktopTools[3]),'preview')&&desktopTools[3].resultRef.id==='result-a'&&desktopTools[4].resultRef.id==='result-b','obsolete preview display state is removed while independent formal screenshot references remain unchanged');
+ const separatedScreenshots=[{...desktopTools[3],status:'approval-required',toolCallId:'shot-approval-a'},{...desktopTools[4],status:'approval-required',toolCallId:'shot-approval-b'},
+  {...desktopTools[3],status:'unknown',toolCallId:'shot-unknown-a'},{...desktopTools[4],status:'unknown',toolCallId:'shot-unknown-b'},
+  {...desktopTools[3],status:'error',toolCallId:'shot-error-a'},{...desktopTools[4],status:'error',toolCallId:'shot-error-b'}];
+ applyTranscript({conversationId:'desktop-chat',messages:[{...desktopReply,toolActivities:separatedScreenshots}]});
+ assert(document.querySelectorAll('.tool-activity').length===6&&[...document.querySelectorAll('.tool-activity')].every(node=>node.dataset.toolCount==='1'),'approval, unknown and failed screenshots retain separate real states');
+ applyTranscript({conversationId:'desktop-chat',messages:[desktopReply]});
+ assert(!document.getElementById('messages').textContent.includes(privateInput)&&![...document.querySelectorAll('[title]')].some(node=>node.title.includes(privateInput)),'private desktop input never appears in commands, summaries or tooltips');
+ assert(document.querySelector('[data-tool-call-id=desktop-type] .tool-command').textContent==='HWND 123456 · PID 789 · '+privateInput.length+'字符','desktop type shows target and true character count only');
+ assert(document.querySelector('[data-tool-call-id=desktop-launch] .tool-command').textContent.includes('"a file.txt"')&&document.querySelector('[data-tool-call-id=desktop-launch] .tool-command').textContent.includes('--literal=<fixture>')&&!document.querySelector('fixture'),'launch arguments are literal text, not markup');
+ assert(document.querySelector('[data-tool-call-id=desktop-scroll] .tool-command').textContent.endsWith('(12, 34) · 滚动量 -120'),'scroll preserves exact coordinates and amount');
+ assert(!document.querySelector('.tool-activity button,#messages img:not(.message-avatar),#messages canvas'),'active screenshot process never creates chat buttons or eagerly loads images');
+ hostMessage({data:{type:'initializeUi',language:'en',strings:{toolTypeText:'Type text',toolCharacterCount:'{0} characters',toolScrollDelta:'Scroll delta {0}',toolViewScreenshot:'View screenshot'}}});
+ assert(document.querySelector('[data-tool-call-id=desktop-type] .tool-command').textContent.endsWith(privateInput.length+' characters')&&document.querySelector('[data-tool-call-id=desktop-scroll] .tool-command').textContent.endsWith('Scroll delta -120')&&!document.getElementById('messages').textContent.includes('View screenshot'),'desktop labels hot-switch without exposing input or adding screenshot controls');
+ const finalDesktop={...desktopReply,status:'completed',streaming:false,durationMs:37000,content:'Final desktop answer.',html:'<p><strong>Final desktop answer.</strong></p>'};
+ const beforeFinalMessages=sentMessages.length;
+ applyTranscript({conversationId:'desktop-chat',messages:[finalDesktop]});
+ assert(document.querySelector('.message-body strong')&&!document.querySelector('.tool-activity,.tool-preview,.screenshot-result,.message-attachments')&&desktopReply.toolActivities.length===5,'successful final removes desktop process and screenshot controls while preserving formal source receipts');
+ assert(sentMessages.length===beforeFinalMessages&&!document.querySelector('#messages img:not(.message-avatar),#messages canvas'),'final chat never loads base64 or requests image data automatically');
+ document.querySelector('.copy-message').click();assert(sentMessages.at(-1).text===finalDesktop.content,'whole message copy contains only final prose');
+ const finalDesktopBody=document.querySelector('.message-body strong');
+ hostMessage({data:{type:'initializeUi',language:'zh-CN',strings:{toolViewScreenshot:'查看截图'}}});
+ assert(!document.querySelector('.tool-preview,.screenshot-result')&&document.querySelector('.message-body strong')===finalDesktopBody,'language switching never adds chat screenshot buttons or re-renders the answer');
+ applyTranscript({conversationId:'other-desktop-chat',messages:[]});applyTranscript({conversationId:'desktop-chat',messages:[finalDesktop]});
+ assert(document.querySelector('.message-body strong')===finalDesktopBody&&!document.querySelector('.tool-activity,.tool-preview,.screenshot-result'),'cached final history preserves final-only chat without screenshot controls');
+ applyTranscript({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message'}]});
+ assert(!document.querySelector('.tool-activity,.tool-preview,.screenshot-result')&&document.querySelector('.message-body strong'),'freshly reloaded final history has no chat screenshot controls');
+ applyTranscript({conversationId:'fresh-desktop-chat',messages:[{...finalDesktop,id:'fresh-desktop-message',status:'interrupted'}]});
+ assert(!document.querySelector('.tool-preview,.screenshot-result')&&document.querySelector('.tool-activity'),'interrupted requests retain actual process without chat screenshot controls');
  document.getElementById('result').textContent='PASS: '+checks+' compact progress DOM checks';
 }catch(error){document.getElementById('result').textContent='FAIL: '+error.stack;}
 </script></body></html>

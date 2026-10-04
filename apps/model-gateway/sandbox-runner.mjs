@@ -1,13 +1,12 @@
 import { spawn } from 'node:child_process';
-import { access, lstat, realpath, rm } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { lstat, realpath, rm } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { supportsSkillExecution, verifiesSkillExecution } from './sandbox-skill.mjs';
+import { findNativeToolHost } from './tool-host-path.mjs';
+import { inspectLocalPath } from './tool-paths.mjs';
 
-const gatewayDirectory = dirname(fileURLToPath(import.meta.url));
 const maximumHostOutputBytes = 2 * 1024 * 1024;
 
 function failure(code, message) {
@@ -26,34 +25,19 @@ export class SandboxRunner {
   #verifiedSkillExecution = false;
   #stagingDirectories = new Set();
   #onStarted;
+  #conversationWorkspaceHome;
 
-  constructor({ toolHostPath, excludedRoots = [], onStarted } = {}) {
+  constructor({ toolHostPath, excludedRoots = [], conversationWorkspaceHome, onStarted } = {}) {
     this.#toolHostPath = toolHostPath ? resolve(toolHostPath) : null;
     this.#excludedRoots = [...new Set([...excludedRoots,
       ...(process.env.KYNXA_DATA_HOME ? [process.env.KYNXA_DATA_HOME] : [])].map(path => resolve(path)))];
     this.#onStarted = onStarted;
+    this.#conversationWorkspaceHome = conversationWorkspaceHome ? resolve(conversationWorkspaceHome) : null;
   }
 
   get verifiedAppContainer() { return this.#verifiedAppContainer; }
 
-  async #findToolHost() {
-    if (process.platform !== 'win32') throw failure('SANDBOX_UNAVAILABLE', 'The AppContainer tool host requires Windows.');
-    const candidates = this.#toolHostPath ? [this.#toolHostPath] : [
-      join(gatewayDirectory, '..', 'ToolHost', 'KYNXA.ToolHost.exe'),
-      join(gatewayDirectory, '..', 'tool-host', 'KYNXA.ToolHost.exe'),
-      join(gatewayDirectory, '..', 'tool-host', 'bin', 'Debug', 'net10.0-windows', 'KYNXA.ToolHost.exe'),
-      join(gatewayDirectory, '..', 'tool-host', 'bin', 'Release', 'net10.0-windows', 'KYNXA.ToolHost.exe')
-    ];
-    for (const path of candidates) {
-      try {
-        const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink()) continue;
-        await access(path, constants.R_OK);
-        return path;
-      } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error; }
-    }
-    throw failure('SANDBOX_UNAVAILABLE', 'The native KYNXA.ToolHost executable has not been built or packaged.');
-  }
+  async #findToolHost() { return findNativeToolHost(this.#toolHostPath, 'SANDBOX_UNAVAILABLE'); }
 
   async capabilities() {
     this.#verifiedAppContainer = false;
@@ -89,10 +73,17 @@ export class SandboxRunner {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000)
       throw failure('SANDBOX_INVALID_REQUEST', 'Timeout must be between 100 and 120000 milliseconds.');
     const host = await this.#findToolHost();
+    const canonicalPath = async path => {
+      try { return await realpath(path); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; return path; }
+    };
+    const excludedRoots = [...new Set([...this.#excludedRoots, ...await Promise.all(this.#excludedRoots.map(canonicalPath))])];
+    const conversationWorkspaceHome = this.#conversationWorkspaceHome ? await canonicalPath(this.#conversationWorkspaceHome) : null;
     let result;
     try {
       result = await this.#invoke(host, { operation: 'run', workspaceRoot: resolve(workspaceRoot), command,
-        args, timeoutMs, nodeExecutable: process.execPath, excludedRoots: this.#excludedRoots,
+        args, timeoutMs, nodeExecutable: process.execPath, excludedRoots,
+        ...(conversationWorkspaceHome ? { conversationWorkspaceHome } : {}),
         trustedManagedWorkspace: trustedManagedWorkspace === true, ...(skill ? { skill } : {}) }, signal, timeoutMs + 30000);
     } catch (error) {
       const completed = error.sandboxResult;
@@ -134,8 +125,12 @@ export class SandboxRunner {
   /** Only directories returned by this runner may be removed; junctions below are not followed by fs.rm. */
   async cleanup(stagingDirectory) {
     if (!this.#stagingDirectories.has(stagingDirectory)) throw failure('SANDBOX_INVALID_CLEANUP', 'The staging directory does not belong to this runner.');
-    const root = await realpath(join(tmpdir(), 'kynxa-tool-sandbox'));
-    const run = dirname(resolve(stagingDirectory));
+    const lexicalRoot = join(tmpdir(), 'kynxa-tool-sandbox');
+    await inspectLocalPath(lexicalRoot);
+    const root = await realpath(lexicalRoot);
+    const requestedRun = dirname(resolve(stagingDirectory));
+    await inspectLocalPath(requestedRun);
+    const run = await realpath(requestedRun);
     const runRelative = relative(root, run);
     if (!runRelative || runRelative.startsWith('..') || isAbsolute(runRelative) || runRelative.includes('\\') || runRelative.includes('/'))
       throw failure('SANDBOX_INVALID_CLEANUP', 'Refusing cleanup outside an owned sandbox run.');

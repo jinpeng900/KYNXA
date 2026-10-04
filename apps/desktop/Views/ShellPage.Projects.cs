@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.ViewModels;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
@@ -59,17 +60,6 @@ public sealed partial class ShellPage
             if (choice == ContentDialogResult.Primary) { _closeApproved = true; App.Window.Close(); }
         }
         finally { _savingOnClose = false; if (!_closeApproved) IsEnabled = true; }
-    }
-
-    private async void SaveProjectOrder()
-    {
-        try { await _projectStore.SaveAsync(_projects); }
-        catch (Exception error)
-        {
-            if (_projectViewClosed) return;
-            ProjectNotice.Message = UiText.Get("工作顺序暂未保存：") + error.Message;
-            ProjectNotice.IsOpen = true;
-        }
     }
 
     private async Task InitializeProjectsAsync()
@@ -170,31 +160,10 @@ public sealed partial class ShellPage
             project.IsPinned = !project.IsPinned;
             await SaveProjectsAndRenderAsync();
         });
-        Item(UiText.Get("在文件资源管理器中打开"), "\uE8B7", async () =>
-        {
-            if (string.IsNullOrEmpty(project.FolderPath))
-            {
-                project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
-                await _projectStore.SaveAsync(_projects);
-            }
-            if (!Directory.Exists(project.FolderPath)) throw new DirectoryNotFoundException(string.Format(UiText.Get("关联文件夹不存在：{0}"), project.FolderPath));
-            var folder = await StorageFolder.GetFolderFromPathAsync(project.FolderPath);
-            if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
-        });
-        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", async () =>
-        {
-            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-            picker.FileTypeFilter.Add("*");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-            var folder = await picker.PickSingleFolderAsync();
-            if (folder is null) return;
-            var previous = project.FolderPath;
-            project.FolderPath = folder.Path;
-            try { await SaveProjectsAndRenderAsync(); }
-            catch { project.FolderPath = previous; throw; }
-            ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
-            ProjectNotice.IsOpen = true;
-        });
+        Item(UiText.Get("在文件资源管理器中打开"), "\uE8B7", () => OpenProjectFolderAsync(project));
+        Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
+        if (!string.IsNullOrWhiteSpace(project.FolderPath))
+            Item(UiText.Get("取消关联文件夹"), "\uE8F4", () => UnmountProjectFolderAsync(project));
         Item(UiText.Get("重命名项目"), "\uE70F", async () =>
         {
             string? name = await AskProjectNameAsync(UiText.Get("重命名项目"), project.Name, UiText.Get("保存"));
@@ -245,6 +214,69 @@ public sealed partial class ShellPage
         });
         return menu;
     }
+
+    private bool IsAvailableProject(ProjectState project) => !_projectViewClosed && !project.IsArchived && !project.IsFolderlessWorkspace && _projects.Contains(project);
+
+    private async Task OpenProjectFolderAsync(ProjectState project)
+    {
+        if (!IsAvailableProject(project)) return;
+        if (string.IsNullOrWhiteSpace(project.FolderPath))
+        {
+            string? previous = project.FolderPath;
+            project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
+            try { await SaveProjectsAndRenderAsync(); }
+            catch { project.FolderPath = previous; throw; }
+        }
+        string path = project.FolderPath ?? throw new DirectoryNotFoundException(UiText.Get("关联工作文件夹"));
+        if (!Directory.Exists(path)) throw new DirectoryNotFoundException(string.Format(UiText.Get("关联文件夹不存在：{0}"), path));
+        var folder = await StorageFolder.GetFolderFromPathAsync(path);
+        if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
+    }
+
+    private async Task ChangeProjectFolderAsync(ProjectState project)
+    {
+        if (!IsAvailableProject(project)) return;
+        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null || !IsAvailableProject(project)) return;
+        string? previous = project.FolderPath;
+        project.FolderPath = folder.Path;
+        try { await SaveProjectsAndRenderAsync(); }
+        catch { project.FolderPath = previous; throw; }
+        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
+        ProjectNotice.IsOpen = true;
+    }
+
+    private async Task UnmountProjectFolderAsync(ProjectState project)
+    {
+        if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(project.FolderPath)) return;
+        string? previous = project.FolderPath;
+        project.FolderPath = null;
+        try { await SaveProjectsAndRenderAsync(); }
+        catch { project.FolderPath = previous; throw; }
+        ProjectNotice.Message = string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name);
+        ProjectNotice.IsOpen = true;
+    }
+
+    private async Task RunMountedWorkspaceActionAsync(MountedWorkspaceRequest request, Func<ProjectState, Task> action)
+    {
+        await RunProjectActionAsync(() =>
+        {
+            var project = WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+            if (ViewModel.IsChatMode || project is null || project.Id != request.ProjectId || !IsAvailableProject(project) ||
+                !string.Equals(UserMountedFolder(project), request.FolderPath, StringComparison.OrdinalIgnoreCase)) return Task.CompletedTask;
+            return action(project);
+        });
+    }
+
+    private async void MountedWorkspaceOpenRequested(object? sender, MountedWorkspaceRequest request) =>
+        await RunMountedWorkspaceActionAsync(request, OpenProjectFolderAsync);
+    private async void MountedWorkspaceChangeRequested(object? sender, MountedWorkspaceRequest request) =>
+        await RunMountedWorkspaceActionAsync(request, ChangeProjectFolderAsync);
+    private async void MountedWorkspaceUnmountRequested(object? sender, MountedWorkspaceRequest request) =>
+        await RunMountedWorkspaceActionAsync(request, UnmountProjectFolderAsync);
 
     private async void NewBlankProject_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
     {
@@ -304,6 +336,7 @@ public sealed partial class ShellPage
         CaptureProjectDraft();
         await _projectStore.SaveAsync(_projects);
         RenderProjects();
+        UpdateMountedWorkspacePresentation();
     }
 
     private void ShowProjects()

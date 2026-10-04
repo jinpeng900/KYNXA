@@ -28,6 +28,7 @@ public static class ModelGatewayService
         };
         start.ArgumentList.Add(script);
         start.ArgumentList.Add(Path.GetFullPath(target));
+        AddBundledRuntimePath(start);
         try
         {
             using var process = Process.Start(start) ?? throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序。"));
@@ -58,7 +59,7 @@ public static class ModelGatewayService
         }
         catch (System.ComponentModel.Win32Exception error)
         {
-            throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序，请安装 Node.js 22.19 或更新版本。"), error);
+            throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序，请检查安装文件与运行权限。"), error);
         }
     }
 
@@ -79,6 +80,7 @@ public static class ModelGatewayService
                 WorkingDirectory = Path.GetDirectoryName(script)!
             };
             start.ArgumentList.Add(script);
+            AddBundledRuntimePath(start);
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
                 start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;
@@ -97,7 +99,7 @@ public static class ModelGatewayService
         }
         catch (System.ComponentModel.Win32Exception error)
         {
-            throw new InvalidOperationException(UiText.Get("无法启动模型网关，请安装 Node.js 22.19 或更新版本后重新打开 KYNXA。"), error);
+            throw new InvalidOperationException(UiText.Get("无法启动模型网关，请检查安装文件与运行权限。"), error);
         }
         finally { StartupLock.Release(); }
     }
@@ -122,6 +124,12 @@ public static class ModelGatewayService
                 !context.TryGetInt32(out int contextVersion) || contextVersion < 3 ||
                 !body.RootElement.TryGetProperty("agentProtocol", out var agent) ||
                 !agent.TryGetInt32(out int agentVersion) || agentVersion < 5 ||
+                !body.RootElement.TryGetProperty("officialToolsProtocol", out var officialTools) ||
+                !officialTools.TryGetInt32(out int officialToolsVersion) || officialToolsVersion < 2 ||
+                !body.RootElement.TryGetProperty("hostTerminalProtocol", out var hostTerminal) ||
+                !hostTerminal.TryGetInt32(out int hostTerminalVersion) || hostTerminalVersion < 3 ||
+                !body.RootElement.TryGetProperty("browserAutomationProtocol", out var browserAutomation) ||
+                !browserAutomation.TryGetInt32(out int browserAutomationVersion) || browserAutomationVersion < 2 ||
                 !body.RootElement.TryGetProperty("extensionStorageProtocol", out var extensions) ||
                 !extensions.TryGetInt32(out int extensionVersion) || extensionVersion < 1 ||
                 !body.RootElement.TryGetProperty("toolStreamProtocol", out var toolStream) ||
@@ -140,6 +148,8 @@ public static class ModelGatewayService
     {
         var bundled = Path.Combine(AppContext.BaseDirectory, "runtime", "node.exe");
         if (File.Exists(bundled)) return bundled;
+        if (File.Exists(Path.Combine(AppContext.BaseDirectory, "node-runtime.json")) || Directory.Exists(Path.GetDirectoryName(bundled)))
+            throw new FileNotFoundException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"), bundled);
         foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
             if (string.IsNullOrWhiteSpace(directory)) continue;
@@ -148,5 +158,13 @@ public static class ModelGatewayService
         }
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe");
         return File.Exists(installed) ? installed : "node.exe";
+    }
+
+    private static void AddBundledRuntimePath(ProcessStartInfo start)
+    {
+        string runtime = Path.Combine(AppContext.BaseDirectory, "runtime");
+        if (!string.Equals(start.FileName, Path.Combine(runtime, "node.exe"), StringComparison.OrdinalIgnoreCase)) return;
+        start.Environment.TryGetValue("PATH", out string? existing);
+        start.Environment["PATH"] = runtime + (string.IsNullOrEmpty(existing) ? string.Empty : Path.PathSeparator + existing);
     }
 }

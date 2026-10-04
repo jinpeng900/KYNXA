@@ -48,6 +48,7 @@ public sealed partial class ModelManagementWindow : Window
             _closed = true;
             UiText.LanguageChanged -= UiText_LanguageChanged;
             _lifetime.Cancel();
+            _lifetime.Dispose();
             _api.Dispose();
         };
         PresetBox.ItemsSource = ModelPresets.All;
@@ -120,11 +121,13 @@ public sealed partial class ModelManagementWindow : Window
         try
         {
             await RefreshAsync();
+            if (_closed) return;
             // Resolve a new ID only after saved connections have been loaded.
             if (_editing is null && PresetBox.SelectedItem is ModelPreset preset)
                 ProviderIdBox.Text = NewId(preset.Id);
         }
-        catch (Exception error) { SetStatus(() => FriendlyError(error), true); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { if (!_closed) SetStatus(() => FriendlyError(error), true); }
         finally { if (!_closed) SetBusy(false); }
     }
 

@@ -58,7 +58,18 @@ var config = new JsonObject
         ["env"] = new JsonObject { ["npm_config_cache"] = Path.Combine(source, "MCP", "npm-cache"), ["PLAYWRIGHT_BROWSERS_PATH"] = Path.Combine(source, "MCP", "browser-cache"), ["EXTERNAL_PATH"] = external, ["TEXT"] = "--cache=" + Path.Combine(source, "MCP", "browser-cache") }
     }, new JsonObject { ["id"] = "external", ["command"] = "npx", ["args"] = new JsonArray("-y", "fixture@1.0"), ["cwd"] = external, ["enabled"] = true }),
     ["skillDirectories"] = new JsonArray(Path.Combine(source, "Skills"), external, Path.GetDirectoryName(agentSkill)!, mcpAliasDirectory),
-    ["disabledSkills"] = new JsonArray(oldId, externalId, unknownId, ExtensionConfigurationMigration.SkillId(agentSkill), mcpAliasId)
+    ["disabledSkills"] = new JsonArray(oldId, externalId, unknownId, ExtensionConfigurationMigration.SkillId(agentSkill), mcpAliasId),
+    ["disabledOfficialMcpServers"] = new JsonArray("playwright"),
+    ["officialMcpOverrides"] = new JsonArray(new JsonObject
+    {
+        ["presetId"] = "fetch", ["id"] = "official-fetch",
+        ["changes"] = new JsonObject
+        {
+            ["command"] = Path.Combine(source, "MCP", "bin", "uvx.exe"), ["cwd"] = Path.Combine(source, "MCP"),
+            ["args"] = new JsonArray("--config=" + Path.Combine(source, "MCP", "settings.json"), externalSkill),
+            ["enabled"] = true, ["envRefs"] = new JsonObject { ["API_TOKEN"] = "SYNTHETIC_TOKEN_ENV" }
+        }
+    })
 };
 string configPath = Path.Combine(source, "Agent", "config.json"), originalConfig = config.ToJsonString();
 await Write(configPath, originalConfig);
@@ -92,6 +103,13 @@ Check(copiedConfig["mcpServers"]![0]!["env"]!["npm_config_cache"]!.GetValue<stri
 Check(copiedConfig["mcpServers"]![0]!["envRefs"]!["API_KEY"]!.GetValue<string>() == "FICTIONAL_KEY_ENV" && copiedConfig["mcpServers"]![0]!["env"]!["EXTERNAL_PATH"]!.GetValue<string>() == external && copiedConfig["mcpServers"]![0]!["env"]!["TEXT"]!.GetValue<string>().StartsWith("--cache=" + source), "env references external paths and embedded text retained");
 Check(File.ReadAllText(Path.Combine(target, "extensions-pointer.previous.json")) == originalPointer, "pointer backup");
 Check(ExtensionPaths.Resolve(source, null, pointer).Root == target, "pointer activated last");
+var officialChanges = copiedConfig["officialMcpOverrides"]![0]!["changes"]!;
+Check(officialChanges["command"]!.GetValue<string>() == Path.Combine(target, "MCP", "bin", "uvx.exe") &&
+    officialChanges["cwd"]!.GetValue<string>() == Path.Combine(target, "MCP"), "official user override runtime paths relocated");
+Check(officialChanges["args"]![0]!.GetValue<string>() == "--config=" + Path.Combine(target, "MCP", "settings.json") &&
+    officialChanges["args"]![1]!.GetValue<string>() == externalSkill, "official user override owned arguments relocate; external paths remain");
+Check(officialChanges["enabled"]!.GetValue<bool>() && officialChanges["envRefs"]!["API_TOKEN"]!.GetValue<string>() == "SYNTHETIC_TOKEN_ENV" &&
+    copiedConfig["disabledOfficialMcpServers"]![0]!.GetValue<string>() == "playwright", "official choices and credential references survive user migration");
 
 foreach (string name in ExtensionPaths.LayoutDirectories)
     Check(Directory.Exists(Path.Combine(target, name)), "complete first migration framework: " + name);
@@ -111,6 +129,8 @@ string[] history = Directory.GetFiles(Path.Combine(remigrated, "Backups", "Exten
 Check(history.Any(path => Path.GetFileName(path) == "extension-migration-info.json") && history.Any(path => Path.GetFileName(path) == "extensions-pointer.previous.json"), "prior migration metadata retained in recovery namespace");
 var remigratedConfig = JsonNode.Parse(File.ReadAllText(Path.Combine(remigrated, "Agent", "config.json")))!;
 Check(remigratedConfig["disabledSkills"]![0]!.GetValue<string>() == ExtensionConfigurationMigration.SkillId(Path.Combine(remigrated, "Skills", "mine", "SKILL.md")), "disabled skill remains disabled after repeated migration");
+Check(remigratedConfig["officialMcpOverrides"]![0]!["changes"]!["command"]!.GetValue<string>() == Path.Combine(remigrated, "MCP", "bin", "uvx.exe"),
+    "official user override path survives repeated migration");
 Check(File.ReadAllText(Path.Combine(target, "Backups", "formal-chat-backup.json")).Contains("formal Data"), "shared backup source retained");
 
 string initial = Path.Combine(fixture, "first-inactive-layout");

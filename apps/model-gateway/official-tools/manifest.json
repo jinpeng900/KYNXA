@@ -1,0 +1,276 @@
+{
+  "schemaVersion": 1,
+  "packageId": "kynxa-official-tools",
+  "version": "0.3.1",
+  "license": "Apache-2.0",
+  "licenseFile": "LICENSE.txt",
+  "description": "Installed, read-only KYNXA tool descriptors, skill packages and MCP connection presets. External MCP implementations are not vendored.",
+  "catalogs": {
+    "tools": "Tools/catalog.mjs",
+    "mcp": "MCP/catalog.mjs",
+    "skills": "Skills"
+  },
+  "skills": [
+    {
+      "name": "workspace-inspect",
+      "path": "workspace-inspect/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "960cfce9963043ae9c1dc711e1456c8029894b4a86a9b6f019b847374f99186c"
+        }
+      ]
+    },
+    {
+      "name": "safe-file-edit",
+      "path": "safe-file-edit/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "bc5d8ea8edaec8ba4a7050c2a8c0a34646d5f902f31429e288bba264a157fb7e"
+        }
+      ]
+    },
+    {
+      "name": "browser-workflow",
+      "path": "browser-workflow/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "4664d6205deff489c0b723bf19f87c72fd940675b468b7a8275f290cedbf1d9b"
+        }
+      ]
+    },
+    {
+      "name": "internal-comms",
+      "path": "internal-comms/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "Anthropic",
+        "sourceUrl": "https://github.com/anthropics/skills/tree/8a1541c4a3ffa5a20a5a91de0dcf3f0bab1d1ef4/skills/internal-comms",
+        "revision": "8a1541c4a3ffa5a20a5a91de0dcf3f0bab1d1ef4",
+        "provenanceFile": "Skills/internal-comms/UPSTREAM.md",
+        "licenseFile": "Skills/internal-comms/LICENSE.txt",
+        "adapted": true
+      },
+      "files": [
+        {
+          "path": "examples/3p-updates.md",
+          "sha256": "5ea581bce7bc7030e5d9b5f65c192fd9aa05db8460837c485057ee9ad1b4e736"
+        },
+        {
+          "path": "examples/company-newsletter.md",
+          "sha256": "408275de740b7a849df557abd2136dc4f689c9aaa35a76fe5549a745bcc1df09"
+        },
+        {
+          "path": "examples/faq-answers.md",
+          "sha256": "02808d0a5dc3c0fe03c6b03a4e291fbda51dfc970a91cc4f28a82faa62d16251"
+        },
+        {
+          "path": "examples/general-comms.md",
+          "sha256": "c30fa95415e6b03b7501b9dcfbf4aa5a37494408c3b7bd8ae2a72e750dc456d2"
+        },
+        {
+          "path": "LICENSE.txt",
+          "sha256": "52b223c318576d65c32f70cb745f31352730e9f4c2c2c2570a66ce700f4f5a64"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "e581a6a5a8d6fc397672645411f047c8f98588c3f6ded2fc2dee52840b2d14ec"
+        },
+        {
+          "path": "UPSTREAM.md",
+          "sha256": "1678abf2ad1a4e28c3e937486b2438be21e665b0cd371729443509e701958f61"
+        }
+      ]
+    }
+  ],
+  "coreTools": [
+    "filesystem.list",
+    "filesystem.read",
+    "filesystem.stat",
+    "filesystem.search",
+    "filesystem.write",
+    "filesystem.edit",
+    "filesystem.delete",
+    "filesystem.mkdir",
+    "skill.list",
+    "skill.read",
+    "skill.resource.read",
+    "skill.inspect",
+    "skill.check",
+    "skill.run",
+    "terminal.run",
+    "terminal.host.run",
+    "tool.search",
+    "tool.load",
+    "tool.result.read",
+    "conversation.history.search",
+    "conversation.history.read",
+    "computer.windows",
+    "computer.apps",
+    "computer.screenshot",
+    "computer.read",
+    "computer.launch",
+    "computer.window",
+    "computer.activate",
+    "computer.move",
+    "computer.click",
+    "computer.scroll",
+    "computer.drag",
+    "computer.type",
+    "computer.key"
+  ],
+  "mcpPresets": [
+    {
+      "id": "playwright",
+      "license": "Apache-2.0",
+      "sourceUrl": "https://github.com/microsoft/playwright-mcp",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "npm",
+        "name": "@playwright/mcp",
+        "version": "0.0.83",
+        "entryPoint": "playwright-mcp"
+      }
+    },
+    {
+      "id": "github",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/github/github-mcp-server",
+      "publisher": "vendor",
+      "distribution": "hosted-service"
+    },
+    {
+      "id": "fetch",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+      "publisher": "reference",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "pypi",
+        "name": "mcp-server-fetch",
+        "version": "2026.8.18",
+        "entryPoint": "mcp-server-fetch"
+      }
+    },
+    {
+      "id": "git",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+      "publisher": "reference",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "pypi",
+        "name": "mcp-server-git",
+        "version": "2026.8.18",
+        "entryPoint": "mcp-server-git"
+      }
+    },
+    {
+      "id": "context7",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/upstash/context7",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "npm",
+        "name": "@upstash/context7-mcp",
+        "version": "4.1.1",
+        "entryPoint": "context7-mcp"
+      }
+    },
+    {
+      "id": "chrome-devtools",
+      "license": "Apache-2.0",
+      "sourceUrl": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "npm",
+        "name": "chrome-devtools-mcp",
+        "version": "1.10.1",
+        "entryPoint": "chrome-devtools-mcp"
+      }
+    },
+    {
+      "id": "exa",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/exa-labs/exa-mcp-server",
+      "publisher": "vendor",
+      "distribution": "hosted-service"
+    },
+    {
+      "id": "brave-search",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/brave/brave-search-mcp-server",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "npm",
+        "name": "@brave/brave-search-mcp-server",
+        "version": "2.1.4",
+        "entryPoint": "brave-search-mcp-server"
+      }
+    },
+    {
+      "id": "dbhub",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/bytebase/dbhub",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "npm",
+        "name": "@bytebase/dbhub",
+        "version": "1.4.0",
+        "entryPoint": "dbhub"
+      }
+    },
+    {
+      "id": "markitdown",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp",
+      "publisher": "vendor",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "pypi",
+        "name": "markitdown-mcp",
+        "version": "0.0.1a7",
+        "entryPoint": "markitdown-mcp"
+      }
+    },
+    {
+      "id": "windows-screenshot",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/CursorTouch/Windows-MCP",
+      "publisher": "community",
+      "distribution": "external-runtime",
+      "package": {
+        "registry": "pypi",
+        "name": "windows-mcp",
+        "version": "0.8.7",
+        "entryPoint": "windows-mcp"
+      }
+    }
+  ],
+  "sourceFilesRelativeTo": "package-root"
+}

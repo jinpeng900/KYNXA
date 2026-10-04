@@ -43,9 +43,8 @@ internal static class ExtensionConfigurationMigration
             int equals = value.StartsWith("--", StringComparison.Ordinal) ? value.IndexOf('=') : -1;
             return equals < 0 ? Relocate(value) : value[..(equals + 1)] + Relocate(value[(equals + 1)..]);
         }
-        foreach (var server in config["mcpServers"]!.AsArray())
+        void RelocateServerPaths(JsonObject obj)
         {
-            if (server is not JsonObject obj) throw InvalidConfig();
             foreach (string key in new[] { "command", "cwd" })
                 if (obj[key] is JsonValue value && value.TryGetValue<string>(out string? original)) obj[key] = Relocate(original);
             if (obj["args"] is JsonArray args)
@@ -55,6 +54,17 @@ internal static class ExtensionConfigurationMigration
                 foreach (var pair in environment.ToArray())
                     if (pair.Value is JsonValue value && value.TryGetValue<string>(out string? original)) environment[pair.Key] = Relocate(original);
         }
+        foreach (var server in config["mcpServers"]!.AsArray())
+        {
+            if (server is not JsonObject obj) throw InvalidConfig();
+            RelocateServerPaths(obj);
+        }
+        if (config["officialMcpOverrides"] is JsonArray overrides)
+            foreach (var item in overrides)
+            {
+                if (item is not JsonObject entry || (entry["changes"] ?? entry["server"]) is not JsonObject settings) throw InvalidConfig();
+                RelocateServerPaths(settings);
+            }
         var directories = config["skillDirectories"]!.AsArray();
         for (int index = 0; index < directories.Count; index++)
             directories[index] = Relocate(directories[index]!.GetValue<string>());
@@ -285,10 +295,20 @@ internal static class ExtensionConfigurationMigration
             if (config["disabledSkills"] is JsonNode disabled && (disabled is not JsonArray list || list.Count > 4096 || list.Any(node =>
                 node is not JsonValue value || !value.TryGetValue<string>(out string? id) || id.Length != 24 || id.Any(c => !"0123456789abcdef".Contains(c)))))
                 throw InvalidConfig();
+            if (config["disabledOfficialMcpServers"] is JsonNode hidden &&
+                (hidden is not JsonArray hiddenList || hiddenList.Count > 64 || hiddenList.Any(node => !IsPresetId(node))))
+                throw InvalidConfig();
+            if (config["officialMcpOverrides"] is JsonNode overrides &&
+                (overrides is not JsonArray overrideList || overrideList.Count > 64 || overrideList.Any(node =>
+                    node is not JsonObject entry || !IsPresetId(entry["presetId"]) ||
+                    (entry["changes"] ?? entry["server"]) is not JsonObject))) throw InvalidConfig();
             return config;
         }
         catch (JsonException error) { throw new InvalidDataException(UiText.Get("工具配置文件损坏，原文件已保留。"), error); }
     }
+
+    private static bool IsPresetId(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out string? id) &&
+        id.Length is >= 2 and <= 40 && id[0] is >= 'a' and <= 'z' && id.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 
     private static InvalidDataException InvalidConfig() => new(UiText.Get("工具配置文件损坏，原文件已保留。"));
 }

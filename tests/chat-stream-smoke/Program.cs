@@ -90,6 +90,23 @@ Check((await Read(prefix + Frame(Event("content_snapshot", content: "修订正�
     + Frame(Event("interrupted", content: "修订正文"))))[1].Content == "修订正文", "Round snapshot was not accepted");
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("content_snapshot", content: "缺摘要"))), "Incomplete snapshot accepted");
 
+var hostCall = new ToolActivity("host-live-fixture", "terminal.host.run", JsonSerializer.SerializeToElement(new { shell = "cmd", script = "echo fixture" }), "running", "Run command");
+var hostOutput = new HostTerminalOutput(hostCall.ToolCallId, 1, "stdout", "实时输出😀\n");
+ChatStreamEvent HostOutput(HostTerminalOutput output) => Event("terminal_output") with { Terminal = output };
+string hostStart = prefix + Frame(Event("tool_call") with { Tool = hostCall });
+var hostEvents = await Read(hostStart + Frame(HostOutput(hostOutput)) + Frame(HostOutput(hostOutput with { Sequence = 2, Stream = "stderr", Text = "错误预览" })) +
+    Frame(Event("tool_result") with { Tool = hostCall with { Status = "completed", Result = "fixture receipt" } }) + Frame(Event("completed", content: "done")));
+Check(hostEvents[2].Terminal?.Text == hostOutput.Text && hostEvents[3].Terminal?.Sequence == 2, "Live terminal Unicode and sequence was lost");
+foreach (var invalid in new[] { hostOutput with { ToolCallId = "other-call" }, hostOutput with { Sequence = 0 },
+    hostOutput with { Stream = "unknown" }, hostOutput with { Text = new string('x', 65537) }, hostOutput with { Replace = true } })
+    await ExpectAsync<InvalidDataException>(() => Read(hostStart + Frame(HostOutput(invalid))), "Invalid terminal output was accepted");
+await ExpectAsync<InvalidDataException>(() => Read(hostStart + Frame(HostOutput(hostOutput)) + Frame(HostOutput(hostOutput))), "Duplicate terminal output was accepted");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(HostOutput(hostOutput))), "Unannounced terminal output was accepted");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("tool_call") with { Tool = hostCall with { Name = "filesystem.read" } }) +
+    Frame(HostOutput(hostOutput))), "Terminal output was associated with a nonterminal tool");
+Check((await Read(hostStart + Frame(HostOutput(hostOutput with { Stream = "console", Replace = true })) + Frame(Event("interrupted", content: "partial"))))[2].Terminal?.Replace == true,
+    "Explicit console-screen replacement was rejected");
+
 var firstSegment = new AssistantSegment("fixture-round-1", 1, 0, "commentary", "streaming", "", "");
 var firstCompleted = firstSegment with { Status = "completed", Content = "先核对来源。", Reasoning = "可公开的摘要", ReasoningDurationMs = 1000 };
 var secondSegment = new AssistantSegment("fixture-round-2", 2, 2, "commentary", "streaming", "", "");
@@ -199,7 +216,7 @@ async Task Handle(HttpListenerContext context)
         if (context.Request.Url!.AbsolutePath == "/health")
         {
             context.Response.ContentType = "application/json";
-            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3}"));
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3}"));
             return;
         }
         var incoming = await JsonSerializer.DeserializeAsync<ChatRequest>(context.Request.InputStream, json)
