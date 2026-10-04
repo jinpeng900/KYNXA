@@ -243,6 +243,7 @@ public static partial class UiText
         ["连接失败"] = "Connection failed",
         ["需要认证"] = "Authentication required",
         ["未连接"] = "Disconnected",
+        ["未就绪"] = "Not ready",
         ["请先保存当前服务编辑，再连接。"] = "Save your server edits before connecting.",
         ["MCP 服务已断开。"] = "MCP server disconnected.",
         ["MCP 尚未连接，请查看连接状态。"] = "MCP has not connected. Review the connection status.",

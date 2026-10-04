@@ -232,7 +232,7 @@ export class ToolService {
       enabled: !(config.mcpServers.find(server => server.id === tool.serverId)?.disabledTools ?? []).includes(tool.toolName) }))];
     const descriptors = all.filter(tool => tool.enabled !== false);
     if (context) this.catalogs.set(context, { generation, descriptors: new Map(descriptors.map(item => [item.name, item])),
-      browserPrompt: browserConnectionPrompt(config.mcpServers) });
+      browserPrompt: browserConnectionPrompt(config.mcpServers.filter(server => descriptors.some(tool => tool.serverId === server.id))) });
     return (includeDisabled ? all : descriptors).map(publicDescriptor);
   }
 

@@ -6,6 +6,21 @@ import { join, relative, resolve, sep } from 'node:path';
 import { ConversationStore } from '../conversations.mjs';
 import { ToolService } from '../tool-service.mjs';
 
+function fixtureMcpServer(server) {
+  if (server.origin !== 'official' || server.command === process.execPath) return true;
+  try {
+    const url = new URL(server.url);
+    return ['http:', 'https:'].includes(url.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  } catch { return false; }
+}
+
+/** Keep real defaults visible while excluding upstream publishers from isolated test discovery. */
+export function isolateFixtureMcpCatalog(service) {
+  const catalog = service.mcp.catalog.bind(service.mcp);
+  service.mcp.catalog = (config, context, options) => catalog({ ...config,
+    mcpServers: config.mcpServers.filter(fixtureMcpServer) }, context, options);
+}
+
 export async function toolFixture(t, { sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, nestedData = false, legacyData = false, officialTools = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-tool-test-'));
   const workspace = join(root, 'work');
@@ -18,6 +33,7 @@ export async function toolFixture(t, { sandboxRunner, desktopRunner, hostTermina
   await conversations.saveCatalog({ ...(await conversations.catalog()),
     Projects: [{ Id: projectId, Name: 'Synthetic tools work', FolderPath: workspace, Chats: [chat(conversationId)] }], Chats: [chat(standaloneId)] });
   const service = new ToolService({ conversationStore: conversations, dataHome, sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, bundledDirectory: officialTools ? undefined : null, officialTools });
+  isolateFixtureMcpCatalog(service);
   t.after(async () => {
     await service.close();
     const suffix = relative(resolve(tmpdir()), resolve(root));

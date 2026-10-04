@@ -11,6 +11,7 @@ import { ModelRuntime } from '../runtime.mjs';
 import { createModelServer } from '../server.mjs';
 import { readModelStream, readSse } from '../streaming.mjs';
 import { chatRequest } from '../protocols.mjs';
+import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 const frame = value => `data: ${typeof value === 'string' ? value : JSON.stringify(value)}\r\n\r\n`;
 const chatDelta = (content, extra = {}) => ({ choices: [{ index: 0, delta: { content, ...extra } }] });
@@ -37,6 +38,8 @@ async function fixture(t, protocol, handler, runtimeOptions = {}) {
   await modelStore.save({ providerId: 'test-api', displayName: 'Test', protocol,
     baseUrl: `${endpoint}/v1`, models: ['test-model'], apiKey: 'secret-not-for-events' });
   const modelRuntime = new ModelRuntime({ modelStore, dataHome, ...runtimeOptions });
+  // An injected fake tool service may intentionally omit the real MCP client.
+  if (typeof modelRuntime.tools?.mcp?.catalog === 'function') isolateFixtureMcpCatalog(modelRuntime.tools);
   t.after(() => modelRuntime.close());
   const gateway = createModelServer({ modelStore, modelRuntime });
   const base = await listen(gateway, t);

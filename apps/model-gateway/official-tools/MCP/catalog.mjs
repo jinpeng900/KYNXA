@@ -3,9 +3,9 @@
 const runtime = (name, description) => ({ name, type: 'runtime', required: true, description });
 const environment = (name, description, required = true) => ({ name, type: 'environment', required, description });
 const stdio = (id, name, args, options = {}) => ({ id, name, transport: 'stdio', command: 'npx', args,
-  enabled: false, protocolVersion: '2025-11-25', disabledTools: [], startupTimeoutMs: 60000, ...options });
+  enabled: true, protocolVersion: '2025-11-25', disabledTools: [], startupTimeoutMs: 60000, ...options });
 const hosted = (id, name, url, options = {}) => ({ id, name, transport: 'streamable-http', command: '', args: [], url,
-  enabled: false, protocolVersion: '2025-11-25', disabledTools: [], startupTimeoutMs: 30000, ...options });
+  enabled: true, protocolVersion: '2025-11-25', disabledTools: [], startupTimeoutMs: 30000, ...options });
 const npm = (name, version, entryPoint = name.split('/').at(-1)) => ({ registry: 'npm', name, version, entryPoint });
 const pypi = (name, version) => ({ registry: 'pypi', name, version, entryPoint: name });
 const node = runtime('Node.js and npm/npx', 'Use the Node.js runtime available to the gateway. First launch downloads the pinned package.');

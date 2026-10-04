@@ -20,6 +20,9 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const desktopRunner = { capabilities: async () => ({ protocolVersion: 1, boundary: 'host-desktop', available: true,
       interactiveWindows: true, operations: ['windows', 'apps', 'launch', 'read'] }) };
     const f = await toolFixture(t, { officialTools: true, desktopRunner });
+    const defaults = await f.service.getConfig();
+    assert.ok(defaults.mcpServers.length > 0 && defaults.mcpServers.every(server => server.enabled),
+      'The test retains enabled official defaults rather than altering the product configuration');
     const models = new ModelStore({ dataHome: f.dataHome });
     await models.save({ providerId: 'workflow-budget-fixture', displayName: 'Workflow budget fixture', protocol,
       baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'FAKE_LOCAL_WORKFLOW_ONLY', models: ['fixture-model'], contextWindowTokens: 8192 });
@@ -30,6 +33,8 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       provider: 'workflow-budget-fixture', model: 'fixture-model', permissionMode: 'full', message: '打开记事本并读取界面' };
     const prepared = await runtime.prepare(input, input.conversationId);
     try {
+      assert.equal(f.service.mcp.connections.size, 0, 'No publisher process or remote service is started by isolated skill discovery');
+      assert.equal(f.service.mcp.servers.size, 0, 'Only explicitly replaced fixture connections may enter the real MCP catalog');
       assert.equal(prepared.contextMetrics.contextWindowTokens, 8192);
       assert.equal((await models.connectionFor(input.provider)).contextWindowTokens, 8192);
       assert.ok([...prepared.requestOptions.system.matchAll(/Application skill [a-f0-9]{24}:/g)].length <= 7,

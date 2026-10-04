@@ -454,6 +454,7 @@ public sealed partial class ToolManagementWindow : Window
         var state = _connections.FirstOrDefault(item => item.ServerId == _editingServerId);
         string key = state?.State switch { "ready" => "已连接", "connecting" => "正在连接", "error" => "连接失败",
             "auth-required" => "需要认证", _ => "未连接" };
+        if (state?.Code is "MCP_ENV_MISSING" or "MCP_CONFIG_REQUIRED" or "MCP_COMMAND_NOT_FOUND") key = "未就绪";
         AgentConnectionStatusLabel.Text = string.Format(UiText.Get("连接状态：{0} · 工具：{1}"), UiText.Get(key), state?.ToolCount ?? 0) +
             (state?.Code is { } code ? " · " + code : "");
     }

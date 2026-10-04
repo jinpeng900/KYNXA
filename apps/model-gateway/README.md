@@ -49,14 +49,14 @@ node apps/model-gateway/server.mjs
 - `POST /api/chat`：`{conversationId,message,provider,model,permissionMode}`，按连接协议请求 `/chat/completions`、`/responses` 或 `/messages` 并返回完整文本。Claude 使用 `x-api-key` 与版本头；Responses 使用客户端会话记录并设置 `store:false`。
 - `POST /api/chat/stream`：相同参数，可额外传入 UUID 格式的 `requestId`（助手消息 ID）和 `userMessageId`（已保存用户消息 ID），返回 SSE 流。`GET /health` 中的 `streamProtocol:1` 表示已支持此接口。
 - `GET /api/agent/tools` / `POST /api/agent/mcp/refresh`：管理目录包含原始工具名与 enabled 状态；配置的 `disabledTools` 排除执行和模型声明中的对应项。
-- `GET /api/agent/mcp/catalog` / `POST /api/agent/mcp/catalog/:id/add`：11 个官方预设；首次有效配置已列出但默认关闭，添加需 expectedRevision、重复复用或恢复隐藏项。
+- `GET /api/agent/mcp/catalog` / `POST /api/agent/mcp/catalog/:id/add`：11 个官方预设首次有效配置即列出并默认启用；保留已有用户明确关闭。启用不等于就绪或已连接，缺少依赖、认证引用或必填配置时不发起连接。添加需 expectedRevision、重复复用或恢复隐藏项，读取清单不启动服务。
 - `POST /api/agent/mcp/disconnect` / `reconnect`：`{serverId}`，断开或明确重连，不重放上次执行；列表和连接响应含脱敏 `connections` 状态。
 - `GET /api/agent/skills/:id/inspect|check|resource`：包清单、环境诊断、资源分页（resource 带 path/offset/limit）；`POST /api/agent/skills/import {directory}` 原子导入完整包。禁用项只在管理目录展示，模型工具不能绕过开关。
 - `GET /api/conversations/:chatId/tool-results/:resultId`：公开完整结果；带 `offset` / `limit` 时返回最多 16000 字符的公开 JSON 页，详情见 [基础工具指南](../../docs/architecture/agent-tools.md)。
 
-扩展存储由 `extension-storage.mjs` 解析，按扩展环境变量、独立用户指针、旧正式 Data 根依次选择。官方 `official-tools/` 随本体发布，用户 Agent 配置、官方差量覆盖、导入 Skills、MCP npm/浏览器缓存可独立于聊天 Data；默认 MCP 不自动启动，旧自定义连接和外部用户路径保持不变。设置迁移共用 Data 维护锁，复制校验和配置路径/禁用 ID 更新完成后才切换指针；无活动请求时先关闭原运行时，再串行重建，关闭失败禁止继续写入并显示安全错误码。位置更改的具体目录和界面见 [工具与技能存储](../../docs/architecture/agent-tools.md#使用入口与代码归属)。
+扩展存储由 `extension-storage.mjs` 解析，按扩展环境变量、独立用户指针、旧正式 Data 根依次选择。官方 `official-tools/` 随本体发布，用户 Agent 配置、官方差量覆盖、导入 Skills、MCP npm/浏览器缓存可独立于聊天 Data；官方 MCP 默认启用，读取设置、保存开关或显示清单不会启动服务，旧自定义连接、明确关闭选择和外部用户路径保持不变。设置迁移共用 Data 维护锁，复制校验和配置路径/禁用 ID 更新完成后才切换指针；无活动请求时先关闭原运行时，再串行重建，关闭失败禁止继续写入并显示安全错误码。位置更改的具体目录和界面见 [工具与技能存储](../../docs/architecture/agent-tools.md#使用入口与代码归属)。
 
-当前官方包 `0.4.0` 提供 35 个核心工具、7 项官方技能及 11 个可选 MCP 预设。新增 `web.fetch` 复用固定 MIT 组件 `html-to-text` 读取公开网页，不需要 Python 或 MCP 连接；网页正文、最终来源、错误和完整结果归档经过已有审批及回执链。动态、登录和本地页面用浏览器 MCP。新增桌面操作、本机/沙箱终端和资料检索技能；文件读取支持 Unicode 分页及每页全文件 SHA。技能摘要按输入余量注入，保持旧 8K 连接的工具加载能力，用户技能和 MCP 覆盖规则不变。具体条件见 [官方能力表](../../docs/architecture/agent-tools.md#官方工具包与用户工具)。
+当前官方包 `0.4.1` 提供 35 个核心工具、7 项官方技能及 11 个默认启用、可由用户关闭的 MCP 预设。连接前检查认证变量与配置路径占位符；缺启动程序、认证变量或必填路径时显示未就绪，不把失败服务的工具声明给模型。第三方 Python、浏览器等运行环境仍按各预设要求准备，目录发现成功不代表所有工具都可执行。实际发现且启用的远端工具进入后续按需选择，模型声明预算与单工具开关保持不变。新增 `web.fetch` 复用固定 MIT 组件 `html-to-text` 读取公开网页，不需要 Python 或 MCP 连接；网页正文、最终来源、错误和完整结果归档经过已有审批及回执链。动态、登录和本地页面用浏览器 MCP。新增桌面操作、本机/沙箱终端和资料检索技能；文件读取支持 Unicode 分页及每页全文件 SHA。技能摘要按输入余量注入，保持旧 8K 连接的工具加载能力，用户技能和 MCP 覆盖规则不变。具体条件见 [官方能力表](../../docs/architecture/agent-tools.md#官方工具包与用户工具)。
 
 会话只按稳定聊天 ID 标识；服务商和模型是每次回复的属性，切换后继续使用同一历史。同一聊天的完整回复和流式请求共用队列。正式日志保存全部消息，没有 200 条截断；`context.mjs` 按配置窗口选择近期完整问答、已确认记忆和当前请求相关的旧约束/代码摘录，预留输出与安全余量。`context-history.mjs` 的 v2 导航带真实消息来源，基础工具 `conversation.history.search/read` 可按需分页查回当前有效聊天公开正文，排除思考、配置、工具内部记录和兄弟聊天。工具循环按压力缩小已保存结果与旧历史的请求投影，保留调用/返回配对和原生续接字段。失败/中断尝试保留展示但不加入成功上下文。完整规则见 [聊天与工作记忆](../../docs/architecture/chat-work-memory.md#请求上下文与恢复) 与 [基础工具指南](../../docs/architecture/agent-tools.md)。
 
@@ -181,6 +181,8 @@ node --test apps/model-gateway/tests/*.test.mjs
 
 ## 当前验证与后续接口
 
+2026-10-05 官方 MCP 默认启用更新：官方包 `0.4.1` 的 11 个预设默认启用；关闭、隐藏及旧自定义连接保留用户选择。完整网关以 `--test-concurrency=4` 运行 **670/670** 通过、无跳过；实际原生设置窗口默认层 **34**、通用操作 **129** 项通过，x64 桌面构建零警告零错误。最新载荷复制到带空格路径、清空 PATH 且禁用外部 .NET 后，**39** 项运行检查通过，启用清单的读取没有启动任何 MCP。覆盖无连接的设置读写、关闭持久化、恢复默认、缺配置诊断、连接批次顺序、重置期间所有权和中英文状态。测试使用临时数据、模拟 MCP 或本机自造服务，未连接公开 MCP、读取用户凭据或调用真实模型；默认启用不是对所有预设环境已齐全的保证。
+
 2026-10-05 代码规范与后台启动修缮：本轮完整网关 **625/625**、开发预览代理 **4/4** 通过。x64 整包构建零警告、零错误；复制本次载荷到带空格的临时目录，在无系统 PATH、不可用 DOTNET_ROOT 下，**34** 项 Node/npm/npx、宿主能力和隔离网关检查通过。原生后台窗口/控制台 **30**、桌面能力 **35**、终端 **23**、解码 **9**、全新 profile 的 Edge/Chrome **42** 项通过；浏览器检查次数受 UIA 初始化重试影响，截图正文已目视检查。原生工具设置 **129**、浏览器设置 **35**、Transcript DOM **195**、模型窗口 **64** 与延迟初始化关闭 **4**、纯标签状态 **35**、浏览器/MCP 编辑输入 **41** 项通过；流、接口、会话、记忆、预算、迁移和冷启动客户端检查通过。此次不使用用户账号、付费模型或正式数据，结果不覆盖所有第三方软件或所有设备。代码模块边界与未实现部分见 [代码组织](../../docs/architecture/code-organization.md)。
 
 2026-10-02 实现基线 `3226527`：151 项网关自动测试通过；桌面构建零警告、零错误。记忆测试覆盖三层隔离、来源生命周期、版本冲突、迁移、摘要损坏恢复，以及记忆读写与会话移动/删除的并发顺序。该记录是此次基线结果，不是对未来提交、所有真实模型或 1M 推理能力的保证。
@@ -199,7 +201,7 @@ node --test apps/model-gateway/tests/*.test.mjs
 
 2026-10-03 上一阶段工具兼容与可靠性更新：发现目录和模型声明预算分离，支持工具启停、搜索和下一轮加载；原始 typed/structured MCP 结果按聊天保存，消息使用受限预览与完整引用；第三方参数与审批理由分离，包装保留原 schema 方言；技能支持安全 YAML 1.2；取消先保存已返回执行结果；长输出不破坏 JSON。工具续接复用普通聊天预算口径，避免重复计算正文的 JSON 转义。该阶段完整网关回归 239/239、桌面工具客户端 34 项、实际 DOM 20 项、独立原生窗口 78 项、语言 1751 项通过。
 
-随后完成 MCP/Skill 能力补齐：使用官方 SDK 接入 Streamable HTTP、环境变量认证引用和 OAuth client credentials；支持目录通知、资源包装、断开/重连及自有 stdio 进程树清理。Playwright/GitHub 预设默认禁用、重复添加复用配置。技能支持标准包校验、资源分页、导入去重、启停、依赖诊断和 SHA-256 清单下的只读 Node 脚本沙箱；复用 Apache-2.0 沟通写作技能及现有浏览器、文件和记忆能力。完整网关 276/276、客户端 45、独立原生 UI 108、语言 1881 项通过；聊天流式、网关启动、模型上下文、正式聊天与 Data 迁移客户端检查通过。桌面编译零警告零错误，输出模块可独立导入，打包 ToolHost 的实际 AppContainer 技能执行通过。官方 Playwright MCP 实测发现 25 个工具并正常清理。Python/Bash/PowerShell 技能脚本与浏览器交互式 OAuth 尚不支持，也不保证每个模型都会正确选择工具。入口、文件归属及验证范围见 [工具与技能指南](../../docs/architecture/agent-tools.md)。
+随后完成 MCP/Skill 能力补齐：使用官方 SDK 接入 Streamable HTTP、环境变量认证引用和 OAuth client credentials；支持目录通知、资源包装、断开/重连及自有 stdio 进程树清理。该阶段 Playwright/GitHub 预设默认禁用、重复添加复用配置；当前默认启用规则见上方官方包说明。技能支持标准包校验、资源分页、导入去重、启停、依赖诊断和 SHA-256 清单下的只读 Node 脚本沙箱；复用 Apache-2.0 沟通写作技能及现有浏览器、文件和记忆能力。完整网关 276/276、客户端 45、独立原生 UI 108、语言 1881 项通过；聊天流式、网关启动、模型上下文、正式聊天与 Data 迁移客户端检查通过。桌面编译零警告零错误，输出模块可独立导入，打包 ToolHost 的实际 AppContainer 技能执行通过。官方 Playwright MCP 实测发现 25 个工具并正常清理。Python/Bash/PowerShell 技能脚本与浏览器交互式 OAuth 尚不支持，也不保证每个模型都会正确选择工具。入口、文件归属及验证范围见 [工具与技能指南](../../docs/architecture/agent-tools.md)。
 
 独立扩展存储补齐后的完整网关检查为 288/288；扩展迁移 73 项、原生存储 UI 116 项、语言 1968 项通过，桌面构建零警告零错误。路径解析、迁移锁、双根保密与客户端清理失败均有独立回归，实际新缓存目录中的 Playwright MCP 仍发现 25 个工具。
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packageId": "kynxa-official-tools",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "Apache-2.0",
   "licenseFile": "LICENSE.txt",
   "description": "Installed, read-only KYNXA tool descriptors, skill packages and MCP connection presets. External MCP implementations are not vendored.",

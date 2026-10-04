@@ -12,7 +12,8 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public AgentConfigSaveRequest? LastSaveRequest { get; private set; }
     public AgentConfig? NextSaveResponse { get; set; }
     private bool _officialLayers;
-    public McpServerConfig OfficialBrowserDefault => BrowserPreset with { Id = "official-browser", Origin = "official", PresetId = "browser", Overridden = false };
+    public McpServerConfig OfficialBrowserDefault => BrowserPreset with { Id = "official-browser", Enabled = true,
+        Origin = "official", PresetId = "browser", Overridden = false };
     public void InstallOfficialLayers()
     {
         _officialLayers = true;
@@ -96,7 +97,8 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
         CatalogReads++;
         var configured = Config.McpServers.FirstOrDefault(server => server.Id == BrowserPreset.Id || server.PresetId == "browser");
         bool exists = configured is not null;
-        return Task.FromResult(new McpCatalogResponse([new("browser", "Browser fixture", "Pinned browser preset", BrowserPreset, exists,
+        var presetServer = _officialLayers ? OfficialBrowserDefault : BrowserPreset;
+        return Task.FromResult(new McpCatalogResponse([new("browser", "Browser fixture", "Pinned browser preset", presetServer, exists,
             "https://source.test.invalid/browser", ["browser"], configured?.Id)], ["filesystem", "memory"]));
     }
     public Task<AgentConfig> AddMcpPresetAsync(string id, long expectedRevision, CancellationToken cancellationToken = default)
@@ -113,7 +115,8 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public Task<McpConnectionsResponse> DisconnectMcpAsync(string serverId, CancellationToken cancellationToken = default)
     { Disconnects++; ConnectionState = "disconnected"; return Task.FromResult(new McpConnectionsResponse(Diagnostics())); }
     private McpConnectionDiagnostic[] Diagnostics() => Config.McpServers.Select(server => new McpConnectionDiagnostic(server.Id,
-        server.Transport, ConnectionState, ConnectionState == "auth-required" ? "MCP_AUTH_REQUIRED" : null,
+        server.Transport, ConnectionState, ConnectionState == "auth-required" ? "MCP_AUTH_REQUIRED"
+            : _officialLayers && server.Origin == "official" ? "MCP_COMMAND_NOT_FOUND" : null,
         ConnectionState == "ready" ? 1 : 0, new(true, true))).ToArray();
     private AgentTool[] Tools()
     {

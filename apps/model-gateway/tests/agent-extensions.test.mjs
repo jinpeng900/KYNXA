@@ -18,12 +18,12 @@ async function saveSkill(f, name = 'fixture') {
   return (await f.service.listSkills(await f.context())).find(skill => skill.name === name);
 }
 
-test('curated MCP presets are disabled, duplicate-safe, portable and revision checked', async t => {
+test('curated MCP presets are enabled, duplicate-safe, portable and revision checked without connecting', async t => {
   const f = await toolFixture(t);
   let config = await f.service.getConfig();
   const catalog = mcpPresetCatalog(config);
   assert.equal(catalog.presets.length, 11); assert.deepEqual(catalog.presets.slice(0, 2).map(item => item.id), ['playwright', 'github']);
-  assert.ok(catalog.presets.every(item => item.server.enabled === false && !item.alreadyConfigured));
+  assert.ok(catalog.presets.every(item => item.server.enabled === true && !item.alreadyConfigured));
   assert.ok(catalog.presets[0].server.args.includes('@playwright/mcp@0.0.83'));
   config = await addMcpPreset(f.service, 'playwright', { expectedRevision: config.revision });
   assert.equal(config.mcpServers.length, 1);
@@ -108,7 +108,7 @@ test('agent settings routes import packages, preserve disable switches and never
   const catalog = await fetch(base + '/api/agent/mcp/catalog').then(response => response.json());
   assert.equal(catalog.presets.length, 11);
   const added = await fetch(base + '/api/agent/mcp/catalog/github/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"expectedRevision":0}' }).then(response => response.json());
-  assert.equal(added.mcpServers[0].enabled, false);
+  assert.equal(added.mcpServers[0].enabled, true);
   const importBody = JSON.stringify({ directory: join(f.workspace, '.kynxa', 'skills', 'fixture') });
   const imported = await fetch(base + '/api/agent/skills/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: importBody }).then(response => response.json());
   assert.equal(imported.imported, true);
