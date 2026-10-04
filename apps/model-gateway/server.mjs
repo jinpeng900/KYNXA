@@ -98,7 +98,7 @@ export function createModelServer(options = {}) {
       }
       if (request.method === 'GET' && pathname === '/health')
         return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
-          agentProtocol: 5, extensionStorageProtocol: EXTENSION_STORAGE_PROTOCOL,
+          agentProtocol: 5, officialToolsProtocol: 2, hostTerminalProtocol: 3, browserAutomationProtocol: 2, extensionStorageProtocol: EXTENSION_STORAGE_PROTOCOL,
           toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 3, dataLayoutVersion: DATA_LAYOUT_VERSION,
           activeRequests, migrating, modelDataHome: modelStore.dataHome, extensionRoot: currentExtensionRoot(),
           ...(storageConfigError ? { storageConfigError } : {}),

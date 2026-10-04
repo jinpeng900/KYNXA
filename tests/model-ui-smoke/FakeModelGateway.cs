@@ -27,6 +27,7 @@ internal sealed class FakeModelGateway : IAsyncDisposable
     public int Saves => Volatile.Read(ref _saves);
     public int Probes => Volatile.Read(ref _probes);
     public int ProbeDelayMs { get; set; }
+    public int ListDelayMs { get; set; }
     public Exception? Failure { get; private set; }
     public ConcurrentQueue<ReceivedModelRequest> Requests { get; } = new();
 
@@ -82,12 +83,13 @@ internal sealed class FakeModelGateway : IAsyncDisposable
             if (path == "/health")
             {
                 result = new { service = "kynxa-model-gateway", status = "ok", storageProtocol = 1,
-                    conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5,
+                    conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2,
                     extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1 };
             }
             else if (path == "/api/models" && context.Request.HttpMethod == "GET")
             {
                 Interlocked.Increment(ref _listReads);
+                if (ListDelayMs > 0) await Task.Delay(ListDelayMs, _shutdown.Token);
                 result = new { providers = ProviderResponse() };
             }
             else if (context.Request.HttpMethod == "POST" && path is "/api/models" or "/api/models/test")

@@ -44,6 +44,12 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal))
+            {
+                await CheckComputerToolsAsync();
+                File.WriteAllText(_result, $"PASS: {_checks} native computer transcript checks. Preview: kynxa-transcript-computer-tools.png.");
+                return;
+            }
             var longChat = Guid.NewGuid();
             string table = "COLD_START\n\n| 名称 | 公式 | 符号解释 | 条件 |\n| --- | --- | --- | --- |\n"
                 + string.Join("\n", Enumerable.Range(1, 50).Select(index =>

@@ -41,3 +41,13 @@ npm run dev -- --port=5173
 - Does not implement WinUI, Mica, AppWindow, WinRT, WebView2 or system tray behavior.
 
 The WinUI project remains the source of truth. When its layout changes, update this preview deliberately.
+
+## Transport and checks
+
+`server.mjs` owns static files and preview startup. `preview-api-proxy.mjs` forwards the API path and query, preserves response types, streams without buffering the entire reply, and cancels upstream work when the preview connection closes. The gateway owns model configuration, conversation records and authorization; the preview adds no parallel storage.
+
+```bash
+npm test
+```
+
+Tests use an ephemeral local gateway fixture. They cover request bodies/query parameters, streaming and disconnect cancellation, malformed paths, and unavailable gateways without using a model key or ordinary chat data.

@@ -1,18 +1,18 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, opendir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ensureLocalDirectory, inspectLocalPath, toolFailure, within } from './tool-paths.mjs';
 import { parseSkillFrontmatter, validateSkillFrontmatter } from './skill-frontmatter.mjs';
 import { assertSkillResourceAllowed, inspectSkillPackage, readSkillFile, readSkillResource, resolveSkillResource, skillScriptRuntime } from './skill-resources.mjs';
 import { checkSkillEnvironment, skillPackagePublicInventory } from './skill-package.mjs';
 import { isExtensionManagedPath } from './extension-storage.mjs';
+import { OFFICIAL_SKILLS_DIRECTORY, officialSkillIdentity } from './official-tools.mjs';
 
 const MAX_SKILL_BYTES = 256 * 1024;
 const MAX_SKILLS = 128;
 const MAX_CANDIDATES_PER_DIRECTORY = 512;
 const decoder = new TextDecoder('utf-8', { fatal: true });
-const defaultBundledDirectory = join(dirname(fileURLToPath(import.meta.url)), 'skills');
+const defaultBundledDirectory = OFFICIAL_SKILLS_DIRECTORY;
 
 
 export class AppSkillService {
@@ -86,6 +86,11 @@ export class AppSkillService {
     // Unavailable sources still retain their lexical identity and diagnostic; dedup must not block other skills.
     catch { return this._sourceKey(path); }
   }
+  _skillIdentity(file) {
+    if (this.bundledDirectory && this._sourceKey(this.bundledDirectory) === this._sourceKey(OFFICIAL_SKILLS_DIRECTORY) &&
+        within(this.bundledDirectory, file)) return officialSkillIdentity(relative(this.bundledDirectory, file));
+    return { id: createHash('sha256').update(resolve(file)).digest('hex').slice(0, 24), legacyIds: [] };
+  }
   roots(context, config) { return this._sources(context, config).map(source => source.path); }
 
   async _load(file, { includeContent = false, signal } = {}) {
@@ -103,7 +108,7 @@ export class AppSkillService {
     const header = parseSkillFrontmatter(content);
     if (!header) throw toolFailure('应用技能元数据无效，原文件已保留。', 'INVALID_APP_SKILL');
     const validation = validateSkillFrontmatter(content, { directoryName: basename(dirname(file)) });
-    const id = createHash('sha256').update(resolve(file)).digest('hex').slice(0, 24);
+    const { id } = this._skillIdentity(file);
     return { id, ...header, source: resolve(file), sha256: data.sha256,
       standardCompliant: validation.valid, diagnostics: validation.diagnostics, ...(includeContent ? { content } : {}) };
   }
@@ -118,7 +123,9 @@ export class AppSkillService {
       const identity = await this._sourceIdentity(skill.source);
       if (!sources.has(identity)) {
         sources.add(identity);
-        skills.push({ ...skill, origin: source.origin, priority: source.priority, enabled: !disabled.has(skill.id) });
+        const { legacyIds } = this._skillIdentity(skill.source);
+        skills.push({ ...skill, origin: source.origin, priority: source.priority,
+          enabled: !disabled.has(skill.id) && !legacyIds.some(id => disabled.has(id)) });
       }
     };
     for (const source of this._sources(context, config)) {
@@ -142,7 +149,7 @@ export class AppSkillService {
       } catch (error) {
         if (signal?.aborted || error.name === 'AbortError') throw error;
         status.unavailableCount++;
-        await add({ id: createHash('sha256').update(join(root, 'SKILL.md')).digest('hex').slice(0, 24), name: basename(root).slice(0, 100) || 'Unavailable skill directory',
+        await add({ id: this._skillIdentity(join(root, 'SKILL.md')).id, name: basename(root).slice(0, 100) || 'Unavailable skill directory',
           description: `Application skill directory unavailable (${error.code ?? 'APP_SKILL_UNAVAILABLE'}); original files preserved.`, source: join(root, 'SKILL.md'),
           status: 'unavailable', standardCompliant: false, diagnostics: [{ code: error.code ?? 'APP_SKILL_UNAVAILABLE', message: 'Skill directory unavailable; originals preserved.' }] }, source);
         continue;
@@ -153,7 +160,7 @@ export class AppSkillService {
         catch (error) {
           if (signal?.aborted || error.name === 'AbortError') throw error;
           status.unavailableCount++;
-          await add({ id: createHash('sha256').update(resolve(file)).digest('hex').slice(0, 24), name: basename(dirname(file)).slice(0, 100) || 'Unavailable application skill',
+          await add({ id: this._skillIdentity(file).id, name: basename(dirname(file)).slice(0, 100) || 'Unavailable application skill',
             description: `Application skill unavailable (${error.code ?? 'APP_SKILL_UNAVAILABLE'}); original file preserved.`, source: resolve(file),
             status: 'unavailable', standardCompliant: false, diagnostics: [{ code: error.code ?? 'APP_SKILL_UNAVAILABLE', message: 'Skill unavailable; original file preserved.' }] }, source);
         }

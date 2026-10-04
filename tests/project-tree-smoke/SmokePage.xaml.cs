@@ -22,6 +22,12 @@ public sealed partial class ShellPage : Page
     public bool IsRendering => _renderingProjects;
     public ShellPage() => InitializeComponent();
     private void RebuildWorkTasks() { }
+    private static readonly string FixtureDesktopDirectory = Path.Combine(Path.GetTempPath(), "kynxa-tree-fixture", "Desktop");
+    public string? MountedFolder { get; private set; }
+    private static string? UserMountedFolder(ProjectState? project) =>
+        KYNXA_Desktop.Services.ProjectMountPresentation.UserFolder(project, FixtureDesktopDirectory);
+    private void UpdateMountedWorkspacePresentation() => MountedFolder = UserMountedFolder(
+        _projects.FirstOrDefault(project => project.Id == _selectedWorkProjectId));
     private void SelectProjectChat(ProjectState project, ProjectChatState chat) =>
         QueueFixture(_projects, chat, selectedProjectId: project.IsFolderlessWorkspace ? null : project.Id);
     private void SelectWorkspaceProject(ProjectState project) => QueueFixture(_projects, null, selectedProjectId: project.Id);

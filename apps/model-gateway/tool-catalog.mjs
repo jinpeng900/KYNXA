@@ -1,33 +1,22 @@
 import { estimateTokens } from './context.mjs';
 import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from './tool-protocols.mjs';
 import { toolFailure } from './tool-paths.mjs';
+import { toolDiscoveryCategory, toolSelectionSignals } from './tool-discovery.mjs';
 
 const discoveryNames = new Set(['tool.search', 'tool.load', 'tool.result.read']);
-
-function querySignals(message) {
-  const text = message.toLowerCase(), terms = new Set(text.match(/[a-z0-9_-]{3,}/g) ?? []);
-  for (const phrase of text.match(/\p{Script=Han}{2,}/gu) ?? []) {
-    if (terms.size >= 64) break;
-    terms.add(phrase);
-    const characters = Array.from(phrase);
-    for (let index = 0; index < characters.length - 1 && terms.size < 64; index++)
-      terms.add(characters[index] + characters[index + 1]);
-  }
-  return { terms: [...terms].slice(0, 64),
-    web: /最新|最近|当前|现在|今天|今日|新闻|官网|官方|上线|发布|搜索|查询|查证|联网|搜一下|是谁|什么时候|什么时间|多少钱/.test(text) ||
-      /\b(?:latest|current|recent|today|news|official|released?|announced?|search|who|when|price|weather)\b|\blook\s+up\b/.test(text),
-    docs: /文档|接口|代码|编程|开发|框架|库的|库怎么/.test(text) ||
-      /\b(?:api|sdk|docs?|documentation|library|libraries|framework|programming|code|typescript|python|dotnet|winui|react)\b/.test(text),
-    url: /https?:\/\/\S+/i.test(text) };
-}
+const coreTool = tool => tool.source === 'builtin' && !tool.name.startsWith('computer.');
 
 function relevanceScore(tool, signals) {
   const name = tool.name.toLowerCase(), description = String(tool.description ?? '').toLowerCase();
+  if (name.startsWith('computer.')) return signals.desktop ? 40 : 0;
+  if (name === 'terminal.host.run') return signals.hostTerminal ? 40 : 0;
   let score = signals.terms.reduce((sum, word) => sum + (name.includes(word) ? 3 : description.includes(word) ? 1 : 0), 0);
   const docs = /context7|query[-_]docs|resolve[-_]library[-_]id|(?:search|fetch|get)[-_](?:docs|documentation)/.test(name);
   const webSearch = /web[-_]?search|search[-_]?web|search[-_]?news|news[-_]?search/.test(name) || /public web search|search (?:the )?(?:web|internet)/.test(description);
   const search = /(?:^|[._-])search(?:$|[._-])/.test(name);
   const fetch = /(?:^|[._-])(?:fetch|web_fetch|fetch_url)(?:$|[._-])/.test(name);
+  if (signals.browser && toolDiscoveryCategory(tool) === 'browser') score += 32;
+  if (signals.retainedNames.has(tool.name)) score += 24;
   if (signals.docs && docs) score += 28;
   if (signals.web || signals.docs) score += webSearch ? (signals.docs ? 12 : 24) : search ? 6 : 0;
   if (fetch && (signals.web || signals.docs || signals.url)) score += signals.url ? 32 : 10;
@@ -36,15 +25,19 @@ function relevanceScore(tool, signals) {
 
 /** Discovery can be large; only a bounded, explicitly selected projection enters a model request. */
 export class ModelToolCatalog {
-  constructor(descriptors, { protocol, tokenBudget = 16000, message = '' } = {}) {
-    this.descriptors = descriptors;
+  constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [] } = {}) {
+    this.descriptors = descriptors.filter(tool => tool.enabled !== false);
     this.protocol = protocol;
     this.tokenBudget = Math.max(0, Math.floor(tokenBudget));
     this.selected = [];
-    const signals = querySignals(message), scores = new Map(descriptors.map(tool => [tool, relevanceScore(tool, signals)]));
-    const ordered = [...descriptors].sort((left, right) =>
+    const signals = toolSelectionSignals(message, { historySignals, previousToolNames });
+    const scores = new Map(this.descriptors.map(tool => [tool, relevanceScore(tool, signals)]));
+    const ordered = this.descriptors.filter(tool => (!tool.name.startsWith('computer.') || signals.desktop) &&
+      (tool.name !== 'terminal.host.run' || signals.hostTerminal)).sort((left, right) =>
       Number(discoveryNames.has(right.name)) - Number(discoveryNames.has(left.name)) ||
-      Number(right.source === 'builtin') - Number(left.source === 'builtin') || scores.get(right) - scores.get(left) ||
+      (signals.remoteBrowser ? Number(toolDiscoveryCategory(right) === 'browser') - Number(toolDiscoveryCategory(left) === 'browser') : 0) ||
+      (signals.desktop ? Number(right.name.startsWith('computer.')) - Number(left.name.startsWith('computer.')) : 0) ||
+      Number(coreTool(right)) - Number(coreTool(left)) || scores.get(right) - scores.get(left) ||
       left.name.localeCompare(right.name));
     for (const descriptor of ordered) if (this.fits([...this.selected, descriptor])) this.selected.push(descriptor);
   }
@@ -59,7 +52,9 @@ export class ModelToolCatalog {
   load(names) {
     const requested = names.map(name => this.descriptors.find(tool => tool.name === name));
     if (requested.some(tool => !tool)) throw toolFailure('工具不存在或已禁用。', 'TOOL_NOT_FOUND', 404);
-    const keep = this.selected.filter(tool => tool.source === 'builtin');
+    // Explicit discovery may replace ordinary builtin schemas as well as remote ones.
+    // Keeping every builtin prevents a small-window model from ever loading the requested capability.
+    const keep = this.descriptors.filter(tool => discoveryNames.has(tool.name));
     const next = [...keep];
     for (const descriptor of requested) if (!next.some(tool => tool.name === descriptor.name)) next.push(descriptor);
     if (!this.fits(next)) throw toolFailure('请求的工具定义超过本轮模型预算，请减少选择。', 'TOOL_CATALOG_BUDGET', 413);

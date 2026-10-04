@@ -32,12 +32,14 @@ public sealed partial class ShellPage
         {
             ProjectTreeReconciler.Update(ProjectEntries, _projects, _activeProjectChat?.Id,
                 _collapsedByUser, _pendingProjectExpansions, _selectedWorkProjectId);
+            foreach (var entry in ProjectEntries) entry.SetMountedFolderPath(UserMountedFolder(entry.Project));
             foreach (var child in ProjectEntries.SelectMany(project => project.Children))
                 child.IsReplying = _pendingReplies.ContainsKey(child.Chat!.Id);
             _pendingProjectExpansions.Clear();
         }
         finally { _renderingProjects = false; }
         RebuildWorkTasks();
+        UpdateMountedWorkspacePresentation();
 
         if (_projectToReveal is not Guid id) return;
         _projectToReveal = null;

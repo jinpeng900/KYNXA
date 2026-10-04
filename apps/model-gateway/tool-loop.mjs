@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import { StreamFailure } from './streaming.mjs';
 import { appendToolResults } from './tool-protocols.mjs';
 import { ToolContextProjection } from './tool-context.mjs';
-import { ToolRunProgress, runLimitFailure } from './tool-run.mjs';
+import { ToolRunProgress, runLimitFailure, startRunTimer } from './tool-run.mjs';
 import { AssistantSegments } from './assistant-segments.mjs';
 import { canRunInParallel } from './tool-scheduling.mjs';
+import { ToolProgressGuard, ToolReadFailureGuard } from './tool-observations.mjs';
+import { isDesktopObservation } from './tool-outcomes.mjs';
 
 export function toolPolicyHash(context) {
   return createHash('sha256').update(JSON.stringify([context.permissionMode, context.workspaceRoot,
@@ -20,6 +22,9 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
   let callsRun = 0;
   const segments = new AssistantSegments(emit);
   const progress = new ToolRunProgress(limits, saveRunState);
+  const observations = new ToolProgressGuard();
+  const readFailures = new ToolReadFailureGuard();
+  let summarizeOnly = false;
   const deadline = AbortSignal.timeout(progress.limits.maxDurationMs);
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
@@ -28,16 +33,21 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       progress.rounds = round + 1;
       segments.start(round + 1);
       await progress.save('model');
-      const roundDeclarations = declarationsForRound?.() ?? declarations;
+      const roundDeclarations = summarizeOnly ? [] : declarationsForRound?.() ?? declarations;
       const compacted = projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
       messages = compacted.messages;
       if (compacted.metrics) await onContextCompacted(compacted.metrics);
-      const turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event));
+      const modelElapsed = startRunTimer();
+      let turn;
+      try { turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event)); }
+      finally { progress.recordModel(modelElapsed()); }
       // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
       await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations });
       segments.finish(turn);
       await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
       progress.observeTurn(turn);
+      if (summarizeOnly && turn.calls.length)
+        throw Object.assign(new StreamFailure('连续读取没有新增信息，已停止重复调用并保留已有结果。请调整查询或补充条件。', 'interrupted'), { code: 'TOOL_RUN_NO_PROGRESS' });
       if (!turn.calls.length) {
         await progress.save('finalizing');
         return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3 };
@@ -61,21 +71,39 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         });
         starts = start;
         await start;
-        const result = await service.execute(context, call, { signal, interactive, emit: event => {
-          // The approval token is ephemeral; only the call itself is durable.
-          emit({ ...event, ...(event.tool ? { tool: { ...event.tool, round: activity.round, order: activity.order } } : {}) });
-        } });
+        const toolElapsed = startRunTimer();
+        let approvalMs = 0, result;
+        try {
+          result = await service.execute(context, call, { signal, interactive,
+            onApprovalWait: durationMs => { approvalMs += durationMs; }, emit: event => {
+              // The approval token is ephemeral; only the call itself is durable.
+              emit({ ...event, ...(event.tool ? { tool: { ...event.tool, round: activity.round, order: activity.order } } : {}) });
+            } });
+        }
+        finally { progress.recordTool({ id: call.id, round: round + 1, durationMs: toolElapsed(), approvalMs, reused: result?.reused === true }); }
+        if (isDesktopObservation(call.name) && result.status === 'unknown')
+          result = { ...result, status: result.code === 'TOOL_CANCELLED' ? 'cancelled' : 'error' };
         if (typeof result.content !== 'string' || result.content.length > 65536)
           throw new StreamFailure('工具结果超过大小限制。', 'interrupted');
         const completed = { ...activity, status: result.status ?? (result.code === 'TOOL_CANCELLED' ? 'cancelled' : result.isError ? 'error' : 'completed'), result: result.content,
           ...(result.resultRef ? { resultRef: result.resultRef } : {}), ...(result.code ? { code: result.code } : {}),
           ...(result.sandbox ? { sandbox: result.sandbox } : {}),
           ...(result.outsideWorkspace != null ? { outsideWorkspace: result.outsideWorkspace } : {}) };
+        if (result.reused) { completed.reused = true; completed.observationCapturedAt = result.observationCapturedAt; }
         await saveActivity(completed);
         emit({ type: 'tool_result', tool: completed });
         await progress.save('continuing', { toolCallId: call.id });
         if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code))
           throw Object.assign(new StreamFailure(result.content, 'interrupted'), { code: result.code });
+        if (call.name === 'terminal.host.run' && result.status === 'unknown')
+          throw Object.assign(new StreamFailure('本机命令结果尚未确认，已保留执行记录。请核验已执行的操作后再继续。', 'interrupted'),
+            { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
+        if (call.name.startsWith('computer.') && !isDesktopObservation(call.name) && result.status === 'unknown')
+          throw Object.assign(new StreamFailure('本机操作结果尚未确认，已保留执行记录。请检查窗口状态后再继续。', 'interrupted'),
+            { code: 'DESKTOP_OUTCOME_UNKNOWN' });
+        if (call.name.startsWith('mcp.') && result.status === 'unknown')
+          throw Object.assign(new StreamFailure('浏览器或外部工具操作结果尚未确认，已保留执行记录。请核验页面状态后再继续。', 'interrupted'),
+            { code: 'MCP_OUTCOME_UNKNOWN' });
         // Once execution returned, record its known outcome before honoring stop.
         // The same cancellation prevents subsequent effects, never this receipt.
         signal?.throwIfAborted();
@@ -96,6 +124,22 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       messages = appendToolResults(protocol, messages, turn, results,
         { onResult: (message, pair) => projection.observeResult(message, pair, round) });
+      const state = observations.observeRound(results);
+      const failures = readFailures.observeRound(results);
+      if (state.repeated) progress.observeNoProgress();
+      if (failures.repeated) progress.observeNoProgress();
+      if (failures.warning || failures.finalize) {
+        summarizeOnly = failures.finalize;
+        messages.push({ role: 'user', content: failures.finalize
+          ? '[KYNXA_READ_FAILURE_FINAL] The same observation target failed three times. Tools are disabled for this final response. Explain the concrete blocker and preserve verified findings. Do not claim that the page was read, the task completed, or the user cancelled. The conversation and saved history remain available.'
+          : '[KYNXA_READ_FAILURE_WARNING] Reading the same target failed twice. Change the connection, use browser DOM/frames instead of desktop UIA, or report the blocker. Do not repeat the same failing read or reactivate the browser just to retry it. This is runtime guidance, not a new user task.' });
+      } else if (state.warning || state.finalize) {
+        summarizeOnly = state.finalize;
+        messages.push({ role: 'user', content: state.finalize
+          ? '[KYNXA_NO_PROGRESS_FINAL] Repeated successful read/search calls produced no new observations. Tools are disabled for this final response. Answer the original task using the existing evidence and actual source URLs. If unresolved, state the specific missing evidence or blocker. Do not claim unsupported completion or repeat the process.'
+          : '[KYNXA_NO_PROGRESS_WARNING] Repeated successful read/search calls produced no new observations. Reassess the original task: answer now if evidence is sufficient; otherwise change the query, page, or approach to obtain genuinely new evidence. Repeating the same observations will end tool execution. This is runtime guidance, not a new user task.' });
+      }
+      await progress.save('continuing', { toolCallId: results.at(-1)?.call.id ?? null });
     }
     throw runLimitFailure('TOOL_RUN_ROUND_LIMIT');
   } catch (error) {

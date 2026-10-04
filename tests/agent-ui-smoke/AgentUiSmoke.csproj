@@ -16,11 +16,17 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <Compile Include="../../apps/desktop/ToolManagementWindow.xaml.cs" Link="ToolManagementWindow.xaml.cs" />
+    <Compile Include="../../apps/desktop/ToolManagementWindow.Browser.cs" Link="ToolManagementWindow.Browser.cs" />
+    <Compile Include="../../apps/desktop/Services/BrowserConnectionSettings.cs" Link="BrowserConnectionSettings.cs" />
+    <Compile Include="../../apps/desktop/Services/McpConfigurationInput.cs" Link="McpConfigurationInput.cs" />
     <Page Include="../../apps/desktop/ToolManagementWindow.xaml" Link="ToolManagementWindow.xaml" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/AgentApiClient.cs" Link="AgentApiClient.cs" />
     <Compile Include="../../apps/desktop/Services/ToolApprovalDialog.cs" Link="ToolApprovalDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/ComputerToolPresentation.cs" Link="ComputerToolPresentation.cs" />
     <Compile Include="../../apps/desktop/Services/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
+    <Compile Include="../../apps/desktop/Services/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
     <Compile Include="../../apps/desktop/Controls/StorageLocationRow.cs" Link="StorageLocationRow.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />

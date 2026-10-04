@@ -19,6 +19,7 @@ public partial class App : Application
     private FrameworkElement _root = null!;
     private Exception? _unhandled;
     private bool _windowClosed;
+    private readonly bool _closeDuringInitialization = Environment.GetCommandLineArgs().Contains("--close-during-initialization", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -26,6 +27,7 @@ public partial class App : Application
         Directory.CreateDirectory(_directory);
         Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", Path.Combine(_directory, "Data"));
         _gateway = new FakeModelGateway();
+        if (_closeDuringInitialization) _gateway.ListDelayMs = 750;
         Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", _gateway.Address);
         File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-model-ui-smoke-latest.txt"), ResultPath);
         InitializeComponent();
@@ -142,6 +144,26 @@ public partial class App : Application
     {
         try
         {
+            if (_closeDuringInitialization)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && !Button("SaveButton").IsEnabled,
+                    "initializer fixture has an in-flight synthetic model catalog read");
+                var initializerId = Element<TextBox>("ProviderIdBox");
+                var initializerStatus = Element<TextBlock>("StatusText");
+                var initializerProviders = Element<StackPanel>("ProviderList");
+                string closingId = initializerId.Text;
+                string initializerClosingStatus = initializerStatus.Text;
+                _window!.Close();
+                await WaitAsync(() => _windowClosed, "native model window closes promptly during initialization");
+                await Task.Delay(900);
+                Check(initializerId.Text == closingId && initializerStatus.Text == initializerClosingStatus &&
+                    initializerProviders.Children.Count == 0 && _unhandled is null,
+                    "late initialization does not populate or update a closed model window");
+                Check(_gateway.Failure is null && _gateway.Saves == 0 && _gateway.Probes == 0,
+                    "closing initialization leaves synthetic configuration unchanged and releases the cancelled read");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native model initializer UI checks.");
+                return;
+            }
             await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && Button("SaveButton").IsEnabled &&
                 Element<StackPanel>("ProviderList").Children.Count == 2, "production model window loads only the isolated fake connection list");
             Check(_window!.Title == "KYNXA 模型管理" && _window.ExtendsContentIntoTitleBar &&

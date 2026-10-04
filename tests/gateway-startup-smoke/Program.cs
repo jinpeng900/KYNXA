@@ -12,8 +12,9 @@ Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", $"http://127.0.0.1:{po
 Environment.SetEnvironmentVariable("KYNXA_STARTUP_TEST_LOG", log);
 try
 {
-    foreach (var (legacyAgentVersion, legacyContextVersion, legacyToolVersion) in new[]
-    { (1, 3, 3), (4, 3, 3), (5, 1, 3), (5, 2, 3), (5, 3, 2) })
+    foreach (var (legacyAgentVersion, legacyContextVersion, legacyToolVersion, legacyOfficialVersion, legacyHostVersion, legacyBrowserVersion) in new[]
+    { (1, 3, 3, 2, 3, 2), (4, 3, 3, 2, 3, 2), (5, 1, 3, 2, 3, 2), (5, 2, 3, 2, 3, 2), (5, 3, 2, 2, 3, 2),
+        (5, 3, 3, 0, 3, 2), (5, 3, 3, 1, 3, 2), (5, 3, 3, 2, 0, 2), (5, 3, 3, 2, 1, 2), (5, 3, 3, 2, 2, 2), (5, 3, 3, 2, 3, 0), (5, 3, 3, 2, 3, 1) })
     using (var legacyReservation = new TcpListener(IPAddress.Loopback, 0))
     {
         legacyReservation.Start();
@@ -28,7 +29,7 @@ try
             {
                 status = "ok", service = "kynxa-model-gateway", conversationProtocol = 1,
                 dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = legacyContextVersion,
-                agentProtocol = legacyAgentVersion, extensionStorageProtocol = 1, toolStreamProtocol = legacyToolVersion
+                agentProtocol = legacyAgentVersion, officialToolsProtocol = legacyOfficialVersion, hostTerminalProtocol = legacyHostVersion, browserAutomationProtocol = legacyBrowserVersion, extensionStorageProtocol = 1, toolStreamProtocol = legacyToolVersion
             });
             request.Response.ContentType = "application/json";
             await request.Response.OutputStream.WriteAsync(bytes); request.Response.Close();

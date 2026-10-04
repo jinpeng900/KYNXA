@@ -10,11 +10,31 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
 {
     private string _title = chat?.Title ?? project.Name;
     private string _glyph = (chat?.IsPinned ?? project.IsPinned) ? "\uE718" : "\uE8B7";
+    private string? _mountedFolder;
     public ProjectState Project { get; private set; } = project;
     public ProjectChatState? Chat { get; private set; } = chat;
     public string Title => _title;
     public override string ToString() => Title;
     public string ContextTitle => Chat is null || Project.IsFolderlessWorkspace ? Title : $"{Project.Name} / {Title}";
+    public string? MountedFolderTooltip => _mountedFolder;
+    public string MountedFolderName
+    {
+        get
+        {
+            if (_mountedFolder is null) return "";
+            string name = Path.GetFileName(Path.TrimEndingDirectorySeparator(_mountedFolder));
+            return name.Length == 0 ? _mountedFolder : name;
+        }
+    }
+    public Visibility MountedFolderVisibility => _mountedFolder is null ? Visibility.Collapsed : Visibility.Visible;
+
+    public void SetMountedFolderPath(string? path)
+    {
+        path = Chat is null && !Project.IsFolderlessWorkspace ? path : null;
+        if (!SetProperty(ref _mountedFolder, path, nameof(MountedFolderTooltip))) return;
+        OnPropertyChanged(nameof(MountedFolderName));
+        OnPropertyChanged(nameof(MountedFolderVisibility));
+    }
     public string Glyph => _glyph;
     public Visibility ProjectOnlyVisibility => Chat is null ? Visibility.Visible : Visibility.Collapsed;
     public string MoreLabel => Chat is null ? Services.UiText.Get("项目操作") : Services.UiText.Get("聊天操作");
@@ -46,6 +66,7 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
         }
         SetProperty(ref _title, chat?.Title ?? project.Name, nameof(Title));
         OnPropertyChanged(nameof(ContextTitle));
+        OnPropertyChanged(nameof(MountedFolderTooltip));
         SetProperty(ref _glyph, (chat?.IsPinned ?? project.IsPinned) ? "\uE718" : "\uE8B7", nameof(Glyph));
     }
 

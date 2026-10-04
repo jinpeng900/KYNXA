@@ -1,7 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Net;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using KYNXA.Contracts;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Windowing;
@@ -15,6 +14,7 @@ namespace KYNXA_Desktop;
 public sealed partial class ToolManagementWindow : Window
 {
     private readonly IAgentApi _api;
+    private readonly bool _ownsApi;
     private readonly Guid? _conversationId;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ObservableCollection<McpServerConfig> _servers = [];
@@ -23,6 +23,7 @@ public sealed partial class ToolManagementWindow : Window
     private CancellationTokenSource? _preview;
     private int _previewGeneration;
     private int _activeTabIndex;
+    private int _serverSourceIndex;
     private string? _editingServerId;
     private bool _busy, _updating, _closed, _allowClose, _serverDirty, _directoriesDirty, _dialogOpen;
     private string? _noticeKey;
@@ -35,12 +36,14 @@ public sealed partial class ToolManagementWindow : Window
     private McpCatalogResponse _catalog = new([], []);
     private McpConnectionDiagnostic[] _connections = [];
     private sealed record ServerEditorState(string Id, string Name, string Command, string Arguments, bool Enabled,
-        string Transport, string Cwd, string EnvRefs, string Url, string HeaderEnv, string Auth);
+        string Transport, string Cwd, string EnvRefs, string Url, string HeaderEnv, string Auth,
+        int BrowserMode, bool BrowserVisible, string BrowserEndpoint);
 
     public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null)
     {
         InitializeComponent();
         _api = api ?? new AgentApiClient();
+        _ownsApi = api is null;
         _conversationId = conversationId;
         AgentServerList.ItemsSource = _servers;
         AgentDirectoryList.ItemsSource = _directories;
@@ -80,12 +83,21 @@ public sealed partial class ToolManagementWindow : Window
         Title = UiText.Get("KYNXA · 工具与技能");
         if (_noticeKey is not null) AgentStatusBar.Message = UiText.Get(_noticeKey) + _noticeDetails;
         RefreshConnectionStatus();
+        RenderServerSource();
+        if (_config is { } config) RenderToolLocations(config);
         RenderSkillDiagnostics(); Preset_SelectionChanged(this, null!);
+        if (_editingSkill is { } skill) UiLocalization.Bind(AgentSkillSourceTypeLabel, TextBlock.TextProperty, SkillSourceKey(skill));
         int transportIndex = AgentServerTransportBox.SelectedIndex;
+        int browserModeIndex = AgentBrowserModeBox.SelectedIndex;
         bool wasUpdating = _updating; _updating = true;
         AgentServerTransportBox.SelectedIndex = -1;
         AgentServerTransportBox.SelectedIndex = transportIndex;
+        AgentServerSourceBox.SelectedIndex = -1;
+        AgentServerSourceBox.SelectedIndex = _serverSourceIndex;
+        AgentBrowserModeBox.SelectedIndex = -1;
+        AgentBrowserModeBox.SelectedIndex = browserModeIndex;
         _updating = wasUpdating;
+        RefreshBrowserFields();
     }
 
     private void Notice(string key, InfoBarSeverity severity = InfoBarSeverity.Warning, Exception? error = null)
@@ -107,11 +119,18 @@ public sealed partial class ToolManagementWindow : Window
         AgentAddDirectoryButton.IsEnabled = AgentRemoveDirectoryButton.IsEnabled = !value && _config is not null;
         AgentSaveDirectoriesButton.IsEnabled = !value && _config is not null && _directoriesDirty;
         AgentImportSkillButton.IsEnabled = !value && _config is not null;
-        AgentDeleteServerButton.IsEnabled = !value && _editingServerId is not null;
+        var editingServer = _config?.McpServers.FirstOrDefault(server => server.Id == _editingServerId);
+        bool official = IsOfficial(editingServer);
+        AgentDeleteServerButton.Visibility = official ? Visibility.Collapsed : Visibility.Visible;
+        AgentDeleteServerButton.IsEnabled = !value && editingServer is not null && !official;
+        bool canRestore = official && editingServer?.Overridden == true && OfficialPresetFor(editingServer) is not null;
+        AgentRestoreServerButton.Visibility = canRestore ? Visibility.Visible : Visibility.Collapsed;
+        AgentRestoreServerButton.IsEnabled = !value && canRestore;
         AgentToolList.IsEnabled = !value;
         AgentToolEnabledBox.IsEnabled = !value && SelectedToolServer() is not null;
         AgentSaveToolButton.IsEnabled = !value && _toolDirty && SelectedToolServer() is not null;
         AgentPresetBox.IsEnabled = !value && _config is not null;
+        AgentServerSourceBox.IsEnabled = !value && _config is not null;
         AgentAddPresetButton.IsEnabled = !value && _config is not null && AgentPresetBox.SelectedItem is McpPreset;
         AgentReconnectButton.IsEnabled = !value && _editingServerId is not null && _config?.McpServers.Any(server => server.Id == _editingServerId && server.Enabled) == true;
         AgentDisconnectButton.IsEnabled = !value && _editingServerId is not null;
@@ -127,10 +146,8 @@ public sealed partial class ToolManagementWindow : Window
         if (config.Version != 1 || config.Revision < 0 || config.McpServers is null || config.SkillDirectories is null)
             throw new InvalidDataException(UiText.Get("工具配置版本不受支持。"));
         _config = config;
+        RefreshServerList();
         _updating = true;
-        _servers.Clear();
-        foreach (var server in config.McpServers) _servers.Add(server);
-        AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == _editingServerId);
         if (replaceDirectories)
         {
             _directories.Clear();
@@ -138,6 +155,8 @@ public sealed partial class ToolManagementWindow : Window
             _directoriesDirty = false;
         }
         _updating = false;
+        RenderToolLocations(config);
+        RenderServerSource();
     }
 
     private async Task LoadAsync()
@@ -177,7 +196,7 @@ public sealed partial class ToolManagementWindow : Window
         {
             string[] directories = saveDirectories ? _directories.ToArray() : _config.SkillDirectories;
             var saved = await _api.SaveConfigAsync(new(1, _config.Revision, servers, directories,
-                disabledSkills ?? _config.DisabledSkills ?? []), _lifetime.Token);
+                disabledSkills ?? _config.DisabledSkills ?? [], _config.DisabledOfficialMcpServers), _lifetime.Token);
             if (_closed) return false;
             AcceptConfig(saved, replaceDirectories: saveDirectories);
             Notice("工具配置已保存。", InfoBarSeverity.Success);
@@ -217,11 +236,104 @@ public sealed partial class ToolManagementWindow : Window
         AgentServerAuthBox.Text = server?.Auth is { } auth ? JsonSerializer.Serialize(auth,
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }) : "";
         RefreshTransportFields();
+        FillBrowserSettings();
         _savedEditor = ReadEditor();
         _serverDirty = false;
         _updating = false;
-        AgentDeleteServerButton.IsEnabled = !_busy && server is not null;
+        RenderServerSource();
         RefreshConnectionStatus(); SetBusy(_busy);
+    }
+
+    private static bool IsOfficial(McpServerConfig? server) => server?.Origin == "official";
+
+    private static string ServerSourceKey(McpServerConfig? server) => IsOfficial(server)
+        ? server!.Overridden == true ? "官方 · 已自定义" : "官方工具"
+        : "用户工具";
+
+    private static string SkillSourceKey(AgentSkill skill) => skill.Origin switch
+    {
+        "builtin" => "官方工具",
+        "workspace" => "项目工具",
+        _ => "用户工具"
+    };
+
+    private McpPreset? OfficialPresetFor(McpServerConfig? server) => IsOfficial(server) && server?.PresetId is { } id
+        ? _catalog.Presets.FirstOrDefault(preset => preset.Id == id) : null;
+
+    private void RenderServerSource()
+    {
+        var server = _config?.McpServers.FirstOrDefault(item => item.Id == _editingServerId);
+        AgentServerSourceLabel.Text = UiText.Get(ServerSourceKey(server)) + (IsOfficial(server)
+            ? " · " + UiText.Get("修改保存在用户工具中。") : string.Empty);
+    }
+
+    private void RenderToolLocations(AgentConfig config)
+    {
+        void Fill(TextBlock label, TextBlock path, string? location, string? version = null)
+        {
+            bool visible = !string.IsNullOrWhiteSpace(location);
+            label.Visibility = path.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            path.Text = location ?? string.Empty;
+            ToolTipService.SetToolTip(path, location + (version is null ? string.Empty : "\n" + string.Format(UiText.Get("版本 {0}"), version)));
+        }
+        Fill(AgentOfficialRootLabel, AgentOfficialRootPath, config.OfficialToolsRoot, config.OfficialPackageVersion);
+        Fill(AgentUserRootLabel, AgentUserRootPath, config.UserToolsRoot);
+    }
+
+    private void RefreshServerList()
+    {
+        bool wasUpdating = _updating;
+        _updating = true;
+        _servers.Clear();
+        foreach (var server in _config?.McpServers ?? [])
+            if (_serverSourceIndex == 0 || (_serverSourceIndex == 1) == IsOfficial(server)) _servers.Add(server);
+        AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == _editingServerId);
+        _updating = wasUpdating;
+    }
+
+    private void SelectServer(McpServerConfig server)
+    {
+        _editingServerId = server.Id;
+        if ((_serverSourceIndex == 1 && !IsOfficial(server)) || (_serverSourceIndex == 2 && IsOfficial(server)))
+        {
+            _updating = true;
+            _serverSourceIndex = AgentServerSourceBox.SelectedIndex = 0;
+            _updating = false;
+        }
+        RefreshServerList();
+        FillServer(server);
+    }
+
+    private async void ServerSource_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_api is null || _updating || _closed) return;
+        int selected = AgentServerSourceBox.SelectedIndex;
+        if (selected < 0 || selected == _serverSourceIndex) return;
+        if (_serverDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
+        {
+            _updating = true; AgentServerSourceBox.SelectedIndex = _serverSourceIndex; _updating = false;
+            return;
+        }
+        if (_closed) return;
+        _serverSourceIndex = selected;
+        RefreshServerList();
+        FillServer(_servers.FirstOrDefault(server => server.Id == _editingServerId));
+    }
+
+    private static void BindListSource(ContainerContentChangingEventArgs args, string name, string key)
+    {
+        if (!args.InRecycleQueue && args.ItemContainer.ContentTemplateRoot is FrameworkElement template &&
+            template.FindName(name) is TextBlock label) UiLocalization.Bind(label, TextBlock.TextProperty, key);
+    }
+
+    private void ServerList_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
+    {
+        if (e.Item is McpServerConfig server) BindListSource(e, "AgentServerListSourceLabel", ServerSourceKey(server));
+    }
+
+    private void SkillList_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
+    {
+        if (e.Item is AgentSkill skill) BindListSource(e, "AgentSkillListSourceLabel", SkillSourceKey(skill));
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -308,15 +420,15 @@ public sealed partial class ToolManagementWindow : Window
         if (_serverDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改")) return;
         if (_closed) return;
         if (preset.AlreadyConfigured && _config.McpServers.FirstOrDefault(server => server.Id == preset.ConfiguredServerId) is { } existing)
-        { FillServer(existing); AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == existing.Id); Notice("此预设已配置，已打开现有服务。", InfoBarSeverity.Informational); return; }
+        { SelectServer(existing); Notice("此预设已配置，已打开现有服务。", InfoBarSeverity.Informational); return; }
         SetBusy(true);
         try
         {
             var config = await _api.AddMcpPresetAsync(preset.Id, _config.Revision, _lifetime.Token);
             if (_closed) return;
             AcceptConfig(config, replaceDirectories: false);
-            FillServer(config.McpServers.FirstOrDefault(server => server.Id == preset.Server.Id));
-            _updating = true; AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == _editingServerId); _updating = false;
+            var added = config.McpServers.FirstOrDefault(server => server.PresetId == preset.Id || server.Id == preset.Server.Id);
+            if (added is not null) SelectServer(added);
             Notice("预设已添加，当前保持停用。", InfoBarSeverity.Success);
             var refreshed = await _api.GetMcpCatalogAsync(_lifetime.Token);
             if (_closed) return;
@@ -413,6 +525,7 @@ public sealed partial class ToolManagementWindow : Window
         {
             bool http = ServerTransport == "streamable-http";
             var args = http ? [] : JsonSerializer.Deserialize<string[]>(AgentServerArgsBox.Text) ?? throw new JsonException();
+            if (!http && _browserSettingsEdited && ReadBrowserSettings(args) is { } browser) args = browser.Apply(args);
             if (args.Any(argument => argument is null || argument.Contains('\0')) || string.IsNullOrWhiteSpace(AgentServerIdBox.Text) ||
                 string.IsNullOrWhiteSpace(AgentServerNameBox.Text) || (!http && string.IsNullOrWhiteSpace(AgentServerCommandBox.Text)) ||
                 AgentServerIdBox.Text.Contains('\0') || AgentServerNameBox.Text.Contains('\0') || AgentServerCommandBox.Text.Contains('\0')) throw new JsonException();
@@ -424,33 +537,47 @@ public sealed partial class ToolManagementWindow : Window
                 address.Query.Length > 0 || address.Fragment.Length > 0 || (address.Scheme != "https" && !(address.Scheme == "http" && address.IsLoopback)))) throw new JsonException();
             edited = new(AgentServerIdBox.Text.Trim(), AgentServerNameBox.Text.Trim(), http ? "" : AgentServerCommandBox.Text.Trim(), args,
                 AgentServerEnabledBox.IsChecked == true, previous?.ProtocolVersion, previous?.DisabledTools ?? [], ServerTransport,
-                http ? null : cwd, previous?.Env, http ? null : ReadReferences(AgentServerEnvRefsBox.Text, headers: false),
-                url, http ? ReadReferences(AgentServerHeaderEnvBox.Text, headers: true) : null,
-                http ? ReadAuthentication(AgentServerAuthBox.Text) : previous?.Auth, previous?.StartupTimeoutMs);
+                http ? null : cwd, previous?.Env, http ? null : McpConfigurationInput.ReadReferences(AgentServerEnvRefsBox.Text, headers: false),
+                url, http ? McpConfigurationInput.ReadReferences(AgentServerHeaderEnvBox.Text, headers: true) : null,
+                http ? McpConfigurationInput.ReadAuthentication(AgentServerAuthBox.Text) : previous?.Auth, previous?.StartupTimeoutMs);
             if (_editingServerId is null && _config.McpServers.Any(server => server.Id == edited.Id))
                 throw new JsonException();
         }
-        catch (Exception error) when (error is JsonException or ArgumentException)
+        catch (ArgumentException error)
+        { Notice(error.Message, InfoBarSeverity.Error); return; }
+        catch (JsonException)
         { Notice("请核对服务信息、URL、绝对路径及 JSON 环境变量引用。", InfoBarSeverity.Error); return; }
         var servers = _config.McpServers.Where(server => server.Id != _editingServerId).Append(edited).ToArray();
         if (await SaveAsync(servers, saveDirectories: false) && !_closed)
         {
-            FillServer(edited);
-            _updating = true;
-            AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == edited.Id);
-            _updating = false;
+            var saved = _config!.McpServers.FirstOrDefault(server => server.Id == edited.Id);
+            if (saved is not null) SelectServer(saved);
         }
     }
 
     private async void DeleteServer_Click(object sender, RoutedEventArgs e)
     {
-        if (_config is null || _editingServerId is not { } id || !await ConfirmAsync("删除服务？", "删除后，此服务不再连接。", "删除")) return;
+        if (_config is null || _editingServerId is not { } id || IsOfficial(_config.McpServers.FirstOrDefault(server => server.Id == id)) ||
+            !await ConfirmAsync("删除服务？", "删除后，此服务不再连接。", "删除")) return;
         if (!_closed && await SaveAsync(_config.McpServers.Where(server => server.Id != id).ToArray(), saveDirectories: false)) FillServer(null);
+    }
+
+    private async void RestoreServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || _busy || _editingServerId is not { } id ||
+            OfficialPresetFor(_config.McpServers.FirstOrDefault(server => server.Id == id)) is not { } preset ||
+            !await ConfirmAsync("恢复默认？", "当前自定义服务配置将恢复为官方预设。", "恢复默认")) return;
+        if (_closed) return;
+        var restored = preset.Server with { Id = id, Origin = "official", PresetId = preset.Id, Overridden = null };
+        var servers = _config.McpServers.Select(server => server.Id == id ? restored : server).ToArray();
+        if (await SaveAsync(servers, saveDirectories: false) && !_closed &&
+            _config!.McpServers.FirstOrDefault(server => server.Id == id) is { } saved) SelectServer(saved);
     }
 
     private ServerEditorState ReadEditor() => new(AgentServerIdBox.Text, AgentServerNameBox.Text, AgentServerCommandBox.Text,
         AgentServerArgsBox.Text, AgentServerEnabledBox.IsChecked == true, ServerTransport, AgentServerCwdBox.Text,
-        AgentServerEnvRefsBox.Text, AgentServerUrlBox.Text, AgentServerHeaderEnvBox.Text, AgentServerAuthBox.Text);
+        AgentServerEnvRefsBox.Text, AgentServerUrlBox.Text, AgentServerHeaderEnvBox.Text, AgentServerAuthBox.Text,
+        AgentBrowserModeBox.SelectedIndex, AgentBrowserVisibleBox.IsChecked == true, AgentBrowserEndpointBox.Text);
 
     private string ServerTransport => AgentServerTransportBox.SelectedIndex == 1 ? "streamable-http" : "stdio";
     private void RefreshTransportFields()
@@ -459,31 +586,20 @@ public sealed partial class ToolManagementWindow : Window
         AgentStdioAdvancedFields.Visibility = AgentStdioFields.Visibility;
         AgentHttpAdvancedFields.Visibility = AgentHttpFields.Visibility; }
     private void Transport_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    { if (_api is null) return; RefreshTransportFields(); if (!_updating) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
-
-    private static Dictionary<string, string> ReadReferences(string text, bool headers)
-    {
-        var references = JsonSerializer.Deserialize<Dictionary<string, string>>(text) ?? throw new JsonException();
-        foreach (var pair in references)
-            if (!Regex.IsMatch(pair.Key, headers ? "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$" : "^[A-Za-z_][A-Za-z0-9_]*$") ||
-                pair.Value is null || !Regex.IsMatch(pair.Value, "^[A-Za-z_][A-Za-z0-9_]*$")) throw new JsonException();
-        return references;
-    }
-
-    private static McpAuthentication? ReadAuthentication(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        var auth = JsonSerializer.Deserialize<McpAuthentication>(text, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? throw new JsonException();
-        bool environmentName(string? value) => value is not null && Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]*$");
-        if (auth.Type == "bearer-env" && environmentName(auth.TokenEnv)) return auth;
-        if (auth.Type == "oauth-client-credentials" && !string.IsNullOrWhiteSpace(auth.ClientId) && environmentName(auth.ClientSecretEnv) &&
-            Uri.TryCreate(auth.Issuer, UriKind.Absolute, out var issuer) && issuer.Scheme == "https" && issuer.UserInfo.Length == 0 &&
-            issuer.Query.Length == 0 && issuer.Fragment.Length == 0) return auth;
-        throw new JsonException();
-    }
+    { if (_api is null) return; RefreshTransportFields(); RefreshBrowserFields(); if (!_updating) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
 
     private void Server_TextChanged(object sender, TextChangedEventArgs e)
-    { if (!_updating && _api is not null) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
+    {
+        if (_updating || _api is null) return;
+        if (ReferenceEquals(sender, AgentServerArgsBox) || ReferenceEquals(sender, AgentServerCommandBox) || ReferenceEquals(sender, AgentServerEnvRefsBox))
+        {
+            _updating = true;
+            FillBrowserSettings();
+            _updating = false;
+        }
+        _serverDirty = ReadEditor() != _savedEditor;
+        SetBusy(_busy);
+    }
     private void Server_EnabledChanged(object sender, RoutedEventArgs e)
     { if (!_updating && _api is not null) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
 
@@ -576,6 +692,7 @@ public sealed partial class ToolManagementWindow : Window
     {
         _updating = true; _skillDirty = false;
         AgentSkillNameLabel.Text = skill?.Name ?? string.Empty;
+        UiLocalization.Bind(AgentSkillSourceTypeLabel, TextBlock.TextProperty, skill is null ? string.Empty : SkillSourceKey(skill));
         AgentSkillEnabledBox.IsChecked = skill is not null && !(_config?.DisabledSkills ?? []).Contains(skill.Id, StringComparer.Ordinal);
         RenderSkillDiagnostics();
         _updating = false; SetBusy(_busy);
@@ -703,7 +820,7 @@ public sealed partial class ToolManagementWindow : Window
         _preview?.Cancel();
         UiText.LanguageChanged -= Language_Changed;
         AppWindow.Closing -= Window_Closing;
-        if (_api is IDisposable disposable) disposable.Dispose();
+        if (_ownsApi && _api is IDisposable disposable) disposable.Dispose();
         _lifetime.Dispose();
     }
 }

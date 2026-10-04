@@ -5,9 +5,10 @@
   "description": "Linux-runnable visual preview for the KYNXA WinUI 3 desktop shell",
   "scripts": {
     "dev": "node server.mjs",
-    "dev:open": "node server.mjs --open"
+    "dev:open": "node server.mjs --open",
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   }
 }

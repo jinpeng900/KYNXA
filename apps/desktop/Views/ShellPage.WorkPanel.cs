@@ -1,5 +1,7 @@
 using KYNXA_Desktop.Controls;
 using Microsoft.UI.Xaml;
+using KYNXA_Desktop.Models.UI;
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Layout;
 using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 
@@ -9,12 +11,24 @@ public sealed partial class ShellPage
 {
     private double _workPanelWidthBeforeDrag;
 
+    private static string? UserMountedFolder(ProjectState? project) =>
+        ProjectMountPresentation.UserFolder(project, StoragePaths.DesktopDirectory);
+
+    private void UpdateMountedWorkspacePresentation()
+    {
+        var project = ViewModel.IsChatMode ? null : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
+        MountedWorkspace.ShowProject(project?.Id, UserMountedFolder(project));
+        ApplyLayout();
+    }
+
     private double UpdateWorkPanelLayout()
     {
         double available = MainRegion.ActualWidth;
-        bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
         bool hasSpace = CanShowWorkPanel(available, MainRegion.ActualHeight);
-        bool canOpen = isWorkConversation && hasSpace;
+        SuspendUnselectedWorkViewers(_layout.PreviewVisible && hasSpace);
+        SynchronizeWorkTabs();
+        bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
+        bool canOpen = (isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder) && hasSpace;
         bool visible = canOpen && _layout.PreviewVisible;
         double panelWidth = visible ? GetWorkPanelWidth(available, _layout.PreviewWidth) : 0;
         double gap = visible ? WorkPanelGap : 0;
@@ -22,6 +36,7 @@ public sealed partial class ShellPage
         PreviewColumn.Width = new GridLength(panelWidth);
         PreviewGripColumn.Width = new GridLength(gap);
         WorkContextPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        PresentSelectedWorkTab(visible);
         WorkPanelGrip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         OpenWorkPanelButton.Visibility = canOpen && !visible ? Visibility.Visible : Visibility.Collapsed;
         ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 56 : 24, 0);

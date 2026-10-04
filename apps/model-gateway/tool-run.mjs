@@ -22,6 +22,23 @@ export function runLimitFailure(code) {
   return Object.assign(new StreamFailure('连续执行达到预算上限，已保留回复和工具执行记录。', 'interrupted'), { code });
 }
 
+const metricFailure = () => Object.assign(new Error('执行耗时诊断格式无效。'), { code: 'INVALID_TOOL_RUN_DIAGNOSTICS' });
+function metricInteger(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw metricFailure();
+  return value;
+}
+function metricSum(left, right) { return metricInteger(left + right); }
+function metricRound(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 128) throw metricFailure();
+  return value;
+}
+
+/** Caller ends this timer at the real operation boundary; wall-clock/date edits cannot change elapsed time. */
+export function startRunTimer() {
+  const started = performance.now();
+  return () => Math.max(0, Math.ceil(performance.now() - started));
+}
+
 /** Small public projection; native provider continuation and credentials never enter it. */
 export class ToolRunProgress {
   constructor(limits, persist = async () => {}) {
@@ -31,6 +48,9 @@ export class ToolRunProgress {
     this.generatedTokens = 0;
     this.rounds = 0;
     this.toolCalls = 0;
+    this.diagnostics = { version: 1, totalModelMs: 0, totalToolMs: 0, totalApprovalWaitMs: 0,
+      maxModelMs: 0, maxToolMs: 0, maxApprovalWaitMs: 0, modelCalls: 0,
+      executedToolCalls: 0, reusedToolCalls: 0, noProgressRounds: 0, modelRounds: [], toolCallsTiming: [] };
   }
 
   observeTurn(turn) {
@@ -39,9 +59,39 @@ export class ToolRunProgress {
     if (this.generatedTokens > this.limits.maxGeneratedTokens) throw runLimitFailure('TOOL_RUN_OUTPUT_LIMIT');
   }
 
+  recordModel(durationMs, round = this.rounds) {
+    durationMs = metricInteger(durationMs); round = metricRound(round);
+    const previous = this.diagnostics;
+    this.diagnostics = { ...previous, totalModelMs: metricSum(previous.totalModelMs, durationMs),
+      maxModelMs: Math.max(previous.maxModelMs, durationMs), modelCalls: metricSum(previous.modelCalls, 1),
+      modelRounds: [...previous.modelRounds, { round, durationMs }].slice(-64) };
+  }
+
+  /** durationMs is the complete call span. Tool totals/maxima exclude measured approval wait.
+   * Concurrent tool spans are summed processing time, never the request's elapsed wall time.
+   * Reused calls measure lookup/projection overhead and do not increment executedToolCalls. */
+  recordTool({ id, round, durationMs, approvalMs = 0, reused = false }) {
+    durationMs = metricInteger(durationMs); approvalMs = metricInteger(approvalMs); round = metricRound(round);
+    if (typeof id !== 'string' || !id || id.length > 200 || /[\0\r\n]/.test(id) || typeof reused !== 'boolean' || approvalMs > durationMs)
+      throw metricFailure();
+    const previous = this.diagnostics, executionMs = durationMs - approvalMs;
+    this.diagnostics = { ...previous, totalToolMs: metricSum(previous.totalToolMs, executionMs),
+      totalApprovalWaitMs: metricSum(previous.totalApprovalWaitMs, approvalMs),
+      maxToolMs: Math.max(previous.maxToolMs, executionMs), maxApprovalWaitMs: Math.max(previous.maxApprovalWaitMs, approvalMs),
+      executedToolCalls: metricSum(previous.executedToolCalls, reused ? 0 : 1),
+      reusedToolCalls: metricSum(previous.reusedToolCalls, reused ? 1 : 0),
+      toolCallsTiming: [...previous.toolCallsTiming, { toolCallId: id, round, durationMs, approvalMs, reused }].slice(-256) };
+  }
+
+  observeNoProgress(count = 1) {
+    const previous = this.diagnostics;
+    this.diagnostics = { ...previous, noProgressRounds: metricSum(previous.noProgressRounds, metricInteger(count)) };
+  }
+
   async save(phase, { toolCallId = null, code = null } = {}) {
     await this.persist({ version: 1, phase, rounds: this.rounds, toolCalls: this.toolCalls,
       estimatedGeneratedTokens: this.generatedTokens, limits: this.limits,
-      startedAt: this.startedAt, updatedAt: new Date().toISOString(), toolCallId, code });
+      startedAt: this.startedAt, updatedAt: new Date().toISOString(), toolCallId, code,
+      diagnostics: structuredClone(this.diagnostics) });
   }
 }

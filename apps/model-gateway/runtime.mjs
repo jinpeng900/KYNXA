@@ -10,6 +10,8 @@ import { buildContext, ContextError, estimateTokens, estimateMessageTokens } fro
 
 import { ToolService } from './tool-service.mjs';
 import { SandboxRunner } from './sandbox-runner.mjs';
+import { DesktopRunner } from './desktop-runner.mjs';
+import { HostTerminalRunner } from './host-terminal-runner.mjs';
 import { toolDeclarations, decodeToolTurn, estimateToolMessageTokens } from './tool-protocols.mjs';
 import { readToolStream } from './tool-streaming.mjs';
 import { runToolLoop, toolPolicyHash } from './tool-loop.mjs';
@@ -45,7 +47,7 @@ export class ModelRuntime {
     this.extensionRoot = resolve(extensionRoot ?? toolService?.extensionRoot ?? this.conversations.root);
     this.memory = memoryService ?? new MemoryService({ conversationStore: this.conversations });
     this.tools = toolService ?? new ToolService({ conversationStore: this.conversations, dataHome, extensionRoot: this.extensionRoot,
-      sandboxRunner: new SandboxRunner({ excludedRoots: [dataHome, this.conversations.root, this.extensionRoot,
+      desktopRunner: new DesktopRunner(), hostTerminalRunner: new HostTerminalRunner(), sandboxRunner: new SandboxRunner({ conversationWorkspaceHome: dataHome, excludedRoots: [dataHome, this.conversations.root, this.extensionRoot,
         ...extensionControlPaths(extensionPointerPath()).map(path => dirname(path))].filter(Boolean) }) });
     this.timeoutMs = timeoutMs;
     this.idleTimeoutMs = idleTimeoutMs;
@@ -125,10 +127,15 @@ export class ModelRuntime {
       if (toolContext) {
         await this.tools.catalog(toolContext, { connectMcp: true });
         toolSystem = await this.tools.systemPrompt(toolContext);
-        const tokenBudget = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .30),
+        const tokenBudget = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40),
           context.metrics.inputBudgetTokens - estimateMessageTokens([{ role: 'user', content: input.message }])
             - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - 512);
-        catalog = this.tools.configureModelCatalog(toolContext, { protocol: connection.protocol, tokenBudget, message: input.message });
+        const recentHistory = history.slice(-12);
+        catalog = this.tools.configureModelCatalog(toolContext, { protocol: connection.protocol, tokenBudget, message: input.message,
+          historySignals: recentHistory.filter(item => item.Role === 'user' && item.Id !== userId).slice(-3)
+            .map(item => String(item.Content ?? '').slice(0, 1000)),
+          previousToolNames: recentHistory.filter(item => item.Role === 'assistant').flatMap(item =>
+            (item.ToolActivities ?? []).filter(activity => ['completed', 'error', 'unknown'].includes(activity.status)).map(activity => activity.name)).slice(-32) });
         declarations = toolDeclarations(connection.protocol, catalog);
       }
       const projection = new ModelHistoryProjection({ history, beforeUserId: userId, protocol: connection.protocol,
@@ -455,8 +462,11 @@ export class ModelRuntime {
 
   async close() {
     this.shutdown.abort();
-    await this.tools.close();
-    await Promise.allSettled([...this.queues.values()]);
+    try { await this.tools.close(); }
+    finally {
+      // Even failed process teardown must wait for final receipts and context releases.
+      await Promise.allSettled([...this.queues.values()]);
+    }
   }
 }
 

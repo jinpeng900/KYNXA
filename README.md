@@ -15,7 +15,7 @@ KYNXA is currently under active development. Many features described in the desi
 
 ## Current Implementation
 
-Updated 2026-10-03. This section describes implemented behavior; the larger runtime design remains a plan.
+Updated 2026-10-05. This section describes implemented behavior; the larger runtime design remains a plan.
 
 * Windows desktop: C# / WinUI 3 / XAML, with WebView2 for selectable Markdown, code highlighting and KaTeX math.
 * A bundled Node.js gateway connects cloud and local HTTP model services using Chat Completions, Responses or Claude Messages. Streaming, cancellation and visible reasoning are supported.
@@ -30,13 +30,15 @@ Settings includes memory management for chat, work and user scopes. Gateway regr
 
 Model-controlled file tools, per-request approvals, stdio / Streamable HTTP MCP, application skills and a Windows AppContainer terminal are implemented. Tools and skills settings support official service presets, environment-variable authentication references, skill import and enable switches; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints, automatic semantic memory and full-text/vector search remain planned. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
 
+Folderless chats have persistent isolated work directories. Bundled native tools can launch GUI applications, read accessible window text, capture target windows and perform approved targeted input without requiring Python. A separate host CMD/PowerShell tool preserves actual output and execution receipts. The right sidebar uses horizontally scrollable screenshot tabs and original-pixel fullscreen viewing; new screenshots do not replace an already selected tab. Terminal output is kept in execution receipts, and an explicitly requested visible console opens separately.
+
 Large MCP catalogs are discovered separately from the bounded model tool declarations. Individual tools can be disabled or loaded on demand. Typed and structured results are saved with chat-scoped references and paged previews; private MCP metadata stays out of model and viewer projections. Approval reasons are separate from third-party arguments, skill headers use bounded YAML 1.2 parsing, and cancellation records returned execution outcomes before stopping.
 
 Skill resources resolve from their package root, with standard validation, dependency diagnostics and read-only package snapshots for isolated Node scripts. Official Playwright and GitHub MCP presets and an Apache-2.0 communication-writing skill are reused without adding duplicate filesystem or memory services. Presets start disabled and repeated additions reuse existing configurations. Python/Bash skill scripts and interactive browser OAuth login are not supported; unverified runtime dependencies block execution.
 
-Settings provide separate Data and Tools/skills storage rows. MCP configuration, imported skills and managed npm/browser caches can move to an independent folder through a verified copy and atomic pointer switch. Old files remain available; changing Data keeps an explicitly configured extension folder in place. Built-in tools remain bundled with the application.
+Settings provide separate Data and User tools storage rows. MCP configuration, imported skills and managed npm/browser caches can move to an independent folder through a verified copy and atomic pointer switch. Old files remain available; changing Data keeps an explicitly configured extension folder in place. The read-only official package remains bundled under `model-gateway/official-tools/`, with core tool definitions, four skills and eleven disabled-by-default MCP presets. User extensions and overrides are stored separately.
 
-Start with the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
+Start with [code organization and responsibilities](docs/architecture/code-organization.md), the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
 
 ## Next Steps
 

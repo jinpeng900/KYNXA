@@ -74,26 +74,43 @@
         </Grid>
         <InfoBar x:Name="AgentStatusBar" Grid.Row="1" Margin="24,12,24,0" IsClosable="True" />
         <Grid Grid.Row="2" Margin="24,14,24,24" RowSpacing="10">
-            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
             <StackPanel Orientation="Horizontal" Spacing="10">
                 <Button x:Name="AgentRefreshButton" services:UiLocalization.Content="刷新列表" Click="Refresh_Click" />
                 <ProgressRing x:Name="AgentLoadingRing" IsActive="False" Width="22" Height="22" Foreground="#888888" />
             </StackPanel>
-            <Pivot x:Name="AgentTabs" Grid.Row="1" SelectionChanged="Tabs_SelectionChanged" UseSystemFocusVisuals="False" FocusVisualPrimaryBrush="#888888" FocusVisualSecondaryBrush="Transparent" FocusVisualPrimaryThickness="1">
+            <Grid Grid.Row="1" RowSpacing="4" ColumnSpacing="12">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <TextBlock x:Name="AgentOfficialRootLabel" services:UiLocalization.Text="官方工具" Foreground="#777777" VerticalAlignment="Center" Visibility="Collapsed" />
+                <TextBlock x:Name="AgentOfficialRootPath" Grid.Column="1" Foreground="#777777" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
+                <TextBlock x:Name="AgentUserRootLabel" Grid.Row="1" services:UiLocalization.Text="用户工具" Foreground="#777777" VerticalAlignment="Center" Visibility="Collapsed" />
+                <TextBlock x:Name="AgentUserRootPath" Grid.Row="1" Grid.Column="1" Foreground="#777777" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
+            </Grid>
+            <Pivot x:Name="AgentTabs" Grid.Row="2" SelectionChanged="Tabs_SelectionChanged" UseSystemFocusVisuals="False" FocusVisualPrimaryBrush="#888888" FocusVisualSecondaryBrush="Transparent" FocusVisualPrimaryThickness="1">
                 <PivotItem x:Name="AgentServersTab">
                     <Grid ColumnSpacing="20" RowSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="240" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                         <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="10">
+                            <ComboBox x:Name="AgentServerSourceBox" Width="140" SelectedIndex="0" SelectionChanged="ServerSource_SelectionChanged" services:UiLocalization.AutomationName="工具来源">
+                                <ComboBoxItem Tag="all" services:UiLocalization.Content="全部来源" />
+                                <ComboBoxItem Tag="official" services:UiLocalization.Content="官方工具" />
+                                <ComboBoxItem Tag="user" services:UiLocalization.Content="用户工具" />
+                            </ComboBox>
                             <ComboBox x:Name="AgentPresetBox" Width="240" DisplayMemberPath="Name" services:UiLocalization.PlaceholderText="选择 MCP 预设" SelectionChanged="Preset_SelectionChanged" />
                             <Button x:Name="AgentAddPresetButton" services:UiLocalization.Content="添加预设" Click="AddPreset_Click" />
                             <Button x:Name="AgentNewServerButton" services:UiLocalization.Content="新增服务" Click="NewServer_Click" />
                         </StackPanel>
-                        <ListView x:Name="AgentServerList" Grid.Row="1" SelectionChanged="Server_SelectionChanged">
-                            <ListView.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" VerticalAlignment="Center" Margin="0,6" /></DataTemplate></ListView.ItemTemplate>
+                        <ListView x:Name="AgentServerList" Grid.Row="1" SelectionChanged="Server_SelectionChanged" ContainerContentChanging="ServerList_ContainerContentChanging">
+                            <ListView.ItemTemplate><DataTemplate><StackPanel Spacing="2" Margin="0,6">
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                <TextBlock x:Name="AgentServerListSourceLabel" FontSize="12" Foreground="#777777" TextWrapping="NoWrap" />
+                            </StackPanel></DataTemplate></ListView.ItemTemplate>
                         </ListView>
                         <ScrollViewer x:Name="AgentServerEditor" Grid.Row="1" Grid.Column="1" VerticalScrollBarVisibility="Auto">
                             <StackPanel Spacing="10">
+                                <TextBlock x:Name="AgentServerSourceLabel" Foreground="#777777" />
                                 <TextBox x:Name="AgentServerNameBox" services:UiLocalization.Header="名称" TextChanged="Server_TextChanged" />
                                 <ComboBox x:Name="AgentServerTransportBox" services:UiLocalization.Header="连接方式" SelectionChanged="Transport_SelectionChanged" SelectedIndex="0" HorizontalAlignment="Stretch">
                                     <ComboBoxItem Tag="stdio" services:UiLocalization.Content="本地程序（stdio）" />
@@ -104,6 +121,18 @@
                                 </StackPanel>
                                 <StackPanel x:Name="AgentHttpFields" Spacing="10" Visibility="Collapsed">
                                     <TextBox x:Name="AgentServerUrlBox" services:UiLocalization.Header="服务 URL" TextChanged="Server_TextChanged" />
+                                </StackPanel>
+                                <StackPanel x:Name="AgentBrowserFields" Spacing="8" Visibility="Collapsed">
+                                    <ComboBox x:Name="AgentBrowserModeBox" services:UiLocalization.Header="浏览器模式" HorizontalAlignment="Stretch" SelectionChanged="BrowserMode_SelectionChanged">
+                                        <ComboBoxItem services:UiLocalization.Content="独立浏览器" />
+                                        <ComboBoxItem services:UiLocalization.Content="本机已登录浏览器" />
+                                        <ComboBoxItem services:UiLocalization.Content="远程浏览器" />
+                                        <ComboBoxItem services:UiLocalization.Content="自定义参数" />
+                                    </ComboBox>
+                                    <CheckBox x:Name="AgentBrowserVisibleBox" services:UiLocalization.Content="显示浏览器窗口" Checked="BrowserOption_Changed" Unchecked="BrowserOption_Changed" />
+                                    <TextBox x:Name="AgentBrowserEndpointBox" services:UiLocalization.Header="浏览器连接地址" PlaceholderText="http://127.0.0.1:9222 / wss://…" TextChanged="BrowserEndpoint_TextChanged" Visibility="Collapsed" />
+                                    <TextBlock x:Name="AgentBrowserHintLabel" Foreground="#777777" TextWrapping="Wrap" FontSize="12" />
+                                    <Button x:Name="AgentBrowserSetupButton" services:UiLocalization.Content="打开 Chrome 连接设置" Click="BrowserSetup_Click" HorizontalAlignment="Left" Visibility="Collapsed" />
                                 </StackPanel>
                                 <CheckBox x:Name="AgentServerEnabledBox" services:UiLocalization.Content="启用服务" Checked="Server_EnabledChanged" Unchecked="Server_EnabledChanged" />
                                 <Expander x:Name="AgentServerAdvanced" services:UiLocalization.Header="高级设置">
@@ -126,6 +155,7 @@
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button x:Name="AgentSaveServerButton" services:UiLocalization.Content="保存服务" Click="SaveServer_Click" />
                                     <Button x:Name="AgentDeleteServerButton" services:UiLocalization.Content="删除服务" Click="DeleteServer_Click" />
+                                    <Button x:Name="AgentRestoreServerButton" services:UiLocalization.Content="恢复默认" Click="RestoreServer_Click" Visibility="Collapsed" />
                                     <Button x:Name="AgentCancelServerButton" services:UiLocalization.Content="取消" Click="CancelServer_Click" Visibility="Collapsed" />
                                 </StackPanel>
                                 <Expander x:Name="AgentToolCatalogExpander" services:UiLocalization.Header="工具目录">
@@ -171,12 +201,16 @@
                                 </StackPanel>
                             </StackPanel>
                         </Expander>
-                        <ListView x:Name="AgentSkillList" Grid.Row="2" SelectionChanged="Skill_SelectionChanged">
-                            <ListView.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" VerticalAlignment="Center" Margin="0,6" /></DataTemplate></ListView.ItemTemplate>
+                        <ListView x:Name="AgentSkillList" Grid.Row="2" SelectionChanged="Skill_SelectionChanged" ContainerContentChanging="SkillList_ContainerContentChanging">
+                            <ListView.ItemTemplate><DataTemplate><StackPanel Spacing="2" Margin="0,6">
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                <TextBlock x:Name="AgentSkillListSourceLabel" FontSize="12" Foreground="#777777" TextWrapping="NoWrap" />
+                            </StackPanel></DataTemplate></ListView.ItemTemplate>
                         </ListView>
                         <ScrollViewer Grid.Row="2" Grid.Column="1" VerticalScrollBarVisibility="Auto">
                             <StackPanel Spacing="10">
                                 <TextBlock x:Name="AgentSkillNameLabel" FontWeight="SemiBold" />
+                                <TextBlock x:Name="AgentSkillSourceTypeLabel" Foreground="#777777" />
                                 <StackPanel Orientation="Horizontal" Spacing="10">
                                     <CheckBox x:Name="AgentSkillEnabledBox" services:UiLocalization.Content="启用此技能" Checked="Skill_EnabledChanged" Unchecked="Skill_EnabledChanged" />
                                     <Button x:Name="AgentSaveSkillButton" services:UiLocalization.Content="保存技能开关" Click="SaveSkill_Click" />

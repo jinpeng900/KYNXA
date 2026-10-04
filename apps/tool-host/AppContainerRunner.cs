@@ -27,7 +27,7 @@ internal static class AppContainerRunner
         try
         {
             Directory.CreateDirectory(stage);
-            var snapshot = new WorkspaceSnapshot(request.ExcludedRoots, request.TrustedManagedWorkspace);
+            var snapshot = new WorkspaceSnapshot(request.ExcludedRoots, request.TrustedManagedWorkspace, request.ConversationWorkspaceHome);
             snapshot.Copy(workspace, stage);
             string skillDirectory = Path.Combine(stage, ".sandbox-skill");
             if (request.Skill is not null) SkillSnapshot.Copy(request.Skill, skillDirectory);

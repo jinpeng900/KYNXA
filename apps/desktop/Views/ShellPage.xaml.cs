@@ -37,6 +37,13 @@ public sealed partial class ShellPage : Page
         Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
         ConversationMessages.ToolResultRequested += ToolResultRequested;
+        ScreenshotPanel.ConfigureApi(_agentApiClient);
+        ScreenshotPanel.ScreenshotOpenRequested += ToolResultRequested;
+        ScreenshotPanel.ScreenshotsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
+        InitializeWorkTabs();
+        MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
+        MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
+        MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;
         // A click in native chrome/input is outside the browser document too.
         AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
         {

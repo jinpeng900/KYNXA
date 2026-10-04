@@ -36,6 +36,17 @@ public sealed record ToolActivity(string ToolCallId, string Name, JsonElement? A
     string? Sandbox = null, string? WorkspaceRoot = null, ToolResultReference? ResultRef = null, string? Code = null,
     int? Round = null, int? Order = null);
 
+/// <summary>Ephemeral terminal display data. Formal output remains in the tool receipt archive.</summary>
+public sealed record HostTerminalOutput(string ToolCallId, int Sequence, string Stream, string Text, bool Replace = false);
+
+public static class HostTerminalOutputRules
+{
+    public static bool IsValid(HostTerminalOutput? output) => output is not null &&
+        !string.IsNullOrWhiteSpace(output.ToolCallId) && output.ToolCallId.Length <= 200 && output.Sequence >= 1 &&
+        output.Text is not null && output.Text.Length <= 65536 &&
+        (output.Stream is "stdout" or "stderr" && !output.Replace || output.Stream == "console" && output.Replace);
+}
+
 public sealed record ToolResultReference(Guid Id, long Bytes, string Sha256);
 public sealed record ToolResultResponse(JsonElement Result);
 public sealed record ToolResultPage(Guid Id, string Text, int TotalCharacters, int Offset, int NextOffset,
@@ -44,13 +55,15 @@ public sealed record ToolResultPage(Guid Id, string Text, int TotalCharacters, i
 public sealed record McpServerConfig(string Id, string Name, string Command, string[] Args, bool Enabled,
     string? ProtocolVersion = null, string[]? DisabledTools = null, string Transport = "stdio", string? Cwd = null,
     Dictionary<string, string>? Env = null, Dictionary<string, string>? EnvRefs = null, string? Url = null,
-    Dictionary<string, string>? HeaderEnv = null, McpAuthentication? Auth = null, int? StartupTimeoutMs = null);
+    Dictionary<string, string>? HeaderEnv = null, McpAuthentication? Auth = null, int? StartupTimeoutMs = null,
+    string? Origin = null, string? PresetId = null, bool? Overridden = null);
 public sealed record McpAuthentication(string Type, string? TokenEnv = null, string? ClientId = null,
     string? ClientSecretEnv = null, string? Issuer = null, string? Scope = null);
 public sealed record AgentConfig(int Version, long Revision, McpServerConfig[] McpServers, string[] SkillDirectories,
-    string[]? DisabledSkills = null);
+    string[]? DisabledSkills = null, string[]? DisabledOfficialMcpServers = null,
+    string? OfficialToolsRoot = null, string? UserToolsRoot = null, string? OfficialPackageVersion = null);
 public sealed record AgentConfigSaveRequest(int Version, long ExpectedRevision, McpServerConfig[] McpServers,
-    string[] SkillDirectories, string[]? DisabledSkills = null);
+    string[] SkillDirectories, string[]? DisabledSkills = null, string[]? DisabledOfficialMcpServers = null);
 public sealed record AgentSkillDiagnostic(string Code, string Message, string? Severity = null, string? Field = null);
 public sealed record AgentSkillConflict(string PreferredId, string[] Ids, bool Preferred);
 public sealed record AgentSkill(string Id, string Name, string Description, string Source, bool Enabled = true,

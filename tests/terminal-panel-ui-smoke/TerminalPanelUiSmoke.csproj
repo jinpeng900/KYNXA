@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <Compile Include="../../apps/desktop/Controls/ConversationTerminalPanel.cs" Link="ConversationTerminalPanel.cs" />
+    <Compile Include="../../apps/desktop/Services/TerminalOutputState.cs" Link="TerminalOutputState.cs" />
+    <Compile Include="../../apps/desktop/Services/AgentApiClient.cs" Link="AgentApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/UiText*.cs" Exclude="../../apps/desktop/Services/UiTextExtension.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
+    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
+    <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
+    <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

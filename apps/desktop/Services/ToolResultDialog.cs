@@ -1,13 +1,10 @@
-using System.Runtime.InteropServices.WindowsRuntime;
 using System.Text;
 using System.Text.Json;
 using KYNXA.Contracts;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Graphics.Imaging;
 
 namespace KYNXA_Desktop.Services;
 
@@ -17,6 +14,7 @@ public sealed class ToolResultDialog : IDisposable
     private readonly IAgentApi _api;
     private readonly Guid _conversationId;
     private readonly ToolResultReference _reference;
+    private readonly bool _screenshot;
     private readonly CancellationTokenSource _lifetime;
     private readonly TextBox _text = new() { Name = "ToolResultText", IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 280 };
     private readonly TextBlock _status = new() { Name = "ToolResultStatus", TextWrapping = TextWrapping.Wrap };
@@ -36,35 +34,39 @@ public sealed class ToolResultDialog : IDisposable
         _api = api;
         _conversationId = conversationId;
         _reference = tool.ResultRef ?? throw new ArgumentException("A result reference is required.");
+        _screenshot = ConversationScreenshotSources.IsScreenshotTool(tool.Name);
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _text.Resources["TextControlBorderBrushFocused"] = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 136, 136, 136));
         _more.Style = _media.Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"];
         UiLocalization.Bind(_more, ContentControl.ContentProperty, "加载下一段");
-        UiLocalization.Bind(_media, ContentControl.ContentProperty, "查看媒体与资源");
+        UiLocalization.Bind(_media, ContentControl.ContentProperty, _screenshot ? "查看截图" : "查看媒体与资源");
         _more.Click += async (_, _) => await LoadNextAsync();
         _media.Click += async (_, _) => await LoadResourcesAsync();
         var copy = new Button { Name = "ToolResultCopy", Style = _more.Style };
         UiLocalization.Bind(copy, ContentControl.ContentProperty, "复制已加载内容");
         copy.Click += (_, _) => { var data = new DataPackage(); data.SetText(_text.Text); Clipboard.SetContent(data); };
         var content = new StackPanel { Spacing = 10 };
-        content.Children.Add(new TextBlock { Text = tool.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-        content.Children.Add(new TextBlock { Text = $"{_reference.Bytes} bytes · SHA256 {_reference.Sha256}", TextWrapping = TextWrapping.Wrap });
+        var name = new TextBlock { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+        if (_screenshot) UiLocalization.Bind(name, TextBlock.TextProperty, "截图"); else name.Text = tool.Name;
+        content.Children.Add(name);
+        if (!_screenshot) content.Children.Add(new TextBlock { Text = $"{_reference.Bytes} bytes · SHA256 {_reference.Sha256}", TextWrapping = TextWrapping.Wrap });
         content.Children.Add(_status);
-        content.Children.Add(_text);
+        if (!_screenshot) content.Children.Add(_text);
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        actions.Children.Add(_more); actions.Children.Add(copy); actions.Children.Add(_media);
+        if (!_screenshot) { actions.Children.Add(_more); actions.Children.Add(copy); }
+        actions.Children.Add(_media);
         content.Children.Add(actions); content.Children.Add(_resources);
         Dialog = new ContentDialog { XamlRoot = root, Content = new ScrollViewer { Content = content, MaxHeight = 520 },
             DefaultButton = ContentDialogButton.None, CloseButtonStyle = _more.Style };
-        UiLocalization.Bind(Dialog, ContentDialog.TitleProperty, "工具结果详情");
+        UiLocalization.Bind(Dialog, ContentDialog.TitleProperty, _screenshot ? "截图预览" : "工具结果详情");
         UiLocalization.Bind(Dialog, ContentDialog.CloseButtonTextProperty, "关闭");
-        Dialog.Opened += async (_, _) => await LoadNextAsync();
+        Dialog.Opened += async (_, _) => { if (_screenshot) await LoadResourcesAsync(); else await LoadNextAsync(); };
         Dialog.Closed += (_, _) => Dispose();
         UiText.LanguageChanged += LanguageChanged;
         LanguageChanged(null, EventArgs.Empty);
-        // A large object remains available through text pages without allocating all media bytes.
+        // Keep media decoding bounded; regular results can still be read through text pages.
         _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024;
-        if (!_media.IsEnabled) AddNotice("结果过大，请通过分页查看文本；媒体预览限制为 8 MB。");
+        if (!_media.IsEnabled) AddNotice(_screenshot ? "截图过大，无法预览（最大 8 MB）。" : "结果过大，请通过分页查看文本；媒体预览限制为 8 MB。");
     }
 
     public async Task ShowAsync()
@@ -143,23 +145,16 @@ public sealed class ToolResultDialog : IDisposable
     private async Task AddImageAsync(JsonElement block)
     {
         string mime = StringField(block, "mimeType");
-        AddLiteral("image · " + mime);
+        if (!_screenshot) AddLiteral("image · " + mime);
         if (mime is not ("image/png" or "image/jpeg" or "image/gif" or "image/webp"))
         { AddNotice("此媒体类型暂不支持直接预览。"); return; }
         try
         {
-            byte[] bytes = Convert.FromBase64String(StringField(block, "data"));
-            using var stream = new MemoryStream(bytes).AsRandomAccessStream();
-            var decoder = await BitmapDecoder.CreateAsync(stream).AsTask(_lifetime.Token);
-            if ((long)decoder.PixelWidth * decoder.PixelHeight > 16 * 1024 * 1024)
-            { AddNotice("图片尺寸过大，当前仅显示元信息。"); return; }
-            stream.Seek(0);
-            var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(stream).AsTask(_lifetime.Token);
+            var bitmap = await ToolResultImageDecoder.DecodeAsync(block, _lifetime.Token);
             if (!_closed && !_lifetime.IsCancellationRequested) _resources.Children.Add(new Image { Source = bitmap, MaxHeight = 260 });
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception) { if (!_closed) AddNotice("图片无法预览，当前仅显示元信息。"); }
+        catch (Exception) { if (!_closed) AddNotice(_screenshot ? "图片无法预览。" : "图片无法预览，当前仅显示元信息。"); }
     }
 
     private static string StringField(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object &&

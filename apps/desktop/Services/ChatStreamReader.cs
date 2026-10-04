@@ -19,6 +19,7 @@ public static class ChatStreamReader
         var data = new StringBuilder();
         bool started = false;
         var tools = new Dictionary<string, ToolActivity>(StringComparer.Ordinal);
+        var terminalSequences = new Dictionary<string, int>(StringComparer.Ordinal);
         var segments = new Dictionary<string, AssistantSegment>(StringComparer.Ordinal);
         int lastTimelineOrder = -1;
         while (true)
@@ -96,7 +97,14 @@ public static class ChatStreamReader
                             }
                             else if (!tools.TryGetValue(callId, out var original) || original.Name != name || original.Round != item.Tool.Round || original.Order != item.Tool.Order)
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
-                            if (item.Type == "tool_result") tools.Remove(callId);
+                            if (item.Type == "tool_result") { tools.Remove(callId); terminalSequences.Remove(callId); }
+                            break;
+                        case "terminal_output":
+                            if (!HostTerminalOutputRules.IsValid(item.Terminal) ||
+                                !tools.TryGetValue(item.Terminal!.ToolCallId, out var terminalCall) || terminalCall.Name != "terminal.host.run" ||
+                                item.Terminal.Sequence <= terminalSequences.GetValueOrDefault(item.Terminal.ToolCallId))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            terminalSequences[item.Terminal.ToolCallId] = item.Terminal.Sequence;
                             break;
                         case "completed":
                             if (item.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));

@@ -17,6 +17,12 @@
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
     toolMoreWebLinks: '另{0}个链接',
+    toolInspectWindows: '查看窗口', toolFindApps: '查找软件', toolScreenshot: '截图', toolReadWindow: '读取窗口', toolOpenApp: '打开软件',
+    toolActivateWindow: '切换窗口', toolClick: '点击', toolMovePointer: '移动鼠标', toolScroll: '滚动', toolDrag: '拖动',
+    toolTypeText: '输入文字', toolPressKey: '按下按键', toolCharacterCount: '{0}字符', toolScrollDelta: '滚动量 {0}',
+    toolAdjustWindow: '调整窗口', toolWindowResize: '调整大小', toolWindowMaximize: '最大化', toolWindowMinimize: '最小化',
+    toolWindowRestore: '恢复窗口', toolBackgroundLaunch: '后台启动', toolWindowUnresponsive: '窗口未响应',
+    toolViewScreenshot: '查看截图',
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
@@ -271,6 +277,13 @@
     row.state.dataset.status = row.tool.status;
     const error = uiStrings[row.presentation.errorKey] || row.presentation.errorText;
     setToolText(row.error, error); row.error.hidden = !error;
+    if (!row.website) {
+      const action = [...new Set((row.actionPresentations || []).map(presentation => presentation.actionParts
+        ? presentation.actionParts.map(part => typeof part === 'string' ? part : (part.values || []).reduce((text, value, index) =>
+          text.replace('{' + index + '}', String(value)), uiStrings[part.key] || '')).filter(Boolean).join(' · ')
+        : presentation.action).filter(Boolean))].join('\n');
+      setToolText(row.command, action); row.command.hidden = !action; row.command.title = action;
+    }
     if (row.more) {
       setToolText(row.more, row.moreCount > 0 ? uiStrings.toolMoreWebLinks.replace('{0}', String(row.moreCount)) : '');
       row.more.hidden = !row.moreCount;
@@ -292,8 +305,7 @@
     const links = document.createElement('div'); links.className = 'tool-web-links';
     const more = document.createElement('span'); more.className = 'tool-web-more'; more.hidden = true;
     root.append(header, ...(website ? [links, more] : []), error);
-    const row = { root, title, state, command, error, links, more, moreCount: 0, website, tool: null, presentation: null, signature: null, count: 1 };
-    return row;
+    return { root, title, state, command, error, links, more, moreCount: 0, website, tool: null, presentation: null, signature: null, count: 1 };
   }
   function toolGroups(entry, activities) {
     entry.toolSourceCache ??= new Map();
@@ -337,6 +349,7 @@
       if (row.signature === signature) continue;
       row.signature = signature;
       row.tool = first.tool; row.presentation = first.presentation; row.count = group.views.length;
+      row.actionPresentations = group.views.map(view => view.presentation);
       row.root.dataset.toolCount = String(row.count);
       localizeToolRow(row);
       if (row.website) {
@@ -357,8 +370,6 @@
         setToolText(row.command, action); row.command.hidden = !action; row.command.title = action;
         continue;
       }
-      const action = [...new Set(group.views.map(view => view.presentation.action).filter(Boolean))].join('\n');
-      setToolText(row.command, action); row.command.hidden = !action; row.command.title = action;
     }
   }
   function removeCached(id) {

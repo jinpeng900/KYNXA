@@ -16,7 +16,7 @@ public sealed record ChatReply(Guid ConversationId, Guid RequestId, string Role,
 public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid RequestId, DateTimeOffset CreatedAt,
     string? Delta = null, string? Content = null, string? Reasoning = null, string? Error = null, ToolActivity? Tool = null,
     AssistantSegment? Segment = null, string? SegmentId = null, AssistantSegment[]? AssistantSegments = null,
-    int? ToolStreamProtocol = null, long DurationMs = 0);
+    int? ToolStreamProtocol = null, long DurationMs = 0, HostTerminalOutput? Terminal = null);
 
 public static class ChatDurationRules
 {

@@ -6,7 +6,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { ConversationStore } from '../conversations.mjs';
 import { ToolService } from '../tool-service.mjs';
 
-export async function toolFixture(t, { sandboxRunner, approvalTimeoutMs, nestedData = false, legacyData = false } = {}) {
+export async function toolFixture(t, { sandboxRunner, desktopRunner, hostTerminalRunner, approvalTimeoutMs, nestedData = false, legacyData = false, officialTools = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-tool-test-'));
   const workspace = join(root, 'work');
   const dataHome = join(nestedData ? workspace : root, 'Data', legacyData ? 'custom-model-home' : 'Models');
@@ -17,7 +17,7 @@ export async function toolFixture(t, { sandboxRunner, approvalTimeoutMs, nestedD
     Content: 'Synthetic saved message', Status: 'completed' }] });
   await conversations.saveCatalog({ ...(await conversations.catalog()),
     Projects: [{ Id: projectId, Name: 'Synthetic tools work', FolderPath: workspace, Chats: [chat(conversationId)] }], Chats: [chat(standaloneId)] });
-  const service = new ToolService({ conversationStore: conversations, dataHome, sandboxRunner, approvalTimeoutMs, bundledDirectory: null });
+  const service = new ToolService({ conversationStore: conversations, dataHome, sandboxRunner, desktopRunner, hostTerminalRunner, approvalTimeoutMs, bundledDirectory: officialTools ? undefined : null, officialTools });
   t.after(async () => {
     await service.close();
     const suffix = relative(resolve(tmpdir()), resolve(root));
