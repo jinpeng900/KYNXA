@@ -84,6 +84,37 @@ $hostTerminalCapabilities = Invoke-IsolatedRuntime $runtimeHost '' '{"operation"
 Assert-Runtime ($hostTerminalCapabilities.protocolVersion -eq 2 -and $hostTerminalCapabilities.boundary -eq 'host-terminal' -and
     $hostTerminalCapabilities.visibleTerminal -eq $true) 'The copied helper exposes current host terminal and real-console capability without external .NET.'
 
+$officialProbePath = Join-Path $runtimeTestRoot 'official-package-check.mjs'
+$officialProbe = @'
+import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { WebFetchTool } from './package with spaces/model-gateway/web-fetch.mjs';
+const root = new URL('./package with spaces/model-gateway/official-tools/', import.meta.url);
+const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
+for (const skill of manifest.skills) {
+  const directory = skill.path.slice(0, skill.path.lastIndexOf('/'));
+  for (const file of skill.files) {
+    const bytes = await readFile(new URL('Skills/' + directory + '/' + file.path, root));
+    if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error('Packaged skill hash mismatch: ' + skill.name);
+  }
+}
+const reader = new WebFetchTool({ fetchPage: async () => ({ url: 'https://fixture.example.invalid/', status: 200,
+  headers: { contentType: 'text/html; charset=utf-8' }, redirects: [],
+  bytes: Buffer.from('<title>Package fixture</title><p>\u4e2d\u6587 English</p><a href="/source">Evidence</a><script>HiddenFixture</script>') }) });
+try {
+  const { value } = await reader.run({ url: 'https://fixture.example.invalid/', reason: 'Isolated package verification.' });
+  const license = await readFile(new URL('./package with spaces/model-gateway/node_modules/html-to-text/LICENSE', import.meta.url), 'utf8');
+  console.log(JSON.stringify({ tools: manifest.coreTools.length, skills: manifest.skills.length,
+    text: value.content, title: value.title, licensePresent: license.includes('MIT') }));
+} finally { reader.close(); }
+'@
+[IO.File]::WriteAllText($officialProbePath, $officialProbe, [Text.UTF8Encoding]::new($false))
+$officialPackage = Invoke-IsolatedRuntime $runtimeNode ('"' + $officialProbePath + '"') | ConvertFrom-Json
+Assert-Runtime ($officialPackage.tools -eq 35 -and $officialPackage.skills -eq 7) 'The copied official package retains all 35 tools and seven skills with matching resource hashes.'
+Assert-Runtime ($officialPackage.title -eq 'Package fixture' -and $officialPackage.text.Contains(([char]0x4E2D).ToString() + [char]0x6587 + ' English')) 'Bundled public-page conversion reads Chinese and English without Python or external Node.'
+Assert-Runtime ($officialPackage.text.Contains('https://fixture.example.invalid/source') -and -not $officialPackage.text.Contains('HiddenFixture')) 'Copied page conversion retains source URLs without executing or displaying scripts.'
+Assert-Runtime $officialPackage.licensePresent 'The new HTML parser license is included in the package.'
+
 $runtimeListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $runtimeListener.Start(); $runtimePort = $runtimeListener.LocalEndpoint.Port; $runtimeListener.Stop()
 $start = New-IsolatedStart $runtimeNode ('"' + (Join-Path $runtimePackage 'model-gateway/server.mjs') + '"')

@@ -20,6 +20,7 @@
   }
 
   function toolKind(tool) {
+    if (tool.name === 'web.fetch') return 'fetch';
     if (typeof tool.name !== 'string' || !tool.name.startsWith('mcp.')) return null;
     const leaf = tool.name.slice(tool.name.lastIndexOf('.') + 1);
     if (!websiteTools.has(leaf)) return null;

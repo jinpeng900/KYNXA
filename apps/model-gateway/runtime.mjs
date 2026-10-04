@@ -126,7 +126,10 @@ export class ModelRuntime {
       let toolSystem = '';
       if (toolContext) {
         await this.tools.catalog(toolContext, { connectMcp: true });
-        toolSystem = await this.tools.systemPrompt(toolContext);
+        const schemaReserve = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40));
+        const maximumPromptTokens = Math.max(0, context.metrics.inputBudgetTokens - schemaReserve
+          - estimateMessageTokens([{ role: 'user', content: input.message }]) - estimateMessageTokens([], MODEL_HISTORY_NOTICE) - 512);
+        toolSystem = await this.tools.systemPrompt(toolContext, { maximumTokens: maximumPromptTokens });
         const tokenBudget = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40),
           context.metrics.inputBudgetTokens - estimateMessageTokens([{ role: 'user', content: input.message }])
             - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - 512);

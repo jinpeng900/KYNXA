@@ -34,7 +34,7 @@ test('official inventory locates the single packaged tool, MCP and skill sources
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(manifest.license, 'Apache-2.0');
   assert.strictEqual(compatibilityPresets, curatedMcpPresets);
-  assert.equal(manifest.skills.length, 4);
+  assert.equal(manifest.skills.length, 7);
   assert.equal(manifest.mcpPresets.length, 11);
   assert.equal(manifest.coreTools.length, builtinDescriptors.length);
   assert.deepEqual(manifest.coreTools, builtinDescriptors.map(tool => tool.name));
@@ -51,7 +51,7 @@ test('official inventory locates the single packaged tool, MCP and skill sources
   manifest.skills.length = 0;
   manifest.coreTools[0] = 'fixture.mutated';
   const untouched = await readOfficialToolsManifest();
-  assert.equal(untouched.skills.length, 4);
+  assert.equal(untouched.skills.length, 7);
   assert.equal(untouched.coreTools[0], 'filesystem.list');
 });
 
@@ -145,7 +145,7 @@ test('the real default broker lists the installed package and rejects changes to
   const settings = await f.service.getConfig();
   assert.equal(settings.officialPackageVersion, (await readOfficialToolsManifest()).version);
   assert.equal(settings.mcpServers.filter(server => curatedMcpPresets.some(preset => preset.id === server.presetId || preset.id === server.id)).length, 11);
-  assert.equal((await f.service.listSkills(context)).filter(skill => skill.origin === 'builtin').length, 4);
+  assert.equal((await f.service.listSkills(context)).filter(skill => skill.origin === 'builtin').length, 7);
   for (const path of ['manifest.json', 'MCP/catalog.mjs', 'Tools/catalog.mjs', 'Skills/workspace-inspect/SKILL.md']) {
     const file = join(OFFICIAL_TOOLS_ROOT, path), original = await readFile(file, 'utf8');
     const result = await f.run(context, 'filesystem.write', { path: file, content: original,

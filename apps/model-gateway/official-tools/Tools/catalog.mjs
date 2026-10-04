@@ -1,5 +1,6 @@
 import { filesystemDescriptors } from '../../filesystem-tools.mjs';
 import { historyDescriptors } from '../../tool-history.mjs';
+import { webFetchDescriptor } from '../../web-fetch.mjs';
 import { computerDescriptors } from './computer.mjs';
 import { hostTerminalDescriptor } from './terminal.mjs';
 
@@ -36,4 +37,4 @@ const catalogDescriptors = [
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },
       limit: { type: 'integer', minimum: 1, maximum: 16000 } }, required: ['id'], additionalProperties: false }, source: 'builtin' }
 ];
-export const builtinDescriptors = [...filesystemDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];
+export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];

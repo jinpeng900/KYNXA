@@ -40,8 +40,15 @@ public partial class App
         var generic = reply.Message.ToolActivities[^1];
         reply.Message.ToolActivities.RemoveAt(reply.Message.ToolActivities.Count - 1);
         reply.Message.ToolActivities.Insert(0, generic);
-        _transcript.ShowConversation(chat, [reply]);
-        await WaitAsync("document.querySelectorAll('.tool-web-link').length === 5 && document.querySelectorAll('.tool-activity').length <= 8", "real DTO distinguishes website rows from generic tool details");
+        // Keep this additional capability in its own reply: the active projection deliberately
+        // retains only eight ordinary activities per message, preserving the full event list.
+        var builtinReply = Message(chat, "assistant", "内置网页读取验证：不打开真实网站。", "streaming");
+        builtinReply.Message.ToolActivities = [new("web-builtin", "web.fetch",
+            JsonSerializer.SerializeToElement(new { url = "https://builtin.example.invalid/source", reason = "Read synthetic public source." }),
+            "completed", "Read public fixture", JsonSerializer.Serialize(new { url = "https://builtin.example.invalid/source", content = "Builtin evidence fixture" }))];
+        _transcript.ShowConversation(chat, [reply, builtinReply]);
+        await WaitAsync("document.querySelectorAll('.tool-web-link').length === 6 && document.querySelectorAll('.tool-activity').length <= 9", "real DTO distinguishes website rows from generic tool details");
+        Check(await EvalAsync<bool>("document.querySelector('[data-tool-call-id=web-builtin] .tool-title').textContent === '阅读网页' && document.querySelector('[data-tool-call-id=web-builtin] .tool-web-link').href === 'https://builtin.example.invalid/source' && !document.querySelector('[data-tool-call-id=web-builtin] details')"), "builtin web.fetch displays a direct website link without JSON panels");
         Check(await EvalAsync<bool>("!document.querySelector('.tool-activities summary') && [...document.querySelectorAll('.tool-web-activity')].every(row => row.tagName === 'DIV')"), "website sources are directly visible without disclosure cards");
         await EvalAsync<bool>("(() => { scrollTo(0,0); return true; })()");
         await Task.Delay(80);
@@ -97,7 +104,8 @@ public partial class App
         _transcript.ShowConversation(manyReply.ConversationId, [manyReply]);
         await WaitAsync("document.querySelectorAll('.tool-web-link').length === 4 && document.querySelector('.tool-web-more').textContent.includes('28')", "many sources show four real links and a static accurate remainder count");
         Check(await EvalAsync<bool>("!document.querySelector('.tool-web-more button,.tool-web-more a')"), "source remainder is plain text rather than another expandable panel");
-        Check(manyReply.Message.ToolActivities[0].Result!.Contains(sources[^1]) && reply.Message.ToolActivities.Count == 9,
+        Check(manyReply.Message.ToolActivities[0].Result!.Contains(sources[^1])
+            && reply.Message.ToolActivities.Count == 9 && builtinReply.Message.ToolActivities.Count == 1,
             "source caps and compact website merging leave full original URL events intact");
     }
 }

@@ -38,7 +38,7 @@ MCP 发现目录与模型声明预算分离，支持单工具禁用、搜索和�
 
 技能资源按技能目录解析，支持标准校验、依赖诊断及选定 Node 脚本的只读包沙箱执行。复用 Playwright 与 GitHub 官方 MCP 服务、Apache-2.0 文档沟通技能；预设默认禁用，重复添加复用现有配置。Python/Bash 技能脚本和浏览器交互式 OAuth 登录尚不支持，缺少环境依赖会明确阻止执行。
 
-设置中的数据存储、用户工具使用相同的简洁行。MCP 配置、导入技能及 npm/浏览器缓存可独立选择目录，复制校验后切换并保留原文件；单独配置后，更改 Data 不移动这一套扩展。官方工具包位于应用本体的 `model-gateway/official-tools/`，包含工具目录、4 个技能与11 个默认禁用的 MCP 预设；用户路径只管理自定义扩展和个人覆盖，升级保留用户选择。
+设置中的数据存储、用户工具使用相同的简洁行。MCP 配置、导入技能及 npm/浏览器缓存可独立选择目录，复制校验后切换并保留原文件；单独配置后，更改 Data 不移动这一套扩展。官方工具包位于应用本体的 `model-gateway/official-tools/`，包含 35 个核心工具定义、7 个技能与 11 个默认禁用的 MCP 预设；内置公共网页读取和长文件分页无需 Python，桌面、浏览器及终端工作流复用现有执行边界。用户路径只管理自定义扩展和个人覆盖，升级保留用户选择。
 
 使用与开发入口：[代码组织与职责](docs/architecture/code-organization.md)、[模型网关](apps/model-gateway/README.md)、[聊天与工作记忆](docs/architecture/chat-work-memory.md)、[UI 组件](apps/desktop/UI-COMPONENTS.md)、[五人计划](docs/team/README.md)。
 

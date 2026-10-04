@@ -24,6 +24,7 @@ export function toolDiscoveryCategory(tool) {
   if (name.startsWith('computer.')) return 'computer';
   if (name === 'terminal.host.run') return 'host-terminal';
   if (name === 'terminal.run') return 'sandbox-terminal';
+  if (name === 'web.fetch') return 'web-fetch';
   if (/playwright|chrome[-_.]?devtools|puppeteer|(?:^|[._-])browser(?:[._-]|$)/.test(name) ||
       /browser automation|browser debugging/.test(description)) return 'browser';
   if (/web[-_]?search|search[-_]?web|search[-_]?news|news[-_]?search/.test(name) ||
@@ -39,6 +40,7 @@ function aliases(tool) {
   if (category === 'host-terminal') return 'host terminal local terminal visible terminal cmd powershell conda 本机终端 本地终端 可见终端 显示终端 终端窗口 宿主终端 本机命令 本地命令 命令提示符';
   if (category === 'sandbox-terminal') return 'sandbox terminal node 沙箱终端 隔离终端 运行代码 执行代码';
   if (category === 'web-search') return 'web search internet 搜索 联网 搜索网页 查资料 查证';
+  if (category === 'web-fetch') return 'web fetch public webpage read url 页面 网页 网站 阅读网页 读取网页 网页内容 网址 获取正文';
   if (category === 'filesystem') return 'file filesystem 文件 文件夹 工作目录 ' +
     ({ read: '读取 查看', list: '列表 列出', search: '搜索 查找', write: '写入 创建', edit: '编辑 修改', delete: '删除', stat: '属性 信息', mkdir: '目录 创建文件夹' }[name.split('.').at(-1)] ?? '');
   if (category !== 'browser') return '';

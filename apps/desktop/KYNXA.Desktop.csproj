@@ -47,6 +47,12 @@
              Link="model-gateway\official-tools\Skills\safe-file-edit\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\Skills\browser-workflow\SKILL.md"
              Link="model-gateway\official-tools\Skills\browser-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\official-tools\Skills\desktop-workflow\SKILL.md"
+             Link="model-gateway\official-tools\Skills\desktop-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\official-tools\Skills\terminal-workflow\SKILL.md"
+             Link="model-gateway\official-tools\Skills\terminal-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\official-tools\Skills\web-research\SKILL.md"
+             Link="model-gateway\official-tools\Skills\web-research\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\Skills\internal-comms\SKILL.md;..\model-gateway\official-tools\Skills\internal-comms\UPSTREAM.md;..\model-gateway\official-tools\Skills\internal-comms\LICENSE.txt"
              Link="model-gateway\official-tools\Skills\internal-comms\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\Skills\internal-comms\examples\3p-updates.md;..\model-gateway\official-tools\Skills\internal-comms\examples\company-newsletter.md;..\model-gateway\official-tools\Skills\internal-comms\examples\faq-answers.md;..\model-gateway\official-tools\Skills\internal-comms\examples\general-comms.md"
