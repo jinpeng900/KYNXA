@@ -1,5 +1,6 @@
 /* Render original TeX with the same KaTeX version and fallback sequence as the reference UI.
-   All output stays in this local document; only measured image regions leave the worker. */
+   All output stays in this local document; only measured image regions leave the worker.
+   使用与参考界面相同的 KaTeX 版本和回退顺序渲染原始 TeX；所有输出留在本地文档，只有测量后的图片区域离开工作器。 */
 (() => {
   const root = document.getElementById('formulas');
   const nextPaint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -14,6 +15,7 @@
         const formula = document.createElement('span');
         formula.className = 'formula ' + (item.block ? 'display' : 'inline');
         // Separate options/macros for each formula prevent definitions leaking into another reply.
+        // 每个公式独立使用选项与宏，避免定义泄漏到其他回复。
         const options = { displayMode: !!item.block, throwOnError: true, trust: false, maxExpand: 1000, maxSize: 100 };
         try {
           formula.innerHTML = katex.renderToString(item.latex, options);

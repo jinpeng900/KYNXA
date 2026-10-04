@@ -48,5 +48,6 @@ public sealed partial class ShellPage
         foreach (var row in WorkTaskEntries) row.RefreshLanguage();
         ApplyLayout();
         // Keep the current draft, active conversation, scroll position and reply stream intact.
+        // 切换语言时保留当前草稿、活动聊天、滚动位置与回复流。
     }
 }

@@ -2,6 +2,7 @@ import { estimateTokens } from './context-tokens.mjs';
 import { StreamFailure } from './streaming.mjs';
 
 // Limits belong to one continuous request, independently of a model's output ceiling.
+// 限制属于一次连续请求，与单轮模型输出上限无关。
 export const DEFAULT_TOOL_RUN_LIMITS = Object.freeze({ maxRounds: 64, maxToolCalls: 256,
   maxGeneratedTokens: 1_048_576, maxDurationMs: 1_800_000 });
 
@@ -33,13 +34,19 @@ function metricRound(value) {
   return value;
 }
 
-/** Caller ends this timer at the real operation boundary; wall-clock/date edits cannot change elapsed time. */
+/**
+ * Caller ends this timer at the real operation boundary; wall-clock/date edits cannot change elapsed time.
+ * 调用方在操作实际结束时停止计时，系统日期或时钟调整不改变已用时。
+ */
 export function startRunTimer() {
   const started = performance.now();
   return () => Math.max(0, Math.ceil(performance.now() - started));
 }
 
-/** Small public projection; native provider continuation and credentials never enter it. */
+/**
+ * Small public projection; native provider continuation and credentials never enter it.
+ * 公开视图保持精简，供应商原生续传状态和凭据不进入其中。
+ */
 export class ToolRunProgress {
   constructor(limits, persist = async () => {}) {
     this.limits = toolRunLimits(limits);
@@ -67,9 +74,12 @@ export class ToolRunProgress {
       modelRounds: [...previous.modelRounds, { round, durationMs }].slice(-64) };
   }
 
-  /** durationMs is the complete call span. Tool totals/maxima exclude measured approval wait.
+  /**
+   * durationMs is the complete call span. Tool totals/maxima exclude measured approval wait.
    * Concurrent tool spans are summed processing time, never the request's elapsed wall time.
-   * Reused calls measure lookup/projection overhead and do not increment executedToolCalls. */
+   * Reused calls measure lookup/projection overhead and do not increment executedToolCalls.
+   * durationMs 表示完整调用跨度；工具总用时和最大用时扣除已测审批等待，并发跨度之和不是请求墙钟用时；复用调用只计查找与投影开销，不增加 executedToolCalls。
+   */
   recordTool({ id, round, durationMs, approvalMs = 0, reused = false }) {
     durationMs = metricInteger(durationMs); approvalMs = metricInteger(approvalMs); round = metricRound(round);
     if (typeof id !== 'string' || !id || id.length > 200 || /[\0\r\n]/.test(id) || typeof reused !== 'boolean' || approvalMs > durationMs)

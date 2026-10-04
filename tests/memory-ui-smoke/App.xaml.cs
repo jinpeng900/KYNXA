@@ -67,6 +67,7 @@ public partial class App : Application
         _api.Seed(_archivedProject, FakeMemoryApi.Entry(_archivedProject, "ARCHIVED_PROJECT_ONLY synthetic memory"));
         _viewModel = new MemoryManagementViewModel(_api);
         // A hidden lifetime window permits checking a late response after the real memory window closes.
+        // 保留隐藏的生命周期窗口，以检查真实记忆窗口关闭之后晚到的响应。
         _anchor = new Window { Content = new Grid() };
         _anchor.AppWindow.Hide();
         _window = new MemoryManagementWindow([_chat, _emptyChat, _project, _archivedProject], viewModel: _viewModel);

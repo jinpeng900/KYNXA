@@ -43,7 +43,10 @@ function identifier(value) {
   return value.toLowerCase();
 }
 
-/** Validate the version BEFORE any canonical migration or transaction is applied. */
+/**
+ * Validate the version BEFORE any canonical migration or transaction is applied.
+ * 正式迁移或事务执行前，必须先验证版本。
+ */
 export async function inspectDataLayout(root, document) {
   root = resolve(root);
   await inspect(root, true);
@@ -87,6 +90,7 @@ export async function inspectDataLayout(root, document) {
  * Reconcile only app-owned scaffolding. catalog.json remains the transactional
  * metadata authority; project.json is its portable, rebuildable manifest.
  * No workspace contents or user settings are inferred from absolute paths.
+ * 仅校正应用拥有的目录框架；catalog.json 保持事务元数据权威，project.json 只是可移植、可重建的清单，不从绝对路径推断工作区内容或用户设置。
  */
 export async function ensureDataLayout(root, document) {
   root = resolve(root);
@@ -128,6 +132,7 @@ export async function ensureDataLayout(root, document) {
   }
 
   // Derived index uses actual SQLite; it can be reconstructed from the catalog.
+  // 派生索引使用实际 SQLite，可由正式目录重建。
   await rebuildConversationIndex(root, document);
   const settings = { ...current, Storage: { ...current?.Storage, LayoutVersion: DATA_LAYOUT_VERSION,
     StoreId: current?.Storage?.StoreId ?? randomUUID(),

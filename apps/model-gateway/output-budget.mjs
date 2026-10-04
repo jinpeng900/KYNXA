@@ -1,4 +1,5 @@
 // Output is a ceiling, not a target length. Keep it independent of history size.
+// 输出额度是上限而非目标长度，与历史大小独立。
 export const DEFAULT_MAX_OUTPUT_TOKENS = 262_144;
 export const MIN_CONFIGURED_OUTPUT_TOKENS = 1_024;
 export const MAX_CONFIGURED_OUTPUT_TOKENS = 262_144;
@@ -40,6 +41,7 @@ export function resolveOutputBudget({ contextWindowTokens, requestedOutputTokens
   // Small local windows keep their existing split. Larger windows protect history
   // and code inputs instead of reserving half the window for hypothetical output.
   // This is an application allocation, independent of a provider's actual limit.
+  // 小型本地窗口保留现有分配；较大窗口优先保护历史与代码输入，不为假设的输出预留半个窗口，此应用分配与供应商硬上限分开。
   const outputShare = contextWindowTokens <= 32_768 ? .5 : .3;
   const contextOutputLimit = Math.min(Math.floor(usableTokens * outputShare), usableTokens - requiredInputTokens);
   const maxOutputTokens = Math.min(requested, providerMaxOutputTokens ?? Infinity, contextOutputLimit);

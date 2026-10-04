@@ -1,7 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
 import { sameMcpEndpoint } from './mcp-config.mjs';
 
-/** Publisher matching only prevents duplicate defaults; it never grants permission or rewrites an existing ID. */
+/**
+ * Publisher matching only prevents duplicate defaults; it never grants permission or rewrites an existing ID.
+ * 发布者匹配只用于去除重复默认项，不授予权限，也不改写已有 ID。
+ */
 export function configuredMcpPreset(preset, servers) {
   return servers.find(server => server.origin === 'official' && server.presetId === preset.id) ??
     servers.find(server => sameMcpEndpoint(server, preset.server)) ?? servers.find(server => {
@@ -25,7 +28,10 @@ export function officialMcpServerId(presetId, occupied = new Set()) {
   return id;
 }
 
-/** Official files remain immutable. This is a disposable execution/settings projection over the user document. */
+/**
+ * Official files remain immutable. This is a disposable execution/settings projection over the user document.
+ * 官方文件保持只读；此处只是基于用户配置生成可丢弃的执行和设置视图。
+ */
 export function mergeOfficialConfig(user, presets, normalizeServer, metadata = {}) {
   const mcpServers = user.mcpServers.map(server => ({ ...structuredClone(server), origin: 'user' }));
   const occupied = new Set(mcpServers.map(server => server.id));
@@ -40,6 +46,7 @@ export function mergeOfficialConfig(user, presets, normalizeServer, metadata = {
     }
     const id = override?.id ?? override?.server?.id ?? officialMcpServerId(preset.id, occupied);
     // An older/custom configuration owns its existing ID, even after a package update.
+    // 旧配置或自定义配置始终保留自己的 ID，包升级也不改变其归属。
     if (occupied.has(id)) continue;
     const server = normalizeServer(override?.server ?? { ...preset.server, ...override?.changes, id });
     if (mcpServers.some(existing => sameMcpEndpoint(existing, server))) continue;
@@ -50,7 +57,10 @@ export function mergeOfficialConfig(user, presets, normalizeServer, metadata = {
     disabledSkills: [...user.disabledSkills], disabledOfficialMcpServers: [...hidden], ...metadata };
 }
 
-/** Save explicit user choices, never a copy of every official default. Removed official rows stay hidden. */
+/**
+ * Save explicit user choices, never a copy of every official default. Removed official rows stay hidden.
+ * 只保存用户明确选择，不复制整份官方默认配置；删除的官方项继续保持隐藏。
+ */
 export function splitOfficialConfig(effective, previousUser, current, presets, normalizeServer) {
   const byId = new Map(current.mcpServers.filter(server => server.origin === 'official').map(server => [server.id, server.presetId]));
   const byPreset = new Map(presets.map(preset => [preset.id, preset]));
@@ -63,6 +73,7 @@ export function splitOfficialConfig(effective, previousUser, current, presets, n
     .filter(item => !visiblePresets.has(item.presetId)).map(item => structuredClone(item));
   for (const server of effective.mcpServers) {
     // Metadata supplied by a client is ignored; only the current ID and the reserved default ID identify a layer.
+    // 忽略客户端传入的来源元信息，仅通过当前 ID 和保留的默认 ID 判断配置层。
     const presetId = byId.get(server.id) ?? (!previousUserIds.has(server.id)
       ? presets.find(preset => officialMcpServerId(preset.id, previousUserIds) === server.id)?.id : undefined);
     if (!presetId) { mcpServers.push(server); continue; }

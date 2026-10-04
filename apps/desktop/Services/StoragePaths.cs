@@ -3,7 +3,10 @@ using Windows.Storage;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Shared data-root pointer; legacy locations remain the default until migrated.</summary>
+/// <summary>
+/// Shared data-root pointer; legacy locations remain the default until migrated.
+/// 共享数据根目录指针；迁移前继续使用旧版默认位置。
+/// </summary>
 public static class StoragePaths
 {
     public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Data");
@@ -20,6 +23,7 @@ public static class StoragePaths
     {
         // Initialize WinRT application storage before the first page's Loaded event,
         // including when the data files themselves live in a custom directory.
+        // 首个页面 Loaded 事件前初始化 WinRT 应用存储，即使实际数据位于自定义目录也一样。
         string legacyDirectory = ApplicationData.Current.LocalFolder.Path;
         string? root = Environment.GetEnvironmentVariable("KYNXA_DATA_HOME");
         string pointer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),

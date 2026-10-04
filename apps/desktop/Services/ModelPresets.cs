@@ -18,6 +18,7 @@ public sealed record ModelPreset(string Id, string Name, string BaseUrl, string[
 public static class ModelPresets
 {
     // Official API references are recorded in UI-COMPONENTS.md. Never store keys here.
+    // 官方 API 来源记录于 UI-COMPONENTS.md；此处绝不保存密钥。
     public static IReadOnlyList<ModelPreset> All { get; } = new ModelPreset[]
     {
         new("deepseek", "DeepSeek", "https://api.deepseek.com",
@@ -53,6 +54,7 @@ public static class ModelPresets
     };
 
     // Notify existing items so the open selector keeps its selection and container state.
+    // 通知已有选项更新，保留已打开选择器的选择与容器状态。
     public static void RefreshDisplayNames()
     {
         foreach (var preset in All) preset.RefreshDisplayName();
@@ -60,6 +62,7 @@ public static class ModelPresets
 
     // Context-only UI defaults mirror the verified gateway capability snapshot.
     // Enforcement and independent input/output ceilings belong to model-capabilities.mjs.
+    // 界面上下文默认值对应已核实的网关能力快照；输入和输出上限的实际约束由 model-capabilities.mjs 负责。
     private static readonly IReadOnlyDictionary<string, Dictionary<string, int>> OfficialContextWindows = BuildContextWindows();
 
     private static IReadOnlyDictionary<string, Dictionary<string, int>> BuildContextWindows()
@@ -93,7 +96,10 @@ public static class ModelPresets
         return hosts;
     }
 
-    /// <summary>A new draft uses the smallest verified window among its selected models.</summary>
+    /// <summary>
+    /// A new draft uses the smallest verified window among its selected models.
+    /// 新草稿取所选模型中最小的已验证上下文窗口。
+    /// </summary>
     public static int DefaultContextWindowTokens(string baseUrl, IEnumerable<string> selectedModels)
     {
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
@@ -122,12 +128,12 @@ public static class ModelPresets
             : (bytes[0] & 0xfe) == 0xfc;
     }
 
-    public static ModelPreset? Recognize(string name) => All.FirstOrDefault(p => p.Id != "custom" &&
-        (string.Equals(name.Trim(), p.Id, StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name.Trim(), p.Name, StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name.Trim(), $"{p.Name} API", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name.Trim(), UiText.Get(p.Name, "en"), StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(name.Trim(), $"{UiText.Get(p.Name, "en")} API", StringComparison.OrdinalIgnoreCase)));
+    public static ModelPreset? Recognize(string name) => All.FirstOrDefault(preset => preset.Id != "custom" &&
+        (string.Equals(name.Trim(), preset.Id, StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), preset.Name, StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), $"{preset.Name} API", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), UiText.Get(preset.Name, "en"), StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(name.Trim(), $"{UiText.Get(preset.Name, "en")} API", StringComparison.OrdinalIgnoreCase)));
 
     public static string UniqueId(string prefix, IEnumerable<string> existing)
     {

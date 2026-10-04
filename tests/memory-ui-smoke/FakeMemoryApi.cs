@@ -5,7 +5,9 @@ using KYNXA_Desktop.ViewModels;
 
 namespace MemoryUiSmoke;
 
-/// <summary>A deterministic backend fixture. Every entry and target is synthetic.</summary>
+/// <summary>A deterministic backend fixture. Every entry and target is synthetic.
+/// 使用确定性的后端夹具；所有记忆条目与目标均为虚构数据。
+/// </summary>
 internal sealed class FakeMemoryApi : IMemoryApi, IDisposable
 {
     private readonly Dictionary<string, MemoryScopeDocument> _documents = [];
@@ -37,6 +39,7 @@ internal sealed class FakeMemoryApi : IMemoryApi, IDisposable
         Requests.Add("GET " + Key(target));
         if (_delayed.TryGetValue(Key(target), out var queue) && queue.TryDequeue(out var delayed))
             // Deliberately model an upstream implementation that returns after cancellation.
+            // 有意模拟收到取消后仍返回的上游实现。
             return delayed.Task;
         cancellationToken.ThrowIfCancellationRequested();
         if (_readFailures.Remove(Key(target), out var failure)) return Task.FromException<MemoryScopeDocument>(failure);

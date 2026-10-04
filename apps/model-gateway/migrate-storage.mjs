@@ -1,4 +1,5 @@
 // Run with the desktop and gateway stopped. Keeps source data as a backup.
+// 桌面和网关停止后运行迁移，保留源数据作为备份。
 import { mkdir, readFile, readdir, writeFile, rename, lstat, copyFile, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, constants } from 'node:fs';
@@ -57,6 +58,7 @@ const json = buffer => JSON.parse(buffer.toString('utf8').replace(/^\uFEFF/, '')
 
 // Explicit arguments make migration testable without touching the current user's
 // pointer. CLI callers still use the configured model home and profile pointer.
+// 显式参数让迁移测试无需触碰当前用户指针；命令行仍使用已配置的模型目录和配置指针。
 export async function migrateStorage({ desktopSource, modelSource, target, pointer, progress = () => {} }) {
   if (![desktopSource, modelSource, target, pointer].every(path => typeof path === 'string' && isAbsolute(path)))
     throw new Error('Migration paths must be absolute.');
@@ -117,6 +119,7 @@ export async function migrateStorage({ desktopSource, modelSource, target, point
   }
   // project.json is a derived view of catalog metadata. Relocate its managed
   // workspace path now; normal gateway initialization will reconcile the view.
+  // project.json 是目录元数据的派生视图；先移动其托管工作区路径，常规网关初始化会重新校正视图。
   let projectDirectories = [];
   try { projectDirectories = await readdir(join(target, 'Projects'), { withFileTypes: true }); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }

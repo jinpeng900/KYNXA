@@ -251,6 +251,7 @@ internal sealed class FakeScreenshotApi : IAgentApi
         var completion = new TaskCompletionSource<ToolResultResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         Reads.Add(new(conversationId, reference, cancellationToken, completion));
         // Deliberately ignore cancellation so the actual control must defend against late results.
+        // 有意忽略取消，让真实控件必须防御晚到的结果。
         return completion.Task;
     }
     public Task<AgentConfig> GetConfigAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();

@@ -47,6 +47,7 @@ var server = Task.Run(async () =>
                 {
                     // Missing limits use their independent defaults. Explicit limits
                     // from an existing connection must survive loading unchanged.
+                    // 缺省限制各自使用独立默认值；加载已有连接时保留显式设置的限制。
                     result = new { providers = new object[] { new { providerId = "fixture-legacy", displayName = "Legacy",
                         baseUrl = "http://127.0.0.1:8080/v1", models = new[] { "fixture-model" },
                         hasApiKey = false, protocol = "openai-completions" }, new {

@@ -42,7 +42,7 @@ tests/                       隔离数据、模拟模型和自有窗口的回归
 | 构建与部署载荷 | 项目声明资源清单，`Build/RuntimePackaging.targets` 处理独立 Node/ToolHost 和 PRI/许可流程 |
 | 开发预览 API | `server.mjs` 管静态文件与启动，`preview-api-proxy.mjs` 管流、背压与取消；正式数据仍归网关 |
 
-## 本轮修缮的边界
+## 既有修缮的边界
 
 - 工具提示和存储路径策略从执行协调服务分离；预算、权限和来源 ID 保持原合同。
 - 工具关闭失败仍清理其他所有者；模型运行时等候在途请求和已执行回执结算，错误保留给调用者。
@@ -58,10 +58,33 @@ tests/                       隔离数据、模拟模型和自有窗口的回归
 
 公开网页读取另由 `web-http-transport.mjs` 负责请求、地址校验、重定向、压缩、大小及取消，`web-fetch.mjs` 复用上游解析器转换文本并生成短页和完整归档；官方目录仅引用声明，`ToolService` 继续拥有权限与回执。文件分页保留在文件模块。`tool-system-prompt.mjs` 按运行时预留的声明空间选择技能摘要，未展示技能由原目录按需加载。
 
-遵循 [开发 Skill](../../.agents/skills/kynxa-development/SKILL.md) 和 [代码规范](../../.agents/skills/kynxa-development/references/coding-standards.md)。新行为放到实际拥有该职责的模块，不用任意行数上限驱动重写。
+遵循 [开发 Skill](../../.agents/skills/kynxa-development/SKILL.md)、[代码书写 Skill](../../.agents/skills/kynxa-code-standards/SKILL.md) 和 [模块规范](../../.agents/skills/kynxa-development/references/coding-standards.md)。新行为放到实际拥有该职责的模块，不用任意行数上限驱动重写。
+
+代码书写 Skill 以 Microsoft C#/.NET、Google JavaScript/TypeScript 与 PowerShell 官方指南为参考，维护本项目的语言选择、语义命名与双语注释规则；具体差异和一手来源集中在 [命名与双语注释](../../.agents/skills/kynxa-code-standards/references/naming-comments.md)。`.editorconfig` 提供格式与 C# 命名建议，不能代替兼容性审查。编写或审查本仓库代码时，`AGENTS.md` 自动引导同时使用两个 Skill。
+
+本次规范化把预算、传输、取消和原生句柄的内部名称改得更明确，例如 `memoryBudgetTokens`、`stdoutBytes`、`_requestGate`、`inputDesktopHandle`，并保留原英文说明、补充中文。公开接口、JSON/schema 键、原生日志、工具 ID、XAML 绑定及第三方原始包保持原合同；命名修改通过作用域和可执行语法树/token 对照检查，第三方许可证和上游内容不翻译。
 
 异步 I/O 传递取消信号，UI 回写检查会话、请求和代次；后台任务观察错误。缓存有容量和失效规则，外部客户端、进程、事件和流由创建者释放。共享 DTO 不引用 WinUI，网关不依赖桌面程序集。
 
 原始记录不因界面隐藏或上下文预算删除；身份、来源隔离、审批快照和版本冲突保持原合同。开发与回归只使用临时数据和模拟凭据。正式安装、真实账号浏览器、付费模型效果及所有第三方软件的前台行为需要各自验收，不由模拟测试代替。
 
-验证命令见 [验证与协作](../../.agents/skills/kynxa-development/references/validation.md)、[网关结果](../../apps/model-gateway/README.md#当前验证与后续接口) 和 [打包说明](../../apps/desktop/Build/README.md)。本轮是代码组织、执行可靠性和前台体验检查，不是安全认证或后续完整 Host 架构的实现。
+验证命令见 [验证与协作](../../.agents/skills/kynxa-development/references/validation.md)、[网关结果](../../apps/model-gateway/README.md#当前验证与后续接口) 和 [打包说明](../../apps/desktop/Build/README.md)。代码组织、规范化和运行回归不是安全认证，也不表示已实现后续完整 Host 架构。
+
+## 2026-10-05 代码书写规范化验收
+
+此次修改以内部命名、双语注释和开发规则为范围；验证使用独立临时数据、模拟模型和自有测试窗口。规范化通过语法树或非注释 token 对照检查，确认协议键、字面量、控制流和资源释放顺序保持兼容。另修正模型预设 smoke 工程遗漏的已有生产依赖链接，保留原断言。
+
+| 实际检查 | 本次结果 |
+|---|---|
+| 桌面 x64 主构建、ToolHost 构建 | 0 警告、0 错误 |
+| 完整网关套件，`--test-concurrency=4` | 670 项中 668 通过；2 项原生交互桌面能力检查失败 |
+| 修改前后原生能力对照 | 同一会话分别编译 HEAD `9841c1d` 和现版；两者均 `available=false`、`interactiveWindows=false`，不是本轮命名改动引入 |
+| 真实 Transcript UI | 196 项通过，公式/表格、复制、实时语言、宽度、最终流式更新和会话滚动；本次未请求额外物理拖拽诊断 |
+| 真实截图面板 UI | 132 项通过；Windows 拒绝夹具前台焦点，物理滚轮/拖拽/Escape 被明确跳过，未发送全局输入 |
+| 原生工具管理 UI | 129 项通过，含配置、审批、结果分页、媒体、取消与晚到结果 |
+| 便携运行时副本 | 39 项通过；空 PATH、隐藏系统 .NET、隔离网关与自包含 ToolHost |
+| 客户端与纯逻辑 smoke | 流式、Agent、记忆、会话、HTTP 响应、扩展迁移、模型上下文/预设、35 项标签状态、22 项 Markdown 检查通过 |
+| Native / preview | 24 项输入序列清理、9 项终端解码、4 项预览代理测试通过 |
+| Skill | 两个 Skill 格式校验通过；独立示例 6 项检查通过，保留预算参数、JSON 键和取消回执顺序 |
+
+两项网关失败及物理输入跳过仍是本次验收限制；不能将其描述为全套通过。第三方原文、许可证、发布哈希、真实用户数据及模型凭据不在此规范化范围中。

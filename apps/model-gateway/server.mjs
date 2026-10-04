@@ -41,6 +41,7 @@ export function createModelServer(options = {}) {
     if (runtimeClosures.has(previous)) return runtimeClosures.get(previous);
     const cleanup = Promise.resolve().then(() => previous.close?.()).then(() => true, () => {
       // A failed teardown cannot start a second MCP process world or accept writes on the retired runtime.
+      // 清理失败后不能启动第二套 MCP 进程，也不能让已退役运行时继续接受写入。
       runtimeCleanupError = 'RUNTIME_CLEANUP_FAILED';
       console.error(runtimeCleanupError);
       return false;
@@ -58,13 +59,14 @@ export function createModelServer(options = {}) {
     try { nextDataHome = modelHome(); nextExtensionRoot = extensionHome(nextDataHome); storageConfigError = null; }
     catch (error) {
       storageConfigError = ['INVALID_EXTENSION_STORAGE', 'UNSUPPORTED_EXTENSION_STORAGE'].includes(error.code) ? error.code : 'INVALID_STORAGE_CONFIGURATION';
-      return; // Keep the previously valid runtime until the native owner repairs its pointer.
+      return; // Keep the previously valid runtime until the native owner repairs its pointer. 原生所有者修复指针之前，保留原先有效的运行时。
     }
     if (!runtimeRetired && modelStore.dataHome === nextDataHome && currentExtensionRoot() === nextExtensionRoot) return;
     const transition = Promise.resolve().then(async () => {
       if (!await closeRuntime(modelRuntime)) return;
       runtimeRetired = true;
       // Maintenance may have started while the last owned MCP processes were being closed.
+      // 最后一批自有 MCP 进程关闭期间，维护流程可能已经开始。
       if (storageMigrationActive()) return;
       const dataHome = modelHome(), extensionRoot = extensionHome(dataHome);
       const replacementStore = new ModelStore({ dataHome });
@@ -83,11 +85,13 @@ export function createModelServer(options = {}) {
     try {
       // Native clients do not send Origin. Block browser-origin access to this local
       // execution/configuration surface, including same-loopback malicious pages.
+      // 原生客户端不发送 Origin；拒绝浏览器来源访问此本机执行和配置接口，包括同回环地址上的恶意页面。
       if (request.headers.origin) return sendJson(response, 403, { error: '浏览器不能直接调用本机模型与工具服务。', code: 'BROWSER_ORIGIN_DENIED' });
       await refreshStorage();
       let migrating = managed && storageMigrationActive();
       if (!migrating && !runtimeCleanupError && !runtimeRetired && !storageConfigError) {
         // Native migration polls activeRequests; initialization is an owned writer too.
+        // 原生迁移会轮询 activeRequests，初始化也是有所有者的写入流程。
         activeRequests++;
         try { await modelRuntime.initializeExtensionStorage?.({ maintenanceActive: () => managed && storageMigrationActive() }); }
         catch (error) {
@@ -236,6 +240,7 @@ export function createModelServer(options = {}) {
     }
   });
   // Shutdown aborts upstream generations before waiting for open HTTP streams.
+  // 关闭时先中止上游生成，再等待开放的 HTTP 流结束。
   server.shutdownModelRuntime = async () => {
     for (const controller of streamControllers) controller.abort();
     if (storageTransition) await storageTransition;

@@ -4,7 +4,10 @@ namespace KYNXA_Desktop.Services;
 
 public sealed record ExtensionStorageMigrationResult(string ExtensionRoot, int VerifiedFiles);
 
-/// <summary>The caller pauses gateway writers under storage-migration.lock; sources remain recoverable.</summary>
+/// <summary>
+/// The caller pauses gateway writers under storage-migration.lock; sources remain recoverable.
+/// 调用方持有 storage-migration.lock 并暂停网关写入；源数据仍可恢复。
+/// </summary>
 public static class ExtensionStorageMigrationService
 {
     public static async Task<ExtensionStorageMigrationResult> MoveAsync(string source, string target, string pointer,
@@ -39,6 +42,7 @@ public static class ExtensionStorageMigrationService
             .Select(name => new StorageMigrationService.CopyRoot(Path.Combine(source, name), name)))
         {
             // Data may share this root: only the extension-owned recovery namespace moves.
+            // 数据可能共用此根目录；仅迁移扩展拥有的恢复命名空间。
             new(Path.Combine(source, "Backups", "Extensions"), Path.Combine("Backups", "Extensions")),
             new(source, "", Include: ["extension-layout.json"])
         };
@@ -105,6 +109,7 @@ public static class ExtensionStorageMigrationService
         AddParentDirectories(expectedDirectories, expectedFiles);
         VerifyDestinationLayout();
         // Hashes cover deliberately rewritten config and new recovery metadata as well.
+        // 哈希验证也覆盖有意重写的配置与新建的恢复元数据。
         var finalHashes = new List<(string Path, byte[] Hash)>();
         foreach (string relative in expectedFiles)
         {
@@ -129,6 +134,7 @@ public static class ExtensionStorageMigrationService
             await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new { version = 1, extensionRoot = target }), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             // No cancellation-sensitive operation follows this atomic activation boundary.
+            // 原子启用完成之后，不再执行会因取消而失败的操作。
             File.Move(temporary, pointer, overwrite: true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }

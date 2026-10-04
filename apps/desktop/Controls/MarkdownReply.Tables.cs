@@ -112,6 +112,7 @@ public sealed partial class MarkdownReply
 
     // Parsed cells are immutable until their Markdown block is replaced. Formula image
     // application is the only in-place text metric change, and invalidates just its cell.
+    // 替换 Markdown 块之前，已解析单元格保持不变；公式图片是唯一会原地改变文本尺寸的操作，只使其所在单元格失效。
     private void InvalidateTableFormula(Run source)
     {
         if (!_tableRunCells.TryGetValue(source, out var cell)) return;
@@ -222,6 +223,7 @@ public sealed partial class MarkdownReply
         _backgroundsDirty = true;
         // Read every cell first. Changing one spacing run invalidates native pointer geometry
         // for later cells; no measurements are taken during the correction pass below.
+        // 先测量所有单元格；修改间距会使后续原生指针几何失效，因此校正阶段不再测量。
         var snapshots = new List<TableSnapshot>();
         foreach (var table in _tables)
         {
@@ -235,6 +237,7 @@ public sealed partial class MarkdownReply
             var rowSnapshots = new List<(TableRowVisual, Rect[], Rect[])>();
             // Stacked rows and converged unchanged tables need no pointer walks. A reflow
             // gets a fresh geometry snapshot on the following layout pass.
+            // 堆叠行及已收敛且未变化的表格无需遍历指针；重新排版后在下一次布局中取得新快照。
             if (!stacked && !table.Stacked && (targetsChanged || (!table.AlignmentSettled && table.AlignmentPasses < 8)))
             {
                 foreach (var row in table.Rows)
@@ -291,6 +294,7 @@ public sealed partial class MarkdownReply
                 for (int i = 0; i + 1 < row.Cells.Count; i++)
                 {
                     // Local deltas cancel shifts introduced by every earlier column.
+                    // 局部偏移量抵消此前每一列引入的位置变化。
                     double correction = table.Widths[i] + 24 - (starts[i + 1].X - starts[i].X);
                     if (Math.Abs(correction) < .6) continue;
                     var gap = row.Cells[i].Gap;
@@ -360,6 +364,7 @@ public sealed partial class MarkdownReply
             int before = _backgrounds.Children.Count;
             AddBackground(rect, true);
             // Table surfaces go behind inline-code decorations already collected in this canvas.
+            // 表格背景放在本画布已收集的行内代码装饰之后。
             if (_backgrounds.Children.Count > before)
             {
                 var background = _backgrounds.Children[^1];

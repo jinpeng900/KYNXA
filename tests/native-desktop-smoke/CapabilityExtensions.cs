@@ -28,6 +28,7 @@ internal static partial class Program
         if (physicalInput)
         {
             Password.Password = ""; // Fixture initialization; Ctrl+A is not supported by every password control.
+            // 初始化测试夹具；并非所有密码控件都支持 Ctrl+A。
             window.Activate(); await Task.Delay(150);
             Check(GetForegroundWindow() == new WindowInteropHelper(window).Handle, "Owned fixture explicitly obtains foreground before physical input");
             await RequestAsync(new { operation = "desktop", action = "activate", windowId = id, processId = pid });

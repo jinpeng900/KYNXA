@@ -66,6 +66,7 @@
     Defining the "Msix" ProjectCapability here allows the Single-project MSIX Packaging
     Tools extension to be activated for this project even if the Windows App SDK Nuget
     package has not yet been restored.
+       在此声明 Msix 项目能力后，即使尚未还原 Windows App SDK NuGet 包，也能为项目启用单项目 MSIX 打包扩展。
   -->
   <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <ProjectCapability Include="Msix" />
@@ -78,6 +79,7 @@
     package identity (AUMID).
     Set <EnableWinAppRunSupport>false</EnableWinAppRunSupport> in a
     <PropertyGroup> above to opt out.
+       此 WinApp 构建包通过 .NET CLI Run 目标注册调试身份，并使用包身份 AUMID 启动 WinUI 应用；如需关闭，在上方 PropertyGroup 中将 EnableWinAppRunSupport 设为 false。
   -->
   <ItemGroup>
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
@@ -94,12 +96,15 @@
     Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
     Explorer "Package and Publish" context menu entry to be enabled for this project even if
     the Windows App SDK Nuget package has not yet been restored.
+       在此声明 HasPackageAndPublishMenuAddedByProject 属性后，即使尚未还原 Windows App SDK NuGet 包，也能启用解决方案资源管理器的打包与发布菜单。
   -->
   <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
 
-  <!-- Publish Properties -->
+  <!-- Publish Properties
+       发布属性。
+  -->
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>

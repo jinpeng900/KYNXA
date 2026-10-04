@@ -69,6 +69,7 @@ function textPage(full, offset, maxChars) {
   let nextOffset = Math.min(full.length, offset + maxChars);
   if (nextOffset < full.length && /[\uD800-\uDBFF]/.test(full[nextOffset - 1]) && /[\uDC00-\uDFFF]/.test(full[nextOffset])) {
     // A one-unit request must still return one complete supplementary character and advance.
+    // 即使请求一个计量单位，也应返回完整补充字符并推进游标。
     nextOffset += nextOffset - offset === 1 ? 1 : -1;
   }
   const hasMore = nextOffset < full.length;
@@ -101,6 +102,7 @@ async function atomicText(path, bytes, expectedHash, signal) {
     await handle.sync();
     await handle.close(); handle = null;
     // Recheck links and external edits immediately before the atomic replacement.
+    // 原子替换前立即重新检查链接及外部修改。
     await inspectLocalPath(parent);
     await checkHash(path, expectedHash);
     signal?.throwIfAborted();

@@ -8,7 +8,10 @@ function operationName(name) {
   return `mcp.${official[1]}.${official[3]}`;
 }
 
-/** Scheduling hint only. Every call still passes the broker's ownership, approval and cancellation checks. */
+/**
+ * Scheduling hint only. Every call still passes the broker's ownership, approval and cancellation checks.
+ * 此处只是调度提示，每次调用仍检查归属、审批和取消。
+ */
 export function canRunInParallel(call) {
   if (!call || typeof call !== 'object' || Array.isArray(call) || typeof call.name !== 'string') return false;
   if (builtinReads.has(call.name)) return true;

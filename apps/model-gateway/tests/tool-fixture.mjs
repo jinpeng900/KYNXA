@@ -14,7 +14,9 @@ function fixtureMcpServer(server) {
   } catch { return false; }
 }
 
-/** Keep real defaults visible while excluding upstream publishers from isolated test discovery. */
+/** Keep real defaults visible while excluding upstream publishers from isolated test discovery.
+ * 保留真实默认配置可见，同时在隔离测试的发现流程中排除公开上游服务。
+ */
 export function isolateFixtureMcpCatalog(service) {
   const catalog = service.mcp.catalog.bind(service.mcp);
   service.mcp.catalog = (config, context, options) => catalog({ ...config,

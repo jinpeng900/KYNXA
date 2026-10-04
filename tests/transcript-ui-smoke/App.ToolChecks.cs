@@ -54,6 +54,7 @@ public partial class App
             Check(await EvalAsync<bool>("document.querySelector('[data-tool-call-id=mcp-fixture] .tool-state').dataset.status === 'approval-required' && document.querySelector('[data-tool-call-id=mcp-fixture]').checkVisibility() && !document.querySelector('[data-tool-call-id=batch-0]')"), "old pending approval stays visible while obsolete ordinary actions leave DOM");
             await EvalAsync<bool>("(() => { window.__unchangedTool = document.querySelector('[data-tool-call-id=mcp-fixture]'); window.__toolMutations = 0; window.__toolObserver = new MutationObserver(records => window.__toolMutations += records.length); window.__toolObserver.observe(window.__unchangedTool,{attributes:true,childList:true,characterData:true,subtree:true}); return true; })()");
             // Let the disclosure toggle finish before checking stream-driven mutations.
+            // 先等待折叠控件切换完成，再检查流式驱动的变化。
             await Task.Delay(50);
             await EvalAsync<bool>("(() => { window.__toolMutations = 0; return true; })()");
             message.Message.ToolActivities[^1] = message.Message.ToolActivities[^1] with { Status = "completed", Result = "Fixture done" };

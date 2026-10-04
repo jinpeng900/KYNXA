@@ -24,10 +24,11 @@ internal static class DesktopWindowState
                 break;
             case "maximize":
                 // Targeted system command maximizes without an explicit activation request.
+                // 向目标窗口发送系统命令以最大化，不显式请求激活。
                 if (SendMessageTimeout(target.Window, 0x0112, 0xf030, 0, 0x0001 | 0x0002, 500, out _) == 0)
                     throw new DesktopException("DESKTOP_WINDOW_FAILED", "Windows did not acknowledge maximization.");
                 break;
-            case "minimize": ShowWindowAsync(target.Window, 7); break; // SW_SHOWMINNOACTIVE.
+            case "minimize": ShowWindowAsync(target.Window, 7); break; // SW_SHOWMINNOACTIVE. 中文：SW_SHOWMINNOACTIVE。最小化窗口但不激活。
             case "restore":
                 if (SendMessageTimeout(target.Window, 0x0112, 0xf120, 0, 0x0001 | 0x0002, 500, out _) == 0)
                     throw new DesktopException("DESKTOP_WINDOW_FAILED", "Windows did not acknowledge restoration.");

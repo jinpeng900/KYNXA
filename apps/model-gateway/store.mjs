@@ -14,6 +14,7 @@ export function isLocalEndpoint(url) {
   if (host === 'localhost' || host === '::1') return true;
   if (isIP(host) === 6) {
     // URL canonicalizes IPv4-mapped addresses into two hexadecimal groups.
+    // URL 会将 IPv4 映射地址规范化为两个十六进制组。
     const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
     if (mapped) {
       const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16);
@@ -110,6 +111,7 @@ export class ModelStore {
       const document = await this.document();
       const previous = document.providers.find(provider => provider.providerId === connection.providerId);
       // Never carry a saved key across endpoints.
+      // 不将已保存密钥带到不同端点。
       const apiKey = connection.apiKey || (previous?.baseUrl === connection.baseUrl ? previous.apiKey : undefined);
       if (!apiKey && !isLocalEndpoint(new URL(connection.baseUrl)))
         throw new Error('此连接需要 API Key。');

@@ -132,6 +132,7 @@ Check(!root.IsExpanded, "Removing collapse bookkeeping does not automatically re
 
 // Exercise the production view functions using an existing manual project/chat order.
 // Navigation changes scope and highlights; only the explicit submission services reorder.
+// 用已有的手动项目和聊天顺序验证生产视图；导航只改变范围和高亮，仅显式发送流程调整排序。
 var firstChat = Chat("First project's first chat");
 var firstPinnedChat = Chat("First project's pinned chat", true);
 var firstOtherChat = Chat("First project's other chat");
@@ -198,6 +199,7 @@ Check(navigationProjects.Select(value => value.Id).SequenceEqual(afterSubmission
     "Viewing an older chat after submission selects it without undoing the submitted order or opening its tree.");
 
 // A task-only draft remains transient until an actual message is submitted.
+// 仅任务中的草稿在实际发送消息前保持临时状态。
 var draftSavedOlder = Chat("Draft project's older chat");
 var draftSavedPinned = Chat("Draft project's pinned chat", true);
 var draftSavedNewer = Chat("Draft project's newer chat");

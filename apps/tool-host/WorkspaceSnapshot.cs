@@ -6,7 +6,7 @@ internal sealed class WorkspaceSnapshot
     internal const int MaximumEntries = 2048;
     internal const long MaximumBytes = 32 * 1024 * 1024;
     internal const long MaximumFileBytes = 4 * 1024 * 1024;
-    private static readonly HashSet<string> ExcludedDirectories = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> ExcludedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Data", "Models", "Backups", "Trash", "Index", "Chats", "Memory", ".kynxa", ".codex", ".ssh", ".aws", ".azure", ".docker", ".kube", ".config",
         ".git", ".svn", ".hg", "node_modules", "bin", "obj", "dist", "build", ".vs", ".venv", "venv",
@@ -54,7 +54,7 @@ internal sealed class WorkspaceSnapshot
             if ((attributes & FileAttributes.ReparsePoint) != 0 || IsExcludedRoot(path)) { Skipped++; continue; }
             if ((attributes & FileAttributes.Directory) != 0)
             {
-                if (ExcludedDirectories.Contains(name)) { Skipped++; continue; }
+                if (ExcludedDirectoryNames.Contains(name)) { Skipped++; continue; }
                 CopyDirectory(path, Path.Combine(destination, name), depth + 1);
                 continue;
             }
@@ -64,6 +64,7 @@ internal sealed class WorkspaceSnapshot
             if (++Files > MaximumFiles || Bytes + file.Length > MaximumBytes)
                 throw new SandboxException("SANDBOX_SNAPSHOT_LIMIT", "Workspace exceeds the bounded sandbox snapshot limit.");
             // Disallow concurrent writers during the copy; recheck reparse attributes after opening.
+            // 复制时禁止并发写入，打开后再次检查重解析属性。
             using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             NativeMethods.Check(NativeMethods.GetFileInformationByHandle(input.SafeFileHandle, out var information), "GetFileInformationByHandle snapshot");
             if (information.NumberOfLinks > 1) { Files--; Skipped++; continue; }
@@ -91,6 +92,7 @@ internal sealed class WorkspaceSnapshot
             if (!IsWithin(root, path)) continue;
             // Only the service's canonical managed work folder may bypass its Data ancestor.
             // Explicit exclusions inside the work folder still apply, as do all sensitive-name filters.
+            // 只有服务规范化管理的工作目录可以跨越其 Data 祖先；工作目录内的显式排除和敏感文件名过滤仍然有效。
             if (_allowDataAncestor && IsWithin(root, _sourceRoot) && !PathEquals(root, _sourceRoot) && IsWithin(_sourceRoot, path)) continue;
             return true;
         }
@@ -109,6 +111,7 @@ internal sealed class WorkspaceSnapshot
             .Equals("Models", StringComparison.OrdinalIgnoreCase) && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) &&
             Guid.TryParse(parts[1], out _);
         // An arbitrary model-home name is accepted only as the configured root, never every excluded extension/data folder.
+        // 自定义模型目录名仅在确为已配置根目录时被接受，不能放行所有被排除的扩展或数据目录。
         bool conversationBelowConfiguredHome = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
             parts.Length == 2 && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
         return project || conversationBelowData || conversationBelowModels || conversationBelowConfiguredHome;

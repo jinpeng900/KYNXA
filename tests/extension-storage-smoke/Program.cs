@@ -5,6 +5,7 @@ using KYNXA_Desktop.Services;
 
 // Explicit migration is an operator entry point. Its owner must first pause gateway
 // writers under storage-migration.lock; this process does not double-acquire that lock.
+// 显式迁移是由操作者调用的入口；调用方应先持有 storage-migration.lock 暂停网关写入，此进程不重复获取该锁。
 if (args.Length > 0)
 {
     if (args.Length != 6 || args[0] != "--source" || args[2] != "--target" || args[4] != "--pointer")
@@ -144,6 +145,7 @@ string unsupportedTarget = Path.Combine(fixture, "unsupported-layout-target");
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(initial, unsupportedTarget, Path.Combine(fixture, "new-profile", "extensions.json")), "future layout rejected before copying");
 Check(!Directory.Exists(unsupportedTarget) && File.ReadAllText(Path.Combine(initial, "extension-layout.json")) == "{\"version\":99}", "future layout source retained");
 // Restore only this synthetic pointer so the existing conflict checks still use their original source.
+// 仅恢复测试生成的存储指针，让已有冲突检查继续使用原始源目录。
 await Write(pointer, JsonSerializer.Serialize(new { version = 1, extensionRoot = target }));
 
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, target, pointer), "nonempty target");
@@ -213,6 +215,7 @@ if (OperatingSystem.IsWindows())
     await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, Path.Combine(fixture, "linked-source"), failurePointer), "source junction");
     await Reject(() => Task.FromResult(ExtensionPaths.Resolve(junction, null, Path.Combine(fixture, "absent.json"))), "resolver junction");
     Directory.Delete(junction); // Remove only the generated junction, never its destination.
+    // 只删除生成的目录联接，不删除其目标目录。
     string hardlink = Path.Combine(source, "Skills", "mine", "linked.txt");
     var hardlinkStart = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
     foreach (string argument in new[] { "/c", "mklink", "/H", hardlink, externalSkill }) hardlinkStart.ArgumentList.Add(argument);
@@ -221,10 +224,12 @@ if (OperatingSystem.IsWindows())
     Check(hardlinkProcess.ExitCode == 0, "hardlink fixture created");
     await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, Path.Combine(fixture, "hardlinked-source"), failurePointer), "source hardlink");
     File.Delete(hardlink); // Delete only this generated link; the external file remains intact.
+    // 只删除生成的链接，保留外部文件。
     Check(File.ReadAllText(externalSkill) == "external stays put", "hardlink target retained");
 }
 
 // Existing Data migration keeps explicit extensions fixed, and moves fallback extensions coherently.
+// 迁移 Data 时保持显式扩展路径不变，同时一致地移动默认回退的扩展目录。
 string legacyDesktop = Path.Combine(source, "Desktop"), legacyModels = Path.Combine(source, "Models");
 Directory.CreateDirectory(legacyDesktop);
 string dataPointer = Path.Combine(fixture, "data-profile", "storage.json");
@@ -243,6 +248,7 @@ Check(ExtensionPaths.Resolve(source, null, pointer).Root == target, "Data migrat
 // Runtime metadata moves without launching Python, uv or any downloaded package.
 // The interpreter is an inert file so this test verifies ownership and relocation,
 // not third-party console-launcher portability or a live Python installation.
+// 迁移运行时元信息，不启动 Python、uv 或已下载的包；解释器为惰性测试文件，验证所有权和路径迁移，不验证第三方启动器可移植性或真实 Python 安装。
 string runtimeSource = Path.Combine(fixture, "runtime-source"), runtimeTarget = Path.Combine(fixture, "runtime-target");
 string runtimePointer = Path.Combine(fixture, "runtime-profile", "extensions.json");
 string interpreterDirectory = Path.Combine(runtimeSource, "MCP", "python", "cpython-3.12.15-windows-x86_64-none");
@@ -282,6 +288,7 @@ Check(targetReceipt.Contains("install-path = " + TomlPath(externalSkill)), "UV e
 Check(targetReceipt.Contains("description = " + TomlPath(interpreter)) && targetReceipt.Contains("# install-path = " + TomlPath(entrypoint)) && targetReceipt.Contains("[tool.options]\npython = " + TomlPath(interpreter)), "receipt requirements comments and options unchanged");
 Check(!File.Exists(Path.Combine(runtimeTarget, "Agent", "config.json")), "runtime relocation does not create Agent config");
 // Move only this generated source aside; no old-root file may satisfy the new paths.
+// 只移走测试生成的源目录，避免旧根目录的文件满足新路径的读取。
 Directory.Move(runtimeSource, runtimeSource + "-retained");
 Check(!Directory.Exists(runtimeSource) && Directory.Exists(targetInterpreterDirectory) && File.ReadAllText(targetInterpreter).Contains("owned interpreter fixture"), "new-root interpreter exists after old root is removed");
 Check(File.ReadAllText(Path.Combine(runtimeTarget, "MCP", "bin", "fixture.exe")) == "NOT-AN-EXECUTABLE: unchanged entrypoint fixture", "entrypoint binary never patched or executed");

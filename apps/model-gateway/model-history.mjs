@@ -25,6 +25,7 @@ function publicResultText(activity) {
 function transcriptRounds(assistant) {
   if (assistant.ModelTranscript) return assistant.ModelTranscript.rounds;
   // Older journals already have the public steps and immutable tool receipts. Recover them without guessing native state.
+  // 旧日志已有公开步骤和不可变工具回执，恢复它们时不猜测原生协议状态。
   const rounds = new Map();
   for (const activity of assistant.ToolActivities ?? []) {
     const call = { id: activity.toolCallId, name: activity.name, arguments: activity.arguments };
@@ -73,7 +74,10 @@ function observation(assistant, round, call) {
     originalCharacters: content.length, originalText: content, previewCharacters: Infinity };
 }
 
-/** One bounded request view of the formal journal; every included tool output stays paired with its call. */
+/**
+ * One bounded request view of the formal journal; every included tool output stays paired with its call.
+ * 正式日志生成大小受限的请求视图，每个注入的工具结果保持与调用配对。
+ */
 export class ModelHistoryProjection {
   constructor({ history, beforeUserId, protocol, resultStore, resultContext, inputBudgetTokens, availableTools = [] }) {
     this.protocol = protocol; this.resultStore = resultStore; this.resultContext = resultContext;
@@ -86,12 +90,14 @@ export class ModelHistoryProjection {
 
   async loadResults() {
     // Bound IO by the model's actual input capacity, not a fixed number of turns/pages.
+    // 按模型实际输入容量限制 I/O，而非固定轮次或页数。
     let remainingBytes = Math.max(0, Math.floor(this.inputBudgetTokens * 4));
     for (const record of [...this.records.values()].reverse()) {
       for (const round of [...record.rounds].reverse()) for (const item of [...round.observations].reverse()) {
         if (!item.ref) continue;
         // Include the bounded document envelope, so thousands of tiny/zero-byte
         // references cannot turn a small input projection into unbounded disk IO.
+        // 预算包含受限文档封装，避免大量微小或空引用将小上下文投影变成无限磁盘 I/O。
         const readBytes = item.ref.bytes + TOOL_RESULT_METADATA_BYTES;
         if (readBytes > remainingBytes) continue;
         remainingBytes -= readBytes;
@@ -102,14 +108,16 @@ export class ModelHistoryProjection {
           this.archiveReads++;
         } catch (error) {
           // Keep a known receipt and its existing public preview. Missing archives never cause execution replay.
+          // 保留已知回执及原有公开预览，附件缺失不能导致重新执行操作。
           if (error.code === 'TOOL_RESULT_REFERENCE_MISMATCH') {
             const invalidId = item.ref.id;
             item.ref = null;
             // The inline observation remains formal evidence; a misbound archive cannot advertise a retrieval target.
+            // 内联观察仍是正式证据；错误绑定的附件不能发布可回源位置。
             try {
               item.content = JSON.stringify(JSON.parse(item.content, (key, value) =>
                 key === 'resultRef' && value?.id === invalidId ? undefined : value));
-            } catch { /* Plain-text observations contain no structured retrieval reference. */ }
+            } catch { /* Plain-text observations contain no structured retrieval reference. 纯文本观察不包含结构化回源引用。 */ }
             item.originalText = item.content; item.originalCharacters = item.content.length;
           }
           if (!item.content) item.content = JSON.stringify({ status: item.status, resultRef: item.ref,
@@ -199,6 +207,7 @@ export class ModelHistoryProjection {
       }
     };
     // Do not damage recent observations merely to fit an unlimited volume of old prose.
+    // 不能为容纳无限旧正文而破坏近期工具观察。
     for (const size of [4096, 1024, 256, 0]) {
       if (total <= available) break;
       mask((record, round) => record !== latestRecord && round !== latestToolRound, size);
@@ -218,6 +227,7 @@ export class ModelHistoryProjection {
     }
     // buildContext may now drop whole old user turns. Only a recent turn that
     // cannot fit by itself justifies masking its newest archived observation.
+    // buildContext 可以丢弃完整旧用户轮次；只有近期整轮单独仍无法容纳时，才裁减其最新已归档观察。
     if (latestRecord && costs.get(latestRecord) > available) {
       total = costs.get(latestRecord);
       for (const size of [4096, 1024, 256, 0]) {
@@ -241,7 +251,10 @@ export class ModelHistoryProjection {
   }
 }
 
-/** Explicitly opted-in public chronology for the existing paged current-chat history tool. */
+/**
+ * Explicitly opted-in public chronology for the existing paged current-chat history tool.
+ * 现有当前聊天分页工具只在明确选择时返回公开过程时间线。
+ */
 export function publicModelHistoryText(message) {
   return JSON.stringify({ messageId: message.Id, status: message.Status, finalText: message.Status === 'completed' ? message.Content : '',
     rounds: transcriptRounds(message).map(round => ({ round: round.round, text: round.text,

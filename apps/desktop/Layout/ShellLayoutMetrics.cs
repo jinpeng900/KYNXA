@@ -1,6 +1,9 @@
 namespace KYNXA_Desktop.Layout;
 
-/// <summary>Shell geometry in device-independent pixels; contains no view or persistence state.</summary>
+/// <summary>
+/// Shell geometry in device-independent pixels; contains no view or persistence state.
+/// 主界面几何尺寸使用设备无关像素；不包含视图或持久化状态。
+/// </summary>
 public static class ShellLayoutMetrics
 {
     public const double SidebarDefault = 240;
@@ -25,6 +28,7 @@ public static class ShellLayoutMetrics
     public static (double Minimum, double Maximum) GetWorkNavigationHeightRange(double availableHeight, bool bothExpanded = false)
     {
         // Keep the outer grip and tasks usable before allocating navigation space.
+        // 分配导航区空间前，先保证外部分隔线和任务区可用。
         double maximum = double.IsFinite(availableHeight) ? Math.Max(0, availableHeight - 8 - 96) : 0;
         double minimum = Math.Min(bothExpanded ? 208 : 136, maximum);
         return (minimum, maximum);

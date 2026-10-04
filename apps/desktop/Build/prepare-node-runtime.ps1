@@ -13,6 +13,7 @@ if ([string]::IsNullOrWhiteSpace($ManifestPath)) { $ManifestPath = Join-Path $PS
 
 # The pinned digests come from the official release's SHASUMS256.txt. The complete
 # verified ZIP supplies npm/npx and their licenses as well as the unmodified node.exe.
+# 固定摘要来自官方发行的 SHASUMS256.txt；完整校验 ZIP 中的 npm/npx、许可及未修改的 node.exe 一并随包提供。
 $runtimeManifestText = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8
 $runtimeManifest = $runtimeManifestText | ConvertFrom-Json
 $runtimePlatform = $runtimeManifest.platforms.PSObject.Properties[$RuntimeIdentifier]
@@ -55,6 +56,7 @@ function Get-RuntimeOutputPath([string]$RelativePath) {
 }
 
 # Concurrent IDE/build invocations share one cache without reading partial files.
+# IDE 与构建并发调用共用一个缓存，通过锁避免读取尚未写完的文件。
 $runtimeLock = $null
 $runtimeLockDeadline = [DateTime]::UtcNow.AddMinutes(2)
 while (-not $runtimeLock) {
@@ -84,28 +86,28 @@ try {
         $runtimePrefix = "node-v$runtimeVersion-$RuntimeIdentifier/"
         foreach ($entry in $runtimeArchive.Entries) {
             if (-not $entry.FullName.StartsWith($runtimePrefix, [StringComparison]::Ordinal) -or -not $entry.Name) { continue }
-            $relative = $entry.FullName.Substring($runtimePrefix.Length)
-            if ($relative -notin @('node.exe', 'LICENSE', 'npm', 'npm.cmd', 'npm.ps1', 'npx', 'npx.cmd', 'npx.ps1') -and
-                -not $relative.StartsWith('node_modules/npm/', [StringComparison]::Ordinal)) { continue }
-            if (-not $runtimeFiles.Add($relative)) { throw 'The runtime archive contains duplicate output paths.' }
-            $outputPath = Get-RuntimeOutputPath $relative
+            $relativePath = $entry.FullName.Substring($runtimePrefix.Length)
+            if ($relativePath -notin @('node.exe', 'LICENSE', 'npm', 'npm.cmd', 'npm.ps1', 'npx', 'npx.cmd', 'npx.ps1') -and
+                -not $relativePath.StartsWith('node_modules/npm/', [StringComparison]::Ordinal)) { continue }
+            if (-not $runtimeFiles.Add($relativePath)) { throw 'The runtime archive contains duplicate output paths.' }
+            $outputPath = Get-RuntimeOutputPath $relativePath
             $sourceStream = $entry.Open()
             $hasher = [Security.Cryptography.SHA256]::Create()
-            try { $expected = ([BitConverter]::ToString($hasher.ComputeHash($sourceStream))).Replace('-', '').ToLowerInvariant() }
+            try { $expectedDigest = ([BitConverter]::ToString($hasher.ComputeHash($sourceStream))).Replace('-', '').ToLowerInvariant() }
             finally { $hasher.Dispose(); $sourceStream.Dispose() }
-            if ($relative -eq 'node.exe' -and $expected -ne $runtimeSpec.nodeSha256) { throw 'Node executable does not match its official SHA-256 pin.' }
-            if ((Test-Path -LiteralPath $outputPath -PathType Leaf) -and (Get-RuntimeDigest $outputPath) -eq $expected) { continue }
+            if ($relativePath -eq 'node.exe' -and $expectedDigest -ne $runtimeSpec.nodeSha256) { throw 'Node executable does not match its official SHA-256 pin.' }
+            if ((Test-Path -LiteralPath $outputPath -PathType Leaf) -and (Get-RuntimeDigest $outputPath) -eq $expectedDigest) { continue }
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($outputPath)) | Out-Null
-            $pending = $outputPath + '.extract-' + [Guid]::NewGuid().ToString('N')
+            $pendingOutputPath = $outputPath + '.extract-' + [Guid]::NewGuid().ToString('N')
             try {
                 $sourceStream = $entry.Open()
-                $destinationStream = [IO.File]::Create($pending)
+                $destinationStream = [IO.File]::Create($pendingOutputPath)
                 try { $sourceStream.CopyTo($destinationStream) }
                 finally { $destinationStream.Dispose(); $sourceStream.Dispose() }
-                if ((Get-RuntimeDigest $pending) -ne $expected) { throw 'Extracted Node runtime file failed verification.' }
-                Move-Item -LiteralPath $pending -Destination $outputPath -Force
+                if ((Get-RuntimeDigest $pendingOutputPath) -ne $expectedDigest) { throw 'Extracted Node runtime file failed verification.' }
+                Move-Item -LiteralPath $pendingOutputPath -Destination $outputPath -Force
             }
-            finally { if (Test-Path -LiteralPath $pending -PathType Leaf) { Remove-Item -LiteralPath $pending } }
+            finally { if (Test-Path -LiteralPath $pendingOutputPath -PathType Leaf) { Remove-Item -LiteralPath $pendingOutputPath } }
         }
     }
     finally { $runtimeArchive.Dispose() }
@@ -116,13 +118,13 @@ try {
     if ((Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8) -ne $runtimeManifestText) { throw 'The Node runtime manifest changed during preparation. Rebuild using the new pin.' }
     [IO.File]::WriteAllText((Join-Path $runtimeBundle 'node-runtime.json'), $runtimeManifestText, [Text.UTF8Encoding]::new($false))
     foreach ($file in Get-ChildItem -LiteralPath $runtimeBundle -File -Recurse -Force) {
-        $relative = $file.FullName.Substring($runtimeBundle.Length + 1).Replace('\', '/')
-        if (-not $runtimeFiles.Contains($relative)) { throw "Unexpected file in the Node runtime cache: $relative" }
+        $relativePath = $file.FullName.Substring($runtimeBundle.Length + 1).Replace('\', '/')
+        if (-not $runtimeFiles.Contains($relativePath)) { throw "Unexpected file in the Node runtime cache: $relativePath" }
     }
-    $bytes = (Get-ChildItem -LiteralPath $runtimeBundle -File -Recurse | Measure-Object Length -Sum).Sum
+    $runtimeTotalBytes = (Get-ChildItem -LiteralPath $runtimeBundle -File -Recurse | Measure-Object Length -Sum).Sum
     $runtimeMarker = Join-Path $runtimeCache 'runtime-path.txt'
     Assert-RuntimeNoReparse $runtimeMarker
     [IO.File]::WriteAllText($runtimeMarker, $runtimeBundle, [Text.UTF8Encoding]::new($false))
-    Write-Output "Verified bundled Node $runtimeVersion $RuntimeIdentifier ($($runtimeFiles.Count) files, $bytes bytes)."
+    Write-Output "Verified bundled Node $runtimeVersion $RuntimeIdentifier ($($runtimeFiles.Count) files, $runtimeTotalBytes bytes)."
 }
 finally { $runtimeLock.Dispose() }

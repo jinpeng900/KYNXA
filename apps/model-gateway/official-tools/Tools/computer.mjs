@@ -15,7 +15,10 @@ function descriptor(action, description, properties = {}, required = []) {
     inputSchema: { type: 'object', properties: { ...properties, reason }, required: [...required, 'reason'], additionalProperties: false } };
 }
 
-/** Installed descriptors only; host control stays behind the broker and native window checks. */
+/**
+ * Installed descriptors only; host control stays behind the broker and native window checks.
+ * 此处仅声明随包描述符；宿主控制仍经过代理层和原生窗口检查。
+ */
 export const computerDescriptors = [
   descriptor('windows', 'List visible local windows with their windowId, processId, executable, client dimensions and isResponding; never invent target IDs.',
     { processId: window.processId }),

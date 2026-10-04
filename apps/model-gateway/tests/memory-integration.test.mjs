@@ -13,6 +13,7 @@ import { migrateStorage } from '../migrate-storage.mjs';
 
 // server.mjs creates unused default objects when imported. Give those objects a
 // synthetic root too, so this suite never resolves the user's storage pointer.
+// 导入 server.mjs 时创建的未使用默认实例也应指向测试根目录，避免解析用户的存储指针。
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-memory-integration-import-'));
 const previousDataRoot = process.env.KYNXA_DATA_HOME;
 process.env.KYNXA_DATA_HOME = importRoot;
@@ -71,6 +72,7 @@ function deferred() {
 async function concurrentChatMemoryAndCatalogChange(f, content, changeCatalog) {
   // Read the intended metadata before blocking storage: fetching it while the
   // write guard is held would correctly queue and deadlock the test driver.
+  // 阻塞存储前先读取目标元信息；持有写锁时再读取会按规则排队，导致测试驱动死锁。
   const catalog = await f.api('GET', '/api/conversations/catalog');
   changeCatalog(catalog);
   const entered = deferred(), release = deferred();
@@ -93,6 +95,7 @@ async function concurrentChatMemoryAndCatalogChange(f, content, changeCatalog) {
     }).then(result => { catalogFinished = true; return result; });
     // Health does not enter the storage queue. Observing both active requests
     // proves the catalog RPC arrived, without depending on arbitrary sleeps.
+    // 健康检查不进入存储队列；观察两个请求都在途即可确认目录 RPC 已到达，不依赖任意时长的等待。
     let simultaneous = false;
     for (let attempt = 0; attempt < 30; attempt++) {
       const health = await f.raw('GET', '/health');
@@ -122,6 +125,7 @@ async function fixture(t, { contextWindowTokens = 8192 } = {}) {
     seen.push({ protocol, path: request.url, body });
     // Real SSE on one path catches an implementation that adds memory only to
     // non-streaming calls. Other protocols also support JSON stream fallbacks.
+    // 真实 SSE 路径用于检测是否只在非流式调用中注入记忆；其他协议同时支持 JSON 流式回退。
     if (protocol === 'openai-completions' && body.stream) {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' });
       response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: replyText } }] })}\n\n` +
@@ -294,6 +298,7 @@ test('a desktop-saved declaration and replay use one source identity without dup
   assert.equal(entries[0].source.messageId, message.Id);
   // A user deletion must remain effective if the same declaration is retried
   // with a fresh request ID (completed-request replay itself does not extract).
+  // 以新请求 ID 重试同一声明时，用户删除的记忆仍应保持删除；已完成请求的重放本身不提取记忆。
   const document = await f.scopeDocument(f.chatA.Id, 'project');
   await f.api('DELETE', `${f.memoryPath(f.chatA.Id)}/${entries[0].id}`,
     { scope: 'project', expectedRevision: document.revision });
@@ -550,6 +555,7 @@ test('bounded session summary uses only this chat, excludes failures/reasoning/m
   await writeFile(summaryPath, JSON.stringify({ ...summary, content: 'FORGED_SUMMARY_SCOPE_ESCAPE' }));
   // Retry the same input with a new assistant ID so the summarized history prefix
   // is identical: rejecting the injected text cannot be blamed on a new range.
+  // 用新助手 ID 重试相同输入，保持被摘要的历史前缀一致，避免将拒绝注入文本归因于新的历史范围。
   await f.reply(f.chatB.Id, 'CURRENT_INPUT_MUST_REMAIN', { userMessageId: sent.input.userMessageId });
   assert.ok(!promptText(f.seen.at(-1)).includes('FORGED_SUMMARY_SCOPE_ESCAPE'));
   assert.ok(!(await readFile(summaryPath, 'utf8')).includes('FORGED_SUMMARY_SCOPE_ESCAPE'));

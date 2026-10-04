@@ -24,6 +24,7 @@ async function fixture(t, connection) {
 }
 
 // Only prepare the request: no request is sent to any official API or user account.
+// 仅准备请求；不向任何官方 API 或用户账号发送请求。
 test('runtime clamps a known official model without rewriting configured context or output ceilings', async t => {
   const { runtime, store } = await fixture(t, { baseUrl: 'https://api.openai.com/v1', protocol: 'openai-responses',
     models: ['gpt-6-astra'], contextWindowTokens: 2_000_000, maxOutputTokens: 262_144 });

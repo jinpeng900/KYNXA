@@ -17,7 +17,10 @@ export class ContextError extends Error {
   }
 }
 
-/** Complete successful turns only; ReplyTo links survive failed attempts and retries. */
+/**
+ * Complete successful turns only; ReplyTo links survive failed attempts and retries.
+ * 仅选取成功完成的整轮对话；失败和重试不会破坏 ReplyTo 配对关系。
+ */
 export function completedTurns(history, beforeUserId) {
   const turns = [], users = new Map(), consumed = new Set();
   let adjacentUser;
@@ -37,13 +40,13 @@ export function completedTurns(history, beforeUserId) {
   return turns;
 }
 
-function clipped(text, budget) {
-  if (estimateTokens(text) <= budget) return text;
+function clipTextToTokenBudget(text, budgetTokens) {
+  if (estimateTokens(text) <= budgetTokens) return text;
   const characters = Array.from(text);
   let lower = 0, upper = characters.length;
   while (lower < upper) {
     const middle = Math.ceil((lower + upper) / 2);
-    if (estimateTokens(characters.slice(0, middle).join('') + '…') <= budget) lower = middle;
+    if (estimateTokens(characters.slice(0, middle).join('') + '…') <= budgetTokens) lower = middle;
     else upper = middle - 1;
   }
   return lower ? characters.slice(0, lower).join('') + '…' : '';
@@ -68,18 +71,18 @@ function memoryLine(entry, excerpt) {
   return `[${label}已确认资料；来源：${source}] ${excerpt ?? JSON.stringify(entry.content)}`;
 }
 
-function memoryExcerpt(entry, lines, budget) {
+function memoryExcerpt(entry, lines, budgetTokens) {
   const prefix = '仅首尾原文摘录，完整记忆仍已保存：';
-  const emptyCost = estimateMessageTokens([], systemText([...lines, memoryLine(entry, prefix)]));
-  let contentBudget = budget - emptyCost - 12;
-  if (contentBudget < 48) return null;
+  const emptyMemoryCostTokens = estimateMessageTokens([], systemText([...lines, memoryLine(entry, prefix)]));
+  let contentBudgetTokens = budgetTokens - emptyMemoryCostTokens - 12;
+  if (contentBudgetTokens < 48) return null;
   const reversed = Array.from(entry.content).reverse().join('');
-  while (contentBudget >= 48) {
-    const beginning = clipped(entry.content, Math.floor(contentBudget / 2));
-    const ending = Array.from(clipped(reversed, Math.floor(contentBudget / 2))).reverse().join('');
+  while (contentBudgetTokens >= 48) {
+    const beginning = clipTextToTokenBudget(entry.content, Math.floor(contentBudgetTokens / 2));
+    const ending = Array.from(clipTextToTokenBudget(reversed, Math.floor(contentBudgetTokens / 2))).reverse().join('');
     const line = memoryLine(entry, `${prefix}${JSON.stringify(beginning)} … ${JSON.stringify(ending)}`);
-    if (estimateMessageTokens([], systemText([...lines, line])) <= budget) return line;
-    contentBudget = Math.floor(contentBudget * .8);
+    if (estimateMessageTokens([], systemText([...lines, line])) <= budgetTokens) return line;
+    contentBudgetTokens = Math.floor(contentBudgetTokens * .8);
   }
   return null;
 }
@@ -89,7 +92,10 @@ function systemText(memoryLines, summaryContent = '') {
   return [referenceNotice, ...memoryLines, ...(summaryContent ? [summaryContent] : [])].join('\n');
 }
 
-/** Builds one bounded request projection. Never mutates history or promotes excerpts into memory. */
+/**
+ * Builds one bounded request projection. Never mutates history or promotes excerpts into memory.
+ * 仅构建大小受限的请求视图，不修改历史，也不把摘录提升为长期记忆。
+ */
 export function buildContext({ conversationId, projectId = null, history = [], currentMessage, beforeUserId,
   memoryEntries = [], summary, contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS,
   additionalSystem = '', reservedInputTokens = 0, maxOutputTokens: requestedOutputTokens, providerMaxOutputTokens, providerMaxInputTokens,
@@ -103,34 +109,35 @@ export function buildContext({ conversationId, projectId = null, history = [], c
   if (!Number.isSafeInteger(reservedInputTokens) || reservedInputTokens < 0 || typeof additionalSystem !== 'string')
     throw new ContextError('工具上下文预算无效。', 'INVALID_CONTEXT');
   const current = { role: 'user', content: currentMessage };
-  const currentCost = estimateContextMessages([current]);
+  const currentMessageTokens = estimateContextMessages([current]);
   let outputBudget;
   try { outputBudget = resolveOutputBudget({ contextWindowTokens, requestedOutputTokens, providerMaxOutputTokens, providerMaxInputTokens,
-    requiredInputTokens: currentCost + reservedInputTokens + estimateMessageTokens([], additionalSystem) }); }
+    requiredInputTokens: currentMessageTokens + reservedInputTokens + estimateMessageTokens([], additionalSystem) }); }
   catch (error) {
     throw new ContextError(error.code === 'CONTEXT_INPUT_TOO_LARGE'
-      ? `当前消息预计约 ${currentCost} tokens，与系统指令和工具定义合计超过本次可用输入预算。请缩短消息、减少工具目录，或选用实际支持更大窗口的模型后重试。` : error.message, error.code);
+      ? `当前消息预计约 ${currentMessageTokens} tokens，与系统指令和工具定义合计超过本次可用输入预算。请缩短消息、减少工具目录，或选用实际支持更大窗口的模型后重试。` : error.message, error.code);
   }
   const { maxOutputTokens, safetyMarginTokens, inputBudgetTokens: fullInputBudgetTokens } = outputBudget;
   const inputBudgetTokens = fullInputBudgetTokens - reservedInputTokens - estimateMessageTokens([], additionalSystem);
-  if (currentCost > inputBudgetTokens)
-    throw new ContextError(`当前消息预计约 ${currentCost} tokens，超过本次可用输入预算 ${inputBudgetTokens} tokens。请缩短消息，或在模型连接中提高上下文窗口配置后重试。`);
+  if (currentMessageTokens > inputBudgetTokens)
+    throw new ContextError(`当前消息预计约 ${currentMessageTokens} tokens，超过本次可用输入预算 ${inputBudgetTokens} tokens。请缩短消息，或在模型连接中提高上下文窗口配置后重试。`);
 
   const turns = historyTurns ?? completedTurns(history, beforeUserId);
   const memories = validMemories(memoryEntries, conversationId, projectId);
   const memoryLines = [], includedMemoryIds = [], truncatedMemoryIds = [];
-  const memoryBudget = Math.min(4096, Math.max(256, Math.floor(inputBudgetTokens * .20)), inputBudgetTokens - currentCost);
-  const compact = entry => estimateTokens(memoryLine(entry)) <= memoryBudget * .5;
-  for (const entry of [...memories.filter(compact), ...memories.filter(entry => !compact(entry))]) {
+  const memoryBudgetTokens = Math.min(4096, Math.max(256, Math.floor(inputBudgetTokens * .20)), inputBudgetTokens - currentMessageTokens);
+  const isCompactMemory = entry => estimateTokens(memoryLine(entry)) <= memoryBudgetTokens * .5;
+  for (const entry of [...memories.filter(isCompactMemory), ...memories.filter(entry => !isCompactMemory(entry))]) {
     const candidate = [...memoryLines, memoryLine(entry)];
-    if (estimateMessageTokens([], systemText(candidate)) > memoryBudget) continue;
+    if (estimateMessageTokens([], systemText(candidate)) > memoryBudgetTokens) continue;
     memoryLines.push(candidate.at(-1));
     includedMemoryIds.push(entry.id);
   }
   // Keep short facts complete first. A long confirmed note must not disappear forever
   // merely because its full text exceeds the request's memory allocation.
+  // 优先完整保留短事实；较长的已确认记忆不能仅因全文超过分配额度就永久消失。
   for (const entry of memories.filter(item => !includedMemoryIds.includes(item.id))) {
-    const excerpt = memoryExcerpt(entry, memoryLines, memoryBudget);
+    const excerpt = memoryExcerpt(entry, memoryLines, memoryBudgetTokens);
     if (!excerpt) continue;
     memoryLines.push(excerpt);
     includedMemoryIds.push(entry.id);
@@ -146,39 +153,41 @@ export function buildContext({ conversationId, projectId = null, history = [], c
       maxOutputTokens, message: `${outputBudget.outputBudgetReductionReason === 'provider_limit' ? '模型实际输出能力' : '当前上下文窗口'}将单次输出上限限制为 ${maxOutputTokens} tokens，配置值为 ${outputBudget.requestedOutputTokens} tokens。` }] : [])
   ];
   const baseSystem = systemText(memoryLines);
-  const available = inputBudgetTokens - currentCost - estimateMessageTokens([], baseSystem);
+  const availableHistoryTokens = inputBudgetTokens - currentMessageTokens - estimateMessageTokens([], baseSystem);
   // Projection may contain several assistant/tool observations. Budget whole turns;
   // summaries still use only public conversation text and never provider-private data.
-  const projections = new Map(turns.map(turn => [turn, projectTurn(turn)]));
-  const turnCost = turn => estimateContextMessages(projections.get(turn));
-  const totalHistoryCost = turns.reduce((sum, turn) => sum + turnCost(turn), 0);
-  let reserve = totalHistoryCost > available ? Math.min(8192, Math.floor(available * .35)) : 0;
-  const latestCost = turns.length ? turnCost(turns.at(-1)) : 0;
-  if (latestCost > available - reserve && latestCost <= available) reserve = Math.max(0, available - latestCost);
-  const extraReferenceCost = baseSystem ? 1 : 8 + estimateTokens(referenceNotice + '\n');
-  let used = 0, firstIncluded = turns.length;
+  // 请求视图可能包含多个助手和工具观察，应按整轮计算预算；摘要只使用公开对话，不包含供应商私有数据。
+  const turnProjections = new Map(turns.map(turn => [turn, projectTurn(turn)]));
+  const estimateTurnTokens = turn => estimateContextMessages(turnProjections.get(turn));
+  const totalHistoryTokens = turns.reduce((sum, turn) => sum + estimateTurnTokens(turn), 0);
+  let summaryReserveTokens = totalHistoryTokens > availableHistoryTokens ? Math.min(8192, Math.floor(availableHistoryTokens * .35)) : 0;
+  const latestTurnTokens = turns.length ? estimateTurnTokens(turns.at(-1)) : 0;
+  if (latestTurnTokens > availableHistoryTokens - summaryReserveTokens && latestTurnTokens <= availableHistoryTokens) summaryReserveTokens = Math.max(0, availableHistoryTokens - latestTurnTokens);
+  const extraReferenceTokens = baseSystem ? 1 : 8 + estimateTokens(referenceNotice + '\n');
+  let usedHistoryTokens = 0, firstIncludedTurnIndex = turns.length;
   for (let index = turns.length - 1; index >= 0; index--) {
-    const cost = turnCost(turns[index]);
-    if (used + cost > available - reserve) break;
-    used += cost; firstIncluded = index;
+    const turnTokens = estimateTurnTokens(turns[index]);
+    if (usedHistoryTokens + turnTokens > availableHistoryTokens - summaryReserveTokens) break;
+    usedHistoryTokens += turnTokens; firstIncludedTurnIndex = index;
   }
   let extracted = {};
-  if (firstIncluded > 0 && reserve > extraReferenceCost)
-    extracted = createHistorySummary({ conversationId, turns: turns.slice(0, firstIncluded), allTurns: turns,
-      currentMessage, budget: reserve - extraReferenceCost, previous: summary });
+  if (firstIncludedTurnIndex > 0 && summaryReserveTokens > extraReferenceTokens)
+    extracted = createHistorySummary({ conversationId, turns: turns.slice(0, firstIncludedTurnIndex), allTurns: turns,
+      currentMessage, budget: summaryReserveTokens - extraReferenceTokens, previous: summary });
   // If a useful excerpt cannot fit, give its reserved space back to complete turns.
+  // 有用摘录无法容纳时，将预留空间还给完整对话轮次。
   if (!extracted.value) {
-    for (let index = firstIncluded - 1; index >= 0; index--) {
-      const cost = turnCost(turns[index]);
-      if (used + cost > available) break;
-      used += cost; firstIncluded = index;
+    for (let index = firstIncludedTurnIndex - 1; index >= 0; index--) {
+      const turnTokens = estimateTurnTokens(turns[index]);
+      if (usedHistoryTokens + turnTokens > availableHistoryTokens) break;
+      usedHistoryTokens += turnTokens; firstIncludedTurnIndex = index;
     }
   }
   const system = [systemText(memoryLines, extracted.value?.content), additionalSystem].filter(Boolean).join('\n');
-  const messages = turns.slice(firstIncluded).flatMap(turn => projections.get(turn)).concat(current);
-  const historySources = turns.slice(firstIncluded).flatMap((turn, index) => projections.get(turn).map((message, position) => ({
+  const messages = turns.slice(firstIncludedTurnIndex).flatMap(turn => turnProjections.get(turn)).concat(current);
+  const historySources = turns.slice(firstIncludedTurnIndex).flatMap((turn, index) => turnProjections.get(turn).map((message, position) => ({
     messageId: position === 0 ? turn.user.Id : turn.assistant.Id,
-    role: message.role ?? 'assistant', turnIndex: firstIncluded + index
+    role: message.role ?? 'assistant', turnIndex: firstIncludedTurnIndex + index
   }))).concat({ messageId: beforeUserId ?? null, role: 'user', turnIndex: null });
   const estimatedInputTokens = estimateContextMessages(messages, system);
   if (estimatedInputTokens + reservedInputTokens > fullInputBudgetTokens)
@@ -189,9 +198,9 @@ export function buildContext({ conversationId, projectId = null, history = [], c
     outputBudgetReductionReason: outputBudget.outputBudgetReductionReason,
     ...(providerMaxOutputTokens === undefined ? {} : { providerMaxOutputTokens }),
     ...(providerMaxInputTokens === undefined ? {} : { providerMaxInputTokens }),
-    includedTurnCount: turns.length - firstIncluded, omittedTurnCount: firstIncluded,
+    includedTurnCount: turns.length - firstIncludedTurnIndex, omittedTurnCount: firstIncludedTurnIndex,
     memoryIncludedIds: includedMemoryIds, memoryOmittedCount: memoryEntries.length - includedMemoryIds.length,
-    memoryBudgetTokens: memoryBudget, memoryTruncatedIds: truncatedMemoryIds, memoryOmittedIds: omittedMemoryIds, warnings,
+    memoryBudgetTokens: memoryBudgetTokens, memoryTruncatedIds: truncatedMemoryIds, memoryOmittedIds: omittedMemoryIds, warnings,
     summaryUsed: Boolean(extracted.value), summaryReused: Boolean(extracted.reused),
     summaryExcerptBudgetTokens: extracted.value?.excerptBudgetTokens ?? 0,
     summarySelectedMessageIds: extracted.value?.selectedSources.flatMap(source => [source.userMessageId, source.assistantMessageId]) ?? []

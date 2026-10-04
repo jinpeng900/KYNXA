@@ -13,7 +13,10 @@ using Windows.UI.Core;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>All message text surfaces in a viewport share one ordered selection.</summary>
+/// <summary>
+/// All message text surfaces in a viewport share one ordered selection.
+/// 视口内所有消息文本表面共享一个有序选择范围。
+/// </summary>
 internal sealed class TextSelectionAutoScroll
 {
     private static readonly ConditionalWeakTable<ScrollViewer, ConversationSelection> Sessions = new();
@@ -127,6 +130,7 @@ internal sealed class TextSelectionAutoScroll
             if (!point.Properties.IsLeftButtonPressed) return;
             // Begin runs on the message before this same event bubbles to the root.
             // Any different press (including controls that handled it) starts a new action.
+            // 同一事件冒泡到根节点前，消息已执行 Begin；其他按下动作，包括已被控件处理的动作，都开启新操作。
             if (_dragging && point.Timestamp == _pressTimestamp) return;
             Finish();
             Clear();
@@ -138,7 +142,7 @@ internal sealed class TextSelectionAutoScroll
             if (e.Pointer.PointerDeviceType != PointerDeviceType.Mouse || !e.GetCurrentPoint(text).Properties.IsLeftButtonPressed || _root is null) return;
             var point = e.GetCurrentPoint(text);
             var anchor = text.GetPositionFromPoint(point.Position);
-            if (anchor is null || text.Blocks.OfType<Paragraph>().Any(p => IsLinkAt(p.Inlines, anchor.Offset))) return;
+            if (anchor is null || text.Blocks.OfType<Paragraph>().Any(paragraph => IsLinkAt(paragraph.Inlines, anchor.Offset))) return;
             Finish();
             long pressedAt = Environment.TickCount64;
             bool repeatClick = _lastPressText == text && pressedAt - _lastPressTime <= GetDoubleClickTime()
@@ -148,6 +152,7 @@ internal sealed class TextSelectionAutoScroll
                 && range.Start.Offset == native.Start.Offset && range.End.Offset == native.End.Offset);
             // A single click, including inside an existing selection, collapses it.
             // Preserve a new native word selection produced by a double click.
+            // 单击任何位置，包括现有选择内部，都结束选择；双击产生的新原生词语选择仍应保留。
             var initial = repeatClick && newNativeRange ? native : new Range(text, anchor, anchor);
             Clear();
             _lastPressText = text;
@@ -168,6 +173,7 @@ internal sealed class TextSelectionAutoScroll
             {
                 text.ReleasePointerCapture(e.Pointer);
                 // Reset native pressed state, not just capture, to prevent selecting on hover after release.
+                // 释放时同时重置原生按下状态与指针捕获，避免悬停继续选中文本。
                 text.IsTextSelectionEnabled = false;
                 text.IsTextSelectionEnabled = true;
                 text.Select(initial.Start, initial.End);
@@ -204,6 +210,7 @@ internal sealed class TextSelectionAutoScroll
             if (range is null || (text.SelectionStart.Offset == range.Start.Offset && text.SelectionEnd.Offset == range.End.Offset)) return;
             // Native text services can process a queued hover after mouse capture ends.
             // A released conversation selection stays immutable until a new user action.
+            // 捕获结束后原生文本服务仍可能处理排队的悬停事件；已释放的选择保持不变，直到用户再次操作。
             _writing = true;
             try { text.Select(range.Start, range.End); }
             finally { _writing = false; }
@@ -281,6 +288,7 @@ internal sealed class TextSelectionAutoScroll
         {
             if (!_dragging) return;
             _dragging = false; // Capture-lost can reenter during release.
+            // 释放捕获可能重入触发捕获丢失事件。
             _timer.Stop();
             _root?.RemoveHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released));
             _root?.RemoveHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Canceled));
@@ -311,6 +319,7 @@ internal sealed class TextSelectionAutoScroll
             {
                 // Focus transfer can clear native selection before PointerPressed reaches
                 // this root. Decorations must be cleared even when SelectedText is empty.
+                // 焦点转移可能先于根节点的 PointerPressed 清空原生选择；即使 SelectedText 已空，也须清除装饰。
                 foreach (var highlight in _highlights.Values) highlight.Ranges.Clear();
                 foreach (var text in _documents.Where(text => text.SelectedText.Length > 0))
                     text.Select(text.ContentStart, text.ContentStart);
@@ -323,6 +332,7 @@ internal sealed class TextSelectionAutoScroll
             var text = range.Text;
             // TextPointer counts formatting positions; TextHighlighter counts plain characters.
             // Use the native selection to translate, including paragraphs, Unicode and code spans.
+            // TextPointer 计算格式位置，TextHighlighter 计算普通字符；用原生选择转换，兼容段落、Unicode 与代码片段。
             text.Select(text.ContentStart, range.Start);
             int start = text.SelectedText.Length;
             text.Select(range.Start, range.End);

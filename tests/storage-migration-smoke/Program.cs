@@ -51,6 +51,7 @@ await File.WriteAllTextAsync(pointer, "{\"version\":1,\"dataRoot\":\"old\"}");
 string originalPointer = await File.ReadAllTextAsync(pointer);
 var target = Path.Combine(root, "new");
 Directory.CreateDirectory(target); // The folder picker may return an existing empty directory.
+// 文件夹选择器可能返回已存在的空目录。
 bool initialized = false;
 var result = await StorageMigrationService.MoveAsync(desktop, models, target, pointer, initializeTarget: async (destination, token) =>
 {
@@ -138,6 +139,7 @@ Check(File.Exists(Path.Combine(customTarget, "Chats", "custom-chat", "events.jso
 Check(!Directory.Exists(Path.Combine(customTarget, "Models", "Conversations")), "custom root not copied twice");
 Console.WriteLine("PASS: legacy/canonical migration, history/backup hashes, managed/external metadata, custom roots, empty directories, target safety, cancellation and concurrent modification.");
 // This directory contains only generated fixtures; leave it available for inspection.
+// 此目录仅包含生成的测试数据，保留以便检查。
 Console.WriteLine("Fixture: " + root);
 
 sealed class ImmediateProgress(Action<string> report) : IProgress<string> { public void Report(string value) => report(value); }

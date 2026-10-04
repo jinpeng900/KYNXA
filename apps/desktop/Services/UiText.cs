@@ -1,6 +1,9 @@
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Translations for application chrome only; user and model content stays unchanged.</summary>
+/// <summary>
+/// Translations for application chrome only; user and model content stays unchanged.
+/// 只翻译应用界面；用户与模型正文保持原样。
+/// </summary>
 public static partial class UiText
 {
     public static string Language { get; private set; } = "zh-CN";

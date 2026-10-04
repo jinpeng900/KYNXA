@@ -1,5 +1,6 @@
 // Upstream stream decoding is separate from HTTP delivery and session persistence.
 // Never return provider error payloads: they can contain credentials or request bodies.
+// 上游流解码与 HTTP 传输及会话持久化分开；不返回供应商原始错误载荷，其中可能含凭据或请求正文。
 export class StreamFailure extends Error {
   constructor(message, type = 'error') { super(message); this.type = type; }
 }
@@ -13,32 +14,35 @@ export function checkFinish(reason) {
       : '模型未完整生成回复，已保留生成的内容。', 'interrupted');
 }
 
-/** SSE parser with streaming UTF-8 decoding, CR/LF handling and bounded frames. */
+/**
+ * SSE parser with streaming UTF-8 decoding, CR/LF handling and bounded frames.
+ * SSE 解析器采用流式 UTF-8 解码，兼容 CR 和 LF，并限制事件帧大小。
+ */
 export async function* readSse(body, onActivity = () => {}) {
   if (!body) throw new StreamFailure('模型接口没有返回响应内容。');
-  const reader = body.getReader(), decoder = new TextDecoder();
-  let buffer = '', data = [], event = '', frameSize = 0;
+  const reader = body.getReader(), utf8Decoder = new TextDecoder();
+  let lineBuffer = '', data = [], event = '', frameDataCharacters = 0;
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (!done) onActivity();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      if (buffer.length + frameSize > 2 * 1024 * 1024)
+      lineBuffer += done ? utf8Decoder.decode() : utf8Decoder.decode(value, { stream: true });
+      if (lineBuffer.length + frameDataCharacters > 2 * 1024 * 1024)
         throw new StreamFailure('模型返回的单条流式事件过大。');
       while (true) {
-        const match = /\r\n|\n|\r/.exec(buffer);
-        if (!match || (!done && match[0] === '\r' && match.index === buffer.length - 1)) break;
-        const line = buffer.slice(0, match.index);
-        buffer = buffer.slice(match.index + match[0].length);
+        const match = /\r\n|\n|\r/.exec(lineBuffer);
+        if (!match || (!done && match[0] === '\r' && match.index === lineBuffer.length - 1)) break;
+        const line = lineBuffer.slice(0, match.index);
+        lineBuffer = lineBuffer.slice(match.index + match[0].length);
         if (!line) {
           if (data.length) yield { event, data: data.join('\n') };
-          data = []; event = ''; frameSize = 0;
+          data = []; event = ''; frameDataCharacters = 0;
         } else if (!line.startsWith(':')) {
           const colon = line.indexOf(':');
           const field = colon < 0 ? line : line.slice(0, colon);
           let text = colon < 0 ? '' : line.slice(colon + 1);
           if (text.startsWith(' ')) text = text.slice(1);
-          if (field === 'data') { data.push(text); frameSize += text.length; }
+          if (field === 'data') { data.push(text); frameDataCharacters += text.length; }
           else if (field === 'event') event = text;
         }
       }
@@ -46,6 +50,7 @@ export async function* readSse(body, onActivity = () => {}) {
     }
     // A final unterminated SSE frame is not dispatched. A missing terminal event
     // is detected by the protocol adapter rather than saved as a successful turn.
+    // 不派发末尾未闭合的 SSE 帧；缺失终止事件由协议适配器发现，不能保存为成功轮次。
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
@@ -54,22 +59,22 @@ export async function* readSse(body, onActivity = () => {}) {
 
 export function textParts(value) {
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.filter(x => x?.type === 'text').map(x => x.text ?? '').join('');
+  if (Array.isArray(value)) return value.filter(part => part?.type === 'text').map(part => part.text ?? '').join('');
   return '';
 }
 
 export function finalParts(protocol, result) {
   if (result?.error) throw new StreamFailure('模型服务返回错误，请检查连接配置或稍后重试。');
   if (protocol === 'anthropic-messages') return {
-    content: result.content?.filter(x => x.type === 'text').map(x => x.text ?? '').join('\n') ?? '',
-    reasoning: result.content?.filter(x => x.type === 'thinking').map(x => x.thinking ?? '').join('\n') ?? '',
+    content: result.content?.filter(part => part.type === 'text').map(part => part.text ?? '').join('\n') ?? '',
+    reasoning: result.content?.filter(part => part.type === 'thinking').map(part => part.thinking ?? '').join('\n') ?? '',
     finish: result.stop_reason
   };
   if (protocol === 'openai-responses') return {
-    content: result.output?.filter(x => x.type === 'message').flatMap(x => x.content ?? [])
-      .filter(x => x.type === 'output_text').map(x => x.text ?? '').join('\n') ?? result.output_text ?? '',
-    reasoning: result.output?.filter(x => x.type === 'reasoning').flatMap(x => x.summary ?? [])
-      .filter(x => x.type === 'summary_text').map(x => x.text ?? '').join('\n') ?? '',
+    content: result.output?.filter(part => part.type === 'message').flatMap(part => part.content ?? [])
+      .filter(part => part.type === 'output_text').map(part => part.text ?? '').join('\n') ?? result.output_text ?? '',
+    reasoning: result.output?.filter(part => part.type === 'reasoning').flatMap(part => part.summary ?? [])
+      .filter(part => part.type === 'summary_text').map(part => part.text ?? '').join('\n') ?? '',
     finish: result.status === 'incomplete' ? result.incomplete_details?.reason || 'incomplete'
       : result.status && result.status !== 'completed' ? result.status : null
   };
@@ -79,7 +84,10 @@ export function finalParts(protocol, result) {
     finish: choice?.finish_reason };
 }
 
-/** emit receives only { type, delta } events; returned snapshots reconcile final content. */
+/**
+ * emit receives only { type, delta } events; returned snapshots reconcile final content.
+ * emit 只接收 type 与 delta 事件，返回快照用于校正最终内容。
+ */
 export async function readModelStream(response, protocol, emit, onActivity) {
   let content = '', reasoning = '', finished = false;
   const append = (type, delta) => {
@@ -91,6 +99,7 @@ export async function readModelStream(response, protocol, emit, onActivity) {
   };
   if (!(response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')) {
     // Some compatible/local servers ignore stream:true and return a JSON response.
+    // 部分兼容或本地服务忽略 stream:true，直接返回 JSON 响应。
     let result;
     try { result = await response.json(); } catch { throw new StreamFailure('模型接口返回了无效的 JSON 响应。'); }
     onActivity();
@@ -140,7 +149,7 @@ export async function readModelStream(response, protocol, emit, onActivity) {
         throw new StreamFailure('模型未完整生成回复，已保留生成的内容。', 'interrupted');
       }
     } else {
-      const choice = event.choices?.find(x => x.index === 0) ?? event.choices?.find(x => x.index == null);
+      const choice = event.choices?.find(part => part.index === 0) ?? event.choices?.find(part => part.index == null);
       append('reasoning_delta', textParts(choice?.delta?.reasoning_content ?? choice?.delta?.reasoning));
       append('text_delta', textParts(choice?.delta?.content));
       if (choice?.finish_reason) { checkFinish(choice.finish_reason); finished = true; break; }

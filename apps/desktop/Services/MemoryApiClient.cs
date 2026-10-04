@@ -13,12 +13,15 @@ public interface IMemoryApi
     Task<MemoryScopeDocument> DeleteAsync(MemoryTarget target, Guid entryId, MemoryDeleteRequest request, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Gateway memory transport; no drafts, snapshots, or authoritative data are written by the desktop.</summary>
+/// <summary>
+/// Gateway memory transport; no drafts, snapshots, or authoritative data are written by the desktop.
+/// 记忆 API 传输层；桌面不写入草稿快照或正式记忆数据。
+/// </summary>
 public sealed class MemoryApiClient : IMemoryApi, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http;
-    private readonly Func<CancellationToken, Task> _ensureReady;
+    private readonly HttpClient _httpClient;
+    private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
 
     public MemoryApiClient() : this(new HttpClient
@@ -29,16 +32,16 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
 
     public MemoryApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {
-        _http = http;
-        _ensureReady = ensureReady ?? (_ => Task.CompletedTask);
+        _httpClient = http;
+        _ensureGatewayReady = ensureReady ?? (_ => Task.CompletedTask);
         _ownsHttpClient = ownsHttpClient;
     }
 
     public async Task<MemoryScopeDocument> GetAsync(MemoryTarget target, CancellationToken cancellationToken = default)
     {
         string path = PathFor(target);
-        await _ensureReady(cancellationToken);
-        using var response = await _http.GetAsync(path, cancellationToken);
+        await _ensureGatewayReady(cancellationToken);
+        using var response = await _httpClient.GetAsync(path, cancellationToken);
         MemoryScopeDocument document;
         if (target.Scope == MemoryScopes.Chat)
         {
@@ -74,9 +77,9 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
     private async Task<MemoryScopeDocument> WriteAsync<T>(MemoryTarget target, HttpMethod method, string path, T payload,
         CancellationToken cancellationToken)
     {
-        await _ensureReady(cancellationToken);
+        await _ensureGatewayReady(cancellationToken);
         using var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(payload, options: JsonOptions) };
-        using var response = await _http.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         var document = await ReadAsync<MemoryScopeDocument>(response, cancellationToken);
         ValidateDocument(target, document, requireSourceStatus: false);
         return document;
@@ -120,10 +123,10 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
         if (document.SchemaVersion != 1 || document.Scope != target.Scope || document.ScopeId != target.ScopeId ||
             document.Revision is < 0 or > MemoryInputValidation.MaximumRevision || document.Entries is null)
             throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
-        var ids = new HashSet<Guid>();
+        var entryIds = new HashSet<Guid>();
         foreach (var entry in document.Entries)
         {
-            if (entry is null || entry.Id == Guid.Empty || !ids.Add(entry.Id) || entry.Scope != document.Scope ||
+            if (entry is null || entry.Id == Guid.Empty || !entryIds.Add(entry.Id) || entry.Scope != document.Scope ||
                 entry.ScopeId != document.ScopeId || entry.Status != "confirmed" || entry.Revision < 1 ||
                 MemoryInputValidation.Validate(entry.Content, entry.Kind) != MemoryInputError.None || entry.Source is null ||
                 entry.Source.Role != "user" || entry.Source.Type is not ("manual" or "user-message") ||
@@ -139,6 +142,6 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
 
     public void Dispose()
     {
-        if (_ownsHttpClient) _http.Dispose();
+        if (_ownsHttpClient) _httpClient.Dispose();
     }
 }

@@ -69,6 +69,7 @@ internal static class Program
             if (request.Operation != "run") throw new SandboxException("SANDBOX_INVALID_REQUEST", "Unknown sandbox operation.");
             using var cancellation = new CancellationTokenSource();
             // Console.In is synchronized: its ReadLineAsync may synchronously block before returning.
+            // Console.In 使用同步访问，ReadLineAsync 在返回任务前也可能同步阻塞。
             _ = Task.Run(() => MonitorCancellationAsync(cancellation));
             var result = await AppContainerRunner.RunAsync(request, cancellation.Token);
             Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
@@ -108,6 +109,7 @@ internal static class Program
         try
         {
             // EOF also cancels: a terminated gateway cannot leave a sandbox worker running.
+            // 收到 EOF 同样取消执行，避免网关终止后仍留下运行中的沙箱进程。
             string? line = await Console.In.ReadLineAsync();
             if (line is null or "cancel") cancellation.Cancel();
         }

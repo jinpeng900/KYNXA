@@ -22,6 +22,7 @@ internal static class Program
         Equal(HostTerminalRunner.DecodeOutput([0xe4, 0xb8, 0xad, 0xe6, 0x96, 0x87], true, 936), "中文", "UTF-8 final line without newline");
         Equal(HostTerminalRunner.DecodeOutput(utf8ChineseLine, false, 936), "中文\r\n", "PowerShell declared UTF-8 output");
         // These bytes are also valid in some OEM pages: an unmarked stream cannot disambiguate them.
+        // 这些字节在某些 OEM 代码页也合法，未标记的字节流无法区分其编码。
         Equal(HostTerminalRunner.DecodeOutput([0xc2, 0xa3, 0x0a], true, 936), "£\n", "Documented strict UTF-8 precedence");
         Console.WriteLine($"PASS: {_checks} host terminal decoding checks");
         return 0;
@@ -35,6 +36,7 @@ internal static class Program
 }
 
 // Linked native declarations reference this exception; decoding checks never launch a process or call native sandbox methods.
+// 链接的原生声明引用此异常；解码检查不启动进程或调用原生沙箱方法。
 internal sealed class SandboxException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;

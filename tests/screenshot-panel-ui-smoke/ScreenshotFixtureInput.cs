@@ -5,7 +5,9 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace ScreenshotPanelUiSmoke;
 
-/// <summary>Finite physical inputs restricted to this fixture's foreground, synthetic full-screen window.</summary>
+/// <summary>Finite physical inputs restricted to this fixture's foreground, synthetic full-screen window.
+/// 有限的真实输入仅作用于此夹具前台的虚构全屏窗口。
+/// </summary>
 internal sealed class ScreenshotFixtureInput : IDisposable
 {
     private readonly nint _window;

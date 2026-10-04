@@ -8,7 +8,10 @@ public sealed record ConversationScreenshotSource(Guid ConversationId, Guid Mess
     public string Identity => $"{ConversationId:D}/{MessageId:D}/{Tool.ToolCallId}/{Tool.ResultRef!.Id:D}/{Tool.ResultRef.Bytes}/{Tool.ResultRef.Sha256.ToLowerInvariant()}";
 }
 
-/// <summary>Projects completed screenshot receipts without changing formal messages or trusting model text.</summary>
+/// <summary>
+/// Projects completed screenshot receipts without changing formal messages or trusting model text.
+/// 只从完成的截图回执生成展示，不改变正式消息，也不信任模型描述。
+/// </summary>
 public static class ConversationScreenshotSources
 {
     public const long MaximumResultBytes = 8 * 1024 * 1024;

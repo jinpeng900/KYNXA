@@ -41,6 +41,7 @@ test('Chrome normalized output extension follows its saved-file receipt instead 
   const f = await fixture(t), requested = join(f.work, 'shot.jpg'), actual = join(f.work, 'shot.jpeg');
   await writeFile(requested, 'old unrelated file');
   // A PNG payload can still be validated by its bytes; the extension never supplies the MIME type.
+  // PNG 载荷按实际字节校验，扩展名不决定 MIME 类型。
   await writeFile(actual, png);
   const receipt = await archiveBrowserScreenshot(upstream('Saved screenshot to ' + actual + '.'),
     { ...f, descriptor: descriptor('take_screenshot'), args: { filePath: requested, format: 'jpeg' } });

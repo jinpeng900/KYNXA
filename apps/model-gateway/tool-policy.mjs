@@ -12,6 +12,7 @@ export function needsToolApproval(context, name, { outsideWorkspace = false, ver
   if (READ_TOOLS.has(name)) return false;
   if (context.permissionMode === 'smart' && (REVERSIBLE_TOOLS.has(name) || (['terminal.run', 'skill.run'].includes(name) && verifiedSandbox))) return false;
   // Unknown MCP annotations never grant authority. Deletion always requires approval in Ask/Smart.
+  // 未知 MCP 注解不授予权限；Ask 和 Smart 模式中的删除始终需要审批。
   return true;
 }
 

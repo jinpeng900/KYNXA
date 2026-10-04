@@ -5,7 +5,9 @@ using Windows.Storage.Streams;
 
 namespace MemoryUiSmoke;
 
-/// <summary>Captures the native window with PrintWindow and encodes the captured pixels unchanged.</summary>
+/// <summary>Captures the native window with PrintWindow and encodes the captured pixels unchanged.
+/// 使用 PrintWindow 捕获原生窗口，并保持捕获像素原样编码。
+/// </summary>
 internal static class NativeWindowCapture
 {
     public static async Task CaptureAsync(Window window, string path)

@@ -186,6 +186,7 @@ test('real SDK teardown failures remain owned and block reset/disconnect/reconne
       assert.equal(events.some(event => event.value === 'never-replayed'), false);
     } finally {
       // Test-only cleanup uses the exact captured SDK owners, never names or broad process searches.
+      // 测试仅清理已捕获的 SDK 自有进程，不按名称或宽泛的进程搜索清理。
       await Promise.all([...original.values()].map(close => close()));
     }
   });

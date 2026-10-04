@@ -8,6 +8,7 @@ namespace KYNXA_Desktop.Views;
 
 // Minimal host for the production tree renderer and hover callbacks. This fixture
 // never creates storage clients, loads user settings, or opens real conversations.
+// 为生产项目树渲染和悬停回调提供最小宿主；不创建存储客户端、加载用户设置或打开真实会话。
 public sealed partial class ShellPage : Page
 {
     public ObservableCollection<ProjectTreeEntry> Entries { get; } = [];

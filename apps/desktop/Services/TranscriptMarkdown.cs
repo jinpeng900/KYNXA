@@ -11,7 +11,10 @@ using Markdig.Syntax.Inlines;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Renders conversation Markdown as selectable HTML with deferred, source-preserving math.</summary>
+/// <summary>
+/// Renders conversation Markdown as selectable HTML with deferred, source-preserving math.
+/// 把聊天 Markdown 渲染为可选择 HTML，公式延迟渲染且保留源文。
+/// </summary>
 internal static class TranscriptMarkdown
 {
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()

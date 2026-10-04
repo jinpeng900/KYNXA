@@ -3,7 +3,10 @@ import { realpath } from 'node:fs/promises';
 import { isModelCredentialPath, within } from './tool-paths.mjs';
 import { extensionControlPaths, isExtensionControlPath, isExtensionManagedPath } from './extension-storage.mjs';
 
-/** Storage identity and protected-path policy; never grants authority to execute an operation. */
+/**
+ * Storage identity and protected-path policy; never grants authority to execute an operation.
+ * 此模块只负责存储身份和受保护路径策略，不授予执行权限。
+ */
 export class ToolStorageBoundary {
   constructor({ root, dataHome, extensionRoot, extensionPointer, officialToolsRoot }) {
     this.root = root;
@@ -18,6 +21,7 @@ export class ToolStorageBoundary {
 
   async refresh() {
     // Publish a complete snapshot only after all canonical roots have been resolved.
+    // 全部正式根目录解析完成后，才发布完整快照。
     this.storageAliases = await Promise.all(this.roots.map(async root => {
       try { return [root, await realpath(root)]; }
       catch (error) {

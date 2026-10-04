@@ -42,6 +42,7 @@ public sealed partial class ShellPage
         ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 56 : 24, 0);
 
         // Automatic hiding never changes the user's explicit open/closed preference.
+        // 自动隐藏不改变用户明确选择的展开或关闭偏好。
         return Math.Max(0, available - panelWidth - gap);
     }
 

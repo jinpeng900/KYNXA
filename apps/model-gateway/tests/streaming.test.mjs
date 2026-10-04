@@ -39,6 +39,7 @@ async function fixture(t, protocol, handler, runtimeOptions = {}) {
     baseUrl: `${endpoint}/v1`, models: ['test-model'], apiKey: 'secret-not-for-events' });
   const modelRuntime = new ModelRuntime({ modelStore, dataHome, ...runtimeOptions });
   // An injected fake tool service may intentionally omit the real MCP client.
+  // 注入的伪工具服务可能有意不包含真实 MCP 客户端。
   if (typeof modelRuntime.tools?.mcp?.catalog === 'function') isolateFixtureMcpCatalog(modelRuntime.tools);
   t.after(() => modelRuntime.close());
   const gateway = createModelServer({ modelStore, modelRuntime });
@@ -62,6 +63,7 @@ async function events(response) {
 async function fragmented(response, text) {
   const bytes = Buffer.from(text);
   // Deliberately split multibyte Chinese, CRLF and JSON tokens across writes.
+  // 刻意跨多次写入切分中文多字节字符、CRLF 和 JSON token。
   for (let index = 0; index < bytes.length; index += 2) {
     response.write(bytes.subarray(index, index + 2));
     await delay(1);
@@ -111,6 +113,7 @@ test('Chat Completions streams before completion, separates reasoning, and repla
   assert.equal(f.seen[0].path, '/v1/chat/completions');
   assert.equal(JSON.stringify(received).includes('secret-not-for-events'), false);
   // Simulates a lost terminal event followed by a retry with the same ID.
+  // 模拟结束事件丢失后，使用同一个 ID 重试。
   const replay = await events(await f.post());
   assert.deepEqual(replay.map(x => x.type), ['started', 'completed']);
   assert.equal(replay.at(-1).reasoning, '先想一想');

@@ -6,7 +6,10 @@ using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Displays the requested operation; the caller owns approval identity and cancellation.</summary>
+/// <summary>
+/// Displays the requested operation; the caller owns approval identity and cancellation.
+/// 展示所请求的操作；审批身份与取消仍由调用方负责。
+/// </summary>
 public static class ToolApprovalDialog
 {
     public static ContentDialog Create(XamlRoot root, ToolActivity tool)

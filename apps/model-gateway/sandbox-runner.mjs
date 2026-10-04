@@ -17,7 +17,10 @@ function abortError(result) {
   return Object.assign(new Error('Sandbox execution was cancelled.'), { name: 'AbortError', code: 'ABORT_ERR', sandboxResult: result });
 }
 
-/** Native helper only. A missing or failing AppContainer never runs a normal host process instead. */
+/**
+ * Native helper only. A missing or failing AppContainer never runs a normal host process instead.
+ * 仅使用原生助手，AppContainer 缺失或失败时绝不改为普通宿主执行。
+ */
 export class SandboxRunner {
   #toolHostPath;
   #excludedRoots;
@@ -88,6 +91,7 @@ export class SandboxRunner {
     } catch (error) {
       const completed = error.sandboxResult;
       // A cancellation can arrive between native completion and pipe close. Its retained copy must still be owned and cleaned.
+      // 取消可能发生在原生完成与管道关闭之间，其保留副本仍需有明确所有者并完成清理。
       if (error.name === 'AbortError' && completed?.protocolVersion === 1 && completed.tokenVerified === true &&
           completed.activeProcessesAfterExit === 0 && completed.cancelled === false && typeof completed.stagingDirectory === 'string') {
         this.#stagingDirectories.add(completed.stagingDirectory);
@@ -122,7 +126,10 @@ export class SandboxRunner {
     return result;
   }
 
-  /** Only directories returned by this runner may be removed; junctions below are not followed by fs.rm. */
+  /**
+   * Only directories returned by this runner may be removed; junctions below are not followed by fs.rm.
+   * 只允许删除此执行器返回的目录，fs.rm 不跟随其中的目录联接。
+   */
   async cleanup(stagingDirectory) {
     if (!this.#stagingDirectories.has(stagingDirectory)) throw failure('SANDBOX_INVALID_CLEANUP', 'The staging directory does not belong to this runner.');
     const lexicalRoot = join(tmpdir(), 'kynxa-tool-sandbox');
@@ -164,6 +171,7 @@ export class SandboxRunner {
         aborted = true;
         if (!child.stdin.destroyed) child.stdin.end('cancel\n');
         // Graceful cancellation releases the unique profile; closing the job handle is the fail-closed fallback.
+        // 正常取消释放唯一配置；关闭作业句柄作为保守拒绝执行的兜底清理。
         hardStopTimer ??= setTimeout(() => child.kill(), 5000);
       };
       const watchdog = setTimeout(() => {
@@ -171,7 +179,7 @@ export class SandboxRunner {
         finish(failure('SANDBOX_HOST_TIMEOUT', 'The native sandbox helper exceeded its startup or cleanup deadline.'));
       }, maximumWaitMs);
       signal?.addEventListener('abort', cancel, { once: true });
-      child.stdin.on('error', () => { /* The close/error event below supplies the authoritative outcome. */ });
+      child.stdin.on('error', () => { /* The close/error event below supplies the authoritative outcome. 下方 close 或 error 事件提供权威执行结果。 */ });
       child.stdout.on('data', chunk => {
         stdoutBytes += chunk.length;
         if (stdoutBytes > maximumHostOutputBytes) {
@@ -198,7 +206,7 @@ export class SandboxRunner {
           }
         }
       });
-      child.stderr.on('data', () => { /* Runtime diagnostics are not copied into tool output; JSON errors are authoritative. */ });
+      child.stderr.on('data', () => { /* Runtime diagnostics are not copied into tool output; JSON errors are authoritative. 不将运行时诊断复制到工具输出，JSON 错误回执才是权威来源。 */ });
       child.on('error', error => finish(failure('SANDBOX_UNAVAILABLE', error.message)));
       child.on('close', code => {
         try {

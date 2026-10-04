@@ -1,7 +1,10 @@
 import { StreamFailure, readSse, textParts, finalParts, checkFinish } from './streaming.mjs';
 import { decodeToolTurn } from './tool-protocols.mjs';
 
-/** Decode complete tool arguments before dispatch. A dropped stream never executes a call. */
+/**
+ * Decode complete tool arguments before dispatch. A dropped stream never executes a call.
+ * 参数完整解码后才能派发工具调用，中断流不能执行半份调用。
+ */
 export async function readToolStream(response, protocol, catalog, emit = () => {}, activity = () => {}) {
   let content = '', reasoning = '';
   const send = (type, delta) => {
@@ -17,14 +20,17 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
     catch (error) {
       // Local servers may ignore stream:true. Keep their returned draft without
       // treating incomplete tool arguments as an executable call.
+      // 本地服务可能忽略 stream:true；保留其返回草稿，但不把未完成工具参数当成可执行调用。
       const parts = finalParts(protocol, result);
       emit({ type: 'content_snapshot', content: parts.content || content, reasoning: parts.reasoning || reasoning });
       throw error;
     }
     if (turn.content.startsWith(content)) send('text_delta', turn.content.slice(content.length));
     // Final snapshots may revise a streamed draft. The completed event reconciles the UI.
+    // 最终快照可修订流式草稿，通过 completed 事件校正界面。
     if (turn.reasoning.startsWith(reasoning)) send('reasoning_delta', turn.reasoning.slice(reasoning.length));
     // Public thought summaries may also be revised in a completed response.
+    // 公开思考摘要也可能在最终响应中修订。
     return turn;
   };
   if (!(response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')) {
@@ -68,6 +74,7 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
         const delta = item.delta;
         // Compatibility with text-only streams omitting block_start. Tool arguments
         // still require an explicit tool_use identity before any input fragments.
+        // 兼容省略 block_start 的纯文本流，但工具参数片段仍需先有明确 tool_use 身份。
         if (!block && ['text_delta', 'thinking_delta'].includes(delta?.type)) {
           block = delta.type === 'text_delta' ? { type: 'text', text: '' } : { type: 'thinking', thinking: '' };
           blocks.set(item.index, block);

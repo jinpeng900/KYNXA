@@ -9,7 +9,9 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <!-- Sidebar slot -->
+        <!-- Sidebar slot
+             侧栏区域。
+        -->
         <Grid Grid.Column="0" Background="{StaticResource KynxaSidebarBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
@@ -20,7 +22,9 @@
             </Grid.RowDefinitions>
 
             <Grid x:Name="GlobalSidebarHeader" Margin="8,0">
-                <!-- Kimi medium segmented control: 36 high, 2 inset, equal 32-high halves. -->
+                <!-- Kimi medium segmented control: 36 high, 2 inset, equal 32-high halves.
+                     采用 Kimi 风格中号分段控件：总高 36、内缩 2，两半等宽且各高 32。
+                -->
                 <Border x:Name="ChatWorkSwitcher" Height="36" Padding="2"
                         Background="{StaticResource KynxaSegmentIdleBrush}" CornerRadius="10">
                     <Grid x:Name="ModeSwitchTrack" SizeChanged="ModeSwitchTrack_SizeChanged">
@@ -87,7 +91,9 @@
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundPointerOver" Color="Transparent" />
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundPressed" Color="Transparent" />
                     <SolidColorBrush x:Key="TreeViewItemSelectionIndicatorForegroundDisabled" Color="Transparent" />
-                    <!-- One opaque surface spans the chevron and content; active and hover never compound. -->
+                    <!-- One opaque surface spans the chevron and content; active and hover never compound.
+                         一层不透明背景同时覆盖展开箭头与内容，选中和悬停反馈不叠加。
+                    -->
                     <SolidColorBrush x:Key="WorkProjectRowBackgroundBrush" Color="#F3F2F1" />
                     <Style x:Key="WorkProjectTreeItemStyle" TargetType="TreeViewItem">
                         <Setter Property="Height" Value="40" />
@@ -132,7 +138,9 @@
                                         <Border Background="{StaticResource WorkProjectRowBackgroundBrush}"
                                                 CornerRadius="{TemplateBinding CornerRadius}" Visibility="{Binding ActiveVisibility}"
                                                 IsHitTestVisible="False" />
-                                        <!-- Native names/settings keep expansion, keyboard navigation and indentation intact. -->
+                                        <!-- Native names/settings keep expansion, keyboard navigation and indentation intact.
+                                             保留原生名称和设置，确保展开、键盘导航与缩进行为不变。
+                                        -->
                                         <Grid x:Name="MultiSelectGrid"
                                               Padding="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=TreeViewItemTemplateSettings.Indentation}">
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
@@ -407,7 +415,9 @@
 
         <controls:ResizeGrip x:Name="SidebarGrip" Grid.Column="1" Axis="Horizontal" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
 
-        <!-- Stable main slots: top workspace, primary content and optional preview. -->
+        <!-- Stable main slots: top workspace, primary content and optional preview.
+             主体固定为顶部工作区、主要内容以及可选预览区域。
+        -->
         <Grid x:Name="MainRegion" Grid.Column="2" Background="{StaticResource KynxaMainBrush}" SizeChanged="MainRegion_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="TopWorkspaceRow" Height="96" />
@@ -455,7 +465,9 @@
                         <Ellipse x:Name="AmbientSoftWave" Width="720" Height="250" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
                     </Grid>
 
-                    <!-- Reserved for the durable work history surface. -->
+                    <!-- Reserved for the durable work history surface.
+                         预留给可持久保存的工作历史视图。
+                    -->
 
 
 

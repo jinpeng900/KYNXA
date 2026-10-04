@@ -297,6 +297,7 @@ test('a configured skill above Data cannot read or snapshot formal config or pri
     await mkdir(join(file, '..'), { recursive: true }); await writeFile(file, 'FAKE_PRIVATE_PAYLOAD');
   }
   // On Windows TEMP may use an 8.3 username alias; discovery deliberately uses its canonical long path.
+  // Windows 的 TEMP 路径可能使用 8.3 用户名别名；发现流程有意使用规范长路径。
   const canonicalParent = await realpath(f.root);
   const current = { skillDirectories: [canonicalParent], disabledSkills: [] }, skill = await f.available(name, null, current);
   assert.ok(skill && skill.status !== 'unavailable');

@@ -35,7 +35,7 @@ let selectedModel = null;
 let conversationId = crypto.randomUUID();
 let sending = false;
 
-async function api(path, options = {}) {
+async function requestApi(path, options = {}) {
   const response = await fetch(path, options);
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
@@ -43,16 +43,16 @@ async function api(path, options = {}) {
 }
 
 async function refreshModels() {
-  ({ providers } = await api("/api/models"));
-  const available = providers.flatMap(provider => provider.models.map(model => ({
+  ({ providers } = await requestApi("/api/models"));
+  const availableModels = providers.flatMap(provider => provider.models.map(model => ({
     provider: provider.providerId, model, label: `${provider.displayName} · ${model}`
   })));
-  if (selectedModel && !available.some(item => item.provider === selectedModel.provider && item.model === selectedModel.model)) selectedModel = null;
+  if (selectedModel && !availableModels.some(item => item.provider === selectedModel.provider && item.model === selectedModel.model)) selectedModel = null;
   document.querySelector("#modelButton span").textContent = selectedModel?.model || "模型选择";
-  return available;
+  return availableModels;
 }
 
-function formConnection() {
+function readConnectionForm() {
   const form = document.querySelector("#modelForm");
   const values = new FormData(form);
   return {
@@ -95,20 +95,20 @@ function renderRecents() {
     for (const [name, children] of projects) {
       const group = document.createElement("div");
       group.className = "recent-group";
-      const project = row(name, "/desktop-assets/Icons/work-folder.svg");
+      const project = createRecentRow(name, "/desktop-assets/Icons/work-folder.svg");
       const nested = document.createElement("div");
       nested.className = "project-children hidden";
-      children.forEach((child) => nested.append(row(child, "/desktop-assets/Icons/chat.svg")));
+      children.forEach((child) => nested.append(createRecentRow(child, "/desktop-assets/Icons/chat.svg")));
       project.addEventListener("click", () => nested.classList.toggle("hidden"));
       group.append(project, nested);
       elements.list.append(group);
     }
   } else {
-    chats.forEach(([name, time]) => elements.list.append(row(name, null, time)));
+    chats.forEach(([name, time]) => elements.list.append(createRecentRow(name, null, time)));
   }
 }
 
-function row(label, icon, detail) {
+function createRecentRow(label, icon, detail) {
   const button = document.createElement("button");
   button.className = "recent-row";
   if (icon) {
@@ -143,14 +143,14 @@ function showMenu(anchor, choices, onSelect) {
     button.addEventListener("click", () => { onSelect(choice); elements.popover.classList.add("hidden"); });
     elements.popover.append(button);
   });
-  const area = document.querySelector(".main-region").getBoundingClientRect();
-  const box = anchor.getBoundingClientRect();
-  elements.popover.style.left = `${Math.max(12, box.right - area.left - 250)}px`;
-  elements.popover.style.top = `${box.bottom - area.top + 8}px`;
+  const mainRegionBounds = document.querySelector(".main-region").getBoundingClientRect();
+  const anchorBounds = anchor.getBoundingClientRect();
+  elements.popover.style.left = `${Math.max(12, anchorBounds.right - mainRegionBounds.left - 250)}px`;
+  elements.popover.style.top = `${anchorBounds.bottom - mainRegionBounds.top + 8}px`;
   elements.popover.classList.remove("hidden");
 }
 
-async function send() {
+async function sendMessage() {
   const value = elements.prompt.value.trim();
   if (!value) { elements.prompt.focus(); return; }
   if (sending) return;
@@ -168,7 +168,7 @@ async function send() {
   elements.messages.append(user, assistant);
   elements.prompt.value = "";
   try {
-    const reply = await api("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+    const reply = await requestApi("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversationId, message: value, provider: selectedModel.provider,
         model: selectedModel.model, permissionMode: "ask" }) });
     assistant.textContent = reply.content;
@@ -187,7 +187,7 @@ document.querySelector("#treeToggle").addEventListener("click", (event) => {
   event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
 });
 document.querySelector("#expandComposer").addEventListener("click", () => elements.composer.classList.toggle("expanded"));
-document.querySelector("#sendButton").addEventListener("click", send);
+document.querySelector("#sendButton").addEventListener("click", sendMessage);
 elements.prompt.addEventListener("compositionstart", () => { composingPrompt = true; });
 elements.prompt.addEventListener("compositionend", () => {
   composingPrompt = false;
@@ -201,7 +201,7 @@ elements.prompt.addEventListener("keydown", (event) => {
   }
   if (event.shiftKey) return;
   event.preventDefault();
-  send();
+  sendMessage();
 });
 elements.prompt.addEventListener("keyup", () => {
   if (!composingPrompt) suppressComposingEnter = false;
@@ -236,7 +236,7 @@ document.querySelector("#customPreset").addEventListener("click", () => setConne
 document.querySelector("#probeModels").addEventListener("click", async () => {
   const status = document.querySelector("#modelStatus"); status.textContent = "正在测试…";
   try {
-    const result = await api("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formConnection()) });
+    const result = await requestApi("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(readConnectionForm()) });
     if (result.models.length) document.querySelector("#modelForm").elements.namedItem("models").value = result.models.join("\n");
     status.textContent = `连接成功，${result.latencyMs} ms；发现 ${result.models.length} 个模型。`;
   } catch (error) { status.textContent = `测试失败：${error.message}。可手动填写 Model ID。`; }
@@ -245,7 +245,7 @@ document.querySelector("#modelForm").addEventListener("submit", async event => {
   event.preventDefault();
   const status = document.querySelector("#modelStatus"); status.textContent = "正在保存…";
   try {
-    const result = await api("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formConnection()) });
+    const result = await requestApi("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(readConnectionForm()) });
     await refreshModels(); renderProviders(); setConnection(result.provider);
     status.textContent = `已保存 ${result.provider.displayName}。现在可以在输入框选择模型。`;
   } catch (error) { status.textContent = `保存失败：${error.message}`; }

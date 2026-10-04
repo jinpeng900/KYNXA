@@ -12,12 +12,18 @@ function currentInstructionText(trustedUserText) {
   return String(trustedUserText).slice(-8000).replace(/```[\s\S]*?```/g, '').replace(/^>.*$/gm, '');
 }
 
-/** Explicit prohibition is distinct from the default preference for background browsing. */
+/**
+ * Explicit prohibition is distinct from the default preference for background browsing.
+ * 用户明确禁止打开窗口，与默认偏好后台浏览是不同约束。
+ */
 export function isExplicitForegroundForbidden(trustedUserText = '') {
   return /(?:不要|不必|别|勿|禁止|不能|不允许|无需)[^，。；,.!?;\n]{0,12}(?:抢.{0,3}焦点|激活|切.{0,3}前台|置.{0,3}前台)|保持.{0,3}后台|后台.{0,3}(?:操作|运行)|(?:do not|don't|never|without)[^,.!?;\n]{0,50}(?:focus|activat(?:e|ing)|bring.{0,40}(?:front|foreground))/i.test(currentInstructionText(trustedUserText));
 }
 
-/** The caller supplies current user instructions, never a tool reason or historical permission. */
+/**
+ * The caller supplies current user instructions, never a tool reason or historical permission.
+ * 调用方提供当前用户指令，不能用工具理由或历史权限替代。
+ */
 export function inferBrowserInteractionPolicy(trustedUserText = '') {
   const text = currentInstructionText(trustedUserText), forbid = isExplicitForegroundForbidden(trustedUserText);
   const foreground = !forbid && /(?:切换?到|切到|置于|放到|带到|显示在).{0,3}前台|激活.{0,8}(?:浏览器|窗口|Chrome|Edge)|(?:focus|activate).{0,15}(?:browser|window|chrome|edge)|bring.{0,15}(?:browser|window|chrome|edge|it).{0,15}(?:front|foreground)/i.test(text);
@@ -29,6 +35,7 @@ export function browserOperation(descriptor, server) {
   const connection = server ? browserConnection(server) : null;
   // Tool names and server descriptions are untrusted. A third-party "click" or
   // "take_snapshot" must not acquire a browser identity from its name alone.
+  // 工具名称和服务说明不可信；第三方 click 或 take_snapshot 不能仅凭名称取得浏览器身份。
   const engine = connection?.engine;
   if (!engine) return null;
   return { engine, mode: connection?.mode ?? 'custom-browser', headless: connection?.headless === true,
@@ -37,7 +44,10 @@ export function browserOperation(descriptor, server) {
       : playwrightReads.has(descriptor.toolName) };
 }
 
-/** Identity diagnostics never expose the configured endpoint or URL credentials. */
+/**
+ * Identity diagnostics never expose the configured endpoint or URL credentials.
+ * 身份诊断不暴露配置端点或 URL 中的凭据。
+ */
 export function publicBrowserUrl(value) {
   if (typeof value !== 'string' || value.length > 8192) return undefined;
   try {
@@ -69,6 +79,7 @@ function resultEvidence(result) {
   for (const match of text.matchAll(/^(\d+):\s+([^\r\n]+)$/gm)) {
     // Chrome 1.10.1 emits "id: title (url) [selected]"; older receipts omit
     // the title. Parse only these live listing formats, never browser history.
+    // 仅解析 Chrome 1.10.1 及旧版本实际返回的实时页面清单格式，不读取浏览器历史。
     const selected = /\s+\[selected\]$/.test(match[2]), label = match[2].replace(/\s+\[selected\]$/, '');
     const url = publicBrowserUrl(label.match(/\((https?:\/\/.*)\)$/)?.[1] ?? label);
     if (url) tabs.push({ tabId: match[1], url, selected });
@@ -86,7 +97,10 @@ function resultEvidence(result) {
   return { tabs, refs, pageUrl };
 }
 
-/** Bounded, request-independent browser identities sourced only from live tool receipts. */
+/**
+ * Bounded, request-independent browser identities sourced only from live tool receipts.
+ * 浏览器身份有容量限制、独立于请求，且只来自实时工具回执。
+ */
 export class BrowserSessionRegistry {
   constructor() { this.connections = new Map(); this.sessions = new Map(); }
 
@@ -135,6 +149,7 @@ export class BrowserSessionRegistry {
     const tabId = prepared.pageId != null ? String(prepared.pageId) : selecting && prepared.index != null
       ? String(prepared.index) : session.selectedTabId ?? connection.selectedTabId;
     // Implicit-page APIs cannot safely act on another session's newly selected tab.
+    // 隐式页面接口不能安全操作另一会话新选中的标签页。
     if (!selecting && !properties.pageId && session.selectedTabId != null && connection.selectedTabId != null &&
         session.selectedTabId !== connection.selectedTabId)
       throw toolFailure('浏览器标签页已由另一任务切换，请先重新选择并读取当前页。', 'BROWSER_TAB_CHANGED', 409);
@@ -158,7 +173,10 @@ export class BrowserSessionRegistry {
       readOnly: operation.readOnly, background, timeoutMs }, connection, session, operation };
   }
 
-  /** Capture only observed identity, without selecting a tab or inventing one. */
+  /**
+   * Capture only observed identity, without selecting a tab or inventing one.
+   * 只捕获已观察到的身份，不主动切换标签页，也不虚构页面。
+   */
   approvalIdentity(prepared) {
     if (!prepared.browser) return undefined;
     const { browser, args, connection } = prepared;
@@ -215,6 +233,7 @@ export class BrowserSessionRegistry {
       } else if (evidence.pageUrl) {
         // A first Playwright snapshot may have no tab listing. Preserve its
         // readable evidence but do not invent a stable tab ID or reusable refs.
+        // 首次 Playwright 快照可能没有标签页清单；保留可读证据，但不编造稳定页面 ID 或可复用引用。
         receipt.url = evidence.pageUrl; receipt.targetVerified = false; receipt.needsTabDiscovery = true;
       }
       if (prepared.browser.toolName === 'close_page' || (prepared.browser.toolName === 'browser_tabs' && prepared.args.action === 'close'))

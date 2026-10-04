@@ -89,7 +89,9 @@
         <Setter Property="CornerRadius" Value="6" />
         <Setter Property="Foreground" Value="{StaticResource KynxaSecondaryTextBrush}" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
-        <!-- The row supplies the background in every pointer state; no separate button tiles. -->
+        <!-- The row supplies the background in every pointer state; no separate button tiles.
+             各指针状态均由整行提供背景，按钮不再单独绘制背景块。
+        -->
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">

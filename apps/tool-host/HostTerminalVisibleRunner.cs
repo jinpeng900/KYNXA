@@ -9,6 +9,7 @@ using static KYNXA.ToolHost.NativeMethods;
 namespace KYNXA.ToolHost;
 
 /// <summary>Owns the real-console companion and its complete bounded process tree.</summary>
+/// <remarks>负责真实控制台辅助进程及其完整且受限的进程树。</remarks>
 internal static class HostTerminalVisibleRunner
 {
     private const int MaximumFrameCharacters = 768 * 1024;
@@ -20,8 +21,8 @@ internal static class HostTerminalVisibleRunner
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(request.TimeoutMs);
-        IntPtr job = IntPtr.Zero;
-        var worker = new ProcessInformation();
+        IntPtr jobHandle = IntPtr.Zero;
+        var workerProcessInformation = new ProcessInformation();
         bool executionAuthorized = false, commandStarted = false, commandCompleted = false, cancelled = false, timedOut = false;
         int commandProcessId = 0, windowProcessId = 0, exitCode = 125;
         string? windowId = null;
@@ -34,33 +35,33 @@ internal static class HostTerminalVisibleRunner
         var placement = new DesktopForegroundPlacement();
         try
         {
-            job = CreateJobObjectW(IntPtr.Zero, null);
-            HostTerminalConsole.Check(job != IntPtr.Zero, "Create visible terminal job");
+            jobHandle = CreateJobObjectW(IntPtr.Zero, null);
+            HostTerminalConsole.Check(jobHandle != IntPtr.Zero, "Create visible terminal job");
             var limits = new JobExtendedLimitInformation
             {
                 BasicLimitInformation = new JobBasicLimitInformation { LimitFlags = 0x2000 | 0x8, ActiveProcessLimit = 32 }
             };
-            HostTerminalConsole.Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set visible terminal job limits");
+            HostTerminalConsole.Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set visible terminal job limits");
             string executable = Path.Combine(AppContext.BaseDirectory, "KYNXA.ToolHost.exe");
             if (!File.Exists(executable))
                 throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "The bundled console companion executable is unavailable.");
             var startup = new StartupInfoEx { StartupInfo = new StartupInfo
             {
-                Cb = Marshal.SizeOf<StartupInfo>(), Flags = 1, ShowWindow = 4 // STARTF_USESHOWWINDOW / SW_SHOWNOACTIVATE.
+                Cb = Marshal.SizeOf<StartupInfo>(), Flags = 1, ShowWindow = 4 // STARTF_USESHOWWINDOW / SW_SHOWNOACTIVATE. 中文：STARTF_USESHOWWINDOW / SW_SHOWNOACTIVATE：请求显示窗口但不激活。
             } };
-            string arguments = HostTerminalRunner.QuoteArgument(executable) + " --host-terminal-visible-worker " + pipeName;
-            HostTerminalConsole.Check(CreateProcessW(executable, new StringBuilder(arguments), IntPtr.Zero, IntPtr.Zero, false,
-                CreateSuspended | 0x10, IntPtr.Zero, request.Cwd!, ref startup, out worker), "Create visible terminal companion");
+            string workerArguments = HostTerminalRunner.QuoteArgument(executable) + " --host-terminal-visible-worker " + pipeName;
+            HostTerminalConsole.Check(CreateProcessW(executable, new StringBuilder(workerArguments), IntPtr.Zero, IntPtr.Zero, false,
+                CreateSuspended | 0x10, IntPtr.Zero, request.Cwd!, ref startup, out workerProcessInformation), "Create visible terminal companion");
             try
             {
-                HostTerminalConsole.Check(AssignProcessToJobObject(job, worker.Process), "Assign visible terminal companion to job");
+                HostTerminalConsole.Check(AssignProcessToJobObject(jobHandle, workerProcessInformation.Process), "Assign visible terminal companion to job");
                 deadline.Token.ThrowIfCancellationRequested();
-                if (ResumeThread(worker.Thread) == uint.MaxValue) HostTerminalConsole.Check(false, "Resume visible terminal companion");
+                if (ResumeThread(workerProcessInformation.Thread) == uint.MaxValue) HostTerminalConsole.Check(false, "Resume visible terminal companion");
             }
-            catch { TerminateProcess(worker.Process, 125); throw; }
+            catch { TerminateProcess(workerProcessInformation.Process, 125); throw; }
             await pipe.WaitForConnectionAsync(deadline.Token);
             HostTerminalConsole.Check(GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out uint clientProcessId), "Verify visible worker pipe client");
-            if (clientProcessId != worker.ProcessId)
+            if (clientProcessId != workerProcessInformation.ProcessId)
                 throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "Unexpected visible worker pipe client.");
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
             using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
@@ -68,7 +69,7 @@ internal static class HostTerminalVisibleRunner
                 ?? throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "The visible companion closed before handshake."))
             {
                 if (hello.RootElement.GetProperty("event").GetString() != "worker_ready" ||
-                    hello.RootElement.GetProperty("processId").GetInt32() != worker.ProcessId)
+                    hello.RootElement.GetProperty("processId").GetInt32() != workerProcessInformation.ProcessId)
                     throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "Invalid visible companion handshake.");
             }
             await writer.WriteLineAsync(JsonSerializer.Serialize(request, Program.JsonOptions));
@@ -76,56 +77,57 @@ internal static class HostTerminalVisibleRunner
             {
                 using JsonDocument? record = await ReadRecordAsync(reader, deadline.Token);
                 if (record is null) break;
-                JsonElement value = record.RootElement;
-                string? name = value.GetProperty("event").GetString();
-                if (name == "window_ready")
+                JsonElement eventPayload = record.RootElement;
+                string? eventName = eventPayload.GetProperty("event").GetString();
+                if (eventName == "window_ready")
                 {
-                    windowId = value.GetProperty("windowId").GetString();
-                    windowProcessId = value.GetProperty("windowProcessId").GetInt32();
-                    if (!long.TryParse(windowId, out long handle) || !IsVisible((IntPtr)handle) ||
-                        !value.GetProperty("consoleInput").GetBoolean() || !value.GetProperty("consoleOutput").GetBoolean())
+                    windowId = eventPayload.GetProperty("windowId").GetString();
+                    windowProcessId = eventPayload.GetProperty("windowProcessId").GetInt32();
+                    if (!long.TryParse(windowId, out long windowHandleValue) || !IsVisible((IntPtr)windowHandleValue) ||
+                        !eventPayload.GetProperty("consoleInput").GetBoolean() || !eventPayload.GetProperty("consoleOutput").GetBoolean())
                         throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "The visible console could not be verified; script not executed.");
-                    placement.PlaceBehind((nint)handle, windowProcessId);
+                    placement.PlaceBehind((nint)windowHandleValue, windowProcessId);
                     deadline.Token.ThrowIfCancellationRequested();
                     executionAuthorized = true;
                     await writer.WriteLineAsync("execute");
                 }
-                else if (name == "command_started")
+                else if (eventName == "command_started")
                 {
                     commandStarted = true;
-                    commandProcessId = value.GetProperty("processId").GetInt32();
-                    windowId = value.GetProperty("windowId").GetString();
-                    if (!long.TryParse(windowId, out long handle) || !IsVisible((IntPtr)handle) ||
-                        !value.GetProperty("consoleInput").GetBoolean() || !value.GetProperty("consoleOutput").GetBoolean())
+                    commandProcessId = eventPayload.GetProperty("processId").GetInt32();
+                    windowId = eventPayload.GetProperty("windowId").GetString();
+                    if (!long.TryParse(windowId, out long windowHandleValue) || !IsVisible((IntPtr)windowHandleValue) ||
+                        !eventPayload.GetProperty("consoleInput").GetBoolean() || !eventPayload.GetProperty("consoleOutput").GetBoolean())
                         throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "The visible console could not be verified after command start.", true);
-                    placement.PlaceBehind((nint)handle, windowProcessId);
+                    placement.PlaceBehind((nint)windowHandleValue, windowProcessId);
                     Console.WriteLine(JsonSerializer.Serialize(new
                     {
                         protocolVersion = 2, boundary = "host-terminal", @event = "host_terminal_started",
-                        processId = commandProcessId, workerProcessId = worker.ProcessId,
+                        processId = commandProcessId, workerProcessId = workerProcessInformation.ProcessId,
                         visibleRequested = true, windowObserved = true, windowId, windowProcessId,
                         backgroundRequested = true, backgroundMode = "best-effort-no-activate",
                         foregroundPreserved = placement.ForegroundPreserved,
                         backgroundPlacementConfirmed = placement.WindowPlacedBehind
                     }, Program.JsonOptions));
                 }
-                else if (name is "command_completed" or "console_snapshot" && commandStarted)
+                else if (eventName is "command_completed" or "console_snapshot" && commandStarted)
                 {
-                    if (name == "command_completed")
+                    if (eventName == "command_completed")
                     {
-                        exitCode = value.GetProperty("exitCode").GetInt32();
-                        windowVisibleAtCompletion = value.GetProperty("windowVisibleAtCompletion").GetBoolean();
+                        exitCode = eventPayload.GetProperty("exitCode").GetInt32();
+                        windowVisibleAtCompletion = eventPayload.GetProperty("windowVisibleAtCompletion").GetBoolean();
                         // Authoritative completion precedes optional preview publication and display hold.
+                        // 先记录正式执行完成，再发布可选预览或等待窗口展示结束。
                         commandCompleted = true;
                         commandCompletedAtMs = elapsed.ElapsedMilliseconds;
                     }
-                    string preview = value.GetProperty("consoleText").GetString() ?? "";
-                    if (Encoding.UTF8.GetByteCount(preview) > 256 * 1024)
+                    string consolePreviewText = eventPayload.GetProperty("consoleText").GetString() ?? "";
+                    if (Encoding.UTF8.GetByteCount(consolePreviewText) > 256 * 1024)
                         throw new HostTerminalException("HOST_TERMINAL_FAILED", "The console snapshot exceeded its byte bound.", true);
-                    if (value.GetProperty("consoleSnapshotAvailable").GetBoolean())
+                    if (eventPayload.GetProperty("consoleSnapshotAvailable").GetBoolean())
                     {
-                        consoleText = preview;
-                        consoleSnapshotTruncated = value.GetProperty("consoleSnapshotTruncated").GetBoolean();
+                        consoleText = consolePreviewText;
+                        consoleSnapshotTruncated = eventPayload.GetProperty("consoleSnapshotTruncated").GetBoolean();
                         consoleSnapshotAvailable = true;
                         Console.WriteLine(JsonSerializer.Serialize(new
                         {
@@ -134,12 +136,12 @@ internal static class HostTerminalVisibleRunner
                         }, Program.JsonOptions));
                     }
                 }
-                else if (name == "worker_failed")
+                else if (eventName == "worker_failed")
                 {
-                    JsonElement error = value.GetProperty("error");
+                    JsonElement error = eventPayload.GetProperty("error");
                     throw new HostTerminalException(error.GetProperty("code").GetString() ?? "HOST_TERMINAL_FAILED",
                         error.GetProperty("message").GetString() ?? "The visible companion failed.",
-                        commandStarted || value.GetProperty("commandStarted").GetBoolean());
+                        commandStarted || eventPayload.GetProperty("commandStarted").GetBoolean());
                 }
             }
         }
@@ -160,11 +162,11 @@ internal static class HostTerminalVisibleRunner
         }
         finally
         {
-            if (job != IntPtr.Zero)
+            if (jobHandle != IntPtr.Zero)
             {
-                TerminateJobObject(job, timedOut ? 124u : 125u);
-                try { await HostTerminalRunner.WaitForEmptyJobAsync(job); }
-                finally { Close(ref worker.Thread); Close(ref worker.Process); Close(ref job); }
+                TerminateJobObject(jobHandle, timedOut ? 124u : 125u);
+                try { await HostTerminalRunner.WaitForEmptyJobAsync(jobHandle); }
+                finally { Close(ref workerProcessInformation.Thread); Close(ref workerProcessInformation.Process); Close(ref jobHandle); }
             }
         }
         if (!commandStarted)
@@ -175,7 +177,7 @@ internal static class HostTerminalVisibleRunner
             protocolVersion = 2, boundary = "host-terminal", completed = commandCompleted,
             outcome = commandCompleted ? "completed" : "unknown", commandCompleted,
             shell = request.Shell!, cwd = Path.GetFullPath(request.Cwd!), exitCode, stdout = "", stderr = "",
-            timedOut, cancelled, processId = commandProcessId, workerProcessId = worker.ProcessId,
+            timedOut, cancelled, processId = commandProcessId, workerProcessId = workerProcessInformation.ProcessId,
             activeProcessesAfterExit = 0, visibleRequested = true, windowObserved = true, windowId, windowProcessId,
             backgroundRequested = true, backgroundMode = "best-effort-no-activate",
             foregroundPreserved = placement.ForegroundPreserved,

@@ -13,7 +13,9 @@ app.MapPost("/api/chat", async (ChatRequest request, CancellationToken cancellat
         return Results.BadRequest(new { error = "permissionMode must be ask, smart, or full" });
 
     // Permission mode is request metadata only until an execution engine is connected.
+    // 执行引擎接入之前，权限模式仅作为请求元数据保存。
     // A short delay makes the waiting state visible during UI development. No model or remote service is called.
+    // 短暂延迟用于在界面开发中展示等待状态，不调用模型或远程服务。
     await Task.Delay(650, cancellationToken);
     return Results.Ok(new ChatReply(request.ConversationId, Guid.NewGuid(), "assistant", "你好", DateTimeOffset.UtcNow));
 });

@@ -43,6 +43,7 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
     {
         _isThinking = isThinking;
         // Notify the current message only; leave other reply controls and their selections intact.
+        // 仅通知当前消息更新；保留其他回复控件及其选择。
         OnPropertyChanged(string.Empty);
     }
 

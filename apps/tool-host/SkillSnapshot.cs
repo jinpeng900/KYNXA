@@ -4,6 +4,7 @@ using System.Text;
 namespace KYNXA.ToolHost;
 
 /// <summary>Copies exactly the approved skill manifest; later changes never expand the sandbox input.</summary>
+/// <remarks>只复制已批准清单中的技能文件，后续变更不能扩大沙箱输入范围。</remarks>
 internal static class SkillSnapshot
 {
     internal static void Copy(SandboxSkill request, string destination)

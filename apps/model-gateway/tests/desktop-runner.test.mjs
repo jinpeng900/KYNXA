@@ -36,6 +36,7 @@ test('real native transport accepts capability discovery without an action compl
   assert.ok(capabilities.operations.includes('launch'));
   assert.ok(capabilities.operations.includes('screenshot'));
   // An impossible PID checks the complete read transport without reading user window titles.
+  // 用不存在的 PID 验证读取传输；不读取用户窗口标题。
   const result = await runner.run('windows', { processId: 2147483647, reason: 'Verify an empty synthetic process filter.' });
   assert.equal(result.isError, false);
   assert.equal(result.value.completed, true);
@@ -126,6 +127,7 @@ test('real transport settles on helper exit and complete frame even when an owne
   assert.ok(Date.now() - started < 2000);
   const ownedChild = await f.ready();
   assert.doesNotThrow(() => process.kill(ownedChild, 0)); // Settlement must not kill the independent launched app.
+  // 调用结束不应终止独立启动的软件。
 });
 
 test('real transport hard-settles deadline and oversized output despite inherited IPC', windowsOnly, async t => {

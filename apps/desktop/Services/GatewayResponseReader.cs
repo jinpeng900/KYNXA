@@ -4,7 +4,10 @@ using System.Text.Json;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Reads gateway JSON and errors. The caller owns the response, including streaming responses.</summary>
+/// <summary>
+/// Reads gateway JSON and errors. The caller owns the response, including streaming responses.
+/// 读取网关 JSON 与错误；调用方负责响应对象的生命周期，包括流式响应。
+/// </summary>
 internal static class GatewayResponseReader
 {
     public static async Task<T> ReadAsync<T>(HttpResponseMessage response, string emptyResponseMessage,
@@ -21,6 +24,7 @@ internal static class GatewayResponseReader
     {
         if (response.IsSuccessStatusCode) return;
         // A catalog conflict has a specific recovery instruction and must not depend on its response body.
+        // 目录冲突有专门的恢复提示，不能依赖响应体中的文案。
         if (response.StatusCode == HttpStatusCode.Conflict && conflictMessage is not null)
             throw new GatewayApiException(conflictMessage, response.StatusCode);
 
@@ -40,6 +44,7 @@ internal static class GatewayResponseReader
         catch (JsonException)
         {
             // HTML/text failures are reported by status; never display an untrusted raw response body.
+            // HTML 或文本错误按状态码展示；绝不显示未经信任的原始响应体。
         }
         throw new GatewayApiException(message ?? string.Format(httpErrorFormat, (int)response.StatusCode),
             response.StatusCode, errorCode);

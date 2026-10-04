@@ -50,9 +50,11 @@ export class AppSkillService {
     if ([this.bundledDirectory, this.canonicalBundledDirectory].some(root => root && within(root, path))) return false;
     const extensionRoots = [...new Set([this.root, this.canonicalRoot])], dataRoots = [...new Set([this.ownedDataRoot, this.canonicalDataRoot])];
     // Recovery/control files stay private even if Extensions is itself a managed workspace.
+    // 即使 Extensions 本身是托管工作区，恢复和控制文件仍保持私有。
     if ([...aliases].some(alias => extensionRoots.some(root => isExtensionManagedPath(alias, root) &&
         !within(join(root, 'Skills'), alias)))) return true;
     // A configured public Skills directory remains readable when Extensions lives below Data.
+    // Extensions 位于 Data 内部时，已配置的公开 Skills 目录仍可读取。
     if (extensionRoots.some(root => within(join(root, 'Skills'), path)) &&
         (!dataRoots.some(root => within(root, path)) ||
           extensionRoots.some(extension => dataRoots.some(data => within(data, extension))))) return false;
@@ -84,6 +86,7 @@ export class AppSkillService {
   async _sourceIdentity(path) {
     try { return this._sourceKey(await realpath(path)); }
     // Unavailable sources still retain their lexical identity and diagnostic; dedup must not block other skills.
+    // 不可用来源仍保留路径身份和诊断，去重不能阻断其他技能。
     catch { return this._sourceKey(path); }
   }
   _skillIdentity(file) {
@@ -262,6 +265,7 @@ export class AppSkillService {
     const fingerprint = files => JSON.stringify(files.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })));
     const result = async (reused, directory = target, origin = 'data') => ({ imported: !reused, reused,
       // Once rename commits, cancellation cannot turn a completed installation into a failed report.
+      // rename 提交后，取消不能把已完成安装报告为失败。
       skill: { ...await this._load(join(directory, 'SKILL.md'), { signal: reused ? signal : undefined }), origin, enabled: true } });
     if (this.bundledDirectory) {
       const bundled = join(this.bundledDirectory, basename(target));
@@ -299,6 +303,7 @@ export class AppSkillService {
       signal?.throwIfAborted();
       if (await equal()) return result(true);
       // The gateway is the only writer of Data/Skills; rename commits the complete staged package.
+      // 网关是 Data/Skills 的唯一写入者，通过 rename 一次提交完整暂存包。
       try { await rename(stage, target); }
       catch (error) {
         if (['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error.code) && await equal()) return result(true);

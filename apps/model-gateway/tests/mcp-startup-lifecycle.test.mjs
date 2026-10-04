@@ -11,7 +11,9 @@ function deferred() {
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const fixtureServer = id => ({ id, name: id, enabled: true });
 
-/** Simulate owned startup/close receipts; never create a transport or process. */
+/** Simulate owned startup/close receipts; never create a transport or process.
+ * 模拟自有启动和关闭回执；不创建真实传输或进程。
+ */
 function controlledClients() {
   const clients = new McpToolClients();
   const started = [], records = [];

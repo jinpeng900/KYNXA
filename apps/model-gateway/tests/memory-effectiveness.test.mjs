@@ -11,6 +11,7 @@ import { ModelStore } from '../store.mjs';
 import { readSse } from '../streaming.mjs';
 
 // Avoid resolving the user's storage pointer when server.mjs constructs its unused defaults.
+// server.mjs 创建未使用的默认实例时，避免解析用户的存储指针。
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-memory-effect-import-'));
 const previousDataRoot = process.env.KYNXA_DATA_HOME;
 process.env.KYNXA_DATA_HOME = importRoot;
@@ -27,6 +28,7 @@ after(() => removeTempRoot(importRoot));
 
 // Gemini currently uses the desktop preset's OpenAI-compatible /v1beta/openai endpoint.
 // This suite intentionally does not invent a Gemini-native systemInstruction adapter.
+// Gemini 沿用桌面预设的 OpenAI 兼容端点；本套件不虚构 Gemini 原生 systemInstruction 适配器。
 const providers = [
   { id: 'effect-openai', name: 'OpenAI Chat Completions', protocol: 'openai-completions', basePath: '/openai/v1', path: '/chat/completions' },
   { id: 'effect-responses', name: 'OpenAI Responses', protocol: 'openai-responses', basePath: '/responses/v1', path: '/responses' },
@@ -96,6 +98,7 @@ async function fixture(t) {
       // The observable reply depends solely on the actual system field received over HTTP.
       // Old assistant answers may remain in this chat's history after memory edits/deletions.
       // They must not masquerade as the current confirmed-memory projection in this probe.
+      // 可观察的回复仅取决于 HTTP 实际收到的 system 字段；编辑或删除记忆后，历史回答可以保留，但不能在此探针中冒充当前已确认记忆的投影。
       const content = JSON.stringify({ memory: rememberedMarkers(system) });
       seen.push({ provider, path: request.url, body, system });
       if (body.stream) {

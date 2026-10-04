@@ -16,27 +16,27 @@ internal static class AppContainerRunner
     internal static async Task<object> RunAsync(SandboxRequest request, CancellationToken cancellationToken)
     {
         Validate(request);
-        string workspace = Path.GetFullPath(request.WorkspaceRoot!);
-        string runtime = Path.GetFullPath(request.NodeExecutable!);
+        string workspaceRoot = Path.GetFullPath(request.WorkspaceRoot!);
+        string trustedRuntimePath = Path.GetFullPath(request.NodeExecutable!);
         string profileName = "kynxa.run." + Guid.NewGuid().ToString("N");
         string runDirectory = Path.Combine(Path.GetTempPath(), "kynxa-tool-sandbox", Guid.NewGuid().ToString("N"));
-        string stage = Path.Combine(runDirectory, "workspace");
-        IntPtr sid = IntPtr.Zero, job = IntPtr.Zero;
+        string stagingDirectory = Path.Combine(runDirectory, "workspace");
+        IntPtr appContainerSid = IntPtr.Zero, jobHandle = IntPtr.Zero;
         bool profileCreated = false, keepWorkspace = false;
-        var process = new ProcessInformation();
+        var processInformation = new ProcessInformation();
         try
         {
-            Directory.CreateDirectory(stage);
+            Directory.CreateDirectory(stagingDirectory);
             var snapshot = new WorkspaceSnapshot(request.ExcludedRoots, request.TrustedManagedWorkspace, request.ConversationWorkspaceHome);
-            snapshot.Copy(workspace, stage);
-            string skillDirectory = Path.Combine(stage, ".sandbox-skill");
+            snapshot.Copy(workspaceRoot, stagingDirectory);
+            string skillDirectory = Path.Combine(stagingDirectory, ".sandbox-skill");
             if (request.Skill is not null) SkillSnapshot.Copy(request.Skill, skillDirectory);
-            string runtimeDirectory = Path.Combine(stage, ".sandbox-runtime");
-            string temporaryDirectory = Path.Combine(stage, ".sandbox-temp");
+            string runtimeDirectory = Path.Combine(stagingDirectory, ".sandbox-runtime");
+            string temporaryDirectory = Path.Combine(stagingDirectory, ".sandbox-temp");
             Directory.CreateDirectory(runtimeDirectory);
             Directory.CreateDirectory(temporaryDirectory);
             string nodeExecutable = Path.Combine(runtimeDirectory, "node.exe");
-            File.Copy(runtime, nodeExecutable);
+            File.Copy(trustedRuntimePath, nodeExecutable);
             bool isCmd = request.Command is "cmd" or "cmd.exe";
             string executable = nodeExecutable;
             if (isCmd)
@@ -49,65 +49,68 @@ internal static class AppContainerRunner
             }
             cancellationToken.ThrowIfCancellationRequested();
 
-            int hr = CreateAppContainerProfile(profileName, "KYNXA terminal", "Isolated per-run terminal", IntPtr.Zero, 0, out sid);
-            if (hr < 0) throw new SandboxException("SANDBOX_START_FAILED", $"CreateAppContainerProfile failed (0x{hr:X8}).");
+            int profileResult = CreateAppContainerProfile(profileName, "KYNXA terminal", "Isolated per-run terminal", IntPtr.Zero, 0, out appContainerSid);
+            if (profileResult < 0) throw new SandboxException("SANDBOX_START_FAILED", $"CreateAppContainerProfile failed (0x{profileResult:X8}).");
             profileCreated = true;
-            SetWorkspaceSecurity(stage, sid);
-            if (request.Skill is not null) SetReadOnlySkillSecurity(skillDirectory, sid);
-            job = CreateJobObjectW(IntPtr.Zero, null);
-            Check(job != IntPtr.Zero, "CreateJobObject");
+            SetWorkspaceSecurity(stagingDirectory, appContainerSid);
+            if (request.Skill is not null) SetReadOnlySkillSecurity(skillDirectory, appContainerSid);
+            jobHandle = CreateJobObjectW(IntPtr.Zero, null);
+            Check(jobHandle != IntPtr.Zero, "CreateJobObject");
             var limits = new JobExtendedLimitInformation
             {
                 BasicLimitInformation = new JobBasicLimitInformation
                 {
                     // Children inherit this job. No breakaway flags are enabled.
+                    // 子进程继承此作业对象，不启用脱离作业的标志。
                     LimitFlags = 0x2000 | 0x8 | 0x100 | 0x200 | 0x400,
                     ActiveProcessLimit = MaximumProcessCount
                 },
                 ProcessMemoryLimit = (UIntPtr)MaximumProcessMemoryBytes,
                 JobMemoryLimit = (UIntPtr)MaximumJobMemoryBytes
             };
-            Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "SetInformationJobObject");
+            Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "SetInformationJobObject");
 
-            var output = new BoundedOutput(job, isCmd);
+            var output = new BoundedOutput(jobHandle, isCmd);
             // Node resolves module paths by probing every host ancestor unless symlink preservation is enabled.
             // Preserve paths inside the already link-free snapshot instead of granting access to host ancestors.
-            string[] commandArgs = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
-            string[] effectiveArgs = isCmd ? commandArgs : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArgs];
-            var (stdout, stderr) = Start(executable, effectiveArgs, stage, temporaryDirectory, sid, job, ref process, output, isCmd);
+            // 未保留符号链接路径时，Node 会探测宿主的各级祖先目录；在已验证无链接的快照内保留路径，避免授权宿主祖先。
+            string[] commandArguments = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
+            string[] effectiveArguments = isCmd ? commandArguments : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArguments];
+            var (stdout, stderr) = StartSandboxProcess(executable, effectiveArguments, stagingDirectory, temporaryDirectory, appContainerSid, jobHandle, ref processInformation, output, isCmd);
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
             {
-                protocolVersion = 1, @event = "sandbox_started", processId = process.ProcessId, stagingDirectory = stage
+                protocolVersion = 1, @event = "sandbox_started", processId = processInformation.ProcessId, stagingDirectory = stagingDirectory
             }, Program.JsonOptions));
             bool timedOut = false, cancelled = false;
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
-            while (WaitForSingleObject(process.Process, 25) == WaitTimeout)
+            while (WaitForSingleObject(processInformation.Process, 25) == WaitTimeout)
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
                     cancelled = true;
-                    Check(TerminateJobObject(job, 125), "TerminateJobObject cancellation");
+                    Check(TerminateJobObject(jobHandle, 125), "TerminateJobObject cancellation");
                     break;
                 }
                 if (elapsed.ElapsedMilliseconds >= request.TimeoutMs)
                 {
                     timedOut = true;
-                    Check(TerminateJobObject(job, 124), "TerminateJobObject timeout");
+                    Check(TerminateJobObject(jobHandle, 124), "TerminateJobObject timeout");
                     break;
                 }
                 await Task.Delay(10);
             }
             // Also kill descendants when the original script exits normally.
-            Check(TerminateJobObject(job, timedOut ? 124u : 125u), "TerminateJobObject completion");
-            await WaitForEmptyJobAsync(job);
-            Check(GetExitCodeProcess(process.Process, out uint exitCode), "GetExitCodeProcess");
+            // 原脚本正常退出时也终止仍存活的子孙进程。
+            Check(TerminateJobObject(jobHandle, timedOut ? 124u : 125u), "TerminateJobObject completion");
+            await WaitForEmptyJobAsync(jobHandle);
+            Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "GetExitCodeProcess");
             await Task.WhenAll(stdout, stderr);
             keepWorkspace = !cancelled;
             return new
             {
                 protocolVersion = 1, exitCode = unchecked((int)exitCode), stdout = await stdout, stderr = await stderr,
-                timedOut, cancelled, sandbox = "appcontainer", workspaceCopy = true, stagingDirectory = stage,
-                processId = process.ProcessId, activeProcessesAfterExit = 0,
+                timedOut, cancelled, sandbox = "appcontainer", workspaceCopy = true, stagingDirectory = stagingDirectory,
+                processId = processInformation.ProcessId, activeProcessesAfterExit = 0,
                 outputTruncated = output.Truncated, outputLimitExceeded = output.Truncated,
                 snapshot = new { files = snapshot.Files, bytes = snapshot.Bytes, skipped = snapshot.Skipped },
                 limits = new { timeoutMs = request.TimeoutMs, outputBytes = MaximumOutputBytes,
@@ -125,11 +128,12 @@ internal static class AppContainerRunner
         finally
         {
             // Closing the sole non-inherited job handle also kills the tree if this host is terminated.
-            if (job != IntPtr.Zero) TerminateJobObject(job, 125);
-            Close(ref process.Thread);
-            Close(ref process.Process);
-            Close(ref job);
-            if (sid != IntPtr.Zero) FreeSid(sid);
+            // 作业句柄不继承且只有一个；宿主终止时关闭它也会结束整个进程树。
+            if (jobHandle != IntPtr.Zero) TerminateJobObject(jobHandle, 125);
+            Close(ref processInformation.Thread);
+            Close(ref processInformation.Process);
+            Close(ref jobHandle);
+            if (appContainerSid != IntPtr.Zero) FreeSid(appContainerSid);
             if (profileCreated) DeleteAppContainerProfile(profileName);
             if (!keepWorkspace) WorkspaceSnapshot.DeleteOwnedRun(runDirectory);
         }
@@ -166,22 +170,24 @@ internal static class AppContainerRunner
         }
     }
 
-    private static void SetWorkspaceSecurity(string stage, IntPtr sid)
+    private static void SetWorkspaceSecurity(string stagingDirectory, IntPtr appContainerSid)
     {
-        Check(ConvertSidToStringSidW(sid, out IntPtr sidText), "ConvertSidToStringSid");
+        Check(ConvertSidToStringSidW(appContainerSid, out IntPtr sidText), "ConvertSidToStringSid");
         try
         {
             string appSid = Marshal.PtrToStringUni(sidText)!;
             string userSid = WindowsIdentity.GetCurrent().User?.Value
                 ?? throw new SandboxException("SANDBOX_START_FAILED", "Cannot identify the current Windows user.");
             // A protected DACL excludes other app containers; low integrity enables writes only here.
+            // 受保护 DACL 排除其他 AppContainer，低完整性标签只允许在此处写入。
             string descriptor = $"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{userSid})(A;OICI;0x1301bf;;;{appSid})S:(ML;OICI;NW;;;LW)";
             Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor, 1, out IntPtr security, out _), "ConvertSecurityDescriptor");
             try
             {
-                Check(SetFileSecurityW(stage, 0x80000004 | 0x10, security), "SetFileSecurity sandbox workspace");
+                Check(SetFileSecurityW(stagingDirectory, 0x80000004 | 0x10, security), "SetFileSecurity sandbox workspace");
                 // Existing snapshot descendants must receive the same ACL and integrity label.
-                foreach (string path in Directory.EnumerateFileSystemEntries(stage, "*", SearchOption.AllDirectories))
+                // 已有快照的所有子项必须使用相同 ACL 与完整性标签。
+                foreach (string path in Directory.EnumerateFileSystemEntries(stagingDirectory, "*", SearchOption.AllDirectories))
                     Check(SetFileSecurityW(path, 0x80000004 | 0x10, security), "SetFileSecurity sandbox content");
             }
             finally { LocalFree(security); }
@@ -189,9 +195,9 @@ internal static class AppContainerRunner
         finally { LocalFree(sidText); }
     }
 
-    private static void SetReadOnlySkillSecurity(string folder, IntPtr sid)
+    private static void SetReadOnlySkillSecurity(string folder, IntPtr appContainerSid)
     {
-        Check(ConvertSidToStringSidW(sid, out IntPtr sidText), "ConvertSidToStringSid skill");
+        Check(ConvertSidToStringSidW(appContainerSid, out IntPtr sidText), "ConvertSidToStringSid skill");
         try
         {
             string appSid = Marshal.PtrToStringUni(sidText)!;
@@ -209,12 +215,12 @@ internal static class AppContainerRunner
         finally { LocalFree(sidText); }
     }
 
-    private static (Task<string> Stdout, Task<string> Stderr) Start(string executable, string[] args, string stage,
-        string temporaryDirectory, IntPtr sid, IntPtr job, ref ProcessInformation process, BoundedOutput output, bool isCmd)
+    private static (Task<string> Stdout, Task<string> Stderr) StartSandboxProcess(string executable, string[] commandArguments, string stagingDirectory,
+        string temporaryDirectory, IntPtr appContainerSid, IntPtr jobHandle, ref ProcessInformation processInformation, BoundedOutput output, bool isCmd)
     {
         IntPtr stdoutRead = IntPtr.Zero, stdoutWrite = IntPtr.Zero, stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
-        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributes = IntPtr.Zero;
-        IntPtr capabilitiesBuffer = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environment = IntPtr.Zero;
+        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributeList = IntPtr.Zero;
+        IntPtr capabilitiesBuffer = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environmentBlock = IntPtr.Zero;
         try
         {
             var security = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = 1 };
@@ -224,55 +230,55 @@ internal static class AppContainerRunner
             Check(SetHandleInformation(stdoutRead, 1, 0), "Protect stdout reader");
             Check(SetHandleInformation(stderrRead, 1, 0), "Protect stderr reader");
             Check(SetHandleInformation(stdinWrite, 1, 0), "Protect stdin writer");
-            UIntPtr size = UIntPtr.Zero;
-            InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
-            attributes = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
-            Check(InitializeProcThreadAttributeList(attributes, 2, 0, ref size), "InitializeProcThreadAttributeList");
-            var capabilities = new SecurityCapabilities { AppContainerSid = sid };
+            UIntPtr attributeListBytes = UIntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref attributeListBytes);
+            attributeList = Marshal.AllocHGlobal(checked((int)attributeListBytes.ToUInt64()));
+            Check(InitializeProcThreadAttributeList(attributeList, 2, 0, ref attributeListBytes), "InitializeProcThreadAttributeList");
+            var capabilities = new SecurityCapabilities { AppContainerSid = appContainerSid };
             capabilitiesBuffer = Marshal.AllocHGlobal(Marshal.SizeOf<SecurityCapabilities>());
             Marshal.StructureToPtr(capabilities, capabilitiesBuffer, false);
-            Check(UpdateProcThreadAttribute(attributes, 0, (IntPtr)0x20009, capabilitiesBuffer,
+            Check(UpdateProcThreadAttribute(attributeList, 0, (IntPtr)0x20009, capabilitiesBuffer,
                 (UIntPtr)Marshal.SizeOf<SecurityCapabilities>(), IntPtr.Zero, IntPtr.Zero), "Set AppContainer security capabilities");
             handlesBuffer = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handlesBuffer, stdoutWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size, stderrWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size * 2, stdinRead);
-            Check(UpdateProcThreadAttribute(attributes, 0, (IntPtr)0x20002, handlesBuffer,
+            Check(UpdateProcThreadAttribute(attributeList, 0, (IntPtr)0x20002, handlesBuffer,
                 (UIntPtr)(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "Set inherited handle allowlist");
             var startup = new StartupInfoEx
             {
-                AttributeList = attributes,
+                AttributeList = attributeList,
                 StartupInfo = new StartupInfo
                 {
                     Cb = Marshal.SizeOf<StartupInfoEx>(), Flags = StartfUseStdHandles,
                     StdInput = stdinRead, StdOutput = stdoutWrite, StdError = stderrWrite
                 }
             };
-            environment = Marshal.StringToHGlobalUni(BuildEnvironment(stage, temporaryDirectory));
+            environmentBlock = Marshal.StringToHGlobalUni(BuildEnvironment(stagingDirectory, temporaryDirectory));
             string arguments = isCmd
-                ? QuoteArgument(executable) + " /d /u /s /c \"" + args[2] + "\""
-                : string.Join(" ", new[] { executable }.Concat(args).Select(QuoteArgument));
+                ? QuoteArgument(executable) + " /d /u /s /c \"" + commandArguments[2] + "\""
+                : string.Join(" ", new[] { executable }.Concat(commandArguments).Select(QuoteArgument));
             var commandLine = new StringBuilder(arguments);
             Check(CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                 CreateSuspended | CreateUnicodeEnvironment | ExtendedStartupInfoPresent | CreateNoWindow,
-                environment, stage, ref startup, out process), "CreateProcess AppContainer");
+                environmentBlock, stagingDirectory, ref startup, out processInformation), "CreateProcess AppContainer");
             try
             {
-                Check(AssignProcessToJobObject(job, process.Process), "AssignProcessToJobObject");
-                Check(OpenProcessToken(process.Process, TokenQuery, out IntPtr token), "Open child process token");
+                Check(AssignProcessToJobObject(jobHandle, processInformation.Process), "AssignProcessToJobObject");
+                Check(OpenProcessToken(processInformation.Process, TokenQuery, out IntPtr processTokenHandle), "Open child process token");
                 try
                 {
-                    Check(GetTokenInformation(token, TokenIsAppContainer, out uint isAppContainer, 4, out _), "Check child AppContainer token");
+                    Check(GetTokenInformation(processTokenHandle, TokenIsAppContainer, out uint isAppContainer, 4, out _), "Check child AppContainer token");
                     if (isAppContainer != 1) throw new SandboxException("SANDBOX_START_FAILED", "Windows did not create an AppContainer token.");
                 }
-                finally { Close(ref token); }
-                if (ResumeThread(process.Thread) == uint.MaxValue) Check(false, "ResumeThread");
+                finally { Close(ref processTokenHandle); }
+                if (ResumeThread(processInformation.Thread) == uint.MaxValue) Check(false, "ResumeThread");
             }
-            catch { TerminateProcess(process.Process, 125); throw; }
+            catch { TerminateProcess(processInformation.Process, 125); throw; }
             Close(ref stdoutWrite);
             Close(ref stderrWrite);
             Close(ref stdinRead);
-            Close(ref stdinWrite); // The script receives EOF; no interactive host input is exposed.
+            Close(ref stdinWrite); // The script receives EOF; no interactive host input is exposed. 中文：脚本收到 EOF，不暴露宿主交互输入。
             var stdoutTask = output.ReadAsync(stdoutRead);
             stdoutRead = IntPtr.Zero;
             var stderrTask = output.ReadAsync(stderrRead);
@@ -283,14 +289,14 @@ internal static class AppContainerRunner
         {
             Close(ref stdoutRead); Close(ref stdoutWrite); Close(ref stderrRead); Close(ref stderrWrite);
             Close(ref stdinRead); Close(ref stdinWrite);
-            if (attributes != IntPtr.Zero) { DeleteProcThreadAttributeList(attributes); Marshal.FreeHGlobal(attributes); }
+            if (attributeList != IntPtr.Zero) { DeleteProcThreadAttributeList(attributeList); Marshal.FreeHGlobal(attributeList); }
             if (capabilitiesBuffer != IntPtr.Zero) Marshal.FreeHGlobal(capabilitiesBuffer);
             if (handlesBuffer != IntPtr.Zero) Marshal.FreeHGlobal(handlesBuffer);
-            if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
+            if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
         }
     }
 
-    private static string BuildEnvironment(string stage, string temporaryDirectory)
+    private static string BuildEnvironment(string stagingDirectory, string temporaryDirectory)
     {
         string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         var values = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -299,8 +305,8 @@ internal static class AppContainerRunner
             ["TEMP"] = temporaryDirectory, ["TMP"] = temporaryDirectory,
             ["USERPROFILE"] = temporaryDirectory, ["HOME"] = temporaryDirectory,
             ["APPDATA"] = temporaryDirectory, ["LOCALAPPDATA"] = temporaryDirectory,
-            ["COMSPEC"] = Path.Combine(stage, ".sandbox-runtime", "cmd.exe"),
-            ["PATH"] = Path.Combine(stage, ".sandbox-runtime"), ["KYNXA_SANDBOX"] = "appcontainer"
+            ["COMSPEC"] = Path.Combine(stagingDirectory, ".sandbox-runtime", "cmd.exe"),
+            ["PATH"] = Path.Combine(stagingDirectory, ".sandbox-runtime"), ["KYNXA_SANDBOX"] = "appcontainer"
         };
         return string.Join('\0', values.Select(pair => pair.Key + "=" + pair.Value)) + "\0\0";
     }
@@ -321,18 +327,18 @@ internal static class AppContainerRunner
         return result.ToString();
     }
 
-    private static async Task WaitForEmptyJobAsync(IntPtr job)
+    private static async Task WaitForEmptyJobAsync(IntPtr jobHandle)
     {
         for (int attempt = 0; attempt < 200; attempt++)
         {
-            Check(QueryInformationJobObject(job, 1, out var information, (uint)Marshal.SizeOf<JobBasicAccountingInformation>(), IntPtr.Zero), "QueryInformationJobObject");
+            Check(QueryInformationJobObject(jobHandle, 1, out var information, (uint)Marshal.SizeOf<JobBasicAccountingInformation>(), IntPtr.Zero), "QueryInformationJobObject");
             if (information.ActiveProcesses == 0) return;
             await Task.Delay(10);
         }
         throw new SandboxException("SANDBOX_CLEANUP_FAILED", "The job still reports live processes after termination.");
     }
 
-    private sealed class BoundedOutput(IntPtr job, bool cmdOutput)
+    private sealed class BoundedOutput(IntPtr jobHandle, bool cmdOutput)
     {
         private int _bytes, _truncated;
         internal bool Truncated => Volatile.Read(ref _truncated) != 0;
@@ -349,10 +355,11 @@ internal static class AppContainerRunner
                 int accepted = Math.Clamp(MaximumOutputBytes - (total - count), 0, count);
                 stored.Write(buffer, 0, accepted);
                 if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0)
-                    TerminateJobObject(job, 126);
+                    TerminateJobObject(jobHandle, 126);
             }
             byte[] bytes = stored.ToArray();
             // /u produces UTF-16 for cmd builtins. Child programs and TYPE may emit plain UTF-8 bytes.
+            // /u 使 cmd 内置命令输出 UTF-16，而子程序或 TYPE 仍可能输出普通 UTF-8 字节。
             return cmdOutput && bytes.Contains((byte)0) ? Encoding.Unicode.GetString(bytes) : Encoding.UTF8.GetString(bytes);
         });
     }

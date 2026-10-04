@@ -433,6 +433,8 @@ KYNXA 当前仍处于早期开发阶段。
 
 随着核心架构和 Public API 稳定，会逐步完善贡献规范。
 
+仓库代码开发同时使用 [开发 Skill](.agents/skills/kynxa-development/SKILL.md) 与 [代码书写 Skill](.agents/skills/kynxa-code-standards/SKILL.md)，由 `AGENTS.md` 自动引导。后者统一语义命名、中英文说明注释、各语言格式及兼容例外；公开协议字段和第三方原始内容保持兼容。这是开发代理的规则，区别于应用内模型使用的技能。
+
 未来欢迎：
 
 * Bug Report；

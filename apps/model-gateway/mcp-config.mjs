@@ -75,7 +75,10 @@ export function normalizeMcpConnection(server) {
 
 function ordered(map) { return Object.entries(map ?? {}).sort(([a], [b]) => a.localeCompare(b)); }
 
-/** Configuration identity excludes display names and IDs, but preserves distinct process instances. */
+/**
+ * Configuration identity excludes display names and IDs, but preserves distinct process instances.
+ * 配置身份不包含显示名称和 ID，但仍区分不同进程实例。
+ */
 export function mcpEndpointIdentity(server) {
   const value = normalizeMcpConnection(server);
   return createHash('sha256').update(JSON.stringify(value.transport === 'stdio'

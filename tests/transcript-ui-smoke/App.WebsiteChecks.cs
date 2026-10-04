@@ -42,6 +42,7 @@ public partial class App
         reply.Message.ToolActivities.Insert(0, generic);
         // Keep this additional capability in its own reply: the active projection deliberately
         // retains only eight ordinary activities per message, preserving the full event list.
+        // 将额外能力放到单独回复；活动投影刻意每条消息仅显示八项普通活动，但保留完整事件列表。
         var builtinReply = Message(chat, "assistant", "内置网页读取验证：不打开真实网站。", "streaming");
         builtinReply.Message.ToolActivities = [new("web-builtin", "web.fetch",
             JsonSerializer.SerializeToElement(new { url = "https://builtin.example.invalid/source", reason = "Read synthetic public source." }),

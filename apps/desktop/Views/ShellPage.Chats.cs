@@ -27,6 +27,7 @@ public sealed partial class ShellPage
     {
         _promptCompositionActive = false;
         // Some IMEs finish composition before forwarding the confirming Enter key.
+        // 某些输入法在转发确认用的 Enter 键之前就结束组合输入。
         _suppressComposingEnter = true;
     }
 
@@ -209,6 +210,7 @@ public sealed partial class ShellPage
                 chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
                 chat.Draft = string.Empty;
                 // First submitted message is the commit boundary; draft-only chats are filtered by the store.
+                // 首次提交用户消息才正式保存聊天；存储层过滤只有草稿的聊天。
                 if (chatMode)
                 {
                     await _projectStore.SaveChatsAsync(_standaloneChats);
@@ -221,7 +223,7 @@ public sealed partial class ShellPage
                 }
                 else
                 {
-                    var project = _projects.First(p => p.Chats.Contains(chat));
+                    var project = _projects.First(candidateProject => candidateProject.Chats.Contains(chat));
                     _selectedWorkProjectId = project.IsFolderlessWorkspace ? null : project.Id;
                     _workChatToReveal = chat.Id;
                     KYNXA_Desktop.Services.ProjectOrdering.Activate(_projects, project);

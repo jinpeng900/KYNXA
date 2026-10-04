@@ -4,7 +4,10 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Updates explicitly marked UI labels without inspecting user-authored content.</summary>
+/// <summary>
+/// Updates explicitly marked UI labels without inspecting user-authored content.
+/// 只更新明确标记的 UI 文案，不检查用户自行编写的内容。
+/// </summary>
 public static class UiLocalization
 {
     private sealed class Registration(DependencyObject target, DependencyProperty property, string key)

@@ -20,7 +20,7 @@ public sealed partial class ShellPage
     private void InitializeModelPicker()
     {
         try { _selectedModel = _modelSelectionStore.Load(); }
-        catch { /* A preference must not prevent the composer from opening. */ }
+        catch { /* A preference must not prevent the composer from opening. 中文：偏好文件不能阻止输入区打开。 */ }
         UpdateModelPickerLabel();
         _ = RefreshModelPickerAsync();
     }
@@ -137,7 +137,7 @@ public sealed partial class ShellPage
         _selectedModel = choice;
         UpdateModelPickerLabel();
         try { _modelSelectionStore.Save(choice); }
-        catch { /* The in-memory selection remains usable. */ }
+        catch { /* The in-memory selection remains usable. 中文：内存中的选择仍可使用。 */ }
         menu.Hide();
     }
 }

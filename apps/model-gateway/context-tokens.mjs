@@ -1,4 +1,7 @@
-/** Conservative heuristic, not a provider tokenizer. Requests also reserve safety headroom. */
+/**
+ * Conservative heuristic, not a provider tokenizer. Requests also reserve safety headroom.
+ * 采用保守估算，并非供应商分词器；请求仍需额外预留安全余量。
+ */
 export function estimateTokens(text) {
   let tokens = 0, ascii = 0, whitespace = 0;
   const flush = () => {

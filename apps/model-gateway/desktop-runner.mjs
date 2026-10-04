@@ -7,11 +7,14 @@ import { computerKeyNames } from './official-tools/Tools/computer.mjs';
 
 const actions = new Set(['windows', 'apps', 'screenshot', 'read', 'launch', 'window', 'activate', 'move', 'click', 'scroll', 'drag', 'type', 'key']);
 const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:w|\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
-const maximumOutputBytes = 8 * 1024 * 1024;
+const maxStdoutBytes = 8 * 1024 * 1024;
 const definiteLaunchFailures = new Set(['DESKTOP_LAUNCH_BLOCKED', 'DESKTOP_LAUNCH_FAILED', 'DESKTOP_INVALID_REQUEST',
   'DESKTOP_UNAVAILABLE', 'DESKTOP_BUSY', 'DESKTOP_CANCELLED', 'DESKTOP_ACCESS_DENIED']);
 
-/** Desktop operations have their own protocol and host boundary; they never run through the terminal sandbox. */
+/**
+ * Desktop operations have their own protocol and host boundary; they never run through the terminal sandbox.
+ * 桌面操作有独立协议和宿主边界，不经过终端沙箱执行。
+ */
 export class DesktopRunner {
   constructor({ toolHostPath, invoke } = {}) {
     this.toolHostPath = toolHostPath;
@@ -45,18 +48,18 @@ export class DesktopRunner {
   async run(action, arguments_, signal) {
     signal?.throwIfAborted(); this.shutdown.signal.throwIfAborted();
     if (!actions.has(action)) throw toolFailure('不支持此本机操作。', 'DESKTOP_ACTION_UNSUPPORTED');
-    const integer = (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+    const isBoundedInteger = (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum;
     for (const name of ['crop', 'region']) if (arguments_[name] !== undefined) {
       const area = arguments_[name];
       if (!area || typeof area !== 'object' || Array.isArray(area) || Object.keys(area).some(key => !['x', 'y', 'width', 'height'].includes(key)) ||
-          !integer(area.x, 0, 32767) || !integer(area.y, 0, 32767) || !integer(area.width, 1, 8192) || !integer(area.height, 1, 8192))
+          !isBoundedInteger(area.x, 0, 32767) || !isBoundedInteger(area.y, 0, 32767) || !isBoundedInteger(area.width, 1, 8192) || !isBoundedInteger(area.height, 1, 8192))
         throw toolFailure('截图或读取区域需要有效的客户区像素坐标和尺寸。', 'DESKTOP_INVALID_COORDINATES');
     }
-    if (action === 'read' && (arguments_.timeoutMs !== undefined && !integer(arguments_.timeoutMs, 500, 5000) ||
+    if (action === 'read' && (arguments_.timeoutMs !== undefined && !isBoundedInteger(arguments_.timeoutMs, 500, 5000) ||
         arguments_.elementId !== undefined && (typeof arguments_.elementId !== 'string' || arguments_.elementId.length > 256 || !/^-?\d+(?:,-?\d+){0,31}$/.test(arguments_.elementId))))
       throw toolFailure('读取期限或元素标识无效。', 'DESKTOP_INVALID_REQUEST');
     if (action === 'window' && (!['resize', 'maximize', 'minimize', 'restore'].includes(arguments_.mode) ||
-        arguments_.mode === 'resize' && (!integer(arguments_.width, 64, 8192) || !integer(arguments_.height, 64, 8192))))
+        arguments_.mode === 'resize' && (!isBoundedInteger(arguments_.width, 64, 8192) || !isBoundedInteger(arguments_.height, 64, 8192))))
       throw toolFailure('窗口调整需要有效模式；调整大小时需指定客户区宽高。', 'DESKTOP_INVALID_REQUEST');
     if (action === 'key' && !computerKeyNames.includes(arguments_.key))
       throw toolFailure('不支持此按键组合。', 'DESKTOP_INVALID_KEY');
@@ -88,13 +91,13 @@ export class DesktopRunner {
       return { value: { action, boundary: 'host-desktop', completed: false, partial: true,
         deliveredInputEvents: value.error.deliveredInputEvents, message: value.error.message }, isError: true, status: 'unknown',
         code: combined.aborted ? 'TOOL_CANCELLED' : 'DESKTOP_PARTIAL_INPUT' };
-    const sameRegion = (expected, actual) => actual && ['x', 'y', 'width', 'height'].every(key => actual[key] === expected[key]);
+    const matchesRegion = (expected, actual) => actual && ['x', 'y', 'width', 'height'].every(key => actual[key] === expected[key]);
     const extensionMismatch = action === 'launch' && parameters.background !== undefined &&
       (value?.backgroundRequested !== parameters.background || value?.backgroundMode !== (parameters.background ? 'best-effort-no-activate' : 'normal')) ||
       action === 'window' && value?.mode !== parameters.mode ||
-      action === 'screenshot' && parameters.crop && (!sameRegion(parameters.crop, value?.crop) ||
+      action === 'screenshot' && parameters.crop && (!matchesRegion(parameters.crop, value?.crop) ||
         value?.width !== parameters.crop.width || value?.height !== parameters.crop.height) ||
-      action === 'read' && (parameters.region && !sameRegion(parameters.region, value?.region) ||
+      action === 'read' && (parameters.region && !matchesRegion(parameters.region, value?.region) ||
         parameters.elementId !== undefined && value?.elementId !== parameters.elementId ||
         parameters.timeoutMs !== undefined && value?.timeoutMs !== parameters.timeoutMs);
     if (value?.protocolVersion !== 1 || value.boundary !== 'host-desktop' || value.action !== action || value.completed !== true || extensionMismatch) {
@@ -123,13 +126,14 @@ export class DesktopRunner {
 }
 
 // The optional process factory is an isolated transport-test seam, never a model/tool parameter.
+// 可选进程工厂只用于隔离传输测试，不属于模型或工具参数。
 export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess = spawn) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawnProcess(host, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
-    const decoder = new StringDecoder('utf8');
-    let output = '', bytes = 0, errorBytes = 0, stopError, settled = false, hardStop, drainTimer;
-    let frame, frameCount = 0, exited = false, spawned = false, submitted = false, invalidTransport;
+    const stdoutDecoder = new StringDecoder('utf8');
+    let stdoutBuffer = '', stdoutBytes = 0, stderrBytes = 0, stopError, settled = false, hardStop, drainTimer;
+    let replyFrame, frameCount = 0, exited = false, spawned = false, submitted = false, invalidTransport;
     const uncertain = error => {
       if (spawned && submitted && request.operation === 'desktop') error.desktopOutcomeUnknown = true;
       return error;
@@ -139,6 +143,7 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
       settled = true; clearTimeout(watchdog); clearTimeout(hardStop); clearTimeout(drainTimer);
       signal?.removeEventListener('abort', cancel);
       // Dispose only this RPC's IPC. Launched apps have independent lifetimes and must not be killed here.
+      // 仅释放本次 RPC 的通信资源；已启动软件生命周期独立，不能在此终止。
       child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
       if (!exited && child.pid && !child.killed) child.kill();
       if (error) reject(error); else resolve(value);
@@ -149,6 +154,7 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
       if (!child.stdin.destroyed) child.stdin.end('cancel\n');
       // Killing the helper need not close pipes accidentally inherited by a GUI app.
       // Settlement has its own deadline and never waits indefinitely for a close event.
+      // 结束助手进程未必关闭 GUI 软件意外继承的管道；结算有独立期限，不无限等待 close 事件。
       hardStop = setTimeout(() => { if (!exited) child.kill(); settleReply(); }, 1000);
     };
     const cancel = () => stop(Object.assign(new Error('本机操作已取消。'), { name: 'AbortError' }));
@@ -158,28 +164,30 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
       try {
         const value = JSON.parse(line);
         if (++frameCount !== 1) throw new Error('Multiple native replies');
-        frame = value;
+        replyFrame = value;
       } catch {
         invalidTransport ??= toolFailure('本机助手未返回有效结果。', 'DESKTOP_INVALID_RESULT', 502);
         stop(invalidTransport);
       }
     };
     const flushFrames = () => {
-      for (let index; (index = output.indexOf('\n')) >= 0;) {
-        const line = output.slice(0, index); output = output.slice(index + 1);
+      for (let index; (index = stdoutBuffer.indexOf('\n')) >= 0;) {
+        const line = stdoutBuffer.slice(0, index); stdoutBuffer = stdoutBuffer.slice(index + 1);
         parseFrame(line);
       }
     };
     const settleReply = () => {
       if (settled) return;
-      if (output.trim() && !invalidTransport) parseFrame(output);
-      output = '';
-      const value = frame;
+      if (stdoutBuffer.trim() && !invalidTransport) parseFrame(stdoutBuffer);
+      stdoutBuffer = '';
+      const value = replyFrame;
       // Discovery is a capability response, not the completion receipt of an executed action.
+      // 能力发现返回的是能力说明，不能当作已执行动作的完成回执。
       if (!stopError && request.operation === 'desktop_capabilities' && value?.protocolVersion === 1 &&
           value.boundary === 'host-desktop' && typeof value.available === 'boolean' && !value.error)
         return finish(value);
       // A complete receipt remains proof even when a cancellation/deadline races with helper exit.
+      // 完整回执仍可证明完成，即使取消或超时与助手退出同时发生。
       if (!invalidTransport && (!stopError || stopError.name === 'AbortError' || stopError.code === 'DESKTOP_TIMED_OUT') &&
           value?.protocolVersion === 1 && value.boundary === 'host-desktop' && value.completed === true && !value.error)
         return finish(value);
@@ -192,6 +200,7 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
         typeof error?.code === 'string' && /^DESKTOP_[A-Z0-9_]+$/.test(error.code) ? error.code : 'DESKTOP_INVALID_RESULT', 502);
       // Only launch validation/start failures prove that no GUI process was created.
       // A generic native failure/timeout can happen after an effect and must not invite a repeated launch.
+      // 只有启动校验或启动失败能证明 GUI 进程未创建；一般原生错误或超时可能发生在副作用之后，不能诱发自动重复启动。
       const unconfirmed = !error || error.code === 'DESKTOP_TIMEOUT' ||
         (request.action === 'launch' && !definiteLaunchFailures.has(error.code));
       finish(null, unconfirmed ? uncertain(failure) : failure);
@@ -201,18 +210,18 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
     child.once('spawn', () => { spawned = true; });
     child.stdout.on('data', chunk => {
       if (settled) return;
-      bytes += chunk.length;
-      if (bytes > maximumOutputBytes) {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxStdoutBytes) {
         invalidTransport = toolFailure('本机结果超过保存上限。', 'DESKTOP_RESULT_TOO_LARGE', 413);
         return stop(invalidTransport);
       }
-      output += decoder.write(chunk); flushFrames();
-      if (exited && frame) settleReply();
+      stdoutBuffer += stdoutDecoder.write(chunk); flushFrames();
+      if (exited && replyFrame) settleReply();
     });
     child.stderr.on('data', chunk => {
       if (settled) return;
-      errorBytes += chunk.length;
-      if (errorBytes > 65536) {
+      stderrBytes += chunk.length;
+      if (stderrBytes > 65536) {
         invalidTransport = toolFailure('本机助手错误输出过大。', 'DESKTOP_INVALID_RESULT', 502);
         stop(invalidTransport);
       }
@@ -221,12 +230,12 @@ export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess
     child.stderr.on('error', () => { if (!settled) stop(toolFailure('本机助手错误连接中断。', 'DESKTOP_INVALID_RESULT', 502)); });
     child.stdout.once('end', () => {
       if (settled) return;
-      output += decoder.end(); flushFrames();
+      stdoutBuffer += stdoutDecoder.end(); flushFrames();
       if (exited) settleReply();
     });
     child.once('exit', () => {
       exited = true;
-      if (frame) settleReply();
+      if (replyFrame) settleReply();
       else drainTimer = setTimeout(settleReply, 100);
     });
     child.once('close', settleReply);

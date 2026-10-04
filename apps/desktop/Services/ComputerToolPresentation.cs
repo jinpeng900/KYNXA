@@ -4,7 +4,10 @@ using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Human-readable desktop operation fields. This never authorizes or executes an operation.</summary>
+/// <summary>
+/// Human-readable desktop operation fields. This never authorizes or executes an operation.
+/// 把桌面操作字段转换为可读描述；此处既不授权也不执行操作。
+/// </summary>
 public static class ComputerToolPresentation
 {
     public sealed record Field(string LabelKey, string Value, bool LocalizedValue = false);

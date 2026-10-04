@@ -35,7 +35,10 @@ function checkDepth(value) {
   }
 }
 
-/** Public projections never expose MCP _meta. Binary data is returned only to the explicit local-view API. */
+/**
+ * Public projections never expose MCP _meta. Binary data is returned only to the explicit local-view API.
+ * 公开视图不暴露 MCP _meta，二进制数据仅返回给明确的本地查看接口。
+ */
 export function publicToolResult(canonical, { resultRef, includeMediaData = false } = {}) {
   checkDepth(canonical);
   const walk = (value, pointer, kind = 'value') => {
@@ -61,7 +64,10 @@ export function publicToolResult(canonical, { resultRef, includeMediaData = fals
   return walk(canonical, '');
 }
 
-/** Preserve small JSON verbatim; size the preview inside a valid envelope, including its JSON escaping. */
+/**
+ * Preserve small JSON verbatim; size the preview inside a valid envelope, including its JSON escaping.
+ * 小 JSON 保持原文，预览大小在合法外层封装中计算，并包含 JSON 转义开销。
+ */
 export function previewToolResult(value, { resultRef, status = 'completed', maximumCharacters = 65536 } = {}) {
   maximumCharacters = boundedInteger(maximumCharacters, 65536, 256, 65536);
   const text = jsonText(value);
@@ -80,7 +86,10 @@ export function previewToolResult(value, { resultRef, status = 'completed', maxi
   return jsonText(envelope(text.slice(0, low)));
 }
 
-/** Result files share the conversation catalog guard and move/trash/restore with their owning session. */
+/**
+ * Result files share the conversation catalog guard and move/trash/restore with their owning session.
+ * 结果文件共用会话目录保护，随所属会话移动、删除到回收站或恢复。
+ */
 export class ToolResultStore {
   constructor({ conversationStore } = {}) {
     if (!conversationStore?.root || typeof conversationStore.withConversationStorage !== 'function')
@@ -195,7 +204,10 @@ export class ToolResultStore {
     return this._load(context, id, document => publicToolResult(document.canonical, { includeMediaData: true }), { allowArchived: true });
   }
 
-  /** Internal model-history projection: complete text, typed media references, no private metadata. */
+  /**
+   * Internal model-history projection: complete text, typed media references, no private metadata.
+   * 内部模型历史视图保留完整文本和带类型媒体引用，不包含私有元信息。
+   */
   async modelResult(context, reference, owner) {
     if (!reference || !Number.isSafeInteger(reference.bytes) || reference.bytes < 0 || reference.bytes > MAX_TOOL_RESULT_BYTES ||
         !/^[0-9a-f]{64}$/i.test(reference.sha256 ?? '')) throw toolFailure('工具历史回执无效。', 'INVALID_TOOL_RESULT_REFERENCE');
@@ -207,7 +219,10 @@ export class ToolResultStore {
     }, { maximumReadBytes: reference.bytes + TOOL_RESULT_METADATA_BYTES });
   }
 
-  /** Native model state shares the protected result archive, never an independently writable chat log. */
+  /**
+   * Native model state shares the protected result archive, never an independently writable chat log.
+   * 原生模型状态共用受保护结果存储，不能另建可独立写入的聊天日志。
+   */
   async saveModelContinuation(context, { origin, prefixFingerprint, round, continuation }) {
     return this.save(context, { id: `model-round-${round}`, name: 'model.continuation' },
       { content: [], _meta: { modelContinuation: { version: 1, origin, prefixFingerprint, round, continuation } } });

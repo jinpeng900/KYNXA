@@ -4,7 +4,10 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>A resizable editor surface with an optional connected, full-width footer.</summary>
+/// <summary>
+/// A resizable editor surface with an optional connected, full-width footer.
+/// 可调整大小的编辑区，支持连接到下方的全宽页脚。
+/// </summary>
 public sealed partial class ComposerSurface : UserControl
 {
     public static readonly DependencyProperty BodyProperty = DependencyProperty.Register(

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { DesktopRunner, invokeDesktopHost } from '../../apps/model-gateway/desktop-runner.mjs';
 
 // Own isolated profiles and loopback pages only. No user's browser/profile is inspected.
+// 仅使用自有隔离配置和回环页面；不检查用户的浏览器或配置目录。
 const artifact = await mkdtemp(join(tmpdir(), 'kynxa-native-browser-'));
 const host = process.env.KYNXA_DESKTOP_SMOKE_TOOL_HOST
   ?? resolve('apps/tool-host/bin/Debug/net10.0-windows/win-x64/KYNXA.ToolHost.exe');
@@ -78,6 +79,7 @@ try {
         read = await request({ operation: 'desktop', action: 'read', windowId: target.windowId, processId: ownedPid, maxCharacters: 32000, maxElements: 400 });
         if (read.text.includes(`KYNXA visible browser ${marker}`) && read.accessibleUrls.includes(url)) break;
         await sleep(300); // Chromium can initialize its cross-process accessibility provider asynchronously.
+        // Chromium 可能异步初始化跨进程辅助功能提供程序。
       }
       await writeFile(join(artifact, `${marker}-read.json`), JSON.stringify(read, null, 2));
       check(read.source === 'uia-visible', 'Browser source is visible UI Automation');
@@ -108,6 +110,7 @@ try {
     } finally {
       for (const ownedBrowserPid of [ownedPid, blankPid].filter(pid => Number.isSafeInteger(pid) && pid > 0)) {
         // The root PID was returned for the brand-new isolated user-data-dir above.
+        // 根 PID 来自上述使用全新隔离 user-data-dir 的进程。
         const cleanup = spawn('taskkill.exe', ['/pid', String(ownedBrowserPid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
         await new Promise(accept => cleanup.once('exit', accept));
       }

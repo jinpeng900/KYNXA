@@ -1,7 +1,8 @@
-/* Display projection only: execution identity, approval and full receipts stay in the host. */
+/* Display projection only: execution identity, approval and full receipts stay in the host.
+ * 仅生成展示投影；执行身份、审批与完整回执仍由宿主保存。 */
 (() => {
   'use strict';
-  const titles = {
+  const toolTitleKeys = {
     'filesystem.read': 'toolReadFile', 'file.read': 'toolReadFile', 'filesystem.stat': 'toolInspectFile',
     'filesystem.list': 'toolListFiles', 'filesystem.search': 'toolSearchFiles',
     'filesystem.write': 'toolEditFile', 'filesystem.edit': 'toolEditFile',
@@ -16,7 +17,7 @@
     'computer.move': 'toolMovePointer', 'computer.scroll': 'toolScroll', 'computer.drag': 'toolDrag',
     'computer.type': 'toolTypeText', 'computer.key': 'toolPressKey'
   };
-  const searches = new Set(['web_search_exa', 'web_search_exa_deep', 'brave_web_search', 'web_search', 'search_web']);
+  const searchToolNames = new Set(['web_search_exa', 'web_search_exa_deep', 'brave_web_search', 'web_search', 'search_web']);
   const errorKeys = {
     MCP_TIMEOUT: 'toolTimedOut', WEB_TIMEOUT: 'toolTimedOut', TOOL_TIMEOUT: 'toolTimedOut', TOOL_TIMED_OUT: 'toolTimedOut', SANDBOX_HOST_TIMEOUT: 'toolTimedOut',
     DESKTOP_TIMEOUT: 'toolTimedOut', DESKTOP_TIMED_OUT: 'toolTimedOut', DESKTOP_READ_TIMEOUT: 'toolTimedOut',
@@ -38,63 +39,63 @@
     return text.length > limit ? text.slice(0, limit) + '…' : text;
   }
   function businessArguments(tool) {
-    const args = tool.arguments;
-    if (!args || typeof args !== 'object' || Array.isArray(args)) return {};
-    if (tool.name?.startsWith('mcp.') && args.policy && args.arguments && typeof args.arguments === 'object') return args.arguments;
-    return args;
+    const businessParameters = tool.arguments;
+    if (!businessParameters || typeof businessParameters !== 'object' || Array.isArray(businessParameters)) return {};
+    if (tool.name?.startsWith('mcp.') && businessParameters.policy && businessParameters.arguments && typeof businessParameters.arguments === 'object') return businessParameters.arguments;
+    return businessParameters;
   }
-  function action(tool, args) {
-    if (tool.name === 'terminal.host.run') return plain(args.script, 2048);
-    const commandArgs = Array.isArray(args.args) ? args.args.filter(value => typeof value === 'string') : [];
-    const quote = value => /[\s"]/u.test(value) ? JSON.stringify(value) : value;
-    if (typeof args.command === 'string') return [args.command, ...commandArgs.map(quote)].join(' ');
-    if (tool.name === 'skill.run' && typeof args.path === 'string') return ['node', quote(args.path), ...commandArgs.map(quote)].join(' ');
+  function action(tool, businessParameters) {
+    if (tool.name === 'terminal.host.run') return plain(businessParameters.script, 2048);
+    const commandArgs = Array.isArray(businessParameters.args) ? businessParameters.args.filter(value => typeof value === 'string') : [];
+    const quoteCommandArgument = value => /[\s"]/u.test(value) ? JSON.stringify(value) : value;
+    if (typeof businessParameters.command === 'string') return [businessParameters.command, ...commandArgs.map(quoteCommandArgument)].join(' ');
+    if (tool.name === 'skill.run' && typeof businessParameters.path === 'string') return ['node', quoteCommandArgument(businessParameters.path), ...commandArgs.map(quoteCommandArgument)].join(' ');
     for (const field of ['path', 'filePath', 'query', 'search_query', 'pattern', 'action', 'method']) {
-      const value = plain(args[field], 2048);
+      const value = plain(businessParameters[field], 2048);
       if (value) return value;
     }
     for (const field of ['url', 'uri']) {
-      if (typeof args[field] !== 'string') continue;
+      if (typeof businessParameters[field] !== 'string') continue;
       try {
-        const url = new URL(args[field]);
+        const url = new URL(businessParameters[field]);
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
         if ([...url.searchParams.keys()].some(key => /key|token|password|auth|secret/i.test(key))) continue;
-        return args[field];
-      } catch { /* An invalid address is not a display action. */ }
+        return businessParameters[field];
+      } catch { /* An invalid address is not a display action. 无效地址不能作为可展示的操作。 */ }
     }
     return '';
   }
-  function computerActions(tool, args) {
-    const parts = [];
-    const number = key => Number.isSafeInteger(args[key]) ? args[key] : null;
-    const point = (x, y) => number(x) !== null && number(y) !== null ? `(${number(x)}, ${number(y)})` : '';
-    if (typeof args.windowId === 'string' && /^[0-9]{1,20}$/u.test(args.windowId) && number('processId') > 0)
-      parts.push(`HWND ${args.windowId} · PID ${number('processId')}`);
+  function computerActions(tool, businessParameters) {
+    const operationParts = [];
+    const integerArgument = key => Number.isSafeInteger(businessParameters[key]) ? businessParameters[key] : null;
+    const pointText = (x, y) => integerArgument(x) !== null && integerArgument(y) !== null ? `(${integerArgument(x)}, ${integerArgument(y)})` : '';
+    if (typeof businessParameters.windowId === 'string' && /^[0-9]{1,20}$/u.test(businessParameters.windowId) && integerArgument('processId') > 0)
+      operationParts.push(`HWND ${businessParameters.windowId} · PID ${integerArgument('processId')}`);
     if (tool.name === 'computer.launch') {
-      const app = plain(args.appPath, 2048), argumentsList = Array.isArray(args.args) ? args.args.filter(value => typeof value === 'string') : [];
-      const quote = value => !value || /[\s"]/u.test(value) ? '"' + value.replace(/"/g, '\\"') + '"' : value;
-      if (app) parts.push([quote(app), ...argumentsList.map(quote)].join(' '));
-      if (args.background === true) parts.push({ key: 'toolBackgroundLaunch', values: [] });
+      const app = plain(businessParameters.appPath, 2048), argumentsList = Array.isArray(businessParameters.args) ? businessParameters.args.filter(value => typeof value === 'string') : [];
+      const quoteCommandArgument = value => !value || /[\s"]/u.test(value) ? '"' + value.replace(/"/g, '\\"') + '"' : value;
+      if (app) operationParts.push([quoteCommandArgument(app), ...argumentsList.map(quoteCommandArgument)].join(' '));
+      if (businessParameters.background === true) operationParts.push({ key: 'toolBackgroundLaunch', values: [] });
     }
-    if (['computer.click', 'computer.move', 'computer.scroll'].includes(tool.name)) parts.push(point('x', 'y'));
+    if (['computer.click', 'computer.move', 'computer.scroll'].includes(tool.name)) operationParts.push(pointText('x', 'y'));
     if (tool.name === 'computer.drag') {
-      const start = point('x', 'y'), end = point('endX', 'endY');
-      if (start && end) parts.push(start + ' → ' + end);
+      const start = pointText('x', 'y'), end = pointText('endX', 'endY');
+      if (start && end) operationParts.push(start + ' → ' + end);
     }
-    if (tool.name === 'computer.scroll' && number('delta') !== null) parts.push({ key: 'toolScrollDelta', values: [number('delta')] });
-    if (tool.name === 'computer.type') parts.push({ key: 'toolCharacterCount', values: [typeof args.text === 'string' ? args.text.length : 0] });
-    if (tool.name === 'computer.key') parts.push(plain(args.key, 120));
+    if (tool.name === 'computer.scroll' && integerArgument('delta') !== null) operationParts.push({ key: 'toolScrollDelta', values: [integerArgument('delta')] });
+    if (tool.name === 'computer.type') operationParts.push({ key: 'toolCharacterCount', values: [typeof businessParameters.text === 'string' ? businessParameters.text.length : 0] });
+    if (tool.name === 'computer.key') operationParts.push(plain(businessParameters.key, 120));
     if (tool.name === 'computer.window') {
       const modes = { resize: 'toolWindowResize', maximize: 'toolWindowMaximize', minimize: 'toolWindowMinimize', restore: 'toolWindowRestore' };
-      if (Object.hasOwn(modes, args.mode)) parts.push({ key: modes[args.mode], values: [] });
-      if (args.mode === 'resize' && number('width') > 0 && number('height') > 0) parts.push(`${number('width')} × ${number('height')} px`);
+      if (Object.hasOwn(modes, businessParameters.mode)) operationParts.push({ key: modes[businessParameters.mode], values: [] });
+      if (businessParameters.mode === 'resize' && integerArgument('width') > 0 && integerArgument('height') > 0) operationParts.push(`${integerArgument('width')} × ${integerArgument('height')} px`);
     }
-    if (tool.name === 'computer.screenshot' && args.crop && typeof args.crop === 'object') {
-      const { x, y, width, height } = args.crop;
+    if (tool.name === 'computer.screenshot' && businessParameters.crop && typeof businessParameters.crop === 'object') {
+      const { x, y, width, height } = businessParameters.crop;
       if ([x, y, width, height].every(Number.isSafeInteger) && x >= 0 && y >= 0 && width > 0 && height > 0)
-        parts.push(`(${x}, ${y}) · ${width} × ${height} px`);
+        operationParts.push(`(${x}, ${y}) · ${width} × ${height} px`);
     }
-    return parts.filter(Boolean);
+    return operationParts.filter(Boolean);
   }
   function readableError(value, depth = 0) {
     if (depth > 3 || value == null) return '';
@@ -104,6 +105,7 @@
     }
     if (typeof value !== 'object' || Array.isArray(value)) return '';
     // Read only documented public error fields. Never scan metadata, parameters or arbitrary result objects.
+    // 只读取已有约定的公开错误字段；不扫描元数据、参数或任意结果对象。
     const message = plain(value.message) || plain(value.error?.message);
     if (message) return message;
     if (value.truncated === true && typeof value.totalCharacters === 'number') return readableError(value.preview, depth + 1);
@@ -119,16 +121,16 @@
   }
   function describe(tool) {
     const website = window.KynxaToolWebLinks.extract(tool) !== null;
-    const leaf = String(tool.name || '').split('.').at(-1);
-    const titleKey = website ? searches.has(leaf) ? 'toolSearchWeb' : 'toolReadWeb' : titles[tool.name] || 'toolExecute';
-    const args = businessArguments(tool);
-    const computer = tool.name?.startsWith('computer.') && Object.hasOwn(titles, tool.name);
+    const toolName = String(tool.name || '').split('.').at(-1);
+    const titleKey = website ? searchToolNames.has(toolName) ? 'toolSearchWeb' : 'toolReadWeb' : toolTitleKeys[tool.name] || 'toolExecute';
+    const businessParameters = businessArguments(tool);
+    const computer = tool.name?.startsWith('computer.') && Object.hasOwn(toolTitleKeys, tool.name);
     const summary = tool.summary === tool.name ? '' : plain(tool.summary);
-    const intent = plain(tool.arguments?.policy?.reason) || plain(args.reason) || summary;
+    const intent = plain(tool.arguments?.policy?.reason) || plain(businessParameters.reason) || summary;
     const failed = ['error', 'denied', 'unknown', 'cancelled'].includes(tool.status);
     const errorKey = failed ? errorKeys[tool.code] || (tool.status === 'unknown' ? 'toolOutcomeUncertain' : '') : '';
-    return { website, titleKey, action: website || computer ? '' : action(tool, args), intent: website || computer ? '' : intent,
-      actionParts: computer ? computerActions(tool, args) : null,
+    return { website, titleKey, action: website || computer ? '' : action(tool, businessParameters), intent: website || computer ? '' : intent,
+      actionParts: computer ? computerActions(tool, businessParameters) : null,
       errorKey, errorText: failed && !errorKey ? readableError(tool.result) : '' };
   }
   window.KynxaToolPresentation = Object.freeze({ describe });

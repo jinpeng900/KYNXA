@@ -4,6 +4,7 @@ export const protocols = ['openai-completions', 'openai-responses', 'anthropic-m
 
 // Opt in only for known Responses reasoning models on the official endpoint.
 // In particular, chat-latest aliases and o3-mini must not inherit this option.
+// 仅在官方端点的已知 Responses 推理模型上启用选项，chat-latest 别名和 o3-mini 不自动继承。
 const summaryModels = new Set(['o3', 'o3-pro', 'o4-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5-pro',
   'gpt-5.1', 'gpt-5.2', 'gpt-5.2-pro', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.4-pro',
   'gpt-5.3-codex', 'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
@@ -11,6 +12,7 @@ const summaryModels = new Set(['o3', 'o3-pro', 'o4-mini', 'gpt-5', 'gpt-5-mini',
 
 // Official model pages mark these Responses models as non-streaming (2026-10-01).
 // The runtime already forwards complete JSON responses through the same UI event protocol.
+// 官方模型页面在 2026-10-01 将这些 Responses 模型标为非流式；运行时仍通过同一 UI 事件协议转发完整 JSON 响应。
 const nonStreamingResponseModels = new Set(['gpt-5.5-pro', 'o3-pro']);
 
 export function authorization(connection) {

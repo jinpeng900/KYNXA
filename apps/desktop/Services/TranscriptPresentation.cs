@@ -2,7 +2,10 @@ using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Visible conversation content; the durable transcript and model history remain untouched.</summary>
+/// <summary>
+/// Visible conversation content; the durable transcript and model history remain untouched.
+/// 聊天可见内容的投影；正式聊天记录与模型历史不变。
+/// </summary>
 internal static class TranscriptPresentation
 {
     internal const int RecentToolLimit = 8;
@@ -27,6 +30,7 @@ internal static class TranscriptPresentation
             if (final is not null) return new("final", final.Content, [final], []);
 
             // A recorded phase is not proof that the enclosing request finished successfully.
+            // 存在阶段记录不代表整个请求已成功完成。
             return Process("incomplete", ordered, orderedTools, ordered.Length == 0 ? content : "");
         }
 
@@ -42,6 +46,7 @@ internal static class TranscriptPresentation
         var toolRounds = visibleTools.Select(tool => tool.Round).ToHashSet();
         var latest = segments.LastOrDefault();
         // Spoken progress stays readable until a successful final answer replaces it.
+        // 成功的最终回答替换中间进展之前，所有已输出的话仍可阅读。
         var visible = segments.Where(segment => !string.IsNullOrWhiteSpace(segment.Content)
             || toolRounds.Contains(segment.Round)
             || (mode == "active" && segment == latest && segment.Status == "streaming")).ToArray();

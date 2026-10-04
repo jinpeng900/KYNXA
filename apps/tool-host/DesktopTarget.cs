@@ -13,28 +13,28 @@ internal sealed class DesktopTarget(nint window, int processId)
     internal static bool IsInteractive()
     {
         if (!OperatingSystem.IsWindows() || !Environment.UserInteractive) return false;
-        nint input = OpenInputDesktop(0, false, 0x101);
-        if (input == 0) return false;
+        nint inputDesktopHandle = OpenInputDesktop(0, false, 0x101);
+        if (inputDesktopHandle == 0) return false;
         try
         {
-            string Name(nint desktop)
+            string GetDesktopName(nint desktop)
             {
                 var name = new StringBuilder(256);
                 return GetUserObjectInformation(desktop, 2, name, 512, out _) ? name.ToString() : "";
             }
-            string actual = Name(input), current = Name(GetThreadDesktop(GetCurrentThreadId()));
-            return actual.Length > 0 && string.Equals(actual, current, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(actual, "Winlogon", StringComparison.OrdinalIgnoreCase);
+            string inputDesktopName = GetDesktopName(inputDesktopHandle), threadDesktopName = GetDesktopName(GetThreadDesktop(GetCurrentThreadId()));
+            return inputDesktopName.Length > 0 && string.Equals(inputDesktopName, threadDesktopName, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(inputDesktopName, "Winlogon", StringComparison.OrdinalIgnoreCase);
         }
-        finally { CloseDesktop(input); }
+        finally { CloseDesktop(inputDesktopHandle); }
     }
 
     internal static DesktopTarget From(DesktopRequest request)
     {
-        if (!long.TryParse(request.WindowId, NumberStyles.None, CultureInfo.InvariantCulture, out long value)
-            || value <= 0 || request.ProcessId is not > 0)
+        if (!long.TryParse(request.WindowId, NumberStyles.None, CultureInfo.InvariantCulture, out long windowHandleValue)
+            || windowHandleValue <= 0 || request.ProcessId is not > 0)
             throw new DesktopException("DESKTOP_INVALID_TARGET", "A windowId and matching processId are required.");
-        var target = new DesktopTarget((nint)value, request.ProcessId.Value);
+        var target = new DesktopTarget((nint)windowHandleValue, request.ProcessId.Value);
         target.Check(visible: request.Action is not "activate" and not "window");
         return target;
     }
@@ -42,7 +42,7 @@ internal sealed class DesktopTarget(nint window, int processId)
     internal void Check(bool foreground = false, bool visible = true)
     {
         if (!IsInteractive()) throw new DesktopException("DESKTOP_UNAVAILABLE", "The interactive desktop is unavailable or locked.");
-        if (!IsWindow(Window) || GetWindowThreadProcessId(Window, out uint owner) == 0 || owner != (uint)ProcessId
+        if (!IsWindow(Window) || GetWindowThreadProcessId(Window, out uint ownerProcessId) == 0 || ownerProcessId != (uint)ProcessId
             || GetAncestor(Window, 2) != Window)
             throw new DesktopException("DESKTOP_TARGET_CHANGED", "The selected window no longer belongs to the selected process.");
         if (visible && (!IsWindowVisible(Window) || IsIconic(Window)))
@@ -68,6 +68,7 @@ internal sealed class DesktopTarget(nint window, int processId)
     {
         Check(visible: false);
         // A bounded WM_NULL handshake avoids entering UIA for an already hung UI thread.
+        // 使用有超时边界的 WM_NULL 握手，避免对已卡死的界面线程启动 UIA 读取。
         if (!IsResponding() || SendMessageTimeout(Window, 0, 0, 0, 0x0001 | 0x0002, 200, out _) == 0)
             throw new DesktopException("DESKTOP_NOT_RESPONDING", "The selected window is not responding; no UI Automation read was started.");
     }
@@ -95,50 +96,50 @@ internal sealed class DesktopTarget(nint window, int processId)
             path, rect.Right, rect.Bottom, GetForegroundWindow() == Window, IsIconic(Window), IsResponding());
     }
 
-    internal static string? ExecutablePath(int id)
+    internal static string? ExecutablePath(int processId)
     {
-        nint process = OpenProcess(ProcessQueryLimitedInformation, false, (uint)id);
-        if (process == 0) return null;
+        nint processHandle = OpenProcess(ProcessQueryLimitedInformation, false, (uint)processId);
+        if (processHandle == 0) return null;
         try
         {
             var text = new StringBuilder(4096); uint length = (uint)text.Capacity;
-            return QueryFullProcessImageName(process, 0, text, ref length) ? text.ToString() : null;
+            return QueryFullProcessImageName(processHandle, 0, text, ref length) ? text.ToString() : null;
         }
-        finally { CloseHandle(process); }
+        finally { CloseHandle(processHandle); }
     }
 
     internal void EnsureIntegrity()
     {
-        nint process = OpenProcess(ProcessQueryLimitedInformation, false, (uint)ProcessId);
-        if (process == 0) throw new DesktopException("DESKTOP_ACCESS_DENIED", "The selected process cannot be queried; no elevation was attempted.");
+        nint processHandle = OpenProcess(ProcessQueryLimitedInformation, false, (uint)ProcessId);
+        if (processHandle == 0) throw new DesktopException("DESKTOP_ACCESS_DENIED", "The selected process cannot be queried; no elevation was attempted.");
         try
         {
-            if (Integrity(process) > Integrity(GetCurrentProcess()))
+            if (GetIntegrityLevel(processHandle) > GetIntegrityLevel(GetCurrentProcess()))
                 throw new DesktopException("DESKTOP_UIPI_BLOCKED", "The selected process has higher integrity; no elevation was attempted.");
         }
-        finally { CloseHandle(process); }
+        finally { CloseHandle(processHandle); }
     }
 
-    private static int Integrity(nint process)
+    private static int GetIntegrityLevel(nint processHandle)
     {
-        if (!OpenProcessToken(process, TokenQuery, out nint token))
+        if (!OpenProcessToken(processHandle, TokenQuery, out nint tokenHandle))
             throw new DesktopException("DESKTOP_ACCESS_DENIED", "Process integrity cannot be verified; no elevation was attempted.");
         try
         {
-            GetTokenInformation(token, TokenIntegrityLevel, 0, 0, out uint length);
+            GetTokenInformation(tokenHandle, TokenIntegrityLevel, 0, 0, out uint length);
             if (length == 0 || length > 65536) throw new DesktopException("DESKTOP_ACCESS_DENIED", "Process integrity cannot be verified.");
-            nint buffer = Marshal.AllocHGlobal((int)length);
+            nint integrityBuffer = Marshal.AllocHGlobal((int)length);
             try
             {
-                if (!GetTokenInformation(token, TokenIntegrityLevel, buffer, length, out _))
+                if (!GetTokenInformation(tokenHandle, TokenIntegrityLevel, integrityBuffer, length, out _))
                     throw new DesktopException("DESKTOP_ACCESS_DENIED", "Process integrity cannot be verified.");
-                nint sid = Marshal.ReadIntPtr(buffer);
-                byte count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
-                if (count == 0) throw new DesktopException("DESKTOP_ACCESS_DENIED", "Process integrity cannot be verified.");
-                return Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+                nint sid = Marshal.ReadIntPtr(integrityBuffer);
+                byte subAuthorityCount = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                if (subAuthorityCount == 0) throw new DesktopException("DESKTOP_ACCESS_DENIED", "Process integrity cannot be verified.");
+                return Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(subAuthorityCount - 1)));
             }
-            finally { Marshal.FreeHGlobal(buffer); }
+            finally { Marshal.FreeHGlobal(integrityBuffer); }
         }
-        finally { CloseHandle(token); }
+        finally { CloseHandle(tokenHandle); }
     }
 }

@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { toolFailure } from './tool-paths.mjs';
 
-const MAX_BYTES = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const blockedUrl = () => toolFailure('网页工具仅支持公共 HTTP(S) 地址，不能访问本机、内网或带凭据的地址。', 'WEB_URL_BLOCKED', 403);
@@ -15,18 +15,18 @@ const tooLarge = () => toolFailure('网页响应超过 2 MiB 限制。', 'WEB_RE
 const unsupportedContent = () => toolFailure('网页响应类型或压缩方式不受支持。', 'WEB_UNSUPPORTED_CONTENT', 415);
 const cancelled = () => Object.assign(new Error('网页获取已取消。'), { name: 'AbortError', code: 'ABORT_ERR' });
 
-function v4Number(address) {
+function ipv4ToNumber(address) {
   return address.split('.').reduce((result, part) => (result * 256) + Number(part), 0);
 }
 
-const privateV4Ranges = [
+const nonPublicIpv4Ranges = [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
   ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
   ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
   ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4]
-].map(([address, prefix]) => ({ start: v4Number(address), size: 2 ** (32 - prefix) }));
+].map(([address, prefixLength]) => ({ start: ipv4ToNumber(address), size: 2 ** (32 - prefixLength) }));
 
-function v6Number(address) {
+function ipv6ToBigInt(address) {
   const [left, right = ''] = address.split('::');
   const first = left ? left.split(':') : [];
   const last = right ? right.split(':') : [];
@@ -34,26 +34,30 @@ function v6Number(address) {
   return parts.reduce((result, part) => (result << 16n) + BigInt('0x' + part), 0n);
 }
 
-function v6Within(address, base, prefix) {
-  const shift = 128n - BigInt(prefix);
-  return (address >> shift) === (v6Number(base) >> shift);
+function isWithinIpv6Prefix(address, base, prefixLength) {
+  const shift = 128n - BigInt(prefixLength);
+  return (address >> shift) === (ipv6ToBigInt(base) >> shift);
 }
 
-function publicAddress(address) {
+function isPublicAddress(address) {
   const family = isIP(address);
   if (family === 4) {
-    const value = v4Number(address);
-    return !privateV4Ranges.some(range => value >= range.start && value < range.start + range.size);
+    const value = ipv4ToNumber(address);
+    return !nonPublicIpv4Ranges.some(range => value >= range.start && value < range.start + range.size);
   }
   if (family !== 6 || address.includes('.')) return false;
-  const value = v6Number(address);
+  const value = ipv6ToBigInt(address);
   // Global unicast only, excluding IETF special uses, documentation and IPv4 tunnels.
-  return v6Within(value, '2000::', 3) && ![
+  // 只允许全球单播地址，排除 IETF 特殊用途、文档地址和 IPv4 隧道。
+  return isWithinIpv6Prefix(value, '2000::', 3) && ![
     ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['3fff::', 20]
-  ].some(([base, prefix]) => v6Within(value, base, prefix));
+  ].some(([base, prefixLength]) => isWithinIpv6Prefix(value, base, prefixLength));
 }
 
-/** Pure validation used before approval; DNS and pinned connections remain execution-time checks. */
+/**
+ * Pure validation used before approval; DNS and pinned connections remain execution-time checks.
+ * 审批前只做纯参数校验，DNS 和固定连接地址仍在执行时检查。
+ */
 export function validatePublicWebUrl(value) {
   if (typeof value !== 'string' || !value || value.length > 8192 ||
       /[\u0000-\u0020\u007f\\]/u.test(value) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(value) ||
@@ -65,7 +69,7 @@ export function validatePublicWebUrl(value) {
   if (!hostname || authority.includes('@') || url.username || url.password ||
       (url.port && !['80', '443'].includes(url.port)) ||
       /(?:^|\.)(?:localhost|local|internal|home|lan|onion|arpa)$/i.test(hostname) ||
-      (isIP(hostname) && !publicAddress(hostname))) throw blockedUrl();
+      (isIP(hostname) && !isPublicAddress(hostname))) throw blockedUrl();
   url.hash = '';
   return url;
 }
@@ -103,7 +107,7 @@ async function validatedAddresses(url, lookup, signal) {
     throw toolFailure('公共网页地址解析失败。', 'WEB_HTTP_ERROR', 502);
   }
   if (!Array.isArray(addresses) || !addresses.length || addresses.length > 64 ||
-      addresses.some(item => !item || !publicAddress(item.address) || item.family !== isIP(item.address)))
+      addresses.some(item => !item || !isPublicAddress(item.address) || item.family !== isIP(item.address)))
     throw toolFailure('当前 DNS 答案包含无效或非公共地址，可能来自代理的虚拟 IP；请使用已启用的浏览器读取。', 'WEB_URL_BLOCKED', 403);
   return addresses.map(item => ({ address: item.address, family: item.family }));
 }
@@ -149,15 +153,15 @@ function contentHeaders(response) {
   const encoding = contentEncoding.trim().toLowerCase();
   if (!['identity', 'gzip', 'deflate', 'br'].includes(encoding)) throw unsupportedContent();
   const length = response.headers['content-length'];
-  if (typeof length === 'string' && /^\d+$/.test(length) && Number(length) > MAX_BYTES) throw tooLarge();
+  if (typeof length === 'string' && /^\d+$/.test(length) && Number(length) > MAX_RESPONSE_BYTES) throw tooLarge();
   return { contentType, contentEncoding: encoding };
 }
 
 function byteLimit() {
-  let total = 0;
+  let receivedBytes = 0;
   return new Transform({ transform(chunk, _encoding, next) {
-    total += chunk.length;
-    if (total > MAX_BYTES) return next(tooLarge());
+    receivedBytes += chunk.length;
+    if (receivedBytes > MAX_RESPONSE_BYTES) return next(tooLarge());
     next(null, chunk);
   } });
 }
@@ -178,7 +182,10 @@ async function readPage(response, headers, signal) {
   return Buffer.concat(chunks);
 }
 
-/** Public GET only: resolve and validate every address, then pin the socket lookup for each redirect. */
+/**
+ * Public GET only: resolve and validate every address, then pin the socket lookup for each redirect.
+ * 只发公开 GET，每次重定向先解析并验证全部地址，再固定套接字查询结果。
+ */
 export async function fetchPublicWebPage(value, { signal, timeoutMs = 20000 } = {}, dependencies = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000)
     throw toolFailure('网页超时须在 1–120000 毫秒之间。');
@@ -186,8 +193,8 @@ export async function fetchPublicWebPage(value, { signal, timeoutMs = 20000 } = 
   const stop = () => controller.abort(cancelled());
   signal?.addEventListener('abort', stop, { once: true });
   if (signal?.aborted) stop();
-  const timeout = setTimeout(() => controller.abort(toolFailure('公共网页获取超时。', 'WEB_TIMEOUT', 504)), timeoutMs);
-  timeout.unref();
+  const timeoutTimer = setTimeout(() => controller.abort(toolFailure('公共网页获取超时。', 'WEB_TIMEOUT', 504)), timeoutMs);
+  timeoutTimer.unref();
   const lookup = dependencies.lookup ?? lookupAddress;
   const httpRequest = dependencies.httpRequest ?? requestHttp;
   const httpsRequest = dependencies.httpsRequest ?? requestHttps;
@@ -208,6 +215,7 @@ export async function fetchPublicWebPage(value, { signal, timeoutMs = 20000 } = 
         try { target = new URL(response.headers.location, url).href; } catch { throw blockedUrl(); }
         const next = validatePublicWebUrl(target);
         // The next DNS lookup is checked before a connection is attempted. No cookies carry across hops.
+        // 尝试连接前检查下一跳 DNS，不在不同跳之间携带 Cookie。
         const nextAddresses = await validatedAddresses(next, lookup, controller.signal);
         redirects.push(next.href);
         response.destroy(); active.request.destroy(); active = undefined;
@@ -222,7 +230,7 @@ export async function fetchPublicWebPage(value, { signal, timeoutMs = 20000 } = 
     }
   } finally {
     active?.response.destroy(); active?.request.destroy();
-    clearTimeout(timeout);
+    clearTimeout(timeoutTimer);
     signal?.removeEventListener('abort', stop);
   }
 }

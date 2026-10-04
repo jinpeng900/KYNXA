@@ -8,12 +8,16 @@ import { BrowserSessionRegistry, browserOperation } from './browser-sessions.mjs
 
 const executionNotDispatched = Symbol('mcp-execution-not-dispatched');
 
-/** Only the adapter's pre-RPC path can create this marker; server fields cannot. */
+/**
+ * Only the adapter's pre-RPC path can create this marker; server fields cannot.
+ * 只有适配器在 RPC 之前的路径能创建此标记，服务端字段不能伪造。
+ */
 export const isMcpExecutionNotDispatched = error => error?.[executionNotDispatched] === true;
 
 function markExecutionNotDispatched(error) {
   // Abort reasons may be shared by already-dispatched calls. Never mark that
   // shared object; only this queue's owned wrapper carries execution metadata.
+  // 取消理由可能被已派发的调用共享；不修改共享对象，仅在当前队列拥有的包装错误中记录执行元信息。
   const failure = new Error(typeof error?.message === 'string' ? error.message : 'MCP 调用尚未发出。', { cause: error });
   if (typeof error?.name === 'string') failure.name = error.name;
   if (typeof error?.code === 'string' || typeof error?.code === 'number') failure.code = error.code;
@@ -65,6 +69,7 @@ function nestedArgumentSchema(originalInputSchema) {
   };
   // A local JSON pointer referred to the original root before this application
   // envelope existed. Preserve that target without rewriting literal/default data.
+  // 应用包装出现前，本地 JSON 指针指向原 schema 根；保留其目标，不改写字面量或默认值。
   visit(schema);
   return schema;
 }
@@ -72,6 +77,7 @@ function nestedArgumentSchema(originalInputSchema) {
 function callSchema(originalInputSchema) {
   // A nested $schema does not select the envelope root dialect. For example,
   // draft-07 tuple items must not be interpreted as 2020-12 prefixItems.
+  // 嵌套 $schema 不决定包装根的方言，例如不能把 draft-07 元组误解释为 2020-12 prefixItems。
   return { ...(typeof originalInputSchema.$schema === 'string' ? { $schema: originalInputSchema.$schema } : {}),
     type: 'object', properties: {
     arguments: nestedArgumentSchema(originalInputSchema),
@@ -99,6 +105,7 @@ function withoutMetadata(value) {
 
 // Provider text is a projection. The canonical result below retains typed blocks,
 // structured content and client-only metadata for separate attachment/viewer use.
+// 供应商文本只是视图，正式结果保留带类型的内容块、结构化内容及客户端元信息，供附件和查看器分别使用。
 function resultPreview(result) {
   const sections = (result.content ?? []).map(block => {
     if (block.type === 'text') return block.text;
@@ -146,7 +153,10 @@ function descriptors(server, key, listing, capabilities) {
   return [...tools, ...mcpResourceDescriptors(server, key, capabilities, names)];
 }
 
-/** MCP dependencies are externally configured, never a claim that their processes are sandboxed. */
+/**
+ * MCP dependencies are externally configured, never a claim that their processes are sandboxed.
+ * MCP 依赖由外部配置管理，不能据此声称其进程受到沙箱保护。
+ */
 export class McpToolClients {
   constructor({ fetch, extensionRoot } = {}) {
     this.connections = new Map(); this.errors = new Map(); this.closed = false;
@@ -178,6 +188,7 @@ export class McpToolClients {
       let failed = false;
       try { await connection.client.close(); } catch { failed = true; }
       // A failed negotiation can leave a started transport detached from Client.
+      // 协商失败时，已启动的 transport 可能脱离 Client，仍需要清理。
       if (startup) try { await connection.transport?.close(); } catch { failed = true; }
       if (failed) {
         this.failedClosures.set(key, connection);
@@ -239,6 +250,7 @@ export class McpToolClients {
       let startupFailure;
       // The SDK may reject connect with a closed-pipe error after reporting the
       // underlying spawn failure. Retain only its sanitized readiness diagnosis.
+      // SDK 报告底层进程启动错误后，connect 可能只返回管道关闭错误；仅保留已去除敏感信息的就绪诊断。
       client.onerror = error => {
         const failure = mcpFailure(error);
         if (failure.code === 'MCP_COMMAND_NOT_FOUND') startupFailure = failure;
@@ -258,7 +270,7 @@ export class McpToolClients {
         state.resourceCapabilities = { resources: !!capabilities.resources, templates: !!capabilities.resources };
         client.onclose = () => {
           connection.closed = true;
-          if (connection.closing) return; // The explicit owner records success/failure before releasing its reference.
+          if (connection.closing) return; // The explicit owner records success/failure before releasing its reference. 显式所有者先记录清理成功或失败，再释放自己拥有的引用。
           if (this.connections.get(key) !== operation) return;
           this.connections.delete(key); state.state = 'disconnected'; state.toolCount = 0; state.code = 'MCP_CONNECTION_LOST';
           this.browserSessions.remove(key);
@@ -311,6 +323,7 @@ export class McpToolClients {
     };
     // Each catalog overlaps at most four handshakes, preserving configured order.
     // Reading settings/catalog without connect still starts no external process or network request.
+    // 每次发现最多并行四次握手并保持配置顺序；未请求连接时，读取设置或工具目录不启动外部进程，也不发网络请求。
     for (let offset = 0; offset < servers.length; offset += 4) {
       this._assertConnectionGeneration(generation);
       const batch = await Promise.all(servers.slice(offset, offset + 4).map(discover));
@@ -347,7 +360,10 @@ export class McpToolClients {
     return this.diagnostics().find(state => state.serverId === server.id);
   }
 
-  /** Revalidate an existing connection and call envelope without reconnecting or invoking the server. */
+  /**
+   * Revalidate an existing connection and call envelope without reconnecting or invoking the server.
+   * 只重新校验已有连接和调用封装，不重连，也不调用服务。
+   */
   async validateExecution(descriptor, input) {
     if (this.failedClosures.size) throw this._cleanupFailure();
     const pending = this.connections.get(descriptor.key);
@@ -362,7 +378,10 @@ export class McpToolClients {
     return { connection, args };
   }
 
-  /** Normalize browser defaults before approval; this performs no RPC or page action. */
+  /**
+   * Normalize browser defaults before approval; this performs no RPC or page action.
+   * 审批前规范化浏览器默认参数，此处不发 RPC，也不操作页面。
+   */
   async prepareBrowserExecution(descriptor, input, options = {}) {
     const knownServer = this.servers.get(descriptor.serverId) ?? (await this.connections.get(descriptor.key))?.artifactContext?.server;
     if (!browserOperation(descriptor, knownServer)) return structuredClone(input);
@@ -381,6 +400,7 @@ export class McpToolClients {
       return this._executePrepared(descriptor, args, connection, signal);
     // A selected-page protocol shares state even across distinct conversations.
     // Serialize its calls and revalidate after waiting; never switch tabs by a hidden RPC.
+    // 隐式选中页面协议跨聊天共享状态；调用需排队并在等待后重新验证，不能用隐藏 RPC 切换标签页。
     const previous = connection.browserQueue ?? Promise.resolve();
     let dispatched = false;
     const operation = previous.catch(() => {}).then(async () => {
@@ -445,6 +465,7 @@ export class McpToolClients {
       throw toolFailure('MCP 服务需要额外交互；此请求未自动授权或重试。', 'MCP_INPUT_REQUIRED', 409);
     // Chrome DevTools reports caught navigation failures as normal MCP text.
     // Classify only its explicit navigation failure lines; preserve the raw result unchanged.
+    // Chrome DevTools 可能以普通 MCP 文本返回捕获的导航错误；只分类明确失败行，完整原始结果保持不变。
     const navigationFailed = descriptor.toolName === 'navigate_page' && (result.content ?? []).some(block =>
       block.type === 'text' && /^Unable to (?:navigate(?: back| forward)? in the selected page|reload the selected page): /m.test(block.text));
     const browserTimedOut = prepared && (result.isError === true || navigationFailed) && (result.content ?? []).some(block =>
@@ -469,6 +490,7 @@ export class McpToolClients {
     if (this.resetOperation) return this.resetOperation;
     // Revoke discovery before awaiting startup/teardown. Otherwise a later
     // discovery batch can start outside this owner's cleanup snapshot.
+    // 等待启动或清理前先撤销目录发现，避免后续发现批次启动不在本次所有者清理快照中的连接。
     this.connectionGeneration++;
     const pending = [...this.connections.entries()];
     let operation;
@@ -476,12 +498,13 @@ export class McpToolClients {
       const settled = await Promise.allSettled(pending.map(async ([key, startup]) => {
         let connection;
         try { connection = await startup; }
-        catch { return; } // Startup failures retain their own bounded cleanup.
+        catch { return; } // Startup failures retain their own bounded cleanup. 启动失败由自身保留有时间上限的清理责任。
         await this._closeConnection(key, connection);
       }));
       if (settled.some(result => result.status === 'rejected') || this.failedClosures.size) throw this._cleanupFailure();
       // Only release references owned by this reset, even if a future caller
       // changes connection scheduling. New work is barred until this completes.
+      // 只释放本次重置拥有的引用；即使以后调整调度，重置完成前仍禁止新连接。
       for (const [key, startup] of pending) if (this.connections.get(key) === startup) this.connections.delete(key);
       this.errors.clear(); this.states.clear(); this.servers.clear();
     }).finally(() => { if (this.resetOperation === operation) this.resetOperation = null; });

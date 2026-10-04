@@ -17,6 +17,7 @@ function matchOffset(text, query) {
   const foldedOffset = text.toLowerCase().indexOf(query);
   if (foldedOffset <= 0) return foldedOffset;
   // Unicode case folding may change UTF-16 length (for example İ → i + dot).
+  // Unicode 大小写折叠可能改变 UTF-16 长度，例如 İ 变为 i 加组合点。
   let offset = 0, folded = 0;
   for (const character of text) {
     const next = folded + character.toLowerCase().length;
@@ -39,6 +40,7 @@ async function publicHistory(conversations, context, signal, includeTools = fals
   const messages = includeTools ? await conversations.readModelMessages(context.conversationId)
     : await conversations.readMessages(context.conversationId);
   // Queued public reads are rechecked so a concurrent archive/move cannot expose an obsolete scope.
+  // 排队的公开读取会再次验证，避免并发归档或移动暴露过期范围。
   checkOwnership(await conversations.describeConversation(context.conversationId), context);
   signal?.throwIfAborted();
   return messages.filter(item => ['user', 'assistant'].includes(item.Role) && item.Status !== 'streaming' && typeof item.Content === 'string')

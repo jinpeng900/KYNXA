@@ -3,7 +3,10 @@ using KYNXA_Desktop.Models.UI;
 
 namespace KYNXA_Desktop.ViewModels;
 
-/// <summary>Updates the sidebar in place, preserving data-row identity and unaffected native containers.</summary>
+/// <summary>
+/// Updates the sidebar in place, preserving data-row identity and unaffected native containers.
+/// 原地更新侧栏，保留数据行身份与未受影响的原生容器。
+/// </summary>
 public static class ProjectTreeReconciler
 {
     public static void Update(ObservableCollection<ProjectTreeEntry> entries,
@@ -54,6 +57,7 @@ public static class ProjectTreeReconciler
                 // TreeView's WinRT ItemsSource projection does not reliably process
                 // ObservableCollection.Move. Express the move as two supported changes;
                 // the row object and its expansion state remain the same.
+                // TreeView 的 WinRT ItemsSource 投影不能可靠处理 ObservableCollection.Move；用受支持的移除与插入表达移动，行对象和展开状态不变。
                 rows.RemoveAt(previous);
                 rows.Insert(index, entry);
             }

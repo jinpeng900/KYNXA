@@ -43,7 +43,9 @@
     <SolidColorBrush x:Key="KynxaAmbientWaveSoftBrush" Color="{StaticResource KynxaAmbientWaveSoftColor}" />
     <SolidColorBrush x:Key="KynxaControlHoverBrush" Color="{StaticResource KynxaControlHoverColor}" />
     <SolidColorBrush x:Key="KynxaControlPressedBrush" Color="{StaticResource KynxaControlPressedColor}" />
-    <!-- Keep interaction feedback quiet and consistent across the shell. -->
+    <!-- Keep interaction feedback quiet and consistent across the shell.
+         整个主界面的交互反馈保持克制且一致。
+    -->
     <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource KynxaControlHoverColor}" />
     <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource KynxaControlPressedColor}" />
     <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />

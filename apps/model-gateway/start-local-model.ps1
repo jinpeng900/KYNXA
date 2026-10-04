@@ -28,8 +28,8 @@ if ((!$ServerPath -or !$ModelPath) -and (Test-Path -LiteralPath $configFile)) {
     if (!$BackendPath -and $config.backendPath) { $BackendPath = $config.backendPath }
 }
 if (!$ServerPath -or !$ModelPath) { throw 'Specify -ServerPath and -ModelPath, or create local-server.json in KYNXA_MODEL_HOME.' }
-$server = (Resolve-Path -LiteralPath $ServerPath).Path
-$model = (Resolve-Path -LiteralPath $ModelPath).Path
+$serverExecutable = (Resolve-Path -LiteralPath $ServerPath).Path
+$modelFilePath = (Resolve-Path -LiteralPath $ModelPath).Path
 if ($ModelId -notmatch '^[a-zA-Z0-9._:/-]+$' -or $GpuLayers -notmatch '^(auto|all|[0-9]+)$') {
     throw 'Invalid model alias or GPU layer setting.'
 }
@@ -40,29 +40,29 @@ $logDirectory = if ($dataRoot) { Join-Path $dataRoot 'Logs\models' } else {
     Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'KYNXA\model-logs'
 }
 [void](New-Item -ItemType Directory -Path $logDirectory -Force)
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$arguments = @('-m', ('"' + $model + '"'), '--alias', $ModelId, '--host', '127.0.0.1',
+$logTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$arguments = @('-m', ('"' + $modelFilePath + '"'), '--alias', $ModelId, '--host', '127.0.0.1',
     '--port', "$Port", '-c', "$ContextSize", '-ngl', $GpuLayers, '--parallel', '1')
 
 function Test-GpuBackend([string]$Candidate) {
-    $info = New-Object System.Diagnostics.ProcessStartInfo
-    $info.FileName = $server
-    $info.Arguments = '--list-devices'
-    $info.UseShellExecute = $false
-    $info.CreateNoWindow = $true
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
-    $info.EnvironmentVariables['GGML_BACKEND_PATH'] = $Candidate
-    $info.EnvironmentVariables['PATH'] = (Split-Path $Candidate) + ';' + $env:PATH
-    $probe = New-Object System.Diagnostics.Process
-    $probe.StartInfo = $info
+    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processStartInfo.FileName = $serverExecutable
+    $processStartInfo.Arguments = '--list-devices'
+    $processStartInfo.UseShellExecute = $false
+    $processStartInfo.CreateNoWindow = $true
+    $processStartInfo.RedirectStandardOutput = $true
+    $processStartInfo.RedirectStandardError = $true
+    $processStartInfo.EnvironmentVariables['GGML_BACKEND_PATH'] = $Candidate
+    $processStartInfo.EnvironmentVariables['PATH'] = (Split-Path $Candidate) + ';' + $env:PATH
+    $backendProbeProcess = New-Object System.Diagnostics.Process
+    $backendProbeProcess.StartInfo = $processStartInfo
     try {
-        [void]$probe.Start()
-        $output = $probe.StandardOutput.ReadToEndAsync()
-        $errors = $probe.StandardError.ReadToEndAsync()
-        if (!$probe.WaitForExit(15000)) { $probe.Kill(); return $false }
-        return $probe.ExitCode -eq 0 -and $output.Result -match '(CUDA\d+|Vulkan\d+|ROCm\d+):'
-    } finally { $probe.Dispose() }
+        [void]$backendProbeProcess.Start()
+        $standardOutputTask = $backendProbeProcess.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $backendProbeProcess.StandardError.ReadToEndAsync()
+        if (!$backendProbeProcess.WaitForExit(15000)) { $backendProbeProcess.Kill(); return $false }
+        return $backendProbeProcess.ExitCode -eq 0 -and $standardOutputTask.Result -match '(CUDA\d+|Vulkan\d+|ROCm\d+):'
+    } finally { $backendProbeProcess.Dispose() }
 }
 
 if ($BackendPath) {
@@ -70,8 +70,9 @@ if ($BackendPath) {
     if (!(Test-GpuBackend $BackendPath)) { throw 'The configured GPU backend could not initialize. Check the driver or choose another backend.' }
 } elseif ($GpuLayers -ne '0') {
     # A GPU layer count alone does not load backends installed in subdirectories.
+    # 仅设置 GPU 层数不会自动加载安装在子目录中的后端。
     foreach ($subdirectory in @('cuda_v12', 'cuda_v13')) {
-        $candidate = Join-Path (Split-Path $server) "$subdirectory\ggml-cuda.dll"
+        $candidate = Join-Path (Split-Path $serverExecutable) "$subdirectory\ggml-cuda.dll"
         if ((Test-Path -LiteralPath $candidate) -and (Test-GpuBackend $candidate)) { $BackendPath = $candidate; break }
     }
 }
@@ -82,9 +83,9 @@ try {
         $env:GGML_BACKEND_PATH = $BackendPath
         $env:PATH = (Split-Path $BackendPath) + ';' + $previousPath
     }
-    $process = Start-Process -FilePath $server -ArgumentList $arguments -WorkingDirectory (Split-Path $server) `
-        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDirectory "$stamp.out.log") `
-        -RedirectStandardError (Join-Path $logDirectory "$stamp.err.log")
+    $modelProcess = Start-Process -FilePath $serverExecutable -ArgumentList $arguments -WorkingDirectory (Split-Path $serverExecutable) `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDirectory "$logTimestamp.out.log") `
+        -RedirectStandardError (Join-Path $logDirectory "$logTimestamp.err.log")
 } finally { $env:PATH = $previousPath; $env:GGML_BACKEND_PATH = $previousBackend }
-[pscustomobject]@{ ProcessId = $process.Id; BaseUrl = "http://127.0.0.1:$Port/v1"; ModelId = $ModelId;
+[pscustomobject]@{ ProcessId = $modelProcess.Id; BaseUrl = "http://127.0.0.1:$Port/v1"; ModelId = $ModelId;
     Backend = $(if ($BackendPath) { $BackendPath } else { 'Runtime default; check log for selected device' }); LogDirectory = $logDirectory }

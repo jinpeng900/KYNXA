@@ -3,6 +3,7 @@ using System.Text.Json;
 namespace KYNXA.Contracts;
 
 /// <summary>One public model round. Tool receipts belong to its round; private provider reasoning is never included.</summary>
+/// <remarks>表示一轮公开模型响应；工具回执归属对应轮次，不包含供应商的私有推理。</remarks>
 public sealed record AssistantSegment(string Id, int Round, int Order, string Phase, string Status,
     string Content, string Reasoning, long ReasoningDurationMs = 0);
 
@@ -37,6 +38,7 @@ public sealed record ToolActivity(string ToolCallId, string Name, JsonElement? A
     int? Round = null, int? Order = null);
 
 /// <summary>Ephemeral terminal display data. Formal output remains in the tool receipt archive.</summary>
+/// <remarks>仅用于临时终端展示；正式输出仍以工具回执归档为准。</remarks>
 public sealed record HostTerminalOutput(string ToolCallId, int Sequence, string Stream, string Text, bool Replace = false);
 
 public static class HostTerminalOutputRules

@@ -1,4 +1,5 @@
-/* One browser selection surface for the whole conversation. KaTeX stays real DOM. */
+/* One browser selection surface for the whole conversation. KaTeX stays real DOM.
+ * 整个聊天共用浏览器选择表面；KaTeX 保持真实 DOM。 */
 (() => {
   'use strict';
   const messages = document.getElementById('messages');
@@ -69,6 +70,7 @@
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
     // Startup has no content to preserve; let its first render follow the bottom.
+    // 首次启动没有需要保留的内容，让第一次渲染跟随底部。
     localizingUi = entries.size > 0;
     if (localizingUi) cancelAnimationFrame(scrollFrame);
     cancelAnimationFrame(languageFrame);
@@ -78,11 +80,13 @@
     document.title = uiStrings.conversation;
     messages.setAttribute('aria-label', uiStrings.transcript);
     // Localize only application controls; message DOM and browser selections stay intact.
+    // 只本地化应用控件；消息 DOM 与浏览器选择保持不变。
     for (const entry of entries.values()) localizeEntry(entry);
     for (const saved of conversations.values()) for (const entry of saved.entries.values()) localizeEntry(entry);
     if (!localizingUi) return;
     // Labels may wrap differently. Keep the user's scroll position and suppress only
     // the automatic bottom-follow triggered by this layout, without touching ranges.
+    // 文案换行可能改变布局；保留用户滚动位置，仅暂停本次布局触发的底部跟随，不修改选择范围。
     if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => { localizingUi = false; });
@@ -265,6 +269,7 @@
       if (!row.tools.hidden && row.tools.parentNode !== row.root) row.root.append(row.tools);
     }
     // Render the replacement body (including math) before removing earlier progress.
+    // 先渲染替换后的正文与公式，再移除此前的中间进展。
     for (const [id, row] of entry.segmentRows) if (!ids.has(id)) { row.root.remove(); entry.segmentRows.delete(id); }
   }
   function localizeToolRow(row) {
@@ -322,6 +327,7 @@
       const previous = groups.at(-1);
       const key = view.presentation.titleKey + ':' + view.presentation.website + ':' + tool.status;
       // Approval requests retain an individual, visible identity. Execution records are never merged.
+      // 审批请求各自保留可见身份；正式执行记录不会被合并。
       if (previous && previous.key === key && ['completed', 'running'].includes(tool.status)) previous.views.push(view);
       else groups.push({ id, key, views: [view] });
     }
@@ -345,6 +351,7 @@
       previous = row.root;
       // Immutable source records get a lightweight display revision from the desktop.
       // Historical/standalone clients fall back to a signature without changing formal events.
+      // 不可变的源记录由桌面分配轻量展示版本；旧版或独立客户端回退到签名，正式事件不变。
       const signature = JSON.stringify(group.views.map(view => view.signature));
       if (row.signature === signature) continue;
       row.signature = signature;
@@ -383,6 +390,7 @@
     pending = null; clearSelection(); following = true;
     // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
     // and expanded reasoning instead of rebuilding every element.
+    // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
     const restored = removeCached(id);
     if (conversationId && entries.size) {
       let characters = 0;
@@ -436,6 +444,7 @@
   function scrollAnchors() {
     const anchors = [], fallbacks = [];
     // Prefer a surviving paragraph in view; keep message-level fallbacks when transient steps disappear.
+    // 优先使用视口内仍存在的段落作滚动锚点；中间阶段消失时仍保留消息级回退。
     for (const entry of entries.values()) {
       const bounds = entry.article.getBoundingClientRect();
       if (bounds.bottom <= 0 || bounds.top >= innerHeight) continue;
@@ -535,6 +544,7 @@
   function fragmentText(fragment) {
     // A range entirely inside literal user text/code has no structural block separators.
     // Preserve even deliberately selected leading/trailing newlines in that case.
+    // 选择完全位于用户原文或代码内部时，不额外添加结构分隔；保留用户明确选中的首尾换行。
     if (fragment.childNodes.length === 1 && fragment.firstChild.nodeType === Node.ELEMENT_NODE
       && fragment.firstChild.hasAttribute('data-copy-plain')) return fragment.firstChild.textContent;
     return serializeSelectionNode(fragment).replace(/^\n+|\n+$/g, '');

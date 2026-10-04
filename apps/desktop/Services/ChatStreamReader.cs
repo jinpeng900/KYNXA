@@ -5,7 +5,10 @@ using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Reads gateway SSE frames independently of network packet and UTF-8 character boundaries.</summary>
+/// <summary>
+/// Reads gateway SSE frames independently of network packet and UTF-8 character boundaries.
+/// 读取网关 SSE 帧，不依赖网络包边界或 UTF-8 字符的分包位置。
+/// </summary>
 public static class ChatStreamReader
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -16,11 +19,11 @@ public static class ChatStreamReader
     {
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true),
             detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
-        var data = new StringBuilder();
-        bool started = false;
-        var tools = new Dictionary<string, ToolActivity>(StringComparer.Ordinal);
-        var terminalSequences = new Dictionary<string, int>(StringComparer.Ordinal);
-        var segments = new Dictionary<string, AssistantSegment>(StringComparer.Ordinal);
+        var eventData = new StringBuilder();
+        bool hasStarted = false;
+        var activeToolCalls = new Dictionary<string, ToolActivity>(StringComparer.Ordinal);
+        var terminalOutputSequences = new Dictionary<string, int>(StringComparer.Ordinal);
+        var assistantSegments = new Dictionary<string, AssistantSegment>(StringComparer.Ordinal);
         int lastTimelineOrder = -1;
         while (true)
         {
@@ -28,129 +31,130 @@ public static class ChatStreamReader
             string? line = await reader.ReadLineAsync(cancellationToken);
             if (line is null || line.Length == 0)
             {
-                if (data.Length > 0)
+                if (eventData.Length > 0)
                 {
-                    ChatStreamEvent item;
+                    ChatStreamEvent streamEvent;
                     try
                     {
-                        item = JsonSerializer.Deserialize<ChatStreamEvent>(data.ToString(), JsonOptions)
+                        streamEvent = JsonSerializer.Deserialize<ChatStreamEvent>(eventData.ToString(), JsonOptions)
                             ?? throw new InvalidDataException(UiText.Get("模型流返回了空事件。"));
                     }
                     catch (JsonException exception)
                     {
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"), exception);
                     }
-                    data.Clear();
-                    if (item.ConversationId != conversationId || item.RequestId != requestId || item.CreatedAt == default)
+                    eventData.Clear();
+                    if (streamEvent.ConversationId != conversationId || streamEvent.RequestId != requestId || streamEvent.CreatedAt == default)
                         throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
-                    if (!ChatDurationRules.IsValid(item.DurationMs))
+                    if (!ChatDurationRules.IsValid(streamEvent.DurationMs))
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"));
-                    if (!started && item.Type != "started")
+                    if (!hasStarted && streamEvent.Type != "started")
                         throw new InvalidDataException(UiText.Get("模型流缺少开始事件。"));
-                    bool terminal = false;
-                    switch (item.Type)
+                    bool isTerminalEvent = false;
+                    switch (streamEvent.Type)
                     {
                         case "started":
-                            if (started) throw new InvalidDataException(UiText.Get("模型流重复开始了同一条回复。"));
-                            started = true;
+                            if (hasStarted) throw new InvalidDataException(UiText.Get("模型流重复开始了同一条回复。"));
+                            hasStarted = true;
                             break;
                         case "text_delta":
                         case "reasoning_delta":
-                            if (item.Delta is null) throw new InvalidDataException(UiText.Get("模型流缺少增量内容。"));
-                            if (item.SegmentId is { } segmentId && (!segments.TryGetValue(segmentId, out var active) || active.Status != "streaming"))
+                            if (streamEvent.Delta is null) throw new InvalidDataException(UiText.Get("模型流缺少增量内容。"));
+                            if (streamEvent.SegmentId is { } segmentId && (!assistantSegments.TryGetValue(segmentId, out var active) || active.Status != "streaming"))
                                 throw InvalidSegment();
-                            if (segments.Count > 0 && item.SegmentId is null) throw InvalidSegment();
+                            if (assistantSegments.Count > 0 && streamEvent.SegmentId is null) throw InvalidSegment();
                             break;
                         case "assistant_segment":
-                            if (item.ToolStreamProtocol != 3 || !AssistantSegmentRules.IsValid(item.Segment))
+                            if (streamEvent.ToolStreamProtocol != 3 || !AssistantSegmentRules.IsValid(streamEvent.Segment))
                                 throw InvalidSegment();
-                            var segment = item.Segment!;
-                            if (segments.TryGetValue(segment.Id, out var previous))
+                            var segment = streamEvent.Segment!;
+                            if (assistantSegments.TryGetValue(segment.Id, out var previous))
                             {
                                 if (previous.Round != segment.Round || previous.Order != segment.Order || previous.Status != "streaming")
                                     throw InvalidSegment();
                             }
                             else
                             {
-                                if (segments.Count >= 128 || segment.Order <= lastTimelineOrder || segments.Values.Any(value => value.Round >= segment.Round || value.Status == "streaming" || value.Phase == "final_answer"))
+                                if (assistantSegments.Count >= 128 || segment.Order <= lastTimelineOrder || assistantSegments.Values.Any(value => value.Round >= segment.Round || value.Status == "streaming" || value.Phase == "final_answer"))
                                     throw InvalidSegment();
                                 lastTimelineOrder = segment.Order;
                             }
-                            segments[segment.Id] = segment;
+                            assistantSegments[segment.Id] = segment;
                             break;
                         case "tool_call":
                         case "tool_result":
                         case "approval_required":
-                            ValidateToolEvent(item);
-                            if (segments.Count > 0 && (item.Tool!.Round is null || !segments.Values.Any(value => value.Round == item.Tool.Round && value.Status == "completed" && value.Phase == "commentary" && value.Order < item.Tool.Order)))
+                            ValidateToolEvent(streamEvent);
+                            if (assistantSegments.Count > 0 && (streamEvent.Tool!.Round is null || !assistantSegments.Values.Any(value => value.Round == streamEvent.Tool.Round && value.Status == "completed" && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order)))
                                 throw InvalidSegment();
-                            string callId = item.Tool!.ToolCallId;
-                            string name = item.Tool.Name;
-                            if (item.Type == "tool_call")
+                            string toolCallId = streamEvent.Tool!.ToolCallId;
+                            string toolName = streamEvent.Tool.Name;
+                            if (streamEvent.Type == "tool_call")
                             {
-                                if (!tools.TryAdd(callId, item.Tool)) throw new InvalidDataException(UiText.Get("工具事件无效。"));
-                                if (segments.Count > 0)
+                                if (!activeToolCalls.TryAdd(toolCallId, streamEvent.Tool)) throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                                if (assistantSegments.Count > 0)
                                 {
-                                    if (item.Tool.Order <= lastTimelineOrder) throw InvalidSegment();
-                                    lastTimelineOrder = item.Tool.Order!.Value;
+                                    if (streamEvent.Tool.Order <= lastTimelineOrder) throw InvalidSegment();
+                                    lastTimelineOrder = streamEvent.Tool.Order!.Value;
                                 }
                             }
-                            else if (!tools.TryGetValue(callId, out var original) || original.Name != name || original.Round != item.Tool.Round || original.Order != item.Tool.Order)
+                            else if (!activeToolCalls.TryGetValue(toolCallId, out var original) || original.Name != toolName || original.Round != streamEvent.Tool.Round || original.Order != streamEvent.Tool.Order)
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
-                            if (item.Type == "tool_result") { tools.Remove(callId); terminalSequences.Remove(callId); }
+                            if (streamEvent.Type == "tool_result") { activeToolCalls.Remove(toolCallId); terminalOutputSequences.Remove(toolCallId); }
                             break;
                         case "terminal_output":
-                            if (!HostTerminalOutputRules.IsValid(item.Terminal) ||
-                                !tools.TryGetValue(item.Terminal!.ToolCallId, out var terminalCall) || terminalCall.Name != "terminal.host.run" ||
-                                item.Terminal.Sequence <= terminalSequences.GetValueOrDefault(item.Terminal.ToolCallId))
+                            if (!HostTerminalOutputRules.IsValid(streamEvent.Terminal) ||
+                                !activeToolCalls.TryGetValue(streamEvent.Terminal!.ToolCallId, out var terminalCall) || terminalCall.Name != "terminal.host.run" ||
+                                streamEvent.Terminal.Sequence <= terminalOutputSequences.GetValueOrDefault(streamEvent.Terminal.ToolCallId))
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
-                            terminalSequences[item.Terminal.ToolCallId] = item.Terminal.Sequence;
+                            terminalOutputSequences[streamEvent.Terminal.ToolCallId] = streamEvent.Terminal.Sequence;
                             break;
                         case "completed":
-                            if (item.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
-                            if (tools.Count > 0) throw new InvalidDataException(UiText.Get("工具事件无效。"));
-                            ValidateTerminalSegments(item, segments);
-                            terminal = true;
+                            if (streamEvent.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
+                            if (activeToolCalls.Count > 0) throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            ValidateTerminalSegments(streamEvent, assistantSegments);
+                            isTerminalEvent = true;
                             break;
                         case "content_snapshot":
-                            if (item.Content is null || item.Reasoning is null)
+                            if (streamEvent.Content is null || streamEvent.Reasoning is null)
                                 throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             break;
                         case "interrupted":
                         case "error":
-                            ValidateTerminalSegments(item, segments);
-                            terminal = true;
+                            ValidateTerminalSegments(streamEvent, assistantSegments);
+                            isTerminalEvent = true;
                             break;
                         default:
                             throw new InvalidDataException(UiText.Get("模型流返回了未知的事件类型。"));
                     }
-                    yield return item;
-                    if (terminal) yield break;
+                    yield return streamEvent;
+                    if (isTerminalEvent) yield break;
                 }
                 if (line is null) throw new EndOfStreamException(UiText.Get("模型连接已断开，已保留收到的内容。"));
                 continue;
             }
             // Ignore comments/heartbeats and optional SSE event/id/retry fields.
+            // 忽略注释、心跳与可选的 SSE event、id、retry 字段。
             int separator = line.IndexOf(':');
             string field = separator < 0 ? line : line[..separator];
             if (field != "data") continue;
             string value = separator < 0 ? string.Empty : line[(separator + 1)..];
             if (value.StartsWith(' ')) value = value[1..];
-            if (data.Length + value.Length + 1 > MaximumEventCharacters)
+            if (eventData.Length + value.Length + 1 > MaximumEventCharacters)
                 throw new InvalidDataException(UiText.Get("模型流的单条事件过大。"));
-            data.Append(value).Append('\n');
+            eventData.Append(value).Append('\n');
         }
     }
-    private static void ValidateToolEvent(ChatStreamEvent item)
+    private static void ValidateToolEvent(ChatStreamEvent streamEvent)
     {
-        ToolActivity? tool = item.Tool;
+        ToolActivity? tool = streamEvent.Tool;
         if (tool is null || string.IsNullOrWhiteSpace(tool.ToolCallId) || tool.ToolCallId.Length > 200
             || string.IsNullOrWhiteSpace(tool.Name) || tool.Name.Length > 200 || tool.Arguments is not { ValueKind: JsonValueKind.Object }
             || tool.Arguments.Value.GetRawText().Length > 65536
             || string.IsNullOrWhiteSpace(tool.Summary) || tool.Summary.Length > 4096
             || tool.Result?.Length > 65536)
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
-        bool validStatus = item.Type switch
+        bool validStatus = streamEvent.Type switch
         {
             "tool_call" => tool.Status == "running" && tool.ApprovalId is null,
             "tool_result" => (tool.Status is "completed" or "error" or "cancelled" or "unknown") && tool.Result is not null && tool.ApprovalId is null,
@@ -165,18 +169,18 @@ public static class ChatStreamReader
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
     }
 
-    private static void ValidateTerminalSegments(ChatStreamEvent item, Dictionary<string, AssistantSegment> known)
+    private static void ValidateTerminalSegments(ChatStreamEvent streamEvent, Dictionary<string, AssistantSegment> knownSegments)
     {
-        if (item.AssistantSegments is not { } segments)
+        if (streamEvent.AssistantSegments is not { } assistantSegments)
         {
-            if (item.Type == "completed" && known.Count > 0) throw InvalidSegment();
+            if (streamEvent.Type == "completed" && knownSegments.Count > 0) throw InvalidSegment();
             return;
         }
-        if (item.ToolStreamProtocol != 3 || !AssistantSegmentRules.IsValidSequence(segments))
+        if (streamEvent.ToolStreamProtocol != 3 || !AssistantSegmentRules.IsValidSequence(assistantSegments))
             throw InvalidSegment();
-        if (known.Count > 0 && (segments.Length != known.Count || segments.Any(segment => !known.TryGetValue(segment.Id, out var prior) || prior.Round != segment.Round || prior.Order != segment.Order)))
+        if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment => !knownSegments.TryGetValue(segment.Id, out var prior) || prior.Round != segment.Round || prior.Order != segment.Order)))
             throw InvalidSegment();
-        if (item.Type == "completed" && (segments.Length == 0 || segments.Any(segment => segment.Status != "completed") || segments[^1].Phase != "final_answer"))
+        if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment => segment.Status != "completed") || assistantSegments[^1].Phase != "final_answer"))
             throw InvalidSegment();
     }
 

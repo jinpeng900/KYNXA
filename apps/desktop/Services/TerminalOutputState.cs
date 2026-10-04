@@ -6,7 +6,10 @@ namespace KYNXA_Desktop.Services;
 
 public sealed record TerminalRunIdentity(Guid ConversationId, Guid RequestId, string ToolCallId);
 
-/// <summary>Bounded display cache only. The gateway still owns command receipts and formal output.</summary>
+/// <summary>
+/// Bounded display cache only. The gateway still owns command receipts and formal output.
+/// 仅作为有容量上限的展示缓存；正式命令回执与输出仍归网关负责。
+/// </summary>
 public sealed class TerminalOutputState
 {
     public const int MaximumOutputBytes = 256 * 1024;
@@ -91,6 +94,7 @@ public sealed class TerminalOutputState
         }
         if (run.Cwd.Length == 0) run.Cwd = activity.WorkspaceRoot ?? "";
         // A reloaded interrupted reply has no stream to resume. Do not invent a completion receipt.
+        // 重开的中断回复没有可恢复的流；不能虚构完成回执。
         run.Status = !requestActive && (activity.Status is "running" or "approval-required") ? "unknown" : activity.Status;
         run.Code = activity.Code;
         ReadReceipt(run, activity.Result);
@@ -149,6 +153,7 @@ public sealed class TerminalOutputState
         {
             var oldest = _conversations.Where(pair => pair.Key != protectedId).MinBy(pair => pair.Value.Touched);
             if (oldest.Value is null) break; // One conversation is bounded to 8 * 256 KiB.
+            // 单个聊天的展示缓存上限为 8 × 256 KiB。
             _conversations.Remove(oldest.Key);
         }
     }
@@ -175,6 +180,7 @@ public sealed class TerminalOutputState
             using var document = JsonDocument.Parse(result, new JsonDocumentOptions { MaxDepth = 12 });
             var value = document.RootElement;
             // Only the known receipt envelope is inspected, never _meta or arbitrary parameter objects.
+            // 只读取已知回执封装，不检查 _meta 或任意参数对象。
             for (int depth = 0; depth < 4 && value.ValueKind == JsonValueKind.Object; depth++)
             {
                 if (value.TryGetProperty("stdout", out _) || value.TryGetProperty("consoleText", out _)) break;
@@ -185,6 +191,7 @@ public sealed class TerminalOutputState
             ApplyReceipt(run, value);
         }
         catch (JsonException) { } // A preview is optional; its raw JSON is never shown as terminal text.
+        // 预览可不存在；原始 JSON 不能作为终端文本展示。
     }
 
     private static void ApplyReceipt(TerminalRun run, JsonElement receipt)

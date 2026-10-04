@@ -71,6 +71,7 @@ test('preserves saved keys only for unchanged endpoints; never returns secrets',
   assert.equal((await store.list())[0].baseUrl, input.baseUrl);
   assert.equal(JSON.stringify(await store.list()).includes('test-secret'), false);
   // Serial writes do not lose either connection.
+  // 串行写入不应丢失任一连接。
   await Promise.all([store.save({ ...input, providerId: 'second', apiKey: 'second-key' }),
     store.save({ ...input, providerId: 'third', apiKey: 'third-key' })]);
   assert.equal((await store.list()).length, 3);
@@ -147,6 +148,7 @@ test('local and private IP routes allow HTTP and optional keys; public routes re
     assert.throws(() => validateConnection({ ...connection, baseUrl: `http://${host}/v1` }), /HTTPS/, host);
   }
   // Private servers can also require authentication; supplied keys are preserved.
+  // 私有服务器也可能要求认证；保留用户提供的密钥。
   const secured = { ...connection, baseUrl: 'http://192.168.1.25:8080/v1', apiKey: 'local-secret' };
   await store.save(secured);
   assert.equal(await store.savedKeyFor(secured.providerId, secured.baseUrl), 'local-secret');

@@ -125,6 +125,7 @@ public sealed partial class ShellPage
                         break;
                     case "terminal_output":
                         continue; // Command output stays in the formal tool receipt; it has no sidebar projection.
+                        // 命令输出保留在正式工具回执中，不生成侧栏展示投影。
                     case "approval_required":
                         if (update.Tool is { } approval)
                         {
@@ -240,6 +241,7 @@ public sealed partial class ShellPage
         string? question = chat.Messages.Take(chat.Messages.Count - 1).LastOrDefault(message => message.Role == "user")?.Content;
         if (question is null) return;
         // Replace only the failed attempt; never add a second copy of the user's question.
+        // 只替换失败的尝试，不重复添加用户问题。
         chat.Messages.Remove(failed.Message);
         var pending = BeginPendingReply(chat.Id, question,
             string.IsNullOrEmpty(failed.Message.Provider) ? _selectedModel?.ProviderId : failed.Message.Provider,

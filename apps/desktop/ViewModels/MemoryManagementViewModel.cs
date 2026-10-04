@@ -7,7 +7,10 @@ using KYNXA_Desktop.Services;
 
 namespace KYNXA_Desktop.ViewModels;
 
-/// <summary>A saved chat, a real project, or the user scope. The display name is never used as identity.</summary>
+/// <summary>
+/// A saved chat, a real project, or the user scope. The display name is never used as identity.
+/// 已保存的聊天、真实项目或用户范围；显示名称不能作为身份。
+/// </summary>
 public sealed record MemoryTarget(string Scope, Guid? Id, string DisplayName, bool IsArchived = false)
 {
     public string ScopeId => Scope == MemoryScopes.User ? "user" : Id?.ToString("D") ?? string.Empty;
@@ -30,13 +33,16 @@ public enum MemoryOperationResult
     Success, Conflict, ValidationFailed, NotReady, EntryMissing, Failed, Cancelled, Superseded
 }
 
-/// <summary>In-memory editor state. Late responses are ignored after a target change or disposal.</summary>
+/// <summary>
+/// In-memory editor state. Late responses are ignored after a target change or disposal.
+/// 内存编辑器状态；目标改变或释放后忽略晚到响应。
+/// </summary>
 public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly IMemoryApi _api;
     private readonly bool _ownsApi;
-    private CancellationTokenSource? _operation;
-    private int _generation;
+    private CancellationTokenSource? _operationCancellation;
+    private int _operationGeneration;
     private int _editorGeneration;
     private bool _disposed;
     private string _editorContent = string.Empty;
@@ -298,6 +304,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     private void ApplyDocument(MemoryScopeDocument document)
     {
         // Keep ordering and selection tied to backend IDs, including inactive entries.
+        // 排序与选择始终绑定后端 ID，包括未启用条目。
         Guid? selectedId = SelectedEntry?.Id;
         Entries.Clear();
         foreach (var entry in document.Entries) Entries.Add(entry);
@@ -330,18 +337,18 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     private Operation StartOperation(CancellationToken cancellationToken)
     {
         var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _operation = source;
+        _operationCancellation = source;
         IsBusy = true;
-        return new(source, _generation);
+        return new(source, _operationGeneration);
     }
 
-    private bool IsCurrent(Operation operation) => !_disposed && operation.Generation == _generation && ReferenceEquals(_operation, operation.Source);
+    private bool IsCurrent(Operation operation) => !_disposed && operation.Generation == _operationGeneration && ReferenceEquals(_operationCancellation, operation.Source);
 
     private void CompleteOperation(Operation operation)
     {
         if (IsCurrent(operation))
         {
-            _operation = null;
+            _operationCancellation = null;
             IsBusy = false;
             NotifyAll();
         }
@@ -350,9 +357,9 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
 
     private void CancelOperation()
     {
-        _generation++;
-        var source = _operation;
-        _operation = null;
+        _operationGeneration++;
+        var source = _operationCancellation;
+        _operationCancellation = null;
         source?.Cancel();
         IsBusy = false;
     }

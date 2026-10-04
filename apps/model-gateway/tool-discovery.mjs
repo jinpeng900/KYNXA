@@ -18,7 +18,10 @@ function normalized(value, maximum = 200) {
   return typeof value === 'string' ? value.slice(0, maximum).normalize('NFKC').trim().toLowerCase() : '';
 }
 
-/** Classification helps discovery only; it neither proves runtime availability nor grants permission. */
+/**
+ * Classification helps discovery only; it neither proves runtime availability nor grants permission.
+ * 分类只辅助发现，不证明运行时可用性，也不授予权限。
+ */
 export function toolDiscoveryCategory(tool) {
   const name = normalized(tool?.name, 256), description = normalized(tool?.description, 2000);
   if (name.startsWith('computer.')) return 'computer';
@@ -65,7 +68,10 @@ function queryTerms(query) {
   return [...terms].slice(0, 32);
 }
 
-/** Enabled descriptors, deterministic ranking and no execution. An empty query preserves catalog order for paging. */
+/**
+ * Enabled descriptors, deterministic ranking and no execution. An empty query preserves catalog order for paging.
+ * 仅检索已启用描述符，排序确定且不执行；空查询按目录原顺序分页。
+ */
 export function searchTools(descriptors, query = '') {
   const enabled = descriptors.filter(tool => tool.enabled !== false), text = normalized(query);
   if (!text) return enabled;
@@ -75,6 +81,7 @@ export function searchTools(descriptors, query = '') {
     const name = normalized(tool.name, 256), description = normalized(tool.description, 8000), alias = aliases(tool);
     // A complete dotted tool identity is not a bag of generic provider/name words.
     // If that identity is absent or disabled, unrelated tools must not look like replacements.
+    // 完整带点工具身份不能拆成通用名称关键词；该身份缺失或禁用时，不能把无关工具当成替代项。
     if (identityQuery && !name.includes(text)) return { tool, index, score: 0 };
     let score = name === text ? 100000 : name.includes(text) ? 10000 : 0;
     if (description.includes(text) || alias.includes(text)) score += 1000;
@@ -122,10 +129,14 @@ function browserBoundary(text) {
   if (local || remote) return local && (!remote || local.index > remote.index) ? 'local' : 'remote';
   // A plain request to open an installed browser is a visible local launch;
   // an explicit remote boundary in the same message takes precedence above.
+  // 普通的打开已安装浏览器请求表示本机可见启动；同条消息明确指定远程边界时，以远程边界为准。
   return /(?:打开|启动|显示).{0,12}(?:chrome|edge|firefox|google)|\b(?:open|launch|show)\s+(?:the\s+)?(?:chrome|edge|firefox)\b/.test(text) ? 'local' : null;
 }
 
-/** Recent subject hints select schemas only. They never import old approval, arguments or capability status. */
+/**
+ * Recent subject hints select schemas only. They never import old approval, arguments or capability status.
+ * 近期主题提示只选择 schema，不继承历史审批、参数或能力状态。
+ */
 export function toolSelectionSignals(message, { historySignals = [], previousToolNames = [] } = {}) {
   const text = normalized(message, 2000), signals = currentSignals(text);
   const currentBoundary = browserBoundary(text);
@@ -153,6 +164,7 @@ export function toolSelectionSignals(message, { historySignals = [], previousToo
   }
   // The latest explicit boundary wins over older text and attempted tool names.
   // Names can keep a schema discoverable, but cannot turn a local retry into remote control.
+  // 最新明确边界优先于旧文本和曾尝试的工具名称；名称可维持可发现性，但不能把本机重试变成远程控制。
   if (boundary) {
     signals.remoteBrowser = boundary === 'remote';
     signals.browser = true;

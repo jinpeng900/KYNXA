@@ -13,7 +13,10 @@ using Windows.Graphics;
 
 namespace KYNXA_Desktop;
 
-/// <summary>Presentation and confirmations only. The gateway owns memory persistence.</summary>
+/// <summary>
+/// Presentation and confirmations only. The gateway owns memory persistence.
+/// 本窗口仅负责展示和确认；记忆的正式持久化由网关负责。
+/// </summary>
 public sealed partial class MemoryManagementWindow : Window
 {
     private readonly MemoryManagementViewModel _viewModel;
@@ -58,6 +61,7 @@ public sealed partial class MemoryManagementWindow : Window
     public bool HasPendingChanges => _viewModel.IsBusy || _viewModel.HasChanges;
 
     // Called only when the application exits or after the migration guard checked the editor.
+    // 仅在应用退出，或迁移保护已检查编辑器之后调用。
     public void CloseForOwner()
     {
         _allowClose = true;
@@ -127,6 +131,7 @@ public sealed partial class MemoryManagementWindow : Window
             var selectedKind = MemoryKindPicker.Items.OfType<ComboBoxItem>().FirstOrDefault(item => (string)item.Tag == _viewModel.EditorKind);
             // ComboBox caches the selection box text; refresh that presentation after localization.
             // The guard prevents these selection events from changing the editor's stable kind ID.
+            // 本地化后刷新 ComboBox 缓存的选中文案；保护标记避免刷新事件修改稳定的记忆类型 ID。
             if (_refreshKindDisplay) MemoryKindPicker.SelectedItem = null;
             MemoryKindPicker.SelectedItem = selectedKind;
             _refreshKindDisplay = false;

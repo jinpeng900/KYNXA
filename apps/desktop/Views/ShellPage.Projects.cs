@@ -130,6 +130,7 @@ public sealed partial class ShellPage
     }
 
     // Both sidebar add actions create the same RAM-only draft; the first user message commits it.
+    // 两处侧栏新增动作创建同一类仅在内存中的草稿；首条用户消息才提交保存。
     private void StartNewProjectChat(ProjectState project)
     {
         if (project.IsArchived || project.IsFolderlessWorkspace || !_projects.Contains(project)) return;
@@ -312,8 +313,8 @@ public sealed partial class ShellPage
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
         StorageFolder? folder = await picker.PickSingleFolderAsync();
         if (folder is null) return null;
-        var project = _projects.FirstOrDefault(p => p.FolderPath is not null && string.Equals(
-            Path.TrimEndingDirectorySeparator(p.FolderPath), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
+        var project = _projects.FirstOrDefault(candidateProject => candidateProject.FolderPath is not null && string.Equals(
+            Path.TrimEndingDirectorySeparator(candidateProject.FolderPath), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
         if (project is null)
         {
             project = new ProjectState { Name = folder.DisplayName, FolderPath = folder.Path };
@@ -403,6 +404,7 @@ public sealed partial class ShellPage
             _undoSidebarChange = null;
             ProjectNotice.IsOpen = false;
             // Roll back visible metadata to the last successfully saved catalog.
+            // 将可见元数据回退到最近一次成功保存的正式目录。
             try
             {
                 var catalog = await _projectStore.LoadAsync();
@@ -414,7 +416,7 @@ public sealed partial class ShellPage
                 RebuildStandaloneRows();
                 UpdateConversationPresentation();
             }
-            catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. */ }
+            catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. 中文：正式目录本身不可用时，保留当前展示。 */ }
             await ShowProjectErrorAsync(UiText.Get("项目操作未完成"), error.Message);
         }
         finally { _projectActionPending = false; }

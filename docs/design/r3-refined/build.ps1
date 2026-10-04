@@ -3,19 +3,19 @@ $ErrorActionPreference = 'Stop'
 $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $utf8 = [System.Text.UTF8Encoding]::new($false)
-$outRoot = $PSScriptRoot
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $outRoot '../../..'))
+$outputRoot = $PSScriptRoot
+$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $outputRoot '../../..'))
 if (-not $SourceArchive) {
-    $SourceArchive = (Get-ChildItem -LiteralPath $repoRoot -Filter '*139页.zip' | Select-Object -First 1).FullName
+    $SourceArchive = (Get-ChildItem -LiteralPath $repositoryRoot -Filter '*139页.zip' | Select-Object -First 1).FullName
 }
 if (-not $SourceArchive) { throw 'Original design archive not found.' }
 $archive = [System.IO.Compression.ZipFile]::OpenRead($SourceArchive)
 function Read-ZipText($entry) {
-    $r = [System.IO.StreamReader]::new($entry.Open(), [System.Text.Encoding]::UTF8)
-    try { $r.ReadToEnd().Replace("`r`n", "`n") } finally { $r.Dispose() }
+    $entryReader = [System.IO.StreamReader]::new($entry.Open(), [System.Text.Encoding]::UTF8)
+    try { $entryReader.ReadToEnd().Replace("`r`n", "`n") } finally { $entryReader.Dispose() }
 }
 function Write-Utf8([string]$path, [string]$value) { [System.IO.File]::WriteAllText($path, $value, $utf8) }
-function Apply-FlatWorkPolicy([string]$text) {
+function ConvertTo-FlatWorkPolicy([string]$text) {
     $text = $text.Replace('Work、Child Work、Conversation', 'Work、Conversation')
     $text = $text.Replace('Work 逻辑树与磁盘目录解耦', 'Work 逻辑边界与磁盘目录解耦')
     $text = $text.Replace('多个 Child Work 移动时循环检测正确', '多个 Work 并发更新时 revision 冲突可检测')
@@ -37,7 +37,7 @@ function Apply-FlatWorkPolicy([string]$text) {
     $text = $text.Replace('| Work | Child Work / scope | 无循环；不跨 Work 泄漏 |', '| Work | 扁平 Work / scope | 不嵌套；不跨 Work 泄漏 |')
     return $text
 }
-$supplement = [System.IO.File]::ReadAllText((Join-Path $outRoot 'engineering-additions.md'))
+$supplement = [System.IO.File]::ReadAllText((Join-Path $outputRoot 'engineering-additions.md'))
 $additions = @{}
 foreach ($m in [regex]::Matches($supplement, '(?s)<!-- CHAPTER:([^ ]+) -->\s*(.*?)(?=<!-- CHAPTER:|\z)')) {
     $additions[$m.Groups[1].Value] = $m.Groups[2].Value.Trim()
@@ -67,7 +67,7 @@ function Compress-Catalog([string]$text, [string]$letter, [string]$label) {
     return $text.Substring(0,$match.Index) + $replacement + $text.Substring($match.Index+$match.Length)
 }
 foreach ($entry in $entries) {
-    $original = Apply-FlatWorkPolicy (Read-ZipText $entry)
+    $original = ConvertTo-FlatWorkPolicy (Read-ZipText $entry)
     $id = if ($entry.Name.StartsWith('Appendix_')) { $entry.Name.Substring(0,10) } else { $entry.Name.Substring(0,2) }
     $sourceChapters[$id] = $original
     $body = $original
@@ -131,10 +131,11 @@ $intro = @'
 $toc = ($chapters | ForEach-Object { '- ' + $_.Title }) -join "`n"
 $fullText = $intro + "`n" + $toc + "`n`n" + (($chapters | ForEach-Object Text) -join "`n`n")
 $baseName = 'KYNXA_R3_精炼与工程细化版'
-$mdPath = Join-Path $outRoot ($baseName+'.md')
+$mdPath = Join-Path $outputRoot ($baseName+'.md')
 Write-Utf8 $mdPath $fullText
 
 # Content-preservation audit: unique table records, numbered flows and bullets.
+# 内容保留检查覆盖独特表格记录、编号流程和项目符号。
 $coverage = [System.Collections.Generic.List[object]]::new()
 foreach($chapter in $chapters) {
     $original = $sourceChapters[$chapter.Id]
@@ -156,18 +157,19 @@ foreach($chapter in $chapters) {
 if (@($coverage | Where-Object {$_.missing.Count -gt 0}).Count) { throw ($coverage | ConvertTo-Json -Depth 5) }
 
 # Word-native OOXML builder. No unmanaged Python/Node dependencies are used.
-function Escape-Xml([string]$text) { [System.Security.SecurityElement]::Escape($text) }
-function Inline-Xml([string]$text) {
-    $s=[System.Text.StringBuilder]::new(); $pos=0
+# 直接构建 Word 原生 OOXML，不依赖额外安装的 Python 或 Node 工具。
+function ConvertTo-XmlEscapedText([string]$text) { [System.Security.SecurityElement]::Escape($text) }
+function ConvertTo-InlineXml([string]$text) {
+    $runXmlBuilder=[System.Text.StringBuilder]::new(); $pos=0
     foreach($m in [regex]::Matches($text,'\*\*([^*]+)\*\*|`([^`]+)`')) {
-        if($m.Index -gt $pos) { [void]$s.Append('<w:r><w:t xml:space="preserve">'+(Escape-Xml $text.Substring($pos,$m.Index-$pos))+'</w:t></w:r>') }
-        $p=if($m.Groups[1].Success){'<w:b/>'}else{'<w:rStyle w:val="CodeInline"/>'}
-        $v=if($m.Groups[1].Success){$m.Groups[1].Value}else{$m.Groups[2].Value}
-        [void]$s.Append('<w:r><w:rPr>'+$p+'</w:rPr><w:t xml:space="preserve">'+(Escape-Xml $v)+'</w:t></w:r>')
+        if($m.Index -gt $pos) { [void]$runXmlBuilder.Append('<w:r><w:t xml:space="preserve">'+(ConvertTo-XmlEscapedText $text.Substring($pos,$m.Index-$pos))+'</w:t></w:r>') }
+        $runProperties=if($m.Groups[1].Success){'<w:b/>'}else{'<w:rStyle w:val="CodeInline"/>'}
+        $runText=if($m.Groups[1].Success){$m.Groups[1].Value}else{$m.Groups[2].Value}
+        [void]$runXmlBuilder.Append('<w:r><w:rPr>'+$runProperties+'</w:rPr><w:t xml:space="preserve">'+(ConvertTo-XmlEscapedText $runText)+'</w:t></w:r>')
         $pos=$m.Index+$m.Length
     }
-    if($pos -lt $text.Length) { [void]$s.Append('<w:r><w:t xml:space="preserve">'+(Escape-Xml $text.Substring($pos))+'</w:t></w:r>') }
-    $s.ToString()
+    if($pos -lt $text.Length) { [void]$runXmlBuilder.Append('<w:r><w:t xml:space="preserve">'+(ConvertTo-XmlEscapedText $text.Substring($pos))+'</w:t></w:r>') }
+    $runXmlBuilder.ToString()
 }
 $bodyXml=[System.Text.StringBuilder]::new()
 $tocTargets=@{}
@@ -186,7 +188,7 @@ $script:numId=1
 $script:extraNums=[System.Text.StringBuilder]::new()
 $script:bookmarkId=0
 function Add-Paragraph([string]$text,[string]$style='Normal',[string]$extra='') {
-    $runs=Inline-Xml $text
+    $runs=ConvertTo-InlineXml $text
     if($style -eq 'ListText' -and $tocTargets.ContainsKey($text)) {
         $runs='<w:hyperlink w:anchor="'+$tocTargets[$text]+'" w:history="1">'+$runs+'</w:hyperlink>'
     }
@@ -194,7 +196,7 @@ function Add-Paragraph([string]$text,[string]$style='Normal',[string]$extra='') 
 }
 function Add-Heading([string]$text,[int]$level) {
     $script:bookmarkId++
-    [void]$bodyXml.Append('<w:p><w:pPr><w:pStyle w:val="Heading'+$level+'"/></w:pPr><w:bookmarkStart w:id="'+$script:bookmarkId+'" w:name="section_'+$script:bookmarkId+'"/>'+(Inline-Xml $text)+'<w:bookmarkEnd w:id="'+$script:bookmarkId+'"/></w:p>')
+    [void]$bodyXml.Append('<w:p><w:pPr><w:pStyle w:val="Heading'+$level+'"/></w:pPr><w:bookmarkStart w:id="'+$script:bookmarkId+'" w:name="section_'+$script:bookmarkId+'"/>'+(ConvertTo-InlineXml $text)+'<w:bookmarkEnd w:id="'+$script:bookmarkId+'"/></w:p>')
 }
 function Add-Table([object[]]$rows) {
     $columns=$rows[0].Count
@@ -207,11 +209,11 @@ function Add-Table([object[]]$rows) {
     [void]$bodyXml.Append('</w:tblGrid>')
     for($r=0;$r -lt $rows.Count;$r++) {
         [void]$bodyXml.Append('<w:tr><w:trPr><w:cantSplit/>'+$(if($r -eq 0){'<w:tblHeader/>'})+'</w:trPr>')
-        for($c=0;$c -lt $columns;$c++) {
-            $cellText=if($c -lt $rows[$r].Count){$rows[$r][$c]}else{''}
+        for($columnIndex=0;$columnIndex -lt $columns;$columnIndex++) {
+            $cellText=if($columnIndex -lt $rows[$r].Count){$rows[$r][$columnIndex]}else{''}
             $fill=if($r -eq 0){'<w:shd w:fill="E8EEF5"/>'}else{''}
             $style=if($r -eq 0){'TableHead'}else{'TableText'}
-            [void]$bodyXml.Append('<w:tc><w:tcPr><w:tcW w:w="'+$widths[$c]+'" w:type="dxa"/><w:vAlign w:val="center"/>'+$fill+'</w:tcPr><w:p><w:pPr><w:pStyle w:val="'+$style+'"/></w:pPr>'+(Inline-Xml $cellText)+'</w:p></w:tc>')
+            [void]$bodyXml.Append('<w:tc><w:tcPr><w:tcW w:w="'+$widths[$columnIndex]+'" w:type="dxa"/><w:vAlign w:val="center"/>'+$fill+'</w:tcPr><w:p><w:pPr><w:pStyle w:val="'+$style+'"/></w:pPr>'+(ConvertTo-InlineXml $cellText)+'</w:p></w:tc>')
         }
         [void]$bodyXml.Append('</w:tr>')
     }
@@ -258,23 +260,24 @@ for($i=0;$i -lt $lines.Count;$i++) {
 if($inCode){throw 'Unclosed code block.'}
 
 # compact_reference_guide preset; named overrides: CJK font, dense table/code, title.
-function Style-Xml($id,$name,$size,$color,$before,$after,$line,$extraP='',$extraR='') {
+# 使用 compact_reference_guide 预设，并明确覆盖中英文字体、密集表格与代码、标题样式。
+function New-StyleXml($id,$name,$size,$color,$before,$after,$line,$extraP='',$extraR='') {
     '<w:style w:type="paragraph" w:styleId="'+$id+'"><w:name w:val="'+$name+'"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="'+$before+'" w:after="'+$after+'" w:line="'+$line+'" w:lineRule="auto"/><w:widowControl/>'+$extraP+'</w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Microsoft YaHei"/><w:color w:val="'+$color+'"/><w:sz w:val="'+$size+'"/><w:szCs w:val="'+$size+'"/>'+$extraR+'</w:rPr></w:style>'
 }
 $styles='<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Microsoft YaHei"/><w:sz w:val="22"/><w:lang w:val="en-US" w:eastAsia="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="120" w:line="300" w:lineRule="auto"/><w:widowControl/></w:pPr></w:pPrDefault></w:docDefaults>'
 $styles+='<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:before="0" w:after="120" w:line="300" w:lineRule="auto"/><w:widowControl/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Microsoft YaHei"/><w:color w:val="202938"/><w:sz w:val="22"/></w:rPr></w:style>'
-$styles+=Style-Xml 'Title' 'Title' 48 '0B2545' 0 100 300 '<w:keepNext/>' '<w:b/>'
-$styles+=Style-Xml 'Subtitle' 'Subtitle' 28 '526174' 0 200 300 '<w:keepNext/>'
-$styles+=Style-Xml 'Heading1' 'heading 1' 32 '2E74B5' 360 200 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="0"/>' '<w:b/>'
-$styles+=Style-Xml 'Heading2' 'heading 2' 26 '2E74B5' 280 140 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="1"/>' '<w:b/>'
-$styles+=Style-Xml 'Heading3' 'heading 3' 24 '1F4D78' 200 100 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="2"/>' '<w:b/>'
-$styles+=Style-Xml 'ListText' 'List Text' 22 '202938' 0 80 300
-$styles+=Style-Xml 'TableText' 'Table Text' 19 '202938' 0 40 270
-$styles+=Style-Xml 'TableHead' 'Table Heading' 19 '0B2545' 0 40 270 '' '<w:b/>'
-$styles+=Style-Xml 'TableGap' 'Table Gap' 4 '202938' 0 40 240
-$styles+=Style-Xml 'CodeBlock' 'Code Block' 18 '202938' 0 20 260 '<w:shd w:fill="F4F6F9"/><w:ind w:left="120" w:right="120"/>' '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Microsoft YaHei"/>'
-$styles+=Style-Xml 'Footer' 'Footer' 17 '526174' 0 0 240 '<w:jc w:val="right"/>'
-$styles+=Style-Xml 'Header' 'Header' 17 '526174' 0 0 240
+$styles+=New-StyleXml 'Title' 'Title' 48 '0B2545' 0 100 300 '<w:keepNext/>' '<w:b/>'
+$styles+=New-StyleXml 'Subtitle' 'Subtitle' 28 '526174' 0 200 300 '<w:keepNext/>'
+$styles+=New-StyleXml 'Heading1' 'heading 1' 32 '2E74B5' 360 200 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="0"/>' '<w:b/>'
+$styles+=New-StyleXml 'Heading2' 'heading 2' 26 '2E74B5' 280 140 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="1"/>' '<w:b/>'
+$styles+=New-StyleXml 'Heading3' 'heading 3' 24 '1F4D78' 200 100 300 '<w:keepNext/><w:keepLines/><w:outlineLvl w:val="2"/>' '<w:b/>'
+$styles+=New-StyleXml 'ListText' 'List Text' 22 '202938' 0 80 300
+$styles+=New-StyleXml 'TableText' 'Table Text' 19 '202938' 0 40 270
+$styles+=New-StyleXml 'TableHead' 'Table Heading' 19 '0B2545' 0 40 270 '' '<w:b/>'
+$styles+=New-StyleXml 'TableGap' 'Table Gap' 4 '202938' 0 40 240
+$styles+=New-StyleXml 'CodeBlock' 'Code Block' 18 '202938' 0 20 260 '<w:shd w:fill="F4F6F9"/><w:ind w:left="120" w:right="120"/>' '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Microsoft YaHei"/>'
+$styles+=New-StyleXml 'Footer' 'Footer' 17 '526174' 0 0 240 '<w:jc w:val="right"/>'
+$styles+=New-StyleXml 'Header' 'Header' 17 '526174' 0 0 240
 $styles+='<w:style w:type="character" w:styleId="CodeInline"><w:name w:val="Code Inline"/><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:eastAsia="Microsoft YaHei"/><w:sz w:val="20"/></w:rPr></w:style></w:styles>'
 $numbering='<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
 foreach($type in @('bullet','decimal')) {
@@ -295,38 +298,39 @@ $parts=@{
     'word/footer1.xml'='<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr><w:r><w:t xml:space="preserve">KYNXA  |  </w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>'
     'docProps/core.xml'='<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>KYNXA R3 精炼与工程细化版</dc:title><dc:creator>KYNXA</dc:creator><dc:description>R3 frozen baseline with proposed engineering refinements.</dc:description></cp:coreProperties>'
 }
-$docxPath=Join-Path $outRoot ($baseName+'.docx')
+$docxPath=Join-Path $outputRoot ($baseName+'.docx')
 $stream=[System.IO.File]::Open($docxPath,[System.IO.FileMode]::Create)
 $zip=[System.IO.Compression.ZipArchive]::new($stream,[System.IO.Compression.ZipArchiveMode]::Create)
 try {
     foreach($key in $parts.Keys) {
         [xml]$null=$parts[$key]
-        $e=$zip.CreateEntry($key)
-        $writer=[System.IO.StreamWriter]::new($e.Open(),$utf8)
+        $archiveEntry=$zip.CreateEntry($key)
+        $writer=[System.IO.StreamWriter]::new($archiveEntry.Open(),$utf8)
         try{$writer.Write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+$parts[$key])}finally{$writer.Dispose()}
     }
 } finally {$zip.Dispose();$stream.Dispose()}
 
 # Exact Word table geometry and style audit.
+# 精确检查 Word 表格宽度、单元格几何关系和样式结构。
 [xml]$docXml=$document
-$ns=[System.Xml.XmlNamespaceManager]::new($docXml.NameTable)
-$ns.AddNamespace('w','http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+$xmlNamespaces=[System.Xml.XmlNamespaceManager]::new($docXml.NameTable)
+$xmlNamespaces.AddNamespace('w','http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 $tableCount=0
-foreach($t in $docXml.SelectNodes('//w:tbl',$ns)) {
+foreach($tableElement in $docXml.SelectNodes('//w:tbl',$xmlNamespaces)) {
     $tableCount++
-    $grid=@($t.SelectNodes('w:tblGrid/w:gridCol',$ns) | ForEach-Object {[int]$_.GetAttribute('w',$ns.LookupNamespace('w'))})
+    $grid=@($tableElement.SelectNodes('w:tblGrid/w:gridCol',$xmlNamespaces) | ForEach-Object {[int]$_.GetAttribute('w',$xmlNamespaces.LookupNamespace('w'))})
     if(($grid | Measure-Object -Sum).Sum -ne 9360){throw 'Incorrect grid width.'}
-    foreach($row in $t.SelectNodes('w:tr',$ns)) {
-        $cells=$row.SelectNodes('w:tc',$ns)
+    foreach($row in $tableElement.SelectNodes('w:tr',$xmlNamespaces)) {
+        $cells=$row.SelectNodes('w:tc',$xmlNamespaces)
         if($cells.Count -ne $grid.Count){throw 'Incorrect cell count.'}
         for($j=0;$j -lt $cells.Count;$j++) {
-            if([int]$cells[$j].SelectSingleNode('w:tcPr/w:tcW',$ns).GetAttribute('w',$ns.LookupNamespace('w')) -ne $grid[$j]){throw 'Incorrect cell width.'}
+            if([int]$cells[$j].SelectSingleNode('w:tcPr/w:tcW',$xmlNamespaces).GetAttribute('w',$xmlNamespaces.LookupNamespace('w')) -ne $grid[$j]){throw 'Incorrect cell width.'}
         }
     }
 }
-$bookmarkNames=@($docXml.SelectNodes('//w:bookmarkStart',$ns) | ForEach-Object {$_.GetAttribute('name',$ns.LookupNamespace('w'))})
-foreach($link in $docXml.SelectNodes('//w:hyperlink',$ns)) {
-    if($link.GetAttribute('anchor',$ns.LookupNamespace('w')) -notin $bookmarkNames){throw 'Broken navigation bookmark.'}
+$bookmarkNames=@($docXml.SelectNodes('//w:bookmarkStart',$xmlNamespaces) | ForEach-Object {$_.GetAttribute('name',$xmlNamespaces.LookupNamespace('w'))})
+foreach($link in $docXml.SelectNodes('//w:hyperlink',$xmlNamespaces)) {
+    if($link.GetAttribute('anchor',$xmlNamespaces.LookupNamespace('w')) -notin $bookmarkNames){throw 'Broken navigation bookmark.'}
 }
 $originalText=($sourceChapters.Values -join "`n")
 $stats=[ordered]@{
@@ -348,8 +352,8 @@ $stats=[ordered]@{
     render_qa='not performed: bundled Python/LibreOffice unavailable in this Windows environment'
     coverage=$coverage
 }
-Write-Utf8 (Join-Path $outRoot 'content-audit.json') ($stats | ConvertTo-Json -Depth 6)
-Write-Utf8 (Join-Path $outRoot 'README.md') @'
+Write-Utf8 (Join-Path $outputRoot 'content-audit.json') ($stats | ConvertTo-Json -Depth 6)
+Write-Utf8 (Join-Path $outputRoot 'README.md') @'
 # R3 精炼与工程细化版
 
 主文档：KYNXA_R3_精炼与工程细化版.docx；可维护文本：同名 .md。

@@ -2,6 +2,7 @@ using KYNXA.ToolHost;
 using static KYNXA.ToolHost.DesktopNativeMethods;
 
 // No desktop calls or windows: inject deterministic SendInput prefixes into the real cleanup module.
+// 不调用桌面或创建窗口；向真实清理模块注入确定性的 SendInput 前缀。
 int checks = 0;
 Input Mouse(uint flags) => new() { Type = 0, Data = new InputUnion { Mouse = new MouseInput { Flags = flags } } };
 Input Key(ushort key, uint flags = 0, ushort scan = 0) => new() { Type = 1,

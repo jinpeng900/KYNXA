@@ -20,6 +20,7 @@ public sealed partial class ShellPage
     public ObservableCollection<ProjectTreeEntry> WorkTaskEntries { get; } = [];
 
     // Selecting a workspace and expanding its tree are independent actions.
+    // 选择工作与展开项目树是互相独立的操作。
     private void SelectWorkspaceProject(ProjectState project)
     {
         if (!_projectsReady || project.IsArchived || project.IsFolderlessWorkspace) return;

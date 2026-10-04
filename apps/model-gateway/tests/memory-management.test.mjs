@@ -9,6 +9,7 @@ import { MemoryService } from '../memory-service.mjs';
 import { ModelStore } from '../store.mjs';
 
 // The server module's unused defaults must also resolve an isolated root at import time.
+// server 模块未使用的默认实例在导入时也必须指向隔离的根目录。
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-memory-management-import-'));
 const previousDataRoot = process.env.KYNXA_DATA_HOME;
 process.env.KYNXA_DATA_HOME = importRoot;

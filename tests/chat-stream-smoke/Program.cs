@@ -186,6 +186,7 @@ restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize
 Check(restored.AssistantSegments[0] == firstCompleted && restored.AssistantSegments[1].Status == "interrupted", "Crashed open round was not recovered independently");
 
 // A local fake gateway verifies the real HTTP transport never waits for the whole response.
+// 用本地伪网关验证真实 HTTP 传输，不应等待整个响应才交付流式内容。
 using var portReservation = new TcpListener(IPAddress.Loopback, 0);
 portReservation.Start();
 int port = ((IPEndPoint)portReservation.LocalEndpoint).Port;

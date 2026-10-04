@@ -9,7 +9,10 @@ public sealed record ModelChoice(string ProviderId, string ProviderName, string 
     public override string ToString() => Label;
 }
 
-/// <summary>The composer's UI selection only; does not store connection credentials.</summary>
+/// <summary>
+/// The composer's UI selection only; does not store connection credentials.
+/// 只保存输入区的 UI 选择，不保存模型连接凭据。
+/// </summary>
 public sealed class ModelSelectionStore(string dataDirectory)
 {
     private readonly string _path = Path.Combine(dataDirectory, "model-selection.json");
@@ -19,6 +22,7 @@ public sealed class ModelSelectionStore(string dataDirectory)
         if (!File.Exists(_path)) return null;
         try { return JsonSerializer.Deserialize<ModelChoice>(File.ReadAllText(_path)); }
         catch (JsonException) { return null; } // Ignore the old name-only preference.
+        // 忽略旧版仅按模型名称保存的偏好。
     }
 
     public void Save(ModelChoice? choice)

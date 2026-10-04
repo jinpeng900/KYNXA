@@ -3,7 +3,10 @@ import { addMcpPreset, mcpPresetCatalog } from './mcp-presets.mjs';
 import { readJsonBody, sendJson } from './http-transport.mjs';
 import { objectInput, toolFailure } from './tool-paths.mjs';
 
-/** Settings APIs own no model permission grants; execution still goes through ToolService. */
+/**
+ * Settings APIs own no model permission grants; execution still goes through ToolService.
+ * 设置接口不授予模型操作权限，实际执行仍统一经过 ToolService。
+ */
 export async function handleAgentRoute(request, response, url, tools) {
   const pathname = url.pathname;
   if (!pathname.startsWith('/api/agent/')) return false;

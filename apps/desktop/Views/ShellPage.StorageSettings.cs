@@ -274,6 +274,7 @@ public sealed partial class ShellPage
                 try
                 {
                     // Release maintenance before asking the gateway to load its new root.
+                    // 请求网关加载新根目录前，先释放维护状态。
                     Guid? activeWork = _activeProjectChat?.Id, activeChat = _activeStandaloneChat?.Id;
                     var catalog = await _projectStore.LoadAsync();
                     _projects = catalog.Projects;

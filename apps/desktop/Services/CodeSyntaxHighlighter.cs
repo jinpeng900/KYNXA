@@ -6,7 +6,10 @@ namespace KYNXA_Desktop.Services;
 
 internal sealed record CodeToken(string Text, uint? Color = null);
 
-/// <summary>Produces colored text without HTML, executable content, or changes to copied code.</summary>
+/// <summary>
+/// Produces colored text without HTML, executable content, or changes to copied code.
+/// 生成带颜色文本，不引入 HTML、可执行内容或复制代码的变化。
+/// </summary>
 internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
 {
     private readonly List<CodeToken> _tokens = [];
@@ -15,6 +18,7 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
     public static IReadOnlyList<CodeToken> Highlight(string source, string? language)
     {
         // Large/generated blocks remain selectable without thousands of UI text runs.
+        // 大型或生成的代码块仍可选择，不创建数千个 UI 文本片段。
         if (source.Length > 40_000 || ResolveLanguage(language) is not { } syntax)
             return [new(source)];
         try
@@ -27,6 +31,7 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or RegexMatchTimeoutException)
         {
             // An unsupported/incomplete grammar must never prevent displaying the response.
+            // 语法不支持或尚未完整时，不能阻止回复展示。
             return [new(source)];
         }
     }
@@ -77,6 +82,7 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
     }
 
     // A restrained light palette with sufficient contrast on the reply's #F7F7F7 surface.
+    // 浅色调色板在回复的 #F7F7F7 背景上保持足够对比度。
     private static uint? GetColor(string scope)
     {
         string name = scope.ToLowerInvariant();

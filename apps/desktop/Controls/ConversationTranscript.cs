@@ -12,7 +12,10 @@ using Windows.System;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>A single document keeps browser selection continuous across the whole conversation.</summary>
+/// <summary>
+/// A single document keeps browser selection continuous across the whole conversation.
+/// 整个聊天使用同一文档，保证浏览器选择可以跨消息连续进行。
+/// </summary>
 public sealed class ConversationTranscript : Grid, IDisposable
 {
     private const string HostName = "kynxa-transcript.local";
@@ -84,9 +87,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         foreach (var message in _messages) message.PropertyChanged += MessageChanged;
         _openAtBottom |= changed || openAtBottom;
         // The browser can restore a recently visited conversation while updated content is parsed.
+        // 解析更新内容期间，浏览器可先恢复最近访问过的聊天。
         if (changed) Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
         QueueRefresh();
         // A navigation should not wait for the 40 ms stream batching timer.
+        // 切换聊天不应等待 40 毫秒的流式合并刷新计时器。
         if (!_rendering && _ready.Task.IsCompletedSuccessfully) { _refresh.Stop(); _ = FlushAsync(); }
     }
 
@@ -105,6 +110,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _notice.Text = UiText.Get(_noticeKey);
         // The browser retains language-neutral metadata for active and cached rows.
         // Do not queue a transcript render: that would also touch selection and scrolling.
+        // 浏览器保留当前行与缓存行的语言无关元数据；本地化不重渲染聊天，以免改变选择和滚动。
         Post(new
         {
             type = "initializeUi", language = UiText.Language,
@@ -175,6 +181,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             var core = _browser.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false;
             // Keep text editing/selection shortcuts, without browser reload or navigation keys.
+            // 保留文本编辑和选择快捷键，同时阻止浏览器刷新与页面导航快捷键。
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsWebMessageEnabled = true;
@@ -283,6 +290,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 var visible = TranscriptPresentation.Select(row.Message.Role, row.Message.Status, row.Content,
                     row.Message.AssistantSegments, row.ToolActivities);
                 // Public process records belong to the gateway. Hidden phases need no HTML or browser payload.
+                // 公开过程记录归网关所有；隐藏的阶段不需要生成 HTML 或传入浏览器。
                 var segments = visible.Segments.Select(segment => segment with { Reasoning = "", ReasoningDurationMs = 0 }).ToArray();
                 return new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
                     visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
@@ -304,15 +312,18 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 if (!hit) missing.Add(index);
             }
             // Cached navigation can post immediately. Parse only changed messages off the UI thread.
+            // 缓存聊天可立即切换；只在 UI 线程之外解析有变化的消息。
             if (missing.Count > 0) await Task.Run(() =>
             {
                 foreach (int index in missing)
                 {
                     // Rapid navigation can abandon a large transcript between messages.
+                    // 快速切换聊天可能在两条消息之间放弃大段聊天记录的解析。
                     if (generation != Volatile.Read(ref _generation)) return;
                     var row = snapshots[index];
                     // The UI owns _html and may dispose it while this worker is parsing.
                     // Only immutable references captured before the await cross that boundary.
+                    // UI 拥有 _html，解析期间可能释放它；跨 await 只使用此前捕获的不可变引用。
                     var previous = previousCaches[index];
                     var segmentHtml = row.AssistantSegments.Select(segment =>
                     {
@@ -327,6 +338,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             });
             if (_disposed || generation != _generation) return;
             // A newer stream tick is allowed to queue behind this snapshot; switching chats is not.
+            // 较新的流式刷新可以排在本快照之后；切换到其他聊天则使本快照失效。
             foreach (var item in rendered) CacheHtml(item.Row.Id, item.Cache!);
             Post(new { type = "render", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom = _openAtBottom,
                 messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
@@ -373,6 +385,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
         // Events are immutable records. A weak source avoids retaining full tool results
         // merely to skip unchanged DOM rows during streaming and cached navigation.
+        // 事件是不可变记录；弱引用避免仅为跳过未变化的 DOM 行而保留完整工具结果。
         long revision = ++_nextToolRevision;
         _toolRevisions[key] = new(new WeakReference<ToolActivity>(tool), revision);
         return revision;

@@ -20,7 +20,10 @@ function verifiesVisibleConsole(value, keepOpenMs) {
     value.stdout === '' && value.stderr === '';
 }
 
-/** Explicit host execution with retained receipts; never a fallback for the sandbox terminal. */
+/**
+ * Explicit host execution with retained receipts; never a fallback for the sandbox terminal.
+ * 显式宿主执行保留回执，绝不作为沙箱终端失败后的隐式回退。
+ */
 export class HostTerminalRunner {
   constructor({ toolHostPath, invoke } = {}) {
     this.toolHostPath = toolHostPath;
@@ -71,11 +74,13 @@ export class HostTerminalRunner {
     if (!(await inspectLocalPath(cwd)).isDirectory())
       throw toolFailure('本机终端工作目录不存在。', 'HOST_TERMINAL_INVALID_WORKSPACE');
     // .NET expands Windows short paths in its receipt; send the canonical identity too.
+    // .NET 会在回执中展开 Windows 短路径，因此也发送规范化身份用于核验。
     cwd = await realpath(cwd);
     await inspectLocalPath(cwd);
     const combined = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
     combined.throwIfAborted();
     // Older helpers ignore unknown fields. Check before dispatch so a visible request cannot execute hidden.
+    // 旧助手可能忽略未知字段，派发前先检查，防止可见窗口请求被隐式执行为隐藏模式。
     if (visible) {
       const current = await this.capabilities();
       combined.throwIfAborted();
@@ -83,6 +88,7 @@ export class HostTerminalRunner {
         throw toolFailure('当前原生助手不支持可见终端，请更新后重试。', 'HOST_TERMINAL_VISIBLE_UNAVAILABLE', 503);
     }
     // A distinct operation also fails closed if the helper is replaced after discovery: old helpers reject it.
+    // 使用独立操作名，即使发现能力后助手被替换，旧助手也会拒绝请求而不降级执行。
     const value = await this._invoke({ operation: visible ? 'host_terminal_visible' : 'host_terminal', shell, script, cwd, timeoutMs,
       ...(visible ? { visible: true, keepOpenMs: holdMs } : {}) }, combined, timeoutMs + 10000, onOutput);
     if (!validEnvelope(value)) throw toolFailure('本机终端回执无效。', 'HOST_TERMINAL_INVALID_RESULT', 502);
@@ -111,8 +117,8 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
   signal?.throwIfAborted();
   return new Promise((resolvePromise, reject) => {
     const child = spawn(host, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
-    const decoder = new StringDecoder('utf8');
-    let output = '', errorBytes = 0, started, value, stopError, hardStop, settled = false, dispatched = false, sequence = 0;
+    const stdoutDecoder = new StringDecoder('utf8');
+    let stdoutBuffer = '', stderrBytes = 0, startedReceipt, value, stopError, hardStop, settled = false, dispatched = false, sequence = 0;
     const partial = { stdout: '', stderr: '', consoleText: '' };
     const finish = (value, error) => {
       if (settled) return;
@@ -125,6 +131,7 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
       stopError = error;
       if (!child.stdin.destroyed) child.stdin.end('cancel\n');
       // Native execution has its own deadline; allow the job tree to terminate and report.
+      // 原生执行有自己的截止时间，允许作业进程树完成终止并报告回执。
       hardStop = setTimeout(() => child.kill(), 4000);
     };
     const cancel = () => stop(Object.assign(new Error('本机终端已取消。'), { name: 'AbortError' }));
@@ -132,11 +139,11 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
       let item;
       try { item = JSON.parse(line); } catch { return; }
       if (!validEnvelope(item)) return;
-      if (item.event === 'host_terminal_started' && Number.isInteger(item.processId) && item.processId > 0) started = item;
+      if (item.event === 'host_terminal_started' && Number.isInteger(item.processId) && item.processId > 0) startedReceipt = item;
       else if (item.event === 'host_terminal_output') {
         const replace = item.stream === 'console' && item.replace === true;
         const text = replace ? item.text : item.delta;
-        if (!started || !Number.isSafeInteger(item.sequence) || item.sequence <= sequence ||
+        if (!startedReceipt || !Number.isSafeInteger(item.sequence) || item.sequence <= sequence ||
             !['stdout', 'stderr', 'console'].includes(item.stream) || (item.stream === 'console' && !replace) ||
             typeof text !== 'string' || text.length > 65536)
           return stop(toolFailure('本机终端输出事件无效。', 'HOST_TERMINAL_INVALID_RESULT', 502));
@@ -148,14 +155,14 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
       } else value = item;
     };
     const drainLines = () => {
-      for (let end; (end = output.indexOf('\n')) >= 0;) {
-        const line = output.slice(0, end); output = output.slice(end + 1);
+      for (let end; (end = stdoutBuffer.indexOf('\n')) >= 0;) {
+        const line = stdoutBuffer.slice(0, end); stdoutBuffer = stdoutBuffer.slice(end + 1);
         if (Buffer.byteLength(line) > maxTransportBytes)
           return stop(toolFailure('本机终端回执过大。', 'HOST_TERMINAL_RESULT_TOO_LARGE', 413));
         receiveLine(line);
       }
-      if (Buffer.byteLength(output) > maxTransportBytes) {
-        output = '';
+      if (Buffer.byteLength(stdoutBuffer) > maxTransportBytes) {
+        stdoutBuffer = '';
         stop(toolFailure('本机终端回执过大。', 'HOST_TERMINAL_RESULT_TOO_LARGE', 413));
       }
     };
@@ -163,21 +170,22 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
     child.stdin.on('error', () => {});
     child.once('error', error => finish(null, error));
     child.stdout.on('data', chunk => {
-      output += decoder.write(chunk);
+      stdoutBuffer += stdoutDecoder.write(chunk);
       drainLines();
     });
-    child.stderr.on('data', chunk => { errorBytes += chunk.length;
-      if (errorBytes > 65536) stop(toolFailure('本机终端协议错误。', 'HOST_TERMINAL_INVALID_RESULT', 502)); });
+    child.stderr.on('data', chunk => { stderrBytes += chunk.length;
+      if (stderrBytes > 65536) stop(toolFailure('本机终端协议错误。', 'HOST_TERMINAL_INVALID_RESULT', 502)); });
     child.once('close', () => {
-      output += decoder.end();
+      stdoutBuffer += stdoutDecoder.end();
       drainLines();
-      if (output.trim() && Buffer.byteLength(output) <= maxTransportBytes) receiveLine(output.trim());
+      if (stdoutBuffer.trim() && Buffer.byteLength(stdoutBuffer) <= maxTransportBytes) receiveLine(stdoutBuffer.trim());
       if (request.operation === 'host_terminal_capabilities' && !stopError && validEnvelope(value) && typeof value.available === 'boolean') return finish(value);
       if (validEnvelope(value) && (value.completed === true || value.outcome === 'unknown')) return finish(value);
       if (validEnvelope(value) && value.outcome === 'not_started') return finish(value);
       // A helper can die after dispatch but before its started event. Missing acknowledgement is not proof of no effects.
-      if (started || dispatched) return finish({ ...value, protocolVersion: 1, boundary, ...partial,
-        completed: false, outcome: 'unknown', processId: started?.processId,
+      // 助手可能在收到请求后、发出 started 事件前退出；缺少确认不能证明没有副作用。
+      if (startedReceipt || dispatched) return finish({ ...value, protocolVersion: 1, boundary, ...partial,
+        completed: false, outcome: 'unknown', processId: startedReceipt?.processId,
         cancelled: stopError?.name === 'AbortError', timedOut: stopError?.code === 'HOST_TERMINAL_TIMED_OUT',
         message: '命令已发送，但没有完整完成回执，执行结果未知；请核验结果，不要自动重做。' });
       if (stopError) return finish(null, stopError);

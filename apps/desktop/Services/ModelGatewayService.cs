@@ -4,7 +4,10 @@ using System.Text.Json;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Starts the bundled gateway on demand without stopping shared services.</summary>
+/// <summary>
+/// Starts the bundled gateway on demand without stopping shared services.
+/// 按需启动随包网关，不停止其他调用方共用的服务。
+/// </summary>
 public static class ModelGatewayService
 {
     private static readonly SemaphoreSlim StartupLock = new(1, 1);
@@ -13,7 +16,10 @@ public static class ModelGatewayService
     public static Uri Address => new(Environment.GetEnvironmentVariable("KYNXA_MODEL_API_URL")
         ?? "http://127.0.0.1:5218");
 
-    /// <summary>Validate and prepare a migration copy before its pointer becomes active.</summary>
+    /// <summary>
+    /// Validate and prepare a migration copy before its pointer becomes active.
+    /// 启用迁移后的路径指针之前，验证并准备迁移副本。
+    /// </summary>
     public static async Task InitializeStorageAsync(string target, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -43,6 +49,7 @@ public static class ModelGatewayService
             catch (OperationCanceledException)
             {
                 // This short-lived helper belongs to this migration. Never stop the shared gateway.
+                // 此短期辅助进程只属于本次迁移；不得停止共享网关。
                 try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
                 catch (InvalidOperationException) { }
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
