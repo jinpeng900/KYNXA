@@ -22,7 +22,29 @@ GUI 启动用 `CreateProcessW` 且禁止继承句柄。网关不等应用退出�
 
 ## 官方工具包与用户工具
 
-官方内容只有一份，位于安装包内的 `model-gateway/official-tools/`；源码对应 `apps/model-gateway/official-tools/`。包内集中提供 34 个工具声明（原 20 个核心工具、13 个本机桌面工具及独立本机终端）、11 个 MCP 连接预设、4 个技能及其资源、来源和许可证。核心执行仍经过原 `ToolService`、文件服务和沙箱，不新增另一套执行链；MCP 实现由固定版本外部发行包或远程服务提供，不把其运行环境重复塞进官方目录。
+官方内容只有一份，位于安装包内的 `model-gateway/official-tools/`；源码对应 `apps/model-gateway/official-tools/`。当前包版本 `0.4.0`，集中提供 **35 个工具声明、11 个 MCP 连接预设、7 个技能**及其资源、来源和许可证。核心执行仍经过原 `ToolService`、文件服务、网页读取服务和沙箱，不新增另一套执行链；MCP 实现由固定版本外部发行包或远程服务提供，不把其运行环境重复塞进官方目录。
+
+| 用户能力 | 官方执行入口 | 运行条件 |
+|---|---|---|
+| 文件增删改查、搜索、长源码分页 | `filesystem.*`，`workspace-inspect` / `safe-file-edit` | 随包；未挂载聊天使用持久独立工作目录 |
+| 软件启动、窗口调整、截图、UIA 阅读与鼠键输入 | `computer.*`，`desktop-workflow` | 随包原生 ToolHost；交互式 Windows 桌面 |
+| 本机 CMD / PowerShell / Conda，或隔离 Node / cmd | `terminal.host.run` / `terminal.run`，`terminal-workflow` | 宿主程序需已安装；沙箱先验证；无需额外 Python 启动工具链 |
+| 公开网页正文与链接 | `web.fetch`，`web-research` | 随包 Node 与 `html-to-text`；需联网，无浏览器登录或脚本执行 |
+| 浏览器结构、表单、导航、页面截图与调试 | Playwright / Chrome DevTools，`browser-workflow` | 用户启用对应 MCP；首次下载固定 npm 包；对应浏览器需可用 |
+
+七个官方技能为 `workspace-inspect`、`safe-file-edit`、`browser-workflow`、`desktop-workflow`、`terminal-workflow`、`web-research`、`internal-comms`。新增工作流不安装软件，也不授予权限。已有文件、终端和本机桌面实现均复用，不重复内置另一个 Filesystem 或 Windows MCP。Python Fetch、Git、MarkItDown 和 Windows Screenshot 仍是可选预设，其额外环境不属于基础工具要求。只有 Edge 的 Windows 用户可在浏览器设置选 `msedge`；预设存在不等于已经启动或连接成功。
+
+`web.fetch` 使用原生 HTTP(S) 请求和固定版本 **html-to-text 10.0.0 / MIT** 的 HTML 解析、实体和链接转换，许可证随 `node_modules/html-to-text/LICENSE` 打包；接口不会执行网页 JavaScript、携带 Cookie 或认证头。每跳验证公共地址和全部 DNS 答案，连接固定已验证地址；拒绝本机/内网、带凭据 URL 及非标准端口。本地开发页、登录页、动态页交给已配置浏览器 MCP。最多五次重定向，压缩前后各限制 2 MiB，整次读取可取消和超时；HTTP 错误或不完整响应不能当作成功。
+
+代理的 Fake-IP DNS 若将公共域名解析至保留/私有地址，轻量读取同样拒绝并明确提示改用已启用的浏览器；不把虚拟 IP 当作已验证公网地址。本机匿名外网探针实测遇到了这个边界，未据此宣称公网 TLS 端到端通过。浏览器路径沿用其已配置网络，不自动变更代理、登录状态或切换浏览器身份。
+
+提取后的正文最多保留 262,144 UTF-16 单位，超限及解析深度省略明确标记；模型默认先读不超过 16,000 单位的页面。结果含实际最终 URL、标题、时间与来源链接，完整有界提取文本沿用聊天的 `tool-results` 归档。`offset` / `nextOffset` / `hasMore` 支持实时网页分页；每次 `web.fetch` 重新获取，稳定回看使用结果引用和 `tool.result.read`，不把当前页面误称为以前的快照。独立读取可并行，网页活动直接显示网址，不展示参数/结果 JSON。Ask/Smart 仍需外部读取审批，Full 沿用已有授权。
+
+`filesystem.read` 的可选 `offset` 为 UTF-16 单位，范围 `0–1,048,576`；原 `maxBytes` / `maxChars` 保留。返回 `nextOffset`、`totalCharacters`、`hasMore`，分页不拆代理对，每页重新计算完整文件 SHA-256。模型应按 `hasMore` 判断结束，发现 SHA 改变即停止拼接并重新读取；尾页的 `truncated:true` 表示这一页不是整个文件，不代表还有下一页。
+
+技能摘要最多十二项，并按本次剩余提示空间注入；小窗口可以全部按需加载。权限和执行规则保留，所有启用技能仍可用 `skill.list/read` 查看，不用扩大旧连接窗口才能载入桌面工具。格式与转换依据：[html-to-text 官方源码](https://github.com/html-to-text/node-html-to-text)、[Playwright 固定版本配置](https://github.com/microsoft/playwright-mcp/tree/v0.0.83)、[Chrome DevTools 工具清单](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/chrome-devtools-mcp-v1.10.1/docs/tool-reference.md)。
+
+2026-10-05 官方能力补齐验收：完整网关 **658/658**、真实 WinUI/WebView2 **196**、复制载荷后清空 PATH/无外部 .NET 的运行检查 **38** 项通过，桌面 x64 构建零警告零错误。固定版本 Chrome DevTools 与 Playwright 在临时配置的本地测试页分别完成跨源 iframe 导航、实际点击、DOM 读回与截图，两条工作流通过；另有 **23** 项检查确认 PNG/JPEG 归档与浏览器源文件逐字节相等，图片已查看。三协议的旧 8K 连接均可发现七个技能并加载桌面工具，未改变用户窗口设置。最初一次桌面能力检测短暂不可用，未捕获当时底层状态；同一二进制复查及最终全量回归通过，未放宽检测或跳过测试。全部使用临时数据、合成页面或独立浏览器配置，未读取日常账号、调用付费模型；云端 CDP、登录/MFA 和所有可选第三方服务未在本轮验收。
 
 ```text
 KYNXA 安装目录/
@@ -163,7 +185,7 @@ AppContainer 是终端的系统隔离边界，Job Object 负责资源和生命�
 
 应用技能来自打包的基础技能、`Extensions/Skills`（未单独配置时为 `Data/Skills`）、用户配置的技能目录，以及当前工作 `.kynxa/skills`。先提供有限的名字和用途，通过 `skill.list/read` 按需读取 SKILL.md；`skill.resource.read` 从所选技能根目录解析资源路径，支持 UTF-8 分页和二进制元数据，拒绝越界、链接、硬链接及敏感文件。`skill.inspect/check` 展示资源清单、格式、运行器和依赖诊断，检查不会执行宿主命令或安装包。来源顺序和同名冲突明确；规范化后的实际路径去重，Windows 忽略大小写并合并长短路径别名，保留优先来源 ID。`disabledSkills` 禁用项不进入模型目录，也不能绕过开关读取、运行。
 
-内置 `workspace-inspect` 与 `safe-file-edit` 引导读取、定位和带 hash 的精确修改；`browser-workflow` 指导使用已有浏览器 MCP。复用的 Apache-2.0 `internal-comms` 保留上游许可证、固定 commit、来源和修改说明，并通过现有资源工具读取例子。技能文本属于参考资料，不授予权限。仓库 `.agents/skills/kynxa-development` 是开发本项目时使用的编码技能，属于另一个用途。
+内置 `workspace-inspect` 与 `safe-file-edit` 引导读取、定位和带 hash 的精确修改；`browser-workflow` 指导使用已有浏览器 MCP，`desktop-workflow`、`terminal-workflow` 与 `web-research` 分别指导本机窗口、执行边界和资料查证。复用的 Apache-2.0 `internal-comms` 保留上游许可证、固定 commit、来源和修改说明，并通过现有资源工具读取例子。技能文本属于参考资料，不授予权限。仓库 `.agents/skills/kynxa-development` 是开发本项目时使用的编码技能，属于另一个用途。
 
 SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支持引号、行尾注释、多行描述和嵌套元信息。已有宽松格式保留可读性并显示诊断；新增包严格检查标准的 name/description/compatibility 上限、名字与父目录、metadata 和 allowed-tools 类型。`allowed-tools` 仅作描述，不扩大权限。拒绝别名、重复键、自定义标签、合并键与危险对象键，限制头部大小、深度及节点数量。坏技能隔离并保留原文件，不阻断其他技能或基础工具。
 

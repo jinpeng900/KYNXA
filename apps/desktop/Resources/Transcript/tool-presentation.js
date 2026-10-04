@@ -18,7 +18,7 @@
   };
   const searches = new Set(['web_search_exa', 'web_search_exa_deep', 'brave_web_search', 'web_search', 'search_web']);
   const errorKeys = {
-    MCP_TIMEOUT: 'toolTimedOut', TOOL_TIMEOUT: 'toolTimedOut', TOOL_TIMED_OUT: 'toolTimedOut', SANDBOX_HOST_TIMEOUT: 'toolTimedOut',
+    MCP_TIMEOUT: 'toolTimedOut', WEB_TIMEOUT: 'toolTimedOut', TOOL_TIMEOUT: 'toolTimedOut', TOOL_TIMED_OUT: 'toolTimedOut', SANDBOX_HOST_TIMEOUT: 'toolTimedOut',
     DESKTOP_TIMEOUT: 'toolTimedOut', DESKTOP_TIMED_OUT: 'toolTimedOut', DESKTOP_READ_TIMEOUT: 'toolTimedOut',
     DESKTOP_NOT_RESPONDING: 'toolWindowUnresponsive',
     SANDBOX_UNAVAILABLE: 'toolSandboxUnavailable', SANDBOX_EXECUTION_UNAVAILABLE: 'toolSandboxUnavailable',

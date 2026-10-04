@@ -6,7 +6,8 @@ export function mcpPresetCatalog(config) {
   return { presets: presets.map(preset => {
     const existing = configuredPreset(preset, config.mcpServers);
     return { ...structuredClone(preset), alreadyConfigured: Boolean(existing), ...(existing ? { configuredServerId: existing.id } : {}) };
-  }), reusedCapabilities: ['filesystem', 'chat-memory', 'work-memory', 'tool-results', 'sandbox-terminal'] };
+  }), reusedCapabilities: ['filesystem', 'chat-memory', 'work-memory', 'tool-results', 'sandbox-terminal',
+    'host-terminal', 'desktop-control', 'public-web-fetch'] };
 }
 
 export async function addMcpPreset(service, id, input) {

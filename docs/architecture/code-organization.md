@@ -56,6 +56,8 @@ tests/                       隔离数据、模拟模型和自有窗口的回归
 
 ## 持续开发约束
 
+公开网页读取另由 `web-http-transport.mjs` 负责请求、地址校验、重定向、压缩、大小及取消，`web-fetch.mjs` 复用上游解析器转换文本并生成短页和完整归档；官方目录仅引用声明，`ToolService` 继续拥有权限与回执。文件分页保留在文件模块。`tool-system-prompt.mjs` 按运行时预留的声明空间选择技能摘要，未展示技能由原目录按需加载。
+
 遵循 [开发 Skill](../../.agents/skills/kynxa-development/SKILL.md) 和 [代码规范](../../.agents/skills/kynxa-development/references/coding-standards.md)。新行为放到实际拥有该职责的模块，不用任意行数上限驱动重写。
 
 异步 I/O 传递取消信号，UI 回写检查会话、请求和代次；后台任务观察错误。缓存有容量和失效规则，外部客户端、进程、事件和流由创建者释放。共享 DTO 不引用 WinUI，网关不依赖桌面程序集。

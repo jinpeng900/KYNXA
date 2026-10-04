@@ -9,7 +9,8 @@ test('public MCP catalog has pinned publisher packages, clear setup requirements
   assert.equal(catalog.presets.length, 11);
   assert.equal(new Set(catalog.presets.map(item => item.id)).size, 11);
   assert.equal(new Set(catalog.presets.flatMap(item => item.capabilities)).size, 11);
-  assert.deepEqual(catalog.reusedCapabilities, ['filesystem', 'chat-memory', 'work-memory', 'tool-results', 'sandbox-terminal']);
+  assert.deepEqual(catalog.reusedCapabilities, ['filesystem', 'chat-memory', 'work-memory', 'tool-results', 'sandbox-terminal',
+    'host-terminal', 'desktop-control', 'public-web-fetch']);
   for (const preset of catalog.presets) {
     assert.equal(preset.server.enabled, false);
     assert.equal(preset.alreadyConfigured, false);

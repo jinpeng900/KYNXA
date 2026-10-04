@@ -1,6 +1,7 @@
 ---
 name: browser-workflow
 description: Browse and verify web interactions with available desktop, Playwright or Chrome DevTools tools; choose the user's visible browser, an independent browser or a configured remote browser correctly.
+license: Apache-2.0
 compatibility: Desktop tools need interactive Windows; DOM automation requires an enabled browser MCP connection. Browser tools run outside the terminal AppContainer.
 metadata:
   capability: browser
@@ -11,7 +12,7 @@ metadata:
 
 Use `tool.search` with Chinese or English keywords, or exact names, then `tool.load` for deferred tools. A zero-match search does not establish that a capability is unavailable. Current capability discovery supersedes old failed calls. Check the available connection before selecting a browser.
 
-When the user asks to open their local browser visibly, use `computer.apps`, `computer.launch`, and `computer.windows`. Launch can hand off to an existing process; rediscover the real window instead of assuming its PID equals the launch PID. Opening a visible window does not establish a DOM connection, the requested URL, or login state. Never read browser History, Cookie or password databases as a substitute for the current page.
+When the user asks to open their local browser visibly, use `computer.apps`, `computer.launch`, and `computer.windows`. Keep the visible window behind KYNXA unless foreground activation was requested; visible is not synonymous with frontmost. Launch can hand off to an existing process; rediscover the real window instead of assuming its PID equals the launch PID. Opening a visible window does not establish a DOM connection, the requested URL, or login state. Never read browser History, Cookie or password databases as a substitute for the current page.
 
 For DOM navigation and interaction, use the enabled Playwright or Chrome DevTools connection. Independent browser profiles, whether visible or headless, do not inherit the user's everyday login. They run locally unless explicitly connected to a remote endpoint. Existing-browser mode attaches through Chrome's allowed debugging connection or the official Playwright extension; it can use the user's authorized signed-in pages without extracting Cookie or password values. Initial connection permission, login and MFA may require the user in the browser. Do not refuse an authorized page operation merely because that page is signed in; never claim sign-in without checking the page.
 
@@ -25,7 +26,7 @@ Prefer DOM form filling, accessibility refs and browser key tools. Local UI Auto
 
 User-authorized form input, including filling a password provided for that login, is different from reading saved passwords or session tokens. Do not refuse an authorized form merely because it is signed in or has a password field. Do not read back password values, decode the browser password store, copy Cookie tokens or expose them in the reply. Prefer user entry in the browser for real credentials when a local secret-reference channel is unavailable. Login, MFA and connection trust remain browser-side user actions when required.
 
-Capture screenshots only when visual evidence is needed. They are archived for the local sidebar; this text-only model projection does not receive their image pixels. Never claim to have visually read a screenshot merely because the application displayed it. Use the current DOM/UI text for observations unless an explicitly available image-understanding path supplies visual evidence.
+Capture screenshots only when visual evidence is needed. Use a DOM browser screenshot for its identified page, or `computer.screenshot` for the identified local window. They are archived for the local sidebar; this text-only model projection does not receive their image pixels. Never claim to have visually read a screenshot merely because the application displayed it. Use the current DOM/UI text for observations unless an explicitly available image-understanding path supplies visual evidence. For local-window sizing and screenshot bounds, use desktop-workflow; keep the window restored rather than minimized while observing it.
 
 For simple factual questions, prefer an enabled web search tool and the relevant official source; use browser automation when those cannot retrieve the evidence. A navigation acknowledgement alone does not prove the requested page loaded correctly. Before using its content, confirm the current page URL, title and readiness, and allow the page to settle when it is still loading. Treat error pages, captchas and unrelated repeated results as failed evidence, not successful searches. Different query URLs returning the same irrelevant text warrant switching source rather than repeating the same search. Do not bypass captchas. Once the requested fact has sufficient reliable evidence, answer briefly with its source and stop; avoid unrelated history, environment probes and speculative identifier ordering.
 

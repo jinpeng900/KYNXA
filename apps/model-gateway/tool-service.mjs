@@ -10,6 +10,8 @@ import { OFFICIAL_TOOLS_ROOT, curatedMcpPresets, readOfficialToolsManifest, norm
 import { AppSkillService } from './skill-service.mjs';
 import { McpToolClients, isMcpExecutionNotDispatched } from './mcp-client.mjs';
 import { executeFilesystem } from './filesystem-tools.mjs';
+import { WebFetchTool } from './web-fetch.mjs';
+import { validatePublicWebUrl } from './web-http-transport.mjs';
 import { needsToolApproval, ToolApprovalRegistry } from './tool-policy.mjs';
 import { boundedInteger, inspectLocalPath, objectInput, resolveToolPath, toolFailure, within } from './tool-paths.mjs';
 import { ModelToolCatalog } from './tool-catalog.mjs';
@@ -66,10 +68,11 @@ function validateBuiltinInput(descriptor, input) {
 
 /** Tool authority is derived from canonical work ownership and immutable turn context, never model metadata. */
 export class ToolService {
-  constructor({ conversationStore, dataHome, extensionRoot, extensionPointer, sandboxRunner, desktopRunner, hostTerminalRunner, approvalTimeoutMs, bundledDirectory, officialTools = bundledDirectory !== null } = {}) {
+  constructor({ conversationStore, dataHome, extensionRoot, extensionPointer, sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, bundledDirectory, officialTools = bundledDirectory !== null } = {}) {
     if (!conversationStore?.root || !dataHome) throw toolFailure('缺少工具存储上下文。');
     this.conversations = conversationStore;
     this.root = resolve(conversationStore.root);
+    this.webFetcher = webFetcher ?? new WebFetchTool();
     this.dataHome = resolve(dataHome);
     this.extensionRoot = resolve(extensionRoot ?? this.root);
     this.extensionPointer = extensionPointer ?? extensionPointerPath();
@@ -250,13 +253,13 @@ export class ToolService {
     return this.catalog(context, { ...options, connectMcp: true, refreshMcpCatalog: true });
   }
 
-  async systemPrompt(context) {
+  async systemPrompt(context, { maximumTokens = Infinity } = {}) {
     this._assertContext(context);
     const skills = await this.listSkills(context);
     return buildToolSystemPrompt(context, { skills,
       browserPrompt: this.catalogs.get(context)?.browserPrompt,
       unavailableSkillCount: this.skills.discovery.get(skills)?.unavailableCount,
-      mcpErrorIds: [...this.mcp.errors.keys()] });
+      mcpErrorIds: [...this.mcp.errors.keys()], maximumTokens });
   }
 
   approve(input) { return this.approvals.approve(input); }
@@ -303,6 +306,10 @@ export class ToolService {
         const existingTarget = await inspectLocalPath(path, { allowMissing: ['filesystem.write', 'filesystem.mkdir'].includes(call.name) });
         if (existingTarget && this.workspaces.isControlPath(await realpath(path)))
           throw toolFailure('聊天工具目录的归属信息由应用管理。', 'PROTECTED_APP_DATA', 403);
+      } else if (call.name === 'web.fetch') {
+        outsideWorkspace = true;
+        validatePublicWebUrl(call.arguments.url);
+        if (!call.arguments.reason.trim()) throw toolFailure('读取外部网页必须说明原因。', 'OUTSIDE_WORKSPACE_REASON_REQUIRED', 403);
       } else if (descriptor.source.startsWith('mcp:')) {
         outsideWorkspace = true;
         const reason = call.arguments.policy?.reason;
@@ -404,6 +411,7 @@ export class ToolService {
       if (call.name.startsWith('filesystem.')) result = await executeFilesystem(call.name, context, call.arguments, path, signal,
         { protectedRoots: outsideWorkspace || context.managedWorkspace ? [] : [this.root, this.dataHome, this.extensionRoot],
           denyRead: path => this.storageBoundary.isCredential(path) || this.storageBoundary.isPrivateResult(path) || this.workspaces.isControlPath(path) });
+      else if (call.name === 'web.fetch') return await this._finishResult(context, call, await this.webFetcher.run(call.arguments, signal));
       else if (call.name === 'tool.search') {
         const all = searchTools([...(snapshot?.descriptors.values() ?? [])], call.arguments.query ?? '');
         const offset = boundedInteger(call.arguments.offset, 0, 0, 100000);
@@ -552,6 +560,7 @@ export class ToolService {
     const outcomes = await Promise.allSettled([
       () => this.desktopRunner?.close?.(),
       () => this.hostTerminalRunner?.close?.(),
+      () => this.webFetcher?.close?.(),
       () => this.mcp.close()
     ].map(close => Promise.resolve().then(close)));
     const cleanup = await Promise.allSettled([Promise.resolve().then(() => this.sandboxRunner?.cleanupAll?.())]);

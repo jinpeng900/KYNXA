@@ -15,8 +15,9 @@ const descriptor = (name, description, properties, required = []) => ({ name: `f
 
 export const filesystemDescriptors = [
   descriptor('list', 'List one directory without following links. Returns bounded entries.', { limit: { type: 'integer', minimum: 1, maximum: 500 } }),
-  descriptor('read', 'Read a bounded UTF-8 text file and its full SHA-256. A truncated preview is marked explicitly.',
-    { maxBytes: { type: 'integer', minimum: 1, maximum: MAX_TOOL_FILE_BYTES }, maxChars: { type: 'integer', minimum: 1, maximum: 64000 } }, ['path']),
+  descriptor('read', 'Read a UTF-8 text page and full-file SHA-256. Continue with nextOffset while hasMore; restart if the hash changes.',
+    { maxBytes: { type: 'integer', minimum: 1, maximum: MAX_TOOL_FILE_BYTES }, maxChars: { type: 'integer', minimum: 1, maximum: 64000 },
+      offset: { type: 'integer', minimum: 0, maximum: MAX_TOOL_FILE_BYTES, description: 'UTF-16 position; use nextOffset to avoid splitting characters.' } }, ['path']),
   descriptor('stat', 'Inspect a file/directory. Small regular files include a SHA-256 for conflict-safe changes.', {}, ['path']),
   descriptor('search', 'Search UTF-8 files for literal text. Does not follow links; traversal, file size and matches are bounded.',
     { query: { type: 'string', minLength: 1, maxLength: 200 }, maxMatches: { type: 'integer', minimum: 1, maximum: 200 },
@@ -59,6 +60,20 @@ async function readBounded(path, maxBytes = MAX_TOOL_FILE_BYTES) {
   const bytes = await readFile(path);
   if (bytes.length > maxBytes) throw toolFailure('文件在读取期间超过大小上限。', 'TOOL_FILE_TOO_LARGE');
   return { info, bytes, hash: sha256(bytes) };
+}
+
+function textPage(full, offset, maxChars) {
+  if (offset > full.length) throw toolFailure('offset 超出当前文件长度，请从 0 重新读取。');
+  if (offset > 0 && offset < full.length && /[\uD800-\uDBFF]/.test(full[offset - 1]) && /[\uDC00-\uDFFF]/.test(full[offset]))
+    throw toolFailure('offset 不能位于字符代理对中间，请使用上一页的 nextOffset。');
+  let nextOffset = Math.min(full.length, offset + maxChars);
+  if (nextOffset < full.length && /[\uD800-\uDBFF]/.test(full[nextOffset - 1]) && /[\uDC00-\uDFFF]/.test(full[nextOffset])) {
+    // A one-unit request must still return one complete supplementary character and advance.
+    nextOffset += nextOffset - offset === 1 ? 1 : -1;
+  }
+  const hasMore = nextOffset < full.length;
+  return { content: full.slice(offset, nextOffset), offset, nextOffset, totalCharacters: full.length,
+    hasMore, truncated: offset > 0 || hasMore };
 }
 
 async function checkHash(path, expectedHash) {
@@ -110,9 +125,8 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
   if (name === 'filesystem.read') {
     const value = await readBounded(path, boundedInteger(input.maxBytes, MAX_TOOL_FILE_BYTES, 1, MAX_TOOL_FILE_BYTES));
     const full = text(value.bytes), maxChars = boundedInteger(input.maxChars, 32000, 1, 64000);
-    let content = full.slice(0, maxChars);
-    if (/^[\uD800-\uDBFF]$/.test(content.slice(-1))) content = content.slice(0, -1);
-    return { path, sha256: value.hash, bytes: value.bytes.length, content, truncated: content.length < full.length };
+    const offset = boundedInteger(input.offset, 0, 0, MAX_TOOL_FILE_BYTES);
+    return { path, sha256: value.hash, bytes: value.bytes.length, ...textPage(full, offset, maxChars) };
   }
   if (name === 'filesystem.stat') {
     const info = await inspectLocalPath(path);
