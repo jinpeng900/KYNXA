@@ -37,7 +37,10 @@ export function isPrivateSkillResource(path) {
     /^(?:connections|credentials|secrets|tokens)(?:[._-][^.]+)*\.(?:json|ya?ml|toml|ini|conf|env)$/i.test(part));
 }
 
-/** Resource references always resolve from the skill root, never the work folder. */
+/**
+ * Resource references always resolve from the skill root, never the work folder.
+ * 资源引用始终相对技能根目录解析，不相对工作目录。
+ */
 export function resolveSkillResource(skillRoot, value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 2048 || /[\0\r\n:]/.test(value) ||
       isAbsolute(value) || win32.isAbsolute(value))
@@ -54,7 +57,10 @@ export function resolveSkillResource(skillRoot, value) {
   return { path, relativePath };
 }
 
-/** Read and hash one regular file, refusing a changed path before returning any bytes. */
+/**
+ * Read and hash one regular file, refusing a changed path before returning any bytes.
+ * 读取并计算单个普通文件哈希，返回字节前拒绝路径变化。
+ */
 export async function readSkillFile(file, { maxBytes = SKILL_PACKAGE_LIMITS.fileBytes, signal, denyResource } = {}) {
   cancelled(signal);
   assertSkillResourceAllowed(file, denyResource);
@@ -99,6 +105,7 @@ export async function readSkillResource(skillRoot, path, { offset, limit, signal
   const canonicalRoot = await realpath(skillRoot), canonicalFile = await realpath(target.path);
   assertSkillResourceAllowed(canonicalFile, denyResource);
   // Windows short-name aliases must not bypass credential-name or package-boundary checks.
+  // Windows 短路径别名不能绕过凭据文件名或包边界检查。
   if (!within(canonicalRoot, canonicalFile))
     throw toolFailure('Skill resource crosses its canonical package boundary.', 'UNSAFE_SKILL_RESOURCE_PATH', 403);
   resolveSkillResource(canonicalRoot, portable(relative(canonicalRoot, canonicalFile)));
@@ -112,12 +119,16 @@ export async function readSkillResource(skillRoot, path, { offset, limit, signal
     return { ...common, kind: 'binary', encoding: null, content: null, readable: false,
       message: 'Binary asset retained in the package; the text reader does not decode it or expose base64.' };
   // Code-point pages do not split surrogate pairs at the preview boundary.
+  // 按码点分页，预览边界不拆开代理项对。
   const chars = Array.from(content), nextOffset = Math.min(chars.length, offset + limit);
   return { ...common, kind: 'text', encoding: 'utf-8', content: chars.slice(offset, nextOffset).join(''),
     offset, nextOffset, totalChars: chars.length, hasMore: nextOffset < chars.length, readable: true };
 }
 
-/** Bounded inventory is also the whitelist for native read-only snapshot copying. */
+/**
+ * Bounded inventory is also the whitelist for native read-only snapshot copying.
+ * 受限资源清单也作为原生只读快照复制的白名单。
+ */
 export async function inspectSkillPackage(skillRoot, { signal, hashes = false, denyResource } = {}) {
   skillRoot = resolve(skillRoot);
   assertSkillResourceAllowed(skillRoot, denyResource);

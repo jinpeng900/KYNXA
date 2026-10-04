@@ -5,12 +5,12 @@ namespace KYNXA.ToolHost;
 
 internal static class DesktopRunner
 {
-    private static readonly string[] Operations = ["apps", "windows", "screenshot", "read", "launch", "window", "activate", "move", "click", "scroll", "drag", "type", "key"];
+    private static readonly string[] SupportedOperations = ["apps", "windows", "screenshot", "read", "launch", "window", "activate", "move", "click", "scroll", "drag", "type", "key"];
 
     internal static object Capabilities() => new
     {
         protocolVersion = 1, boundary = "host-desktop", available = DesktopTarget.IsInteractive(),
-        interactiveWindows = DesktopTarget.IsInteractive(), operations = Operations, keys = DesktopInput.SupportedKeys,
+        interactiveWindows = DesktopTarget.IsInteractive(), operations = SupportedOperations, keys = DesktopInput.SupportedKeys,
         imageMaxBytes = 4 * 1024 * 1024, coordinates = "client-physical-pixels", canElevate = false,
         features = new { backgroundLaunch = "best-effort-no-activate", screenshotCrop = true, passwordLocators = true,
             boundedRead = true, readTimeoutDefaultMs = 3000, readTimeoutMaxMs = 5000,
@@ -28,13 +28,14 @@ internal static class DesktopRunner
         int timeoutMs = request.Action == "read" ? request.TimeoutMs : 18000;
         deadline.CancelAfter(timeoutMs);
         var completion = new TaskCompletionSource<Dictionary<string, object?>>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var worker = new Thread(() =>
+        var operationThread = new Thread(() =>
         {
             try { completion.TrySetResult(Run(request, deadline.Token)); }
             catch (Exception error) { completion.TrySetException(error); }
         }) { IsBackground = true, Name = "KYNXA desktop operation" };
         // UIA runs on its own MTA thread, never an application's UI thread.
-        worker.SetApartmentState(ApartmentState.MTA); worker.Start();
+        // UIA 在独立 MTA 线程运行，不占用应用的界面线程。
+        operationThread.SetApartmentState(ApartmentState.MTA); operationThread.Start();
         try { return await completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs + 100), cancellation); }
         catch (Exception error) when (request.Action == "read" && !cancellation.IsCancellationRequested &&
             (error is TimeoutException || error is OperationCanceledException && deadline.IsCancellationRequested))
@@ -42,17 +43,18 @@ internal static class DesktopRunner
             deadline.Cancel();
             // A stalled provider cannot be cancelled in-process. The helper's background thread
             // is discarded when this independent request process exits after its timeout receipt.
+            // 卡住的提供方无法在进程内取消；独立请求进程返回超时回执并退出后，其后台线程随之终止。
             throw new DesktopException("DESKTOP_READ_TIMEOUT", "The bounded UI Automation read timed out; no input was sent.");
         }
     }
 
     private static Dictionary<string, object?> Run(DesktopRequest request, CancellationToken cancellation)
     {
-        if (request.Operation != "desktop" || request.Action is null || !Operations.Contains(request.Action))
+        if (request.Operation != "desktop" || request.Action is null || !SupportedOperations.Contains(request.Action))
             throw new DesktopException("DESKTOP_INVALID_REQUEST", "Unknown desktop operation.");
         if (!DesktopTarget.IsInteractive()) throw new DesktopException("DESKTOP_UNAVAILABLE", "The interactive desktop is unavailable or locked.");
         cancellation.ThrowIfCancellationRequested();
-        nint originalDpi = SetThreadDpiAwarenessContext((nint)(-4));
+        nint previousDpiAwarenessContext = SetThreadDpiAwarenessContext((nint)(-4));
         try
         {
             Dictionary<string, object?> result;
@@ -85,7 +87,7 @@ internal static class DesktopRunner
             result["action"] = request.Action; result["completed"] = true;
             return result;
         }
-        finally { if (originalDpi != 0) SetThreadDpiAwarenessContext(originalDpi); }
+        finally { if (previousDpiAwarenessContext != 0) SetThreadDpiAwarenessContext(previousDpiAwarenessContext); }
     }
 
     private static Dictionary<string, object?> Windows(int? processId)
@@ -95,12 +97,13 @@ internal static class DesktopRunner
         bool truncated = false;
         EnumWindows((window, _) =>
         {
-            GetWindowThreadProcessId(window, out uint owner);
+            GetWindowThreadProcessId(window, out uint ownerProcessId);
             // Filter before reading titles. Tests inspect only their own synthetic process.
-            if (IsWindowVisible(window) && (processId is null || owner == processId))
+            // 先过滤进程再读取标题；测试只检查自己创建的模拟进程。
+            if (IsWindowVisible(window) && (processId is null || ownerProcessId == processId))
             {
                 if (windows.Count >= 200) { truncated = true; return false; }
-                windows.Add(new DesktopTarget(window, (int)owner).Describe());
+                windows.Add(new DesktopTarget(window, (int)ownerProcessId).Describe());
             }
             return true;
         }, 0);

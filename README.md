@@ -428,6 +428,8 @@ KYNXA is currently in early development.
 
 Contribution guidelines will be expanded as the architecture and public APIs stabilize.
 
+Repository coding work uses the [development Skill](.agents/skills/kynxa-development/SKILL.md) and [code standards Skill](.agents/skills/kynxa-code-standards/SKILL.md), automatically referenced by `AGENTS.md`. The latter maintains semantic naming, English/Chinese explanatory comments, language-specific formatting and compatibility exceptions; protocol keys and third-party originals remain unchanged. These are repository development instructions, separate from the application's model skills.
+
 The [five-person development plan](docs/team/README.md) and [team lead overview](docs/team/队长总览.md) (Chinese) define module ownership, interfaces, a proposed six-week schedule, and acceptance criteria. The team lead is included in the five-person team.
 
 Bug reports, architecture discussions, implementation proposals, tests, documentation improvements, and security reviews will be welcome.

@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto';
 const phases = new Set(['commentary', 'final_answer']);
 const statuses = new Set(['streaming', 'completed', 'interrupted']);
 
-/** Only public text enters the transcript; provider signatures remain in protocol continuations. */
+/**
+ * Only public text enters the transcript; provider signatures remain in protocol continuations.
+ * 聊天记录仅保存公开文本，供应商签名只留在协议续传状态中。
+ */
 export function validateAssistantSegments(value) {
   const invalid = () => Object.assign(new Error('助手消息段格式无效，原记录已保留。'),
     { code: 'INVALID_CONVERSATION_DATA', statusCode: 400 });
@@ -28,7 +31,10 @@ export function validateAssistantSegments(value) {
   });
 }
 
-/** Projects tagged stream events onto the durable public message, without duplicating tool results. */
+/**
+ * Projects tagged stream events onto the durable public message, without duplicating tool results.
+ * 将带标记的流事件投影到正式公开消息，不重复保存工具结果。
+ */
 export function applyAssistantSegmentEvent(assistant, event) {
   if (event.type === 'assistant_segment') {
     const items = (assistant.AssistantSegments ?? []).filter(item => item.id !== event.segment.id);
@@ -50,7 +56,10 @@ export function assistantSegmentText(assistant, field = 'content') {
   return (assistant.AssistantSegments ?? []).map(segment => segment[field]).filter(Boolean).join('\n\n');
 }
 
-/** One segment per model round, interleaved with tool orders from the same monotonically increasing counter. */
+/**
+ * One segment per model round, interleaved with tool orders from the same monotonically increasing counter.
+ * 每轮模型调用形成一个消息段，与工具顺序共用单调递增计数器。
+ */
 export class AssistantSegments {
   constructor(emit) { this.emit = emit; this.items = []; this.order = 0; }
 

@@ -7,6 +7,7 @@ using static KYNXA.ToolHost.HostTerminalConsole;
 namespace KYNXA.ToolHost;
 
 /// <summary>A bundled companion attached to the command's real console, with protocol traffic on a private pipe.</summary>
+/// <remarks>随包提供的辅助进程连接命令的真实控制台，协议数据仅走私有管道。</remarks>
 internal static class HostTerminalVisibleWorker
 {
     internal static async Task<int> RunAsync(string pipeName)
@@ -31,51 +32,53 @@ internal static class HostTerminalVisibleWorker
             SetTitle(title);
             if (!HasRealConsoleHandles())
                 throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "The visible worker has no real console input/output handles.");
-            IntPtr window = IntPtr.Zero;
+            IntPtr consoleWindowHandle = IntPtr.Zero;
             var visibilityWait = Stopwatch.StartNew();
-            while (window == IntPtr.Zero && visibilityWait.ElapsedMilliseconds < 4000)
+            while (consoleWindowHandle == IntPtr.Zero && visibilityWait.ElapsedMilliseconds < 4000)
             {
-                window = FindVisibleWindow(title);
-                if (window == IntPtr.Zero) await Task.Delay(25);
+                consoleWindowHandle = FindVisibleWindow(title);
+                if (consoleWindowHandle == IntPtr.Zero) await Task.Delay(25);
             }
-            if (window == IntPtr.Zero)
+            if (consoleWindowHandle == IntPtr.Zero)
                 throw new HostTerminalException("HOST_TERMINAL_VISIBLE_UNAVAILABLE", "No actual visible console window was observed; the script was not executed.");
-            await SendAsync(writer, new { @event = "window_ready", windowId = window.ToInt64().ToString(),
-                windowObserved = IsVisible(window), windowProcessId = WindowProcessId(window), consoleInput = true, consoleOutput = true });
+            await SendAsync(writer, new { @event = "window_ready", windowId = consoleWindowHandle.ToInt64().ToString(),
+                windowObserved = IsVisible(consoleWindowHandle), windowProcessId = WindowProcessId(consoleWindowHandle), consoleInput = true, consoleOutput = true });
             if (await reader.ReadLineAsync() != "execute") return 126;
 
             Console.OutputEncoding = new UTF8Encoding(false);
             Console.WriteLine("KYNXA visible host terminal");
-            var start = new ProcessStartInfo(HostTerminalRunner.ShellPath(request.Shell!))
+            var processStartInfo = new ProcessStartInfo(HostTerminalRunner.ShellPath(request.Shell!))
             {
                 WorkingDirectory = request.Cwd!, UseShellExecute = false, CreateNoWindow = false
                 // No redirection: the shell and its children inherit genuine console input/output.
+                // 不重定向输入输出，让 shell 及其子进程继承真实控制台。
             };
             if (request.Shell == "cmd")
             {
                 // CMD /s /c parses its outer quotes itself; argv escaping would insert literal
                 // backslashes before the script's executable quotes and prevent command startup.
-                start.Arguments = " /d /s /c \"" + request.Script! + "\"";
+                // CMD /s /c 自行解析外层引号；argv 转义会在脚本可执行路径的引号前插入字面反斜杠，导致命令无法启动。
+                processStartInfo.Arguments = " /d /s /c \"" + request.Script! + "\"";
             }
             else
             {
-                string source = "KYNXA_HOST_SOURCE_" + Guid.NewGuid().ToString("N");
-                start.Environment[source] = request.Script!;
-                string wrapper = "$kynxaHostScript=[Environment]::GetEnvironmentVariable('" + source + "','Process');" +
-                    "[Environment]::SetEnvironmentVariable('" + source + "',$null,'Process');" +
+                string scriptEnvironmentVariable = "KYNXA_HOST_SOURCE_" + Guid.NewGuid().ToString("N");
+                processStartInfo.Environment[scriptEnvironmentVariable] = request.Script!;
+                string shellWrapper = "$kynxaHostScript=[Environment]::GetEnvironmentVariable('" + scriptEnvironmentVariable + "','Process');" +
+                    "[Environment]::SetEnvironmentVariable('" + scriptEnvironmentVariable + "',$null,'Process');" +
                     "& ([ScriptBlock]::Create($kynxaHostScript))";
-                start.ArgumentList.Add("-NoProfile"); start.ArgumentList.Add("-Command"); start.ArgumentList.Add(wrapper);
+                processStartInfo.ArgumentList.Add("-NoProfile"); processStartInfo.ArgumentList.Add("-Command"); processStartInfo.ArgumentList.Add(shellWrapper);
             }
-            using Process process = Process.Start(start)
+            using Process shellProcess = Process.Start(processStartInfo)
                 ?? throw new HostTerminalException("HOST_TERMINAL_START_FAILED", "The visible shell could not start.");
             commandStarted = true;
             await SendAsync(writer, new
             {
-                @event = "command_started", processId = process.Id, workerProcessId = Environment.ProcessId,
-                windowId = window.ToInt64().ToString(), windowObserved = IsVisible(window), windowProcessId = WindowProcessId(window),
+                @event = "command_started", processId = shellProcess.Id, workerProcessId = Environment.ProcessId,
+                windowId = consoleWindowHandle.ToInt64().ToString(), windowObserved = IsVisible(consoleWindowHandle), windowProcessId = WindowProcessId(consoleWindowHandle),
                 consoleInput = true, consoleOutput = true
             });
-            Task commandExit = process.WaitForExitAsync();
+            Task commandExit = shellProcess.WaitForExitAsync();
             string? lastSnapshotText = null;
             bool lastSnapshotTruncated = false;
             while (!commandExit.IsCompleted)
@@ -89,15 +92,15 @@ internal static class HostTerminalVisibleWorker
                     consoleSnapshotTruncated = preview.Truncated, consoleSnapshotAvailable = preview.Available });
             }
             await commandExit;
-            Console.WriteLine($"\n[KYNXA] Command exited with code {process.ExitCode}.");
+            Console.WriteLine($"\n[KYNXA] Command exited with code {shellProcess.ExitCode}.");
             if (displayHoldMs != 0)
                 Console.WriteLine($"[KYNXA] This window will close in {displayHoldMs / 1000.0:0.#} seconds.");
             var snapshot = Snapshot();
             await SendAsync(writer, new
             {
-                @event = "command_completed", exitCode = process.ExitCode, consoleText = snapshot.Text,
+                @event = "command_completed", exitCode = shellProcess.ExitCode, consoleText = snapshot.Text,
                 consoleSnapshotTruncated = snapshot.Truncated, consoleSnapshotAvailable = snapshot.Available,
-                windowVisibleAtCompletion = IsVisible(window)
+                windowVisibleAtCompletion = IsVisible(consoleWindowHandle)
             });
             if (displayHoldMs != 0) await Task.Delay(displayHoldMs);
             return 0;

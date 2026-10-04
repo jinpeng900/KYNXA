@@ -13,6 +13,7 @@ test('request decoding keeps UTF-8 intact across fragmented incoming chunks', as
 });
 
 // A controllable response makes blocked output and heartbeat time deterministic.
+// 可控响应使输出背压和心跳时序可以确定地验证。
 class RecordedResponse extends EventEmitter {
   chunks = [];
   destroyed = false;

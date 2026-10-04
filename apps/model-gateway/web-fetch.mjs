@@ -42,7 +42,10 @@ function decodePage(bytes, contentType) {
   catch { throw toolFailure('网页文本编码无效，请使用浏览器读取。', 'WEB_INVALID_ENCODING', 415); }
 }
 
-/** Text conversion reuses the pinned upstream parser. Fetch never executes page scripts or imports a browser profile. */
+/**
+ * Text conversion reuses the pinned upstream parser. Fetch never executes page scripts or imports a browser profile.
+ * 文本转换复用固定版本的上游解析器；抓取不执行页面脚本，也不导入浏览器用户配置。
+ */
 export class WebFetchTool {
   constructor({ fetchPage = fetchPublicWebPage } = {}) { this.fetchPage = fetchPage; this.active = new Set(); this.closed = false; }
 
@@ -86,6 +89,7 @@ export class WebFetchTool {
     const value = { ...metadata, content: full.slice(offset, end), offset, nextOffset: end,
       hasMore: end < full.length, truncated: offset > 0 || end < full.length || extractionTruncated };
     // Keep the complete bounded source separate from the short model page. Existing result references own retrieval and storage.
+    // 完整且受限的源内容与短模型页面分开，回源和存储仍由现有结果引用负责。
     const canonical = { content: [{ type: 'resource_link', uri: page.url, name: title || page.url, mimeType: 'text/plain' }],
       structuredContent: { ...metadata, content: full }, isError: false };
     return { value, canonical, content: JSON.stringify(value), isError: false, outsideWorkspace: true };

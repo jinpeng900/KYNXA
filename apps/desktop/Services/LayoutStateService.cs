@@ -41,6 +41,7 @@ public sealed class LayoutStateService
         catch
         {
             // A damaged preference must never prevent the shell from starting.
+            // 偏好文件损坏不能阻止主界面启动。
         }
 
         return LayoutState.CreateDefault();
@@ -58,6 +59,7 @@ public sealed class LayoutStateService
         catch
         {
             // Layout persistence is best-effort; the in-memory layout remains usable.
+            // 布局保存尽力完成；保存失败时内存布局仍可使用。
             return false;
         }
     }

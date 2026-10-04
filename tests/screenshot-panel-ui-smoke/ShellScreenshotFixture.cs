@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 namespace KYNXA_Desktop.Controls
 {
     // Only the event-owning transcript surface is substituted. The Shell handler and viewer are production files.
+    // 只替换拥有事件的 Transcript 表面；Shell handler 与查看器仍为生产文件。
     public sealed class ConversationTranscript : Grid
     {
         public event EventHandler? ConversationChanged;

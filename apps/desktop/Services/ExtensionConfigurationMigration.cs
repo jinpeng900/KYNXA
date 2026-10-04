@@ -5,7 +5,10 @@ using System.Text.Json.Nodes;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Only extension-owned paths change; external installations and unknown disabled IDs stay intact.</summary>
+/// <summary>
+/// Only extension-owned paths change; external installations and unknown disabled IDs stay intact.
+/// 只改扩展自身拥有的路径；外部安装及未知的禁用 ID 保持原样。
+/// </summary>
 internal static class ExtensionConfigurationMigration
 {
     internal static async Task ValidateAsync(string root, CancellationToken cancellationToken)
@@ -79,6 +82,7 @@ internal static class ExtensionConfigurationMigration
                 string original = Path.Combine(owned.Source, relative);
                 idMap[SkillId(original)] = SkillId(Path.Combine(targetRoot, name, relative));
                 // Discovery hashes lexical configured paths, including their original casing.
+                // 发现过程按配置路径的原始写法计算哈希，包括原来的大小写。
                 foreach (string directory in originalDirectories)
                     if (StorageMigrationService.IsWithin(directory, owned.Source) && StorageMigrationService.IsWithin(original, directory))
                     {
@@ -100,6 +104,7 @@ internal static class ExtensionConfigurationMigration
     // uv-managed Windows environments keep their base interpreter in pyvenv.cfg.
     // Only these known text metadata fields change: wheel contents, launchers,
     // requirements, arbitrary package configuration and external paths remain exact.
+    // uv 管理的 Windows 环境在 pyvenv.cfg 保存基础解释器；只改已知路径元数据，wheel、启动器、依赖、任意配置与外部路径原样保留。
     private static async Task RelocateUvRuntimeConfigAsync(string sourceRoot, string targetRoot, CancellationToken cancellationToken)
     {
         string sourceMcp = Path.Combine(sourceRoot, "MCP");
@@ -154,6 +159,7 @@ internal static class ExtensionConfigurationMigration
         {
             // uv 0.12 writes [tool].python and entrypoints=[{install-path=...}].
             // Token boundaries prevent quoted requirements/comments from matching keys.
+            // uv 0.12 使用 [tool].python 与 entrypoints 的 install-path；按 token 边界识别键，避免误匹配引号中的依赖或注释。
             var tokens = TokenizeToml(text);
             var replacements = new List<(int Start, int Length, string Text)>();
             bool toolTable = false, statementStart = true;
@@ -206,6 +212,7 @@ internal static class ExtensionConfigurationMigration
                 string? relocated = RelocateRuntimePath(value);
                 if (relocated is null) return;
                 // JSON basic strings are valid TOML basic strings; never substitute inside a binary or arbitrary string.
+                // JSON 基本字符串也符合 TOML 基本字符串语法；绝不替换二进制或任意字符串内部内容。
                 replacements.Add((token.Start, token.Value.Length, JsonSerializer.Serialize(relocated.Replace('\\', '/'))));
             }
         }
@@ -293,7 +300,7 @@ internal static class ExtensionConfigurationMigration
                 || directories.Any(node => node is not JsonValue value || !value.TryGetValue<string>(out string? path) || string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)))
                 throw InvalidConfig();
             if (config["disabledSkills"] is JsonNode disabled && (disabled is not JsonArray list || list.Count > 4096 || list.Any(node =>
-                node is not JsonValue value || !value.TryGetValue<string>(out string? id) || id.Length != 24 || id.Any(c => !"0123456789abcdef".Contains(c)))))
+                node is not JsonValue value || !value.TryGetValue<string>(out string? id) || id.Length != 24 || id.Any(character => !"0123456789abcdef".Contains(character)))))
                 throw InvalidConfig();
             if (config["disabledOfficialMcpServers"] is JsonNode hidden &&
                 (hidden is not JsonArray hiddenList || hiddenList.Count > 64 || hiddenList.Any(node => !IsPresetId(node))))

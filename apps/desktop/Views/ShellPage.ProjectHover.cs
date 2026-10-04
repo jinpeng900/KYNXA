@@ -32,6 +32,7 @@ public sealed partial class ShellPage
         catch (ArgumentException)
         {
             // PointerExited/LostFocus can arrive while XAML detaches this root.
+            // XAML 移除当前根节点时，PointerExited 或 LostFocus 仍可能到达。
             return false;
         }
         if (child is Control control && control.FocusState != FocusState.Keyboard) return false;

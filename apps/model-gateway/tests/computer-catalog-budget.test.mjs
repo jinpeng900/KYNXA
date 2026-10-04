@@ -20,6 +20,7 @@ for (const protocol of protocols) test(`${protocol}: an unchanged 8K connection 
     capabilities: async () => ({ protocolVersion: 1, boundary: 'host-desktop', available: true,
       interactiveWindows: true, operations: desktopActions }),
     // No real application is opened or controlled. The actual runtime/broker/schema and archive paths are exercised.
+    // 验证真实运行时、权限代理、schema 与归档链路；不打开或控制真实软件。
     run: async action => { actions.push(action); return { value: { completed: true, action, boundary: 'host-desktop' }, isError: false }; }
   };
   const f = await toolFixture(t, { desktopRunner });

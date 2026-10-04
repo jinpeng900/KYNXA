@@ -1,5 +1,6 @@
 // Explicit live publisher discovery only. This is not part of the offline Node test suite.
 // No tools are called, no account environment is inherited, and every stdio profile/cache is temporary.
+// 仅用于显式发现上游服务，不属于离线 Node 测试套件；不调用工具或继承账号环境，stdio 配置与缓存均为临时数据。
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';

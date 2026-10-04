@@ -1,5 +1,6 @@
 // Explicit live acceptance against pinned public packages and a disposable local page.
 // No user configuration, logged-in profile, external website or paid model is touched.
+// 使用固定版本的公开包和临时本地页面进行显式验收；不触及用户配置、登录资料、外部网站或付费模型。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -52,6 +53,7 @@ try {
       } else {
         // Start with a snapshot, not a hidden tabs RPC. An unbound snapshot stays
         // readable, while later reference actions require explicit tab discovery.
+        // 从快照开始，不暗中查询标签页；未绑定快照仍可读取，后续引用操作需要显式发现标签页。
         const initial = await call('browser_snapshot');
         item.firstSnapshotUnbound = initial.result.browser.needsTabDiscovery === true || !initial.result.browser.tabId;
         await call('browser_tabs', { action: 'list' }); await call('browser_navigate', { url });

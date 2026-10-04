@@ -33,7 +33,10 @@ function remoteBrowser(server) {
   } catch { return true; }
 }
 
-/** Header/structure bounds precede native image decoding in the local viewer. */
+/**
+ * Header/structure bounds precede native image decoding in the local viewer.
+ * 本地查看器原生解码图片前，先检查文件头和结构边界。
+ */
 export function inspectScreenshotImage(bytes, declaredMime) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > maximumImageBytes) return null;
   let mimeType, width, height;
@@ -105,7 +108,7 @@ async function artifactPaths(server, context, args, result) {
       const canonical = await realpath(root);
       if (!(await inspectLocalPath(canonical)).isDirectory()) continue;
       aliases.push({ lexical: root, canonical });
-    } catch { /* Invalid configured roots cannot grant access to artifact paths. */ }
+    } catch { /* Invalid configured roots cannot grant access to artifact paths. 无效的配置根目录不能授予附件路径访问权限。 */ }
   }
   const normalize = value => {
     const path = safePath(value, cwd);
@@ -113,6 +116,7 @@ async function artifactPaths(server, context, args, result) {
     for (const root of aliases) {
       // Win32 expands 8.3 paths in browser receipts. Only known roots gain aliases;
       // an arbitrary path is never resolved to discover a wider read boundary.
+      // Win32 会在浏览器回执中展开 8.3 短路径；只为已知根目录建立别名，不解析任意路径来扩大读取范围。
       if (within(root.lexical, path)) return resolve(root.canonical, relative(root.lexical, path));
       if (within(root.canonical, path)) return path;
     }
@@ -122,6 +126,7 @@ async function artifactPaths(server, context, args, result) {
   let candidates = supplied === undefined ? [] : [supplied];
   // Chrome normalizes .jpg to .jpeg (and other extensions to the capture format).
   // Accept only its explicit saved-file receipt with the same requested stem.
+  // Chrome 会按截图格式规范化扩展名，例如将 .jpg 改为 .jpeg；只接受文件主名与请求一致的明确保存回执。
   if (args.filePath !== undefined) {
     const requested = normalize(args.filePath), reported = []; let hasReceipt = false;
     for (const block of result.content ?? []) {
@@ -137,6 +142,7 @@ async function artifactPaths(server, context, args, result) {
   }
   // Only the known screenshot tool's explicit Markdown output links are considered.
   // A configured output root is required for generated paths; arbitrary result text never widens scope.
+  // 仅识别已知截图工具明确返回的 Markdown 文件链接；生成路径必须有配置的输出根目录，任意结果文本不能扩大范围。
   if (supplied === undefined && output) for (const block of result.content ?? []) {
     if (block.type !== 'text' || typeof block.text !== 'string' || block.text.length > 65536) continue;
     for (const match of block.text.matchAll(/\[(?:Screenshot[^\]\r\n]*|Page screenshot)\]\(([^)\r\n]+)\)/g)) candidates.push(match[1]);
@@ -154,6 +160,7 @@ async function readImage(path, signal) {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.nlink !== 1 || opened.size !== original.size || opened.ino !== original.ino || opened.dev !== original.dev) return null;
     // Allocate only the bounded length from the opened receipt; a growing file cannot allocate unbounded memory.
+    // 仅按已打开回执的受限长度分配内存，防止文件持续增长导致无限分配。
     const bytes = Buffer.alloc(opened.size); let offset = 0;
     while (offset < bytes.length) {
       signal?.throwIfAborted();
@@ -168,7 +175,10 @@ async function readImage(path, signal) {
   } finally { await handle?.close(); }
 }
 
-/** Preserve every upstream block/field; append verified media without rewriting third-party metadata. */
+/**
+ * Preserve every upstream block/field; append verified media without rewriting third-party metadata.
+ * 保留上游所有块和字段，只追加已验证媒体，不改写第三方元信息。
+ */
 export async function archiveBrowserScreenshot(result, { descriptor, server = {}, context = {}, args = {}, signal } = {}) {
   const canonical = structuredClone(result);
   if (!isBrowserScreenshotTool(descriptor) || result.isError) return { canonical };

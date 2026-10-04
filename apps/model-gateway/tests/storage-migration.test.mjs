@@ -52,12 +52,14 @@ async function fixture(custom = false) {
 for (const custom of [false, true]) test(`storage move preserves canonical conversations and remaps managed folders (${custom ? 'custom' : 'standard'} root)`, async () => {
   const f = await fixture(custom);
   await mkdir(f.target); // Folder picker can return an empty existing directory.
+  // 文件夹选择器可能返回已存在的空目录。
   const result = await migrateStorage(f);
   assert.equal(result.verifiedFiles, 21);
   const catalog = JSON.parse(await readFile(join(f.target, 'catalog.json'), 'utf8'));
   assert.equal(catalog.Projects[0].FolderPath, join(f.target, 'Desktop', 'Projects', 'one'));
   assert.equal(catalog.Projects[1].FolderPath, f.external);
   // Target initialization applies and removes the copied transaction before activation.
+  // 目标初始化在激活之前应用并清除复制的事务。
   await assert.rejects(access(join(f.target, '.catalog-transaction.json')), { code: 'ENOENT' });
   const managedManifest = JSON.parse(await readFile(join(f.target, 'Projects', 'one', 'project.json'), 'utf8'));
   const externalManifest = JSON.parse(await readFile(join(f.target, 'Projects', 'two', 'project.json'), 'utf8'));
@@ -89,6 +91,7 @@ test('storage move rejects canonical destination overlap and concurrent source c
   await assert.rejects(migrateStorage({ ...f, progress: () => {
     // The callback runs immediately before the final source verification.
     // Use a synchronous fixture mutation to deterministically simulate another writer.
+    // 回调紧邻最终源数据校验之前执行；同步修改测试夹具，以确定地模拟另一个写入者。
     writeFixtureChange(join(f.conversations, 'catalog.json'));
   } }), /Source files changed/);
   assert.equal(await readFile(f.pointer, 'utf8'), pointerBefore);

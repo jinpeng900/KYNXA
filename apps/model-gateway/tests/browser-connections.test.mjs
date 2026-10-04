@@ -25,12 +25,14 @@ test('browser prompt belongs to the captured catalog and preserves current capab
     server('fixture-browser', ['chrome-devtools-mcp@1.10.1', '--autoConnect'])] });
   const disconnected = await f.context();
   await f.service.catalog(disconnected); // A configured service without a discovered directory is not a ready capability.
+  // 仅配置服务但未发现工具目录，不视为已就绪的能力。
   assert.doesNotMatch(await f.service.systemPrompt(disconnected), /Browser MCP fixture-browser:/);
   assert.equal(f.service.mcp.connections.size, 0, 'Passive discovery never starts a real browser or account connection');
   let remote = [{ name: 'mcp.fixture-browser.list_pages', description: 'List only synthetic fixture pages.',
     source: 'mcp:fixture-browser', serverId: 'fixture-browser', toolName: 'list_pages',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } }];
   // Model a discovered directory explicitly; no process or browser action is performed by this test.
+  // 显式模拟已发现的工具目录；本测试不启动进程或操作浏览器。
   f.service.mcp.catalog = async () => remote;
   const context = await f.context();
   await f.service.catalog(context);

@@ -10,12 +10,14 @@ import { extensionCacheDirectories } from './extension-storage.mjs';
 
 // Pinned modern stdio uses the SDK's documented in-place negotiation path,
 // avoiding the disposable sibling-process probe used for the base class.
+// 固定现代 stdio 协议使用 SDK 公开的原位协商路径，避免基类通过临时同级进程探测。
 const executeFile = promisify(execFile);
 class OwnedWindowsStdioTransport extends StdioClientTransport {
   async close() {
     if (this.ownedClose) return this.ownedClose;
     // Capture the SDK-owned root while it is still alive. Killing that root
     // first would orphan npx/npm's Node descendants and keep their pipes open.
+    // 趁 SDK 拥有的根进程仍存活时记录其身份；先杀根进程会使 npx/npm 的 Node 子进程失去父进程并保持管道打开。
     const pid = this.pid;
     this.ownedClose = (async () => {
       let failure;
@@ -28,6 +30,7 @@ class OwnedWindowsStdioTransport extends StdioClientTransport {
         } catch (error) {
           // 128 means the SDK-owned root exited before teardown. Do not search
           // for or kill unrelated processes based on names or broad patterns.
+          // 退出码 128 表示 SDK 根进程已在清理前退出；不按名称或宽泛模式查找和终止其他进程。
           if (error.code !== 128) failure = toolFailure('MCP 自有进程清理未完成。', 'MCP_PROCESS_CLEANUP_FAILED', 502);
         }
       }
@@ -50,7 +53,10 @@ function environment(name) {
   return value;
 }
 
-/** Never propagate SDK messages: they can contain URLs, headers or process arguments. */
+/**
+ * Never propagate SDK messages: they can contain URLs, headers or process arguments.
+ * 不直接传播 SDK 错误消息，因为其中可能包含 URL、请求头或进程参数。
+ */
 export function mcpFailure(error, fallback = 'MCP_CONNECTION_FAILED') {
   const code = error?.code ?? error?.cause?.code;
   if (LOCAL_CODES.has(error?.code))
@@ -68,6 +74,7 @@ export async function createMcpTransport(server, context, { fetch: fetchImpl = g
   const value = normalizeMcpConnection(server);
   if (value.transport === 'stdio') {
     // A shipped configuration template is enabled but cannot execute until its path is supplied.
+    // 随包配置模板默认启用，但必填路径未填写前不能执行。
     if (value.args.some(argument => argument.includes('<absolute-path-to-')))
       throw toolFailure('MCP 配置模板中的文件路径尚未填写。', 'MCP_CONFIG_REQUIRED', 409);
     const env = { ...getDefaultEnvironment(), ...value.env };
@@ -83,6 +90,7 @@ export async function createMcpTransport(server, context, { fetch: fetchImpl = g
         env[name] = directory;
       }
       // Copied package files can move with Extensions without cross-root hard links.
+      // 复制的包文件可随 Extensions 移动，不依赖跨根目录硬链接。
       if (!explicit.has('uv_link_mode')) env.UV_LINK_MODE = 'copy';
     }
     const Transport = server.protocolVersion === MODERN_MCP_PROTOCOL ? PinnedModernStdioTransport : StdioTransport;
@@ -96,6 +104,7 @@ export async function createMcpTransport(server, context, { fetch: fetchImpl = g
   const issuerOrigin = value.auth?.issuer ? new URL(value.auth.issuer).origin : undefined;
   // Auth discovery may follow metadata links. Credentials and requests remain
   // confined to the configured resource / issuer origins; redirects are refused.
+  // 认证发现可能跟随元数据链接；凭据和请求仅限配置的资源或签发者来源，并拒绝重定向。
   const safeFetch = async (input, init = {}) => {
     const url = new URL(input instanceof Request ? input.url : input);
     mcpUrl(url.href);
@@ -117,6 +126,7 @@ export async function createMcpTransport(server, context, { fetch: fetchImpl = g
     await auth(provider, { serverUrl: value.url, scope: value.auth.scope, fetchFn: safeFetch });
     // Authentication happens during explicit connection only. Expose token()
     // without onUnauthorized so a completed tool POST is never retried for auth.
+    // 仅在显式连接时认证；只提供 token()，不接入 onUnauthorized，防止已完成的工具 POST 因认证重试。
     authProvider = { token: async () => provider.tokens()?.access_token };
   }
   return new StreamableHTTPClientTransport(new URL(value.url), { requestInit: { headers, redirect: 'error' },

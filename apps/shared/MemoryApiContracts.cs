@@ -22,6 +22,7 @@ public enum MemoryInputError
 }
 
 /// <summary>Matches the gateway's UTF-16 content limit without changing the user's editor text.</summary>
+/// <remarks>与网关的 UTF-16 内容长度限制保持一致，不改写用户的编辑文本。</remarks>
 public static class MemoryInputValidation
 {
     public const int MaximumContentLength = 4000;

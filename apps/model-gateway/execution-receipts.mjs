@@ -19,28 +19,32 @@ function toolReceipt(activity) {
       ? { resultRef: activity.resultRef.id.toLowerCase() } : {}) };
 }
 
-/** Keep execution identity across turns without reintroducing stages or private result payloads. */
+/**
+ * Keep execution identity across turns without reintroducing stages or private result payloads.
+ * 跨轮保留执行身份，但不重新注入过程段落或私有结果内容。
+ */
 export function executionReceiptContext(history, beforeUserId, { maxTokens = MAX_EXECUTION_RECEIPT_TOKENS } = {}) {
   if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) return '';
-  const budget = Math.min(maxTokens, MAX_EXECUTION_RECEIPT_TOKENS);
+  const receiptBudgetTokens = Math.min(maxTokens, MAX_EXECUTION_RECEIPT_TOKENS);
   const render = turns => `${notice}\n${JSON.stringify({ version: 1, turns })}`;
   const recent = completedTurns(history, beforeUserId).filter(({ user, assistant }) => {
     const reply = messageId(assistant.ReplyTo), userId = messageId(user.Id);
     return reply && userId && reply.toLowerCase() === userId.toLowerCase() && messageId(assistant.Id);
   }).slice(-MAX_TURNS);
   const included = [];
-  let count = 0;
+  let includedToolCount = 0;
   // Prefer newer turns and their latest calls when the explicit metadata budget is tight.
+  // 元数据预算紧张时，优先保留较新轮次及其最近调用。
   for (const { assistant } of recent.reverse()) {
     const tools = [];
     const activities = Array.isArray(assistant.ToolActivities) ? assistant.ToolActivities : [];
     for (const activity of activities.slice(-MAX_TOOLS).reverse()) {
-      if (count >= MAX_TOOLS) break;
+      if (includedToolCount >= MAX_TOOLS) break;
       const receipt = toolReceipt(activity);
       if (!receipt) continue;
       const candidate = [{ assistantMessageId: messageId(assistant.Id), tools: [receipt, ...tools] }, ...included];
-      if (estimateTokens(render(candidate)) > budget) continue;
-      tools.unshift(receipt); count++;
+      if (estimateTokens(render(candidate)) > receiptBudgetTokens) continue;
+      tools.unshift(receipt); includedToolCount++;
     }
     if (tools.length) included.unshift({ assistantMessageId: messageId(assistant.Id), tools });
   }

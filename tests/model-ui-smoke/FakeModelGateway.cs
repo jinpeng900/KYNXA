@@ -9,7 +9,9 @@ namespace ModelUiSmoke;
 
 internal sealed record ReceivedModelRequest(string Path, ModelConnection Connection);
 
-/// <summary>A loopback-only gateway that records synthetic model settings and never calls an upstream model.</summary>
+/// <summary>A loopback-only gateway that records synthetic model settings and never calls an upstream model.
+/// 仅使用回环网关记录虚构模型设置，不调用真实上游模型。
+/// </summary>
 internal sealed class FakeModelGateway : IAsyncDisposable
 {
     private readonly HttpListener _listener = new();
@@ -139,6 +141,7 @@ internal sealed class FakeModelGateway : IAsyncDisposable
         catch (Exception error) when (error is HttpListenerException or IOException)
         {
             // Closing the owned native window aborts its pending HTTP response.
+            // 关闭自有原生窗口会取消其待处理的 HTTP 响应。
         }
         catch (Exception error) { Failure = error; }
         finally { context.Response.Close(); }

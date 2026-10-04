@@ -23,7 +23,10 @@ function relevanceScore(tool, signals) {
   return score;
 }
 
-/** Discovery can be large; only a bounded, explicitly selected projection enters a model request. */
+/**
+ * Discovery can be large; only a bounded, explicitly selected projection enters a model request.
+ * 工具发现目录可以很大，但只有明确选定且受预算限制的视图进入模型请求。
+ */
 export class ModelToolCatalog {
   constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [] } = {}) {
     this.descriptors = descriptors.filter(tool => tool.enabled !== false);
@@ -54,6 +57,7 @@ export class ModelToolCatalog {
     if (requested.some(tool => !tool)) throw toolFailure('工具不存在或已禁用。', 'TOOL_NOT_FOUND', 404);
     // Explicit discovery may replace ordinary builtin schemas as well as remote ones.
     // Keeping every builtin prevents a small-window model from ever loading the requested capability.
+    // 显式发现可以替换普通内置 schema 或远程 schema；小窗口模型若强制保留全部内置工具，将无法装入请求的能力。
     const keep = this.descriptors.filter(tool => discoveryNames.has(tool.name));
     const next = [...keep];
     for (const descriptor of requested) if (!next.some(tool => tool.name === descriptor.name)) next.push(descriptor);

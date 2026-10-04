@@ -12,6 +12,7 @@ const MAX_OWNER_BYTES = 1024;
 function identity(conversationId) {
   const id = validateId(conversationId).toLowerCase();
   // Older formal IDs stay unchanged. A durable owner marker prevents a chosen UUID from claiming their hashed directory.
+  // 旧正式 ID 保持不变；持久化归属标记避免任意 UUID 占用其他 ID 对应的哈希目录。
   const folderId = UUID.test(id) ? id : validateId(createHash('sha256')
     .update('kynxa-conversation-workspace/v1:' + id).digest('hex').slice(0, 32));
   return { id, folderId };
@@ -33,7 +34,10 @@ async function directory(path) {
     throw toolFailure('聊天工具工作区结构无效。', 'UNSAFE_TOOL_PATH', 403);
 }
 
-/** Persistent per-chat generated files, separate from formal messages and memory. No snapshot write-back or cleanup. */
+/**
+ * Persistent per-chat generated files, separate from formal messages and memory. No snapshot write-back or cleanup.
+ * 每个聊天的生成文件持久保存，并与正式消息、记忆分开，不执行快照回写或自动清理。
+ */
 export class ConversationWorkspaces {
   constructor({ root } = {}) {
     this.root = absoluteLocalPath(root);
@@ -45,7 +49,10 @@ export class ConversationWorkspaces {
     return join(this.folder, identity(conversationId).folderId);
   }
 
-  /** Owned scope metadata is not an editable generated artifact. Protect its aliases in the filesystem broker. */
+  /**
+   * Owned scope metadata is not an editable generated artifact. Protect its aliases in the filesystem broker.
+   * 范围归属元数据不是可编辑生成物，其路径别名也受文件代理保护。
+   */
   isControlPath(path) {
     return typeof path === 'string' && isAbsolute(path) && [...this.folderAliases].some(folder => within(folder, path)) &&
       basename(path).toLowerCase() === OWNER_FILE;
@@ -79,10 +86,14 @@ export class ConversationWorkspaces {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       // A concurrent owner must match; do not overwrite a marker or infer ownership from the directory name.
+      // 并发创建者必须具有相同归属，不覆盖标记，也不从目录名称推断归属。
     } finally { await handle?.close(); }
   }
 
-  /** Lazily initialize one chat. Reopening returns the same files; no catalog ownership is created or changed. */
+  /**
+   * Lazily initialize one chat. Reopening returns the same files; no catalog ownership is created or changed.
+   * 按需初始化单个聊天，重开复用同一批文件，不创建或改变目录中的正式归属。
+   */
   async ensure(conversationId) {
     const path = this._path(conversationId), previous = workspaceQueues.get(path) ?? Promise.resolve();
     const pending = previous.catch(() => {}).then(async () => {
@@ -97,7 +108,10 @@ export class ConversationWorkspaces {
     finally { if (workspaceQueues.get(path) === pending) workspaceQueues.delete(path); }
   }
 
-  /** Recheck the exact root before execution/approval. Children, siblings and link replacements never qualify. */
+  /**
+   * Recheck the exact root before execution/approval. Children, siblings and link replacements never qualify.
+   * 审批或执行前重新验证精确根目录，子目录、同级目录和链接替换均不符合条件。
+   */
   async verify(conversationId, path) {
     const expected = this._path(conversationId), candidate = absoluteLocalPath(path);
     let existing;

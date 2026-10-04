@@ -80,6 +80,7 @@ public partial class App : Application
             follow.ContentChanged(); await Settle(); Bottom($"growth {i} follows bottom");
         }
         // Rich-text block edits and width/viewport changes exercise delayed layout reflow.
+        // 修改富文本块和视口宽度，验证延迟的布局重排。
         reply.Blocks.Clear();
         AddParagraph("# 最终内容\n" + new string('排', 3500));
         follow.ContentChanged(); await Settle(); Bottom("final rich-text reconciliation follows bottom");

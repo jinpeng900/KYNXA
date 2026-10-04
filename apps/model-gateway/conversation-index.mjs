@@ -21,6 +21,7 @@ function requiredText(value) {
 }
 
 // Index only sidebar metadata. Transcripts, drafts, credentials and memory never enter SQLite.
+// SQLite 只索引侧栏元数据，不收录正文、草稿、凭据或记忆。
 function projection(document) {
   if (!document || document.Version !== 1 || !Number.isSafeInteger(document.Revision) || document.Revision < 0 ||
       !Array.isArray(document.Projects) || !Array.isArray(document.Chats)) throw invalid();
@@ -63,6 +64,7 @@ async function inspectLocation(root, directory, filename) {
   const info = await inspect(filename);
   // We never keep connections open or use WAL. A sidecar here can belong to an external
   // process; replacing its database could invalidate that process, so leave both intact.
+  // 不保留数据库连接，也不使用 WAL；旁路文件可能属于外部进程，遇到它们时保留原数据库和旁路文件。
   for (const suffix of ['-wal', '-shm', '-journal']) {
     if (await inspect(filename + suffix))
       throw failure('索引正在被其他程序使用，请关闭该程序后重试。', 'CONVERSATION_INDEX_BUSY');
@@ -94,6 +96,7 @@ function inspectDatabase(DatabaseSync, filename, data) {
     if (version !== schemaVersion || database.prepare('PRAGMA quick_check').all().some(row => row.quick_check !== 'ok'))
       return { corrupt: true, unchanged: false };
     // Check required columns even if the cached fingerprint happens to match.
+    // 即使缓存指纹一致，仍需检查必需的列。
     database.prepare('SELECT id, name, workspace_path, sort_order, pinned, archived FROM projects LIMIT 0').all();
     database.prepare('SELECT id, project_id, title, sort_order, pinned, archived, workspace_path FROM sessions LIMIT 0').all();
     const metadata = Object.fromEntries(database.prepare('SELECT key, value FROM metadata').all().map(row => [row.key, row.value]));
@@ -104,6 +107,7 @@ function inspectDatabase(DatabaseSync, filename, data) {
   } catch (error) {
     if (error.code === 'UNSUPPORTED_INDEX_VERSION') throw error;
     // Opening or reading a disposable, invalid SQLite file never affects canonical JSONL.
+    // 打开或读取无效的可重建 SQLite 缓存，不得影响正式 JSONL 记录。
     if (error.code === 'ERR_SQLITE_ERROR') return { corrupt: true, unchanged: false };
     throw error;
   } finally { database?.close(); }
@@ -147,7 +151,10 @@ function sameFile(before, after) {
     before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs;
 }
 
-/** Read-only preflight for callers to run BEFORE committing canonical catalog changes. */
+/**
+ * Read-only preflight for callers to run BEFORE committing canonical catalog changes.
+ * 调用方应在提交正式目录变更前执行只读预检查。
+ */
 export async function inspectConversationIndex(root) {
   if (typeof root !== 'string' || !root.trim()) throw invalid();
   root = resolve(root);
@@ -164,6 +171,7 @@ async function rebuild(root, data) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const original = await inspectLocation(root, directory, filename);
   // Read the header first so even a newer file with damaged tables is never replaced.
+  // 先检查文件头，避免替换表结构损坏但版本更新的数据库。
   if (original) checkVersion(await headerVersion(filename));
   sqlite ??= import('node:sqlite');
   const { DatabaseSync } = await sqlite;
@@ -174,6 +182,7 @@ async function rebuild(root, data) {
   let recoveredPath;
   try {
     // Reserve exclusively before SQLite opens the file, avoiding an existing link/file.
+    // SQLite 打开文件前先独占创建临时路径，避免误用已有文件或链接。
     const reservation = await open(temporary, 'wx', 0o600);
     await reservation.close();
     writeDatabase(DatabaseSync, temporary, data);
@@ -190,6 +199,7 @@ async function rebuild(root, data) {
   } finally {
     // SQLite only ever writes the uniquely reserved temporary database. All handles are
     // closed before replacement, keeping the whole Data directory movable on Windows.
+    // SQLite 只写入独占创建的临时数据库；替换前关闭所有句柄，保证 Windows 下整个 Data 目录可移动。
     for (const path of [temporary, temporary + '-journal']) {
       const info = await inspect(path);
       if (info) await unlink(path);
@@ -197,7 +207,10 @@ async function rebuild(root, data) {
   }
 }
 
-/** Rebuildable metadata cache. Canonical catalog/events remain authoritative. */
+/**
+ * Rebuildable metadata cache. Canonical catalog/events remain authoritative.
+ * 元数据缓存可重建；正式目录与事件日志才是权威来源。
+ */
 export function rebuildConversationIndex(root, document) {
   if (typeof root !== 'string' || !root.trim()) return Promise.reject(invalid());
   root = resolve(root);

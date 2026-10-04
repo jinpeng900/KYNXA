@@ -10,7 +10,10 @@ using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop;
 
-/// <summary>Edits gateway configuration and displays skills as text; reading never starts an MCP process.</summary>
+/// <summary>
+/// Edits gateway configuration and displays skills as text; reading never starts an MCP process.
+/// 编辑网关配置并以文本展示技能；读取配置不会启动 MCP 进程。
+/// </summary>
 public sealed partial class ToolManagementWindow : Window
 {
     private readonly IAgentApi _api;
@@ -787,6 +790,7 @@ public sealed partial class ToolManagementWindow : Window
         var servers = _config.McpServers.Select(item => item.Id == server.Id ? replacement : item).ToArray();
         if (await SaveAsync(servers, saveDirectories: false) && !_closed) FillTool(_editingTool);
         // A conflict preserves this checkbox draft. An explicit second save uses the freshly loaded revision.
+        // 发生冲突时保留复选框草稿；用户再次明确保存时使用新加载的版本号。
     }
 
     private Task<bool> ConfirmDiscardAsync() => !_serverDirty && !_directoriesDirty && !_toolDirty && !_skillDirty ? Task.FromResult(!_dialogOpen) :

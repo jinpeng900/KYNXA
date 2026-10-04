@@ -18,9 +18,9 @@ const contentTypes = {
   ".svg": "image/svg+xml"
 };
 
-function safeFile(root, requestPath) {
-  const candidate = resolve(root, `.${requestPath}`);
-  return candidate === root || candidate.startsWith(`${root}${sep}`) ? candidate : null;
+function resolveSafeAssetPath(root, requestPath) {
+  const candidatePath = resolve(root, `.${requestPath}`);
+  return candidatePath === root || candidatePath.startsWith(`${root}${sep}`) ? candidatePath : null;
 }
 
 export function createPreviewServer({ modelApi = process.env.KYNXA_MODEL_API_URL ?? "http://127.0.0.1:5218" } = {}) {
@@ -47,19 +47,19 @@ export function createPreviewServer({ modelApi = process.env.KYNXA_MODEL_API_URL
       pathname = "/index.html";
     }
 
-    const file = safeFile(root, pathname);
-    if (!file) {
+    const filePath = resolveSafeAssetPath(root, pathname);
+    if (!filePath) {
       response.writeHead(400).end("Invalid path");
       return;
     }
 
     try {
-      const body = await readFile(file);
+      const assetContent = await readFile(filePath);
       response.writeHead(200, {
-        "Content-Type": contentTypes[extname(file)] ?? "application/octet-stream",
+        "Content-Type": contentTypes[extname(filePath)] ?? "application/octet-stream",
         "Cache-Control": "no-cache"
       });
-      response.end(body);
+      response.end(assetContent);
     } catch (error) {
       response.writeHead(error?.code === "ENOENT" ? 404 : 500).end("Not found");
     }

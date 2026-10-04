@@ -1,4 +1,7 @@
-/** Keep both diagnostic ends; the omission marker never disguises this as complete output. */
+/**
+ * Keep both diagnostic ends; the omission marker never disguises this as complete output.
+ * 保留诊断开头和结尾，省略标记明确说明内容不完整。
+ */
 export function toolOutputExcerpt(value, maximumCharacters) {
   const text = String(value ?? '');
   if (maximumCharacters <= 0) return '';

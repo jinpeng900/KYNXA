@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 
 // A protocol fixture only: it never executes the supplied script as a command.
+// 仅为协议夹具；不会将提供的脚本作为命令执行。
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(false);
 string? input = await Console.In.ReadLineAsync();
@@ -40,6 +41,7 @@ string delta = "分段中文UTF8输出\n";
 string frame = JsonSerializer.Serialize(new { protocolVersion = 2, boundary = "host-terminal", @event = "host_terminal_output",
     sequence = 1, stream = "stdout", delta }, JsonOptions());
 // Split inside a multibyte UTF-8 character, not only between complete protocol lines.
+// 在 UTF-8 多字节字符内部拆分数据，不只在完整协议行之间拆分。
 byte[] bytes = Encoding.UTF8.GetBytes(frame + "\n");
 int split = Array.IndexOf(bytes, (byte)0xe5) + 1;
 using (Stream output = Console.OpenStandardOutput())

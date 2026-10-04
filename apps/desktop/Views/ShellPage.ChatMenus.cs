@@ -14,7 +14,7 @@ public sealed partial class ShellPage
     private void StandaloneChatMore_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: RecentConversation item } button) return;
-        var chat = _standaloneChats.FirstOrDefault(c => c.Id == item.Id);
+        var chat = _standaloneChats.FirstOrDefault(candidateChat => candidateChat.Id == item.Id);
         if (chat is null) return;
         ShowSidebarMenu(button, CreateChatMenu(chat));
     }

@@ -2,11 +2,15 @@ namespace KYNXA_Desktop.Services;
 
 public sealed record ModelDetail(string Id, string Name);
 
-/// <summary>Official chat model IDs and names, checked 2026-10-01. Account access is discovered separately.</summary>
+/// <summary>
+/// Official chat model IDs and names, checked 2026-10-01. Account access is discovered separately.
+/// 官方聊天模型 ID 与名称核对于 2026-10-01；账户实际访问权限另行发现。
+/// </summary>
 public static class ModelCatalog
 {
     // Keep each ID/name pair in one place; presets and picker labels share this catalog.
     // Excludes retired models, duplicate aliases and models requiring unrelated endpoints.
+    // ID 与名称只维护一处，预设与选择器共用；排除退役模型、重复别名与需要其他端点的模型。
     private static readonly IReadOnlyDictionary<string, ModelDetail[]> ByProvider = new Dictionary<string, ModelDetail[]>
     {
         // https://api-docs.deepseek.com/quick_start/pricing/

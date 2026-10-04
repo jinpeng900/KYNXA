@@ -13,6 +13,7 @@ internal static class NativeUi
     public static void RequestClose(Window window)
     {
         // Window.Close() bypasses the native AppWindow.Closing request path.
+        // Window.Close() 绕过原生 AppWindow.Closing 的关闭请求路径。
         if (!PostMessage(WinRT.Interop.WindowNative.GetWindowHandle(window), 0x0010, 0, 0))
             throw new InvalidOperationException("Posting a native WM_CLOSE request failed.");
     }
@@ -51,6 +52,7 @@ internal static class NativeUi
         {
             // WinUI multiline editors expose Text rather than the writable Value pattern.
             // Setting the real control's Text still exercises its production TextChanged event.
+            // WinUI 多行编辑器公开 Text 而非可写 Value 模式；设置真实控件的 Text 仍会触发生产 TextChanged 事件。
             textBox.Text = value;
         }
     }

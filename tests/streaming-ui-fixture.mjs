@@ -1,5 +1,6 @@
 // Isolated upstream + real gateway for native desktop streaming checks. No provider credentials.
 // Usage: node tests/streaming-ui-fixture.mjs <empty temporary data directory>
+// 原生桌面流式检查使用隔离上游和真实网关，不使用供应商凭据；启动参数为独立的空临时数据目录。
 import { createServer } from 'node:http';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';

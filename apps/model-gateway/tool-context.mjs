@@ -28,7 +28,10 @@ function completeToolPairs(messages) {
     results.length === calls.length && new Set(results).size === results.length && results.every(id => calls.includes(id));
 }
 
-/** Request-only projection: never writes history or replays a completed operation. */
+/**
+ * Request-only projection: never writes history or replays a completed operation.
+ * 仅生成当前请求视图，不写历史，也不重放已完成操作。
+ */
 export class ToolContextProjection {
   constructor({ protocol, messages, historySources = [], conversationId } = {}) {
     this.protocol = protocol;
@@ -150,22 +153,22 @@ export class ToolContextProjection {
   }
 
   compact(messages, { system = '', declarations = [], inputBudgetTokens } = {}) {
-    const hardLimit = Number.isFinite(inputBudgetTokens) ? Math.max(0, Math.floor(inputBudgetTokens)) : Infinity;
-    const schemaTokens = estimateTokens(JSON.stringify(declarations)), cost = value => estimateToolMessageTokens(value, system) + schemaTokens;
-    const beforeTokens = cost(messages), target = Math.floor(hardLimit * 0.85);
-    if (beforeTokens <= hardLimit * 0.9) return { messages };
+    const hardInputLimitTokens = Number.isFinite(inputBudgetTokens) ? Math.max(0, Math.floor(inputBudgetTokens)) : Infinity;
+    const schemaTokens = estimateTokens(JSON.stringify(declarations)), estimateProjectionTokens = value => estimateToolMessageTokens(value, system) + schemaTokens;
+    const beforeTokens = estimateProjectionTokens(messages), targetInputTokens = Math.floor(hardInputLimitTokens * 0.85);
+    if (beforeTokens <= hardInputLimitTokens * 0.9) return { messages };
     let projected = messages, changed = false, currentTokens = beforeTokens;
     const latestRound = this.latestResultRound;
-    const compactResults = (sizes, selected, targetTokens, latest = false) => {
-      for (const previewCharacters of sizes) {
+    const compactResults = (previewSizesCharacters, selected, targetTokens, latest = false) => {
+      for (const previewCharacters of previewSizesCharacters) {
         if (currentTokens <= targetTokens) break;
         for (const location of this._resultLocations(projected).filter(item => selected(item.source))
           .sort((left, right) => left.source.round - right.source.round)) {
           if (currentTokens <= targetTokens) break;
           if (location.source.previewCharacters <= previewCharacters) continue;
           const text = this._resultText(location.source, previewCharacters);
-          const oldCost = estimateTokens(location.value[location.source.field]), newCost = estimateTokens(text);
-          if (newCost >= oldCost) continue;
+          const previousTokens = estimateTokens(location.value[location.source.field]), replacementTokens = estimateTokens(text);
+          if (replacementTokens >= previousTokens) continue;
           const replacement = { ...location.value, [location.source.field]: text };
           this.results.set(replacement, { ...location.source, previewCharacters });
           this._copyHistory(location.value, replacement);
@@ -177,7 +180,7 @@ export class ToolContextProjection {
             this._copyHistory(owner, replacementOwner);
             projected[location.index] = replacementOwner;
           } else projected[location.index] = replacement;
-          currentTokens += newCost - oldCost;
+          currentTokens += replacementTokens - previousTokens;
           this.compactedResults.add(location.source.callId);
           if (latest) this.compactedLatestResults.add(location.source.callId);
           changed = true;
@@ -185,9 +188,11 @@ export class ToolContextProjection {
       }
     };
     // Prefer earlier results, keeping the latest round verbatim when it fits.
-    compactResults([4096, 1024, 128, 0], source => source.round < latestRound, target);
+    // 优先裁减较早结果，最近轮次在容量允许时保持原文。
+    compactResults([4096, 1024, 128, 0], source => source.round < latestRound, targetInputTokens);
     // Replace whole historical user turns, including every native call/result.
     // Current request items and native provider continuation fields are immutable.
+    // 完整替换历史用户轮次，包括全部原生调用和结果；当前请求条目及供应商续传字段不可改写。
     const compactHistory = (selected, targetTokens) => {
       if (!safeSourceId(this.conversationId)) return;
       for (let stage = 1; stage <= 3 && currentTokens > targetTokens; stage++) {
@@ -198,36 +203,38 @@ export class ToolContextProjection {
           if (!selected(turnIndex, group)) continue;
           const replacements = this._historyReplacement(group, stage);
           if (!replacements) continue;
-          const oldCost = estimateToolMessageTokens(group.map(item => item.message));
-          const newCost = estimateToolMessageTokens(replacements.map(item => item.message));
-          if (newCost >= oldCost) continue;
+          const previousTokens = estimateToolMessageTokens(group.map(item => item.message));
+          const replacementTokens = estimateToolMessageTokens(replacements.map(item => item.message));
+          if (replacementTokens >= previousTokens) continue;
           projected = [...projected];
           for (const item of replacements) this.history.set(item.message, item.source);
           projected.splice(group[0].index, group.length, ...replacements.map(item => item.message));
           this.compactedTurns.add(turnIndex);
-          currentTokens += newCost - oldCost;
+          currentTokens += replacementTokens - previousTokens;
           changed = true;
         }
       }
     };
     compactHistory((turnIndex, group) => !group.some(item => item.source.modelHistory) ||
-      (turnIndex !== this.latestHistoryTurn && (latestRound >= 0 || turnIndex !== this.latestHistoricalResultTurn)), target);
+      (turnIndex !== this.latestHistoryTurn && (latestRound >= 0 || turnIndex !== this.latestHistoricalResultTurn)), targetInputTokens);
     // A single large stored result must remain usable even when it cannot fit
     // verbatim. Preserve a larger recent excerpt first; never truncate call input
     // or opaque provider continuation, and never invent a missing archive.
-    if (currentTokens > hardLimit)
-      compactResults([4096, 1024, 128, 0], source => source.round === latestRound, target, true);
+    // 单个过大归档结果仍应可用，先保留较大的近期摘录；不截断调用输入或不透明续传状态，也不虚构缺失附件。
+    if (currentTokens > hardInputLimitTokens)
+      compactResults([4096, 1024, 128, 0], source => source.round === latestRound, targetInputTokens, true);
     // Preserve the most recent historical turn/pair while it fits. If even its
     // archived preview cannot fit, omit the complete turn atomically, not its IDs or arguments in isolation.
-    if (currentTokens > hardLimit) compactHistory(() => true, target);
-    const afterTokens = cost(projected);
-    if (afterTokens > hardLimit) {
+    // 最近历史轮次和配对在容纳得下时保留；若连附件预览都超限，应原子省略整轮，而非单独丢弃 ID 或参数。
+    if (currentTokens > hardInputLimitTokens) compactHistory(() => true, targetInputTokens);
+    const afterTokens = estimateProjectionTokens(projected);
+    if (afterTokens > hardInputLimitTokens) {
       const error = new StreamFailure('工具结果超过本次上下文预算：当前请求、工具调用参数或必要工具定义仍过大，或结果缺少可回源归档。请缩小读取范围或提高模型上下文配置。', 'interrupted');
       error.code = 'TOOL_CONTEXT_BUDGET_EXCEEDED';
       throw error;
     }
     return { messages: projected, ...(changed ? { metrics: { beforeTokens, estimatedInputTokens: afterTokens,
-      inputBudgetTokens: hardLimit, schemaTokens, reducedTokens: beforeTokens - afterTokens,
+      inputBudgetTokens: hardInputLimitTokens, schemaTokens, reducedTokens: beforeTokens - afterTokens,
       compactedToolResultCount: this.compactedResults.size, compactedLatestResultCount: this.compactedLatestResults.size,
       compactedHistoryTurnCount: this.compactedTurns.size } } : {}) };
   }

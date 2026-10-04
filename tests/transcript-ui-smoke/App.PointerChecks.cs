@@ -12,6 +12,7 @@ public partial class App
     // Optional diagnostic: this WebView2/CDP environment delivered trusted mouse events
     // but did not extend selections even in a fresh plain HTML control document. Keep
     // that environmental failure visible instead of claiming physical dragging passed.
+    // 可选诊断：此 WebView2/CDP 环境接收到可信鼠标事件，但即使全新纯 HTML 页面也未扩展选择；应明确环境失败，不得声称真实拖拽通过。
     private async Task CheckPointerSelectionAsync()
     {
         var chat = Guid.NewGuid();
@@ -53,6 +54,7 @@ public partial class App
             for (int step = 1; step <= 8; step++)
             {
                 // Pass through the avatar column while dragging; all coordinates stay local to this test WebView.
+                // 拖拽时穿过头像列；所有坐标都限制在此测试的 WebView 内。
                 await DispatchMouse("mouseMoved", x + (30 - x) * step / 8, y + (edge - y) * step / 8, buttons: 1);
                 await Task.Delay(30);
             }

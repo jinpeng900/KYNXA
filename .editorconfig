@@ -9,3 +9,59 @@ indent_size = 4
 
 [*.{json,yml,yaml}]
 indent_size = 2
+
+[*.{js,mjs}]
+indent_size = 2
+
+[*.cs]
+# Naming hints follow KYNXA's maintained conventions; compatibility remains a review responsibility.
+# 命名提示采用 KYNXA 维护的约定，兼容边界仍需人工审查。
+dotnet_naming_rule.types_use_pascal_case.severity = suggestion
+dotnet_naming_rule.types_use_pascal_case.symbols = types
+dotnet_naming_rule.types_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.types.applicable_kinds = class, struct, interface, enum, delegate
+
+dotnet_naming_rule.members_use_pascal_case.severity = suggestion
+dotnet_naming_rule.members_use_pascal_case.symbols = members
+dotnet_naming_rule.members_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.members.applicable_kinds = method, property, event
+
+dotnet_naming_rule.parameters_use_camel_case.severity = suggestion
+dotnet_naming_rule.parameters_use_camel_case.symbols = parameters
+dotnet_naming_rule.parameters_use_camel_case.style = camel_case
+dotnet_naming_symbols.parameters.applicable_kinds = parameter
+
+dotnet_naming_rule.private_fields_use_underscore.severity = suggestion
+dotnet_naming_rule.private_fields_use_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_use_underscore.style = underscore_camel_case
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+
+# More-specific static and const rules retain the project's existing PascalCase fields.
+# 更具体的 static/const 规则保留本项目既有 PascalCase 字段约定。
+dotnet_naming_rule.static_fields_use_pascal_case.severity = suggestion
+dotnet_naming_rule.static_fields_use_pascal_case.symbols = static_fields
+dotnet_naming_rule.static_fields_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.static_fields.applicable_kinds = field
+dotnet_naming_symbols.static_fields.required_modifiers = static
+
+dotnet_naming_rule.constants_use_pascal_case.severity = suggestion
+dotnet_naming_rule.constants_use_pascal_case.symbols = constants
+dotnet_naming_rule.constants_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.constants.applicable_kinds = field
+dotnet_naming_symbols.constants.required_modifiers = const
+
+dotnet_naming_style.pascal_case.capitalization = pascal_case
+dotnet_naming_style.camel_case.capitalization = camel_case
+dotnet_naming_style.underscore_camel_case.capitalization = camel_case
+dotnet_naming_style.underscore_camel_case.required_prefix = _
+
+[apps/tool-host/{NativeMethods,DesktopNativeMethods}.cs]
+# Native identifiers and layout fields follow the Windows ABI, rather than application naming hints.
+# 原生命名和布局字段遵守 Windows ABI，不套用应用命名提示。
+dotnet_diagnostic.IDE1006.severity = none
+
+[docs/design/r3-refined/build.ps1]
+# Preserve Windows PowerShell 5.1 decoding of the existing Chinese execution strings.
+# 保留 Windows PowerShell 5.1 对该历史脚本中文执行字符串的正确解码。
+charset = utf-8-bom

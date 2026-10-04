@@ -9,7 +9,10 @@ namespace KYNXA_Desktop.Controls;
 
 public sealed record MountedWorkspaceRequest(Guid ProjectId, string FolderPath);
 
-/// <summary>Displays the selected project's formal folder. Folder access and catalog writes belong to the page.</summary>
+/// <summary>
+/// Displays the selected project's formal folder. Folder access and catalog writes belong to the page.
+/// 展示所选项目的正式挂载文件夹；文件夹访问和目录写入归页面负责。
+/// </summary>
 public sealed class MountedWorkspaceHeader : Grid, IDisposable
 {
     private readonly TextBlock _name = new() { Name = "MountedWorkspaceName", TextTrimming = TextTrimming.CharacterEllipsis,

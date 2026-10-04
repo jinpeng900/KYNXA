@@ -43,7 +43,10 @@ export function extensionPointerPath(env = process.env, userHome = homedir()) {
     join(userHome, '.kynxa', 'extensions.json');
 }
 
-/** Configuration and maintenance belong to native settings, never generic model file mutations. */
+/**
+ * Configuration and maintenance belong to native settings, never generic model file mutations.
+ * 配置和维护由原生设置界面负责，不能通过模型通用文件工具修改。
+ */
 export function extensionControlPaths(pointer = extensionPointerPath(), userHome = homedir()) {
   const profile = join(userHome, '.kynxa');
   return [...new Set([resolve(pointer), join(profile, 'storage.json'), join(profile, 'extensions.json'),
@@ -53,6 +56,7 @@ export function extensionControlPaths(pointer = extensionPointerPath(), userHome
 
 export function isExtensionControlPath(path, pointer = extensionPointerPath(), userHome = homedir()) {
   // Ancestors cannot be deleted/moved to remove a protected configuration file either.
+  // 同样禁止通过删除或移动祖先目录，间接移除受保护配置。
   return extensionControlPaths(pointer, userHome).some(control => {
     const suffix = relative(resolve(path), control);
     return suffix === '' || (suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
@@ -73,6 +77,7 @@ function parsePointer(content) {
   const value = JSON.parse(content), keys = new Set();
   let depth = 0;
   // JSON.parse accepts duplicate keys. Match C#'s strict top-level pointer semantics.
+  // JSON.parse 接受重复键；这里与 C# 顶层指针的严格语义保持一致。
   for (let index = 0; index < content.length; index++) {
     const char = content[index];
     if (char === '"') {
@@ -89,11 +94,15 @@ function parsePointer(content) {
   return value;
 }
 
-/** dataHome is the model store directory; the default is its formal conversation root. */
+/**
+ * dataHome is the model store directory; the default is its formal conversation root.
+ * dataHome 指向模型存储目录，默认扩展位置来自其正式会话根目录。
+ */
 export function extensionHome(dataHome, env = process.env, userHome = homedir()) {
   if (env.KYNXA_EXTENSION_HOME) return absolute(env.KYNXA_EXTENSION_HOME, '扩展目录');
   const explicitPointer = env.KYNXA_EXTENSION_POINTER;
   // An isolated Data/Model override must never accidentally import a real user's extension settings.
+  // 隔离的 Data/Model 覆盖配置不能意外导入真实用户的扩展设置。
   if (!explicitPointer && (env.KYNXA_DATA_HOME || env.KYNXA_MODEL_HOME)) return conversationDataRoot(dataHome);
   const pointer = extensionPointerPath(env, userHome);
   inspectPath(pointer);
@@ -117,7 +126,10 @@ export function extensionCacheDirectories(root) {
     pythonBin: join(root, 'MCP', 'python-bin'), uvToolBin: join(root, 'MCP', 'bin') };
 }
 
-/** Inspection is read-only; invalid versions or occupied framework paths precede every mkdir. */
+/**
+ * Inspection is read-only; invalid versions or occupied framework paths precede every mkdir.
+ * 检查为只读操作；任何 mkdir 之前先确认版本有效且框架路径未被占用。
+ */
 export function inspectExtensionLayout(root) {
   root = absolute(root, '扩展目录');
   for (const path of [root, ...EXTENSION_LAYOUT_DIRECTORIES.map(name => join(root, name))]) {
@@ -142,7 +154,10 @@ export function inspectExtensionLayout(root) {
   return document;
 }
 
-/** Only gateway-owned startup/activation initializes storage; lookup and inspection never write. */
+/**
+ * Only gateway-owned startup/activation initializes storage; lookup and inspection never write.
+ * 只有网关拥有的启动或激活流程初始化存储；查询和检查不写入。
+ */
 const initializations = new Map();
 export function ensureExtensionLayout(root, options = {}) {
   root = absolute(root, '扩展目录');
@@ -171,6 +186,7 @@ async function createExtensionLayout(root, { maintenanceActive = () => false } =
       await writeFile(temporary, JSON.stringify({ version: EXTENSION_LAYOUT_VERSION }), { flag: 'wx', mode: 0o600 });
       writable(); inspectPath(join(root, 'extension-layout.json'));
       // link publishes a complete file atomically and refuses to replace a racing owner.
+      // 通过 link 原子发布完整文件，遇到并发创建者时拒绝覆盖。
       try { await link(temporary, join(root, 'extension-layout.json')); }
       catch (error) { if (error.code !== 'EEXIST') throw error; }
     } finally {

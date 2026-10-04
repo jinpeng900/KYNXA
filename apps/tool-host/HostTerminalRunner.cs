@@ -8,6 +8,7 @@ using static KYNXA.ToolHost.NativeMethods;
 namespace KYNXA.ToolHost;
 
 /// <summary>Explicit host execution. This channel never changes the AppContainer terminal contract.</summary>
+/// <remarks>显式执行宿主命令；此通道不改变 AppContainer 终端的隔离约定。</remarks>
 internal static class HostTerminalRunner
 {
     private const int MaximumOutputBytes = 256 * 1024;
@@ -37,54 +38,56 @@ internal static class HostTerminalRunner
         if (request.Visible) return await HostTerminalVisibleRunner.RunAsync(request, cancellationToken);
         string cwd = Path.GetFullPath(request.Cwd!);
         string shell = request.Shell!;
-        IntPtr job = IntPtr.Zero;
-        var process = new ProcessInformation();
+        IntPtr jobHandle = IntPtr.Zero;
+        var processInformation = new ProcessInformation();
         bool started = false;
         var elapsed = Stopwatch.StartNew();
         try
         {
-            job = CreateJobObjectW(IntPtr.Zero, null);
-            Check(job != IntPtr.Zero, "Create host terminal job");
+            jobHandle = CreateJobObjectW(IntPtr.Zero, null);
+            Check(jobHandle != IntPtr.Zero, "Create host terminal job");
             var limits = new JobExtendedLimitInformation
             {
                 BasicLimitInformation = new JobBasicLimitInformation
                 {
                     // Kill-on-close applies even if the gateway or this helper is terminated.
                     // No child can break out of the job; a process starts suspended until assignment.
+                    // 网关或辅助进程终止时关闭作业也会结束进程树；子进程不能脱离作业，完成归属前保持挂起。
                     LimitFlags = 0x2000 | 0x8, ActiveProcessLimit = MaximumProcesses
                 }
             };
-            Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
-            var output = new BoundedOutput(job, shell == "cmd");
-            var (stdout, stderr) = Start(shell, request.Script!, cwd, job, ref process, output, cancellationToken);
+            Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
+            var output = new BoundedOutput(jobHandle, shell == "cmd");
+            var (stdout, stderr) = StartHostShell(shell, request.Script!, cwd, jobHandle, ref processInformation, output, cancellationToken);
             started = true;
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
             {
-                protocolVersion = 1, boundary = "host-terminal", @event = "host_terminal_started", processId = process.ProcessId
+                protocolVersion = 1, boundary = "host-terminal", @event = "host_terminal_started", processId = processInformation.ProcessId
             }, Program.JsonOptions));
             output.StartEvents();
 
             bool timedOut = false, cancelled = false, normalExit = false;
             while (true)
             {
-                uint wait = WaitForSingleObject(process.Process, 25);
-                if (wait == 0) { normalExit = true; break; }
-                Check(wait == WaitTimeout, "Wait for host terminal process");
+                uint processWaitResult = WaitForSingleObject(processInformation.Process, 25);
+                if (processWaitResult == 0) { normalExit = true; break; }
+                Check(processWaitResult == WaitTimeout, "Wait for host terminal process");
                 if (cancellationToken.IsCancellationRequested) { cancelled = true; break; }
                 if (elapsed.ElapsedMilliseconds >= request.TimeoutMs) { timedOut = true; break; }
                 await Task.Delay(10);
             }
             // Kill surviving descendants after both interrupted and normal shell completion.
-            Check(TerminateJobObject(job, timedOut ? 124u : 125u), "Terminate host terminal process tree");
-            await WaitForEmptyJobAsync(job);
-            Check(GetExitCodeProcess(process.Process, out uint exitCode), "Read host terminal exit code");
+            // shell 无论中断还是正常完成，都终止仍存活的子孙进程。
+            Check(TerminateJobObject(jobHandle, timedOut ? 124u : 125u), "Terminate host terminal process tree");
+            await WaitForEmptyJobAsync(jobHandle);
+            Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "Read host terminal exit code");
             await Task.WhenAll(stdout, stderr);
             bool completed = normalExit && !output.Truncated;
             return new
             {
                 protocolVersion = 1, boundary = "host-terminal", completed, outcome = completed ? "completed" : "unknown",
                 shell, cwd, exitCode = unchecked((int)exitCode), stdout = await stdout, stderr = await stderr,
-                timedOut, cancelled, processId = process.ProcessId, activeProcessesAfterExit = 0,
+                timedOut, cancelled, processId = processInformation.ProcessId, activeProcessesAfterExit = 0,
                 outputTruncated = output.Truncated, outputLimitExceeded = output.Truncated,
                 elapsedMs = elapsed.ElapsedMilliseconds, maxOutputBytes = MaximumOutputBytes, capturedOutputBytes = output.CapturedBytes,
                 outputEncoding = shell == "cmd" ? "utf-8-or-oem-per-line" : "utf-8",
@@ -101,10 +104,10 @@ internal static class HostTerminalRunner
         }
         finally
         {
-            if (job != IntPtr.Zero) TerminateJobObject(job, 125);
-            Close(ref process.Thread);
-            Close(ref process.Process);
-            Close(ref job);
+            if (jobHandle != IntPtr.Zero) TerminateJobObject(jobHandle, 125);
+            Close(ref processInformation.Thread);
+            Close(ref processInformation.Process);
+            Close(ref jobHandle);
         }
     }
 
@@ -132,11 +135,11 @@ internal static class HostTerminalRunner
         ? Path.Combine(Environment.SystemDirectory, "cmd.exe")
         : Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
 
-    private static (Task<string> Stdout, Task<string> Stderr) Start(string shell, string script, string cwd, IntPtr job,
-        ref ProcessInformation process, BoundedOutput output, CancellationToken cancellationToken)
+    private static (Task<string> Stdout, Task<string> Stderr) StartHostShell(string shell, string script, string cwd, IntPtr jobHandle,
+        ref ProcessInformation processInformation, BoundedOutput output, CancellationToken cancellationToken)
     {
         IntPtr stdoutRead = IntPtr.Zero, stdoutWrite = IntPtr.Zero, stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
-        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributes = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environment = IntPtr.Zero;
+        IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero, attributeList = IntPtr.Zero, handlesBuffer = IntPtr.Zero, environmentBlock = IntPtr.Zero;
         bool resumed = false;
         try
         {
@@ -149,16 +152,16 @@ internal static class HostTerminalRunner
             Check(SetHandleInformation(stdinWrite, 1, 0), "Protect host stdin writer");
             UIntPtr size = UIntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
-            attributes = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
-            Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size), "Initialize host process attributes");
+            attributeList = Marshal.AllocHGlobal(checked((int)size.ToUInt64()));
+            Check(InitializeProcThreadAttributeList(attributeList, 1, 0, ref size), "Initialize host process attributes");
             handlesBuffer = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handlesBuffer, stdoutWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size, stderrWrite);
             Marshal.WriteIntPtr(handlesBuffer, IntPtr.Size * 2, stdinRead);
-            Check(UpdateProcThreadAttribute(attributes, 0, (IntPtr)0x20002, handlesBuffer, (UIntPtr)(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "Set host inherited handle allowlist");
+            Check(UpdateProcThreadAttribute(attributeList, 0, (IntPtr)0x20002, handlesBuffer, (UIntPtr)(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "Set host inherited handle allowlist");
             var startup = new StartupInfoEx
             {
-                AttributeList = attributes,
+                AttributeList = attributeList,
                 StartupInfo = new StartupInfo
                 {
                     Cb = Marshal.SizeOf<StartupInfoEx>(), Flags = StartfUseStdHandles,
@@ -178,20 +181,22 @@ internal static class HostTerminalRunner
                 throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "The effective shell command line exceeds the Windows limit.");
             // The original script remains a separately parsed script block: leading using/param syntax is preserved.
             // A private, per-child source variable also avoids command-line expansion of a 16K quoted script.
-            if (shell == "powershell") environment = Marshal.StringToHGlobalUni(BuildEnvironment(sourceVariable, script));
+            // 原脚本保持独立解析的脚本块，以保留开头的 using/param 语法；每个子进程独有的源变量也避免在命令行展开 16K 引号脚本。
+            if (shell == "powershell") environmentBlock = Marshal.StringToHGlobalUni(BuildEnvironment(sourceVariable, script));
             cancellationToken.ThrowIfCancellationRequested();
             // Host execution preserves the application's environment, including user-configured application PATH.
+            // 宿主执行保留应用环境，包括用户配置的应用 PATH。
             Check(CreateProcessW(executable, new StringBuilder(arguments), IntPtr.Zero, IntPtr.Zero, true,
-                CreateSuspended | ExtendedStartupInfoPresent | CreateNoWindow | (environment != IntPtr.Zero ? CreateUnicodeEnvironment : 0),
-                environment, cwd, ref startup, out process), "Create host terminal process");
+                CreateSuspended | ExtendedStartupInfoPresent | CreateNoWindow | (environmentBlock != IntPtr.Zero ? CreateUnicodeEnvironment : 0),
+                environmentBlock, cwd, ref startup, out processInformation), "Create host terminal process");
             try
             {
-                Check(AssignProcessToJobObject(job, process.Process), "Assign host terminal process to job");
+                Check(AssignProcessToJobObject(jobHandle, processInformation.Process), "Assign host terminal process to job");
                 cancellationToken.ThrowIfCancellationRequested();
-                if (ResumeThread(process.Thread) == uint.MaxValue) Check(false, "Resume host terminal process");
+                if (ResumeThread(processInformation.Thread) == uint.MaxValue) Check(false, "Resume host terminal process");
                 resumed = true;
             }
-            catch { TerminateProcess(process.Process, 125); throw; }
+            catch { TerminateProcess(processInformation.Process, 125); throw; }
             Close(ref stdoutWrite); Close(ref stderrWrite); Close(ref stdinRead); Close(ref stdinWrite);
             var stdout = output.ReadAsync(stdoutRead, "stdout"); stdoutRead = IntPtr.Zero;
             var stderr = output.ReadAsync(stderrRead, "stderr"); stderrRead = IntPtr.Zero;
@@ -205,9 +210,9 @@ internal static class HostTerminalRunner
         {
             Close(ref stdoutRead); Close(ref stdoutWrite); Close(ref stderrRead); Close(ref stderrWrite);
             Close(ref stdinRead); Close(ref stdinWrite);
-            if (attributes != IntPtr.Zero) { DeleteProcThreadAttributeList(attributes); Marshal.FreeHGlobal(attributes); }
+            if (attributeList != IntPtr.Zero) { DeleteProcThreadAttributeList(attributeList); Marshal.FreeHGlobal(attributeList); }
             if (handlesBuffer != IntPtr.Zero) Marshal.FreeHGlobal(handlesBuffer);
-            if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
+            if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
         }
     }
 
@@ -223,21 +228,21 @@ internal static class HostTerminalRunner
     internal static string QuoteArgument(string argument)
     {
         var result = new StringBuilder("\"");
-        int slashes = 0;
+        int backslashCount = 0;
         foreach (char character in argument)
         {
-            if (character == '\\') { slashes++; continue; }
-            result.Append('\\', character == '"' ? slashes * 2 + 1 : slashes);
-            result.Append(character); slashes = 0;
+            if (character == '\\') { backslashCount++; continue; }
+            result.Append('\\', character == '"' ? backslashCount * 2 + 1 : backslashCount);
+            result.Append(character); backslashCount = 0;
         }
-        return result.Append('\\', slashes * 2).Append('"').ToString();
+        return result.Append('\\', backslashCount * 2).Append('"').ToString();
     }
 
-    internal static async Task WaitForEmptyJobAsync(IntPtr job)
+    internal static async Task WaitForEmptyJobAsync(IntPtr jobHandle)
     {
         for (int attempt = 0; attempt < 200; attempt++)
         {
-            Check(QueryInformationJobObject(job, 1, out var information, (uint)Marshal.SizeOf<JobBasicAccountingInformation>(), IntPtr.Zero), "Query host terminal process tree");
+            Check(QueryInformationJobObject(jobHandle, 1, out var information, (uint)Marshal.SizeOf<JobBasicAccountingInformation>(), IntPtr.Zero), "Query host terminal process tree");
             if (information.ActiveProcesses == 0) return;
             await Task.Delay(10);
         }
@@ -249,7 +254,7 @@ internal static class HostTerminalRunner
         if (!succeeded) throw new HostTerminalException("HOST_TERMINAL_START_FAILED", $"{operation}: {new Win32Exception(Marshal.GetLastWin32Error()).Message}");
     }
 
-    private sealed class BoundedOutput(IntPtr job, bool cmdOutput)
+    private sealed class BoundedOutput(IntPtr jobHandle, bool cmdOutput)
     {
         private long _bytes, _capturedBytes;
         private int _truncated;
@@ -291,7 +296,7 @@ internal static class HostTerminalRunner
                 }
                 PublishDelta(channel, decoded.ToString());
                 if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0)
-                    TerminateJobObject(job, 126);
+                    TerminateJobObject(jobHandle, 126);
             }
             if (line.Length != 0) PublishDelta(channel, DecodeOutput(line.ToArray(), cmdOutput));
             lock (_eventLock) FlushEvents();
@@ -351,6 +356,7 @@ internal static class HostTerminalRunner
         }
         // Arbitrary encodings mixed within one line, or OEM bytes also valid as UTF-8, are inherently ambiguous.
         // The receipt names this per-line policy rather than claiming lossless decoding of every binary stream.
+        // 同一行混合编码或同时满足 UTF-8 的 OEM 字节存在固有歧义；回执说明逐行解码策略，不声称任意二进制流都能无损解码。
         return result.ToString();
     }
 

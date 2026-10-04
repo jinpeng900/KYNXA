@@ -27,6 +27,7 @@ public sealed partial class ShellPage
             foreach (var tool in message.ToolActivities)
                 if (resources.Remove((message.Message.Id, tool.ToolCallId), out var tab)) items.Add(tab);
         // A live call can arrive before the message view model's next refresh.
+        // 实际工具调用可能先于消息视图模型的下一次刷新到达。
         items.AddRange(resources.Values);
         WorkTabs.ShowConversation(ActiveChatId, items);
     }
@@ -39,6 +40,7 @@ public sealed partial class ShellPage
         bool showScreenshot = sidebarVisible && screenshot is not null;
 
         // Disable hidden viewers before switching their identity; they must not fetch or decode in the background.
+        // 切换查看器身份之前禁用隐藏查看器，避免在后台继续获取或解码。
         if (!showScreenshot) ScreenshotPanel.SetPreviewEnabled(false);
         if (showScreenshot)
         {

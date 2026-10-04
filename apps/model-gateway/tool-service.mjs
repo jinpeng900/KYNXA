@@ -66,7 +66,10 @@ function validateBuiltinInput(descriptor, input) {
   }
 }
 
-/** Tool authority is derived from canonical work ownership and immutable turn context, never model metadata. */
+/**
+ * Tool authority is derived from canonical work ownership and immutable turn context, never model metadata.
+ * 工具权限来自正式工作归属和不可变轮次上下文，不来自模型元信息。
+ */
 export class ToolService {
   constructor({ conversationStore, dataHome, extensionRoot, extensionPointer, sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, bundledDirectory, officialTools = bundledDirectory !== null } = {}) {
     if (!conversationStore?.root || !dataHome) throw toolFailure('缺少工具存储上下文。');
@@ -111,10 +114,12 @@ export class ToolService {
     if (this.officialTools) value.officialPackageVersion = (await readOfficialToolsManifest()).version;
     // Revision-only saves must not destroy browser state or revoke otherwise unchanged calls.
     // A concurrent update may have advanced the repository after our read; then fail safe.
+    // 只有修订号变化的保存不能破坏浏览器状态或撤销未变化调用；若并发更新已推进仓储，则保守拒绝旧状态。
     if (current.revision === input.expectedRevision &&
         isDeepStrictEqual({ ...current, revision: 0 }, { ...value, revision: 0 })) return value;
     this.configGeneration++;
     // Skill changes revoke old request authority, but do not replace unrelated MCP processes.
+    // 技能变更会撤销旧请求权限，但不会替换无关 MCP 进程。
     if (current.revision !== input.expectedRevision || !isDeepStrictEqual(current.mcpServers, value.mcpServers))
       await this.mcp.reset();
     return value;
@@ -129,12 +134,13 @@ export class ToolService {
       const managedParent = join(this.root, 'Desktop', 'Projects');
       let managedWorkspace = false;
       if (workspaceRoot && within(managedParent, dirname(workspaceRoot)) && within(dirname(workspaceRoot), managedParent)) {
-        try { managedWorkspace = validateId(basename(workspaceRoot)).toLowerCase() === projectId; } catch { /* Not a canonical project folder. */ }
+        try { managedWorkspace = validateId(basename(workspaceRoot)).toLowerCase() === projectId; } catch { /* Not a canonical project folder. 此路径不是正式项目目录。 */ }
       }
       return { projectId, workspaceRoot, managedWorkspace };
     }
     if (catalog.Chats.some(chat => same(chat.Id))) return { projectId: null, workspaceRoot: null, managedWorkspace: false };
     // Preserve the formal store's distinct deleted/not-found error instead of fabricating a conversation.
+    // 保留正式存储明确的已删除或不存在错误，不虚构会话。
     await this.conversations.describeConversation(conversationId);
     throw toolFailure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
   }
@@ -152,6 +158,7 @@ export class ToolService {
     catch (error) {
       // Only our exact legacy project directory may use a separate chat workspace.
       // An explicitly mounted folder never gains a link-traversal exception.
+      // 只有本应用精确识别的旧项目目录可改用独立聊天工作区，明确挂载的目录不获得链接遍历例外。
       if (error.code === 'UNSAFE_TOOL_PATH') return true;
       throw error;
     }
@@ -280,6 +287,7 @@ export class ToolService {
       const descriptor = snapshot?.descriptors.get(call.name) ?? builtinDescriptors.find(item => item.name === call.name);
       if (!descriptor) throw toolFailure('工具不存在或尚未发现。', 'TOOL_NOT_FOUND', 404);
       // Effects and unknown operations invalidate observations before their execution or approval.
+      // 有副作用和未知操作在执行或审批前使观察缓存失效。
       if (!canRunInParallel(call)) this.observationCaches.get(context)?.clear();
       if (descriptor.source === 'builtin') validateBuiltinInput(descriptor, call.arguments);
       let path;
@@ -338,10 +346,12 @@ export class ToolService {
         if (!call.arguments.reason?.trim()) throw toolFailure('本机桌面操作必须说明原因。', 'OUTSIDE_WORKSPACE_REASON_REQUIRED', 403);
         const action = call.name.slice('computer.'.length);
         // Normalize before approval so the user approves the exact launch mode sent to the native host.
+        // 审批前规范化，让用户批准的启动模式与发给原生宿主的完全一致。
         if (action === 'launch') {
           call.arguments = prepareDesktopLaunchArguments(call.arguments,
             { allowForeground: context.browserInteraction.allowForeground === true });
           // Added defaults must obey the same bounds as model-supplied arguments.
+          // 新增默认值遵守与模型传入参数相同的限制。
           validateBuiltinInput(descriptor, call.arguments);
         }
         if (context.foregroundForbidden) {
@@ -402,6 +412,7 @@ export class ToolService {
           throw toolFailure('工具配置已变化，此工具调用已停止。', 'AGENT_CONFIG_CHANGED', 409);
         signal?.throwIfAborted();
         // Bind a fresh archive reference to this call; the previous call's reference is never reassigned.
+        // 为当前调用绑定新的结果引用，不重新分配上一次调用的引用。
         const finished = await this._finishResult(context, call, cached.result);
         return { ...finished, reused: true, observationCapturedAt: cached.capturedAt,
           content: `[KYNXA_OBSERVATION_REUSED] Reused this request's successful observation captured at ${cached.capturedAt}; no new network request.\n\n${finished.content}` };
@@ -490,6 +501,7 @@ export class ToolService {
           Number.isInteger(error.sandboxResult.exitCode) && (callName !== 'skill.run' || verifiesSkillExecution(error.sandboxResult, preparedSkill))) {
         const partial = error.sandboxResult;
         // SandboxRunner owns cancellation cleanup, including native completion just before stop.
+        // SandboxRunner 负责取消后的清理，包括停止前刚完成的原生操作。
         const interrupted = partial.cancelled === true || partial.timedOut === true;
         return this._finishResult(context, call, { value: partial,
           isError: interrupted || partial.exitCode !== 0,
@@ -505,6 +517,7 @@ export class ToolService {
         (cancelled || desktopTimedOut || externalOutcomeLost || error?.outcomeUnknown === true);
       // Failed observations have no write outcome to verify. Archive the failure just like a returned receipt,
       // so the next model turn can change approach without losing the call/result pair.
+      // 失败观察没有待核验的写入结果，但仍像正常回执一样归档，使下一轮可调整方法且保留调用和结果配对。
       if (executionStarted && (callName.startsWith('computer.') || callName.startsWith('mcp.')))
         return this._finishResult(context, call, { value: { completed: false, error: { code, message: boundedContent(message) },
           outcome: unknown ? 'unknown' : cancelled ? 'cancelled' : 'failed' }, isError: true, code, ...(unknown ? { status: 'unknown' } : {}), outsideWorkspace });
@@ -557,6 +570,7 @@ export class ToolService {
   async _closeResources() {
     // One failed owner must not prevent the remaining processes from being stopped.
     // Wait for all closures before cleaning snapshots, and retain the failure for runtime retirement.
+    // 一个所有者清理失败不能阻止其余进程停止；先等待全部关闭，再清理快照，并保留失败用于运行时退役判断。
     const outcomes = await Promise.allSettled([
       () => this.desktopRunner?.close?.(),
       () => this.hostTerminalRunner?.close?.(),

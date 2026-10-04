@@ -22,7 +22,10 @@ public sealed class ChatMessageState
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
-/// <summary>Older previews stored each user message as a plain string. Preserve them when loading new transcripts.</summary>
+/// <summary>
+/// Older previews stored each user message as a plain string. Preserve them when loading new transcripts.
+/// 旧版预览把用户消息保存为纯字符串；加载新聊天记录时保留这些数据。
+/// </summary>
 public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
 {
     private static readonly JsonSerializerOptions ToolOptions = new(JsonSerializerDefaults.Web);
@@ -39,6 +42,7 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             Content = value.GetProperty("Content").GetString() ?? string.Empty,
             Reasoning = ReadString(value, "Reasoning"),
             // A process that exited during generation cannot resume the old HTTP stream.
+            // 生成期间进程退出后，无法恢复旧 HTTP 流。
             Status = status == "streaming" ? "interrupted" : status,
             Error = ReadString(value, "Error"),
             Provider = ReadString(value, "Provider"),
@@ -93,6 +97,7 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         var segments = value.Deserialize<List<AssistantSegment>>(ToolOptions) ?? [];
         if (!AssistantSegmentRules.IsValidSequence(segments)) throw new JsonException("Invalid assistant segments.");
         // A stopped process has no live stream even when its last durable round was still generating.
+        // 停止的进程没有活动流，即使最后保存的一轮仍处于生成状态。
         return messageStatus == "streaming"
             ? segments.Select(segment => segment.Status == "streaming" ? segment with { Status = "interrupted" } : segment).ToList()
             : segments;

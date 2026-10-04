@@ -110,5 +110,6 @@ public partial class App
             await Task.Delay(50);
         Check(replies.All(reply => !reply.HasPendingFormulaRendering), "formula rendering completes within the deadline");
         await Task.Delay(100); // Native text layout follows the completed image dimensions.
+        // 原生文本布局应跟随已完成渲染的图片尺寸。
     }
 }

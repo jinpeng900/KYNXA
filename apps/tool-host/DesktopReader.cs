@@ -17,16 +17,16 @@ internal static class DesktopReader
         if (crop is not null) ValidateRegion(crop, width, height);
         if (width > 8192 || height > 8192 || (long)width * height > 16000000)
             throw new DesktopException("DESKTOP_IMAGE_TOO_LARGE", "The selected client area is too large to capture.");
-        nint dc = GetDC(target.Window), memory = 0, bitmap = 0, previous = 0;
+        nint windowDeviceContext = GetDC(target.Window), memoryDeviceContext = 0, bitmapHandle = 0, previousBitmap = 0;
         try
         {
-            if (dc == 0 || (memory = CreateCompatibleDC(dc)) == 0 || (bitmap = CreateCompatibleBitmap(dc, width, height)) == 0)
+            if (windowDeviceContext == 0 || (memoryDeviceContext = CreateCompatibleDC(windowDeviceContext)) == 0 || (bitmapHandle = CreateCompatibleBitmap(windowDeviceContext, width, height)) == 0)
                 throw new DesktopException("DESKTOP_CAPTURE_FAILED", "The selected window capture surface is unavailable.");
-            previous = SelectObject(memory, bitmap);
-            if (!PrintWindow(target.Window, memory, 3))
+            previousBitmap = SelectObject(memoryDeviceContext, bitmapHandle);
+            if (!PrintWindow(target.Window, memoryDeviceContext, 3))
                 throw new DesktopException("DESKTOP_CAPTURE_FAILED", "The selected window did not provide a client image; no full-desktop fallback was used.");
             target.Check();
-            BitmapSource image = Imaging.CreateBitmapSourceFromHBitmap(bitmap, 0, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            BitmapSource image = Imaging.CreateBitmapSourceFromHBitmap(bitmapHandle, 0, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
             if (crop is not null)
             {
                 image = new CroppedBitmap(image, new Int32Rect(crop.X, crop.Y, crop.Width, crop.Height));
@@ -42,10 +42,10 @@ internal static class DesktopReader
         }
         finally
         {
-            if (previous != 0 && memory != 0) SelectObject(memory, previous);
-            if (bitmap != 0) DeleteObject(bitmap);
-            if (memory != 0) DeleteDC(memory);
-            if (dc != 0) ReleaseDC(target.Window, dc);
+            if (previousBitmap != 0 && memoryDeviceContext != 0) SelectObject(memoryDeviceContext, previousBitmap);
+            if (bitmapHandle != 0) DeleteObject(bitmapHandle);
+            if (memoryDeviceContext != 0) DeleteDC(memoryDeviceContext);
+            if (windowDeviceContext != 0) ReleaseDC(target.Window, windowDeviceContext);
         }
     }
 
@@ -100,6 +100,7 @@ internal static class DesktopReader
                 bool password = current.IsPassword;
                 // IsPassword is checked before Name, Value or TextPattern: even an unsafe
                 // provider's password Name must never enter the returned metadata.
+                // 在读取 Name、Value 或 TextPattern 前先检查 IsPassword，避免不安全提供方将密码控件名称带入返回元数据。
                 string name = selected && !password ? current.Name ?? "" : "", value = "";
                 if (selected && !password && element.TryGetCurrentPattern(TextPattern.Pattern, out object rawText))
                     foreach (TextPatternRange range in ((TextPattern)rawText).GetVisibleRanges().Take(64))

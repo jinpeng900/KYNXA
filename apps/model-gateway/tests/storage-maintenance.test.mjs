@@ -109,6 +109,7 @@ test('a retired runtime cleanup failure is redacted and prevents a second runtim
     const privateFailure = 'PRIVATE_RUNTIME_CLEANUP_FAILURE_DO_NOT_EXPOSE';
     // No server/store import may happen until this subprocess has its own profile and Data.
     // Strict rejection mode also proves that a listener cannot merely hide a fatal rejection.
+    // 子进程先配置自身的用户目录和 Data，再导入服务器或存储模块；严格拒绝模式同时证明监听器不能仅掩盖致命拒绝。
     const source = `
       import assert from 'node:assert/strict';
       import { join } from 'node:path';

@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const directory = dirname(fileURLToPath(import.meta.url));
 
-/** The installed helper is preferred. No PATH lookup or user-configured MCP impersonates it. */
+/**
+ * The installed helper is preferred. No PATH lookup or user-configured MCP impersonates it.
+ * 优先使用已安装助手，不通过 PATH 搜索，也不允许用户配置的 MCP 冒充它。
+ */
 export async function findNativeToolHost(toolHostPath, unavailableCode) {
   if (process.platform !== 'win32') throw Object.assign(new Error('The native tool host requires Windows.'), { code: unavailableCode });
   const candidates = toolHostPath ? [resolve(toolHostPath)] : [join(directory, '..', 'ToolHost', 'KYNXA.ToolHost.exe'),

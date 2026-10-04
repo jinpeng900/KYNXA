@@ -1,6 +1,7 @@
 // Official API documentation snapshot checked 2026-10-04. These are capability
 // ceilings, not connection defaults or promises of access for a particular key.
 // Exact IDs only: do not infer limits for fine-tunes, proxies or future aliases.
+// 此能力快照核对于 2026-10-04，只表示能力上限，不是连接默认值，也不保证任意密钥都有使用权限。
 const providers = new Map();
 
 function register(host, model, contextWindowTokens, maxOutputTokens, source, { aliases = [], maxInputTokens } = {}) {
@@ -13,12 +14,14 @@ function register(host, model, contextWindowTokens, maxOutputTokens, source, { a
 
 // The published /models example gives current alias metadata. The old
 // deepseek-chat/reasoner aliases are intentionally not guessed from their names.
+// 公开 /models 示例提供当前别名元数据，不凭旧 deepseek-chat/reasoner 名称猜测能力。
 for (const model of ['deepseek-flash', 'deepseek-v4-pro'])
   register('api.deepseek.com', model, 1_048_576, 393_216, 'https://api-docs.deepseek.com/api/list-models/');
 
 register('api.moonshot.cn', 'kimi-k3', 1_048_576, 1_048_576,
   'https://platform.kimi.com/docs/guide/kimi-k3-quickstart');
 // K2 docs give a 32K default, not a verified hard output ceiling.
+// K2 文档给出的是 32K 默认输出，尚未验证为硬上限。
 for (const model of ['kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'])
   register('api.moonshot.cn', model, 262_144, undefined, 'https://platform.kimi.com/docs/pricing/chat');
 
@@ -31,6 +34,7 @@ for (const [suffix, snapshot] of [['haiku-4-5', '20251001'], ['opus-4-5', '20251
     `https://platform.claude.com/docs/en/models/${suffix}/overview`, { aliases: [`claude-${suffix}-${snapshot}`] });
 
 // Every entry and dated snapshot below was checked against its own model page.
+// 以下每个条目及带日期快照均按对应模型页面核验。
 const openai = [
   ['gpt-6-astra', 1_050_000, 128_000, null, 922_000],
   ['gpt-6.1-sol', 1_050_000, 128_000, null, 922_000],
@@ -65,7 +69,10 @@ for (const [model, context, output, snapshot, input] of openai)
   register('api.openai.com', model, context, output, `https://developers.openai.com/api/docs/models/${model}`,
     { aliases: snapshot ? [`${model}-${snapshot}`] : [], maxInputTokens: input });
 
-/** Capability lookup never alters stored connections or consults credentials. */
+/**
+ * Capability lookup never alters stored connections or consults credentials.
+ * 能力查询不修改已保存连接，也不读取凭据。
+ */
 export function resolveModelCapabilities(connection, model) {
   if (typeof connection?.baseUrl !== 'string' || typeof model !== 'string') return {};
   let endpoint;
@@ -73,6 +80,7 @@ export function resolveModelCapabilities(connection, model) {
   if (endpoint.protocol !== 'https:' || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)
     return {};
   // Match official API roots only, not a different product mounted on that host.
+  // 只匹配官方 API 根路径，不匹配同一主机上挂载的其他产品。
   if (!['', '/', '/v1', '/v1/'].includes(endpoint.pathname)) return {};
   const capability = providers.get(endpoint.hostname)?.get(model);
   return capability ? { ...capability } : {};

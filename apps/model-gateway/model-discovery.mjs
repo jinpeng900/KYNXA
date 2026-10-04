@@ -20,6 +20,7 @@ async function readModelPage(response) {
 // Anthropic documents cursor pagination separately from its Messages API.
 // OpenAI-compatible endpoints normally return one complete list; do not guess
 // an undocumented cursor or follow a provider-supplied URL with credentials.
+// Anthropic 的游标分页文档与 Messages API 分开。
 export async function discoverModels(connection) {
   const endpoint = new URL(`${connection.baseUrl}/models`);
   const anthropic = connection.protocol === 'anthropic-messages';

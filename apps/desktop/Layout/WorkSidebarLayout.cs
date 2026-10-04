@@ -20,7 +20,10 @@ public sealed record WorkSidebarLayoutResult(
     double RecentMaximumHeight,
     double ProjectsMaximumHeight);
 
-/// <summary>Allocates work sidebar space and owns divider drag snapshots without view or storage dependencies.</summary>
+/// <summary>
+/// Allocates work sidebar space and owns divider drag snapshots without view or storage dependencies.
+/// 计算工作侧栏空间并保存分隔线拖动快照，不依赖视图或存储。
+/// </summary>
 public sealed class WorkSidebarLayout
 {
     private const double NavigationHeaderHeight = 72;
@@ -36,6 +39,7 @@ public sealed class WorkSidebarLayout
         double navigationRatio, double recentRatio)
     {
         // An unmeasured or detached view must retain its last applied geometry.
+        // 未测量或已脱离视觉树的视图保留上次应用的几何尺寸。
         if (!double.IsFinite(availableHeight) || availableHeight <= 0) return null;
         bool bothExpanded = recentExpanded && projectsExpanded;
         bool anyExpanded = recentExpanded || projectsExpanded;
@@ -49,6 +53,7 @@ public sealed class WorkSidebarLayout
         bool resized = double.IsFinite(navigationRatio) && navigationRatio > 0;
         double navigationHeight = resized
             // A naturally short boundary saved by the inner grip must not jump down.
+            // 内部分隔线保存的较短自然边界不能突然向下跳动。
             ? Math.Clamp(availableHeight * navigationRatio, Math.Min(minimum, NavigationHeaderHeight + (bothExpanded ? DividerHeight : 0)), maximum)
             : Math.Clamp(availableHeight * 0.5, minimum, maximum);
         var navigationRow = resized ? new WorkSidebarRowHeight(WorkSidebarRowSizing.Pixels, navigationHeight) : automatic;
@@ -95,6 +100,7 @@ public sealed class WorkSidebarLayout
         double budget = Math.Max(0, _recentDrag.NavigationHeight - NavigationHeaderHeight - DividerHeight);
         if (budget <= 0 || availableHeight <= 0 || Math.Abs(delta) < MinimumDragDelta) return false;
         // Freeze an automatic outer boundary only when dragged; keep an existing preference intact.
+        // 只有拖动时才固定自动外部边界；已有用户偏好保持不变。
         if (!double.IsFinite(_recentDrag.NavigationRatio) || _recentDrag.NavigationRatio <= 0)
             preferences.WorkNavigationRatio = _recentDrag.NavigationHeight / availableHeight;
         var (minimum, maximum) = ShellLayoutMetrics.GetWorkRecentHeightRange(budget);

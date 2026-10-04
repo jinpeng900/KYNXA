@@ -105,6 +105,7 @@ public partial class App
     private static async Task WaitForPhysicsImages(MarkdownReply reply, int expected)
     {
         // Wait for every queued formula (including unsupported ones) before counting images.
+        // 统计图片前等待所有排队公式完成，包括不支持的公式。
         await WaitForFormulaRendering(reply);
         var layer = (Canvas)((Grid)reply.Content).Children[2];
         if (layer.Children.Count == expected && layer.Children.OfType<Image>().All(image => image.Source is not null)) return;

@@ -21,7 +21,9 @@
   </Target>
   <!-- Dependencies may not exist during initial project evaluation on a clean
        checkout. Populate content after npm restore, with qualified metadata to
-       avoid batching against unrelated Content items. -->
+       avoid batching against unrelated Content items.
+       干净克隆的项目在首次求值时可能尚无依赖；npm 还原后再填充内容，并使用限定元数据，避免与无关 Content 项一起批处理。
+  -->
   <Target Name="IncludeGatewayRuntimeDependencies" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
     <ItemGroup>
       <_KynxaGatewayDependencyFiles Include="..\model-gateway\node_modules\**\*"
@@ -53,7 +55,9 @@
   </Target>
   <!-- The SDK extracts WinUI portable-library resources from PackagingOutputs.
        ToolHost is a separate self-contained WPF process: keep its DLLs in the
-       payload while excluding them only from that PRI extraction step. -->
+       payload while excluding them only from that PRI extraction step.
+       SDK 从 PackagingOutputs 提取 WinUI 可移植库资源；ToolHost 是独立自包含的 WPF 进程，DLL 仍随包提供，仅从这一 PRI 提取步骤中排除。
+  -->
   <Target Name="ExcludeToolHostLibrariesFromWinUiPri" BeforeTargets="_GeneratePrisForPortableLibraries">
     <ItemGroup Condition="'@(_LibrariesUnfiltered)' == '' and '@(CreatedResWFiles)' == '' and '$(NetCoreGeneratePrisForPortableLibraries)' != 'true'">
       <_LibrariesUnfiltered Include="@(PackagingOutputs)" Exclude="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" Condition="'%(Extension)' == '.dll'" />
@@ -64,7 +68,9 @@
   </Target>
   <!-- PRI's layout indexer also parses arbitrary content filenames as resource
        qualifiers. Preserve these separate runtimes as unindexed main payloads,
-       without suppressing validation of the actual desktop UI resources. -->
+       without suppressing validation of the actual desktop UI resources.
+       PRI 布局索引器也会将普通内容文件名解析为资源限定符；独立运行时保持为不参与索引的主包负载，不关闭桌面界面资源的实际验证。
+  -->
   <Target Name="KeepExecutableRuntimePayloadsOutsideWinUiPri"
           AfterTargets="_GenerateProjectPriConfigurationFiles"
           BeforeTargets="_GenerateProjectPriFileCore"

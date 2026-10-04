@@ -34,13 +34,9 @@
 
 ## 命名与书写
 
-- 遵循 [`.editorconfig`](../../../../.editorconfig)：UTF-8、CRLF、末尾换行、空格缩进；默认 4 空格，JSON/YAML 2 空格。已有 `.mjs` 多使用 2 空格，局部修改保持原文件风格，不夹带整文件格式化。全局格式调整单独实施。
-- C# 类型、方法、属性使用 PascalCase；参数和局部变量 camelCase；私有字段 `_camelCase`。异步方法使用 `Async` 后缀，框架事件处理函数遵循其约定。
-- JavaScript 函数、变量 camelCase，类 PascalCase；保留现有模块命名与导出风格。
-- 单位写在名称中，例如 `TimeoutMs`、`ContextWindowTokens`，不让调用方猜测秒/毫秒、字符/token。
-- 区分 `ConversationId`、`RequestId`、`UserMessageId` 等身份。标题、模型 ID、服务商名称和文件夹路径不能替代聊天或工作 ID。
-- 使用项目现有 C# 语法和类型表达方式，语义不清时写明确类型。注释解释约束、原因、恢复和兼容逻辑，不复述语法。
-- 错误码、协议字段、模型 ID 和日志事件名称不翻译；用户可见文案走既有本地化入口。
+统一规则由 [代码规范 Skill](../../kynxa-code-standards/SKILL.md) 及其 [命名与双语注释](../../kynxa-code-standards/references/naming-comments.md) 维护，格式入口是 [`.editorconfig`](../../../../.editorconfig)。C#/PowerShell 4 空格、JS/ESM 和 JSON/YAML 2 空格；自有说明性英文注释保留英文并补中文。局部修改不夹带整文件格式化，第三方包字节与许可证保持原文。
+
+命名规范不能代替身份边界：`ConversationId`、`RequestId`、`UserMessageId` 不互换；标题和路径不能替代稳定 ID。错误码、协议字段、模型 ID 与日志事件保持合同；用户可见文案继续走本地化入口。
 
 ## 异步、并发与资源
 

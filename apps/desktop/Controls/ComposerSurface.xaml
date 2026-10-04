@@ -5,7 +5,9 @@
              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
     <Grid>
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-        <!-- The backing spans both rows, filling the editor's lower corners without a seam. -->
+        <!-- The backing spans both rows, filling the editor's lower corners without a seam.
+             背景跨越两行，填满编辑器下方圆角而不留下接缝。
+        -->
         <Border x:Name="FooterBackground" Grid.RowSpan="2" Visibility="Collapsed"
                 Background="{StaticResource KynxaSegmentIdleBrush}" CornerRadius="{StaticResource KynxaComposerRadius}" />
         <Border x:Name="EditorSurface" Height="{Binding EditorHeight, ElementName=SurfaceRoot}"

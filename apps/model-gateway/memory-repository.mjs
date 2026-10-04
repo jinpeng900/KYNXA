@@ -6,6 +6,7 @@ import { MEMORY_SCHEMA_VERSION, MAX_MEMORY_ENTRIES, memoryFailure, memoryId, mem
   memoryContent, memoryKind, expectedMemoryRevision, validateMemoryDocument, validateMemorySource } from './memory-contracts.mjs';
 
 // All gateway instances in this process share a file queue. The gateway remains the sole writer of Data.
+// 同一进程中的所有网关实例共用文件队列，网关仍是 Data 的唯一正式写入者。
 const queues = new Map();
 const MAX_MEMORY_FILE_BYTES = 8 * 1024 * 1024;
 
@@ -98,6 +99,7 @@ export class MemoryRepository {
         return this._run(location.file, () => this._read(location));
       }));
       // A failed scope must not release the catalog guard while another scope still performs session IO.
+      // 某个范围失败时，不能在另一个范围仍进行会话 I/O 时释放目录保护。
       const failed = reads.find(result => result.status === 'rejected');
       if (failed) throw failed.reason;
       const scopes = reads.map(result => result.value);
@@ -108,6 +110,7 @@ export class MemoryRepository {
 
   _withScope(conversationId, scope, operation) {
     // Always acquire the conversation queue before the file queue. Resolve paths only while catalog moves are excluded.
+    // 始终先取得会话队列，再取得文件队列；仅在目录移动被排除期间解析路径。
     return this.conversations.withConversationStorage(memoryId(conversationId), relationship => {
       const location = this._location(relationship, scope);
       return this._run(location.file, () => operation(location));
@@ -120,10 +123,12 @@ export class MemoryRepository {
       if (scope === 'project' && relationship.isFolderlessWorkspace)
         throw memoryFailure('无文件夹工作不提供共享记忆。');
       // Archived real work remains manageable; only conversation context suppresses its injection.
+      // 已归档的真实工作仍可管理，只在聊天上下文中停止注入其记忆。
       const location = this._location(scope === 'project' ? { projectId: relationship.projectId } : {}, scope);
       return this._run(location.file, () => operation(location));
     };
     // Preserve catalog/conversation queue -> memory file queue ordering for every management operation.
+    // 所有管理操作都保持目录或会话队列到记忆文件队列的锁定顺序。
     if (scope === 'user') return this.conversations.withCatalogStorage(() => run({}));
     if (scope === 'project') return this.conversations.withProjectStorage(memoryId(scopeId), run);
     throw memoryFailure('独立记忆管理仅支持工作和用户作用域。');
@@ -146,6 +151,7 @@ export class MemoryRepository {
     document.revision++;
     const validated = validateMemoryDocument(document, location);
     // atomicJson writes indented JSON; enforce the size of those exact bytes so a successful write always remains readable.
+    // atomicJson 写入带缩进 JSON，按实际写出字节检查大小，确保写入成功后仍可读取。
     if (Buffer.byteLength(JSON.stringify(validated, null, 2)) > MAX_MEMORY_FILE_BYTES)
       throw memoryFailure('此作用域记忆文件已达容量上限，无法追加；已有记忆已保留。', 'MEMORY_CAPACITY_EXCEEDED', 409);
     await this._safe(location.folder, { create: true });
@@ -167,6 +173,7 @@ export class MemoryRepository {
     const source = validateMemorySource(input.source);
     return mutate(scope, expectedMemoryRevision(input.expectedRevision), document => {
       // A failed/retried model turn must not create the same explicit memory twice.
+      // 模型轮次失败或重试时，不得重复创建同一条显式记忆。
       if (source.type === 'user-message' && document.dismissedSources.some(item =>
           item.conversationId === source.conversationId && item.messageId === source.messageId)) return false;
       if (source.type === 'user-message' && document.entries.some(entry => entry.source.type === 'user-message' &&
@@ -238,6 +245,7 @@ export class MemoryRepository {
       catch (error) {
         if (error instanceof SyntaxError) {
           // Summaries are rebuildable projections. Preserve the exact corrupt bytes before clearing the canonical file.
+          // 摘要是可重建视图；清除正式文件前先保留损坏内容的精确原始字节。
           await this._preserveCorruptSummary(file, original);
           return null;
         }
@@ -245,6 +253,7 @@ export class MemoryRepository {
       }
       // v1 was request-independent first/last excerpts. Leave it intact until a v2
       // projection is rebuilt from authoritative history; never use its cached text.
+      // v1 摘录与请求无关；从正式历史重建 v2 之前保留旧文件，但不使用其缓存文本。
       if (value?.schemaVersion === 1) return null;
       if (!value || value.schemaVersion !== 2)
         throw memoryFailure('聊天摘要版本不受当前程序支持，原文件已保留。', 'UNSUPPORTED_SUMMARY_VERSION', 409);
@@ -258,6 +267,7 @@ export class MemoryRepository {
     await this._safe(backup, { file: true });
     await writeFile(backup, original, { flag: 'wx', mode: 0o600 });
     // A failed backup or removal must propagate; the caller must not rebuild over unpreserved data.
+    // 备份或移除失败必须向调用方传播，不得在未保存原数据的情况下重建。
     await unlink(file);
   }
 
@@ -267,6 +277,7 @@ export class MemoryRepository {
     if (Buffer.byteLength(JSON.stringify(summary, null, 2)) > MAX_MEMORY_FILE_BYTES) throw memoryFailure('聊天摘要过大。');
     return this._withSummary(conversationId, async file => {
       // An unsupported future document must never be replaced by an older application.
+      // 旧应用不得替换尚不支持的未来版本文档。
       if (await this._safe(file, { file: true })) {
         let previous;
         try { previous = JSON.parse((await readFile(file, 'utf8')).replace(/^\uFEFF/, '')); }

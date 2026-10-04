@@ -8,7 +8,10 @@ function option(args, names) {
   return null;
 }
 
-/** Describe the configured boundary, never infer authentication or disclose endpoint credentials. */
+/**
+ * Describe the configured boundary, never infer authentication or disclose endpoint credentials.
+ * 只描述配置中声明的边界，不推断认证状态，也不暴露端点凭据。
+ */
 export function browserConnection(server) {
   if ((server.transport ?? 'stdio') !== 'stdio') return null;
   const args = server.args ?? [], executable = String(server.command ?? '').replaceAll('\\', '/').split('/').at(-1);

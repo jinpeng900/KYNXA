@@ -149,6 +149,7 @@ test('metadata activation keeps a concurrently-created future version and cleans
   let staged = false;
   await assert.rejects(ensureExtensionLayout(root, { maintenanceActive: () => {
     // The second check follows the complete temporary write and precedes publication.
+    // 第二次检查位于完整的临时写入之后、正式发布之前。
     if (existsSync(root) && !staged) staged = readdirSync(root).some(name => name.startsWith('.extension-layout.'));
     return staged;
   } }), { code: 'STORAGE_MAINTENANCE_ACTIVE' });

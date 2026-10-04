@@ -16,6 +16,7 @@ $runtimeExecutable = Join-Path $versionCache 'runtime/node.exe'
 $expected = $runtimeManifest.platforms.'win-x64'.nodeSha256
 if ((Get-FileHash -LiteralPath $runtimeExecutable).Hash.ToLowerInvariant() -ne $expected) { throw 'Initial offline extraction did not use the pinned Node.' }
 # Corrupt only this fixture's copy, then prove rebuilding repairs it from the verified archive.
+# 仅损坏此夹具的副本，验证重新构建会使用已校验的归档修复它。
 [IO.File]::WriteAllText($runtimeExecutable, 'deliberately invalid fixture executable')
 & $runtimePrepare -RuntimeIdentifier win-x64 -CacheDirectory $runtimeCacheTest -Offline
 if ((Get-FileHash -LiteralPath $runtimeExecutable).Hash.ToLowerInvariant() -ne $expected) { throw 'A corrupted cached runtime was reused.' }

@@ -99,6 +99,7 @@ function validateDocument(input) {
   const active = new Set(locations(document).map(item => key(item.Id)));
   if (document.Tombstones.some(item => active.has(key(item.Id)))) throw failure('聊天删除状态冲突。');
   // Transcript bodies never belong in the catalog, including after restart.
+  // 聊天正文不进入目录元数据，重启后也维持这一约定。
   document.Projects = document.Projects.map(item => ({ ...item, Chats: item.Chats.map(metadata) }));
   document.Chats = document.Chats.map(metadata);
   return document;
@@ -108,7 +109,10 @@ async function exists(path) {
   try { await stat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
-/** One owner for both sidebar metadata and model context; model names never determine paths. */
+/**
+ * One owner for both sidebar metadata and model context; model names never determine paths.
+ * 侧栏元数据和模型上下文共享同一正式存储所有者，模型名称不决定存储路径。
+ */
 export class ConversationStore {
   constructor({ dataHome, root, legacyDesktopDirectory = process.env.KYNXA_LEGACY_DESKTOP_HOME } = {}) {
     if (!dataHome) throw failure('缺少模型数据目录。');
@@ -141,6 +145,7 @@ export class ConversationStore {
     else await this._migrate();
     await inspectDataLayout(this.root, this.document);
     // Recover only when this process opens the store, never during an active stream.
+    // 只在当前进程打开存储时恢复记录，不在正在进行的流中恢复。
     for (const location of locations(this.document)) {
       const messages = await this._readLog(location);
       for (const item of messages) if (item.Status === 'streaming')
@@ -208,6 +213,7 @@ export class ConversationStore {
         if (index !== lines.length - 1 || endsWithNewline)
           throw failure(`会话日志中间记录损坏，已停止读取并保留原文件：${location.Id}`, 'CORRUPT_CONVERSATION', 500);
         // A crash can leave one incomplete final append. Keep its exact bytes for diagnosis.
+        // 崩溃可能留下未完成的最后一次追加；保留其原始字节供诊断。
         await writeFile(`${filename}.recovered-tail-${randomUUID()}`, bytes.subarray(validLength), { mode: 0o600, flag: 'wx' });
         await truncate(filename, validLength);
         return this._cacheLog(filename, [...messages.values()]);
@@ -250,7 +256,10 @@ export class ConversationStore {
     return this._readMessages(conversationId, false);
   }
 
-  /** Gateway-only model projection source. Public APIs always use readMessages/catalog. */
+  /**
+   * Gateway-only model projection source. Public APIs always use readMessages/catalog.
+   * 仅供网关生成模型视图，公开接口始终使用 readMessages 或目录数据。
+   */
   readModelMessages(conversationId) {
     return this._readMessages(conversationId, true);
   }
@@ -266,6 +275,7 @@ export class ConversationStore {
   }
 
   // Memory ownership always follows the canonical catalog, never a caller's path.
+  // 记忆归属始终依据正式目录，不能依赖调用方传入的路径。
   describeConversation(conversationId) {
     return this._run(() => {
       this._notDeleted(conversationId);
@@ -288,7 +298,10 @@ export class ConversationStore {
 
   describeProject(projectId) { return this._run(() => this._projectRelationship(projectId)); }
 
-  /** Scope IO holds the same catalog guard as session IO, including work removal and global memory initialization. */
+  /**
+   * Scope IO holds the same catalog guard as session IO, including work removal and global memory initialization.
+   * 范围 I/O 与会话 I/O 使用同一目录保护，包括工作删除和全局记忆初始化。
+   */
   withCatalogStorage(operation) { return this._run(operation); }
 
   withProjectStorage(projectId, operation) {
@@ -305,7 +318,10 @@ export class ConversationStore {
     });
   }
 
-  /** Keep current ownership and dependent session IO atomic with catalog moves/deletions. */
+  /**
+   * Keep current ownership and dependent session IO atomic with catalog moves/deletions.
+   * 保持当前归属及其依赖的会话 I/O 与目录移动、删除互斥。
+   */
   withConversationStorage(conversationId, operation) {
     return this._run(() => {
       this._notDeleted(conversationId);
@@ -314,6 +330,7 @@ export class ConversationStore {
       const owner = location.ProjectId == null ? null :
         this.document.Projects.find(project => key(project.Id) === key(location.ProjectId));
       // The callback uses these app-owned paths under this queue, and must not reenter queued store methods.
+      // 回调只在当前队列保护下使用应用拥有的路径，不得重入已排队的存储方法。
       return operation({ conversationId: location.Id, projectId: owner?.Id ?? null,
         projectName: owner?.Name ?? null, isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace),
         isArchived: Boolean(location.Chat.IsArchived), projectArchived: Boolean(owner?.IsArchived),
@@ -403,6 +420,7 @@ export class ConversationStore {
   async _commit(next, moves = [], writes = []) {
     await inspectDataLayout(this.root, next);
     // Persist intent before any cross-folder move, so a process exit can finish the same transaction.
+    // 跨目录移动前先持久化事务意图，进程退出后才能继续完成同一事务。
     const slim = location => ({ Id: location.Id, ...(location.Trash ? { Trash: true } : { ProjectId: location.ProjectId ?? null }) });
     const transaction = { Version: 1, NextCatalog: validateDocument(next),
       Moves: moves.map(item => ({ From: slim(item.From), To: slim(item.To) })),
@@ -418,6 +436,7 @@ export class ConversationStore {
     const next = validateDocument(transaction.NextCatalog);
     await inspectDataLayout(this.root, next);
     // Validate all transaction paths before touching files.
+    // 实际操作文件前，验证所有事务路径。
     for (const item of transaction.Moves) { this._directory(item.From); this._directory(item.To); }
     for (const item of transaction.Writes) { this._directory(item.Location); message(item.Message); }
     for (const move of transaction.Moves) {
@@ -449,6 +468,7 @@ export class ConversationStore {
     imported.Projects = imported.Projects.map(value => ({ ...value, Chats: value.Chats.filter(keep) }));
     const writes = locations(imported).flatMap(location => location.Chat.Messages.map(value => ({ Location: location, Message: value })));
     // Backup exact original catalogs and ALL legacy model logs before committing the new store.
+    // 提交新存储前，备份原目录及全部旧模型日志的精确原始内容。
     const backup = join(this.root, 'Backups', 'conversations-v1');
     if (this.legacyDesktopDirectory) for (const filename of ['projects.json', 'chats.json'])
       await this._backup(join(this.legacyDesktopDirectory, filename), join(backup, 'Desktop', filename));
@@ -474,12 +494,14 @@ export class ConversationStore {
           throw failure('旧版记录与迁移备份不一致，请保留两份数据后检查。', 'MIGRATION_CONFLICT', 500);
       } else {
         // An interrupted backup must not leave a partial file at the final backup path.
+        // 备份中断不能在最终备份路径留下半份文件。
         const temporary = `${target}.${randomUUID()}.tmp`, fallback = `${target}.${randomUUID()}.tmp`;
         let completed = temporary;
         try {
           try { await copyFile(source, temporary); }
           catch (error) {
             // Some Windows filesystems reject copyFile across drives although ordinary reads work.
+            // 某些 Windows 文件系统会拒绝跨盘 copyFile，即使普通读取可用。
             if (!['UNKNOWN', 'EXDEV', 'ENOSYS'].includes(error.code)) throw error;
             await writeFile(fallback, await readFile(source), { mode: 0o600, flag: 'wx' });
             completed = fallback;

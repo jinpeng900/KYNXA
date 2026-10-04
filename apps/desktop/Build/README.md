@@ -20,4 +20,4 @@ powershell -File tests/node-runtime-smoke/check-pri.ps1
 powershell -File tests/node-runtime-smoke/run.ps1 -BundleRoot 'apps/desktop/bin/x64/Debug/net10.0-windows10.0.26100.0/win-x64'
 ```
 
-运行时检查复制本次构建的载荷到临时目录，清空 PATH 并隐藏系统 .NET，仅使用隔离数据和禁用的默认 MCP 配置。它不替代正式 MSIX 安装或其他架构设备的验收。
+运行时检查复制本次构建的载荷到临时目录，清空 PATH 并隐藏系统 .NET，仅使用隔离数据；检查默认启用的官方 MCP 清单时不发起连接、不启动上游服务。它不替代正式 MSIX 安装或其他架构设备的验收。

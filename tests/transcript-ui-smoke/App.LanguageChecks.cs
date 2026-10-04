@@ -80,6 +80,7 @@ public partial class App
             Check(await EvalAsync<bool>("!window.__languageCached.isConnected && !window.__languageCached.querySelector('.reasoning') && window.__languageCached.querySelector('.message-status').textContent === 'Generation stopped · CACHED_PROVIDER_ERROR 原始错误' && window.__languageCached.querySelector('.retry').textContent === 'Retry'"), "detached cached conversation controls switch without process cards");
 
             // A queued stream update must remain deferred while UI labels switch.
+            // 切换界面语言时，已排队的流式更新仍必须延后处理。
             thinking.Message.Content += " PENDING_LANGUAGE_UPDATE";
             thinking.Refresh(isThinking: true);
             await WaitAsync("!!(window.transcriptState().pending)", "selected transcript queues a model update before the next language switch");

@@ -15,6 +15,7 @@ async function fixture(t, handler, lookup = async () => [address()]) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   // Only this explicit test dependency routes a validated public URL to an owned local fixture.
   // Production keeps the native request(URL, options) and its validated socket lookup.
+  // 仅此显式测试依赖将已校验的公网 URL 路由到自有本地夹具；生产代码保留原生 request(URL, options) 及经过校验的套接字解析。
   const request = (url, options, callback) => {
     const pin = new Promise((resolve, reject) => options.lookup(url.hostname, { all: true },
       (error, values) => error ? reject(error) : resolve(values)));

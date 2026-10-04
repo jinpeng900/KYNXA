@@ -1,4 +1,7 @@
-/** Elapsed generation time has one gateway owner and uses a monotonic clock. */
+/**
+ * Elapsed generation time has one gateway owner and uses a monotonic clock.
+ * 生成用时由网关统一拥有，使用单调时钟计量。
+ */
 export function replyDurationMs(startedAtMonotonicMs) {
   return Math.max(0, Math.ceil(performance.now() - startedAtMonotonicMs));
 }
@@ -10,6 +13,7 @@ export function storedReplyDurationMs(message) {
     return message.DurationMs;
   }
   // Old terminal tool runs have real start/end receipts. Never derive a duration from the current clock.
+  // 旧终端工具记录具有真实起止回执，不能用当前时间推算历史用时。
   const run = message.ToolRun;
   const status = message.Status ?? 'completed';
   if (message.Role !== 'assistant' || !['completed', 'error', 'interrupted'].includes(status) ||

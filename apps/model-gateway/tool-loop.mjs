@@ -13,7 +13,10 @@ export function toolPolicyHash(context) {
     context.projectId, 'broker-v1-appcontainer-workspace-copy'])).digest('hex');
 }
 
-/** Bounded model → broker → model loop. Persist before side effects and after each result. */
+/**
+ * Bounded model → broker → model loop. Persist before side effects and after each result.
+ * 模型到代理再到模型的循环有明确上限，副作用前及每次结果返回后都先持久化。
+ */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
   context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, signal, interactive = false,
   historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {} }) {
@@ -42,6 +45,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       try { turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event)); }
       finally { progress.recordModel(modelElapsed()); }
       // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
+      // 执行副作用前先保存已解码模型步骤，结果仍由 saveActivity 负责保存。
       await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations });
       segments.finish(turn);
       await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
@@ -63,6 +67,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           status: 'running', summary: call.name, workspaceRoot: context.workspaceRoot ?? null,
           round: round + 1, order: segments.order++ };
         // Publish call starts in their assigned order, even when a storage callback is slow.
+        // 即使存储回调较慢，仍按已分配顺序发布调用开始事件。
         const start = starts.then(async () => {
           await saveActivity(activity);
           progress.toolCalls = callsRun;
@@ -77,6 +82,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           result = await service.execute(context, call, { signal, interactive,
             onApprovalWait: durationMs => { approvalMs += durationMs; }, emit: event => {
               // The approval token is ephemeral; only the call itself is durable.
+              // 审批令牌是临时数据，只持久化调用本身。
               emit({ ...event, ...(event.tool ? { tool: { ...event.tool, round: activity.round, order: activity.order } } : {}) });
             } });
         }
@@ -106,6 +112,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
             { code: 'MCP_OUTCOME_UNKNOWN' });
         // Once execution returned, record its known outcome before honoring stop.
         // The same cancellation prevents subsequent effects, never this receipt.
+        // 执行返回后先保存已知结果，再处理停止信号；取消阻止后续副作用，不能丢失本次回执。
         signal?.throwIfAborted();
         return { call, result };
       };
@@ -116,6 +123,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         }
         // Unknown tools and effects stay serial. Every accepted read still passes the same permission broker.
         // Settle the whole batch before failing so cancellation never drops a finished receipt.
+        // 未知工具和有副作用操作保持串行，允许并发的读取仍经过相同权限代理；整批全部结算后再报告失败，取消也不能丢失已完成回执。
         const batch = await Promise.allSettled(turn.calls.slice(index, end).map(executeCall));
         const failed = batch.find(item => item.status === 'rejected');
         if (failed) throw failed.reason;

@@ -19,10 +19,16 @@ function callKey(call) {
   return observationFingerprint([call.name, input]);
 }
 
-/** Only known stateless web operations may reuse an observation; local reads always recheck the source. */
+/**
+ * Only known stateless web operations may reuse an observation; local reads always recheck the source.
+ * 只有已知无状态网页操作可复用观察，本机读取始终重新检查源内容。
+ */
 export const canReuseObservation = call => call?.name?.startsWith('mcp.') === true && canRunInParallel(call);
 
-/** Owned by one immutable request context, never shared between requests or persisted. */
+/**
+ * Owned by one immutable request context, never shared between requests or persisted.
+ * 缓存仅属于单个不可变请求上下文，不跨请求共享，也不持久化。
+ */
 export class RequestObservationCache {
   constructor({ now = () => performance.now(), ttlMs = 15000 } = {}) {
     this.now = now; this.ttlMs = ttlMs; this.entries = new Map(); this.bytes = 0;
@@ -54,7 +60,10 @@ export class RequestObservationCache {
   }
 }
 
-/** Repeated successful observations, not repeated call IDs or prose, determine lack of progress. */
+/**
+ * Repeated successful observations, not repeated call IDs or prose, determine lack of progress.
+ * 以重复成功观察判断缺乏进展，不能仅凭重复调用 ID 或正文判断。
+ */
 export class ToolProgressGuard {
   constructor() { this.observations = new Map(); this.stagnantRounds = 0; }
   observeRound(pairs) {
@@ -80,7 +89,10 @@ export class ToolProgressGuard {
   }
 }
 
-/** Three failed attempts at the same read target end retries, not the conversation. */
+/**
+ * Three failed attempts at the same read target end retries, not the conversation.
+ * 同一读取目标连续失败三次后停止重试，但不终止整个聊天。
+ */
 export class ToolReadFailureGuard {
   constructor() { this.previousTargets = null; this.failedRounds = 0; }
   observeRound(pairs) {

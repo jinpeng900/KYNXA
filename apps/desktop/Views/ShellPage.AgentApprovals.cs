@@ -15,6 +15,7 @@ public sealed partial class ShellPage
         if (tool.ApprovalId is not { } approvalId) throw new InvalidDataException(UiText.Get("工具审批缺少请求标识。"));
         bool approved = false;
         // A new approval takes the dialog surface from a history preview, without deciding for the user.
+        // 新的审批可以占用历史预览的对话框，但不能替用户作出决定。
         if (_toolResultClosed is { } preview)
         {
             _toolResultCancellation?.Cancel();
@@ -28,6 +29,7 @@ public sealed partial class ShellPage
             catch (InvalidOperationException) { approved = false; }
         }
         // Stream cancellation revokes the pending server operation; it cannot be approved by a late dialog result.
+        // 取消流会撤销待执行的服务器操作；晚到的对话框结果不能批准它。
         if (_chatClosing || pending.Cancellation.IsCancellationRequested) return;
         await _agentApiClient.SubmitApprovalAsync(new(pending.ConversationId, pending.Message.Id, tool.ToolCallId, approvalId, approved),
             pending.Cancellation.Token);

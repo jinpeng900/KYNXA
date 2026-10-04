@@ -5,6 +5,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 
 // Isolated test process only: these reserved-domain documents never contact the internet.
+// 仅用于隔离测试；保留域名中的资料不访问互联网。
 const [mode, log] = process.argv.slice(2);
 const sources = [
   { title: 'Fixture release', url: 'https://sources.example.test/release', text: 'Version 2.1.0 was released on 2026-10-01.' },

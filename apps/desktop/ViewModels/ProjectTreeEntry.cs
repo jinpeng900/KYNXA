@@ -5,7 +5,10 @@ using Microsoft.UI.Xaml;
 
 namespace KYNXA_Desktop.ViewModels;
 
-/// <summary>Data-backed tree rows, safe to recycle when projects are reordered.</summary>
+/// <summary>
+/// Data-backed tree rows, safe to recycle when projects are reordered.
+/// 由正式数据支持的树行；项目重排时可安全复用。
+/// </summary>
 public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? chat = null) : ObservableObject
 {
     private string _title = chat?.Title ?? project.Name;
@@ -49,7 +52,10 @@ public partial class ProjectTreeEntry(ProjectState project, ProjectChatState? ch
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ReplyingVisibility => IsReplying ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>Refresh metadata without replacing the row or its native TreeView container.</summary>
+    /// <summary>
+    /// Refresh metadata without replacing the row or its native TreeView container.
+    /// 刷新元数据时保留原行及其原生 TreeView 容器。
+    /// </summary>
     public void Refresh(ProjectState project, ProjectChatState? chat = null)
     {
         if (Project.Id != project.Id || Chat?.Id != chat?.Id)

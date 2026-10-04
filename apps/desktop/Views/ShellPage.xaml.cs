@@ -12,7 +12,10 @@ using static KYNXA_Desktop.Layout.ShellLayoutMetrics;
 
 namespace KYNXA_Desktop.Views;
 
-/// <summary>The default KYNXA desktop shell defined by UI Design Spec v1.1.</summary>
+/// <summary>
+/// The default KYNXA desktop shell defined by UI Design Spec v1.1.
+/// 符合 UI Design Spec v1.1 的默认 KYNXA 桌面主界面。
+/// </summary>
 public sealed partial class ShellPage : Page
 {
     private readonly LayoutStateService _layoutStateService = new();
@@ -45,6 +48,7 @@ public sealed partial class ShellPage : Page
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
         MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;
         // A click in native chrome/input is outside the browser document too.
+        // 在原生界面区域或输入控件单击，也属于浏览器文档之外的操作。
         AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
         {
             for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null; node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
@@ -117,6 +121,7 @@ public sealed partial class ShellPage : Page
         }
 
         // Scale gently around the reference layout while keeping compact windows usable.
+        // 围绕参考布局缓慢缩放，同时保证小窗口仍可使用。
         double scale = Math.Clamp(Math.Min(width / 1100, height / 720), 0.76, 1.12);
         LogoHost.Width = 176 * scale;
         LogoHost.Height = 132 * scale;
@@ -128,6 +133,7 @@ public sealed partial class ShellPage : Page
 
         MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
         // The transcript fills the remaining grid column as the work panel resizes.
+        // 工作面板调整宽度时，聊天填满网格中剩余的列空间。
         ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 40);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
@@ -325,6 +331,7 @@ public sealed partial class ShellPage : Page
         if (changed)
         {
             // TextBox's two-way source can still be pending a focus change.
+            // TextBox 双向绑定的源值可能仍在等待焦点改变后提交。
             PromptTextBox.Text = chat ? _chatDraft : _workDraft;
             ViewModel.Prompt = PromptTextBox.Text;
             AnimateSidebarEntrance(chat ? ChatSidebarContent : WorkSidebarContent);
@@ -342,6 +349,7 @@ public sealed partial class ShellPage : Page
     {
         if (PrimaryModeSelectionPill is null) return;
         // Resize immediately; only mode changes animate between the two equal halves.
+        // 尺寸拖动立即生效；只有模式切换才在相等的左右半区间播放动画。
         var transition = PrimaryModeSelectionPill.TranslationTransition;
         PrimaryModeSelectionPill.TranslationTransition = null;
         UpdateModeSelection();
@@ -390,6 +398,7 @@ public sealed partial class ShellPage : Page
     {
         if (WorkRecentHistory is null || ProjectTree is null) return;
         // The task list gets all remaining height, above the fixed sidebar footer.
+        // 任务列表占用固定侧栏页脚上方的全部剩余高度。
         UpdateWorkSidebarHeights(e.NewSize.Height);
     }
 
@@ -488,6 +497,7 @@ public sealed partial class ShellPage : Page
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         // Match the editor's reserved scrollbar lane so wrapping never runs beneath it.
+        // 与输入区预留的滚动条通道对齐，避免换行文本延伸到滚动条下。
         double availableTextWidth = Math.Max(120, PromptTextBox.ActualWidth - 88);
         TextBlock measure = new()
         {

@@ -20,6 +20,7 @@ internal static partial class Program
         {
             // Background is deliberately omitted to verify the native default. The fixture
             // deliberately activates after loading to exercise delayed focus/placement repair.
+            // 有意省略 background 参数，以验证原生默认值；夹具加载后主动激活，检验延迟的焦点与位置修复。
             JsonElement launched = await RequestAsync(new { operation = "desktop", action = "launch",
                 appPath = Environment.ProcessPath, args = new[] { "--delayed-activation-fixture", folder } });
             childPid = launched.GetProperty("processId").GetInt32();

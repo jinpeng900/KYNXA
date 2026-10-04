@@ -17,6 +17,7 @@ export function modelOrigin(connection, { providerId, model }) {
   return { providerId, model, protocol: connection.protocol,
     // A changed account, endpoint or model cannot receive another origin's private continuation.
     // Only the digest is durable; the authentication value never becomes transcript text.
+    // 账号、端点或模型变化后，不能获取其他来源的私有续传状态。
     connectionFingerprint: hash([providerId, model, connection.protocol, connection.baseUrl, connection.apiKey ?? '']) };
 }
 
@@ -62,7 +63,10 @@ export function appendModelRound(assistant, origin, round) {
   return validateModelTranscript({ version: 1, origin, rounds });
 }
 
-/** Only known provider continuation fields can enter the protected archive. */
+/**
+ * Only known provider continuation fields can enter the protected archive.
+ * 只有已知供应商续传字段可以进入受保护附件。
+ */
 export function nativeContinuation(protocol, turn) {
   if (protocol === 'anthropic-messages') {
     const blocks = turn.continuation?.[0]?.content;
@@ -104,7 +108,10 @@ export function nativeContinuation(protocol, turn) {
     }) }];
 }
 
-/** Display/API callers see public messages, never private continuation pointers or origins. */
+/**
+ * Display/API callers see public messages, never private continuation pointers or origins.
+ * 界面和公开 API 只见公开消息，不暴露私有续传引用或来源。
+ */
 export function publicConversationMessage(message) {
   const { ModelTranscript: _private, ...publicMessage } = message;
   return publicMessage;

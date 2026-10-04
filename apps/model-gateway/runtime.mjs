@@ -25,6 +25,7 @@ import { replyDurationMs } from './reply-timing.mjs';
 // Compatibility helper for older callers. ModelRuntime uses buildContext below.
 // Failed attempts are visible in the transcript but excluded from model context.
 // Only the request is bounded; durable history is never truncated.
+// 此兼容助手服务旧调用方，ModelRuntime 使用下方 buildContext；失败尝试仍在聊天中可见但不进入模型上下文，只限制当前请求、不截断正式历史。
 export function completedContext(messages, beforeUserId) {
   const result = [];
   let user;
@@ -39,7 +40,10 @@ export function completedContext(messages, beforeUserId) {
   return result;
 }
 
-/** Transport adapters consume the same conversation log the desktop displays. */
+/**
+ * Transport adapters consume the same conversation log the desktop displays.
+ * 传输适配器使用与桌面展示相同的正式会话日志。
+ */
 export class ModelRuntime {
   constructor({ modelStore, dataHome, extensionRoot, conversationStore, memoryService, toolService, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = DEFAULT_TOOL_RUN_LIMITS.maxDurationMs }) {
     this.store = modelStore;
@@ -113,6 +117,7 @@ export class ModelRuntime {
       const summary = await this.memory.repository.readSummary(id);
       // Freeze one validated connection for this turn. A settings edit during
       // MCP discovery must not mix one provider's schemas with another protocol.
+      // 为本轮冻结同一已验证连接；MCP 发现期间编辑设置，不能混用一个供应商的 schema 和另一协议。
       const connection = Object.freeze(structuredClone(await this.connection(input)));
       const capabilities = resolveModelCapabilities(connection, input.model);
       const contextInput = { conversationId: id,
@@ -157,6 +162,7 @@ export class ModelRuntime {
       catch (error) {
         if (!catalog.length || (!(error instanceof ContextError) && !(error instanceof OutputBudgetError))) throw error;
         // Disabled/unavailable tools retain a portable low-trust chronology, never old executable schemas.
+        // 工具禁用或不可用时，只保留可移植、低信任的时间线，不注入旧执行 schema。
         catalog = []; declarations = []; projection.availableTools.clear();
         context = buildContext({ ...projectedInput, additionalSystem: hasToolHistory ? MODEL_HISTORY_NOTICE : '' });
       }
@@ -254,6 +260,7 @@ export class ModelRuntime {
         const parts = finalParts(connection.protocol, result);
         const content = parts.content;
         // Persist returned text even when the provider reports truncation.
+        // 供应商报告输出截断时，仍保存已返回的文本。
         turn.assistant.Content = content;
         turn.assistant.Reasoning = parts.reasoning;
         checkFinish(parts.finish);
@@ -455,6 +462,7 @@ export class ModelRuntime {
       { round, text: modelTurn.content ?? '', calls: modelTurn.calls ?? [],
         ...(nativeContinuationRef ? { nativeContinuationRef, prefixFingerprint } : {}) }) };
     // Commit the decoded round before dispatching effects. Results retain their one existing receipt owner.
+    // 派发副作用前先提交已解码轮次，结果仍由原有回执所有者负责保存。
     await this.conversations.upsertMessage(id, turn.assistant);
   }
 
@@ -468,6 +476,7 @@ export class ModelRuntime {
     try { await this.tools.close(); }
     finally {
       // Even failed process teardown must wait for final receipts and context releases.
+      // 进程清理失败也必须等待最终回执和上下文释放完成。
       await Promise.allSettled([...this.queues.values()]);
     }
   }

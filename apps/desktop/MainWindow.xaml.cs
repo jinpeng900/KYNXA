@@ -3,10 +3,14 @@ using KYNXA_Desktop.Views;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
+// WinUI 项目结构和模板的官方说明见上方链接。
 
 namespace KYNXA_Desktop;
 
-/// <summary>The application window hosting the KYNXA shell.</summary>
+/// <summary>
+/// The application window hosting the KYNXA shell.
+/// 承载 KYNXA 主界面的应用窗口。
+/// </summary>
 public sealed partial class MainWindow : Window
 {
     public MainWindow()

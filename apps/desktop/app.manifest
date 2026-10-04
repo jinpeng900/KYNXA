@@ -6,7 +6,9 @@
     <application>
       <!-- The ID below informs the system that this application is compatible with OS features first introduced in Windows 10. 
       It is necessary to support features in unpackaged applications, for example the custom titlebar implementation.
-      For more info see https://docs.microsoft.com/windows/apps/windows-app-sdk/use-windows-app-sdk-run-time#declare-os-compatibility-in-your-application-manifest -->
+      For more info see https://docs.microsoft.com/windows/apps/windows-app-sdk/use-windows-app-sdk-run-time#declare-os-compatibility-in-your-application-manifest
+           下方 ID 声明应用兼容 Windows 10 起提供的系统功能，确保未打包应用能使用自定义标题栏等能力；详细规则见上方 Microsoft 文档。
+      -->
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
     </application>
   </compatibility>

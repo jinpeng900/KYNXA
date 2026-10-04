@@ -1,5 +1,6 @@
 // Public publisher sources and registry versions were checked on 2026-10-03.
 // Hosted services are provider-managed; their implementation cannot be version-pinned by this client.
+// 公开发布者来源和注册表版本核验于 2026-10-03；托管服务由供应商管理，客户端无法固定其内部实现版本。
 const runtime = (name, description) => ({ name, type: 'runtime', required: true, description });
 const environment = (name, description, required = true) => ({ name, type: 'environment', required, description });
 const stdio = (id, name, args, options = {}) => ({ id, name, transport: 'stdio', command: 'npx', args,

@@ -6,7 +6,10 @@ using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>A storage label, current path and explicit folder selection button.</summary>
+/// <summary>
+/// A storage label, current path and explicit folder selection button.
+/// 统一展示存储名称、当前路径与明确的文件夹选择按钮。
+/// </summary>
 public sealed class StorageLocationRow : Grid
 {
     public TextBlock LocationLabel { get; }

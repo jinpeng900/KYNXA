@@ -10,6 +10,7 @@ import { inspectScreenshotImage } from '../../apps/model-gateway/browser-artifac
 
 // Explicit opt-in paths select already installed packages. No user browser profile,
 // user conversation, cloud model, credential or dependency installer is used.
+// 显式选择已安装的包路径；不使用用户浏览器配置、聊天、云模型、凭据或依赖安装器。
 const playwright = process.env.KYNXA_LIVE_PLAYWRIGHT_ENTRY;
 const devtools = process.env.KYNXA_LIVE_CHROME_DEVTOOLS_ENTRY;
 const browser = process.env.KYNXA_LIVE_BROWSER_PATH;
@@ -38,7 +39,9 @@ async function closeOwnedBrowser() {
       socket.addEventListener('message', event => { try { if (JSON.parse(event.data).id === 1) finish(); } catch { } });
       socket.addEventListener('close', finish); socket.addEventListener('error', finish);
     });
-  } catch { /* Only this fixture's retained process handle can be used for the fallback. */ }
+  } catch { /* Only this fixture's retained process handle can be used for the fallback.
+   * 回退逻辑只能使用此测试夹具保留的自有进程句柄。
+   */ }
   if (browserProcess.exitCode === null) await new Promise(resolve => {
     const timer = setTimeout(resolve, 3000);
     browserProcess.once('close', () => { clearTimeout(timer); resolve(); });

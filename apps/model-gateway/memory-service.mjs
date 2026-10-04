@@ -1,7 +1,10 @@
 import { MemoryRepository } from './memory-repository.mjs';
 import { explicitMemoryInstruction, memoryFailure, memoryId, memoryScope, validateMemorySource } from './memory-contracts.mjs';
 
-/** Long-term memory is user-confirmed data, separate from transcripts and derived context summaries. */
+/**
+ * Long-term memory is user-confirmed data, separate from transcripts and derived context summaries.
+ * 长期记忆是用户确认的数据，与聊天日志和派生上下文摘要分开管理。
+ */
 export class MemoryService {
   constructor({ conversationStore, repository }) {
     this.conversations = conversationStore;
@@ -38,6 +41,7 @@ export class MemoryService {
     input = this._scopeInput(scope, input);
     const source = validateMemorySource(input.source ?? { type: 'manual', role: 'user' });
     // Saved-message sources remain on the conversation endpoint, which verifies the canonical user message.
+    // 已保存消息的来源仍由会话端点验证，确保引用正式用户消息。
     if (source.type !== 'manual') throw memoryFailure('独立记忆管理只能创建手动确认记忆。');
     return this._withSourceStatus(await this.repository.createScope(scope, scopeId, { ...input, source }));
   }

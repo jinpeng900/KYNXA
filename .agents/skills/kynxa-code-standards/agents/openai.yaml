@@ -1,0 +1,6 @@
+interface:
+  display_name: "KYNXA 代码规范"
+  short_description: "规范 KYNXA 命名与中英注释，保持模块职责和行为兼容并验证"
+  default_prompt: "使用 $kynxa-code-standards 规范当前 KYNXA 改动的命名、注释和格式，核对接口与功能兼容并执行相称验证。"
+policy:
+  allow_implicit_invocation: true

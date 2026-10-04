@@ -78,6 +78,7 @@ test('legacy fallback cannot keep a pending approval after its effective work sc
   const call = f.call('filesystem.write', { path: 'pending.txt', content: 'not written', expectedHash: null });
   const pending = await pendingApproval(f.service, ctx, call);
   // Remove only the synthetic junction, preserving the source directory and its contents.
+  // 仅删除测试创建的目录联接，保留源目录及其内容。
   await unlink(link);
   await mkdir(join(link, 'Projects', f.projectId), { recursive: true });
   approve(f.service, ctx, pending.event.tool);

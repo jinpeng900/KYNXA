@@ -8,7 +8,10 @@ using Windows.ApplicationModel.DataTransfer;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Loads bounded text pages on demand. Media is fetched only by an explicit action.</summary>
+/// <summary>
+/// Loads bounded text pages on demand. Media is fetched only by an explicit action.
+/// 按需读取有大小上限的文本页；媒体只在明确操作之后获取。
+/// </summary>
 public sealed class ToolResultDialog : IDisposable
 {
     private readonly IAgentApi _api;
@@ -65,6 +68,7 @@ public sealed class ToolResultDialog : IDisposable
         UiText.LanguageChanged += LanguageChanged;
         LanguageChanged(null, EventArgs.Empty);
         // Keep media decoding bounded; regular results can still be read through text pages.
+        // 限制媒体解码规模；常规结果仍可通过文本分页读取。
         _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024;
         if (!_media.IsEnabled) AddNotice(_screenshot ? "截图过大，无法预览（最大 8 MB）。" : "结果过大，请通过分页查看文本；媒体预览限制为 8 MB。");
     }

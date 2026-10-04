@@ -314,6 +314,7 @@ internal sealed class FakeWorkApi : IAgentApi
         var completion = new TaskCompletionSource<ToolResultResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         Reads.Add(new(conversationId, reference, cancellationToken, completion));
         // Ignoring cancellation deliberately exercises each production pane's late-result guard.
+        // 有意忽略取消，验证各生产面板防御晚到结果的能力。
         return completion.Task;
     }
     public void Complete(int index, object receipt) => Reads[index].Completion.TrySetResult(new(JsonSerializer.SerializeToElement(receipt)));

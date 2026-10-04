@@ -37,6 +37,7 @@ public partial class App
         Check(partial.Mode == "partial" && partial.Segments.Length == 6
             && partial.Content == string.Join("\n\n", segments.Select(segment => segment.Content)), "interrupted request retains all received prose despite a completed-looking final segment");
         // Selection creates arrays; it never removes the authoritative source collection.
+        // 展示选择创建新数组，不删除正式来源集合。
         Check(segments.Count == 6 && tools.Count == 211 && before.Contains("BODY_2"), "all source stages and actions survive display projection");
         string after = JsonSerializer.Serialize(new { segments, tools });
         _ = TranscriptPresentation.Select("assistant", "streaming", "legacy body", segments, tools);

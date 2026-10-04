@@ -76,6 +76,7 @@ public partial class App
         Check(ComputerToolPresentation.Fields(key).Any(field => field.Value == "CTRL+A"), "key approval preserves the exact shortcut");
 
         // Capture only this test's own fake-data window; no user desktop, model or MCP is read.
+        // 仅捕获本测试自有的虚构数据窗口，不读取用户桌面、模型或 MCP。
         _api.ScreenshotImagePath = Path.Combine(_directory, "isolated-screenshot-source.png");
         await NativeWindowCapture.CaptureAsync(_window!, _api.ScreenshotImagePath);
         var screenshot = input with { Name = "computer.screenshot", Status = "completed", ResultRef = _api.ResultReference,

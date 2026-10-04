@@ -42,6 +42,7 @@ test('connection configuration keeps old stdio, env references, skill disablemen
   await assert.rejects(repository.update({ ...value, expectedRevision: 1, disabledSkills: ['arbitrary/path'] }), { code: 'INVALID_AGENT_CONFIG' });
   // A configuration produced by the old version is never called corrupt solely
   // because that version permitted duplicate connections.
+  // 旧版本曾允许重复连接；不能仅因此将旧版生成的配置判为损坏。
   await writeFile(repository.file, JSON.stringify({ ...value, mcpServers: [first, { ...first, id: 'old-duplicate' }] }));
   assert.equal((await repository.read()).mcpServers.length, 2);
 });

@@ -10,7 +10,10 @@ using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>A lazy, bounded gallery owned by the current conversation. Images are never put in chat text.</summary>
+/// <summary>
+/// A lazy, bounded gallery owned by the current conversation. Images are never put in chat text.
+/// 当前聊天拥有的延迟加载、有容量上限的图片集合；截图不进入聊天正文。
+/// </summary>
 public sealed class ConversationScreenshotsPanel : Grid, IDisposable
 {
     private const int MaximumCachedImages = 3;
@@ -33,14 +36,14 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     private readonly Dictionary<string, CachedScreenshot> _cache = [];
     private readonly LinkedList<string> _cacheOrder = [];
     private IReadOnlyList<ConversationMessageViewModel> _messages = [];
-    private ConversationScreenshotSource[] _sources = [];
+    private ConversationScreenshotSource[] _screenshotSources = [];
     private IAgentApi? _api;
     private Guid? _conversationId;
-    private CancellationTokenSource? _loading;
-    private string? _loadingIdentity;
+    private CancellationTokenSource? _loadCancellation;
+    private string? _loadingSourceIdentity;
     private XamlRoot? _observedRoot;
-    private long _generation;
-    private int _selected;
+    private long _loadGeneration;
+    private int _selectedSourceIndex;
     private bool _previewEnabled, _disposed, _tabbedMode;
     private string _noticeKey = "正在读取工具结果…";
 
@@ -56,9 +59,9 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         }
     }
 
-    public bool HasScreenshots => _sources.Length > 0;
-    public IReadOnlyList<ConversationScreenshotSource> Items => _sources;
-    public ConversationScreenshotSource? SelectedSource => _sources.Length > 0 ? _sources[_selected] : null;
+    public bool HasScreenshots => _screenshotSources.Length > 0;
+    public IReadOnlyList<ConversationScreenshotSource> Items => _screenshotSources;
+    public ConversationScreenshotSource? SelectedSource => _screenshotSources.Length > 0 ? _screenshotSources[_selectedSourceIndex] : null;
     public event EventHandler? ScreenshotsChanged;
     public event EventHandler<ToolResultRequest>? ScreenshotOpenRequested;
 
@@ -94,8 +97,8 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         _resizeTimer = DispatcherQueue.CreateTimer();
         _resizeTimer.Interval = TimeSpan.FromMilliseconds(180); _resizeTimer.IsRepeating = false;
         _resizeTimer.Tick += ResizeSettled;
-        _previous.Click += (_, _) => Select(_selected - 1);
-        _next.Click += (_, _) => Select(_selected + 1);
+        _previous.Click += (_, _) => Select(_selectedSourceIndex - 1);
+        _next.Click += (_, _) => Select(_selectedSourceIndex + 1);
         _open.Click += (_, _) => OpenSelected();
         Loaded += PanelLoaded; Unloaded += PanelUnloaded; SizeChanged += PanelSizeChanged;
         UiText.LanguageChanged += LanguageChanged;
@@ -120,7 +123,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         if (_disposed) return;
         ArgumentNullException.ThrowIfNull(messages);
         bool changed = _conversationId != conversationId;
-        if (changed) { CancelLoading(); ClearImages(); _sources = []; _selected = 0; }
+        if (changed) { CancelLoading(); ClearImages(); _screenshotSources = []; _selectedSourceIndex = 0; }
         bool sameRows = !changed && _messages.Count == messages.Count && _messages.Zip(messages).All(pair => ReferenceEquals(pair.First, pair.Second));
         _conversationId = conversationId;
         if (sameRows && !_messages.Any(RememberActivities)) return;
@@ -157,14 +160,14 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
 
     public bool SelectResult(Guid resultId)
     {
-        int index = Array.FindIndex(_sources, source => source.Tool.ResultRef?.Id == resultId);
+        int index = Array.FindIndex(_screenshotSources, source => source.Tool.ResultRef?.Id == resultId);
         if (_disposed || index < 0) return false;
         Select(index); return true;
     }
 
     public bool SelectSource(Guid messageId, string toolCallId)
     {
-        int index = Array.FindIndex(_sources, source => source.MessageId == messageId && source.Tool.ToolCallId == toolCallId);
+        int index = Array.FindIndex(_screenshotSources, source => source.MessageId == messageId && source.Tool.ToolCallId == toolCallId);
         if (_disposed || index < 0) return false;
         Select(index); return true;
     }
@@ -190,12 +193,12 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         var selected = SelectedSource;
         var next = ConversationScreenshotSources.Collect(_conversationId,
             _messages.Select(message => new ScreenshotMessage(message.ConversationId, message.Message.Id, message.Message.Role, message.ToolActivities)));
-        bool changed = force || !_sources.Select(source => source.Identity).SequenceEqual(next.Select(source => source.Identity));
-        _sources = next;
+        bool changed = force || !_screenshotSources.Select(source => source.Identity).SequenceEqual(next.Select(source => source.Identity));
+        _screenshotSources = next;
         if (!changed) return;
         int previousIndex = _tabbedMode && !force && selected is not null
             ? Array.FindIndex(next, source => source.MessageId == selected.MessageId && source.Tool.ToolCallId == selected.Tool.ToolCallId) : -1;
-        _selected = previousIndex >= 0 ? previousIndex : next.Length == 0 ? 0 : next.Length - 1;
+        _selectedSourceIndex = previousIndex >= 0 ? previousIndex : next.Length == 0 ? 0 : next.Length - 1;
         Visibility = HasScreenshots && (!_tabbedMode || _previewEnabled) ? Visibility.Visible : Visibility.Collapsed;
         ScreenshotsChanged?.Invoke(this, EventArgs.Empty);
         RenderSelected();
@@ -203,30 +206,31 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
 
     private void Select(int index)
     {
-        if (_disposed || index < 0 || index >= _sources.Length || index == _selected) return;
-        _selected = index; RenderSelected();
+        if (_disposed || index < 0 || index >= _screenshotSources.Length || index == _selectedSourceIndex) return;
+        _selectedSourceIndex = index; RenderSelected();
     }
 
     private void OpenSelected()
     {
-        if (_disposed || !_previewEnabled || _sources.Length == 0) return;
+        if (_disposed || !_previewEnabled || _screenshotSources.Length == 0) return;
         if (_image.Source is null) { RenderSelected(); return; }
-        var source = _sources[_selected];
+        var source = _screenshotSources[_selectedSourceIndex];
         ScreenshotOpenRequested?.Invoke(this, new(source.ConversationId, source.MessageId, source.Tool));
     }
 
     private void RenderSelected()
     {
-        _navigation.Visibility = !_tabbedMode && _sources.Length > 1 ? Visibility.Visible : Visibility.Collapsed;
-        _position.Text = $"{(_sources.Length == 0 ? 0 : _selected + 1)} / {_sources.Length}";
-        _previous.IsEnabled = _selected > 0; _next.IsEnabled = _selected < _sources.Length - 1;
+        _navigation.Visibility = !_tabbedMode && _screenshotSources.Length > 1 ? Visibility.Visible : Visibility.Collapsed;
+        _position.Text = $"{(_screenshotSources.Length == 0 ? 0 : _selectedSourceIndex + 1)} / {_screenshotSources.Length}";
+        _previous.IsEnabled = _selectedSourceIndex > 0; _next.IsEnabled = _selectedSourceIndex < _screenshotSources.Length - 1;
         // Shell can synchronously open the sidebar during ScreenshotsChanged. Keep the same in-flight read.
-        if (!_disposed && _previewEnabled && IsLoaded && HasScreenshots && _loading is not null &&
-            _loadingIdentity == _sources[_selected].Identity) return;
+        // ScreenshotsChanged 可能让主界面同步打开侧栏；保留正在进行的同一次读取。
+        if (!_disposed && _previewEnabled && IsLoaded && HasScreenshots && _loadCancellation is not null &&
+            _loadingSourceIdentity == _screenshotSources[_selectedSourceIndex].Identity) return;
         CancelLoading(); _image.Source = null; _open.IsEnabled = false;
         _notice.Visibility = Visibility.Collapsed;
         if (_disposed || !_previewEnabled || !IsLoaded || !HasScreenshots || _api is null) return;
-        var source = _sources[_selected];
+        var source = _screenshotSources[_selectedSourceIndex];
         int previewDimension = RequestedPreviewDimension();
         _cache.TryGetValue(source.Identity, out var cached);
         if (cached is not null)
@@ -235,9 +239,9 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
             if (cached.PreviewDimension >= previewDimension || Math.Max(cached.Image.OriginalPixelWidth, cached.Image.OriginalPixelHeight) <= cached.PreviewDimension) return;
         }
         else { _noticeKey = "正在读取工具结果…"; RefreshLanguage(); _notice.Visibility = Visibility.Visible; }
-        var cancellation = _loading = new CancellationTokenSource();
-        _loadingIdentity = source.Identity;
-        _ = LoadSelectedAsync(source, cached?.Archive, previewDimension, _generation, cancellation);
+        var cancellation = _loadCancellation = new CancellationTokenSource();
+        _loadingSourceIdentity = source.Identity;
+        _ = LoadSelectedAsync(source, cached?.Archive, previewDimension, _loadGeneration, cancellation);
     }
 
     private async Task LoadSelectedAsync(ConversationScreenshotSource source, ArchivedScreenshot? archive, int previewDimension,
@@ -265,16 +269,16 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         }
         finally
         {
-            if (ReferenceEquals(_loading, cancellation))
+            if (ReferenceEquals(_loadCancellation, cancellation))
             {
-                _loading = null; _loadingIdentity = null; cancellation.Dispose();
+                _loadCancellation = null; _loadingSourceIdentity = null; cancellation.Dispose();
                 if (decoded && _cache.TryGetValue(source.Identity, out var cached) && cached.PreviewDimension < RequestedPreviewDimension()) QueuePreviewResize();
             }
         }
     }
 
     private bool IsCurrent(string identity, long generation, CancellationToken cancellation) => !_disposed && _previewEnabled && IsLoaded &&
-        !cancellation.IsCancellationRequested && generation == _generation && _sources.Length > 0 && _sources[_selected].Identity == identity;
+        !cancellation.IsCancellationRequested && generation == _loadGeneration && _screenshotSources.Length > 0 && _screenshotSources[_selectedSourceIndex].Identity == identity;
 
     private void Present(string identity, CachedScreenshot screenshot)
     {
@@ -284,7 +288,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
 
     private void ResizePreview()
     {
-        if (!HasScreenshots || !_cache.TryGetValue(_sources[_selected].Identity, out var cached)) return;
+        if (!HasScreenshots || !_cache.TryGetValue(_screenshotSources[_selectedSourceIndex].Identity, out var cached)) return;
         double scale = PreviewScale(cached.Image);
         _image.Width = cached.Image.OriginalPixelWidth * scale; _image.Height = cached.Image.OriginalPixelHeight * scale;
     }
@@ -299,7 +303,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     private int RequestedPreviewDimension()
     {
         double dimension = Math.Max(1, ActualWidth - 16);
-        if (HasScreenshots && _cache.TryGetValue(_sources[_selected].Identity, out var cached))
+        if (HasScreenshots && _cache.TryGetValue(_screenshotSources[_selectedSourceIndex].Identity, out var cached))
             dimension = Math.Max(cached.Image.OriginalPixelWidth, cached.Image.OriginalPixelHeight) * PreviewScale(cached.Image);
         double physical = dimension * (XamlRoot?.RasterizationScale ?? 1);
         return physical <= 1024 ? 1024 : physical <= 2048 ? 2048 : 4096;
@@ -311,12 +315,12 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) { ResizePreview(); QueuePreviewResize(); }
     private void ResizeSettled(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        if (!HasScreenshots || !_cache.TryGetValue(_sources[_selected].Identity, out var cached) ||
+        if (!HasScreenshots || !_cache.TryGetValue(_screenshotSources[_selectedSourceIndex].Identity, out var cached) ||
             cached.PreviewDimension < RequestedPreviewDimension()) RenderSelected();
     }
 
     private void CancelLoading()
-    { _generation++; _loading?.Cancel(); _loading?.Dispose(); _loading = null; _loadingIdentity = null; }
+    { _loadGeneration++; _loadCancellation?.Cancel(); _loadCancellation?.Dispose(); _loadCancellation = null; _loadingSourceIdentity = null; }
     private void ClearImages() { _image.Source = null; _cache.Clear(); _cacheOrder.Clear(); }
     private void PanelLoaded(object sender, RoutedEventArgs args)
     {
@@ -347,7 +351,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         if (_observedRoot is not null) _observedRoot.Changed -= RootChanged;
         _observedRoot = null; CancelLoading(); ClearImages();
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
-        _messages = []; _sources = []; _activitySnapshots.Clear();
+        _messages = []; _screenshotSources = []; _activitySnapshots.Clear();
         UiText.LanguageChanged -= LanguageChanged; Loaded -= PanelLoaded; Unloaded -= PanelUnloaded; SizeChanged -= PanelSizeChanged;
     }
 }

@@ -4,6 +4,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 
 // A synthetic official-SDK process. All paths and values are supplied by isolated tests.
+// 使用官方 SDK 的自造测试进程；所有路径和值均由隔离测试提供。
 const log = process.argv[2];
 await appendFile(log, JSON.stringify({ event: 'started', pid: process.pid }) + '\n');
 serveStdio(() => {

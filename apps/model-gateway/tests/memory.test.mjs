@@ -182,6 +182,7 @@ test('restart and data-root copy preserve memory; writing memory and summary nev
   assert.equal((await memory.repository.readSummary('a1')).content, '摘要');
   const migrated = join(f.root, 'copy-parent');
   // Copy only canonical components into a new root rather than recursively copying a root into itself.
+  // 只将规范目录组件复制到新根目录，避免把根目录递归复制到自身。
   for (const component of ['Projects', 'Chats', 'Memory', 'catalog.json', 'settings.json', '.conversations-v1.json'])
     await cp(join(f.root, component), join(migrated, component), { recursive: true });
   const movedStore = new ConversationStore({ dataHome: join(migrated, 'Models'), legacyDesktopDirectory: null });

@@ -4,7 +4,10 @@ using KYNXA_Desktop.ViewModels;
 
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Views over work chats; sidebar navigation never changes their storage ownership.</summary>
+/// <summary>
+/// Views over work chats; sidebar navigation never changes their storage ownership.
+/// 工作聊天的展示视图；侧栏导航不会改变存储归属。
+/// </summary>
 public static class WorkSidebarState
 {
     public static ProjectState? FindSelectedProject(IEnumerable<ProjectState> projects, Guid? projectId) =>
@@ -24,7 +27,10 @@ public static class WorkSidebarState
             .ThenBy(entry => !entry.Chat.IsPinned && ranks.TryGetValue(entry.Chat.Id, out int rank) ? rank : int.MaxValue);
     }
 
-    /// <summary>Tasks may show the selected project's active draft. Other views omit drafts by default.</summary>
+    /// <summary>
+    /// Tasks may show the selected project's active draft. Other views omit drafts by default.
+    /// 任务区可展示所选项目的当前草稿；其他列表默认省略草稿。
+    /// </summary>
     public static IEnumerable<(ProjectState Project, ProjectChatState Chat)> ProjectChats(
         ProjectState? project, Guid? activeDraftId = null) =>
         project is null || project.IsArchived
@@ -34,7 +40,10 @@ public static class WorkSidebarState
                 .OrderByDescending(chat => chat.IsPinned)
                 .Select(chat => (project, chat));
 
-    /// <summary>Call when submitting a message, never on navigation or streaming updates. Pinned rows retain their order.</summary>
+    /// <summary>
+    /// Call when submitting a message, never on navigation or streaming updates. Pinned rows retain their order.
+    /// 仅在提交消息时调用，导航和流式更新不调用；置顶项保留原排序。
+    /// </summary>
     public static bool ActivateChat(ProjectState project, ProjectChatState chat)
     {
         if (project.IsArchived || chat.IsPinned || chat.IsArchived || !chat.CanPersist) return false;
@@ -60,6 +69,7 @@ public static class WorkSidebarState
             desired.Add(entry);
         }
         // Avoid resets and retain row identity so hover, focus and selection remain stable.
+        // 不重置列表并保留行身份，使悬停、焦点与选择保持稳定。
         ProjectTreeReconciler.ReconcileRows(rows, desired);
     }
 }

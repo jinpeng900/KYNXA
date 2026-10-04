@@ -32,6 +32,7 @@ public partial class App
         await EvalAsync<bool>("(() => { window.__switchObserver.disconnect(); return true; })()");
 
         // Force an uncached parse, then supersede it before its background task posts.
+        // 强制执行未缓存的解析，并在后台任务回写之前用新请求取代。
         var abandonedChat = Guid.NewGuid();
         var abandonedRows = Enumerable.Range(0, 80).Select(index => Message(abandonedChat, "assistant",
             $"ABANDONED_CHAT_{index}\n\n```python\n" + string.Join('\n', Enumerable.Repeat("value = 1 + 2  # abandoned generation", 80)) + "\n```" )).ToList();

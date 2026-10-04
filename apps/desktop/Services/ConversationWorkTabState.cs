@@ -1,9 +1,15 @@
 namespace KYNXA_Desktop.Services;
 
-/// <summary>Key is a logical call identity, not a mutable result-reference or output version.</summary>
+/// <summary>
+/// Key is a logical call identity, not a mutable result-reference or output version.
+/// 键使用逻辑调用身份，不使用可能变化的结果引用或输出版本。
+/// </summary>
 public sealed record ConversationWorkTab(string Key, string Kind, string Title);
 
-/// <summary>Per-conversation display state. Closing never deletes or cancels the source resource.</summary>
+/// <summary>
+/// Per-conversation display state. Closing never deletes or cancels the source resource.
+/// 按聊天隔离的展示状态；关闭标签不会删除资源或取消执行。
+/// </summary>
 public sealed class ConversationWorkTabState
 {
     public const int MaximumConversations = 16;
@@ -42,10 +48,12 @@ public sealed class ConversationWorkTabState
         tabs.Items = next;
         // A late/empty UI projection does not prove that a formal resource was deleted.
         // Remember recent absent closed keys so rehydration cannot silently reopen them.
+        // 晚到或空的 UI 投影不证明正式资源已删除；保留近期关闭键，避免重新加载后悄悄打开。
         var absentClosed = tabs.Closed.Where(pair => !keys.Contains(pair.Key)).OrderByDescending(pair => pair.Value).ToArray();
         foreach (var pair in absentClosed.Skip(MaximumAbsentClosedTabs)) tabs.Closed.Remove(pair.Key);
         if (!autoOpenNew) foreach (var item in added) tabs.Closed[item.Key] = ++_version;
         // New resources open in the background. A stable, still-open selection never changes.
+        // 新资源在后台打开；已有且仍打开的选择保持稳定。
         if (keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
             tabs.SelectedKey = tabs.Items.FirstOrDefault(item => !tabs.Closed.ContainsKey(item.Key))?.Key;
         return added.Length > 0;

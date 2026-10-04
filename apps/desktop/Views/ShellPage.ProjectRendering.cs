@@ -19,6 +19,7 @@ public sealed partial class ShellPage
 
         // ItemInvoked and pointer handlers must finish before changing their tree's
         // nodes. Merge requests and read the latest state when the callback runs.
+        // 树节点更改须等 ItemInvoked 与指针事件处理完成；合并刷新请求，回调执行时读取最新状态。
         _projectRenderQueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyProjectRows);
     }
 

@@ -1,4 +1,5 @@
 // Desktop HTTP delivery is separate from routing, generation and persistence.
+// 桌面 HTTP 传输与路由、生成和持久化职责分离。
 export function sendJson(response, status, value) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   response.end(JSON.stringify(value));
@@ -17,6 +18,7 @@ export async function readJsonBody(request, limit = 64 * 1024) {
 }
 
 // The caller owns generation and shutdown; this owns only the HTTP response.
+// 调用方拥有生成和关闭流程，此处仅管理 HTTP 响应。
 export function openEventStream(response, identity, controller) {
   const cancel = () => { if (!response.writableEnded) controller.abort(); };
   response.on('close', cancel);

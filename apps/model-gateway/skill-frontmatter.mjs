@@ -7,7 +7,10 @@ const standardTags = new Set(['tag:yaml.org,2002:str', 'tag:yaml.org,2002:null',
   'tag:yaml.org,2002:map', 'tag:yaml.org,2002:seq']);
 const standardFields = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools']);
 
-/** Frontmatter is data, never executable YAML. Bound the AST before conversion. */
+/**
+ * Frontmatter is data, never executable YAML. Bound the AST before conversion.
+ * Frontmatter 只作为数据，不执行 YAML；转换前限制 AST 规模。
+ */
 function frontmatterValues(content) {
   if (typeof content !== 'string') return null;
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content.replace(/^\uFEFF/, ''));
@@ -39,7 +42,10 @@ function frontmatterValues(content) {
   } catch { return null; }
 }
 
-/** Preserve readable legacy metadata; standard validation is a separate import boundary. */
+/**
+ * Preserve readable legacy metadata; standard validation is a separate import boundary.
+ * 保留可读取的旧元数据，标准校验属于独立导入边界。
+ */
 export function parseSkillFrontmatter(content) {
   const values = frontmatterValues(content);
   if (!values) return null;
@@ -56,7 +62,10 @@ export function parseSkillFrontmatter(content) {
     ...(Object.keys(extra).length ? { metadata: extra } : {}) };
 }
 
-/** Agent Skills format diagnostics do not silently rewrite existing skill files. */
+/**
+ * Agent Skills format diagnostics do not silently rewrite existing skill files.
+ * Agent Skills 格式诊断不静默改写已有技能文件。
+ */
 export function validateSkillFrontmatter(content, { directoryName } = {}) {
   const values = frontmatterValues(content), header = parseSkillFrontmatter(content), diagnostics = [];
   const error = (code, field, message) => diagnostics.push({ code, field, severity: 'error', message });

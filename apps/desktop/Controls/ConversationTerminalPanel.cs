@@ -9,7 +9,10 @@ using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>Read-only command/output display, not a persistent interactive shell.</summary>
+/// <summary>
+/// Read-only command/output display, not a persistent interactive shell.
+/// 只读命令与输出展示，不承担持久交互终端的职责。
+/// </summary>
 public sealed class ConversationTerminalPanel : Grid, IDisposable
 {
     private readonly TerminalOutputState _state = new();

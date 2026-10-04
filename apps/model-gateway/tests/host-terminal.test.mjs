@@ -213,6 +213,7 @@ test('visible command reaches the real native console in a folderless chat and i
       { requestId: ctx.requestId, toolCallId: call.id, toolName: 'terminal.host.run' });
     assert.equal(history.structuredContent.consoleText, value.consoleText);
     // The public archive is typed; the model-facing immediate preview must retain actual screen content too.
+    // 公开归档保留结果类型；给模型的即时预览也应保留实际屏幕内容。
     assert.match(result.content, /VISIBLE_BROKER_SUCCESS/);
   });
 

@@ -54,6 +54,7 @@ try {
   $anchor = if ($direction -eq 'up') { $selection.Substring([Math]::Max(0, $selection.Length - 24)) } else { $selection.Substring(0, [Math]::Min(24, $selection.Length)) }
   for ($tick = 0; $tick -lt 14; $tick++) {
    # Continue moving at the edge, then cross into the assistant avatar column.
+   # 在边缘继续移动，再穿过助手头像列。
    $dragX = if ($tick -ge 5) { [int]($bounds.Left + 24) } else { $x + ($tick % 2) }
    [void][SelectionMouse]::SetCursorPos($dragX, $edge)
    Start-Sleep -Milliseconds 100
@@ -83,6 +84,7 @@ try {
   Write-Output "PASS $direction : scroll $before -> $after ; selected characters $initialLength -> $length ; stops on release"
  }
  # Cross the actual assistant image while pressed, then return to the bottom edge.
+ # 按住时穿过真实助手图片，再返回底部边缘。
  $scroll.SetScrollPercent(-1, 0)
  Start-Sleep -Milliseconds 300
  $avatar = (Find-Id 'ReplyAvatar').Current.BoundingRectangle

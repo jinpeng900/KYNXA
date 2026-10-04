@@ -135,6 +135,7 @@ test('real Windows AppContainer: snapshot IO, denied external read/network, proc
       const started = new Promise(resolve => { onStarted = resolve; });
       const pendingCancellation = runner.run({ workspaceRoot: workspace, command: 'node', args: ['-e', descendantsScript], timeoutMs: 10000 }, controller.signal);
       // A native start record identifies the stage; wait until the actual child has also started.
+      // 原生启动记录用于确定阶段；还需等待实际子进程启动。
       const cancellationStage = (await started).stagingDirectory;
       for (let attempt = 0; attempt < 200; attempt++) {
         try { await readFile(join(cancellationStage, 'ready.json')); break; }

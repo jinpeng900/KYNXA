@@ -15,6 +15,7 @@ let manifestPromise;
 
 export async function readOfficialToolsManifest() {
   // Installed metadata is read-only. Return a copy so callers cannot change the shared package inventory.
+  // 安装元信息只读，返回副本避免调用方修改共享包清单。
   manifestPromise ??= readFile(manifestUrl, 'utf8').then(text => {
     const manifest = JSON.parse(text);
     if (manifest.schemaVersion !== 1 || manifest.packageId !== OFFICIAL_TOOLS_PACKAGE_ID ||

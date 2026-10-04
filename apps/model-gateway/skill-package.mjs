@@ -14,6 +14,7 @@ function checkNodeVersion(requirement) {
     if (operator === '=') return expected.every((part, index) => current[index] === part);
     const partial = expected.length < 3;
     // Partial inclusive upper ranges (<=22, >22.1) cover their entire major/minor series.
+    // 带部分版本的比较范围按主版本或次版本系列处理，例如 <=22 和 >22.1。
     if (partial && ['<=', '>'].includes(operator)) expected[expected.length - 1]++;
     while (expected.length < 3) expected.push(0);
     let comparison = 0;
@@ -23,7 +24,10 @@ function checkNodeVersion(requirement) {
   });
 }
 
-/** Describe requirements using declared sandbox capabilities; never probe with host commands. */
+/**
+ * Describe requirements using declared sandbox capabilities; never probe with host commands.
+ * 仅根据已声明沙箱能力描述要求，不通过宿主命令探测。
+ */
 export async function checkSkillEnvironment(skill, inventory, { sandboxCapabilities, signal, scriptPath, denyResource } = {}) {
   const capabilities = sandboxCapabilities ?? {}, commands = Array.isArray(capabilities.commands)
     ? [...new Set(capabilities.commands.filter(value => typeof value === 'string').map(value => value.replace(/\.exe$/i, '').toLowerCase()))] : [];

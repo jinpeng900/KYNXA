@@ -55,6 +55,7 @@ export function validateMemorySource(value) {
     throw memoryFailure('记忆须由用户明确确认，来源格式无效。');
   const source = { type, role: 'user' };
   // Manual confirmation can belong directly to a work/global scope without creating a conversation.
+  // 人工确认可直接归属工作或全局范围，不必创建聊天。
   if (type === 'user-message' || value.conversationId != null) source.conversationId = memoryId(value.conversationId);
   if (type === 'user-message') source.messageId = memoryId(value.messageId);
   else if (value.messageId != null) throw memoryFailure('手动记忆不能伪造消息来源。');
@@ -89,7 +90,10 @@ export function validateMemoryDocument(value, { scope, scopeId }) {
   return { schemaVersion: MEMORY_SCHEMA_VERSION, scope, scopeId, revision: value.revision, entries, dismissedSources };
 }
 
-/** Commands are explicit whole-message prefixes; assistant text and quoted code are never scanned. */
+/**
+ * Commands are explicit whole-message prefixes; assistant text and quoted code are never scanned.
+ * 命令必须是整条用户消息的明确前缀，不扫描助手正文或引用代码。
+ */
 export function explicitMemoryInstruction(message, hasProject) {
   if (typeof message !== 'string') return null;
   const match = /^\s*(全局记住|聊天记住|项目记住|工作记住|记住这个|记住)\s*[:：]\s*([\s\S]+?)\s*$/.exec(message);

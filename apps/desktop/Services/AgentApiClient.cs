@@ -29,8 +29,8 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull };
-    private readonly HttpClient _http;
-    private readonly Func<CancellationToken, Task> _ensureReady;
+    private readonly HttpClient _httpClient;
+    private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
 
     public AgentApiClient() : this(new HttpClient { BaseAddress = ModelGatewayService.Address,
@@ -38,8 +38,8 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
 
     public AgentApiClient(HttpClient http, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {
-        _http = http;
-        _ensureReady = ensureReady ?? (_ => Task.CompletedTask);
+        _httpClient = http;
+        _ensureGatewayReady = ensureReady ?? (_ => Task.CompletedTask);
         _ownsHttpClient = ownsHttpClient;
     }
 
@@ -148,16 +148,16 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object? payload, CancellationToken cancellationToken)
     {
         JsonElement? snapshot = payload is null ? null : JsonSerializer.SerializeToElement(payload, JsonOptions);
-        await _ensureReady(cancellationToken);
+        await _ensureGatewayReady(cancellationToken);
         using var request = new HttpRequestMessage(method, path);
         if (snapshot is { } body) request.Content = JsonContent.Create(body, options: JsonOptions);
-        using var response = await _http.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         return await GatewayResponseReader.ReadAsync<T>(response, UiText.Get("工具接口返回了空响应。"),
             UiText.Get("工具接口返回 HTTP {0}。"), cancellationToken, JsonOptions);
     }
 
     public void Dispose()
     {
-        if (_ownsHttpClient) _http.Dispose();
+        if (_ownsHttpClient) _httpClient.Dispose();
     }
 }

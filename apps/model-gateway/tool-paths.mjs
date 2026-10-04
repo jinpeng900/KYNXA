@@ -18,7 +18,10 @@ export function isModelCredentialPath(path, dataHome, appDataRoot) {
   return Boolean(modelConnection || agentConfig);
 }
 
-/** Reject links/reparse directories at every existing component, including parents outside the work root. */
+/**
+ * Reject links/reparse directories at every existing component, including parents outside the work root.
+ * 检查每个已存在路径组件的链接或重解析目录，包含工作根以外的祖先目录。
+ */
 export async function inspectLocalPath(path, { allowMissing = false } = {}) {
   path = resolve(path);
   const root = parse(path).root;
@@ -43,6 +46,7 @@ export function resolveToolPath(context, input, protectedRoots = []) {
   if (typeof value !== 'string' || !value.trim() || value.length > 4096 || /[\0\r\n]/.test(value))
     throw toolFailure('请提供有效文件路径。');
   // Device paths, alternate data streams and network shares do not belong to local UTF-8 tools.
+  // 设备路径、替代数据流和网络共享不属于本地 UTF-8 文件工具支持范围。
   if (process.platform === 'win32' && (/^\\\\/.test(value) || /^[a-z]:(?:$|[^\\/])/i.test(value) || value.replace(/^[a-z]:/i, '').includes(':') ||
       value.split(/[\\/]/).some(part => (/[. ]$/.test(part) && !['.', '..'].includes(part)) ||
         /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))))

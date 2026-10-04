@@ -6,7 +6,10 @@ using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>A neutral tab strip. The shell maps the selected logical resource to its existing content pane.</summary>
+/// <summary>
+/// A neutral tab strip. The shell maps the selected logical resource to its existing content pane.
+/// 通用标签栏；主界面把选中的逻辑资源映射到已有内容面板。
+/// </summary>
 public sealed class ConversationWorkTabs : Grid, IDisposable
 {
     private readonly ConversationWorkTabState _state = new();

@@ -71,12 +71,15 @@ function pairs(body, protocol, expected) {
 function observationValue(text) {
   const result = JSON.parse(text);
   // Current-step previews and reloaded canonical typed archives are both legitimate observations.
+  // 当前步骤的预览和重新加载的正式带类型归档都是有效的观测结果。
   if (result.structuredContent !== undefined) return result.structuredContent;
   const block = Array.isArray(result.content) ? result.content.find(item => item.type === 'text') : null;
   return block ? JSON.parse(block.text) : result;
 }
 
-/** All stores, native snapshots, MCP processes and network endpoints belong to this temporary fixture. */
+/** All stores, native snapshots, MCP processes and network endpoints belong to this temporary fixture.
+ * 所有存储、原生快照、MCP 进程和网络端点均属于此临时测试夹具。
+ */
 async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-official-workflow-'));
   const dataHome = join(root, 'Data', 'Models'), extensionRoot = join(root, 'Extensions'), workspace = join(root, 'Work');
@@ -116,6 +119,7 @@ async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure
   });
   await start(); if (configure) await configure({ service, root, workspace, extensionRoot });
   // A new package may add enabled publisher defaults. This workflow only owns its explicitly replaced Node fixtures.
+  // 新包可能新增默认启用的上游服务；本工作流仅运行显式替换的 Node 测试服务。
   const config = await service.getConfig();
   if (config.mcpServers.some(server => server.origin === 'official' && server.enabled && server.command !== process.execPath))
     await service.updateConfig({ ...config, expectedRevision: config.revision,

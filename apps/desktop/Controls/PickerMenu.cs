@@ -6,7 +6,10 @@ using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Controls;
 
-/// <summary>Shared menu presentation. Callers retain selection, persistence and action behavior.</summary>
+/// <summary>
+/// Shared menu presentation. Callers retain selection, persistence and action behavior.
+/// 共享菜单展示；选择、持久化与具体动作仍由调用方负责。
+/// </summary>
 internal static class PickerMenu
 {
     public static double Dimension(string key) => (double)Application.Current.Resources[key];

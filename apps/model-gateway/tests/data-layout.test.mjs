@@ -53,6 +53,7 @@ test('project creation, real chat, rename and relinking update scaffolding witho
   assert.equal(changed.Name, '改名'); assert.equal(changed.FolderPath, project.FolderPath);
   assert.ok(log.equals(await readFile(join(session, 'events.jsonl'))));
   // Missing scaffold/index is reconstructable; user files and conversation text are not rewritten.
+  // 缺失的目录骨架和索引可以重建；不改写用户文件或聊天正文。
   await rm(join(projectRoot, 'project.json'));
   await rm(join(root, 'Index', 'search.sqlite'));
   await new ConversationStore(options).initialize();

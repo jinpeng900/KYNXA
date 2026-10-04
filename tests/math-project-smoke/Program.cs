@@ -174,4 +174,5 @@ Check(ProjectOrdering.Move(projects, b, a, true), "manual reorder");
 Check(projects.OrderByDescending(p => p.IsPinned).SequenceEqual(new[] { pinned, a, b }), "drop below target");
 Check(!ProjectOrdering.Move(projects, a, pinned, false), "cannot cross pinned group");
 // Persistence now belongs to the gateway; HTTP snapshot/order checks live in conversation-store-smoke.
+// 正式持久化由网关负责；HTTP 快照与排序验证位于 conversation-store-smoke。
 Console.WriteLine($"PASS: 8 formula layouts, {sizedDelimiters.Length} sized delimiters, {aliases.Length} aliases and {modularFormulas.Length} modular formulas in inline/block layouts, {standardFormulas.Length} standard/escaped formulas, scalable delimiter images, scope/unknown-command guards, source fallback, delimiters/code protection and recent/pinned/manual ordering.");

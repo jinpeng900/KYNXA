@@ -60,6 +60,7 @@ public sealed partial class ShellPage
         projects.ItemClick += async (_, args) =>
         {
             // WinUI can return the explicit item's content instead of its container.
+            // WinUI 可能返回选项的内容，而不是其容器。
             if (args.ClickedItem is not FrameworkElement { Tag: ProjectState project }) return;
             menu.Hide();
             await RunProjectActionAsync(() => { StartWorkspaceProject(project); return Task.CompletedTask; });
@@ -72,6 +73,7 @@ public sealed partial class ShellPage
             {
                 menu.Hide();
                 // Let the flyout close before presenting the name dialog or native folder picker.
+                // 先让浮出菜单关闭，再显示名称对话框或原生文件夹选择器。
                 DispatcherQueue.TryEnqueue(async () => await RunProjectActionAsync(action));
             };
             actions.Children.Add(button);

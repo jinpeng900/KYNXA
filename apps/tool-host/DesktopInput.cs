@@ -4,7 +4,7 @@ namespace KYNXA.ToolHost;
 
 internal static class DesktopInput
 {
-    private static readonly Dictionary<string, ushort[]> Keys = new(StringComparer.Ordinal)
+    private static readonly Dictionary<string, ushort[]> KeyCombinations = new(StringComparer.Ordinal)
     {
         ["ENTER"] = [0x0d], ["TAB"] = [0x09], ["ESC"] = [0x1b], ["BACKSPACE"] = [0x08], ["DELETE"] = [0x2e],
         ["UP"] = [0x26], ["DOWN"] = [0x28], ["LEFT"] = [0x25], ["RIGHT"] = [0x27], ["HOME"] = [0x24], ["END"] = [0x23],
@@ -14,7 +14,7 @@ internal static class DesktopInput
         ["CTRL+PLUS"] = [0x11, 0x6b], ["CTRL+MINUS"] = [0x11, 0x6d], ["CTRL+0"] = [0x11, 0x30]
     };
 
-    internal static string[] SupportedKeys => Keys.Keys.ToArray();
+    internal static string[] SupportedKeys => KeyCombinations.Keys.ToArray();
     internal static Dictionary<string, object?> Apply(DesktopTarget target, DesktopRequest request, CancellationToken cancellation)
     {
         var sequence = new DesktopInputSequence();
@@ -47,7 +47,7 @@ internal static class DesktopInput
             }
             else if (request.Action == "key")
             {
-                if (request.Key is null || !Keys.TryGetValue(request.Key, out ushort[]? keys))
+                if (request.Key is null || !KeyCombinations.TryGetValue(request.Key, out ushort[]? keys))
                     throw new DesktopException("DESKTOP_INVALID_KEY", "The requested key combination is not supported.");
                 if (keys.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0))
                     throw new DesktopException("DESKTOP_INPUT_BUSY", "A requested key is physically held; input was not changed.");
