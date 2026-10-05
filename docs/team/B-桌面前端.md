@@ -1,6 +1,6 @@
 # B：桌面前端
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`codex/team-b-ui`。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/b-ui`。
 
 ## 代码范围
 

@@ -1,6 +1,6 @@
 # A：队长与任务编排
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`codex/team-a-integration`。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/a-integration`。
 
 ## 代码范围
 

@@ -22,11 +22,11 @@ gateway、desktop、shared、tool-host 分别指 apps/model-gateway、apps/deskt
 
 | 成员 | 交接分支 | 典型文件与配套目录 |
 |---|---|---|
-| A 队长 | `codex/team-a-integration` | `orchestration/runtime.mjs`、`orchestration/tool-loop.mjs`、`orchestration/retrieval/coordinator.mjs`；`platform/`、desktop `Services/Integration/`、`Build/RuntimePackaging.targets`；根 CLI/工程入口、`tools/development/`、`.github/` |
-| B 界面 | `codex/team-b-ui` | desktop `Views/ShellPage.*`、`Views/RetrievalSettingsWindow*`、`Resources/Transcript/transcript.js` / `transcript.css`；`Controls/`、`ViewModels/`、UI 模型/布局/资源及 `Services/Presentation/` |
-| C 模型 | `codex/team-c-models` | `models/context.mjs`、`models/model-history.mjs`、`models/output-budget.mjs`、`models/streaming.mjs`、`models/retrieval/embedding-service.mjs` / `models/retrieval/reranker-service.mjs`；desktop `Services/Models/`、shared `Chat/`、`start-local-model.ps1` |
-| D 工具 | `codex/team-d-tools` | `tools/mcp-client.mjs`、`tools/skill-service.mjs`、`tools/tool-policy.mjs`、`tools/browser-sessions.mjs`、`tools/retrieval/web-search.mjs`；`official-tools/`、tool-host `Desktop/Terminal/Sandbox/Native/`、desktop `Services/Tools/`、shared `Tools/` |
-| E 数据 | `codex/team-e-data` | `data/conversations.mjs`、`data/memory-service.mjs`、`data/data-layout.mjs`、`data/retrieval/index.mjs` / `data/retrieval/source-library.mjs`；desktop `Services/Data/`、shared `Memory/`（含 `RetrievalApiContracts.cs`） |
+| A 队长 | `kynxa_team/a-integration` | `orchestration/runtime.mjs`、`orchestration/tool-loop.mjs`、`orchestration/retrieval/coordinator.mjs`；`platform/`、desktop `Services/Integration/`、`Build/RuntimePackaging.targets`；根 CLI/工程入口、`tools/development/`、`.github/` |
+| B 界面 | `kynxa_team/b-ui` | desktop `Views/ShellPage.*`、`Views/RetrievalSettingsWindow*`、`Resources/Transcript/transcript.js` / `transcript.css`；`Controls/`、`ViewModels/`、UI 模型/布局/资源及 `Services/Presentation/` |
+| C 模型 | `kynxa_team/c-models` | `models/context.mjs`、`models/model-history.mjs`、`models/output-budget.mjs`、`models/streaming.mjs`、`models/retrieval/embedding-service.mjs` / `models/retrieval/reranker-service.mjs`；desktop `Services/Models/`、shared `Chat/`、`start-local-model.ps1` |
+| D 工具 | `kynxa_team/d-tools` | `tools/mcp-client.mjs`、`tools/skill-service.mjs`、`tools/tool-policy.mjs`、`tools/browser-sessions.mjs`、`tools/retrieval/web-search.mjs`；`official-tools/`、tool-host `Desktop/Terminal/Sandbox/Native/`、desktop `Services/Tools/`、shared `Tools/` |
+| E 数据 | `kynxa_team/e-data` | `data/conversations.mjs`、`data/memory-service.mjs`、`data/data-layout.mjs`、`data/retrieval/index.mjs` / `data/retrieval/source-library.mjs`；desktop `Services/Data/`、shared `Memory/`（含 `RetrievalApiContracts.cs`） |
 
 表中未写 apps 前缀的网关路径以 `apps/model-gateway/` 为根，desktop/shared/tool-host 与上表定义相同。完整文件归属以 [主责清单](module-ownership.json) 为准；A 维护 `apps/mock-backend/`、`apps/desktop-preview/` 和公共构建配置，ToolHost 根 `Program.cs` 与工程文件也归 A，原生功能归 D。
 

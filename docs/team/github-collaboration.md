@@ -72,21 +72,21 @@ gh api --method PUT repos/jinpeng900/KYNXA/branches/main/protection --input docs
 
 ## 4. 成员日常操作
 
-五个交接分支对应 A/B/C/D/E：`codex/team-a-integration`、`codex/team-b-ui`、`codex/team-c-models`、`codex/team-d-tools`、`codex/team-e-data`。它们从同一个包含最新交接说明的 `main` 提交建立，仅作为成员初次取代码的入口，不作为文件夹权限。已有分支不能用强推重置。
+五个交接分支对应 A/B/C/D/E：`kynxa_team/a-integration`、`kynxa_team/b-ui`、`kynxa_team/c-models`、`kynxa_team/d-tools`、`kynxa_team/e-data`。它们从同一个包含最新交接说明的 `main` 提交建立，仅作为成员初次取代码的入口，不作为文件夹权限。已有分支不能用强推重置。
 
 例如 B 首次下载并切到其交接分支：
 
 ```powershell
 git clone https://github.com/jinpeng900/KYNXA.git
 Set-Location KYNXA
-git switch --track origin/codex/team-b-ui
+git switch --track origin/kynxa_team/b-ui
 ```
 
-后续每个任务从最新 `main` 建任务分支，避免长期交接分支积累已合并差异；不要直接向 `main` 推送。旧分支需同步重组后的目录。以下示例由 C 执行，B/D/E 分别使用 `codex/ui/`、`codex/tools/`、`codex/data/`，A 使用 `codex/integration/`。
+后续每个任务从最新 `main` 建任务分支，避免长期交接分支积累已合并差异；不要直接向 `main` 推送。旧分支需同步重组后的目录。以下示例由 C 执行，B/D/E 分别使用 `kynxa_team/ui/`、`kynxa_team/tools/`、`kynxa_team/data/`，A 使用 `kynxa_team/integration/`。
 
 ```powershell
 git fetch origin
-git switch -c codex/models/context-budget origin/main
+git switch -c kynxa_team/models/context-budget origin/main
 
 # Stage the files actually changed, including coordinated client/contract changes.
 # 暂存实际修改的文件，含已协调的客户端和契约改动。
@@ -96,7 +96,7 @@ git push -u origin HEAD
 gh pr create --base main --fill
 ```
 
-新任务统一使用 `codex/` 前缀和领域名，既有 `feature/` 或 `integration/` 分支不需要批量改名。跨模块 PR 写明接口和双方调用端，负责人跑本模块验证，队长完成集成与合并。每个人的测试仍放现有 tests，不为人员分工复制测试框架。
+新任务按用户约定统一使用 `kynxa_team/` 前缀和领域名，既有 `feature/` 或 `integration/` 分支不需要批量改名。跨模块 PR 写明接口和双方调用端，负责人跑本模块验证，队长完成集成与合并。每个人的测试仍放现有 tests，不为人员分工复制测试框架。
 
 本次交接文档和开发分支按用户授权提交/推送；不因此发送邀请或修改远端保护。四位成员账号尚未填写，CODEOWNERS 继续使用已知仓库所有者；保护配置只是初始化模板，未核验远端生效状态，不能声称已限制其他人合并。
 

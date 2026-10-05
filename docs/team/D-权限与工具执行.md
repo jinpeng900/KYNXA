@@ -1,6 +1,6 @@
 # D：权限与工具执行
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)；能力以 [工具架构](../architecture/agent-tools.md) 为准。交接分支：`codex/team-d-tools`。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)；能力以 [工具架构](../architecture/agent-tools.md) 为准。交接分支：`kynxa_team/d-tools`。
 
 ## 代码范围
 
