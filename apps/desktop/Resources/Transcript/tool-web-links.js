@@ -22,6 +22,7 @@
 
   function toolKind(tool) {
     if (tool.name === 'web.fetch') return 'fetch';
+    if (tool.name === 'web.search') return 'search';
     if (typeof tool.name !== 'string' || !tool.name.startsWith('mcp.')) return null;
     const toolName = tool.name.slice(tool.name.lastIndexOf('.') + 1);
     if (!websiteTools.has(toolName)) return null;
@@ -51,7 +52,7 @@
         for (const child of value.slice(0, 64)) resultQueue.push({ value: child, depth: depth + 1 });
       } else if (typeof value === 'object') {
         for (const field of ['url', 'uri', 'link']) if (typeof value[field] === 'string') urls.push(value[field]);
-        for (const field of ['text', 'content', 'structuredContent', 'results', 'items', 'web', 'data', 'output', 'preview', 'resource'])
+        for (const field of ['text', 'content', 'structuredContent', 'results', 'sources', 'items', 'web', 'data', 'output', 'preview', 'resource'])
           if (value[field] != null) resultQueue.push({ value: value[field], depth: depth + 1 });
       }
     }

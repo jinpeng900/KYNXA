@@ -3,6 +3,8 @@ import { estimateToolMessageTokens } from './tool-protocols.mjs';
 import { StreamFailure } from './streaming.mjs';
 import { validateId } from '../platform/conversation-id.mjs';
 import { toolOutputExcerpt } from '../platform/tool-excerpts.mjs';
+import { TOOL_RESULT_METADATA_BYTES } from '../data/tool-result-store.mjs';
+import { describeToolObservation, planObservationCompaction, observationCompactionText } from './tool-observation-compaction.mjs';
 
 const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const safeSourceId = value => { try { return validateId(value); } catch { return null; } };
@@ -33,9 +35,13 @@ function completeToolPairs(messages) {
  * 仅生成当前请求视图，不写历史，也不重放已完成操作。
  */
 export class ToolContextProjection {
-  constructor({ protocol, messages, historySources = [], conversationId } = {}) {
+  constructor({ protocol, messages, historySources = [], conversationId, resultStore, resultContext } = {}) {
     this.protocol = protocol;
     this.conversationId = conversationId;
+    this.resultStore = resultStore; this.resultContext = resultContext;
+    this.verifiedArchiveCount = 0; this.unavailableArchiveCount = 0; this.archiveReadBytes = 0;
+    this.observationReasons = new Map();
+    this.checkedObservationReceipts = new Map();
     this.history = new WeakMap();
     this.results = new WeakMap();
     this.compactedResults = new Set();
@@ -65,7 +71,9 @@ export class ToolContextProjection {
         this.latestHistoricalResultTurn = Math.max(this.latestHistoricalResultTurn, source.turnIndex);
         this.results.set(value, { callId: result.callId, name: result.name, resultRef: { ...result.resultRef }, field, round,
           historical: true, turnIndex: source.turnIndex, status: result.status, originalCharacters: result.originalCharacters ?? value[field].length,
-          originalExcerpt: toolOutputExcerpt(result.originalExcerpt ?? value[field], 4096), previewCharacters: Infinity });
+          originalExcerpt: toolOutputExcerpt(result.originalExcerpt ?? value[field], 4096),
+          identity: result.observationIdentity, observationCompacted: result.observationCompacted === true,
+          previewCharacters: result.observationCompacted ? 0 : Infinity });
       };
       registerResult(message, source);
       for (const item of source.historicalResultBlocks ?? []) {
@@ -78,9 +86,89 @@ export class ToolContextProjection {
   observeResult(message, { call, result, field }, round) {
     this.latestResultRound = Math.max(this.latestResultRound, round);
     if (!validReference(result.resultRef)) return;
+    const status = result.status ?? (result.isError ? 'error' : 'completed');
     this.results.set(message, { callId: call.id, name: call.name, resultRef: { ...result.resultRef }, field, round,
-      status: result.status ?? (result.isError ? 'error' : 'completed'), originalCharacters: result.content.length,
-      originalExcerpt: toolOutputExcerpt(result.content, 4096), previewCharacters: Infinity });
+      status, originalCharacters: result.content.length, originalExcerpt: toolOutputExcerpt(result.content, 4096), previewCharacters: Infinity,
+      candidateIdentity: describeToolObservation({ name: call.name, status, payload: result.content, scopeKey: this.conversationId }),
+      archiveOwner: { requestId: this.resultContext?.requestId, toolCallId: call.id, toolName: call.name } });
+  }
+
+  /** Verify only potentially reusable reads, once per receipt and within the real input IO budget.
+   * 仅核验可能复用的读取观察，每份回执只读取一次，实际输入预算同时限制归档 I/O。 */
+  async prepareObservations(messages, { inputBudgetTokens, signal } = {}) {
+    signal?.throwIfAborted();
+    if (!this.resultStore?.modelResult || !Number.isFinite(inputBudgetTokens)) return this._observationMetrics();
+    const groups = new Map(), projectedText = new Map();
+    for (const { source, value } of this._resultLocations(messages)) {
+      const identity = source.identity ?? source.candidateIdentity;
+      if (!identity) continue;
+      if (!groups.has(identity.targetKey)) groups.set(identity.targetKey, []);
+      groups.get(identity.targetKey).push(source);
+      projectedText.set(source, value[source.field]);
+    }
+    let remainingBytes = Math.max(0, Math.floor(inputBudgetTokens * 4) - this.archiveReadBytes);
+    const pending = [];
+    for (const sources of groups.values()) {
+      if (sources.length < 2) continue;
+      // Estimate the replacement before disk IO; tiny repeated reads are cheaper to retain verbatim.
+      // 归档 I/O 前先估算替代文本，小型重复结果直接保留更省成本。
+      const candidates = sources.map(source => ({ ...source, original: source,
+        identity: { ...(source.identity ?? source.candidateIdentity), archiveVerified: true } }));
+      const usefulPlans = planObservationCompaction(candidates).filter(plan => !plan.source.observationCompacted &&
+        estimateTokens(observationCompactionText(plan)) < estimateTokens(projectedText.get(plan.source.original)));
+      const needed = new Set(usefulPlans.flatMap(plan => [plan.source.original, plan.replacement.original]));
+      for (const source of [...sources].reverse().filter(item => needed.has(item))) {
+        if (source.identity?.archiveVerified || source.archiveChecked || source.historical || !source.archiveOwner?.requestId) continue;
+        const receiptKey = JSON.stringify([source.resultRef, source.archiveOwner]);
+        const previous = this.checkedObservationReceipts.get(source.resultRef.id);
+        if (previous) {
+          source.archiveChecked = true;
+          if (previous.key === receiptKey) pending.push(previous.promise.then(identity => { source.identity = identity; }));
+          else this.unavailableArchiveCount++;
+          continue;
+        }
+        const readBytes = source.resultRef.bytes + TOOL_RESULT_METADATA_BYTES;
+        if (readBytes > remainingBytes) continue;
+        remainingBytes -= readBytes; this.archiveReadBytes += readBytes; source.archiveChecked = true;
+        const reference = { ...source.resultRef }, owner = { ...source.archiveOwner };
+        const verification = Promise.resolve().then(async () => {
+          signal?.throwIfAborted();
+          const payload = await this.resultStore.modelResult(this.resultContext, reference, owner);
+          source.identity = describeToolObservation({ name: source.name, status: source.status, payload,
+            scopeKey: this.conversationId, archiveVerified: true });
+          this.verifiedArchiveCount++;
+          return source.identity;
+        }).catch(() => { this.unavailableArchiveCount++; return null; });
+        this.checkedObservationReceipts.set(reference.id, { key: receiptKey, promise: verification });
+        pending.push(verification);
+      }
+    }
+    // All admitted reads settle before cancellation releases the model/tool loop.
+    // 已发出的归档读取全部结算后才响应取消并释放模型/工具循环。
+    await Promise.allSettled(pending);
+    signal?.throwIfAborted();
+    return this._observationMetrics();
+  }
+
+  _observationMetrics() {
+    return { duplicateCount: [...this.observationReasons.values()].filter(reason => reason === 'duplicate-observation').length,
+      supersededCount: [...this.observationReasons.values()].filter(reason => reason === 'superseded-version').length,
+      verifiedArchiveCount: this.verifiedArchiveCount, unavailableArchiveCount: this.unavailableArchiveCount,
+      archiveReadBytes: this.archiveReadBytes };
+  }
+
+  _replaceResult(messages, location, text, metadata) {
+    const replacement = { ...location.value, [location.source.field]: text };
+    this.results.set(replacement, { ...location.source, ...metadata });
+    this._copyHistory(location.value, replacement);
+    const projected = [...messages];
+    if (location.blockIndex != null) {
+      const owner = projected[location.index], content = [...owner.content];
+      content[location.blockIndex] = replacement;
+      const replacementOwner = { ...owner, content };
+      this._copyHistory(owner, replacementOwner); projected[location.index] = replacementOwner;
+    } else projected[location.index] = replacement;
+    return projected;
   }
 
   _resultLocations(messages) {
@@ -156,8 +244,23 @@ export class ToolContextProjection {
     const hardInputLimitTokens = Number.isFinite(inputBudgetTokens) ? Math.max(0, Math.floor(inputBudgetTokens)) : Infinity;
     const schemaTokens = estimateTokens(JSON.stringify(declarations)), estimateProjectionTokens = value => estimateToolMessageTokens(value, system) + schemaTokens;
     const beforeTokens = estimateProjectionTokens(messages), targetInputTokens = Math.floor(hardInputLimitTokens * 0.85);
-    if (beforeTokens <= hardInputLimitTokens * 0.9) return { messages };
     let projected = messages, changed = false, currentTokens = beforeTokens;
+    const metrics = afterTokens => ({ beforeTokens, estimatedInputTokens: afterTokens,
+      inputBudgetTokens: hardInputLimitTokens, schemaTokens, reducedTokens: beforeTokens - afterTokens,
+      compactedToolResultCount: this.compactedResults.size, compactedLatestResultCount: this.compactedLatestResults.size,
+      compactedHistoryTurnCount: this.compactedTurns.size, observationCompaction: this._observationMetrics() });
+    const locations = this._resultLocations(projected), locationBySource = new Map(locations.map(location => [location.source, location]));
+    for (const plan of completeToolPairs(projected) ? planObservationCompaction(locations.map(location => location.source)) : []) {
+      const location = locationBySource.get(plan.source);
+      if (plan.source.observationCompacted) continue;
+      const text = observationCompactionText(plan);
+      if (estimateTokens(text) >= estimateTokens(location.value[location.source.field])) continue;
+      projected = this._replaceResult(projected, location, text, { previewCharacters: 0, observationCompacted: true });
+      this.compactedResults.add(plan.source.callId); this.observationReasons.set(plan.source.callId, plan.reason); changed = true;
+    }
+    currentTokens = estimateProjectionTokens(projected);
+    if (currentTokens <= hardInputLimitTokens * 0.9) return { messages: projected,
+      ...(changed || this.archiveReadBytes > 0 ? { metrics: metrics(currentTokens) } : {}) };
     const latestRound = this.latestResultRound;
     const compactResults = (previewSizesCharacters, selected, targetTokens, latest = false) => {
       for (const previewCharacters of previewSizesCharacters) {
@@ -169,17 +272,7 @@ export class ToolContextProjection {
           const text = this._resultText(location.source, previewCharacters);
           const previousTokens = estimateTokens(location.value[location.source.field]), replacementTokens = estimateTokens(text);
           if (replacementTokens >= previousTokens) continue;
-          const replacement = { ...location.value, [location.source.field]: text };
-          this.results.set(replacement, { ...location.source, previewCharacters });
-          this._copyHistory(location.value, replacement);
-          projected = [...projected];
-          if (location.blockIndex != null) {
-            const owner = projected[location.index], content = [...owner.content];
-            content[location.blockIndex] = replacement;
-            const replacementOwner = { ...owner, content };
-            this._copyHistory(owner, replacementOwner);
-            projected[location.index] = replacementOwner;
-          } else projected[location.index] = replacement;
+          projected = this._replaceResult(projected, location, text, { previewCharacters });
           currentTokens += replacementTokens - previousTokens;
           this.compactedResults.add(location.source.callId);
           if (latest) this.compactedLatestResults.add(location.source.callId);
@@ -233,9 +326,6 @@ export class ToolContextProjection {
       error.code = 'TOOL_CONTEXT_BUDGET_EXCEEDED';
       throw error;
     }
-    return { messages: projected, ...(changed ? { metrics: { beforeTokens, estimatedInputTokens: afterTokens,
-      inputBudgetTokens: hardInputLimitTokens, schemaTokens, reducedTokens: beforeTokens - afterTokens,
-      compactedToolResultCount: this.compactedResults.size, compactedLatestResultCount: this.compactedLatestResults.size,
-      compactedHistoryTurnCount: this.compactedTurns.size } } : {}) };
+    return { messages: projected, ...(changed || this.archiveReadBytes > 0 ? { metrics: metrics(afterTokens) } : {}) };
   }
 }

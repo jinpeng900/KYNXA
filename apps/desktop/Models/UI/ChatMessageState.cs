@@ -17,6 +17,10 @@ public sealed class ChatMessageState
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
     public long DurationMs { get; set; }
+    // The live UI clock is process-local; persisted totals remain owned by the gateway.
+    // 活动计时仅存在于当前进程；正式总用时仍由网关保存，不持久化 Stopwatch 时间戳。
+    [JsonIgnore]
+    public long? GenerationStartedTimestamp { get; set; }
     public List<ToolActivity> ToolActivities { get; set; } = [];
     public List<AssistantSegment> AssistantSegments { get; set; } = [];
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;

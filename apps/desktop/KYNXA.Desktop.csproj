@@ -60,6 +60,7 @@
     <Compile Include="..\shared\Tools\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
     <Compile Include="..\shared\Chat\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
     <Compile Include="..\shared\Memory\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
+    <Compile Include="..\shared\Memory\RetrievalApiContracts.cs" Link="Contracts\RetrievalApiContracts.cs" />
   </ItemGroup>
 
   <!--

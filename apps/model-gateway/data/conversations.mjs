@@ -286,7 +286,7 @@ export class ConversationStore {
   _projectRelationship(projectId) {
     const project = this.document.Projects.find(value => key(value.Id) === key(projectId));
     if (!project) throw failure('工作不存在。', 'PROJECT_NOT_FOUND', 404);
-    return { projectId: project.Id, name: project.Name,
+    return { projectId: project.Id, name: project.Name, folderPath: project.FolderPath ?? null,
       isFolderlessWorkspace: Boolean(project.IsFolderlessWorkspace), isArchived: Boolean(project.IsArchived) };
   }
 

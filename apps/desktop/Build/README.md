@@ -4,13 +4,16 @@
 
 | 文件 | 职责 |
 |---|---|
-| `RuntimePackaging.targets` | 恢复网关依赖、加入 Node 和 ToolHost 载荷、接入许可证及 PRI 处理；保留原构建顺序和增量恢复条件 |
+| `RuntimePackaging.targets` | 恢复网关依赖、加入 Node、ToolHost、本地嵌入模型及原生运行库载荷、接入许可证及 PRI 处理；保留原构建顺序和增量恢复条件 |
 | `node-runtime.json` | 按平台固定官方 Node 版本和 SHA-256 |
 | `prepare-node-runtime.ps1` | 并发锁、下载/缓存校验、逐文件提取和运行时完整性检查 |
 | `prepare-toolhost-notices.ps1` | 从实际恢复的 .NET 运行时包复制原许可证和第三方声明 |
+| `vc-runtime.json` / `prepare-vc-runtime.ps1` | 从固定正式 Microsoft Redist 获取并验证 x64 app-local VC 运行库及许可；生成明确发布清单，不复制 System32 DLL |
 | `filter-runtime-pri-layout.ps1` | 将独立运行时保留为普通包载荷，不让 WinUI 把它们解释成界面资源 |
 
-所有项目路径以 `MSBuildProjectDirectory` 和项目内相对路径解析，输出缓存位于项目的中间目录。不根据开发机用户名、盘符或安装 SDK 的猜测版本定位运行时。
+所有项目路径以 `MSBuildProjectDirectory` 和项目内相对路径解析，输出缓存位于项目的中间目录或忽略的 `artifacts/runtime`。不根据开发机用户名、盘符或安装 SDK 的猜测版本定位运行时。嵌入权重和 VC 文件仅按验证后的发布清单复制，缓存杂项不进入安装包。模型资产清单及准备脚本位于 `apps/model-gateway/models/retrieval`。
+
+默认嵌入模型、分词资源、CPU 原生推理和必要的 VC DLL 均随 x64 包提供；用户不需要 Python、Docker 或另下载嵌入模型。首次构建需要下载固定权重，并需要对应版本且有许可的正式 Visual Studio Redist；这些是构建机依赖，不是用户运行依赖。当前未验收 Windows arm64 的 `sqlite-vec` 原生发布和正式安装器首用。
 
 在仓库根目录验证：
 

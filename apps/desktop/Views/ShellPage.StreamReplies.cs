@@ -135,17 +135,23 @@ public sealed partial class ShellPage
                         }
                         break;
                     case "reasoning_delta":
+                        StartReplyTimer(pending);
                         pending.ThinkingTime.Start();
                         pending.Reasoning.Append(update.Delta);
                         AppendSegmentDelta(pending, update, reasoning: true);
                         break;
                     case "text_delta":
+                        StartReplyTimer(pending);
                         pending.ThinkingTime.Stop();
                         pending.Content.Append(update.Delta);
                         AppendSegmentDelta(pending, update, reasoning: false);
                         break;
                     case "assistant_segment":
-                        if (update.Segment is { } segment) AcceptAssistantSegment(pending, segment);
+                        if (update.Segment is { } segment)
+                        {
+                            if (segment.Status == "streaming") StartReplyTimer(pending);
+                            AcceptAssistantSegment(pending, segment);
+                        }
                         break;
                     case "content_snapshot":
                         pending.Content.Clear();
@@ -210,6 +216,13 @@ public sealed partial class ShellPage
                 RenderProjects();
             }
         }
+    }
+
+    private static void StartReplyTimer(PendingChatReply pending)
+    {
+        // The first model segment follows preparation; transport acceptance and later rounds do not restart the clock.
+        // 首个模型消息段表示准备已完成；传输接受事件不开始计时，后续轮次也不重置计时。
+        pending.Message.GenerationStartedTimestamp ??= Stopwatch.GetTimestamp();
     }
 
     private static void AcceptAssistantSegment(PendingChatReply pending, AssistantSegment segment)

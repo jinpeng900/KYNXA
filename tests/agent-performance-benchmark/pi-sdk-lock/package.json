@@ -1,0 +1,10 @@
+{
+  "name": "kynxa-pi-reference-benchmark-dependencies",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-telemetry": "1.0.3"
+  }
+}

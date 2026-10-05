@@ -140,7 +140,9 @@ public static class ModelGatewayService
                 !body.RootElement.TryGetProperty("extensionStorageProtocol", out var extensions) ||
                 !extensions.TryGetInt32(out int extensionVersion) || extensionVersion < 1 ||
                 !body.RootElement.TryGetProperty("toolStreamProtocol", out var toolStream) ||
-                !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 3))
+                !toolStream.TryGetInt32(out int toolStreamVersion) || toolStreamVersion < 3 ||
+                !body.RootElement.TryGetProperty("retrievalProtocol", out var retrieval) ||
+                !retrieval.TryGetInt32(out int retrievalVersion) || retrievalVersion < 1))
                 throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
             return ready;
         }

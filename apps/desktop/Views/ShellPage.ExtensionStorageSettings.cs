@@ -10,7 +10,8 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
-    private sealed record ExtensionStorageHealth(int ExtensionStorageProtocol, string? ExtensionRoot, int ActiveRequests, bool Migrating);
+    private sealed record ExtensionStorageHealth(int ExtensionStorageProtocol, string? ExtensionRoot, int ActiveRequests, bool Migrating,
+        bool MigrationReady = false, string? RuntimeCleanupError = null);
 
     private sealed class StorageSettingsControls(Window window, StorageLocationRow dataRow, StorageLocationRow extensionRow,
         Button memoryButton, Button toolsButton, ComboBox languagePicker, ProgressRing progress, InfoBar status)
@@ -107,7 +108,8 @@ public sealed partial class ShellPage
             {
                 health = await http.GetFromJsonAsync<ExtensionStorageHealth>("/health", controls.Token);
                 RequireExtensionStorageHealth(health, source);
-                if (health!.Migrating && health.ActiveRequests == 0) break;
+                if (health!.RuntimeCleanupError is not null) throw new InvalidOperationException(UiText.Get("后台工具未安全停止，请重启网关后再迁移。"));
+                if (health.Migrating && health.ActiveRequests == 0 && health.MigrationReady) break;
                 if (DateTime.UtcNow >= deadline)
                     throw new InvalidOperationException(UiText.Get("模型网关还有请求正在处理，请稍后再试。"));
                 await Task.Delay(250, controls.Token);

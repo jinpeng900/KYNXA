@@ -10,6 +10,7 @@ import { StreamFailure } from '../models/streaming.mjs';
 import { DATA_LAYOUT_VERSION } from '../data/data-layout.mjs';
 import { readJsonBody, sendJson, openEventStream } from './http-transport.mjs';
 import { handleAgentRoute } from './agent-http-routes.mjs';
+import { handleRetrievalRoute } from './retrieval/http-routes.mjs';
 import { toolRunLimits } from './tool-run.mjs';
 
 const port = Number(process.env.KYNXA_MODEL_API_PORT ?? 5218);
@@ -87,6 +88,14 @@ export function createModelServer(options = {}) {
       if (request.headers.origin) return sendJson(response, 403, { error: '浏览器不能直接调用本机模型与工具服务。', code: 'BROWSER_ORIGIN_DENIED' });
       await refreshStorage();
       let migrating = managed && storageMigrationActive();
+      if (migrating && activeRequests === 0 && !runtimeRetired && !runtimeCleanupError) {
+        // Background indexing is an owned writer even with zero HTTP requests. Drain it and checkpoint WAL before copying.
+        // HTTP 请求为零时后台索引仍可能写入；迁移复制前停止自有写入、完成回执并关闭 WAL。
+        if (!storageTransition) storageTransition = closeRuntime(modelRuntime).then(closed => { if (closed) runtimeRetired = true; });
+        const transition = storageTransition;
+        try { await transition; }
+        finally { if (storageTransition === transition) storageTransition = null; }
+      }
       if (!migrating && !runtimeCleanupError && !runtimeRetired && !storageConfigError) {
         // Native migration polls activeRequests; initialization is an owned writer too.
         // 原生迁移会轮询 activeRequests，初始化也是有所有者的写入流程。
@@ -101,8 +110,9 @@ export function createModelServer(options = {}) {
       if (request.method === 'GET' && pathname === '/health')
         return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
           agentProtocol: 5, officialToolsProtocol: 2, hostTerminalProtocol: 3, browserAutomationProtocol: 2, extensionStorageProtocol: EXTENSION_STORAGE_PROTOCOL,
-          toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 3, dataLayoutVersion: DATA_LAYOUT_VERSION,
-          activeRequests, migrating, modelDataHome: modelStore.dataHome, extensionRoot: currentExtensionRoot(),
+          toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 3, retrievalProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          activeRequests, migrating, migrationReady: migrating && runtimeRetired && !runtimeCleanupError && activeRequests === 0,
+          modelDataHome: modelStore.dataHome, extensionRoot: currentExtensionRoot(),
           ...(storageConfigError ? { storageConfigError } : {}),
           ...(runtimeCleanupError ? { runtimeCleanupError } : {}) });
       if (migrating) return sendJson(response, 503, { error: '正在迁移数据，请完成后再试。' });
@@ -112,6 +122,7 @@ export function createModelServer(options = {}) {
       activeRequests++;
       counted = true;
       if (await handleAgentRoute(request, response, url, modelRuntime.tools)) return;
+      if (await handleRetrievalRoute(request, response, url, modelRuntime.retrieval)) return;
       const runRoute = /^\/api\/conversations\/([0-9a-f-]{36})\/runs\/([0-9a-f-]{36})$/i.exec(pathname);
       if (request.method === 'GET' && runRoute) {
         const message = (await modelRuntime.conversations.readMessages(runRoute[1]))

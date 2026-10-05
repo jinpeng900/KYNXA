@@ -15,7 +15,7 @@ public sealed record StorageMigrationResult(string DataRoot, int VerifiedFiles);
 public static class StorageMigrationService
 {
     private static readonly string[] ConversationEntries =
-        ["Projects", "Chats", "Trash", "Backups", "Memory", "Index", "Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json", "settings.json", "catalog.json", ".conversations-v1.json", ".catalog-transaction.json"];
+        ["Projects", "Chats", "Trash", "Backups", "Memory", "Knowledge", "Retrieval", "Index", "Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json", "settings.json", "catalog.json", ".conversations-v1.json", ".catalog-transaction.json"];
 
     internal sealed record CopyRoot(string Source, string Name, string[]? Include = null, string[]? Exclude = null);
 

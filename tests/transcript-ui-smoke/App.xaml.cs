@@ -29,7 +29,9 @@ public partial class App : Application
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
-        _window.Activate();
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only"))
+            _window.AppWindow.Show(activateWindow: false);
+        else _window.Activate();
         _ = RunChecksAsync(cold);
     }
 
@@ -44,6 +46,18 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--reply-timing-only", StringComparer.Ordinal))
+            {
+                await CheckReplyTimingAsync();
+                File.WriteAllText(_result, $"PASS: {_checks} native reply timing checks; preparation hidden, monotonic live duration, selection-safe completion, language/navigation, retry and terminal cleanup.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--retrieval-tools-only", StringComparer.Ordinal))
+            {
+                await CheckRetrievalToolsAsync();
+                File.WriteAllText(_result, $"PASS: {_checks} native retrieval transcript checks; unified website links, local source labels, live translation and final convergence.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal))
             {
                 await CheckComputerToolsAsync();
@@ -100,6 +114,7 @@ public partial class App : Application
             await CheckAssistantTimelineAsync();
             await CheckPartialProgressAsync();
             await CheckProgressScrollAnchorAsync();
+            await CheckReplyTimingAsync();
             await CheckWrappingAndResizeAsync();
             await CaptureVisualPreviewAsync();
             bool pointerRequested = Environment.GetCommandLineArgs().Contains("--pointer");

@@ -40,9 +40,9 @@
       content: visibleSegments.map(segment => segment.content || '').filter(hasText).join('\n\n') };
   }
 
-  function elapsedText(durationMs, strings) {
-    if (!Number.isSafeInteger(durationMs) || durationMs <= 0) return '';
-    const seconds = Math.ceil(durationMs / 1000);
+  function elapsedText(durationMs, strings, { live = false } = {}) {
+    if (!Number.isSafeInteger(durationMs) || durationMs < 0 || !live && durationMs === 0) return '';
+    const seconds = live ? Math.floor(durationMs / 1000) : Math.ceil(durationMs / 1000);
     const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60), remainingSeconds = seconds % 60;
     const key = hours ? 'elapsedHoursMinutesSeconds' : minutes ? 'elapsedMinutesSeconds' : 'elapsedSeconds';
     const fallback = hours ? '用时 {0}小时{1}分钟{2}秒' : minutes ? '用时 {0}分钟{1}秒' : '用时 {0}秒';

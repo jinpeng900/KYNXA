@@ -8,7 +8,7 @@ const navigationTools = new Set(['new_page', 'navigate_page', 'browser_navigate'
 const snapshotTools = new Set(['take_snapshot', 'browser_snapshot']);
 const maximumSessions = 128, maximumTabs = 128;
 
-function currentInstructionText(trustedUserText) {
+export function currentBrowserInstructionText(trustedUserText) {
   return String(trustedUserText).slice(-8000).replace(/```[\s\S]*?```/g, '').replace(/^>.*$/gm, '');
 }
 
@@ -17,7 +17,7 @@ function currentInstructionText(trustedUserText) {
  * 用户明确禁止打开窗口，与默认偏好后台浏览是不同约束。
  */
 export function isExplicitForegroundForbidden(trustedUserText = '') {
-  return /(?:不要|不必|别|勿|禁止|不能|不允许|无需)[^，。；,.!?;\n]{0,12}(?:抢.{0,3}焦点|激活|切.{0,3}前台|置.{0,3}前台)|保持.{0,3}后台|后台.{0,3}(?:操作|运行)|(?:do not|don't|never|without)[^,.!?;\n]{0,50}(?:focus|activat(?:e|ing)|bring.{0,40}(?:front|foreground))/i.test(currentInstructionText(trustedUserText));
+  return /(?:不要|不必|别|勿|禁止|不能|不允许|无需)[^，。；,.!?;\n]{0,12}(?:抢.{0,3}焦点|激活|切.{0,3}前台|置.{0,3}前台)|保持.{0,3}后台|后台.{0,3}(?:操作|运行)|(?:do not|don't|never|without)[^,.!?;\n]{0,50}(?:focus|activat(?:e|ing)|bring.{0,40}(?:front|foreground))/i.test(currentBrowserInstructionText(trustedUserText));
 }
 
 /**
@@ -25,7 +25,7 @@ export function isExplicitForegroundForbidden(trustedUserText = '') {
  * 调用方提供当前用户指令，不能用工具理由或历史权限替代。
  */
 export function inferBrowserInteractionPolicy(trustedUserText = '') {
-  const text = currentInstructionText(trustedUserText), forbid = isExplicitForegroundForbidden(trustedUserText);
+  const text = currentBrowserInstructionText(trustedUserText), forbid = isExplicitForegroundForbidden(trustedUserText);
   const foreground = !forbid && /(?:切换?到|切到|置于|放到|带到|显示在).{0,3}前台|激活.{0,8}(?:浏览器|窗口|Chrome|Edge)|(?:focus|activate).{0,15}(?:browser|window|chrome|edge)|bring.{0,15}(?:browser|window|chrome|edge|it).{0,15}(?:front|foreground)/i.test(text);
   return { background: !foreground, allowForeground: foreground };
 }

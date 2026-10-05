@@ -12,6 +12,7 @@
     'skill.inspect': 'toolInspectSkill', 'skill.check': 'toolInspectSkill',
     'tool.search': 'toolFindTools', 'tool.load': 'toolFindTools', 'tool.result.read': 'toolReadResult',
     'conversation.history.search': 'toolFindHistory', 'conversation.history.read': 'toolReadHistory',
+    'knowledge.search': 'toolFindSources', 'knowledge.read': 'toolReadSource',
     'computer.windows': 'toolInspectWindows', 'computer.apps': 'toolFindApps', 'computer.screenshot': 'toolScreenshot', 'computer.read': 'toolReadWindow',
     'computer.launch': 'toolOpenApp', 'computer.window': 'toolAdjustWindow', 'computer.activate': 'toolActivateWindow', 'computer.click': 'toolClick',
     'computer.move': 'toolMovePointer', 'computer.scroll': 'toolScroll', 'computer.drag': 'toolDrag',
@@ -122,7 +123,8 @@
   function describe(tool) {
     const website = window.KynxaToolWebLinks.extract(tool) !== null;
     const toolName = String(tool.name || '').split('.').at(-1);
-    const titleKey = website ? searchToolNames.has(toolName) ? 'toolSearchWeb' : 'toolReadWeb' : toolTitleKeys[tool.name] || 'toolExecute';
+    let titleKey = toolTitleKeys[tool.name] || 'toolExecute';
+    if (website) titleKey = tool.name === 'web.search' || searchToolNames.has(toolName) ? 'toolSearchWeb' : 'toolReadWeb';
     const businessParameters = businessArguments(tool);
     const computer = tool.name?.startsWith('computer.') && Object.hasOwn(toolTitleKeys, tool.name);
     const summary = tool.summary === tool.name ? '' : plain(tool.summary);

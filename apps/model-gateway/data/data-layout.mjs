@@ -5,7 +5,7 @@ import { atomicJson } from '../platform/atomic-json.mjs';
 import { rebuildConversationIndex, inspectConversationIndex } from './conversation-index.mjs';
 
 export const DATA_LAYOUT_VERSION = 1;
-const rootDirectories = ['Projects', 'Chats', 'Memory', 'Index', 'Trash', 'Backups', 'Agent', 'Skills'];
+const rootDirectories = ['Projects', 'Chats', 'Memory', 'Knowledge', 'Retrieval', 'Index', 'Trash', 'Backups', 'Agent', 'Skills'];
 
 function layoutError(message) {
   return Object.assign(new Error(message), { code: 'INVALID_DATA_LAYOUT', statusCode: 409 });

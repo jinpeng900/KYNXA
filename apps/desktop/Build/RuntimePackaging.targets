@@ -27,10 +27,76 @@
   <Target Name="IncludeGatewayRuntimeDependencies" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
     <ItemGroup>
       <_KynxaGatewayDependencyFiles Include="..\model-gateway\node_modules\**\*"
-          Exclude="..\model-gateway\node_modules\**\*.map;..\model-gateway\node_modules\.package-lock.json;..\model-gateway\node_modules\**\src\**\*;..\model-gateway\node_modules\**\tests\**\*;..\model-gateway\node_modules\**\test\**\*" />
+          Exclude="..\model-gateway\node_modules\**\*.map;..\model-gateway\node_modules\.package-lock.json;..\model-gateway\node_modules\**\src\**\*;..\model-gateway\node_modules\**\tests\**\*;..\model-gateway\node_modules\**\test\**\*;..\model-gateway\node_modules\onnxruntime-node\bin\napi-v3\darwin\**\*;..\model-gateway\node_modules\onnxruntime-node\bin\napi-v3\linux\**\*" />
+      <_KynxaGatewayDependencyFiles Remove="..\model-gateway\node_modules\onnxruntime-node\bin\napi-v3\win32\arm64\**\*" Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+      <_KynxaGatewayDependencyFiles Remove="..\model-gateway\node_modules\onnxruntime-node\bin\napi-v3\win32\x64\**\*" Condition="'$(RuntimeIdentifier)' == 'win-arm64'" />
       <Content Include="@(_KynxaGatewayDependencyFiles)"
           Link="model-gateway\node_modules\%(_KynxaGatewayDependencyFiles.RecursiveDir)%(_KynxaGatewayDependencyFiles.Filename)%(_KynxaGatewayDependencyFiles.Extension)"
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <!-- Model weights are restored only by build tooling, then shipped read-only.
+       First-use inference never needs Python, Docker, a download, or an API key.
+       权重仅由构建工具还原，作为只读资产随包提供；首次推理无需 Python、Docker、下载或 API 密钥。
+  -->
+  <Target Name="IncludeBundledEmbeddingModel" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
+    <PropertyGroup>
+      <_KynxaEmbeddingCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\embedding\builtin-multilingual', '$(MSBuildProjectDirectory)'))</_KynxaEmbeddingCacheDirectory>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway"
+          Command="node models/retrieval/prepare-embedding-model.mjs --model-root &quot;$(_KynxaEmbeddingCacheDirectory)&quot;" />
+    <ReadLinesFromFile File="$(_KynxaEmbeddingCacheDirectory)\bundle-files.txt">
+      <Output TaskParameter="Lines" ItemName="_KynxaEmbeddingModelFiles" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <Content Include="@(_KynxaEmbeddingModelFiles)"
+               Link="runtime\embedding\builtin-multilingual\$([MSBuild]::MakeRelative('$(_KynxaEmbeddingCacheDirectory)', '%(_KynxaEmbeddingModelFiles.Identity)'))"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <!-- Optional reranking shares the Node/ONNX runtime and stays unloaded for ordinary chat.
+       可选重排复用 Node/ONNX 运行时，普通聊天不加载；公开权重与许可证按校验白名单随包提供。
+  -->
+  <Target Name="IncludeBundledRerankerModel" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
+    <PropertyGroup>
+      <_KynxaRerankerCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\rerank\builtin-multilingual-reranker', '$(MSBuildProjectDirectory)'))</_KynxaRerankerCacheDirectory>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway"
+          Command="node models/retrieval/prepare-reranker-model.mjs --model-root &quot;$(_KynxaRerankerCacheDirectory)&quot;" />
+    <ReadLinesFromFile File="$(_KynxaRerankerCacheDirectory)\bundle-files.txt">
+      <Output TaskParameter="Lines" ItemName="_KynxaRerankerModelFiles" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <Content Include="@(_KynxaRerankerModelFiles)"
+               Link="runtime\rerank\builtin-multilingual-reranker\$([MSBuild]::MakeRelative('$(_KynxaRerankerCacheDirectory)', '%(_KynxaRerankerModelFiles.Identity)'))"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <PropertyGroup>
+      <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\vc\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaVisualCppCacheDirectory>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot;" />
+    <ReadLinesFromFile File="$(_KynxaVisualCppCacheDirectory)\runtime-path.txt">
+      <Output TaskParameter="Lines" PropertyName="_KynxaVisualCppRuntimeDirectory" />
+    </ReadLinesFromFile>
+    <ReadLinesFromFile File="$(_KynxaVisualCppCacheDirectory)\runtime-files.txt">
+      <Output TaskParameter="Lines" ItemName="_KynxaVisualCppFiles" />
+    </ReadLinesFromFile>
+    <ReadLinesFromFile File="$(_KynxaVisualCppCacheDirectory)\runtime-notices.txt">
+      <Output TaskParameter="Lines" ItemName="_KynxaVisualCppNotices" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <Content Include="@(_KynxaVisualCppFiles)"
+               Link="runtime\%(_KynxaVisualCppFiles.Filename)%(_KynxaVisualCppFiles.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <Content Include="@(_KynxaVisualCppFiles)"
+               Link="model-gateway\node_modules\onnxruntime-node\bin\napi-v3\win32\x64\%(_KynxaVisualCppFiles.Filename)%(_KynxaVisualCppFiles.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <Content Include="@(_KynxaVisualCppNotices)"
+               Link="runtime\licenses\vc\%(_KynxaVisualCppNotices.Filename)%(_KynxaVisualCppNotices.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
   <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths">
@@ -64,6 +130,11 @@
     </ItemGroup>
     <ItemGroup>
       <_LibrariesUnfiltered Remove="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" />
+      <!-- Native Node addons are not WinUI assemblies and must not be parsed by PRI.
+           Node 原生运行库不是 WinUI 程序集，不能参与 PRI 可移植资源程序集提取。
+      -->
+      <_LibrariesUnfiltered Remove="@(_KynxaGatewayDependencyFiles);@(_KynxaGatewayDependencyFiles->'%(FullPath)')" />
+      <_LibrariesUnfiltered Remove="@(_KynxaVisualCppFiles);@(_KynxaVisualCppFiles->'%(FullPath)')" />
     </ItemGroup>
   </Target>
   <!-- PRI's layout indexer also parses arbitrary content filenames as resource

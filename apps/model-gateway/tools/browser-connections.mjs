@@ -30,6 +30,30 @@ export function browserConnection(server) {
     isolated: args.some(arg => /^(?:--isolated)(?:=true)?$/.test(arg)) };
 }
 
+/** Background web reading must not attach to the user's local signed-in browser.
+ * 后台网页阅读不能附着用户本机已登录浏览器；只有明确隔离的无头实例或非回环远程端点可自动使用。
+ */
+export function isBackgroundBrowserConnection(server) {
+  if (!server || typeof server !== 'object') return false;
+  const connection = browserConnection(server);
+  if (connection?.mode === 'independent-browser') {
+    const args = server.args ?? [];
+    // Conflicting false overrides must not turn a presumed headless profile into a visible launch.
+    // 显式 false 或冲突覆盖不能把以为是无头的配置变成可见窗口。
+    const disabledIsolation = args.some((argument, index) => /^--(?:headless|isolated)=(?:false|0)$/u.test(argument) ||
+      /^(?:--headless|--isolated)$/u.test(argument) && /^(?:false|0)$/u.test(args[index + 1] ?? ''));
+    return connection.headless && connection.isolated && !disabledIsolation;
+  }
+  if (connection?.mode !== 'remote-browser') return false;
+  const endpoint = option(server.args ?? [], connection.engine === 'playwright' ? ['--cdp-endpoint', '--endpoint']
+    : ['--browserUrl', '--browser-url', '-u', '--wsEndpoint', '--ws-endpoint', '-w']);
+  try {
+    const url = new URL(endpoint), hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    return ['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) &&
+      !/^(?:localhost|127(?:\.\d{1,3}){3}|::1|0\.0\.0\.0|::)$/u.test(hostname) && !hostname.endsWith('.localhost');
+  } catch { return false; }
+}
+
 export function browserConnectionPrompt(servers) {
   const descriptions = {
     'existing-browser': 'Connects to a local existing browser and its existing signed-in pages; initial browser connection approval may be required. This does not extract cookies.',

@@ -4,6 +4,7 @@ import { open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { validateId } from '../platform/conversation-id.mjs';
 import { boundedInteger, ensureLocalDirectory, inspectLocalPath, objectInput, toolFailure, within } from '../platform/tool-paths.mjs';
+import { MAX_EVIDENCE_REFERENCES, projectEvidenceSearchResult, validatedEvidenceReference } from './retrieval/evidence-references.mjs';
 
 export const MAX_TOOL_RESULT_BYTES = 8 * 1024 * 1024;
 export const TOOL_RESULT_METADATA_BYTES = 8192;
@@ -113,7 +114,7 @@ export class ToolResultStore {
     });
   }
 
-  async save(context, call, canonical) {
+  async save(context, call, canonical, options = {}) {
     objectInput(call); objectInput(canonical);
     const requestId = validateId(context.requestId);
     if (typeof call.id !== 'string' || !call.id || call.id.length > 200 || /[\0\r\n]/.test(call.id) ||
@@ -123,7 +124,8 @@ export class ToolResultStore {
     if (bytes > MAX_TOOL_RESULT_BYTES) throw toolFailure('完整工具结果超过 8 MiB 保存上限。', 'TOOL_RESULT_TOO_LARGE', 413);
     const safeCanonical = JSON.parse(source);
     checkDepth(safeCanonical);
-    const id = randomUUID(), hash = sha256(source);
+    objectInput(options);
+    const id = options.id === undefined ? randomUUID() : resultId(options.id), hash = sha256(source);
     return this._scope(context, async (relationship, directory) => {
       await ensureLocalDirectory(directory);
       const document = { version: 1, id, conversationId: relationship.conversationId, requestId,
@@ -215,8 +217,35 @@ export class ToolResultStore {
       if (document.sha256 !== reference.sha256 || document.bytes !== reference.bytes ||
           !sameId(document.requestId, owner.requestId) || document.toolCallId !== owner.toolCallId || document.toolName !== owner.toolName)
         throw toolFailure('工具历史回执与归档身份不匹配。', 'TOOL_RESULT_REFERENCE_MISMATCH', 409);
-      return publicToolResult(document.canonical, { resultRef });
+      const projected = publicToolResult(document.canonical, { resultRef });
+      return document.toolName === 'knowledge.search' ? projectEvidenceSearchResult(projected, resultRef.id) : projected;
     }, { maximumReadBytes: reference.bytes + TOOL_RESULT_METADATA_BYTES });
+  }
+
+  /** Resolve one canonical tuple only after checking the caller's formal receipt and archive owner.
+   * 核对正式回执与归档归属后，只返回一条 canonical 身份元组，不返回旧正文。 */
+  async evidenceReference(context, reference, owner, referenceNumber, { signal } = {}) {
+    if (!reference || !Number.isSafeInteger(reference.bytes) || reference.bytes < 0 || reference.bytes > MAX_TOOL_RESULT_BYTES ||
+        !/^[0-9a-f]{64}$/i.test(reference.sha256 ?? '') || owner?.toolName !== 'knowledge.search' ||
+        !Number.isSafeInteger(referenceNumber) || referenceNumber < 1 || referenceNumber > MAX_EVIDENCE_REFERENCES)
+      throw toolFailure('证据回执无效。', 'INVALID_EVIDENCE_REFERENCE');
+    signal?.throwIfAborted();
+    const result = await this._load(context, reference.id, document => {
+      if (document.sha256 !== reference.sha256 || document.bytes !== reference.bytes ||
+          !sameId(document.requestId, owner.requestId) || document.toolCallId !== owner.toolCallId || document.toolName !== owner.toolName)
+        throw toolFailure('证据回执与归档身份不匹配。', 'TOOL_RESULT_REFERENCE_MISMATCH', 409);
+      const items = document.canonical.structuredContent?.items;
+      if (!Array.isArray(items) || items.length > MAX_EVIDENCE_REFERENCES || referenceNumber > items.length)
+        throw toolFailure('证据条目不存在。', 'EVIDENCE_REFERENCE_NOT_FOUND', 404);
+      const item = items[referenceNumber - 1], descriptor = validatedEvidenceReference(item);
+      return { ...descriptor, sourceRef: item.sourceRef,
+        ...(typeof item.title === 'string' ? { title: item.title } : {}),
+        ...(typeof item.sourceType === 'string' ? { sourceType: item.sourceType } : {}),
+        ...(item.locator && typeof item.locator === 'object' && !Array.isArray(item.locator) ? { locator: structuredClone(item.locator) } : {}),
+        ...(item.bindingRevision !== undefined ? { bindingRevision: item.bindingRevision } : {}) };
+    }, { maximumReadBytes: reference.bytes + TOOL_RESULT_METADATA_BYTES });
+    signal?.throwIfAborted();
+    return result;
   }
 
   /**

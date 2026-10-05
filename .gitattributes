@@ -1,3 +1,7 @@
 # Preserve the original whitespace in vendored upstream skill examples.
 apps/model-gateway/official-tools/Skills/** -text whitespace=cr-at-eol
 apps/model-gateway/official-tools/Skills/internal-comms/examples/** whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve the pinned benchmark dependency lock bytes across checkout and installation.
+# 保留固定基准依赖锁的原始字节，检出和安装不能改变已登记的哈希。
+tests/agent-performance-benchmark/pi-sdk-lock/*.json -text

@@ -99,6 +99,26 @@ test('storage move rejects canonical destination overlap and concurrent source c
 
 function writeFixtureChange(path) { appendFileSync(path, ' '); }
 
+test('storage migration preserves imported knowledge, retrieval overrides and revocation identities byte for byte', async () => {
+  const f = await fixture();
+  const payloads = new Map([
+    ['Knowledge/catalog.json', JSON.stringify({ schemaVersion: 1, revision: 1, sources: [] })],
+    ['Knowledge/imported/source/document.txt', '用户显式导入的资料快照，不是可丢弃缓存。'],
+    ['Retrieval/settings.json', JSON.stringify({ schemaVersion: 1, revision: 3, local: { enabled: true }, web: { mode: 'off' } })],
+    ['Retrieval/source-identities.json', JSON.stringify({ schemaVersion: 1, revision: 2, sources: { synthetic: { tombstone: true } } })],
+    ['Retrieval/jobs.json', JSON.stringify({ schemaVersion: 1, jobs: [{ jobId: 'synthetic', status: 'cancelled' }] })]
+  ]);
+  for (const [path, content] of payloads) {
+    await mkdir(dirname(join(f.conversations, path)), { recursive: true });
+    await writeFile(join(f.conversations, path), content, 'utf8');
+  }
+  await migrateStorage(f);
+  for (const [path, content] of payloads) {
+    assert.equal(await readFile(join(f.target, path), 'utf8'), content);
+    assert.equal(await readFile(join(f.conversations, path), 'utf8'), content);
+  }
+});
+
 test('storage move refuses invalid or future layout settings and keeps the active pointer unchanged', async () => {
   for (const settings of ['{', 'null', '[]', '{"Storage":null}', '{"Storage":{"LayoutVersion":2}}', '{"Storage":{"LayoutVersion":"1"}}']) {
     const f = await fixture(), pointerBefore = await readFile(f.pointer, 'utf8');
