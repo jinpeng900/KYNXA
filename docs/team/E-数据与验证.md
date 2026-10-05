@@ -1,6 +1,6 @@
 # E：数据与验证
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)；[正式数据约定](../architecture/chat-work-memory.md)。交接分支：`codex/team-e-data`。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)；[正式数据约定](../architecture/chat-work-memory.md)。交接分支：`kynxa_team/e-data`。
 
 ## 代码范围
 

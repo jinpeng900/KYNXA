@@ -1,6 +1,6 @@
 # C：模型与本地推理
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`codex/team-c-models`。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/c-models`。
 
 ## 代码范围
 
