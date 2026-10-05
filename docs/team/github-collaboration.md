@@ -1,5 +1,7 @@
 # 五人 GitHub 协作
 
+更新日期：2026-10-06。功能交接基线 `0b3b23a`；具体文件和 RAG 分工见 [团队入口](README.md)。
+
 采用现有功能模块分工和单仓库 PR 流程。每人有一个主要目录，桌面客户端与共享契约按同一领域归属，实际位置由 [主责清单](module-ownership.json) 维护。
 
 | 人员 | 主要目录 | 配套范围 |
@@ -20,13 +22,13 @@ CODEOWNERS 指定审查人；启用主分支保护后要求负责人审查。生
 
 ## 1. 队长邀请四位成员
 
-先安装并登录 GitHub CLI，从仓库根运行。把数组中的四项替换为真实 GitHub 用户名，不带 `@`。以下命令由队长执行，邀请需要对方接受；未在本轮自动执行。
+先安装并登录 GitHub CLI，从仓库根运行。当前开发机没有可直接调用的 `gh`；未安装时先运行 `winget install --id GitHub.cli --exact`，安装后重新打开 PowerShell，再执行以下命令。把数组中的四项替换为真实 GitHub 用户名，不带 `@`。邀请由队长发送，需要对方接受；未自动执行。
 
 ```powershell
 gh auth login
 $kynxaMembers = @('界面成员用户名', '模型成员用户名', '工具成员用户名', '数据成员用户名')
 foreach ($kynxaMember in $kynxaMembers) {
-    gh api --method PUT "repos/jinpeng900/KYNXA/collaborators/$kynxaMember"
+    gh api --method PUT "repos/jinpeng900/KYNXA/collaborators/$kynxaMember" -H 'Content-Length: 0'
     if ($LASTEXITCODE -ne 0) { throw "Invitation failed: $kynxaMember" }
 }
 ```
@@ -70,12 +72,21 @@ gh api --method PUT repos/jinpeng900/KYNXA/branches/main/protection --input docs
 
 ## 4. 成员日常操作
 
-每个任务一个分支，不直接向 `main` 推送。首次交接由队长完成当前架构集成，成员再从同一个 `main` 基线开始；旧分支需同步重组后的目录。
+五个交接分支对应 A/B/C/D/E：`codex/team-a-integration`、`codex/team-b-ui`、`codex/team-c-models`、`codex/team-d-tools`、`codex/team-e-data`。它们从同一个包含最新交接说明的 `main` 提交建立，仅作为成员初次取代码的入口，不作为文件夹权限。已有分支不能用强推重置。
+
+例如 B 首次下载并切到其交接分支：
 
 ```powershell
 git clone https://github.com/jinpeng900/KYNXA.git
 Set-Location KYNXA
-git switch -c feature/models/任务名称
+git switch --track origin/codex/team-b-ui
+```
+
+后续每个任务从最新 `main` 建任务分支，避免长期交接分支积累已合并差异；不要直接向 `main` 推送。旧分支需同步重组后的目录。以下示例由 C 执行，B/D/E 分别使用 `codex/ui/`、`codex/tools/`、`codex/data/`，A 使用 `codex/integration/`。
+
+```powershell
+git fetch origin
+git switch -c codex/models/context-budget origin/main
 
 # Stage the files actually changed, including coordinated client/contract changes.
 # 暂存实际修改的文件，含已协调的客户端和契约改动。
@@ -85,10 +96,10 @@ git push -u origin HEAD
 gh pr create --base main --fill
 ```
 
-分支前缀可用 `feature/ui/`、`feature/models/`、`feature/tools/`、`feature/data/` 和 `integration/`。前缀帮助区分工作，不是文件访问权限。跨模块 PR 写明接口和双方调用端，负责人跑本模块验证，队长完成集成与合并。每个人的测试仍放现有 tests，不为人员分工复制测试框架。
+新任务统一使用 `codex/` 前缀和领域名，既有 `feature/` 或 `integration/` 分支不需要批量改名。跨模块 PR 写明接口和双方调用端，负责人跑本模块验证，队长完成集成与合并。每个人的测试仍放现有 tests，不为人员分工复制测试框架。
 
-当前本机配置未自动邀请任何人、修改远端保护、提交或推送。GitHub 上只有这些配置实际集成并启用后，PR 保护才生效。
+本次交接文档和开发分支按用户授权提交/推送；不因此发送邀请或修改远端保护。四位成员账号尚未填写，CODEOWNERS 继续使用已知仓库所有者；保护配置只是初始化模板，未核验远端生效状态，不能声称已限制其他人合并。
 
-## 本次本机验证
+## 验证入口
 
-目录守卫通过：240 个源码/工程、78 个网关模块和 193 个静态相对引用，无归属违规或域循环。审查规则生成已验证主要目录、客户端/契约映射、规则顺序、无效用户名拒绝、默认预览不写文件及失败不覆盖既有规则。工作流 YAML、分支保护 JSON 和检查名称一致性已校验；GitHub Actions 的实际运行及远端保护尚未执行。此处没有修改产品协议或界面，不沿用此前的功能回归数字作为本次 GitHub 配置验证。
+从仓库根运行 `node tools/development/check-architecture.mjs --details` 核对当前源码归属、相对引用与测试负责人，再执行 `git diff --check` 检查交接差异。新增或移动文件需验证两端引用和随包路径；文档更新不替代产品回归，历史验证数字不代表当前源码清单。邀请状态、GitHub Actions 和远端保护需分别核对，不能以本机模板或分支建立成功替代。
