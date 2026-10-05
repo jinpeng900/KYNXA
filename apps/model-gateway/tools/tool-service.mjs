@@ -11,12 +11,14 @@ import { AppSkillService } from './skill-service.mjs';
 import { McpToolClients, isMcpExecutionNotDispatched } from './mcp-client.mjs';
 import { executeFilesystem } from './filesystem-tools.mjs';
 import { WebFetchTool } from './web-fetch.mjs';
+import { WebSearchTool, isPublicSearchTool, isPublicFetchTool, isAutomaticBrowserRead } from './retrieval/web-search.mjs';
 import { validatePublicWebUrl } from './web-http-transport.mjs';
 import { needsToolApproval, ToolApprovalRegistry } from './tool-policy.mjs';
 import { boundedInteger, inspectLocalPath, objectInput, resolveToolPath, toolFailure, within } from '../platform/tool-paths.mjs';
 import { ModelToolCatalog } from './tool-catalog.mjs';
 import { searchTools } from './tool-discovery.mjs';
-import { browserConnectionPrompt } from './browser-connections.mjs';
+import { browserConnectionPrompt, isBackgroundBrowserConnection } from './browser-connections.mjs';
+import { assertBrowserLaunchAllowed, assertBrowserServerAllowed, canUseBrowserServer, inferBrowserTaskIntent, isBrowserTaskFollowUp } from './browser-intent-policy.mjs';
 import { ToolResultStore, previewToolResult, publicToolResult } from '../data/tool-result-store.mjs';
 import { supportsSkillExecution, verifiesSkillExecution } from './sandbox-skill.mjs';
 import { extensionPointerPath } from '../data/extension-storage.mjs';
@@ -28,6 +30,7 @@ import { isDesktopObservation } from './tool-outcomes.mjs';
 import { inferBrowserInteractionPolicy, isExplicitForegroundForbidden } from './browser-sessions.mjs';
 import { prepareDesktopLaunchArguments } from './desktop-launch-options.mjs';
 import { isSensitiveFilePath } from './sensitive-files.mjs';
+import { projectEvidenceSearchResult } from '../data/retrieval/evidence-references.mjs';
 
 const MAX_TOOL_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 65536;
@@ -197,11 +200,16 @@ export class ToolService {
     const workspaceRoot = isolatedWorkspace ? await this.workspaces.ensure(conversationId) : ownership.workspaceRoot;
     const [sandbox, desktop, hostTerminal] = await Promise.all([this._sandboxCapabilities(), this._desktopCapabilities(), this._hostTerminalCapabilities()]);
     const sandboxCapabilities = Object.freeze(sandbox), desktopCapabilities = Object.freeze(desktop);
+    // Bare retries may continue the previous user browser task; new requests never inherit local control.
+    // 仅纯重试读取紧邻用户任务；新问题不能继承历史本机浏览器操作权限。
+    const previousUserMessages = isBrowserTaskFollowUp(message)
+      ? (await this.conversations.readModelMessages(conversationId)).filter(item => item.Role === 'user').slice(-3).map(item => item.Content ?? '') : [];
     const context = Object.freeze({ conversationId, requestId, permissionMode, message, ...ownership,
       linkedWorkspaceRoot: ownership.workspaceRoot, workspaceRoot, isolatedWorkspace,
       managedWorkspace: ownership.managedWorkspace || ownership.workspaceRoot === null, sandboxCapabilities, desktopCapabilities,
       hostTerminalCapabilities: Object.freeze(hostTerminal),
       browserInteraction: Object.freeze(inferBrowserInteractionPolicy(message)),
+      browserTaskIntent: Object.freeze(inferBrowserTaskIntent(message, previousUserMessages)),
       foregroundForbidden: isExplicitForegroundForbidden(message),
       extensionRoot: this.extensionRoot });
     this.contexts.add(context);
@@ -233,13 +241,19 @@ export class ToolService {
     if (context) this._assertContext(context);
     const generation = this.configGeneration;
     const config = await this.getConfig();
-    const remote = await this.mcp.catalog(config, context, { connect: connectMcp, refresh: refreshMcpCatalog });
+    const allowedServers = config.mcpServers.filter(server => canUseBrowserServer(context, server));
+    const remote = await this.mcp.catalog({ ...config, mcpServers: allowedServers }, context, { connect: connectMcp, refresh: refreshMcpCatalog });
     if (generation !== this.configGeneration)
       throw toolFailure('工具配置在发现期间已变化，请开始新请求。', 'AGENT_CONFIG_CHANGED', 409);
     const all = [...builtinDescriptors, ...remote.map(tool => ({ ...tool,
       enabled: !(config.mcpServers.find(server => server.id === tool.serverId)?.disabledTools ?? []).includes(tool.toolName) }))];
-    const descriptors = all.filter(tool => tool.enabled !== false);
-    if (context) this.catalogs.set(context, { generation, descriptors: new Map(descriptors.map(item => [item.name, item])),
+    const retrievalSettings = context && this.retrieval ? await this.retrieval.effective(context.projectId) : null;
+    const servers = new Map(config.mcpServers.map(server => [server.id, server]));
+    const descriptors = all.filter(tool => tool.enabled !== false && canUseBrowserServer(context, servers.get(tool.serverId)) &&
+      (!tool.name.startsWith('knowledge.') || this.retrieval && retrievalSettings?.local.enabled !== false) &&
+      (retrievalSettings?.web.browserRead !== 'off' || !isAutomaticBrowserRead(context, tool)) &&
+      (retrievalSettings?.web.mode !== 'off' || !(tool.name.startsWith('web.') || isPublicSearchTool(tool) || isPublicFetchTool(tool))));
+    if (context) this.catalogs.set(context, { generation, descriptors: new Map(descriptors.map(item => [item.name, item])), servers,
       browserPrompt: browserConnectionPrompt(config.mcpServers.filter(server => descriptors.some(tool => tool.serverId === server.id))) });
     return (includeDisabled ? all : descriptors).map(publicDescriptor);
   }
@@ -253,7 +267,7 @@ export class ToolService {
 
   modelCatalog(context) {
     this._assertContext(context);
-    return this.catalogs.get(context)?.model?.wire() ?? [];
+    return (this.catalogs.get(context)?.model?.wire() ?? []).filter(tool => !this.webSearch || this.webSearch.available(context, tool));
   }
 
   async refreshMcp(context, options = {}) {
@@ -276,6 +290,9 @@ export class ToolService {
     let outsideWorkspace = false;
     let executionStarted = false;
     let preparedSkill;
+    let webStage;
+    let webDeadline;
+    const originalSignal = signal;
     try {
       this._assertContext(context);
       await this.storageBoundary.refresh();
@@ -287,6 +304,14 @@ export class ToolService {
       if (snapshot && snapshot.generation !== this.configGeneration) throw toolFailure('工具配置已变化，请开始新请求。', 'AGENT_CONFIG_CHANGED', 409);
       const descriptor = snapshot?.descriptors.get(call.name) ?? builtinDescriptors.find(item => item.name === call.name);
       if (!descriptor) throw toolFailure('工具不存在或尚未发现。', 'TOOL_NOT_FOUND', 404);
+      if (descriptor.source.startsWith('mcp:'))
+        assertBrowserServerAllowed(context, snapshot?.servers?.get(descriptor.serverId) ?? this.mcp.servers.get(descriptor.serverId));
+      if (this.retrieval && isAutomaticBrowserRead(context, descriptor) &&
+          (await this.retrieval.effective(context.projectId)).web.browserRead === 'off')
+        throw toolFailure('自动浏览器阅读已关闭；请使用公开网页读取或用户明确要求的浏览器操作。', 'WEB_BROWSER_READ_DISABLED', 409);
+      if (!this.webSearch) this.webSearch = new WebSearchTool(this);
+      if ((isPublicFetchTool(descriptor) || isPublicSearchTool(descriptor)) && this.retrieval)
+        webStage = await this.webSearch.take(context, isPublicFetchTool(descriptor) ? 'page' : 'query');
       // Effects and unknown operations invalidate observations before their execution or approval.
       // 有副作用和未知操作在执行或审批前使观察缓存失效。
       if (!canRunInParallel(call)) this.observationCaches.get(context)?.clear();
@@ -351,6 +376,7 @@ export class ToolService {
         // Normalize before approval so the user approves the exact launch mode sent to the native host.
         // 审批前规范化，让用户批准的启动模式与发给原生宿主的完全一致。
         if (action === 'launch') {
+          assertBrowserLaunchAllowed(context, call.arguments.appPath);
           call.arguments = prepareDesktopLaunchArguments(call.arguments,
             { allowForeground: context.browserInteraction.allowForeground === true });
           // Added defaults must obey the same bounds as model-supplied arguments.
@@ -399,10 +425,21 @@ export class ToolService {
         let approved;
         try { approved = await this.approvals.wait(context, call, { signal, emit, outsideWorkspace,
           ...(sensitiveRead ? { summary: '读取可能含密钥的文件，批准后内容可能进入工具记录并发送给当前模型。' } : {}) }); }
-        finally { onApprovalWait(Math.max(0, Math.ceil(performance.now() - approvalStarted))); }
+        finally {
+          const waited = Math.max(0, Math.ceil(performance.now() - approvalStarted));
+          if (webStage) webStage.stage.started += waited;
+          onApprovalWait(waited);
+        }
         if (!approved) throw toolFailure('用户拒绝了此工具调用。', 'TOOL_DENIED', 403);
       }
       signal?.throwIfAborted();
+      if (webStage) {
+        const remainingMs = webStage.stage.durationMs - (performance.now() - webStage.stage.started);
+        if (remainingMs <= 0) throw toolFailure('网页检索预算已用完。', 'WEB_STAGE_BUDGET_EXHAUSTED', 409);
+        const durationMs = Math.max(1, Math.ceil(remainingMs));
+        webDeadline = AbortSignal.timeout(durationMs);
+        signal = signal ? AbortSignal.any([signal, webDeadline]) : webDeadline;
+      }
       await this._assertOwnership(context);
       if (snapshot && snapshot.generation !== this.configGeneration) throw toolFailure('工具配置已变化，此工具调用已停止。', 'AGENT_CONFIG_CHANGED', 409);
       let observationConnection;
@@ -430,8 +467,20 @@ export class ToolService {
           denyRead: candidate => this.storageBoundary.isCredential(candidate) || this.storageBoundary.isPrivateResult(candidate) ||
             this.workspaces.isControlPath(candidate) || (context.permissionMode !== 'full' && !sensitiveRead && isSensitiveFilePath(candidate)) });
       else if (call.name === 'web.fetch') return await this._finishResult(context, call, await this.webFetcher.run(call.arguments, signal));
+      else if (call.name === 'web.search') return await this._finishResult(context, call,
+        await this.webSearch.run(context, call.arguments, { signal, emit, interactive, onApprovalWait }));
+      else if (call.name.startsWith('knowledge.')) {
+        if (!this.retrieval) throw toolFailure('本地检索不可用。', 'RETRIEVAL_UNAVAILABLE', 503);
+        if (call.name === 'knowledge.search') {
+          result = await this.retrieval.search(context, call.arguments, { signal, modelReferences: true });
+          return await this._finishResult(context, call, { value: result, isError: false },
+            { archiveId: result.evidenceArchiveId, modelProjection: id =>
+              projectEvidenceSearchResult(publicToolResult({ content: [], structuredContent: result, isError: false }), id).structuredContent });
+        }
+        result = await this.retrieval.read(context, call.arguments, { signal });
+      }
       else if (call.name === 'tool.search') {
-        const all = searchTools([...(snapshot?.descriptors.values() ?? [])], call.arguments.query ?? '');
+        const all = searchTools([...(snapshot?.descriptors.values() ?? [])].filter(tool => this.webSearch.available(context, tool)), call.arguments.query ?? '');
         const offset = boundedInteger(call.arguments.offset, 0, 0, 100000);
         const limit = boundedInteger(call.arguments.limit, 10, 1, 20);
         result = { tools: all.slice(offset, offset + limit).map(publicDescriptor), offset,
@@ -439,6 +488,9 @@ export class ToolService {
       }
       else if (call.name === 'tool.load') {
         if (!snapshot?.model) throw toolFailure('当前请求没有模型工具预算。', 'TOOL_CATALOG_UNAVAILABLE', 409);
+        if (call.arguments.names.some(name => {
+          const tool = snapshot.descriptors.get(name); return tool && !this.webSearch.available(context, tool);
+        })) throw toolFailure('网页检索阶段预算已用完，请继续处理已有证据和其他工作。', 'WEB_STAGE_BUDGET_EXHAUSTED', 409);
         result = snapshot.model.load(call.arguments.names);
       }
       else if (call.name === 'tool.result.read') result = await this.results.read(context, call.arguments.id,
@@ -497,7 +549,8 @@ export class ToolService {
       return await this._finishResult(context, call, { value: result, isError: false, outsideWorkspace });
     } catch (error) {
       const callName = typeof call?.name === 'string' ? call.name : '';
-      const cancelled = signal?.aborted || error?.name === 'AbortError';
+      const webExpired = webDeadline?.aborted && !originalSignal?.aborted;
+      const cancelled = !webExpired && (signal?.aborted || error?.name === 'AbortError');
       const desktopTimedOut = callName.startsWith('computer.') && ['DESKTOP_TIMED_OUT', 'DESKTOP_TIMEOUT', 'DESKTOP_READ_TIMEOUT'].includes(error?.code);
       const externalOutcomeLost = callName.startsWith('mcp.') && ['MCP_TIMEOUT', 'MCP_CONNECTION_LOST'].includes(error?.code);
       if (['terminal.run', 'skill.run'].includes(callName) && error?.sandboxResult?.protocolVersion === 1 &&
@@ -515,12 +568,21 @@ export class ToolService {
           code: partial.cancelled === true ? 'TOOL_CANCELLED' : partial.timedOut === true ? 'TOOL_TIMED_OUT' : undefined,
           sandbox: 'appcontainer' });
       }
-      const code = cancelled ? 'TOOL_CANCELLED' : safeErrorCode(error);
-      const message = cancelled ? '工具调用已取消。' : typeof error?.message === 'string' ? error.message : '工具执行失败。';
+      const code = webExpired ? 'WEB_STAGE_BUDGET_EXHAUSTED' : cancelled ? 'TOOL_CANCELLED' : safeErrorCode(error);
+      let message = webExpired ? '网页检索阶段已到期，已有证据与其他代码任务可以继续。' : cancelled ? '工具调用已取消。' : typeof error?.message === 'string' ? error.message : '工具执行失败。';
+      if (!cancelled && !webExpired && error?.webFailureReason === 'dns-non-public') {
+        const snapshot = this.catalogs.get(context);
+        const hasBackgroundBrowser = error.allowBackgroundReadHint === true && [...(snapshot?.descriptors.values() ?? [])].some(tool =>
+          /(?:take_snapshot|evaluate_script|browser_snapshot|browser_evaluate)$/u.test(tool.toolName ?? '') &&
+          isBackgroundBrowserConnection(snapshot.servers?.get(tool.serverId)));
+        message = '当前 DNS 答案包含无效或非公共地址，可能来自代理的虚拟 IP；本次 HTTP 读取已拒绝。' +
+          (hasBackgroundBrowser ? '可以发现并加载已允许的后台网页读取工具，不会打开本机浏览器窗口。'
+            : '请使用已有搜索证据或说明读取阻碍，不会自动打开本机浏览器。');
+      }
       const mayHaveEffect = (callName.startsWith('computer.') && !isDesktopObservation(callName)) ||
         callName.startsWith('mcp.') || ['terminal.run', 'terminal.host.run', 'skill.run'].includes(callName) ||
         (callName.startsWith('filesystem.') && !filesystemReadTools.has(callName));
-      const unknown = executionStarted && mayHaveEffect && !isMcpExecutionNotDispatched(error) &&
+      const unknown = !webExpired && executionStarted && mayHaveEffect && !isMcpExecutionNotDispatched(error) &&
         (cancelled || desktopTimedOut || externalOutcomeLost || error?.outcomeUnknown === true);
       // Failed observations have no write outcome to verify. Archive the failure just like a returned receipt,
       // so the next model turn can change approach without losing the call/result pair.
@@ -532,23 +594,35 @@ export class ToolService {
     }
   }
 
-  async _finishResult(context, call, result) {
+  async _finishResult(context, call, result, { archiveId, modelProjection } = {}) {
     const canonical = result.canonical ?? { content: [], structuredContent: result.value,
       isError: Boolean(result.isError), ...(result.code ? { code: result.code } : {}) };
     const status = result.status === 'unknown' ? 'unknown' : result.code === 'TOOL_CANCELLED' ? 'cancelled' : result.isError ? 'error' : 'completed';
     let resultRef, storageError;
-    try { resultRef = await this.results.save(context, call, canonical); }
+    try { resultRef = await this.results.save(context, call, canonical, { id: archiveId }); }
     catch (error) { storageError = { code: safeErrorCode(error, 'TOOL_RESULT_SAVE_FAILED'), saved: false }; }
     let content;
     if (storageError) {
+      const unsavedValue = modelProjection && result.value?.items
+        ? { ...result.value, evidenceArchiveId: undefined, items: result.value.items.map(({ modelSourceRef, ...item }) => item) }
+        : result.value;
       content = previewToolResult({ status, storageError,
-        output: result.canonical ? publicToolResult(canonical) : result.value }, { status });
+        output: result.canonical ? publicToolResult(canonical) : unsavedValue }, { status });
+    } else if (modelProjection) {
+      // Short references become visible only after their complete canonical archive is durable.
+      // 完整 canonical 归档持久化后，模型才能看到对应短引用。
+      content = previewToolResult(modelProjection(resultRef.id), { resultRef, status });
     } else if (result.canonical) {
       content = result.content.length <= MAX_TOOL_RESULT_CHARS ? result.content
         : previewToolResult(publicToolResult(canonical, { resultRef }), { resultRef, status });
     } else content = previewToolResult(result.value, { resultRef, status });
+    // Archive IDs and retry diagnostics change on every call, even when retrieved evidence is identical.
+    // 每次调用的归档 ID 和重试诊断都会变化，不能把这些变化当作检索取得了新证据。
+    const observedResult = call.name === 'knowledge.search' && Array.isArray(result.value?.items)
+      ? { strategy: result.value.strategy, items: result.value.items.map(({ modelSourceRef, ...item }) => item) }
+      : publicToolResult(canonical);
     return { content, isError: Boolean(result.isError), ...(resultRef ? { resultRef } : {}), status,
-      observationHash: observationFingerprint(publicToolResult(canonical)),
+      observationHash: observationFingerprint(observedResult),
       ...(result.code || storageError ? { code: result.code ?? 'TOOL_RESULT_SAVE_FAILED' } : {}), ...(result.sandbox ? { sandbox: result.sandbox } : {}),
       ...(result.browser ? { browser: result.browser } : {}),
       outsideWorkspace: result.outsideWorkspace ?? false };
@@ -582,6 +656,7 @@ export class ToolService {
       () => this.desktopRunner?.close?.(),
       () => this.hostTerminalRunner?.close?.(),
       () => this.webFetcher?.close?.(),
+      () => this.retrieval?.close?.(),
       () => this.mcp.close()
     ].map(close => Promise.resolve().then(close)));
     const cleanup = await Promise.allSettled([Promise.resolve().then(() => this.sandboxRunner?.cleanupAll?.())]);

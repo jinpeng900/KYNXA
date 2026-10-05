@@ -107,8 +107,16 @@ async function validatedAddresses(url, lookup, signal) {
     throw toolFailure('公共网页地址解析失败。', 'WEB_HTTP_ERROR', 502);
   }
   if (!Array.isArray(addresses) || !addresses.length || addresses.length > 64 ||
-      addresses.some(item => !item || !isPublicAddress(item.address) || item.family !== isIP(item.address)))
-    throw toolFailure('当前 DNS 答案包含无效或非公共地址，可能来自代理的虚拟 IP；请使用已启用的浏览器读取。', 'WEB_URL_BLOCKED', 403);
+      addresses.some(item => !item || !isPublicAddress(item.address) || item.family !== isIP(item.address))) {
+    // A fake-IP hint is not a private-network exception; all direct HTTP sockets remain blocked.
+    // 虚拟 IP 提示不是私网例外；原始 HTTP 连接仍全部拒绝，不为普通私网或无效 DNS 建议绕过。
+    const isProxyRange = item => item?.family === 4 && isIP(item.address) === 4 && /^198\.(?:18|19)\./u.test(item.address);
+    const allowBackgroundReadHint = Array.isArray(addresses) && addresses.length > 0 && addresses.length <= 64 &&
+      addresses.some(isProxyRange) && addresses.every(item => item && item.family === isIP(item.address) &&
+        (isPublicAddress(item.address) || isProxyRange(item)));
+    throw Object.assign(toolFailure('当前 DNS 答案包含无效或非公共地址，可能来自代理的虚拟 IP；本次 HTTP 读取已拒绝，不会自动打开本机浏览器。', 'WEB_URL_BLOCKED', 403),
+      { webFailureReason: 'dns-non-public', allowBackgroundReadHint });
+  }
   return addresses.map(item => ({ address: item.address, family: item.family }));
 }
 

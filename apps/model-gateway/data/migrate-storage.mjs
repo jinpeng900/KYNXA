@@ -10,7 +10,7 @@ import { inspectDataLayout } from './data-layout.mjs';
 import { initializeStorage } from './initialize-storage.mjs';
 
 const conversationNames = [
-  'Projects', 'Chats', 'Trash', 'Backups', 'Memory', 'Index',
+  'Projects', 'Chats', 'Trash', 'Backups', 'Memory', 'Knowledge', 'Retrieval', 'Index',
   'settings.json', 'catalog.json', '.conversations-v1.json', '.catalog-transaction.json'
 ];
 const conversationEntries = new Set(conversationNames.map(name => name.toLowerCase()));

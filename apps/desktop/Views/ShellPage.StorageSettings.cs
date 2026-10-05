@@ -14,7 +14,8 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private Window? _storageSettingsWindow;
-    private sealed record StorageHealth(int StorageProtocol, int ActiveRequests, bool Migrating, string? ModelDataHome);
+    private sealed record StorageHealth(int StorageProtocol, int ActiveRequests, bool Migrating, string? ModelDataHome,
+        bool MigrationReady = false, string? RuntimeCleanupError = null);
 
     private void StorageSettings_Click(object sender, RoutedEventArgs args)
     {
@@ -93,6 +94,19 @@ public sealed partial class ShellPage
         toolsRow.Children.Add(toolsLabel); toolsRow.Children.Add(toolsButton);
         content.Children.Add(toolsRow);
         toolsButton.Click += (_, _) => { if (!StoragePaths.IsMigrating) OpenAgentTools(); };
+        var retrievalRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+        retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        retrievalRow.Children.Add(LocalizedLabel("检索与网页搜索"));
+        var retrievalButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6), CornerRadius = new CornerRadius(8),
+            Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
+        UiLocalization.Bind(retrievalButton, Button.ContentProperty, "管理");
+        AutomationProperties.SetAutomationId(retrievalButton, "RetrievalSettingsButton");
+        Grid.SetColumn(retrievalButton, 1);
+        retrievalRow.Children.Add(retrievalButton);
+        content.Children.Add(retrievalRow);
+        retrievalButton.Click += (_, _) => OpenRetrievalSettings();
         var section = LocalizedLabel("存储", 13);
         section.Opacity = 0.6;
         content.Children.Add(section);
@@ -194,6 +208,9 @@ public sealed partial class ShellPage
                 if (_toolManagementWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成工具配置，再更改数据存储位置。"));
                 _toolManagementWindow?.CloseForOwner();
+                if (_retrievalSettingsWindow is { HasPendingChanges: true })
+                    throw new InvalidOperationException(UiText.Get("请先完成检索配置，再更改数据存储位置。"));
+                _retrievalSettingsWindow?.CloseForOwner();
                 if (_sendingPrompt || _pendingReplies.Values.Any(reply => reply.Error is null)) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
                 using (var self = System.Diagnostics.Process.GetCurrentProcess())
                 {
@@ -240,7 +257,9 @@ public sealed partial class ShellPage
                 await maintenance.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new { pid = Environment.ProcessId }));
                 maintenance.Flush(true);
                 health = await http.GetFromJsonAsync<StorageHealth>("/health");
-                if (health is null || !health.Migrating || health.ActiveRequests != 0) throw new InvalidOperationException(UiText.Get("模型网关还有请求正在处理，请稍后再试。"));
+                if (health?.RuntimeCleanupError is not null) throw new InvalidOperationException(UiText.Get("后台工具未安全停止，请重启网关后再迁移。"));
+                if (health is null || !health.Migrating || health.ActiveRequests != 0 || !health.MigrationReady)
+                    throw new InvalidOperationException(UiText.Get("模型网关还有请求正在处理，请稍后再试。"));
                 Message(UiText.Get("正在迁移，请保持应用打开…"));
                 string sourceDesktop = StoragePaths.DesktopDirectory, sourceModels = health.ModelDataHome!;
                 var updates = new Progress<string>(text => Message(text));

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "toolsetDirectory": "14.51.36231",
+  "version": "14.51.36247.0",
+  "source": "Visual Studio 2026 stable MSVC Redist; original Microsoft-signed files",
+  "license": {
+    "url": "https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual-C-V14-License-Redistributable_and_Runtime_ENU.docx",
+    "bytes": 39553,
+    "sha256": "08651651a7602fc7c0e2763de0fde1ff9f868df2780597cd1775ee9d6441c783"
+  },
+  "platforms": {
+    "win-x64": {
+      "redistDirectory": "x64/Microsoft.VC145.CRT",
+      "files": [
+        { "name": "msvcp140.dll", "bytes": 643512, "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca" },
+        { "name": "msvcp140_1.dll", "bytes": 35768, "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982" },
+        { "name": "vcruntime140.dll", "bytes": 178616, "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7" },
+        { "name": "vcruntime140_1.dll", "bytes": 50112, "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e" }
+      ]
+    }
+  }
+}

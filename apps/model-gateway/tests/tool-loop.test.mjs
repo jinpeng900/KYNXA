@@ -366,3 +366,121 @@ test('agent config, skills and cached-tool routes use revision checks without st
   response = await fetch(f.address + '/api/agent/mcp/refresh', { method: 'POST' }); assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).errors, []); assert.equal(f.seen.length, 0);
 });
+
+function withCallId(protocol, result, callId) {
+  if (protocol === 'anthropic-messages') result.content.find(item => item.type === 'tool_use').id = callId;
+  else if (protocol === 'openai-responses') result.output.find(item => item.type === 'function_call').call_id = callId;
+  else result.choices[0].message.tool_calls[0].id = callId;
+  return result;
+}
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  test(`${protocol}: an undeclared tool returns a paired failure, then a valid call and final answer continue`, async t => {
+    const f = await fixture(t, protocol);
+    const dispatched = [], originalExecute = f.runtime.tools.execute.bind(f.runtime.tools);
+    f.runtime.tools.execute = async (...args) => { dispatched.push(args[1].name); return originalExecute(...args); };
+    f.setPlan((body, marker, round) => {
+      if (round === 1) return nativeTool(protocol, 'not_a_declared_tool', { path: 'must-not-execute.txt' });
+      assert.ok(JSON.stringify(body.messages ?? body.input).includes('MODEL_TOOL_UNAVAILABLE'));
+      if (round === 2) {
+        const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+        return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), 'call_2');
+      }
+      return nativeText(protocol, `Recovered with verified result ${marker}`);
+    });
+    const response = await fetch(f.address + '/api/chat/stream', { method: 'POST', body: JSON.stringify(f.input) });
+    const events = [];
+    for await (const raw of readSse(response.body)) events.push(JSON.parse(raw.data));
+    assert.equal(events.at(-1).type, 'completed'); assert.ok(events.at(-1).content.includes(f.marker));
+    assert.deepEqual(dispatched, ['filesystem.read']);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed'); assert.equal(saved.ToolActivities[0].code, 'MODEL_TOOL_UNAVAILABLE');
+    assert.equal(JSON.parse(saved.ToolActivities[0].result).executed, false);
+    assert.equal(saved.ToolActivities[1].status, 'completed');
+    assert.equal(saved.ToolRun.diagnostics.executedToolCalls, 1);
+    const modelSaved = (await f.conversations.readModelMessages(f.input.conversationId)).at(-1);
+    assert.equal(modelSaved.ModelTranscript.rounds[0].calls[0].name, 'not_a_declared_tool');
+    assert.equal(modelSaved.ModelTranscript.rounds.length, 3);
+  });
+
+  test(`${protocol}: repeated unavailable tools finish normally, even when the provider ignores no-tools finalization`, async t => {
+    const f = await fixture(t, protocol);
+    f.runtime.tools.execute = async () => assert.fail('undeclared tools must never reach the execution broker');
+    f.setPlan((_body, _marker, round) => withCallId(protocol,
+      nativeTool(protocol, 'unavailable_browser_launcher', {}), `unavailable_${round}`));
+    const result = await f.runtime.reply(f.input);
+    assert.match(result, /unavailable/); assert.equal(f.seen.length, 3);
+    assert.deepEqual(f.seen.at(-1).tools ?? [], []);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed'); assert.equal(saved.ToolRun.phase, 'completed');
+    assert.equal(saved.ToolActivities.length, 3);
+    assert.ok(saved.ToolActivities.every(item => item.code === 'MODEL_TOOL_UNAVAILABLE'));
+    assert.equal(saved.ToolRun.diagnostics.executedToolCalls, 0);
+    assert.equal(saved.AssistantSegments.at(-1).phase, 'final_answer');
+    const next = await f.runtime.prepare({ ...f.input, requestId: randomUUID(), userMessageId: randomUUID(),
+      message: 'Next question in the same conversation.' }, f.input.conversationId);
+    assert.ok(JSON.stringify(next.messages).includes(saved.Content), 'the honest final limitation remains in future history');
+    await f.runtime.tools.releaseContext(next.toolContext);
+  });
+}
+
+test('a round decodes its exact declared catalog when availability changes while the response is generated', async t => {
+  const f = await fixture(t);
+  const originalCatalog = f.runtime.tools.modelCatalog.bind(f.runtime.tools);
+  let expired = false;
+  f.runtime.tools.modelCatalog = context => expired ? [] : originalCatalog(context);
+  f.setPlan((body, marker, round) => {
+    if (round > 1) return nativeText('openai-completions', `Verified ${marker}`);
+    const descriptor = body.tools.find(item => item.function.description.startsWith('filesystem.read:'));
+    expired = true;
+    return nativeTool('openai-completions', descriptor.function.name, { path: 'note.txt' });
+  });
+  assert.ok((await f.runtime.reply(f.input)).includes(f.marker));
+  const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+  assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
+  assert.equal(saved.ToolActivities[0].status, 'completed');
+});
+
+test('two searches, blocked public reads and a stale exhausted tool name still yield a normal final answer', async t => {
+  const f = await fixture(t);
+  let searchWireName;
+  const originalExecute = f.runtime.tools.execute.bind(f.runtime.tools);
+  f.runtime.tools.execute = async (context, call, options) => {
+    if (call.name === 'web.search') {
+      await f.runtime.tools.webSearch.take(context, 'query');
+      return { content: JSON.stringify({ sources: [{ url: 'https://example.com/official', title: 'Dated official source',
+        excerpt: 'Synthetic search evidence only; not a verified full page.' }] }), status: 'completed', isError: false };
+    }
+    if (call.name === 'web.fetch') return { content: JSON.stringify({ code: 'WEB_URL_BLOCKED',
+      message: 'Synthetic non-public DNS answer. The full page has not been read.' }),
+    code: 'WEB_URL_BLOCKED', status: 'error', isError: true };
+    return originalExecute(context, call, options);
+  };
+  f.setPlan((body, _marker, round) => {
+    if (round === 3) {
+      assert.ok(!body.tools.some(item => item.function.name === searchWireName));
+      return withCallId('openai-completions', nativeTool('openai-completions', searchWireName,
+        { query: 'Try the exhausted search again', reason: 'Synthetic retry' }), 'stale_search');
+    }
+    if (round > 3) return nativeText('openai-completions', 'Search evidence is preserved, but the official pages could not be verified.');
+    const toolName = round === 1 ? 'web.search' : 'web.fetch';
+    const descriptor = body.tools.find(item => item.function.description.startsWith(toolName + ':'));
+    if (round === 1) searchWireName = descriptor.function.name;
+    const args = round === 1 ? { query: 'Current official announcement', reason: 'Synthetic query' }
+      : { url: 'https://example.com/official', reason: 'Synthetic read' };
+    const result = withCallId('openai-completions', nativeTool('openai-completions', descriptor.function.name, args), `round_${round}_a`);
+    result.choices[0].message.tool_calls.push(withCallId('openai-completions',
+      nativeTool('openai-completions', descriptor.function.name, args), `round_${round}_b`).choices[0].message.tool_calls[0]);
+    return result;
+  });
+  const content = await f.runtime.reply({ ...f.input, message: '查证最新的官方公告', permissionMode: 'full' });
+  assert.match(content, /could not be verified/); assert.equal(f.seen.length, 4);
+  const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+  assert.equal(saved.Status, 'completed');
+  assert.deepEqual(saved.ToolActivities.map(item => item.code ?? null),
+    [null, null, 'WEB_URL_BLOCKED', 'WEB_URL_BLOCKED', 'MODEL_TOOL_UNAVAILABLE']);
+  assert.equal(JSON.parse(saved.ToolActivities.at(-1).result).executed, false);
+  const next = await f.runtime.prepare({ ...f.input, requestId: randomUUID(), userMessageId: randomUUID(), message: 'Continue the same task.' }, f.input.conversationId);
+  assert.ok(JSON.stringify(next.messages).includes('MODEL_TOOL_UNAVAILABLE'));
+  await f.runtime.tools.releaseContext(next.toolContext);
+});

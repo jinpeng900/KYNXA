@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Text.Json;
 using KYNXA.Contracts;
 using KYNXA_Desktop.Services;
@@ -51,7 +52,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
-        ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs);
+        ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs, long? GenerationElapsedMs);
     private sealed record ToolDisplayRevision(WeakReference<ToolActivity> Source, long Revision);
 
     public Task Ready => _ready.Task;
@@ -129,12 +130,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 toolCompleted = UiText.Get("已完成"), toolError = UiText.Get("工具失败"),
                 toolDenied = UiText.Get("已拒绝"), toolApproval = UiText.Get("等待批准"),
                 toolCancelled = UiText.Get("已取消"), toolUnknown = UiText.Get("结果未知"),
-                toolSearchWeb = UiText.Get("搜索资料"), toolReadWeb = UiText.Get("阅读网页"), toolReadFile = UiText.Get("读取文件"),
+                toolSearchWeb = UiText.Get("搜索网页"), toolReadWeb = UiText.Get("阅读网页"), toolReadFile = UiText.Get("读取文件"),
                 toolInspectFile = UiText.Get("查看文件"), toolListFiles = UiText.Get("查看文件夹"), toolSearchFiles = UiText.Get("查找文件"),
                 toolEditFile = UiText.Get("修改文件"), toolDeleteFile = UiText.Get("删除文件"), toolCreateFolder = UiText.Get("创建文件夹"),
                 toolRunCommand = UiText.Get("运行命令"), toolUseSkill = UiText.Get("使用技能"), toolReadSkill = UiText.Get("读取技能"),
                 toolFindSkill = UiText.Get("查找技能"), toolInspectSkill = UiText.Get("检查技能"), toolFindTools = UiText.Get("查找工具"),
                 toolReadResult = UiText.Get("读取工具记录"), toolFindHistory = UiText.Get("查找聊天记录"), toolReadHistory = UiText.Get("读取聊天记录"),
+                toolFindSources = UiText.Get("查找资料"), toolReadSource = UiText.Get("读取资料"),
                 toolExecute = UiText.Get("执行操作"), toolOutcomeUncertain = UiText.Get("操作已中断，执行结果尚未确定。"),
                 toolTimedOut = UiText.Get("操作超时。"), toolSandboxUnavailable = UiText.Get("沙箱暂不可用。"),
                 toolSkillUnavailable = UiText.Get("技能运行环境尚未满足。"), toolApprovalExpired = UiText.Get("批准已过期。"),
@@ -295,7 +297,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 return new Snapshot(row.Message.Id, row.Message.Role, visible.Content, "", row.IsStreaming,
                     visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
                     row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
-                    visible.Tools, segments, visible.Mode, row.Message.DurationMs);
+                    visible.Tools, segments, visible.Mode, row.Message.DurationMs,
+                    row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
+                        ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null);
             }).ToArray();
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
             var previousCaches = new CachedHtml?[snapshots.Length];
@@ -345,6 +349,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     html = item.Cache!.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                     reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                     presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
+                    generationElapsedMs = item.Row.GenerationElapsedMs,
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                     assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                         round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,

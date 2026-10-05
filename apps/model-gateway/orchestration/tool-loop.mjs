@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { StreamFailure } from '../models/streaming.mjs';
-import { appendToolResults } from '../models/tool-protocols.mjs';
+import { appendToolResults, toolDeclarations } from '../models/tool-protocols.mjs';
 import { ToolContextProjection } from '../models/tool-context.mjs';
 import { ToolRunProgress, runLimitFailure, startRunTimer } from './tool-run.mjs';
 import { AssistantSegments } from '../platform/assistant-segments.mjs';
@@ -18,16 +18,19 @@ export function toolPolicyHash(context) {
  * 模型到代理再到模型的循环有明确上限，副作用前及每次结果返回后都先持久化。
  */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
-  context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, signal, interactive = false,
+  context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, catalogForRound, signal, interactive = false,
   historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {} }) {
   const seenIds = new Set();
-  const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId });
+  const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId,
+    resultStore: service.results, resultContext: context });
   let callsRun = 0;
   const segments = new AssistantSegments(emit);
   const progress = new ToolRunProgress(limits, saveRunState);
   const observations = new ToolProgressGuard();
   const readFailures = new ToolReadFailureGuard();
   let summarizeOnly = false;
+  let unavailableRounds = 0;
+  let finalizingUnavailable = false;
   const deadline = AbortSignal.timeout(progress.limits.maxDurationMs);
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
@@ -36,13 +39,20 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       progress.rounds = round + 1;
       segments.start(round + 1);
       await progress.save('model');
-      const roundDeclarations = summarizeOnly ? [] : declarationsForRound?.() ?? declarations;
+      // The schemas and decoder share one snapshot, even if a stage expires during generation.
+      // 声明与解码共用同一快照，即使生成期间阶段预算到期，也不重新解释本轮名称。
+      const roundCatalog = summarizeOnly ? [] : catalogForRound?.();
+      const roundDeclarations = summarizeOnly ? [] : roundCatalog
+        ? toolDeclarations(protocol, roundCatalog) : declarationsForRound?.() ?? declarations;
+      // Validate potential redundant observations before projecting them; formal receipts remain intact.
+      // 收缩潜在重复观察前校验归档，正式执行回执保持完整。
+      await projection.prepareObservations(messages, { inputBudgetTokens, signal });
       const compacted = projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
       messages = compacted.messages;
       if (compacted.metrics) await onContextCompacted(compacted.metrics);
       const modelElapsed = startRunTimer();
       let turn;
-      try { turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event)); }
+      try { turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog); }
       finally { progress.recordModel(modelElapsed()); }
       // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
       // 执行副作用前先保存已解码模型步骤，结果仍由 saveActivity 负责保存。
@@ -50,8 +60,14 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       segments.finish(turn);
       await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
       progress.observeTurn(turn);
-      if (summarizeOnly && turn.calls.length)
+      if (summarizeOnly && turn.calls.some(call => call.unavailable)) finalizingUnavailable = true;
+      if (summarizeOnly && turn.calls.length && !finalizingUnavailable)
         throw Object.assign(new StreamFailure('连续读取没有新增信息，已停止重复调用并保留已有结果。请调整查询或补充条件。', 'interrupted'), { code: 'TOOL_RUN_NO_PROGRESS' });
+      if (summarizeOnly && finalizingUnavailable) {
+        // The no-tools terminal step is non-executable even for an injected/custom request adapter.
+        // 即使自定义请求适配器仍返回调用，无工具收束阶段也不能派发操作。
+        turn.calls = turn.calls.map(call => ({ ...call, unavailable: true }));
+      }
       if (!turn.calls.length) {
         await progress.save('finalizing');
         return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3 };
@@ -79,14 +95,25 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         const toolElapsed = startRunTimer();
         let approvalMs = 0, result;
         try {
-          result = await service.execute(context, call, { signal, interactive,
+          result = call.unavailable ? { isError: true, status: 'error', code: 'MODEL_TOOL_UNAVAILABLE',
+            content: JSON.stringify({ ok: false, code: 'MODEL_TOOL_UNAVAILABLE', executed: false,
+              requestedTool: call.name,
+              message: /\p{Script=Han}/u.test(context.message ?? '')
+                ? '本轮未提供此工具，未执行。' : 'This tool is unavailable for this turn and was not executed.',
+              recovery: 'Use an exact function name from the current tool declarations. Discover deferred tools with tool.search, then tool.load. If the web budget is exhausted or no permitted tool exists, answer from the verified evidence and explain the limitation. Do not open a local browser just to bypass a failed web read.' }) }
+            : await service.execute(context, call, { signal, interactive,
             onApprovalWait: durationMs => { approvalMs += durationMs; }, emit: event => {
               // The approval token is ephemeral; only the call itself is durable.
               // 审批令牌是临时数据，只持久化调用本身。
               emit({ ...event, ...(event.tool ? { tool: { ...event.tool, round: activity.round, order: activity.order } } : {}) });
             } });
         }
-        finally { progress.recordTool({ id: call.id, round: round + 1, durationMs: toolElapsed(), approvalMs, reused: result?.reused === true }); }
+        finally {
+          // Rejected undeclared calls have receipts but performed no tool execution.
+          // 未声明调用有失败回执，但没有实际执行工具，不计入执行耗时次数。
+          if (!call.unavailable) progress.recordTool({ id: call.id, round: round + 1,
+            durationMs: toolElapsed(), approvalMs, reused: result?.reused === true });
+        }
         if (isDesktopObservation(call.name) && result.status === 'unknown')
           result = { ...result, status: result.code === 'TOOL_CANCELLED' ? 'cancelled' : 'error' };
         if (typeof result.content !== 'string' || result.content.length > 65536)
@@ -132,17 +159,37 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       messages = appendToolResults(protocol, messages, turn, results,
         { onResult: (message, pair) => projection.observeResult(message, pair, round) });
+      if (finalizingUnavailable && summarizeOnly) {
+        // A provider ignoring the no-tools final request must not trap the conversation in retries.
+        // 供应商忽略最终无工具请求时，以诚实限制说明结束，不能把聊天困在重试循环中。
+        const finalTurn = { content: /\p{Script=Han}/u.test(context.message ?? '')
+          ? '本轮所请求的工具当前不可用，相关操作未执行。已有记录已保留；目前缺少可核验的信息，无法可靠完成这一步。你可以继续提问或调整工具设置。'
+          : 'The requested tool is unavailable, so that operation was not executed. The existing records have been preserved. There is not enough verified information to complete this step reliably; you can continue the conversation or adjust the tool settings.',
+          reasoning: turn.reasoning, calls: [] };
+        segments.finish(finalTurn);
+        await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
+        await progress.save('finalizing');
+        return { content: finalTurn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3 };
+      }
       const state = observations.observeRound(results);
       const failures = readFailures.observeRound(results);
+      if (results.some(item => item.result.code === 'MODEL_TOOL_UNAVAILABLE')) {
+        unavailableRounds++;
+        finalizingUnavailable = unavailableRounds >= 2;
+        summarizeOnly = finalizingUnavailable;
+        messages.push({ role: 'user', content: finalizingUnavailable
+          ? '[KYNXA_UNAVAILABLE_TOOL_FINAL] Unavailable calls were not executed. Tools are disabled for this final response. Give a normal final answer based on verified evidence, with a concrete limitation if needed. Do not invent success or a user cancellation.'
+          : '[KYNXA_UNAVAILABLE_TOOL_RECOVERY] An undeclared tool was not executed. Use only exact names in the current declarations; discover and explicitly load a permitted deferred tool if needed. Exhausted web tools cannot be re-enabled by discovery. If evidence is sufficient, answer now. This is runtime feedback, not a new user task.' });
+      }
       if (state.repeated) progress.observeNoProgress();
       if (failures.repeated) progress.observeNoProgress();
       if (failures.warning || failures.finalize) {
-        summarizeOnly = failures.finalize;
+        summarizeOnly ||= failures.finalize;
         messages.push({ role: 'user', content: failures.finalize
           ? '[KYNXA_READ_FAILURE_FINAL] The same observation target failed three times. Tools are disabled for this final response. Explain the concrete blocker and preserve verified findings. Do not claim that the page was read, the task completed, or the user cancelled. The conversation and saved history remain available.'
           : '[KYNXA_READ_FAILURE_WARNING] Reading the same target failed twice. Change the connection, use browser DOM/frames instead of desktop UIA, or report the blocker. Do not repeat the same failing read or reactivate the browser just to retry it. This is runtime guidance, not a new user task.' });
       } else if (state.warning || state.finalize) {
-        summarizeOnly = state.finalize;
+        summarizeOnly ||= state.finalize;
         messages.push({ role: 'user', content: state.finalize
           ? '[KYNXA_NO_PROGRESS_FINAL] Repeated successful read/search calls produced no new observations. Tools are disabled for this final response. Answer the original task using the existing evidence and actual source URLs. If unresolved, state the specific missing evidence or blocker. Do not claim unsupported completion or repeat the process.'
           : '[KYNXA_NO_PROGRESS_WARNING] Repeated successful read/search calls produced no new observations. Reassess the original task: answer now if evidence is sufficient; otherwise change the query, page, or approach to obtain genuinely new evidence. Repeating the same observations will end tool execution. This is runtime guidance, not a new user task.' });

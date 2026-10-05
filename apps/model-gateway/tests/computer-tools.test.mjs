@@ -56,7 +56,8 @@ test('desktop launch defaults to background before approval and retains explicit
 
 test('background browser render options are approved exactly, bounded and absent from unrelated apps', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
-  const context = await f.context('ask');
+  const context = await f.service.createContext(f.conversationId,
+    { requestId: randomUUID(), permissionMode: 'ask', message: '打开本机浏览器并保持后台' });
   const browser = { appPath: 'C:\\Synthetic\\Chrome\\chrome.exe', args: ['--user-data-dir=C:\\Synthetic\\isolated'], reason: target.reason };
   const flag = '--disable-backgrounding-occluded-windows';
   const pending = await pendingApproval(f.service, context, f.call('computer.launch', browser));
@@ -66,7 +67,8 @@ test('background browser render options are approved exactly, bounded and absent
   assert.equal((await pending.result).isError, false);
   assert.deepEqual(desktopRunner.calls[0].args.args, [...browser.args, flag]);
   assert.deepEqual(browser.args, ['--user-data-dir=C:\\Synthetic\\isolated']);
-  const full = await f.context('full');
+  const full = await f.service.createContext(f.conversationId,
+    { requestId: randomUUID(), permissionMode: 'full', message: '打开本机浏览器' });
   assert.equal((await f.run(full, 'computer.launch', { ...browser, appPath: 'C:\\Synthetic\\msedge.exe', args: [flag] })).isError, false);
   assert.deepEqual(desktopRunner.calls[1].args.args, [flag]);
   assert.equal((await f.run(full, 'computer.launch', { ...browser, background: false })).isError, false);

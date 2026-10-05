@@ -130,19 +130,29 @@ for (const protocol of protocols) test(`${protocol}: real HTTP stops stagnant fi
   assert.equal(f.seen.length, 5); assert.equal(f.executions(), 4);
 });
 
-test('a model ignoring the tools-disabled final round is interrupted without a fifth execution and retains four complete receipts', async t => {
+test('a model ignoring the tools-disabled final round completes with a limitation and no fifth execution', async t => {
   const f = await fixture(t, 'openai-completions', { ignoreFinal: true });
-  const response = await f.post('/api/chat', f.input), failure = await response.json();
-  assert.equal(response.ok, false); assert.equal(failure.code, 'TOOL_RUN_NO_PROGRESS');
+  const response = await f.post('/api/chat', f.input), reply = await response.json();
+  assert.equal(response.ok, true); assert.match(reply.content, /unavailable/);
   assert.equal(f.seen.length, 5); assert.equal(f.executions(), 4);
   const saved = await f.saved(), run = await f.run();
-  assert.equal(saved.Status, 'interrupted'); assert.equal(run.phase, 'interrupted'); assert.equal(run.code, 'TOOL_RUN_NO_PROGRESS');
-  assert.equal(saved.ToolActivities.length, 4); assert.ok(saved.ToolActivities.every(tool => tool.status === 'completed' && tool.resultRef));
+  assert.equal(saved.Status, 'completed'); assert.equal(run.phase, 'completed');
+  assert.equal(saved.Content, reply.content); assert.equal(saved.AssistantSegments.at(-1).phase, 'final_answer');
+  assert.equal(saved.ToolActivities.length, 5);
+  assert.ok(saved.ToolActivities.slice(0, 4).every(tool => tool.status === 'completed' && tool.resultRef));
+  const rejected = saved.ToolActivities.at(-1);
+  assert.equal(rejected.status, 'error'); assert.equal(rejected.code, 'MODEL_TOOL_UNAVAILABLE');
+  assert.equal(JSON.parse(rejected.result).executed, false);
   assert.equal(run.diagnostics.modelCalls, 5); assert.equal(run.diagnostics.executedToolCalls, 4); assert.equal(run.diagnostics.noProgressRounds, 3);
   const privateMessages = await f.conversations.readModelMessages(f.conversationId);
   assert.equal(privateMessages.find(message => message.Id === f.input.requestId).ModelTranscript.rounds.at(-1).calls[0].id, 'progress_call_5');
-  const retry = await f.post('/api/chat', f.input); assert.equal(retry.ok, false);
-  assert.equal((await retry.json()).code, 'TOOL_RETRY_REQUIRES_NEW_REQUEST'); assert.equal(f.executions(), 4);
+  const next = await f.runtime.prepare({ ...f.input, requestId: randomUUID(), userMessageId: randomUUID(),
+    message: 'Continue the same conversation.' }, f.conversationId);
+  assert.ok(JSON.stringify(next.messages).includes(saved.Content));
+  assert.ok(JSON.stringify(next.messages).includes('MODEL_TOOL_UNAVAILABLE'));
+  await f.runtime.tools.releaseContext(next.toolContext);
+  const retry = await f.post('/api/chat', f.input); assert.equal(retry.ok, true);
+  assert.equal((await retry.json()).content, reply.content); assert.equal(f.executions(), 4); assert.equal(f.seen.length, 5);
 });
 
 test('a real Ask approval measures only the actual approval wait and persists it through SSE completion', async t => {

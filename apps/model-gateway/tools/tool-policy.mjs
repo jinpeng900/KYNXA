@@ -3,7 +3,7 @@ import { toolFailure } from '../platform/tool-paths.mjs';
 
 const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read',
   'tool.search', 'tool.load', 'tool.result.read', 'skill.resource.read', 'skill.inspect', 'skill.check',
-  'conversation.history.search', 'conversation.history.read']);
+  'conversation.history.search', 'conversation.history.read', 'knowledge.search', 'knowledge.read', 'web.search']);
 const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
 
 export function needsToolApproval(context, name, { outsideWorkspace = false, verifiedSandbox = false, sensitiveRead = false } = {}) {

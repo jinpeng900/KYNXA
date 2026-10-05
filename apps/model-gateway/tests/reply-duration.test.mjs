@@ -24,7 +24,7 @@ function call(protocol, name) {
   return { choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '', tool_calls: [{ id: 'duration_call', type: 'function',
     function: { name, arguments: '{"path":"note.txt"}' } }] } }] };
 }
-async function fixture(t, protocol, { tool = false, truncated = false } = {}) {
+async function fixture(t, protocol, { tool = false, truncated = false, preparationDelayMs = 0 } = {}) {
   const f = await toolFixture(t); await writeFile(join(f.workspace, 'note.txt'), 'Public tool output');
   let requests = 0;
   const upstream = createServer(async (request, response) => {
@@ -40,6 +40,10 @@ async function fixture(t, protocol, { tool = false, truncated = false } = {}) {
   await store.save({ providerId: 'duration-fixture', displayName: 'Fixture', protocol, baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
     models: ['model'], contextWindowTokens: 32768, maxOutputTokens: 2048 });
   const runtime = new ModelRuntime({ modelStore: store, dataHome: f.dataHome, conversationStore: f.conversations, toolService: f.service });
+  if (preparationDelayMs) {
+    const contextFor = runtime.memory.contextFor.bind(runtime.memory);
+    runtime.memory.contextFor = async (...args) => { await delay(preparationDelayMs); return contextFor(...args); };
+  }
   t.after(async () => { await runtime.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); });
   const input = { conversationId: f.conversationId, requestId: randomUUID(), userMessageId: randomUUID(), provider: 'duration-fixture', model: 'model',
     message: 'Read this note.', ...(tool ? { permissionMode: 'ask' } : {}) };
@@ -70,6 +74,58 @@ test('real failed SSE terminal reports the persisted interrupted duration', asyn
   assert.equal(events.at(-1).type, 'interrupted'); assert.ok(events.at(-1).durationMs >= 70);
   const saved = (await f.conversations.readMessages(f.conversationId)).at(-1);
   assert.equal(saved.Status, 'interrupted'); assert.equal(saved.DurationMs, events.at(-1).durationMs);
+});
+
+test('prepared nonstreaming requests exclude context preparation delay and persist generation elapsed time', async t => {
+  const f = await fixture(t, 'openai-completions', { preparationDelayMs: 350 });
+  let preparedAt;
+  const prepare = f.runtime.prepare.bind(f.runtime);
+  f.runtime.prepare = async (...args) => { const turn = await prepare(...args); preparedAt = performance.now(); return turn; };
+  const reply = await f.runtime.replyResult(f.input);
+  const generationElapsedMs = performance.now() - preparedAt;
+  assert.ok(reply.durationMs >= 70, 'the actual model response delay remains included');
+  assert.ok(reply.durationMs <= generationElapsedMs + 25, 'the injected context preparation delay is excluded');
+  const saved = (await f.conversations.readMessages(f.conversationId)).find(message => message.Id === f.input.requestId);
+  assert.equal(saved.DurationMs, reply.durationMs);
+  await delay(40);
+  assert.deepEqual(await f.runtime.replyResult(f.input), reply);
+  assert.equal(f.requests(), 1, 'replaying the receipt does not restart generation or its stored clock');
+});
+
+test('stream elapsed begins at the first prepared segment and includes all tool and model rounds', async t => {
+  const f = await fixture(t, 'openai-completions', { tool: true, preparationDelayMs: 350 });
+  const execute = f.service.execute.bind(f.service);
+  f.service.execute = async (...args) => { await delay(70); return execute(...args); };
+  let firstSegmentAt, streamingSegments = 0;
+  const reply = await f.runtime.replyStream(f.input, event => {
+    if (event.type === 'assistant_segment' && event.segment.status === 'streaming') {
+      firstSegmentAt ??= performance.now();
+      streamingSegments++;
+    }
+  });
+  const generationElapsedMs = performance.now() - firstSegmentAt;
+  assert.equal(streamingSegments, 2);
+  assert.ok(reply.durationMs >= 220, 'both model rounds and the intervening tool delay remain included');
+  assert.ok(reply.durationMs <= generationElapsedMs + 25, 'time before the first prepared segment is excluded');
+  const saved = (await f.conversations.readMessages(f.conversationId)).find(message => message.Id === f.input.requestId);
+  assert.equal(saved.DurationMs, reply.durationMs);
+  assert.equal(saved.Status, 'completed');
+  assert.equal(saved.ToolActivities[0].status, 'completed');
+  assert.equal((await f.runtime.replyStream(f.input, () => assert.fail('receipts emit no fresh model segments'))).durationMs, reply.durationMs);
+  assert.equal(f.requests(), 2);
+});
+
+test('a failed preparation retains its elapsed receipt without starting a model generation timer', async t => {
+  const f = await fixture(t, 'openai-completions');
+  f.runtime.memory.contextFor = async () => { await delay(120); throw new Error('Synthetic preparation failure.'); };
+  let failure;
+  await assert.rejects(f.runtime.replyStream(f.input, () => assert.fail('preparation must not emit generation segments')),
+    error => { failure = error; return error.type === 'error'; });
+  const saved = (await f.conversations.readMessages(f.conversationId)).find(message => message.Id === f.input.requestId);
+  assert.ok(failure.durationMs >= 110);
+  assert.equal(saved.DurationMs, failure.durationMs);
+  assert.equal(saved.Status, 'error');
+  assert.equal(f.requests(), 0);
 });
 
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {

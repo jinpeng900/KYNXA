@@ -1,0 +1,39 @@
+import { readJsonBody, sendJson } from '../http-transport.mjs';
+import { objectInput, toolFailure } from '../../platform/tool-paths.mjs';
+
+// Settings are independent of chats; no synthetic chat, model request or MCP restart is created.
+// 检索设置不依赖聊天，不创建临时聊天、模型请求或重启 MCP 服务。
+export async function handleRetrievalRoute(request, response, url, retrieval) {
+  const path = url.pathname, method = request.method;
+  if (!path.startsWith('/api/retrieval/') && !/^\/api\/projects\/[^/]+\/retrieval\//u.test(path)) return false;
+  const send = value => { sendJson(response, 200, value); return true; };
+  if (path === '/api/retrieval/settings') {
+    if (method === 'GET') return send(await retrieval.settings.getGlobal());
+    if (method === 'PATCH') return send(await retrieval.settings.patchGlobal(await readJsonBody(request)));
+  }
+  const projectSettings = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/retrieval\/settings$/u.exec(path);
+  if (projectSettings) {
+    if (method === 'GET') return send({ ...await retrieval.settings.getProject(projectSettings[1]),
+      effective: await retrieval.effective(projectSettings[1]) });
+    if (method === 'PATCH') {
+      const result = await retrieval.settings.patchProject(projectSettings[1], await readJsonBody(request));
+      const effective = await retrieval.effective(projectSettings[1]);
+      if (effective.projectIndexing?.mountedFolder) await retrieval.rebuild({ projectId: projectSettings[1] });
+      return send({ ...result, effective });
+    }
+  }
+  if (path === '/api/retrieval/status' && method === 'GET') return send(await retrieval.status());
+  if (path === '/api/retrieval/providers' && method === 'GET') return send(await retrieval.tools.webSearch.providers());
+  if (path === '/api/retrieval/index/rebuild' && method === 'POST')
+    return send(await retrieval.rebuild(objectInput(await readJsonBody(request))));
+  const job = /^\/api\/retrieval\/index\/jobs\/([a-zA-Z0-9-]+)(\/cancel)?$/u.exec(path);
+  if (job && method === (job[2] ? 'POST' : 'GET'))
+    return send(job[2] ? await retrieval.cancelJob(job[1]) : await retrieval.jobs.get(job[1]));
+  if (path === '/api/retrieval/sources') {
+    if (method === 'GET') return send(await retrieval.library.list(url.searchParams.get('projectId')));
+    if (method === 'POST') return send(await retrieval.importSource(objectInput(await readJsonBody(request))));
+  }
+  const source = /^\/api\/retrieval\/sources\/([a-zA-Z0-9-]+)$/u.exec(path);
+  if (source && method === 'DELETE') return send(await retrieval.removeSource(source[1], await readJsonBody(request)));
+  throw toolFailure('检索接口或操作不存在。', 'RETRIEVAL_ROUTE_NOT_FOUND', 404);
+}

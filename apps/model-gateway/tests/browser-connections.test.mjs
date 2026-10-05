@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { browserConnection, browserConnectionPrompt } from '../tools/browser-connections.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
@@ -34,7 +35,7 @@ test('browser prompt belongs to the captured catalog and preserves current capab
   // Model a discovered directory explicitly; no process or browser action is performed by this test.
   // 显式模拟已发现的工具目录；本测试不启动进程或操作浏览器。
   f.service.mcp.catalog = async () => remote;
-  const context = await f.context();
+  const context = await f.service.createContext(f.conversationId, { requestId: randomUUID(), permissionMode: 'ask', message: '读取本机浏览器内容' });
   await f.service.catalog(context);
   const prompt = await f.service.systemPrompt(context);
   assert.match(prompt, /fixture-browser: Connects to a local existing browser/);

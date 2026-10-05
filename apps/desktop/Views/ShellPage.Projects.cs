@@ -165,6 +165,11 @@ public sealed partial class ShellPage
         Item(string.IsNullOrWhiteSpace(project.FolderPath) ? UiText.Get("关联工作文件夹") : UiText.Get("重新关联文件夹"), "\uE8F4", () => ChangeProjectFolderAsync(project));
         if (!string.IsNullOrWhiteSpace(project.FolderPath))
             Item(UiText.Get("取消关联文件夹"), "\uE8F4", () => UnmountProjectFolderAsync(project));
+        Item(UiText.Get("检索设置"), "\uE721", () =>
+        {
+            OpenRetrievalSettings(project);
+            return Task.CompletedTask;
+        });
         Item(UiText.Get("重命名项目"), "\uE70F", async () =>
         {
             string? name = await AskProjectNameAsync(UiText.Get("重命名项目"), project.Name, UiText.Get("保存"));

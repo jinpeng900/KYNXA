@@ -132,3 +132,34 @@ test('builtin webpage activity shows a friendly label and direct source URL with
   assert.equal(presentation.titleKey, 'toolReadWeb'); assert.equal(presentation.website, true); assert.equal(presentation.action, '');
   assert.ok(window.KynxaToolWebLinks.extract(tool).includes(sourceUrl));
 });
+
+test('unified web search presents deduplicated source links and never exposes private result metadata', async () => {
+  const window = {}, sandbox = vm.createContext({ window, URL });
+  for (const name of ['tool-web-links.js', 'tool-presentation.js'])
+    vm.runInContext(await readFile(new URL(`../../desktop/Resources/Transcript/${name}`, import.meta.url), 'utf8'), sandbox);
+  const tool = { name: 'web.search', arguments: { query: 'Synthetic latest public evidence', reason: 'Private approval reason.' },
+    status: 'completed', result: JSON.stringify({ structuredContent: { sources: [
+      { url: sourceUrl, title: 'Source one', excerpt: 'Synthetic excerpt' }, { url: finalUrl }, { url: sourceUrl },
+      { url: 'https://www.example.com/private?access_token=synthetic' }
+    ], _meta: { url: 'https://metadata.example.invalid/private' } } }) };
+  const presentation = window.KynxaToolPresentation.describe(tool);
+  assert.equal(presentation.titleKey, 'toolSearchWeb'); assert.equal(presentation.website, true);
+  assert.equal(presentation.action, ''); assert.equal(presentation.intent, '');
+  assert.deepEqual([...window.KynxaToolWebLinks.extract(tool)], [sourceUrl, finalUrl]);
+  assert.equal(window.KynxaToolWebLinks.query(tool), 'Synthetic latest public evidence');
+  assert.deepEqual([...window.KynxaToolWebLinks.extract({ ...tool, result: '' })], []);
+});
+
+test('knowledge tools use readable labels and retain a short query without expanding result JSON', async () => {
+  const window = {}, sandbox = vm.createContext({ window, URL });
+  for (const name of ['tool-web-links.js', 'tool-presentation.js'])
+    vm.runInContext(await readFile(new URL(`../../desktop/Resources/Transcript/${name}`, import.meta.url), 'utf8'), sandbox);
+  const result = JSON.stringify({ items: [{ sourceRef: { id: 'synthetic-local-source' }, text: 'Synthetic evidence',
+    locator: { url: sourceUrl }, metadata: { private: 'Do not expose this JSON.' } }] });
+  const search = window.KynxaToolPresentation.describe({ name: 'knowledge.search', arguments: { query: '中文工作约定' }, status: 'completed', result });
+  assert.equal(search.titleKey, 'toolFindSources'); assert.equal(search.action, '中文工作约定');
+  assert.equal(search.website, false); assert.equal(search.errorText, '');
+  const read = window.KynxaToolPresentation.describe({ name: 'knowledge.read', arguments: { sourceRef: { id: 'synthetic-local-source' } }, status: 'completed', result });
+  assert.equal(read.titleKey, 'toolReadSource'); assert.equal(read.website, false); assert.equal(read.action, '');
+  assert.equal(window.KynxaToolWebLinks.extract({ name: 'knowledge.read', result }), null);
+});

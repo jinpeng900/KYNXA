@@ -51,10 +51,10 @@ export function toolDeclarations(protocol, catalog) {
 }
 
 function decodeCall(rawCall, catalog) {
-  if (typeof rawCall.id !== 'string' || !rawCall.id || rawCall.id.length > 200 || typeof rawCall.name !== 'string')
+  if (typeof rawCall.id !== 'string' || !rawCall.id || rawCall.id.length > 200 || typeof rawCall.name !== 'string' ||
+      !rawCall.name || rawCall.name.length > 256 || /[\0\r\n]/.test(rawCall.name))
     throw new StreamFailure('模型返回了无效的工具调用身份。');
   const descriptor = catalog.find(tool => tool.wireName === rawCall.name);
-  if (!descriptor) throw new StreamFailure('模型请求了本次未提供的工具。');
   let args = rawCall.arguments;
   if (typeof args === 'string') {
     if (args.length > 65536) throw new StreamFailure('工具参数超过大小限制。');
@@ -62,7 +62,10 @@ function decodeCall(rawCall, catalog) {
   }
   if (!args || typeof args !== 'object' || Array.isArray(args) || JSON.stringify(args).length > 65536)
     throw new StreamFailure('工具参数必须为大小受限的 JSON 对象。');
-  return { id: rawCall.id, name: descriptor.name, arguments: args };
+  // Unknown names become non-executable observations, never permission or an implicit tool load.
+  // 未知名称形成不可执行的失败观察，不能因此取得权限或隐式加载工具。
+  return { id: rawCall.id, name: descriptor?.name ?? rawCall.name, arguments: args,
+    ...(!descriptor ? { unavailable: true } : {}) };
 }
 
 export function decodeToolTurn(protocol, result, catalog) {

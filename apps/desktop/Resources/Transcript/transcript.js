@@ -9,11 +9,12 @@
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
     toolDenied: '已拒绝', toolApproval: '等待批准', toolCancelled: '已取消', toolUnknown: '结果未知',
-    toolSearchWeb: '搜索资料', toolReadWeb: '阅读网页', toolReadFile: '读取文件', toolInspectFile: '查看文件',
+    toolSearchWeb: '搜索网页', toolReadWeb: '阅读网页', toolReadFile: '读取文件', toolInspectFile: '查看文件',
     toolListFiles: '查看文件夹', toolSearchFiles: '查找文件', toolEditFile: '修改文件', toolDeleteFile: '删除文件',
     toolCreateFolder: '创建文件夹', toolRunCommand: '运行命令', toolUseSkill: '使用技能', toolReadSkill: '读取技能',
     toolFindSkill: '查找技能', toolInspectSkill: '检查技能', toolFindTools: '查找工具', toolReadResult: '读取工具记录',
     toolFindHistory: '查找聊天记录', toolReadHistory: '读取聊天记录', toolExecute: '执行操作',
+    toolFindSources: '查找资料', toolReadSource: '读取资料',
     toolOutcomeUncertain: '操作已中断，执行结果尚未确定。', toolTimedOut: '操作超时。',
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
@@ -35,8 +36,42 @@
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   let anchoringScroll = false, anchorFrame = 0;
+  const liveElapsedEntries = new Set();
+  let elapsedTimer = null;
   const send = value => window.chrome?.webview?.postMessage(value);
   const presentationFor = message => window.KynxaMessagePresentation.selectMessagePresentation(message);
+  function refreshElapsedText(entry) {
+    const durationMs = entry.elapsedMode === 'live'
+      ? Math.floor(Math.max(0, performance.now() - entry.generationStartedAtMs)) : entry.finalDurationMs;
+    const text = entry.elapsedMode ? window.KynxaMessagePresentation.elapsedText(durationMs, uiStrings,
+      { live: entry.elapsedMode === 'live' }) : '';
+    setToolText(entry.elapsed, text); entry.elapsed.hidden = !text;
+    entry.elapsed.dataset.mode = entry.elapsedMode || '';
+  }
+  function synchronizeElapsedTimer() {
+    const hasVisibleClock = !document.hidden && [...liveElapsedEntries].some(entry => entry.article.isConnected);
+    if (hasVisibleClock && elapsedTimer === null) elapsedTimer = setInterval(() => {
+      for (const entry of liveElapsedEntries) if (entry.article.isConnected) refreshElapsedText(entry);
+      synchronizeElapsedTimer();
+    }, 1000);
+    else if (!hasVisibleClock && elapsedTimer !== null) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  }
+  function updateElapsedState(entry, message) {
+    const presentation = presentationFor(message);
+    if (presentation.mode === 'final') {
+      entry.elapsedMode = 'final'; entry.finalDurationMs = message.durationMs;
+      liveElapsedEntries.delete(entry);
+    } else if (message.role === 'assistant' && message.streaming && Number.isSafeInteger(message.generationElapsedMs)
+        && message.generationElapsedMs >= 0) {
+      // Anchor each attempt once; tokens, rounds, language and cached navigation keep the ongoing clock.
+      // 每次尝试仅定位一次；token、轮次、语言与缓存聊天切换保留本次计时，重试则使用新的起点。
+      if (entry.elapsedMode !== 'live') entry.generationStartedAtMs = performance.now() - message.generationElapsedMs;
+      entry.elapsedMode = 'live'; liveElapsedEntries.add(entry);
+    } else {
+      entry.elapsedMode = null; delete entry.generationStartedAtMs; liveElapsedEntries.delete(entry);
+    }
+    refreshElapsedText(entry);
+  }
   function statusText(message, presentation = presentationFor(message)) {
     if (presentation.mode === 'incomplete') return uiStrings.interrupted;
     if (message.status === 'interrupted')
@@ -58,8 +93,7 @@
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
       setStatusText(entry, statusText(entry.message));
-      setToolText(entry.elapsed, entry.presentation?.mode === 'final'
-        ? window.KynxaMessagePresentation.elapsedText(entry.message.durationMs, uiStrings) : '');
+      refreshElapsedText(entry);
     }
     entry.status.querySelector('.streaming-dot')?.setAttribute('aria-label', uiStrings.generating);
     for (const row of entry.toolRows?.values() || []) localizeToolRow(row);
@@ -191,7 +225,8 @@
   }
   function updateMessage(entry, message) {
     const old = entry.message;
-    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'presentationMode']
+    updateElapsedState(entry, message);
+    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
@@ -210,8 +245,6 @@
     updateAssistantSegments(entry, message, presentation);
     updateTools(entry, presentation.tools.filter(tool => !presentation.segments.some(segment => segment.round === tool.round)));
     if (!entry.tools.hidden && entry.tools.nextSibling !== entry.status) entry.content.insertBefore(entry.tools, entry.status);
-    const elapsed = presentation.mode === 'final' ? window.KynxaMessagePresentation.elapsedText(message.durationMs, uiStrings) : '';
-    setToolText(entry.elapsed, elapsed); entry.elapsed.hidden = !elapsed;
     if (role === 'user') {
       const text = message.content || '';
       if (entry.body._plainContent !== text || !entry.body.hasAttribute('data-copy-plain')) {
@@ -413,6 +446,11 @@
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
+    liveElapsedEntries.clear();
+    for (const entry of entries.values()) if (entry.elapsedMode === 'live') {
+      liveElapsedEntries.add(entry); refreshElapsedText(entry);
+    }
+    synchronizeElapsedTimer();
     followBottom();
   }
   function applyTranscript(snapshot) {
@@ -421,11 +459,21 @@
     if (changedConversation) openConversation(snapshot.conversationId);
     if (changedConversation || snapshot.openAtBottom) {
       pending = null; clearSelection(); following = true;
-    } else if (activeSelection()) { pending = snapshot; return; }
+    } else if (activeSelection()) {
+      pending = snapshot;
+      // Timing is outside selected prose. Terminal metadata stops the clock even while body convergence is deferred.
+      // 计时位于选中正文之外；正文收束延迟时，结束元数据仍立即停止计时，保留选区与正文节点。
+      const timingIds = new Set(snapshot.messages.map(message => String(message.id)));
+      for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
+      for (const message of snapshot.messages) {
+        const entry = entries.get(String(message.id)); if (entry) updateElapsedState(entry, message);
+      }
+      synchronizeElapsedTimer(); return;
+    }
     const anchors = following ? [] : scrollAnchors();
     applying = true;
     const ids = new Set(snapshot.messages.map(message => String(message.id)));
-    for (const [id, entry] of entries) if (!ids.has(id)) { entry.article.remove(); entries.delete(id); }
+    for (const [id, entry] of entries) if (!ids.has(id)) { liveElapsedEntries.delete(entry); entry.article.remove(); entries.delete(id); }
     let previous = null;
     for (const message of snapshot.messages) {
       const id = String(message.id);
@@ -438,6 +486,7 @@
     }
     restoreScrollAnchor(anchors);
     applying = false;
+    synchronizeElapsedTimer();
     followBottom();
     document.fonts.ready.then(followBottom);
   }
@@ -568,6 +617,11 @@
   document.addEventListener('pointercancel', releasePointer);
   document.addEventListener('pointermove', event => { if (!(event.buttons & 1)) releasePointer(); });
   window.addEventListener('blur', () => { clearSelection(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) for (const entry of liveElapsedEntries) refreshElapsedText(entry);
+    synchronizeElapsedTimer();
+  });
+  window.addEventListener('pagehide', () => { if (elapsedTimer !== null) clearInterval(elapsedTimer); elapsedTimer = null; });
   window.addEventListener('scroll', () => {
     if (!applying && !localizingUi && !anchoringScroll) following = !activeSelection() && !pointerSelecting && atBottom();
   }, { passive: true });
@@ -591,6 +645,7 @@
   window.applyTranscript = applyTranscript;
   window.transcriptSelectionText = selectionText;
   window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size,
-    cachedConversations: conversations.size, cachedCharacters, cachedNodes });
+    cachedConversations: conversations.size, cachedCharacters, cachedNodes,
+    liveElapsedCount: liveElapsedEntries.size, elapsedTimerActive: elapsedTimer !== null });
   send({ type: 'ready' });
 })();
