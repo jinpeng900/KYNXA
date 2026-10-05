@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { McpToolClients } from '../mcp-client.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
 
 function deferred() {
   let resolve, reject;

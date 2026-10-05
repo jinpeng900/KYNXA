@@ -18,20 +18,20 @@
     <Compile Include="../../apps/desktop/Controls/ConversationScreenshotsPanel.cs" Link="ConversationScreenshotsPanel.cs" />
     <Compile Include="../../apps/desktop/Controls/MountedWorkspaceHeader.cs" Link="MountedWorkspaceHeader.cs" />
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
-    <Compile Include="../../apps/desktop/Services/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
-    <Compile Include="../../apps/desktop/Services/ConversationScreenshotLoader.cs" Link="ConversationScreenshotLoader.cs" />
-    <Compile Include="../../apps/desktop/Services/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotLoader.cs" Link="ConversationScreenshotLoader.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
     <Compile Include="../../apps/desktop/Views/ScreenshotViewerWindow.cs" Link="ScreenshotViewerWindow.cs" />
     <Compile Include="../../apps/desktop/Views/ShellPage.AgentResults.cs" Link="ShellPage.AgentResults.cs" />
-    <Compile Include="../../apps/desktop/Services/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
-    <Compile Include="../../apps/desktop/Services/UiLocalization.cs" Link="UiLocalization.cs" />
-    <Compile Include="../../apps/desktop/Services/AgentApiClient.cs" Link="AgentApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText*.cs" Exclude="../../apps/desktop/Services/UiTextExtension.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiLocalization.cs" Link="UiLocalization.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/AgentApiClient.cs" Link="AgentApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Exclude="../../apps/desktop/Services/Presentation/UiTextExtension.cs" Link="Services/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />

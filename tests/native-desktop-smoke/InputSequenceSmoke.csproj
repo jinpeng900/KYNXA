@@ -8,8 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="InputSequenceChecks.cs" />
-    <Compile Include="../../apps/tool-host/DesktopInputSequence.cs" Link="DesktopInputSequence.cs" />
-    <Compile Include="../../apps/tool-host/DesktopNativeMethods.cs" Link="DesktopNativeMethods.cs" />
-    <Compile Include="../../apps/tool-host/DesktopRequest.cs" Link="DesktopRequest.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopInputSequence.cs" Link="DesktopInputSequence.cs" />
+    <Compile Include="../../apps/tool-host/Native/DesktopNativeMethods.cs" Link="DesktopNativeMethods.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopRequest.cs" Link="DesktopRequest.cs" />
   </ItemGroup>
 </Project>

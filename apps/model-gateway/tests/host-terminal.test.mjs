@@ -3,11 +3,11 @@ import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { readFile, mkdtemp, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { HostTerminalRunner } from '../host-terminal-runner.mjs';
+import { HostTerminalRunner } from '../tools/host-terminal-runner.mjs';
 import { toolFixture, pendingApproval, approve, parsed } from './tool-fixture.mjs';
-import { ModelToolCatalog } from '../tool-catalog.mjs';
+import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
-import { runToolLoop } from '../tool-loop.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 
 const capabilities = { protocolVersion: 1, boundary: 'host-terminal', available: true, sandbox: false,
   processTreeBounded: true, shells: ['cmd', 'powershell'] };

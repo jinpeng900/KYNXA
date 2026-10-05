@@ -4,8 +4,8 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelStore, validateConnection } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
+import { ModelStore, validateConnection } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { createModelServer } from '../server.mjs';
 import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 

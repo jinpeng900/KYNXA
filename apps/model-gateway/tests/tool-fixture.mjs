@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
-import { ConversationStore } from '../conversations.mjs';
-import { ToolService } from '../tool-service.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { ToolService } from '../tools/tool-service.mjs';
 
 function fixtureMcpServer(server) {
   if (server.origin !== 'official' || server.command === process.execPath) return true;

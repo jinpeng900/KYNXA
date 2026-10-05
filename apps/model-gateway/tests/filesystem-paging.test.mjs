@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MAX_TOOL_FILE_BYTES } from '../filesystem-tools.mjs';
+import { MAX_TOOL_FILE_BYTES } from '../tools/filesystem-tools.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
 
 const sha256 = text => createHash('sha256').update(text).digest('hex');

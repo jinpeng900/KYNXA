@@ -19,10 +19,10 @@
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/ConversationTranscript.cs" Link="ConversationTranscript.cs" />
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
-    <Compile Include="../../apps/desktop/Services/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
-    <Compile Include="../../apps/desktop/Services/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
-    <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
-    <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MathMarkdown.cs" Link="MathMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
     <Content Include="../../apps/desktop/Resources/Transcript/**/*" Link="Resources/Transcript/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
@@ -31,14 +31,14 @@
     <Content Include="Checks.js" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Agent.cs" Link="UiText.Agent.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Memory.cs" Link="UiText.Memory.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Agent.cs" Link="UiText.Agent.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

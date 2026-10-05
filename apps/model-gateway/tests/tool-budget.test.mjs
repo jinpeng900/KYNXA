@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildContext, estimateMessageTokens, estimateTokens } from '../context.mjs';
-import { appendToolResults, estimateToolMessageTokens } from '../tool-protocols.mjs';
-import { runToolLoop } from '../tool-loop.mjs';
+import { buildContext, estimateMessageTokens, estimateTokens } from '../models/context.mjs';
+import { appendToolResults, estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 
 test('ordinary code history uses the same budget before and during the tool loop without counting transport escapes twice', async () => {
   const code = 'print("hello")\n'.repeat(250);

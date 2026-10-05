@@ -21,3 +21,9 @@ powershell -File tests/node-runtime-smoke/run.ps1 -BundleRoot 'apps/desktop/bin/
 ```
 
 运行时检查复制本次构建的载荷到临时目录，清空 PATH 并隐藏系统 .NET，仅使用隔离数据；检查默认启用的官方 MCP 清单时不发起连接、不启动上游服务。它不替代正式 MSIX 安装或其他架构设备的验收。
+
+## 源码路径与调试符号
+
+仓库根 `Directory.Build.props` 和 `Directory.Build.targets` 对 Debug、Release 都保留原有 PDB 和行号，将仓库源码根映射为 `/_/KYNXA/`，将 NuGet 包源码根映射为 `/_/NuGet/`。后者在包还原属性加载后求值，覆盖 Windows App SDK 自动加入的初始化源码。映射不修改运行时存储路径、不嵌入额外源码，也不会自动重写已生成的旧包；分发前须重新构建。
+
+跨机器调试时，将两个虚拟根分别对应到本机仓库与 NuGet 缓存目录；调试器提示找不到源码时可选择实际源码文件。若本机调试需要保留绝对路径，可在仅本机的构建命令中传入 `-p:KynxaMapSourcePaths=false`，该输出不可用作发布包。PDB 映射仅处理符号中的源码文档名，不代表已经完成安装包、构建日志或原生依赖的完整隐私审核。

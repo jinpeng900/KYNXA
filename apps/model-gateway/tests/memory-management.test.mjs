@@ -4,9 +4,9 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { MemoryService } from '../memory-service.mjs';
-import { ModelStore } from '../store.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { MemoryService } from '../data/memory-service.mjs';
+import { ModelStore } from '../models/store.mjs';
 
 // The server module's unused defaults must also resolve an isolated root at import time.
 // server 模块未使用的默认实例在导入时也必须指向隔离的根目录。

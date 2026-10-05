@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runToolLoop } from '../tool-loop.mjs';
-import { ToolReadFailureGuard } from '../tool-observations.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
+import { ToolReadFailureGuard } from '../tools/tool-observations.mjs';
 import { toolFixture, pendingApproval, approve } from './tool-fixture.mjs';
 
 const target = { windowId: '98765', processId: 12345, reason: 'Read the synthetic page.' };

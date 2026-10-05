@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ModelToolCatalog } from '../tool-catalog.mjs';
-import { estimateTokens } from '../context.mjs';
-import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../tool-protocols.mjs';
-import { canRunInParallel } from '../tool-scheduling.mjs';
+import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
+import { estimateTokens } from '../models/context.mjs';
+import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
+import { canRunInParallel } from '../tools/tool-scheduling.mjs';
 
 const tool = (name, source = 'mcp:synthetic', description = 'Synthetic capability.') => ({ name, source, description,
   inputSchema: { type: 'object', properties: {}, additionalProperties: false } });

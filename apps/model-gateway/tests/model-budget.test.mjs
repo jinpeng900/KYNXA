@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelStore, validateConnection } from '../store.mjs';
+import { ModelStore, validateConnection } from '../models/store.mjs';
 
 const connection = { providerId: 'budget-test', displayName: '预算测试',
   baseUrl: 'http://127.0.0.1:8080/v1', models: ['test-model'] };

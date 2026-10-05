@@ -62,7 +62,7 @@
 
 上下文窗口按连接保存，可选择 8K、32K、128K、256K、1M（1000000）或自定义 2048–2000000；旧连接缺少字段时默认 8192。独立最大输出默认 256K，提供 4K、8K、16K、32K、64K、128K、256K 和自定义 1024–262144，已有 2K 等值保留；同一灰色 TokenLimitRowStyle、字号与选择/校验助手覆盖两行。输出是上限，小上下文会降低实际预留。这些配置不改变服务端能力，本地服务须匹配启动窗口。保存/测试先校验，两项均整数往返；切语言刷新选中标签并保留草稿，忙碌禁用全部预算控件。`tests/model-context-smoke` 验证通信，`tests/model-ui-smoke` 用临时 Data、模拟 HTTP 和真实 WinUI 验证表单、窄窗、关闭与晚到响应。聊天/工作/用户记忆由网关分层管理，详见 [记忆架构](../../docs/architecture/chat-work-memory.md)。
 
-设置中的「记忆管理 → 打开」创建独立原生窗口，可最小化、最大化和关闭。`MemoryManagementWindow` 负责展示与确认，`MemoryManagementViewModel` 管理编辑、版本冲突和取消，`MemoryApiClient` 负责范围 HTTP 接口，`apps/shared/MemoryApiContracts.cs` 定义共享 DTO 与内容校验。窗口分别选择聊天、工作、全局记忆，支持内容筛选、手动新增、编辑、单条删除，显示来源与有效状态；加载失败明确提示，写入和 409 后重新 GET，保留冲突编辑。未发送草稿不纳入聊天目标，全局/工作管理不创建聊天。中英界面即时切换，用户内容原样保留，窄窗口上下排列列表与编辑器。更改 Data 位置前须完成编辑，迁移关闭干净的记忆窗口。
+设置中的「记忆管理 → 打开」创建独立原生窗口，可最小化、最大化和关闭。`MemoryManagementWindow` 负责展示与确认，`MemoryManagementViewModel` 管理编辑、版本冲突和取消，`MemoryApiClient` 负责范围 HTTP 接口，`apps/shared/Memory/MemoryApiContracts.cs` 定义共享 DTO 与内容校验。窗口分别选择聊天、工作、全局记忆，支持内容筛选、手动新增、编辑、单条删除，显示来源与有效状态；加载失败明确提示，写入和 409 后重新 GET，保留冲突编辑。未发送草稿不纳入聊天目标，全局/工作管理不创建聊天。中英界面即时切换，用户内容原样保留，窄窗口上下排列列表与编辑器。更改 Data 位置前须完成编辑，迁移关闭干净的记忆窗口。
 
 验证入口：`tests/memory-management-smoke` 覆盖模拟 HTTP 与状态，`tests/memory-ui-smoke` 用隔离临时目录、模拟 API 和真实 WinUI 控件检查窗口。输出配置已实现，SSE 终态可选 contextUsage 诊断尚未显示为桌面用量控件。聊天展示保持现有 Markdown DOM、稳定消息 ID 与跨消息选择行为，验收安排见 [B：桌面前端](../../docs/team/B-桌面前端.md)。
 

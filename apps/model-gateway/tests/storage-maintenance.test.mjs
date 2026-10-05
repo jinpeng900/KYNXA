@@ -6,8 +6,8 @@ import { join, relative, resolve, sep } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { storageMigrationActive } from '../storage-maintenance.mjs';
-import { EXTENSION_LAYOUT_DIRECTORIES } from '../extension-storage.mjs';
+import { storageMigrationActive } from '../data/storage-maintenance.mjs';
+import { EXTENSION_LAYOUT_DIRECTORIES } from '../data/extension-storage.mjs';
 
 test('gateway pauses writes during migration and reloads committed data root', async t => {
   const home = await mkdtemp(join(tmpdir(), 'kynxa-maintenance-'));
@@ -159,7 +159,7 @@ test('a retired runtime cleanup failure is redacted and prevents a second runtim
       }
     `;
     const child = spawn(process.execPath, ['--no-warnings', '--unhandled-rejections=strict', '--input-type=module', '-e', source,
-      first, second, mode, new URL('../server.mjs', import.meta.url).href, new URL('../runtime.mjs', import.meta.url).href, privateFailure], {
+      first, second, mode, new URL('../server.mjs', import.meta.url).href, new URL('../orchestration/runtime.mjs', import.meta.url).href, privateFailure], {
       env: { ...process.env, USERPROFILE: home, HOME: home, APPDATA: join(home, 'AppData'), LOCALAPPDATA: join(home, 'LocalAppData'),
         KYNXA_DATA_HOME: first, KYNXA_MODEL_HOME: '', KYNXA_EXTENSION_HOME: '', KYNXA_EXTENSION_POINTER: '',
         KYNXA_LEGACY_DESKTOP_HOME: join(home, 'LegacyDesktop') },

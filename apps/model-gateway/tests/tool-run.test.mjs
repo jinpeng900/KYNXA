@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runToolLoop } from '../tool-loop.mjs';
-import { toolRunLimits } from '../tool-run.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
+import { toolRunLimits } from '../orchestration/tool-run.mjs';
 
 function fixture(overrides = {}) {
   const states = [], activities = [];

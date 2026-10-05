@@ -4,8 +4,8 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, write
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { ConversationWorkspaces } from '../sandbox-workspaces.mjs';
-import { SandboxRunner } from '../sandbox-runner.mjs';
+import { ConversationWorkspaces } from '../data/sandbox-workspaces.mjs';
+import { SandboxRunner } from '../tools/sandbox-runner.mjs';
 import { migrateStorage } from '../migrate-storage.mjs';
 
 async function fixture(t) {

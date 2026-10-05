@@ -5,11 +5,11 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
 import { createModelServer } from '../server.mjs';
-import { readSse } from '../streaming.mjs';
+import { readSse } from '../models/streaming.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];

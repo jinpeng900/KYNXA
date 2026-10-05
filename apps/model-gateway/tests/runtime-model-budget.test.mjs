@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
-import { ModelStore } from '../store.mjs';
-import { ConversationStore } from '../conversations.mjs';
-import { ModelRuntime } from '../runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
 
 async function fixture(t, connection) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-runtime-model-budget-'));

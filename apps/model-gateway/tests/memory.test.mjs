@@ -3,9 +3,9 @@ import { cp, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } 
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { MemoryService } from '../memory-service.mjs';
-import { explicitMemoryInstruction } from '../memory-contracts.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { MemoryService } from '../data/memory-service.mjs';
+import { explicitMemoryInstruction } from '../data/memory-contracts.mjs';
 
 const user = (Id, Content) => ({ Id, Role: 'user', Content, Status: 'completed' });
 const chat = (Id, Messages = [user(`u-${Id}`, 'hello')]) => ({ Id, Title: Id, Messages });

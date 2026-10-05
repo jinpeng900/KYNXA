@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
-import { WebFetchTool } from '../web-fetch.mjs';
+import { WebFetchTool } from '../tools/web-fetch.mjs';
 import { toolFixture, pendingApproval, approve, parsed } from './tool-fixture.mjs';
-import { searchTools } from '../tool-discovery.mjs';
+import { searchTools } from '../tools/tool-discovery.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
-import { canRunInParallel } from '../tool-scheduling.mjs';
+import { canRunInParallel } from '../tools/tool-scheduling.mjs';
 
 const sourceUrl = 'https://www.example.com/original';
 const finalUrl = 'https://www.example.com/docs/current/page';

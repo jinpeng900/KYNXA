@@ -4,8 +4,8 @@
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
-import { mcpPresetCatalog } from '../../mcp-presets.mjs';
-import { McpToolClients } from '../../mcp-client.mjs';
+import { mcpPresetCatalog } from '../../tools/mcp-presets.mjs';
+import { McpToolClients } from '../../tools/mcp-client.mjs';
 
 const allowed = ['playwright', 'context7', 'chrome-devtools', 'exa', 'fetch', 'git', 'markitdown', 'dbhub'];
 const selected = process.argv.slice(2);

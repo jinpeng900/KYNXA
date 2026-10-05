@@ -10,6 +10,10 @@
 
 ## 始终适用的约束
 
+五人协作按 [职责入口](docs/team/README.md) 和 [模块边界](docs/architecture/team-boundaries.md) 定位文件归属；机器清单位于 `docs/team/module-ownership.json`。模块移动或跨域导入变更后运行 `node tools/development/check-architecture.mjs`，并验证调用端与随包路径。共享接口由领域负责人维护、A 协调兼容；目录规则不替代用户授权。
+
+GitHub 协作按 [交接流程](docs/team/github-collaboration.md)：模块负责人维护功能分支和对应测试，队长协调跨端接口及合并。目录主责与 CODEOWNERS 同源；修改主责清单后用真实账号重新生成审查规则。CODEOWNERS 不赋予或限制目录写入权限；邀请、远端保护和发布遵循用户授权，不能因本地模板存在就声称已经生效。
+
 - 用户当前指令及已授权范围优先于本文件和 Skill。规则不能替用户扩大任务范围，也不能产生额外确认步骤。
 - 保留已有未提交改动。先检查相关文件与调用关系，不通过重置、覆盖或清理来消除不理解的变更。
 - 当前正式链路是 WinUI/C# 桌面 → Node.js 模型网关 → 云端或本地模型接口。明确区分已实现能力与设计文档中的后续计划。

@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { createModelServer } from '../server.mjs';
-import { readModelStream, readSse } from '../streaming.mjs';
-import { chatRequest } from '../protocols.mjs';
+import { readModelStream, readSse } from '../models/streaming.mjs';
+import { chatRequest } from '../models/protocols.mjs';
 import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 const frame = value => `data: ${typeof value === 'string' ? value : JSON.stringify(value)}\r\n\r\n`;

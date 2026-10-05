@@ -4,10 +4,10 @@ import { readFile, symlink, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { toolFixture, pendingApproval, approve, parsed } from './tool-fixture.mjs';
-import { DesktopRunner } from '../desktop-runner.mjs';
-import { ModelToolCatalog } from '../tool-catalog.mjs';
+import { DesktopRunner } from '../tools/desktop-runner.mjs';
+import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
-import { runToolLoop } from '../tool-loop.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 
 const operations = builtinDescriptors.filter(tool => tool.name.startsWith('computer.')).map(tool => tool.name.slice(9));
 const target = { windowId: '98765', processId: 12345, reason: 'Inspect this synthetic test window.' };

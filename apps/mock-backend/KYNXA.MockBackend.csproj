@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
+    <Compile Include="..\shared\Chat\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
+    <Compile Include="..\shared\Tools\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

@@ -215,10 +215,10 @@ SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支
 
 | 文件 | 职责 |
 |---|---|
-| `apps/shared/AgentApiContracts.cs`、`apps/desktop/Services/AgentApiClient.cs` | 桌面和网关共享合同、请求与错误处理 |
+| `apps/shared/Tools/AgentApiContracts.cs`、`apps/desktop/Services/Tools/AgentApiClient.cs` | 桌面和网关共享合同、请求与错误处理 |
 | `apps/desktop/ToolManagementWindow.xaml(.cs)` | 配置、诊断和启停界面 |
-| `apps/desktop/Controls/StorageLocationRow.cs`、`apps/desktop/Services/ExtensionPaths.cs`、`apps/desktop/Services/ExtensionStorageMigrationService.cs` | 共用存储行、扩展路径解析、校验迁移与指针提交 |
-| `apps/model-gateway/agent-http-routes.mjs` | 工具管理 HTTP 接线，不拥有模型授权 |
+| `apps/desktop/Controls/StorageLocationRow.cs`、`apps/desktop/Services/Data/ExtensionPaths.cs`、`apps/desktop/Services/Data/ExtensionStorageMigrationService.cs` | 共用存储行、扩展路径解析、校验迁移与指针提交 |
+| `apps/model-gateway/orchestration/agent-http-routes.mjs` | 工具管理 HTTP 接线，调用 Tools 业务服务，不拥有模型授权 |
 | `extension-storage.mjs` | 扩展根解析；网关在维护完成后与 Data 根一起切换运行时 |
 | `agent-config.mjs`、`agent-config-layers.mjs`、`mcp-config.mjs`、`mcp-presets.mjs` | 用户配置持久化、官方差量合并、连接校验与预设去重 |
 | `official-tools.mjs`、`official-tools/manifest.json`、`official-tools/Tools/catalog.mjs`、`official-tools/MCP/catalog.mjs` | 安装包定位、官方清单、稳定技能身份及单一工具/预设定义 |
@@ -227,10 +227,10 @@ SKILL.md frontmatter 使用固定版本 `yaml` 的 YAML 1.2 Core 解析器，支
 | `tool-service.mjs`、`tool-policy.mjs`、`tool-catalog.mjs`、`tool-result-store.mjs` | 统一调用协调、权限与审批、模型目录预算、完整结果保存 |
 | `tool-storage-boundary.mjs`、`tool-system-prompt.mjs`、`desktop-launch-options.mjs` | 存储身份与保护策略、有界能力提示、审批前可观察的后台启动参数 |
 | `tool-loop.mjs`、`tool-run.mjs`、`tool-observations.mjs` | 模型与工具循环、受限耗时诊断、请求内观察复用及无进展控制 |
-| `sandbox-runner.mjs`、`sandbox-skill.mjs`、`apps/tool-host/SkillSnapshot.cs` | 原生沙箱通信、统一能力/回执判定、哈希核验及只读技能快照 |
+| `sandbox-runner.mjs`、`sandbox-skill.mjs`、`apps/tool-host/Sandbox/SkillSnapshot.cs` | 原生沙箱通信、统一能力/回执判定、哈希核验及只读技能快照 |
 | `sandbox-workspaces.mjs`、`tool-host-path.mjs`、`desktop-runner.mjs`、`official-tools/Tools/computer.mjs` | 独立聊天工具目录、原生助手定位、本机协议与回执、桌面工具声明 |
-| `apps/tool-host/Desktop*.cs`、`apps/desktop/Services/ComputerToolPresentation.cs` | 原生窗口读取/输入与程序启动、无参数 JSON 的动作与审批展示 |
-| `apps/desktop/Controls/ConversationScreenshotsPanel.cs`、`apps/desktop/Services/ConversationScreenshot*.cs`、`ToolResultImageDecoder.cs` | 当前聊天截图投影、可取消的按需读取、有界图片解码与右栏缩略图 |
+| `apps/tool-host/Desktop*.cs`、`apps/desktop/Services/Presentation/ComputerToolPresentation.cs` | 原生窗口读取/输入与程序启动、无参数 JSON 的动作与审批展示 |
+| `apps/desktop/Controls/ConversationScreenshotsPanel.cs`、`apps/desktop/Services/Presentation/ConversationScreenshot*.cs`、`apps/desktop/Services/Presentation/ToolResultImageDecoder.cs` | 当前聊天截图投影、可取消的按需读取、有界图片解码与右栏缩略图 |
 
 上述短文件名均位于 `apps/model-gateway`。技能文本不新增运行器；第三方 MCP 通过原客户端连接，正式聊天和记忆仍由现有服务保存。
 
@@ -401,3 +401,7 @@ MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools�
 公开源码可以按许可证复制、修改与复用；公开可读不自动等于开放许可。复用包保留声明，适配层只处理本机存储、标准协议、审批与展示。不会把整个其他 Agent 的会话/记忆系统并排装入当前正式存储，也不声称已安装其闭源或账号专属能力。
 
 本轮公开包复用与连续执行更新：网关 349/349、MCP客户端 46、扩展迁移120项通过；真实临时CPython/stdlib虚拟环境迁移核验3436文件，移走旧目录后新位置两种解释器实际运行成功。工具展示原生WebView2 114项、工具DOM29项、小号灰色字体与窄窗33项、模型输出表单55项、语言2056项通过。运行环境迁移仅适配自有MCP目录中普通pyvenv.cfg和uv-receipt.toml的确定路径字段；保留原文件、注释、外部解释器路径及原有链接拒绝规则，不盲改任意二进制启动器。已安装的本机Python目录别名采用普通目录，uv包文件使用copy模式，实际MCP服务通过uvx与托管物理解释器启动。
+
+## 2026-10-05 敏感读取补充
+
+内置文件工具在 Ask/Smart 中读取 `.env`、常见凭据文件或私钥目标先请求单次审批，审批说明告知内容可能留存并发送给模型；普通目录搜索跳过敏感内容，外部目录审批不隐式授权嵌套凭据。Full 保留用户授予的读取范围，正式应用连接密钥和私有结果仍走已有保护。[本轮核查与验证](issue-review-20261005.md)。

@@ -4,22 +4,22 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/ProjectStore.cs" Link="ProjectStore.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/Data/ProjectStore.cs" Link="ProjectStore.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Agent.cs" Link="UiText.Agent.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Memory.cs" Link="UiText.Memory.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Agent.cs" Link="UiText.Agent.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

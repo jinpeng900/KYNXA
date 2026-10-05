@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelToolCatalog } from '../tool-catalog.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
-import { estimateTokens } from '../context.mjs';
-import { estimateToolMessageTokens, toolDeclarations } from '../tool-protocols.mjs';
+import { estimateTokens } from '../models/context.mjs';
+import { estimateToolMessageTokens, toolDeclarations } from '../models/tool-protocols.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];

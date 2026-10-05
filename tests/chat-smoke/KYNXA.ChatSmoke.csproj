@@ -6,9 +6,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="..\..\apps\shared\ChatApiContracts.cs" Link="ChatApiContracts.cs" />
-    <Compile Include="..\..\apps\shared\AgentApiContracts.cs" Link="AgentApiContracts.cs" />
-    <Compile Include="..\..\apps\desktop\Services\MockChatClient.cs" Link="MockChatClient.cs" />
+    <Compile Include="..\..\apps\shared\Chat\ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="..\..\apps\shared\Tools\AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="..\..\apps\desktop\Services\Models\MockChatClient.cs" Link="MockChatClient.cs" />
     <Compile Include="..\..\apps\desktop\Models\UI\ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="..\..\apps\desktop\Models\UI\ChatMessageState.cs" Link="ChatMessageState.cs" />
   </ItemGroup>

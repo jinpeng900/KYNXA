@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
-import { SandboxRunner } from '../../apps/model-gateway/sandbox-runner.mjs';
+import { SandboxRunner } from '../../apps/model-gateway/tools/sandbox-runner.mjs';
 
 test('approved skill package runs read-only in the real AppContainer; stale manifests execute nothing',
   { skip: process.platform !== 'win32', timeout: 60000 }, async () => {

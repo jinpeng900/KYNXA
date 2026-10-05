@@ -6,22 +6,22 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../apps/shared/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
-    <Compile Include="../../apps/desktop/Services/ChatStreamReader.cs" Link="ChatStreamReader.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelApiClient.cs" Link="ModelApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelPresets.cs" Link="ModelPresets.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelCatalog.cs" Link="ModelCatalog.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ChatStreamReader.cs" Link="ChatStreamReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelApiClient.cs" Link="ModelApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelPresets.cs" Link="ModelPresets.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelCatalog.cs" Link="ModelCatalog.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Agent.cs" Link="UiText.Agent.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Memory.cs" Link="UiText.Memory.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Agent.cs" Link="UiText.Agent.cs" />
   </ItemGroup>
 </Project>

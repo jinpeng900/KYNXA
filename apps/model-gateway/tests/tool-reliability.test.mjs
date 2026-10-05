@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { runToolLoop } from '../tool-loop.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 test('a completed real file write is committed in formal tool history before stop is honored', async t => {

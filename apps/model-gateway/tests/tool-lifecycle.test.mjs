@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ToolService } from '../tool-service.mjs';
-import { ModelRuntime } from '../runtime.mjs';
+import { ToolService } from '../tools/tool-service.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { pendingApproval, toolFixture } from './tool-fixture.mjs';
 
 test('failed tool teardown still closes every owner, cancels approvals and completes snapshot cleanup once', async t => {

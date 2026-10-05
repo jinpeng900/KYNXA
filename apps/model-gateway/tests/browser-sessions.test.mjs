@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BrowserSessionRegistry, browserOperation, inferBrowserInteractionPolicy, isExplicitForegroundForbidden } from '../browser-sessions.mjs';
-import { McpToolClients, isMcpExecutionNotDispatched } from '../mcp-client.mjs';
+import { BrowserSessionRegistry, browserOperation, inferBrowserInteractionPolicy, isExplicitForegroundForbidden } from '../tools/browser-sessions.mjs';
+import { McpToolClients, isMcpExecutionNotDispatched } from '../tools/mcp-client.mjs';
 
 const envelope = args => ({ arguments: args, policy: { reason: 'Inspect only the isolated fixture browser.' } });
 const server = { id: 'fixture-browser', name: 'Fixture', command: 'npx', enabled: true,

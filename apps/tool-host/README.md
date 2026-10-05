@@ -1,5 +1,20 @@
 # Windows native tool host
 
+## Source architecture / 源码架构
+
+`Program.cs` remains the JSON-line entry point and cancellation monitor. All source folders compile into the same `KYNXA.ToolHost` assembly and retain the `KYNXA.ToolHost` namespace; these boundaries do not create separate executables or change the public protocol.
+`Program.cs` 保留 JSON 行入口与取消监控；以下目录仍编译为同一程序集并保持原命名空间，不增加独立可执行程序或修改公开协议。
+
+| Folder / 目录 | Responsibility / 职责 |
+| --- | --- |
+| [Desktop](Desktop/README.md) | Selected-window discovery, reading, screenshots, input and placement; 已选窗口发现、读取、截图、输入与位置策略。 |
+| [Terminal](Terminal/README.md) | Explicit host CMD/PowerShell execution and visible console lifecycle; 显式宿主 CMD/PowerShell 执行与可见控制台生命周期。 |
+| [Sandbox](Sandbox/README.md) | AppContainer execution and workspace/skill snapshots; AppContainer 执行与工作区、技能快照。 |
+| [Native](Native/README.md) | Shared Windows interop declarations and ABI layouts; 共享 Windows 原生声明与 ABI 布局。 |
+
+The gateway owns approvals and immutable request scope. Channel implementations own their windows, process handles, deadlines and cleanup; native declarations do not own policy. `Terminal` reuses `DesktopForegroundPlacement` for verified console placement. SDK compilation includes these source folders automatically; linked smoke projects explicitly reference the corresponding source paths. Packaging still publishes the root project and locates the visible companion beside the helper executable.
+网关拥有审批与不可变请求范围；各通道拥有其窗口、进程句柄、期限与清理责任，原生声明不承载策略。`Terminal` 复用 `DesktopForegroundPlacement` 放置已验证的控制台。SDK 自动包含子目录源码，链接源码的 smoke 工程使用明确路径。打包仍发布根工程，可见辅助进程仍位于工具宿主可执行文件旁。
+
 ## Host terminal channel
 
 `host_terminal_capabilities` and `host_terminal` provide explicit host CMD/PowerShell execution, separate from AppContainer. They do not require Python. The gateway owns approval and immutable request scope; the helper owns fixed shell paths, inherited host environment, output/deadline limits and Job process-tree cleanup. Normal command exit, including nonzero, has a completion receipt; interrupted effects remain unknown. See [native host terminal verification](../../tests/native-host-terminal-smoke/README.md) for the JSON-line contract, encoding limits and executable checks.

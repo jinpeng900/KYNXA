@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resolveModelCapabilities } from '../model-capabilities.mjs';
+import { resolveModelCapabilities } from '../models/model-capabilities.mjs';
 
 test('official model ceilings distinguish context, independent input and output budgets', () => {
   const deepseek = resolveModelCapabilities({ baseUrl: 'https://api.deepseek.com' }, 'deepseek-flash');

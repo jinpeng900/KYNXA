@@ -39,3 +39,7 @@ Thumbs.db
 
 # Node.js dependencies are restored from the lockfile.
 node_modules/
+
+# Isolated development verification outputs; never ship them with the application.
+# 隔离的开发验收产物，不随应用发布。
+/artifacts/

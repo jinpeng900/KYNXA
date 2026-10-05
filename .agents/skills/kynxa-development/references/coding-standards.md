@@ -4,7 +4,9 @@
 
 ## 模块职责与依赖
 
-当前正式链路：WinUI/C# 桌面 → 本机 Node.js 网关 → 已配置的云端或本地模型接口。桌面使用 WebView2 展示聊天，网关拥有正式会话、记忆和上下文组装。读取 [仓库说明](../../../../README.zh.md) 与相关代码，区分当前实现和后续 Host、工具执行等计划。
+当前正式链路：WinUI/C# 桌面 → 本机 Node.js 网关 → 已配置的云端或本地模型接口，以及网关 → C# ToolHost。桌面使用 WebView2 展示聊天，网关拥有正式会话、记忆和上下文组装。读取 [仓库说明](../../../../README.zh.md) 与相关代码，区分现有工具执行和后续持久任务恢复等计划。
+
+五人职责及实际目录见 [模块边界](../../../../docs/architecture/team-boundaries.md)。网关分为 A 的 Orchestration/Platform、C 的 Models、D 的 Tools 与 E 的 Data；桌面 Services 对应 Integration/Presentation/Models/Tools/Data。Shared 按 Chat/Tools/Memory 合同分目录；ToolHost 按 Desktop/Terminal/Sandbox/Native 分目录。B 维护全部 ShellPage partial。目录、静态依赖及稳定入口由 `node tools/development/check-architecture.mjs` 校验，`--details` 查看回归套件归属。
 
 | 位置或角色 | 应承担的职责 | 应避免的职责 |
 |---|---|---|
@@ -51,7 +53,7 @@
 
 ## 接口与兼容
 
-- 请求、响应、流事件按方向定义。改字段时同时检查 [共享契约](../../../../apps/shared/ChatApiContracts.cs)、桌面客户端、网关与模拟上游。
+- 请求、响应、流事件按方向定义。改字段时同时检查 [共享契约](../../../../apps/shared/Chat/ChatApiContracts.cs)、桌面客户端、网关与模拟上游。
 - 当前聊天 HTTP 字段和目录/持久化消息存在不同大小写约定，保持既有合同；不能为命名统一直接改变 JSON 格式。
 - 新字段明确旧数据默认值、未知值行为和版本判断。跨版本需要迁移或拒绝时返回可辨认的错误，不静默覆盖未来版本文件。
 - 保留 HTTP 状态码与机器错误码，UI 再转换为可读提示。模型服务的认证字段进入对应请求，不进入模型提示词。

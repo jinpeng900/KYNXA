@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readToolStream } from '../tool-streaming.mjs';
-import { wireCatalog } from '../tool-protocols.mjs';
+import { readToolStream } from '../models/tool-streaming.mjs';
+import { wireCatalog } from '../models/tool-protocols.mjs';
 
 const frame = (item, type) => `${type ? `event: ${type}\n` : ''}data: ${JSON.stringify(item)}\n\n`;
 const response = body => new Response(body, { headers: { 'content-type': 'text/event-stream' } });

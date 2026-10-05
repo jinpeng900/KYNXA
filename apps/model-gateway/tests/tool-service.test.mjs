@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { AgentConfigRepository } from '../agent-config.mjs';
-import { ToolService } from '../tool-service.mjs';
-import { estimateTokens } from '../context.mjs';
+import { AgentConfigRepository } from '../tools/agent-config.mjs';
+import { ToolService } from '../tools/tool-service.mjs';
+import { estimateTokens } from '../models/context.mjs';
 import { approve, parsed, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
 test('malformed tool envelopes return a bounded validation receipt without dispatching', async t => {

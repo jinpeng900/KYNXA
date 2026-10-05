@@ -4,8 +4,8 @@ import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { MAX_TOOL_RESULT_BYTES, previewToolResult, publicToolResult, ToolResultStore } from '../tool-result-store.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { MAX_TOOL_RESULT_BYTES, previewToolResult, publicToolResult, ToolResultStore } from '../data/tool-result-store.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-tool-results-'));

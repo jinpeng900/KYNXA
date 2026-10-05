@@ -34,7 +34,7 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
-    <Content Include="..\model-gateway\*.mjs" Exclude="..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\**\*.mjs" Exclude="..\model-gateway\node_modules\**;..\model-gateway\tests\**;..\model-gateway\official-tools\**;..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\manifest.json;..\model-gateway\official-tools\LICENSE.txt"
              Link="model-gateway\official-tools\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\MCP\catalog.mjs"
@@ -57,9 +57,9 @@
              Link="model-gateway\official-tools\Skills\internal-comms\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\Skills\internal-comms\examples\3p-updates.md;..\model-gateway\official-tools\Skills\internal-comms\examples\company-newsletter.md;..\model-gateway\official-tools\Skills\internal-comms\examples\faq-answers.md;..\model-gateway\official-tools\Skills\internal-comms\examples\general-comms.md"
              Link="model-gateway\official-tools\Skills\internal-comms\examples\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Compile Include="..\shared\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
-    <Compile Include="..\shared\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
-    <Compile Include="..\shared\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
+    <Compile Include="..\shared\Tools\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
+    <Compile Include="..\shared\Chat\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
+    <Compile Include="..\shared\Memory\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
   </ItemGroup>
 
   <!--

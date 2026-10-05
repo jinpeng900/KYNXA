@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { ModelHistoryProjection } from '../model-history.mjs';
-import { ToolContextProjection } from '../tool-context.mjs';
-import { estimateToolMessageTokens } from '../tool-protocols.mjs';
-import { estimateTokens } from '../context.mjs';
+import { ModelHistoryProjection } from '../models/model-history.mjs';
+import { ToolContextProjection } from '../models/tool-context.mjs';
+import { estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { estimateTokens } from '../models/context.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const reference = () => ({ id: randomUUID(), bytes: 100_000, sha256: 'a'.repeat(64) });

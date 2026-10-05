@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { SandboxRunner } from '../../apps/model-gateway/sandbox-runner.mjs';
+import { SandboxRunner } from '../../apps/model-gateway/tools/sandbox-runner.mjs';
 
 test('real Windows AppContainer: snapshot IO, denied external read/network, process tree and bounded output',
   { skip: process.platform !== 'win32', timeout: 60000 }, async () => {

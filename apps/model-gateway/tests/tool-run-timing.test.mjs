@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DEFAULT_TOOL_RUN_LIMITS, ToolRunProgress, startRunTimer } from '../tool-run.mjs';
+import { DEFAULT_TOOL_RUN_LIMITS, ToolRunProgress, startRunTimer } from '../orchestration/tool-run.mjs';
 
 test('numeric diagnostics distinguish model, execution and approval spans without treating parallel totals as wall time', async () => {
   const saved = [], progress = new ToolRunProgress(undefined, state => saved.push(state));

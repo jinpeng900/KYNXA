@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mcpPresetCatalog, addMcpPreset } from '../mcp-presets.mjs';
-import { normalizeMcpConnection } from '../mcp-config.mjs';
+import { mcpPresetCatalog, addMcpPreset } from '../tools/mcp-presets.mjs';
+import { normalizeMcpConnection } from '../tools/mcp-config.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 test('public MCP catalog has pinned publisher packages, clear setup requirements and no duplicate builtin implementation', () => {

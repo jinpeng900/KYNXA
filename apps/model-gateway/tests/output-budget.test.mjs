@@ -3,8 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelStore, atomicJson, validateConnection } from '../store.mjs';
-import { resolveOutputBudget, validateOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../output-budget.mjs';
+import { ModelStore, atomicJson, validateConnection } from '../models/store.mjs';
+import { resolveOutputBudget, validateOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../models/output-budget.mjs';
 
 test('output ceiling defaults to 256K and stays bounded by the physical window', () => {
   assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 262_144);

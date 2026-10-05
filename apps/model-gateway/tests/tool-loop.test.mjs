@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { readSse } from '../streaming.mjs';
-import { readToolStream } from '../tool-streaming.mjs';
-import { wireCatalog } from '../tool-protocols.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { readSse } from '../models/streaming.mjs';
+import { readToolStream } from '../models/tool-streaming.mjs';
+import { wireCatalog } from '../models/tool-protocols.mjs';
 import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-tool-import-'));

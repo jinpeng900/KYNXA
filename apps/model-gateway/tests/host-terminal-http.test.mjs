@@ -3,11 +3,11 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { toolFixture } from './tool-fixture.mjs';
-import { HostTerminalRunner } from '../host-terminal-runner.mjs';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
+import { HostTerminalRunner } from '../tools/host-terminal-runner.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { createModelServer } from '../server.mjs';
-import { readSse } from '../streaming.mjs';
+import { readSse } from '../models/streaming.mjs';
 
 async function listen(server) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildContext, completedTurns, estimateTokens, estimateMessageTokens, ContextError } from '../context.mjs';
-import { chatRequest } from '../protocols.mjs';
-import { DEFAULT_MAX_OUTPUT_TOKENS, resolveOutputBudget } from '../output-budget.mjs';
+import { buildContext, completedTurns, estimateTokens, estimateMessageTokens, ContextError } from '../models/context.mjs';
+import { chatRequest } from '../models/protocols.mjs';
+import { DEFAULT_MAX_OUTPUT_TOKENS, resolveOutputBudget } from '../models/output-budget.mjs';
 
 const conversationId = '10000000-0000-4000-8000-000000000001';
 const otherChat = '10000000-0000-4000-8000-000000000002';

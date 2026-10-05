@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { ModelHistoryProjection, publicModelHistoryText } from '../model-history.mjs';
-import { appendModelRound, modelOrigin, modelPrefixFingerprint, nativeContinuation, validateModelTranscript } from '../model-transcript.mjs';
-import { ConversationStore } from '../conversations.mjs';
-import { buildContext } from '../context.mjs';
-import { estimateToolMessageTokens } from '../tool-protocols.mjs';
-import { validateAssistantSegments } from '../assistant-segments.mjs';
+import { ModelHistoryProjection, publicModelHistoryText } from '../models/model-history.mjs';
+import { appendModelRound, modelOrigin, modelPrefixFingerprint, nativeContinuation, validateModelTranscript } from '../platform/model-transcript.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { buildContext } from '../models/context.mjs';
+import { estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { validateAssistantSegments } from '../platform/assistant-segments.mjs';
 import { toolFixture, parsed } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];

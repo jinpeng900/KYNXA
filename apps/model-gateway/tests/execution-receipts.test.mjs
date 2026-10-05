@@ -4,10 +4,10 @@ import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildContext, estimateTokens, estimateMessageTokens } from '../context.mjs';
-import { executionReceiptContext, MAX_EXECUTION_RECEIPT_TOKENS } from '../execution-receipts.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
+import { buildContext, estimateTokens, estimateMessageTokens } from '../models/context.mjs';
+import { executionReceiptContext, MAX_EXECUTION_RECEIPT_TOKENS } from '../models/execution-receipts.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 function savedTurn({ status = 'completed', replyTo = true, tools = [], content = 'Saved final answer.' } = {}) {

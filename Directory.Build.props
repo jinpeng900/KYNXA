@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup Condition="'$(KynxaMapSourcePaths)' != 'false'">
+    <!-- Keep symbols and line information while replacing the developer's repository path.
+         保留符号与行号，将开发者的仓库绝对路径替换为固定的虚拟源码根目录。 -->
+    <PathMap>$(PathMap),$(MSBuildThisFileDirectory)=/_/KYNXA/</PathMap>
+  </PropertyGroup>
+</Project>

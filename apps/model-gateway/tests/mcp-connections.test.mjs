@@ -8,9 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { AgentConfigRepository, sameMcpEndpoint } from '../agent-config.mjs';
-import { McpToolClients } from '../mcp-client.mjs';
-import { createMcpTransport } from '../mcp-transport.mjs';
+import { AgentConfigRepository, sameMcpEndpoint } from '../tools/agent-config.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
+import { createMcpTransport } from '../tools/mcp-transport.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url));
 const envelope = args => ({ arguments: args, policy: { reason: 'Use the isolated synthetic MCP server.' } });
@@ -234,6 +234,88 @@ test('HTTP unauthorized calls are not replayed, and auth diagnostics never expos
   assert.equal(fixture.calls(), 1); assert.equal(clients.diagnostics()[0].state, 'auth-required');
   assert.equal(JSON.stringify(clients.diagnostics()).includes('synthetic-bearer-secret'), false);
   assert.equal(JSON.stringify(clients.diagnostics()).includes('synthetic-only'), false);
+});
+
+function pendingReply() {
+  let resolve, reject;
+  const promise = new Promise((resolveValue, rejectValue) => { resolve = resolveValue; reject = rejectValue; });
+  return { promise, resolve, reject };
+}
+
+async function recoveryFixture(t) {
+  const fixture = await httpFixture(t), clients = new McpToolClients();
+  t.after(() => clients.close());
+  const server = serverConfig({ transport: 'streamable-http', command: '', url: fixture.url, protocolVersion: '2026-07-28' });
+  const descriptor = (await clients.catalog({ mcpServers: [server] }, {}, { connect: true })).find(tool => tool.toolName === 'echo');
+  const connection = await clients.connections.get(descriptor.key);
+  return { clients, descriptor, connection, fixture, input: envelope({ value: 'public-recovery-evidence' }) };
+}
+
+test('a successful RPC after timeout clears diagnostics without changing catalog or connection identity', async t => {
+  const f = await recoveryFixture(t), originalCall = f.connection.client.callTool.bind(f.connection.client);
+  let shouldTimeout = true;
+  f.connection.client.callTool = (...args) => {
+    if (shouldTimeout) { shouldTimeout = false; throw Object.assign(new Error('Synthetic timeout'), { code: 'REQUEST_TIMEOUT' }); }
+    return originalCall(...args);
+  };
+  const generation = f.clients.diagnostics()[0].generation, pending = f.clients.connections.get(f.descriptor.key);
+  await assert.rejects(f.clients.execute(f.descriptor, f.input), { code: 'MCP_TIMEOUT' });
+  assert.equal(f.clients.diagnostics()[0].code, 'MCP_TIMEOUT');
+  assert.equal(f.clients.errors.get(f.descriptor.serverId), 'MCP_TIMEOUT');
+  assert.equal((await f.clients.execute(f.descriptor, f.input)).content, 'public-recovery-evidence');
+  assert.equal(f.clients.diagnostics()[0].state, 'ready');
+  assert.equal(f.clients.diagnostics()[0].code, undefined);
+  assert.equal(f.clients.errors.has(f.descriptor.serverId), false);
+  assert.equal(f.clients.diagnostics()[0].generation, generation);
+  assert.equal(f.clients.connections.get(f.descriptor.key), pending);
+  assert.equal(f.fixture.calls(), 1, 'No automatic replay follows the timeout.');
+});
+
+test('an older pending success cannot clear a concurrently observed newer failure', async t => {
+  const f = await recoveryFixture(t), first = pendingReply(), second = pendingReply(), entered = pendingReply();
+  let calls = 0;
+  f.connection.client.callTool = () => {
+    calls++;
+    if (calls === 1) { entered.resolve(); return first.promise; }
+    return second.promise;
+  };
+  const oldSuccess = f.clients.execute(f.descriptor, f.input);
+  await entered.promise;
+  const newFailure = f.clients.execute(f.descriptor, f.input);
+  const rejection = assert.rejects(newFailure, { code: 'MCP_TIMEOUT' });
+  second.reject(Object.assign(new Error('Synthetic timeout'), { code: 'REQUEST_TIMEOUT' }));
+  await rejection;
+  first.resolve({ content: [{ type: 'text', text: 'Older public result' }] });
+  assert.equal((await oldSuccess).content, 'Older public result');
+  assert.equal(f.clients.diagnostics()[0].code, 'MCP_TIMEOUT');
+  assert.equal(f.clients.errors.get(f.descriptor.serverId), 'MCP_TIMEOUT');
+});
+
+test('a late RPC success cannot revive an explicitly disconnected connection', async t => {
+  const f = await recoveryFixture(t), pending = pendingReply(), entered = pendingReply();
+  f.connection.client.callTool = () => { entered.resolve(); return pending.promise; };
+  const result = f.clients.execute(f.descriptor, f.input);
+  await entered.promise;
+  await f.clients.disconnect(f.descriptor.serverId);
+  pending.resolve({ content: [{ type: 'text', text: 'Already dispatched result' }] });
+  await result;
+  assert.equal(f.clients.diagnostics()[0].state, 'disconnected');
+  assert.equal(f.clients.diagnostics()[0].toolCount, 0);
+  assert.equal(f.clients.connections.has(f.descriptor.key), false);
+});
+
+test('a replaced connection owns diagnostics even when its predecessor returns a late failure', async t => {
+  const f = await recoveryFixture(t), pending = pendingReply(), entered = pendingReply();
+  f.connection.client.callTool = () => { entered.resolve(); return pending.promise; };
+  const result = f.clients.execute(f.descriptor, f.input);
+  const rejection = assert.rejects(result, { code: 'MCP_TIMEOUT' });
+  await entered.promise;
+  await f.clients.reconnect(f.descriptor.serverId, {});
+  pending.reject(Object.assign(new Error('Synthetic timeout'), { code: 'REQUEST_TIMEOUT' }));
+  await rejection;
+  assert.equal(f.clients.diagnostics()[0].state, 'ready');
+  assert.equal(f.clients.diagnostics()[0].code, undefined);
+  assert.equal(f.clients.errors.has(f.descriptor.serverId), false);
 });
 
 test('missing env references and HTTP redirects fail with bounded codes without leaking configured values', async t => {

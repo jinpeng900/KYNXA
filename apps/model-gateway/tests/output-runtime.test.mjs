@@ -5,10 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime, completedContext } from '../runtime.mjs';
-import { responseText } from '../protocols.mjs';
-import { decodeToolTurn, wireCatalog } from '../tool-protocols.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime, completedContext } from '../orchestration/runtime.mjs';
+import { responseText } from '../models/protocols.mjs';
+import { decodeToolTurn, wireCatalog } from '../models/tool-protocols.mjs';
 import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
 
 function nativeReply(protocol, content, truncated) {

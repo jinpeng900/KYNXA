@@ -4,8 +4,8 @@
 import { createServer } from 'node:http';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { ModelStore } from '../apps/model-gateway/store.mjs';
-import { ModelRuntime } from '../apps/model-gateway/runtime.mjs';
+import { ModelStore } from '../apps/model-gateway/models/store.mjs';
+import { ModelRuntime } from '../apps/model-gateway/orchestration/runtime.mjs';
 import { createModelServer } from '../apps/model-gateway/server.mjs';
 
 if (!process.argv[2]) throw new Error('A temporary data directory is required.');

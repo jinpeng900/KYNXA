@@ -8,12 +8,12 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="DecoderChecks.cs" />
-    <Compile Include="../../apps/tool-host/HostTerminalRunner.cs" Link="HostTerminalRunner.cs" />
-    <Compile Include="../../apps/tool-host/HostTerminalRequest.cs" Link="HostTerminalRequest.cs" />
-    <Compile Include="../../apps/tool-host/HostTerminalVisibleRunner.cs" Link="HostTerminalVisibleRunner.cs" />
-    <Compile Include="../../apps/tool-host/HostTerminalConsole.cs" Link="HostTerminalConsole.cs" />
-    <Compile Include="../../apps/tool-host/DesktopForegroundPlacement.cs" Link="DesktopForegroundPlacement.cs" />
-    <Compile Include="../../apps/tool-host/DesktopNativeMethods.cs" Link="DesktopNativeMethods.cs" />
-    <Compile Include="../../apps/tool-host/NativeMethods.cs" Link="NativeMethods.cs" />
+    <Compile Include="../../apps/tool-host/Terminal/HostTerminalRunner.cs" Link="HostTerminalRunner.cs" />
+    <Compile Include="../../apps/tool-host/Terminal/HostTerminalRequest.cs" Link="HostTerminalRequest.cs" />
+    <Compile Include="../../apps/tool-host/Terminal/HostTerminalVisibleRunner.cs" Link="HostTerminalVisibleRunner.cs" />
+    <Compile Include="../../apps/tool-host/Terminal/HostTerminalConsole.cs" Link="HostTerminalConsole.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopForegroundPlacement.cs" Link="DesktopForegroundPlacement.cs" />
+    <Compile Include="../../apps/tool-host/Native/DesktopNativeMethods.cs" Link="DesktopNativeMethods.cs" />
+    <Compile Include="../../apps/tool-host/Native/NativeMethods.cs" Link="NativeMethods.cs" />
   </ItemGroup>
 </Project>

@@ -4,8 +4,8 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { discoverModels } from '../model-discovery.mjs';
-import { MAX_CONNECTION_MODELS, ModelStore, validateConnection } from '../store.mjs';
+import { discoverModels } from '../models/model-discovery.mjs';
+import { MAX_CONNECTION_MODELS, ModelStore, validateConnection } from '../models/store.mjs';
 import { createModelServer } from '../server.mjs';
 
 async function listening(t, handler) {

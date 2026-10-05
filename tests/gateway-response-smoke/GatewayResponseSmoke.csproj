@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
     <ItemGroup>
-        <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-        <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
+        <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+        <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
     </ItemGroup>
 </Project>

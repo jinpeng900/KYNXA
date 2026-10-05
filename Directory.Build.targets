@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup Condition="'$(KynxaMapSourcePaths)' != 'false' and '$(NuGetPackageRoot)' != ''">
+    <!-- SDK package sources also enter the PDB; evaluate their root after restore properties.
+         SDK 包源码也会进入 PDB；在还原属性可用后映射缓存根目录，避免暴露用户目录。 -->
+    <PathMap>$(PathMap),$(NuGetPackageRoot)=/_/NuGet/</PathMap>
+  </PropertyGroup>
+</Project>

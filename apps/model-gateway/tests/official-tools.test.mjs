@@ -6,11 +6,11 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { AppSkillService } from '../skill-service.mjs';
-import { curatedMcpPresets as compatibilityPresets } from '../mcp-preset-catalog.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
+import { curatedMcpPresets as compatibilityPresets } from '../tools/mcp-preset-catalog.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
 import { curatedMcpPresets, OFFICIAL_SKILLS_DIRECTORY, OFFICIAL_TOOLS_PACKAGE_ID, OFFICIAL_TOOLS_ROOT,
-  normalizeOfficialDisabledSkills, officialSkillIdentity, readOfficialToolsManifest } from '../official-tools.mjs';
+  normalizeOfficialDisabledSkills, officialSkillIdentity, readOfficialToolsManifest } from '../tools/official-tools.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');

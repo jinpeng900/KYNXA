@@ -6,12 +6,12 @@ import { join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
-import { AppSkillService } from '../skill-service.mjs';
-import { ToolService } from '../tool-service.mjs';
-import { McpToolClients } from '../mcp-client.mjs';
-import { extensionControlPaths } from '../extension-storage.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
+import { ToolService } from '../tools/tool-service.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
+import { extensionControlPaths } from '../data/extension-storage.mjs';
 import { toolFixture, parsed } from './tool-fixture.mjs';
 
 const skillContent = name => `---\nname: ${name}\ndescription: Synthetic package for isolated extension tests.\n---\nRead scripts/check.mjs.\n`;
@@ -241,7 +241,7 @@ test('managed gateway serializes pointer transitions, waits for active requests 
     }finally{server.closeAllConnections();await new Promise(ready=>server.close(ready));await server.shutdownModelRuntime();}
   `;
   const child = spawn(process.execPath, ['--no-warnings', '--unhandled-rejections=strict', '--input-type=module', '-e', source,
-    home, new URL('../server.mjs', import.meta.url).href, new URL('../runtime.mjs', import.meta.url).href], {
+    home, new URL('../server.mjs', import.meta.url).href, new URL('../orchestration/runtime.mjs', import.meta.url).href], {
     env: { ...process.env, USERPROFILE: home, HOME: home, APPDATA: join(home, 'AppData'), LOCALAPPDATA: join(home, 'LocalAppData'),
       KYNXA_MODEL_HOME: '', KYNXA_EXTENSION_HOME: '', KYNXA_EXTENSION_POINTER: '', KYNXA_LEGACY_DESKTOP_HOME: join(home, 'LegacyDesktop') },
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']

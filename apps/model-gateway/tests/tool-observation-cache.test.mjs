@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RequestObservationCache } from '../tool-observations.mjs';
+import { RequestObservationCache } from '../tools/tool-observations.mjs';
 import { approve, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
 const searchName = 'mcp.exa.web_search_exa';

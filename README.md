@@ -26,7 +26,7 @@ Updated 2026-10-05. This section describes implemented behavior; the larger runt
 * Context and output limits are independent connection settings. Output defaults to a 256K (262144) ceiling, with 4K/8K/16K/32K/64K/128K/256K and custom choices; context offers 8K/32K/128K/256K/1M and custom budgets. Both must match the model service. Small context windows reduce the effective output reserve.
 * Chats retain all original messages; restart and retrieval are tested beyond 200 messages. Bounded requests preserve recent complete turns and relevant older constraints/code excerpts. Models can page through the current chat's original messages; tool loops compact saved-result previews without deleting records.
 
-Settings includes memory management for chat, work and user scopes. Gateway regressions use temporary data and simulated upstreams; desktop tests cover transport, actual DOM and isolated native windows. Current results are in the [gateway guide](apps/model-gateway/README.md#当前验证与后续接口). They do not certify every provider or a real 1M model.
+Settings includes memory management for chat, work and user scopes. Gateway regressions use temporary data and simulated upstreams; desktop tests cover transport, actual DOM and isolated native windows. Earlier validation records are in the [gateway guide](apps/model-gateway/README.md#当前验证与后续接口). They do not certify every provider or a real 1M model.
 
 Model-controlled file tools, per-request approvals, stdio / Streamable HTTP MCP, application skills and a Windows AppContainer terminal are implemented. Tools and skills settings support official service presets, environment-variable authentication references, skill import and enable switches; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints, automatic semantic memory and full-text/vector search remain planned. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
 
@@ -39,6 +39,14 @@ Skill resources resolve from their package root, with standard validation, depen
 Settings provide separate Data and User tools storage rows. MCP configuration, imported skills and managed npm/browser caches can move to an independent folder through a verified copy and atomic pointer switch. Old files remain available; changing Data keeps an explicitly configured extension folder in place. The read-only official package remains bundled under `model-gateway/official-tools/`, with 35 core tool definitions, seven skills and eleven enabled-by-default MCP presets. Users can disable or customize these services; enabling a preset does not mean it is connected or its dependencies are installed. Built-in public webpage reading and paged file reads need no Python; desktop, browser and terminal workflows use the existing execution boundaries. User extensions and overrides are stored separately.
 
 Start with [code organization and responsibilities](docs/architecture/code-organization.md), the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
+
+## Five-Person Code Boundaries
+
+As of 2026-10-05, the committed baseline is `5637dc3`; this reorganization is in the workspace. A owns gateway `orchestration/` and coordinates `platform/`; C owns `models/`; D owns `tools/` and `official-tools/`; E owns `data/`. B owns all ShellPage partials, WinUI and transcript presentation.
+
+Desktop services use `Integration/Presentation/Models/Tools/Data`, and shared contracts use `Chat/Tools/Memory`. ToolHost uses `Desktop/Terminal/Sandbox/Native`. The root gateway CLI entries remain stable. These are directory boundaries within the existing applications, not a completed MVVM or assembly split.
+
+Data and Platform do not depend on higher layers. Existing model-history reads the public result preview from Data, and Tools uses pure model helpers; the domains are not entirely independent. The project-owned official Tools catalog import changed; third-party skill text and licenses were preserved. See [actual dependencies and primary source references](docs/architecture/team-boundaries.md) and [developer handoff](docs/team/README.md). Current reorganization validation is recorded separately from earlier results.
 
 ## Next Steps
 
@@ -100,7 +108,7 @@ Models do not directly own host privileges.
 
 Sensitive operations must pass through KYNXA's trusted authority boundary.
 
-The production architecture separates the trusted `kynxa-authority` process from the less-trusted orchestration and intelligence plane.
+The design specification proposes a separate trusted authority process. The running implementation applies gateway policy and approvals before dispatching to the existing C# ToolHost; a separate Rust Authority is not implemented.
 
 ### Verifiable Execution
 
@@ -140,13 +148,14 @@ WinUI Desktop + WebView2
           │ local HTTP / SSE
           ▼
 Node.js model gateway ───► cloud API / local HTTP model server
+          ├─────────────► C# ToolHost: desktop / terminal / sandbox / native
           │
           ▼
 Data: catalog + JSONL records + scoped memory
       derived context excerpts + SQLite metadata index
 ```
 
-The following diagram is a future runtime design. Host language is not frozen: the team proposes .NET 10; the older Rust Host route is historical. Neither Host nor Authority is currently implemented.
+The following diagram is a historical future-runtime design, separate from the current Node.js gateway and implemented C# ToolHost. It does not prescribe a new Host, language migration or independent Authority for the current five-person work.
 
 ```text
                  KYNXA Desktop
@@ -265,7 +274,7 @@ Current technologies:
 * **Persistence:** versioned JSON metadata, JSONL conversation events and scoped memory files; SQLite metadata index.
 * **Desktop communication:** local HTTP / SSE to the gateway.
 
-Future Host (.NET 10 proposed), Rust Authority, execution storage and Named Pipes require separate decisions and implementation. A Python AI service remains an optional design direction rather than a current dependency.
+The C# ToolHost already provides native execution. A separate Host/Authority, durable execution storage and Named Pipes remain design references requiring separate decisions; the current team works on the existing WinUI/Node.js/C# chain. Python is not a current dependency.
 
 macOS, Linux, and iOS are not part of the initial product scope.
 
@@ -277,7 +286,7 @@ KYNXA/
 │   ├── desktop/              # Production Windows WinUI 3 frontend
 │   ├── model-gateway/        # Current Node.js model, conversation and memory service
 │   ├── shared/               # Current C# chat, memory and tool contracts
-│   ├── tool-host/            # Native Windows AppContainer terminal and skill helper
+│   ├── tool-host/            # Native Windows desktop, terminal, sandbox and skill execution
 │   ├── desktop-preview/      # Earlier visual and interaction preview
 │   └── mock-backend/         # Earlier mock service
 ├── docs/
@@ -430,7 +439,7 @@ Contribution guidelines will be expanded as the architecture and public APIs sta
 
 Repository coding work uses the [development Skill](.agents/skills/kynxa-development/SKILL.md) and [code standards Skill](.agents/skills/kynxa-code-standards/SKILL.md), automatically referenced by `AGENTS.md`. The latter maintains semantic naming, English/Chinese explanatory comments, language-specific formatting and compatibility exceptions; protocol keys and third-party originals remain unchanged. These are repository development instructions, separate from the application's model skills.
 
-The [five-person development plan](docs/team/README.md) and [team lead overview](docs/team/队长总览.md) (Chinese) define module ownership, interfaces, a proposed six-week schedule, and acceptance criteria. The team lead is included in the five-person team.
+The [five-person development guide](docs/team/README.md) and [team lead overview](docs/team/队长总览.md) (Chinese) define the implemented module ownership, interfaces, and acceptance criteria. The lead is one of the five people. [GitHub collaboration](docs/team/github-collaboration.md) provides collaborator invitations, CODEOWNERS generation and main-branch protection setup; directory ownership is a review responsibility, not a folder-scoped Git permission.
 
 Bug reports, architecture discussions, implementation proposals, tests, documentation improvements, and security reviews will be welcome.
 

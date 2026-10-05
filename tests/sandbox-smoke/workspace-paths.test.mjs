@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { SandboxRunner } from '../../apps/model-gateway/sandbox-runner.mjs';
+import { SandboxRunner } from '../../apps/model-gateway/tools/sandbox-runner.mjs';
 
 test('real AppContainer accepts legacy project IDs and DOS path aliases while rejecting real junctions',
   { skip: process.platform !== 'win32', timeout: 60000 }, async t => {

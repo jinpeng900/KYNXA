@@ -5,10 +5,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
-import { readSse } from '../streaming.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { readSse } from '../models/streaming.mjs';
 
 // Avoid resolving the user's storage pointer when server.mjs constructs its unused defaults.
 // server.mjs 创建未使用的默认实例时，避免解析用户的存储指针。

@@ -5,8 +5,8 @@ import { mkdtemp, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelRuntime, completedContext } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
+import { ModelRuntime, completedContext } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
 import { createModelServer } from '../server.mjs';
 
 async function listen(server, t) {

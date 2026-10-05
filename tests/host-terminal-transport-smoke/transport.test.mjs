@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { HostTerminalRunner } from '../../apps/model-gateway/host-terminal-runner.mjs';
+import { HostTerminalRunner } from '../../apps/model-gateway/tools/host-terminal-runner.mjs';
 
 const directory = dirname(fileURLToPath(import.meta.url));
 

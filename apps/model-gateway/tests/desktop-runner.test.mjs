@@ -4,8 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { DesktopRunner, invokeDesktopHost } from '../desktop-runner.mjs';
-import { findNativeToolHost } from '../tool-host-path.mjs';
+import { DesktopRunner, invokeDesktopHost } from '../tools/desktop-runner.mjs';
+import { findNativeToolHost } from '../tools/tool-host-path.mjs';
 
 const target = { windowId: '12345', processId: 555, reason: 'Synthetic fixture only.' };
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4GQAAAAASUVORK5CYII=';
