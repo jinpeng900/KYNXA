@@ -1,6 +1,6 @@
 # 五人模块边界与源码参考
 
-更新日期：2026-10-05。已提交基线 `5637dc3`；以下为本轮工作区重组，实际验证/提交由交付记录确认。[团队入口](../team/README.md)。
+更新日期：2026-10-06。目录重组已提交；功能交接基线 `0b3b23a` 已包含本地 RAG 与网页工具恢复。[团队入口](../team/README.md)。
 
 ## 实际调用链
 
@@ -56,6 +56,8 @@ Models、Tools、Data、Platform 不引用 Orchestration。Data 只依赖自身�
 原先 ConversationStore 从模型 store 取得 atomicJson/readJson，工具服务从 conversations 取得 validateId：纯基础下沉 Platform，避免 E 依赖 C 和 D 依赖 E 仓储。当前 models/model-history.mjs 仍从 data/tool-result-store.mjs 导入 publicToolResult 与元数据限额，使用公开结果预览；Tools 的 tool-catalog 等仍引用 Models 的纯预算/协议辅助，并读取 Data 的结果归档及工作区服务。这些有向依赖保留，不宣称所有域无交叉引用；不得让 Data/Platform 反向依赖模型、工具或编排。platform 只收真正共用合同/基础，不成为业务杂物箱。
 
 Chat/Tools/Memory 分别由 C/D/E 主责，A 协调版本。跨端改动先列出字段、身份、错误、旧数据默认值和双方调用方，再同步实现、验证与说明。Platform 专业规则联系对应成员核对。跨目录协作注明文件归属，保留已有改动；不使用虚构账号 CODEOWNERS，不增加普通可逆修改审批。
+
+RAG 遵循已有方向：A 的 `orchestration/retrieval` 组合 C 的 `models/retrieval` 推理与 E 的 `data/retrieval` 来源/索引；D 的 `tools/retrieval` 暴露网页搜索和资料回读，B 接设置与引用展示。检索共享 DTO 位于 `shared/Memory/RetrievalApiContracts.cs`，归 E，A 协调跨端兼容。每位成员负责本域测试；检索与 Agent 基准的具体维护按被测模块确定，不把所有测试统一分给 E。
 
 ## 当前成果与后续能力
 

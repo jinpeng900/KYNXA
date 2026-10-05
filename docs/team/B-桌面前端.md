@@ -1,10 +1,12 @@
 # B：桌面前端
 
-更新日期：2026-10-05。[团队边界](../architecture/team-boundaries.md)。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`codex/team-b-ui`。
 
 ## 代码范围
 
 apps/desktop 的 Views、Controls、ViewModels、UI 模型/布局/资源与 Services/Presentation。B 是全部 ShellPage partial 的唯一主负责人。Presentation 包含本地化、侧栏、Markdown/公式、审批与结果、终端和截图展示。
+
+检索界面 `Views/RetrievalSettingsWindow.cs`、`RetrievalSettingsWindow.Layout.cs`、`ShellPage.Retrieval.cs` 也归 B；检索 API 客户端与共享数据合同归 E。聊天 WebView2 入口是 `Resources/Transcript/transcript.js` / `transcript.css`，截图和附件沿现有右侧面板展示，不把终端重新渲染为右侧卡片。
 
 ## 首轮交付
 

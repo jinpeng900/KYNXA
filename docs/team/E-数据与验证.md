@@ -1,12 +1,14 @@
 # E：数据与验证
 
-更新日期：2026-10-05。[团队边界](../architecture/team-boundaries.md)；[正式数据约定](../architecture/chat-work-memory.md)。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)；[正式数据约定](../architecture/chat-work-memory.md)。交接分支：`codex/team-e-data`。
 
 ## 代码范围
 
 apps/model-gateway/data：conversation、memory、索引、Data/扩展路径及迁移、sandbox-workspaces、tool-result-store。apps/desktop/Services/Data：会话/记忆 API 与路径迁移。apps/shared/Memory：记忆 DTO。
 
 Data 只依赖自身和 Platform，不能导入模型预算、执行服务或 HTTP 路由。工具结果/工作区事实由 E 管理，执行由 D 管理，请求投影由 C 管理。
+
+`data/retrieval/` 归 E：SQLite 混合索引、分块、来源库、索引作业、检索设置与证据引用/窗口。配套 `apps/desktop/Services/Data/RetrievalApiClient.cs` 与 `apps/shared/Memory/RetrievalApiContracts.cs` 同归 E。C 的嵌入/重排通过上层协调接入，不能让索引层反向依赖模型；重建索引不得删除来源原文或正式聊天。
 
 ## 首轮交付
 

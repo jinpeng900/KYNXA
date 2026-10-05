@@ -1,12 +1,14 @@
 # C：模型与本地推理
 
-更新日期：2026-10-05。[团队边界](../architecture/team-boundaries.md)。
+更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`codex/team-c-models`。
 
 ## 代码范围
 
 apps/model-gateway/models：连接/发现、能力、供应商与工具协议、流式、输出预算、context/history。apps/desktop/Services/Models：模型 API、SSE、预设与选择偏好。apps/shared/Chat：聊天 DTO；版本由 A 协调。本地模型脚本由 C 维护，进程集成/打包与 A 配合。
 
 tool-protocols/tool-streaming 属模型映射；原生签名/加密续接与来源绑定保留，私有续接不能进入公开接口。
+
+`models/retrieval/` 的 embedding/reranker profile、资源准备、服务与 worker 归 C。C 负责推理能力、输出与请求预算，E 负责索引、来源事实和重建版本，A 负责检索编排与随包接线；更换模型需协调索引兼容与打包资源。检索任务的耗时与质量验证使用固定配置，不能把模型差异当作纯 Agent 优化收益。
 
 ## 首轮交付
 
