@@ -1,0 +1,10 @@
+# The repository owner coordinates integration until the four domain owners are assigned.
+# 四位领域负责人的 GitHub 账号填写前，由仓库所有者负责集成审查。
+# Generate domain rules with tools/development/configure-codeowners.mjs --write.
+# 使用生成脚本填写真实账号，不把 A/B/C/D/E 当成 GitHub 用户名。
+* @jinpeng900
+/.github/ @jinpeng900
+/.agents/ @jinpeng900
+/AGENTS.md @jinpeng900
+/docs/team/ @jinpeng900
+/tools/development/ @jinpeng900

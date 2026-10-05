@@ -6,8 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/BrowserConnectionSettings.cs" Link="BrowserConnectionSettings.cs" />
-    <Compile Include="../../apps/desktop/Services/McpConfigurationInput.cs" Link="McpConfigurationInput.cs" />
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/BrowserConnectionSettings.cs" Link="BrowserConnectionSettings.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/McpConfigurationInput.cs" Link="McpConfigurationInput.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

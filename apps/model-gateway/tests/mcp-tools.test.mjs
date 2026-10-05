@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
-import { estimateTokens } from '../context.mjs';
-import { toolDeclarations } from '../tool-protocols.mjs';
+import { estimateTokens } from '../models/context.mjs';
+import { toolDeclarations } from '../models/tool-protocols.mjs';
 import { approve, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url));

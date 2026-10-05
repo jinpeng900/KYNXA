@@ -3,9 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { buildContext, completedTurns, estimateTokens } from '../context.mjs';
-import { ConversationStore } from '../conversations.mjs';
-import { MemoryRepository } from '../memory-repository.mjs';
+import { buildContext, completedTurns, estimateTokens } from '../models/context.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
+import { MemoryRepository } from '../data/memory-repository.mjs';
 
 const conversationId = 'long-task-chat';
 const request = '继续 Python build_energy_solver，按之前能量守恒的约束完善 VerletIntegrator，再加测试。';

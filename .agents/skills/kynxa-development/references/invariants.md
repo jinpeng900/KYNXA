@@ -14,7 +14,7 @@
 - 切换界面语言即时更新菜单、设置等界面文字，聊天正文、用户自定义名称、模型 ID、地址和凭据保持原内容。保留草稿、选中项、滚动及进行中的回复。
 - 界面刷新按稳定 ID 保留行对象；不要在输入回调中清空整棵 TreeView，避免重复渲染和丢失状态。
 
-主要入口：[WorkSidebarState](../../../../apps/desktop/Services/WorkSidebarState.cs)、[工作侧栏](../../../../apps/desktop/Views/ShellPage.WorkSidebar.cs)、[布局状态](../../../../apps/desktop/Models/UI/LayoutState.cs)、[界面文本](../../../../apps/desktop/Services/UiText.cs)。
+主要入口：[WorkSidebarState](../../../../apps/desktop/Services/Presentation/WorkSidebarState.cs)、[工作侧栏](../../../../apps/desktop/Views/ShellPage.WorkSidebar.cs)、[布局状态](../../../../apps/desktop/Models/UI/LayoutState.cs)、[界面文本](../../../../apps/desktop/Services/Presentation/UiText.cs)。
 
 ## 聊天展示、选择与流式输出
 
@@ -28,7 +28,7 @@
 - 快速切换时废弃过期解析结果；缓存有容量、身份和失效边界。保留未变化 DOM，不为新 token 重建整个页面。
 - HTML、JS、样式和字体随应用打包。保持现有 Markdown 转义、导航/资源/权限拦截及链接协议限制，不能让回复内容引入脚本或远程资源加载。
 
-主要入口：[TranscriptMarkdown](../../../../apps/desktop/Services/TranscriptMarkdown.cs)、[transcript.js](../../../../apps/desktop/Resources/Transcript/transcript.js)、[transcript.css](../../../../apps/desktop/Resources/Transcript/transcript.css)。
+主要入口：[TranscriptMarkdown](../../../../apps/desktop/Services/Presentation/TranscriptMarkdown.cs)、[transcript.js](../../../../apps/desktop/Resources/Transcript/transcript.js)、[transcript.css](../../../../apps/desktop/Resources/Transcript/transcript.css)。
 
 ## 正式记录与工作关系
 
@@ -39,7 +39,7 @@
 - 归属、删除、撤销、移动、归档及生成事务经过既有会话队列；不得在旁路直接移动日志后补 UI。
 - 单网关拥有 Data 的前提不可悄悄变成多个进程同时写。新增多进程方案需要明确新的并发合同。
 
-主要入口：[conversations.mjs](../../../../apps/model-gateway/conversations.mjs)、[runtime.mjs](../../../../apps/model-gateway/runtime.mjs)、[data-layout.mjs](../../../../apps/model-gateway/data-layout.mjs)。
+主要入口：[conversations.mjs](../../../../apps/model-gateway/data/conversations.mjs)、[runtime.mjs](../../../../apps/model-gateway/orchestration/runtime.mjs)、[data-layout.mjs](../../../../apps/model-gateway/data/data-layout.mjs)。
 
 ## 记忆、上下文与来源
 
@@ -54,11 +54,11 @@
 - 工具循环压缩只修改请求投影。调用/结果 ID 必须完整配对，供应商原生签名/加密字段不丢；已归档大结果以合法预览、完整引用和分页入口替代。历史回查只限当前有效聊天公开正文，不包含可见思考、配置、工具内部记录及兄弟聊天；截断参数不执行，返回的部分正文不记为 completed。
 - 并行范围读取全部结算后才释放会话保护；不要将这里的 `Promise.allSettled` 简化为会提前失败退出的 `Promise.all`。
 
-主要入口：[memory-service](../../../../apps/model-gateway/memory-service.mjs)、[memory-repository](../../../../apps/model-gateway/memory-repository.mjs)、[memory-contracts](../../../../apps/model-gateway/memory-contracts.mjs)、[context](../../../../apps/model-gateway/context.mjs)。
+主要入口：[memory-service](../../../../apps/model-gateway/data/memory-service.mjs)、[memory-repository](../../../../apps/model-gateway/data/memory-repository.mjs)、[memory-contracts](../../../../apps/model-gateway/data/memory-contracts.mjs)、[context](../../../../apps/model-gateway/models/context.mjs)。
 
 ## 存储、迁移与凭据
 
-- 数据位置由用户配置、环境和平台默认值解析；桌面使用 [StoragePaths](../../../../apps/desktop/Services/StoragePaths.cs)，网关使用 [storage.mjs](../../../../apps/model-gateway/storage.mjs)。不把个人盘符、用户名、下载目录或参考源码地址写进生产路径。
+- 数据位置由用户配置、环境和平台默认值解析；桌面使用 [StoragePaths](../../../../apps/desktop/Services/Data/StoragePaths.cs)，网关使用 [storage.mjs](../../../../apps/model-gateway/data/storage.mjs)。不把个人盘符、用户名、下载目录或参考源码地址写进生产路径。
 - 外部关联工作文件夹存放项目文件，聊天和记忆继续归统一 Data。改变存储位置使用实际迁移流程，复制、验证后切换指针，并保留可恢复备份；不只改设置造成旧记录不可见。
 - 保持自动初始化、版本判断、原子写入、链接路径检查和失败恢复。迁移须能处理重复执行或中途退出。
 - 当前模型连接包含存储于 JSON 的凭据，列表接口有脱敏；不能声称已实现系统安全凭据库。开发日志、Git、文档和测试只使用虚构 Key，不输出真实连接文件内容。

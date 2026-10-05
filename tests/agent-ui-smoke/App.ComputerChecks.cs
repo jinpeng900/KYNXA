@@ -107,6 +107,25 @@ public partial class App
 
     private async Task CheckHostTerminalApprovalAsync()
     {
+        // Verify consent text without reading a credential file or executing a tool.
+        // 不读取凭据文件或执行工具，验证审批明确告知模型传输范围并支持即时切换语言。
+        var sensitive = new ToolActivity("sensitive-read-fixture", "filesystem.read",
+            JsonSerializer.SerializeToElement(new { path = ".env" }), "approval-required",
+            "读取可能含密钥的文件，批准后内容可能进入工具记录并发送给当前模型。",
+            ApprovalId: Guid.NewGuid(), WorkspaceRoot: _directory);
+        var sensitiveDialog = ToolApprovalDialog.Create(_root.XamlRoot, sensitive);
+        var sensitiveDecision = sensitiveDialog.ShowAsync();
+        await WaitAsync(() => NativeUi.OpenDialog(_root) == sensitiveDialog, "sensitive read approval opens without reading credentials");
+        Check(NativeUi.Descendants<TextBlock>(sensitiveDialog).Any(block => block.Text.Contains("发送给当前模型")),
+            "sensitive read approval states model transmission in Chinese");
+        UiText.Initialize("en");
+        await SettleAsync();
+        Check(NativeUi.Descendants<TextBlock>(sensitiveDialog).Any(block => block.Text.Contains("sent to the current model")),
+            "sensitive read consent switches live to English");
+        sensitiveDialog.Hide();
+        await sensitiveDecision;
+        UiText.Initialize("zh-CN");
+
         foreach (bool visible in new[] { false, true })
         {
             var activity = new ToolActivity("host-terminal-fixture", "terminal.host.run", JsonSerializer.SerializeToElement(new

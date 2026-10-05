@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile, stat, rm, rmdir } from 'node:fs/promises'
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-layout-'));

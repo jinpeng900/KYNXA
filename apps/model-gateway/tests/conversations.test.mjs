@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, stat, unlink, writeFile 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { ConversationStore } from '../conversations.mjs';
+import { ConversationStore } from '../data/conversations.mjs';
 
 const user = (Id = 'u1', Content = '你好') => ({ Id, Role: 'user', Content, CreatedAt: '2026-01-01T00:00:00.000Z' });
 const assistant = (Id = 'a1', Content = '回复', extra = {}) => ({ Id, Role: 'assistant', Content,

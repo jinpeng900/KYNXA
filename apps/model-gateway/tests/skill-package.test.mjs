@@ -3,10 +3,10 @@ import { link, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFi
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { AppSkillService } from '../skill-service.mjs';
-import { parseSkillFrontmatter, validateSkillFrontmatter } from '../skill-frontmatter.mjs';
-import { SKILL_PACKAGE_LIMITS } from '../skill-resources.mjs';
-import { within } from '../tool-paths.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
+import { parseSkillFrontmatter, validateSkillFrontmatter } from '../tools/skill-frontmatter.mjs';
+import { SKILL_PACKAGE_LIMITS } from '../tools/skill-resources.mjs';
+import { within } from '../platform/tool-paths.mjs';
 
 const content = (name, extra = '', body = 'Read resources only when needed.') =>
   `---\nname: ${name}\ndescription: Useful instructions for an explicit task.\n${extra}---\n${body}\n`;

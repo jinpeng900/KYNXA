@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { inspectConversationIndex, rebuildConversationIndex } from '../conversation-index.mjs';
+import { inspectConversationIndex, rebuildConversationIndex } from '../data/conversation-index.mjs';
 
 function document() {
   return { Version: 1, Revision: 3,

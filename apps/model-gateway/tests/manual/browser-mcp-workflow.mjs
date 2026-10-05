@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile, realpath } from 'node:fs/promises'
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative } from 'node:path';
-import { McpToolClients } from '../../mcp-client.mjs';
+import { McpToolClients } from '../../tools/mcp-client.mjs';
 
 const [runtimeDirectory, chromeExecutable] = process.argv.slice(2);
 if (!runtimeDirectory || !chromeExecutable) throw Error('Usage: node browser-mcp-workflow.mjs <temporary npm runtime directory> <Chrome executable>');

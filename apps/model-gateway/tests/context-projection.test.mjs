@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildContext, completedTurns, estimateTokens, estimateMessageTokens } from '../context.mjs';
+import { buildContext, completedTurns, estimateTokens, estimateMessageTokens } from '../models/context.mjs';
 
 const history = Array.from({ length: 8 }, (_, index) => [
   { Id: `u-${index}`, Role: 'user', Content: `Keep code constraint ${index}`, Status: 'completed' },

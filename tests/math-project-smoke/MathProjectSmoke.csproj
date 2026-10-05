@@ -7,13 +7,13 @@
     <PackageReference Include="CSharpMath.SkiaSharp" Version="0.5.1" />
     <PackageReference Include="SkiaSharp" Version="2.88.9" />
     <PackageReference Include="Markdig" Version="1.4.0" />
-    <Compile Include="../../apps/desktop/Services/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
-    <Compile Include="../../apps/desktop/Services/MathMarkdown.cs" Link="MathMarkdown.cs" />
-    <Compile Include="../../apps/desktop/Services/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MathMarkdown.cs" Link="MathMarkdown.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

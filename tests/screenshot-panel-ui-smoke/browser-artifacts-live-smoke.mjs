@@ -5,8 +5,8 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { McpToolClients } from '../../apps/model-gateway/mcp-client.mjs';
-import { inspectScreenshotImage } from '../../apps/model-gateway/browser-artifacts.mjs';
+import { McpToolClients } from '../../apps/model-gateway/tools/mcp-client.mjs';
+import { inspectScreenshotImage } from '../../apps/model-gateway/tools/browser-artifacts.mjs';
 
 // Explicit opt-in paths select already installed packages. No user browser profile,
 // user conversation, cloud model, credential or dependency installer is used.

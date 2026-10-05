@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { McpToolClients } from '../mcp-client.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
 
 const envelope = argumentsValue => ({ arguments: argumentsValue, policy: { reason: 'Inspect the isolated public observation.' } });
 

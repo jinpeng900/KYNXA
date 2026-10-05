@@ -88,7 +88,7 @@ $officialProbePath = Join-Path $runtimeTestRoot 'official-package-check.mjs'
 $officialProbe = @'
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { WebFetchTool } from './package with spaces/model-gateway/web-fetch.mjs';
+import { WebFetchTool } from './package with spaces/model-gateway/tools/web-fetch.mjs';
 const root = new URL('./package with spaces/model-gateway/official-tools/', import.meta.url);
 const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
 for (const skill of manifest.skills) {

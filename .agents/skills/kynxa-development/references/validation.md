@@ -38,6 +38,7 @@ dotnet run --project tests/conversation-store-smoke/ConversationStoreSmoke.cspro
 dotnet run --project tests/storage-migration-smoke/StorageMigrationSmoke.csproj
 dotnet run --project tests/gateway-startup-smoke/GatewayStartupSmoke.csproj
 node --test apps/model-gateway/tests/*.test.mjs
+node tools/development/check-architecture.mjs
 ```
 
 单项网关检查使用 `node --test apps/model-gateway/tests/实际文件名.test.mjs`。用 `rg --files apps/model-gateway/tests` 选择现存文件，不猜测测试名称。不要一次启动竞争相同端口、固定临时结果或窗口的多个 UI/集成测试。

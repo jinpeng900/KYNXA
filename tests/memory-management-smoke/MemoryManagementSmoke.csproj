@@ -6,10 +6,10 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
     <ItemGroup>
-        <Compile Include="../../apps/shared/MemoryApiContracts.cs" Link="MemoryApiContracts.cs" />
-        <Compile Include="../../apps/desktop/Services/MemoryApiClient.cs" Link="MemoryApiClient.cs" />
-        <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-        <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
+        <Compile Include="../../apps/shared/Memory/MemoryApiContracts.cs" Link="MemoryApiContracts.cs" />
+        <Compile Include="../../apps/desktop/Services/Data/MemoryApiClient.cs" Link="MemoryApiClient.cs" />
+        <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+        <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
         <Compile Include="../../apps/desktop/ViewModels/MemoryManagementViewModel.cs" Link="MemoryManagementViewModel.cs" />
     </ItemGroup>
 </Project>

@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "roles": {
+    "A": "编排、基础合同、集成与打包 / orchestration, platform, integration and packaging",
+    "B": "桌面展示与交互 / desktop presentation and interaction",
+    "C": "模型、协议、流式与上下文 / models, protocols, streaming and context",
+    "D": "权限、工具与原生执行 / permissions, tools and native execution",
+    "E": "会话、记忆、路径与迁移 / conversations, memory, paths and migration"
+  },
+  "sourceScopes": [
+    "apps/model-gateway",
+    "apps/desktop",
+    "apps/desktop-preview",
+    "apps/mock-backend",
+    "apps/shared",
+    "apps/tool-host"
+  ],
+  "sourceExtensions": [".mjs", ".js", ".cs", ".ps1", ".csproj", ".xaml", ".html", ".css"],
+  "excludedDirectoryNames": ["node_modules", "bin", "obj", "tests", ".git"],
+  "ownershipRules": [
+    { "prefix": "apps/model-gateway/orchestration/", "role": "A" },
+    { "prefix": "apps/model-gateway/platform/", "role": "A" },
+    { "prefix": "apps/model-gateway/models/", "role": "C" },
+    { "prefix": "apps/model-gateway/tools/", "role": "D" },
+    { "prefix": "apps/model-gateway/official-tools/", "role": "D" },
+    { "prefix": "apps/model-gateway/data/", "role": "E" },
+    { "files": ["apps/model-gateway/server.mjs", "apps/model-gateway/initialize-storage.mjs", "apps/model-gateway/migrate-storage.mjs"], "role": "A" },
+    { "files": ["apps/model-gateway/start-local-model.ps1"], "role": "C" },
+    { "prefix": "apps/desktop-preview/", "role": "A" },
+    { "prefix": "apps/mock-backend/", "role": "A" },
+    { "prefix": "apps/desktop/Build/", "role": "A" },
+    { "files": ["apps/desktop/KYNXA.Desktop.csproj", "apps/tool-host/KYNXA.ToolHost.csproj"], "role": "A" },
+    { "directory": "apps/desktop", "extensions": [".cs", ".xaml"], "role": "B" },
+    { "prefix": "apps/desktop/Views/", "role": "B" },
+    { "prefix": "apps/desktop/Controls/", "role": "B" },
+    { "prefix": "apps/desktop/ViewModels/", "role": "B" },
+    { "prefix": "apps/desktop/Models/", "role": "B" },
+    { "prefix": "apps/desktop/Layout/", "role": "B" },
+    { "prefix": "apps/desktop/Resources/", "role": "B" },
+    { "prefix": "apps/desktop/UI/", "role": "B" },
+    { "prefix": "apps/desktop/Styles/", "role": "B" },
+    { "prefix": "apps/desktop/Services/Integration/", "role": "A" },
+    { "prefix": "apps/desktop/Services/Presentation/", "role": "B" },
+    { "prefix": "apps/desktop/Services/Models/", "role": "C" },
+    { "prefix": "apps/desktop/Services/Tools/", "role": "D" },
+    { "prefix": "apps/desktop/Services/Data/", "role": "E" },
+    { "prefix": "apps/shared/Chat/", "extensions": [".cs"], "role": "C" },
+    { "prefix": "apps/shared/Tools/", "extensions": [".cs"], "role": "D" },
+    { "prefix": "apps/shared/Memory/", "extensions": [".cs"], "role": "E" },
+    { "prefix": "apps/shared/", "extensions": [".csproj"], "role": "A" },
+    { "prefix": "apps/tool-host/Desktop/", "role": "D" },
+    { "prefix": "apps/tool-host/Terminal/", "role": "D" },
+    { "prefix": "apps/tool-host/Sandbox/", "role": "D" },
+    { "prefix": "apps/tool-host/Native/", "role": "D" },
+    { "files": ["apps/tool-host/Program.cs"], "role": "A" }
+  ],
+  "developmentEntrypoints": [
+    { "files": ["Directory.Build.props", "Directory.Build.targets"], "role": "A", "inventory": "shared build configuration outside apps / apps 范围外的共享构建配置" },
+    { "prefix": "tools/development/", "role": "A", "inventory": "outside apps production inventory / 不计入 apps 生产源码统计" }
+  ],
+  "gatewayDomains": ["orchestration", "models", "tools", "data", "platform"],
+  "additionalGatewayModules": ["apps/model-gateway/official-tools/Tools/catalog.mjs"],
+  "allowedDomainDependencies": {
+    "orchestration": ["models", "tools", "data", "platform"],
+    "models": ["data", "platform"],
+    "tools": ["models", "data", "platform"],
+    "data": ["platform"],
+    "platform": []
+  },
+  "stableEntrypoints": {
+    "apps/model-gateway/server.mjs": "./orchestration/server.mjs",
+    "apps/model-gateway/initialize-storage.mjs": "./data/initialize-storage.mjs",
+    "apps/model-gateway/migrate-storage.mjs": "./data/migrate-storage.mjs"
+  },
+  "optionalRelativeResources": [
+    {
+      "source": "apps/model-gateway/tools/official-tools.mjs",
+      "specifier": "../skills/",
+      "reason": "Absent legacy bundled skill location is retained only for identity compatibility / 旧内置技能位置可不存在，仅用于身份兼容"
+    }
+  ],
+  "testAttribution": {
+    "strategy": "Direct static production imports and linked Compile Include resolve to implementation owners; multiple owners mean shared review / 直接静态生产导入和链接源码引用映射到实现负责人，多角色表示共同审查",
+    "gatewayRoot": "apps/model-gateway/tests",
+    "smokeRoot": "tests",
+    "fallbackRole": "A",
+    "fallbackMeaning": "Fixtures or integration checks without direct owned sources are coordinated by A, not automatically assigned to data / 无直接主责源码的夹具或集成检查由 A 协调，不统一归数据负责人",
+    "limitation": "Indirect runtime calls and nested fixture ownership require suite README review / 间接运行调用及嵌套夹具归属仍需查阅套件 README"
+  },
+  "coverageNotes": [
+    "Production inventory is limited to listed apps source scopes; generated outputs, dependencies and tests are excluded / 生产清单仅覆盖列出的 apps 源码范围，排除生成产物、依赖和测试",
+    "All six implemented apps are inventoried, including desktop UI/resources/build projects and preview/mock code; hypothetical Rust components are not added / 覆盖六个现有 apps，包括桌面 UI/资源/构建工程及预览/模拟代码，不加入设计中未实现的 Rust 组件",
+    "Bundled vendor UI assets are counted under B stewardship without authorizing edits to third-party source / 内置第三方 UI 资源统计为 B 的维护范围，不授权修改第三方原文",
+    "Gateway checks cover static import, export-from and literal new URL(relative, import.meta.url); dynamic import, require, computed paths, template interpolation and regex ambiguity are outside this lexical scanner / 网关检查覆盖静态导入、重导出与字面量相对资源；动态导入、require、计算路径、模板插值及正则歧义不在词法扫描范围",
+    "Role labels are local responsibility identifiers, not Git account names / 角色标记是本地职责标识，不是 Git 账号"
+  ]
+}

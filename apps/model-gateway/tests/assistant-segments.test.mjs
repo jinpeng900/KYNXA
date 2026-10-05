@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AssistantSegments, applyAssistantSegmentEvent, assistantSegmentText, validateAssistantSegments } from '../assistant-segments.mjs';
-import { runToolLoop } from '../tool-loop.mjs';
+import { AssistantSegments, applyAssistantSegmentEvent, assistantSegmentText, validateAssistantSegments } from '../platform/assistant-segments.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 
 test('three rounds expose ordered public segments, tools and an independent final answer', async () => {
   const events = [], saved = [], assistant = {};

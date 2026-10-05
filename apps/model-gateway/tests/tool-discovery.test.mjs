@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
-import { ModelToolCatalog } from '../tool-catalog.mjs';
-import { searchTools, toolDiscoveryCategory, toolSelectionSignals } from '../tool-discovery.mjs';
-import { estimateTokens } from '../context.mjs';
-import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../tool-protocols.mjs';
+import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
+import { searchTools, toolDiscoveryCategory, toolSelectionSignals } from '../tools/tool-discovery.mjs';
+import { estimateTokens } from '../models/context.mjs';
+import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
 
 const remote = (name, description = 'Browser automation.') => ({ name, description, source: 'mcp:synthetic',

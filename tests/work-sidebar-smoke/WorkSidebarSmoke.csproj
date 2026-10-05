@@ -11,18 +11,18 @@
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ProjectTreeEntry.cs" Link="ProjectTreeEntry.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ProjectTreeReconciler.cs" Link="ProjectTreeReconciler.cs" />
-    <Compile Include="../../apps/desktop/Services/WorkSidebarState.cs" Link="WorkSidebarState.cs" />
-    <Compile Include="../../apps/desktop/Services/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/WorkSidebarState.cs" Link="WorkSidebarState.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ProjectOrdering.cs" Link="ProjectOrdering.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/desktop/Services/UiText.cs" Link="UiText.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.English.cs" Link="UiText.English.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Models.cs" Link="UiText.Models.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Memory.cs" Link="UiText.Memory.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText.Agent.cs" Link="UiText.Agent.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.English.cs" Link="UiText.English.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Models.cs" Link="UiText.Models.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Runtime.cs" Link="UiText.Runtime.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Memory.cs" Link="UiText.Memory.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText.Agent.cs" Link="UiText.Agent.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
   </ItemGroup>
 </Project>

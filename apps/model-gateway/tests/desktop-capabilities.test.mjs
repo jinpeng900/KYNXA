@@ -3,9 +3,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { DesktopRunner } from '../desktop-runner.mjs';
+import { DesktopRunner } from '../tools/desktop-runner.mjs';
 import { computerDescriptors, computerKeyNames } from '../official-tools/Tools/computer.mjs';
-import { findNativeToolHost } from '../tool-host-path.mjs';
+import { findNativeToolHost } from '../tools/tool-host-path.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 const target = { windowId: '12345', processId: 54321, reason: 'Only the owned synthetic fixture.' };

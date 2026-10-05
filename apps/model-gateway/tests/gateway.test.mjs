@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createModelServer } from '../server.mjs';
-import { ModelStore } from '../store.mjs';
+import { ModelStore } from '../models/store.mjs';
 
 async function listening(server) {
   await new Promise(resolveReady => server.listen(0, '127.0.0.1', resolveReady));

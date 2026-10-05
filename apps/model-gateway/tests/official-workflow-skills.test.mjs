@@ -4,12 +4,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { AppSkillService } from '../skill-service.mjs';
-import { OFFICIAL_SKILLS_DIRECTORY, officialSkillIdentity } from '../official-tools.mjs';
-import { ModelStore } from '../store.mjs';
-import { ModelRuntime } from '../runtime.mjs';
-import { estimateTokens } from '../context.mjs';
-import { estimateToolMessageTokens, toolDeclarations } from '../tool-protocols.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
+import { OFFICIAL_SKILLS_DIRECTORY, officialSkillIdentity } from '../tools/official-tools.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { estimateTokens } from '../models/context.mjs';
+import { estimateToolMessageTokens, toolDeclarations } from '../models/tool-protocols.mjs';
 import { toolFixture, parsed } from './tool-fixture.mjs';
 
 const workflowNames = ['workspace-inspect', 'safe-file-edit', 'browser-workflow',

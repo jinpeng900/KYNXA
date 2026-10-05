@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserConnection, browserConnectionPrompt } from '../browser-connections.mjs';
+import { browserConnection, browserConnectionPrompt } from '../tools/browser-connections.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 const server = (id, args, extra = {}) => ({ id, name: id, command: 'npx', enabled: true, args, ...extra });

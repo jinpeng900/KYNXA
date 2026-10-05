@@ -17,25 +17,25 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <Compile Include="../../apps/desktop/ToolManagementWindow.xaml.cs" Link="ToolManagementWindow.xaml.cs" />
     <Compile Include="../../apps/desktop/ToolManagementWindow.Browser.cs" Link="ToolManagementWindow.Browser.cs" />
-    <Compile Include="../../apps/desktop/Services/BrowserConnectionSettings.cs" Link="BrowserConnectionSettings.cs" />
-    <Compile Include="../../apps/desktop/Services/McpConfigurationInput.cs" Link="McpConfigurationInput.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/BrowserConnectionSettings.cs" Link="BrowserConnectionSettings.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/McpConfigurationInput.cs" Link="McpConfigurationInput.cs" />
     <Page Include="../../apps/desktop/ToolManagementWindow.xaml" Link="ToolManagementWindow.xaml" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/AgentApiClient.cs" Link="AgentApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/ToolApprovalDialog.cs" Link="ToolApprovalDialog.cs" />
-    <Compile Include="../../apps/desktop/Services/ComputerToolPresentation.cs" Link="ComputerToolPresentation.cs" />
-    <Compile Include="../../apps/desktop/Services/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
-    <Compile Include="../../apps/desktop/Services/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
-    <Compile Include="../../apps/desktop/Services/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
+    <Compile Include="../../apps/desktop/Services/Tools/AgentApiClient.cs" Link="AgentApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ToolApprovalDialog.cs" Link="ToolApprovalDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ComputerToolPresentation.cs" Link="ComputerToolPresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ToolResultImageDecoder.cs" Link="ToolResultImageDecoder.cs" />
     <Compile Include="../../apps/desktop/Controls/StorageLocationRow.cs" Link="StorageLocationRow.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/UiLocalization.cs" Link="UiLocalization.cs" />
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiLocalization.cs" Link="UiLocalization.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
     <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />

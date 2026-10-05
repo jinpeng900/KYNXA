@@ -3,7 +3,7 @@ import { createServer, request as requestHttp } from 'node:http';
 import { getEventListeners } from 'node:events';
 import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import test from 'node:test';
-import { fetchPublicWebPage, validatePublicWebUrl } from '../web-http-transport.mjs';
+import { fetchPublicWebPage, validatePublicWebUrl } from '../tools/web-http-transport.mjs';
 
 const PUBLIC_IP = '93.184.216.34';
 const LIMIT = 2 * 1024 * 1024;

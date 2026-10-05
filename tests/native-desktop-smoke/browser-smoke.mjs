@@ -5,7 +5,7 @@ import { access, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DesktopRunner, invokeDesktopHost } from '../../apps/model-gateway/desktop-runner.mjs';
+import { DesktopRunner, invokeDesktopHost } from '../../apps/model-gateway/tools/desktop-runner.mjs';
 
 // Own isolated profiles and loopback pages only. No user's browser/profile is inspected.
 // 仅使用自有隔离配置和回环页面；不检查用户的浏览器或配置目录。

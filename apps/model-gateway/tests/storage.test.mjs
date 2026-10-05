@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { modelHome } from '../storage.mjs';
+import { modelHome } from '../data/storage.mjs';
 
 test('storage pointer relocates model data; explicit environment paths have priority', async () => {
   const userHome = await mkdtemp(join(tmpdir(), 'kynxa-paths-'));

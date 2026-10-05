@@ -18,13 +18,13 @@
     <Page Include="../../apps/desktop/MemoryManagementWindow.xaml" Link="MemoryManagementWindow.xaml" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/ViewModels/Memory*.cs" Link="ViewModels/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/MemoryApiClient.cs" Link="Services/MemoryApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/UiLocalization.cs" Link="Services/UiLocalization.cs" />
-    <Compile Include="../../apps/shared/Memory*.cs" Link="Contracts/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/Data/MemoryApiClient.cs" Link="Services/MemoryApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiLocalization.cs" Link="Services/UiLocalization.cs" />
+    <Compile Include="../../apps/shared/Memory/Memory*.cs" Link="Contracts/%(Filename)%(Extension)" />
     <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

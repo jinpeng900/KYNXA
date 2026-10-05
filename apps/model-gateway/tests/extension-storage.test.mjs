@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, parse, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { ensureExtensionLayout, inspectExtensionLayout, EXTENSION_LAYOUT_DIRECTORIES, extensionCacheDirectories, extensionControlPaths,
-  extensionHome, extensionPointerPath, isExtensionControlPath, isExtensionManagedPath } from '../extension-storage.mjs';
+  extensionHome, extensionPointerPath, isExtensionControlPath, isExtensionManagedPath } from '../data/extension-storage.mjs';
 
 async function temporary(t) {
   const home = await mkdtemp(join(tmpdir(), 'kynxa-extension-path-'));

@@ -26,7 +26,7 @@ KYNXA 当前仍处于积极开发阶段。完整设计文档中描述的很多�
 * 每个模型连接独立配置上下文与最大输出。输出默认上限 256K（262144），提供 4K、8K、16K、32K、64K、128K、256K 和自定义；上下文提供 8K、32K、128K、256K、1M 和自定义，两项须匹配服务端实际能力。小窗口会降低实际输出预算。
 * 同一聊天保存全部消息，已验证超过 200 条的重启和回源；输入超预算时选取近期完整问答、相关旧约束与代码摘录。模型可分页查回当前聊天原文，工具循环压缩已保存结果的请求预览，不删除正式记录。
 
-设置已包含聊天、工作和全局记忆管理。网关回归使用临时数据与模拟上游，桌面检查包含实际 DOM、独立原生窗口和传输接口；本轮结果见 [模型网关](apps/model-gateway/README.md#当前验证与后续接口)，不代表所有服务商或真实 1M 模型已验收。
+设置已包含聊天、工作和全局记忆管理。网关回归使用临时数据与模拟上游，桌面检查包含实际 DOM、独立原生窗口和传输接口；此前验证记录见 [模型网关](apps/model-gateway/README.md#当前验证与后续接口)，不代表所有服务商或真实 1M 模型已验收。
 
 已接入模型文件工具、按请求固定的权限与单次审批、stdio / Streamable HTTP MCP、应用技能和 Windows AppContainer 终端。设置中的“工具与技能”支持官方服务预设、环境变量认证引用、技能导入与启停；已启用 MCP 程序是用户信任的外部进程，不属于终端沙箱。完整 Host 编排、崩溃后精确续跑、自动语义记忆和全文/向量检索仍属计划；权限及命令范围见 [基础工具指南](docs/architecture/agent-tools.md)。
 
@@ -41,6 +41,14 @@ MCP 发现目录与模型声明预算分离，支持单工具禁用、搜索和�
 设置中的数据存储、用户工具使用相同的简洁行。MCP 配置、导入技能及 npm/浏览器缓存可独立选择目录，复制校验后切换并保留原文件；单独配置后，更改 Data 不移动这一套扩展。官方工具包位于应用本体的 `model-gateway/official-tools/`，包含 35 个核心工具定义、7 个技能与 11 个默认启用的 MCP 预设；用户可以关闭或自定义，启用不等于已连接或已安装所需环境。内置公共网页读取和长文件分页无需 Python，桌面、浏览器及终端工作流复用现有执行边界。用户路径只管理自定义扩展和个人覆盖，升级保留用户选择。
 
 使用与开发入口：[代码组织与职责](docs/architecture/code-organization.md)、[模型网关](apps/model-gateway/README.md)、[聊天与工作记忆](docs/architecture/chat-work-memory.md)、[UI 组件](apps/desktop/UI-COMPONENTS.md)、[五人计划](docs/team/README.md)。
+
+## 五人代码边界
+
+2026-10-05 已提交基线为 `5637dc3`，本次重组在工作区。A 主责网关 `orchestration/` 并协调 `platform/`；C 主责 `models/`；D 主责 `tools/` 与 `official-tools/`；E 主责 `data/`。B 唯一负责全部 ShellPage partial、WinUI 与聊天展示。
+
+桌面服务分为 `Integration/Presentation/Models/Tools/Data`，共享契约分为 `Chat/Tools/Memory`，ToolHost 分为 `Desktop/Terminal/Sandbox/Native`。网关根 CLI 入口保持兼容；这些是现有应用内的目录职责，不代表完整 MVVM 或跨程序集隔离。
+
+Data 与 Platform 不依赖高层；模型历史仍读取 Data 的公开工具结果预览，Tools 仍使用 Models 的纯辅助，因此不宣称全部业务域互相独立。官方包的自有 Tools catalog 导入已调整，第三方技能原文和许可证保留。实际依赖与一手参考见 [团队边界](docs/architecture/team-boundaries.md)，交接见 [五人分工](docs/team/README.md)。本轮验证另记，不沿用此前结果冒充本轮验收。
 
 ## 下一步建议
 
@@ -102,7 +110,7 @@ KYNXA 使用结构化 CognitiveState 保存任务认知状态，并允许在需�
 
 所有敏感操作必须经过 KYNXA 的可信 Authority Boundary。
 
-正式架构中，可信的 `kynxa-authority` Rust 进程与较低可信度的 Orchestrator、AI Service 和第三方能力分离。
+设计规范提出独立可信 Authority；当前实际实现由网关策略与审批约束执行，并分派到已有 C# ToolHost，尚未实现独立 Rust Authority。
 
 ### Verifiable Execution
 
@@ -142,13 +150,14 @@ WinUI 桌面 + WebView2
           │ 本机 HTTP / SSE
           ▼
 Node.js 模型网关 ───► 云端 API / 本地 HTTP 模型服务
+          ├────────► C# ToolHost：桌面 / 终端 / 沙箱 / 原生执行
           │
           ▼
 Data：目录元信息 + JSONL 正式记录 + 分层确认记忆
       可重建的历史摘录 + SQLite 元数据索引
 ```
 
-下图是后续运行时设计。Host 语言尚未冻结，团队建议 .NET 10；旧版 Rust Host 属于历史路线。Host 与 Authority 当前均未实现。
+下图保留为历史后续运行时设计，与当前 Node.js 网关及已实现的 C# ToolHost 分开理解；本轮五人工作不据此新增 Host、迁移语言或建立独立 Authority。
 
 ```text
                  KYNXA Desktop
@@ -267,7 +276,7 @@ Resume Work
 * **持久化：** 带版本的 JSON 元信息、JSONL 会话事件、分层记忆文件；SQLite 元数据索引。
 * **桌面通信：** 与网关通过本机 HTTP / SSE 通信。
 
-后续 Host（建议 .NET 10）、Rust Authority、执行存储和 Named Pipe 仍需单独决策与实现。Python AI Service 是可选设计方向，不是当前运行依赖。
+C# ToolHost 已承担原生执行。独立 Host/Authority、持久执行存储和 Named Pipe 保留为需单独决策的设计参考；五人团队沿已有 WinUI/Node.js/C# 链路开发，目前不依赖 Python。
 
 macOS、Linux 和 iOS 暂不属于首版目标范围。
 
@@ -279,7 +288,7 @@ KYNXA/
 │   ├── desktop/              # Windows WinUI 3 正式前端
 │   ├── model-gateway/        # 当前 Node 模型、会话与记忆服务
 │   ├── shared/               # 当前 C# 聊天、记忆与工具契约
-│   ├── tool-host/            # Windows AppContainer 终端与技能原生助手
+│   ├── tool-host/            # Windows 桌面、终端、沙箱与技能原生执行
 │   ├── desktop-preview/      # 早期视觉与交互预览
 │   └── mock-backend/         # 早期模拟服务
 ├── docs/
@@ -429,7 +438,7 @@ Roadmap 会根据实际开发和 Benchmark 结果调整。
 
 KYNXA 当前仍处于早期开发阶段。
 
-五人共同开发请从[团队分工与个人任务清单](docs/team/README.md)开始；[队长总览](docs/team/队长总览.md)汇总当前实现、接口边界、六周建议排期和验收要求。队长计入五人，具体姓名和投入时间待团队确认。
+五人共同开发请从[团队分工与个人任务清单](docs/team/README.md)开始；[队长总览](docs/team/队长总览.md)汇总实际模块、接口边界和验收要求。队长计入五人。[GitHub 协作](docs/team/github-collaboration.md)提供成员邀请命令、CODEOWNERS 生成和主分支保护设置；目录主责是审查归属，不是文件夹级 Git 权限。
 
 随着核心架构和 Public API 稳定，会逐步完善贡献规范。
 

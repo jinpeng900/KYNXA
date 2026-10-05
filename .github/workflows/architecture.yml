@@ -1,0 +1,28 @@
+name: Architecture
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  architecture:
+    name: Architecture guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Pin verified upstream v7 revisions for reproducible checks.
+      # 固定已核对的上游 v7 版本，保证协作检查可复现。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # This checks source boundaries, not native Windows functionality.
+      # 此检查验证源码边界，不代替 Windows 原生功能回归。
+      - run: node tools/development/check-architecture.mjs

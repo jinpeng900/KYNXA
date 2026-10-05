@@ -17,17 +17,17 @@
     <Compile Include="../../apps/desktop/ModelManagementWindow.xaml.cs" Link="ModelManagementWindow.xaml.cs" />
     <Page Include="../../apps/desktop/ModelManagementWindow.xaml" Link="ModelManagementWindow.xaml" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/ModelApiClient.cs" Link="Services/ModelApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelPresets.cs" Link="Services/ModelPresets.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelCatalog.cs" Link="Services/ModelCatalog.cs" />
-    <Compile Include="../../apps/desktop/Services/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
-    <Compile Include="../../apps/desktop/Services/ChatStreamReader.cs" Link="Services/ChatStreamReader.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
-    <Compile Include="../../apps/desktop/Services/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
-    <Compile Include="../../apps/desktop/Services/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
-    <Compile Include="../../apps/desktop/Services/UiLocalization.cs" Link="Services/UiLocalization.cs" />
-    <Compile Include="../../apps/shared/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
-    <Compile Include="../../apps/shared/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelApiClient.cs" Link="Services/ModelApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelPresets.cs" Link="Services/ModelPresets.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ModelCatalog.cs" Link="Services/ModelCatalog.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
+    <Compile Include="../../apps/desktop/Services/Models/ChatStreamReader.cs" Link="Services/ChatStreamReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
+    <Compile Include="../../apps/desktop/Services/Presentation/UiLocalization.cs" Link="Services/UiLocalization.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
     <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />

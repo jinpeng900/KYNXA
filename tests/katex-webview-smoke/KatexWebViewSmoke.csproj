@@ -16,8 +16,8 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="SkiaSharp" Version="2.88.9" />
     <PackageReference Include="CSharpMath.SkiaSharp" Version="0.5.1" />
-    <Compile Include="../../apps/desktop/Services/KatexFormulaRenderer.cs" Link="KatexFormulaRenderer.cs" />
-    <Compile Include="../../apps/desktop/Services/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/KatexFormulaRenderer.cs" Link="KatexFormulaRenderer.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MathFormulaRenderer.cs" Link="MathFormulaRenderer.cs" />
     <Content Include="../../apps/desktop/Resources/Math/**/*" Link="Resources/Math/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

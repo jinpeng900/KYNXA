@@ -1,6 +1,6 @@
-import { filesystemDescriptors } from '../../filesystem-tools.mjs';
-import { historyDescriptors } from '../../tool-history.mjs';
-import { webFetchDescriptor } from '../../web-fetch.mjs';
+import { filesystemDescriptors } from '../../tools/filesystem-tools.mjs';
+import { historyDescriptors } from '../../tools/tool-history.mjs';
+import { webFetchDescriptor } from '../../tools/web-fetch.mjs';
 import { computerDescriptors } from './computer.mjs';
 import { hostTerminalDescriptor } from './terminal.mjs';
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runToolLoop } from '../tool-loop.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const continuation = calls => [{ role: 'assistant', content: 'Reading the sources.', tool_calls: calls.map(call =>

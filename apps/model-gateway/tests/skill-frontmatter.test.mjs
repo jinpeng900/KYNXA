@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { parseSkillFrontmatter } from '../skill-frontmatter.mjs';
-import { AppSkillService } from '../skill-service.mjs';
+import { parseSkillFrontmatter } from '../tools/skill-frontmatter.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
 
 const skill = header => `---\n${header}\n---\n# Literal original body\nDo not execute automatically.\n`;
 const basic = 'name: standard-skill\ndescription: Standard description';

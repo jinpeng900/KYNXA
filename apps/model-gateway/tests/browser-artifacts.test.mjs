@@ -3,9 +3,9 @@ import { mkdtemp, mkdir, rm, realpath, symlink, link, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { archiveBrowserScreenshot, inspectScreenshotImage } from '../browser-artifacts.mjs';
-import { McpToolClients } from '../mcp-client.mjs';
-import { publicToolResult } from '../tool-result-store.mjs';
+import { archiveBrowserScreenshot, inspectScreenshotImage } from '../tools/browser-artifacts.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
+import { publicToolResult } from '../data/tool-result-store.mjs';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=', 'base64');
 const descriptor = (toolName = 'browser_take_screenshot') => ({ name: `mcp.custom-browser.${toolName}`, toolName, operation: 'tools/call' });

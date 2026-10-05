@@ -5,10 +5,10 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
-import { readSse } from '../streaming.mjs';
-import { estimateTokens, estimateMessageTokens } from '../context.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { readSse } from '../models/streaming.mjs';
+import { estimateTokens, estimateMessageTokens } from '../models/context.mjs';
 import { migrateStorage } from '../migrate-storage.mjs';
 
 // server.mjs creates unused default objects when imported. Give those objects a

@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { runToolLoop } from '../tool-loop.mjs';
-import { appendToolResults, estimateToolMessageTokens } from '../tool-protocols.mjs';
-import { ToolContextProjection } from '../tool-context.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
+import { appendToolResults, estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { ToolContextProjection } from '../models/tool-context.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];

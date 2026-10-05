@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
-import { openEventStream, readJsonBody } from '../http-transport.mjs';
+import { openEventStream, readJsonBody } from '../orchestration/http-transport.mjs';
 
 test('request decoding keeps UTF-8 intact across fragmented incoming chunks', async () => {
   const input = { message: '你好\n世界' };

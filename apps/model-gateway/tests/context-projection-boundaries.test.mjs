@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildContext, completedTurns } from '../context.mjs';
-import { resolveOutputBudget } from '../output-budget.mjs';
-import { estimateToolMessageTokens } from '../tool-protocols.mjs';
+import { buildContext, completedTurns } from '../models/context.mjs';
+import { resolveOutputBudget } from '../models/output-budget.mjs';
+import { estimateToolMessageTokens } from '../models/tool-protocols.mjs';
 
 function freeze(value) {
   if (value && typeof value === 'object') {

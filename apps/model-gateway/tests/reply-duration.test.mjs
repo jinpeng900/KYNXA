@@ -5,11 +5,11 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ModelRuntime } from '../runtime.mjs';
-import { ModelStore } from '../store.mjs';
-import { storedReplyDurationMs } from '../reply-timing.mjs';
+import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { ModelStore } from '../models/store.mjs';
+import { storedReplyDurationMs } from '../platform/reply-timing.mjs';
 import { createModelServer } from '../server.mjs';
-import { readSse } from '../streaming.mjs';
+import { readSse } from '../models/streaming.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 function text(protocol, content, truncated = false) {

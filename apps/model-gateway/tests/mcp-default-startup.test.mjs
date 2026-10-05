@@ -3,8 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { McpToolClients } from '../mcp-client.mjs';
-import { curatedMcpPresets } from '../official-tools.mjs';
+import { McpToolClients } from '../tools/mcp-client.mjs';
+import { curatedMcpPresets } from '../tools/official-tools.mjs';
 
 test('enabled defaults with missing configuration or runtime do not contact an upstream and expose useful diagnostics', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'kynxa-enabled-defaults-'));

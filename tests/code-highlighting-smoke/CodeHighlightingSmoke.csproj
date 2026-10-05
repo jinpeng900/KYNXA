@@ -7,6 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
-    <Compile Include="../../apps/desktop/Services/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
   </ItemGroup>
 </Project>

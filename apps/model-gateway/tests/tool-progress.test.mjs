@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { runToolLoop } from '../tool-loop.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { approve, toolFixture } from './tool-fixture.mjs';
 
 const warning = '[KYNXA_NO_PROGRESS_WARNING]';

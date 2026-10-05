@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createModelServer } from '../server.mjs';
-import { mcpPresetCatalog, addMcpPreset } from '../mcp-presets.mjs';
-import { AppSkillService } from '../skill-service.mjs';
-import { OFFICIAL_SKILLS_DIRECTORY } from '../official-tools.mjs';
+import { mcpPresetCatalog, addMcpPreset } from '../tools/mcp-presets.mjs';
+import { AppSkillService } from '../tools/skill-service.mjs';
+import { OFFICIAL_SKILLS_DIRECTORY } from '../tools/official-tools.mjs';
 import { toolFixture, parsed, pendingApproval, approve } from './tool-fixture.mjs';
 
 const verified = { available: true, commands: ['node'], sandbox: 'appcontainer', failClosed: true, checksChildToken: true, network: false,
