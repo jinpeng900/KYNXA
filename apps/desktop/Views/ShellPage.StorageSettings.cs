@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 
@@ -32,7 +33,7 @@ public sealed partial class ShellPage
         var window = new Window { Title = UiText.Get("KYNXA · 设置") };
         _storageSettingsWindow = window;
         var font = (FontFamily)Application.Current.Resources["KynxaUIFont"];
-        var content = new StackPanel { Spacing = 12, Margin = new Thickness(24, 24, 24, 24) };
+        var content = new StackPanel { Spacing = 12, Margin = new Thickness(24, 24, 24, 24), MaxWidth = 760 };
         TextBlock Label(string text, double size = 14) => new() { Text = text, FontSize = size, FontFamily = font, TextWrapping = TextWrapping.Wrap };
         TextBlock LocalizedLabel(string key, double size = 14)
         {
@@ -119,6 +120,7 @@ public sealed partial class ShellPage
         content.Children.Add(extensionRow);
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };
         var status = new InfoBar { IsOpen = false, IsClosable = false };
+        AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         content.Children.Add(progress); content.Children.Add(status);
         var storageControls = new StorageSettingsControls(window, row, extensionRow, memoryButton, toolsButton, languagePicker, progress, status);
         var root = new Grid { RequestedTheme = ElementTheme.Light, Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
@@ -129,7 +131,8 @@ public sealed partial class ShellPage
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
         titleBar.Children.Add(title);
-        var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         Grid.SetRow(scroll, 1);
         root.Children.Add(titleBar); root.Children.Add(scroll);
         window.Content = root;
@@ -139,6 +142,26 @@ public sealed partial class ShellPage
         var ownerBounds = App.Window.AppWindow;
         window.AppWindow.Move(new Windows.Graphics.PointInt32(ownerBounds.Position.X + Math.Max(0, (ownerBounds.Size.Width - 720) / 2),
             ownerBounds.Position.Y + Math.Max(0, (ownerBounds.Size.Height - 420) / 2)));
+        bool initialSizeApplied = false;
+        root.Loaded += (_, _) =>
+        {
+            if (initialSizeApplied) return;
+            initialSizeApplied = true;
+            // Native window sizes are physical pixels; size the settings page in DIP after its root is available.
+            // 原生窗口尺寸使用物理像素；根节点可用后按 DIP 设置界面并约束到工作区。
+            double scale = root.XamlRoot.RasterizationScale;
+            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
+                presenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
+            }
+            var area = DisplayArea.GetFromWindowId(App.Window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+            int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
+            int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
+            int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
+            int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
+            window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
+        };
         if (Microsoft.UI.Windowing.AppWindowTitleBar.IsCustomizationSupported())
         {
             window.AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;

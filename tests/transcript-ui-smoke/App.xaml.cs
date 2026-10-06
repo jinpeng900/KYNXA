@@ -30,8 +30,13 @@ public partial class App : Application
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
         if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only"))
+        {
             _window.AppWindow.Show(activateWindow: false);
-        else _window.Activate();
+        }
+        else
+        {
+            _window.Activate();
+        }
         _ = RunChecksAsync(cold);
     }
 
@@ -58,10 +63,22 @@ public partial class App : Application
                 File.WriteAllText(_result, $"PASS: {_checks} native retrieval transcript checks; unified website links, local source labels, live translation and final convergence.");
                 return;
             }
+            if (Environment.GetCommandLineArgs().Contains("--inline-math-only", StringComparer.Ordinal))
+            {
+                await CheckLongInlineMathAsync();
+                File.WriteAllText(_result, $"PASS: {_checks} long inline math checks.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal))
             {
                 await CheckComputerToolsAsync();
                 File.WriteAllText(_result, $"PASS: {_checks} native computer transcript checks. Preview: kynxa-transcript-computer-tools.png.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--multiline-only", StringComparer.Ordinal))
+            {
+                await CheckMultilineRepliesAsync();
+                File.WriteAllText(_result, $"PASS: {_checks} multiline reply checks. Preview: kynxa-transcript-multiline.png.");
                 return;
             }
             var longChat = Guid.NewGuid();
@@ -110,12 +127,17 @@ public partial class App : Application
             await CheckConversationSwitchingAsync(longChat, longRows);
             await CheckToolActivitiesAsync();
             await CheckWebsiteActivitiesAsync();
+            await CheckRetrievalToolsAsync();
             CheckPresentationSources();
             await CheckAssistantTimelineAsync();
             await CheckPartialProgressAsync();
             await CheckProgressScrollAnchorAsync();
             await CheckReplyTimingAsync();
+            await CheckTranscriptActionsAsync();
+            await CheckMessageMetadataAsync();
+            await CheckMultilineRepliesAsync();
             await CheckWrappingAndResizeAsync();
+            await CheckLongInlineMathAsync();
             await CaptureVisualPreviewAsync();
             bool pointerRequested = Environment.GetCommandLineArgs().Contains("--pointer");
             _metrics["pointerValidation"] = pointerRequested ? "requested" : "not requested; run --pointer for the isolated CDP drag diagnostic";

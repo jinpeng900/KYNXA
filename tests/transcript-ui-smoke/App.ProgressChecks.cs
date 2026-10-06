@@ -138,7 +138,8 @@ public partial class App
             Check(await EvalAsync<bool>("document.getElementById('messages').textContent.includes('EARLIER_PROSE_MUST_REMAIN') && !document.querySelector('.final-answer') && !document.querySelector('.reasoning,.tool-activity')"), "partial state retains earlier prose without claiming successful completion");
             Check(await EvalAsync<bool>("document.querySelector('.message-status').textContent.trim().length > 0"), "interruption or missing final phase has a concise visible reason");
             await EvalAsync<bool>("(() => { document.querySelector('.assistant .copy-message').click(); return true; })()");
-            await Task.Delay(80);
+            await WaitAsync("document.querySelector('.assistant .copy-message').dataset.copyState === 'success'",
+                "partial copy waits for its matching native clipboard acknowledgement");
             Check(await Clipboard.GetContent().GetTextAsync() == "EARLIER_PROSE_MUST_REMAIN\n\n" + body, "partial copy matches all visible source Markdown exactly");
             Check(reply.Message.AssistantSegments.Count == 2 && reply.Message.Content == "OLD_AGGREGATE", "partial presentation preserves all underlying source text");
         }

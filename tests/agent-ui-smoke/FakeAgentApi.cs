@@ -48,6 +48,7 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public bool ConflictNextSave { get; set; }
     public bool Disposed { get; private set; }
     public TaskCompletionSource<AgentSkillDetail>? DelayedPreview { get; set; }
+    public TaskCompletionSource<AgentConfig>? DelayedConfig { get; set; }
     public CancellationToken LastPreviewToken { get; private set; }
     public string[]? ConnectionErrors { get; set; }
     public bool IncludeMcpTools { get; private set; }
@@ -66,7 +67,11 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     }
     public string PreviewText => "# Example skill\nLiteral fixture instructions: run scripts.\n<script>neverExecuted()</script>\n技能原文不随语言切换。";
 
-    public Task<AgentConfig> GetConfigAsync(CancellationToken cancellationToken = default) { Reads++; return Task.FromResult(Config); }
+    public Task<AgentConfig> GetConfigAsync(CancellationToken cancellationToken = default)
+    {
+        Reads++;
+        return DelayedConfig?.Task.WaitAsync(cancellationToken) ?? Task.FromResult(Config);
+    }
     public Task<AgentConfig> SaveConfigAsync(AgentConfigSaveRequest request, CancellationToken cancellationToken = default)
     {
         Saves++;

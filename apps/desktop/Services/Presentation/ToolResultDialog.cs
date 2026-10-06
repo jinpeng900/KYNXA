@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using KYNXA.Contracts;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -23,18 +25,25 @@ public sealed class ToolResultDialog : IDisposable
     private readonly TextBlock _status = new() { Name = "ToolResultStatus", TextWrapping = TextWrapping.Wrap };
     private readonly Button _more = new() { Name = "ToolResultMore" };
     private readonly Button _media = new() { Name = "ToolResultMedia" };
+    private readonly Button _copy = new() { Name = "ToolResultCopy", IsEnabled = false };
+    private readonly TextBlock _copyNotice = new() { Name = "ToolResultCopyStatus", TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
+    private readonly StackPanel _actions = new() { Name = "ToolResultActions", Orientation = Orientation.Horizontal, Spacing = 8 };
+    private readonly ScrollViewer _contentScroll;
+    private readonly XamlRoot _root;
     private readonly StackPanel _resources = new() { Name = "ToolResultResources", Spacing = 8 };
     private readonly StringBuilder _loaded = new();
     private int _nextOffset;
     private bool _closed, _busy;
     private string _statusKey = "正在读取工具结果…";
     private string _statusDetails = string.Empty;
+    private string _copyNoticeKey = string.Empty;
     public ContentDialog Dialog { get; }
 
     public ToolResultDialog(XamlRoot root, IAgentApi api, Guid conversationId, ToolActivity tool,
         CancellationToken cancellationToken = default)
     {
         _api = api;
+        _root = root;
         _conversationId = conversationId;
         _reference = tool.ResultRef ?? throw new ArgumentException("A result reference is required.");
         _screenshot = ConversationScreenshotSources.IsScreenshotTool(tool.Name);
@@ -45,28 +54,39 @@ public sealed class ToolResultDialog : IDisposable
         UiLocalization.Bind(_media, ContentControl.ContentProperty, _screenshot ? "查看截图" : "查看媒体与资源");
         _more.Click += async (_, _) => await LoadNextAsync();
         _media.Click += async (_, _) => await LoadResourcesAsync();
-        var copy = new Button { Name = "ToolResultCopy", Style = _more.Style };
-        UiLocalization.Bind(copy, ContentControl.ContentProperty, "复制已加载内容");
-        copy.Click += (_, _) => { var data = new DataPackage(); data.SetText(_text.Text); Clipboard.SetContent(data); };
+        _copy.Style = _more.Style;
+        UiLocalization.Bind(_copy, ContentControl.ContentProperty, "复制已加载内容");
+        _copy.Click += CopyLoadedContent;
+        AutomationProperties.SetLiveSetting(_copyNotice, AutomationLiveSetting.Polite);
+        AutomationProperties.SetLiveSetting(_status, AutomationLiveSetting.Polite);
         var content = new StackPanel { Spacing = 10 };
-        var name = new TextBlock { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+        var name = new TextBlock { Name = "ToolResultName", TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
         if (_screenshot) UiLocalization.Bind(name, TextBlock.TextProperty, "截图"); else name.Text = tool.Name;
         content.Children.Add(name);
         if (!_screenshot) content.Children.Add(new TextBlock { Text = $"{_reference.Bytes} bytes · SHA256 {_reference.Sha256}", TextWrapping = TextWrapping.Wrap });
         content.Children.Add(_status);
         if (!_screenshot) content.Children.Add(_text);
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        if (!_screenshot) { actions.Children.Add(_more); actions.Children.Add(copy); }
-        actions.Children.Add(_media);
-        content.Children.Add(actions); content.Children.Add(_resources);
-        Dialog = new ContentDialog { XamlRoot = root, Content = new ScrollViewer { Content = content, MaxHeight = 520 },
+        if (!_screenshot) { _actions.Children.Add(_more); _actions.Children.Add(_copy); }
+        _actions.Children.Add(_media);
+        content.Children.Add(_actions); content.Children.Add(_copyNotice); content.Children.Add(_resources);
+        _contentScroll = new ScrollViewer { Name = "ToolResultContentScroll", Content = content,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        _contentScroll.SizeChanged += ContentSizeChanged;
+        Dialog = new ContentDialog { XamlRoot = root, Content = _contentScroll,
             DefaultButton = ContentDialogButton.None, CloseButtonStyle = _more.Style };
         UiLocalization.Bind(Dialog, ContentDialog.TitleProperty, _screenshot ? "截图预览" : "工具结果详情");
         UiLocalization.Bind(Dialog, ContentDialog.CloseButtonTextProperty, "关闭");
-        Dialog.Opened += async (_, _) => { if (_screenshot) await LoadResourcesAsync(); else await LoadNextAsync(); };
+        Dialog.Opened += async (_, _) =>
+        {
+            _root.Changed += RootChanged;
+            UpdateLayout();
+            if (_screenshot) await LoadResourcesAsync(); else await LoadNextAsync();
+        };
         Dialog.Closed += (_, _) => Dispose();
         UiText.LanguageChanged += LanguageChanged;
         LanguageChanged(null, EventArgs.Empty);
+        UpdateLayout();
         // Keep media decoding bounded; regular results can still be read through text pages.
         // 限制媒体解码规模；常规结果仍可通过文本分页读取。
         _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024;
@@ -87,6 +107,53 @@ public sealed class ToolResultDialog : IDisposable
         if (_closed) return;
         if (!Dialog.DispatcherQueue.HasThreadAccess) { Dialog.DispatcherQueue.TryEnqueue(() => LanguageChanged(sender, e)); return; }
         _status.Text = UiText.Get(_statusKey) + _statusDetails;
+        _copyNotice.Text = _copyNoticeKey.Length == 0 ? string.Empty : UiText.Get(_copyNoticeKey);
+        UpdateLayout();
+    }
+
+    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => UpdateLayout();
+    private void ContentSizeChanged(object sender, SizeChangedEventArgs args) => UpdateLayout();
+
+    private void UpdateLayout()
+    {
+        if (_closed) return;
+        // Vertical actions keep English labels and keyboard targets within a narrow dialog.
+        // 窄对话框竖排操作，保证英文标签和键盘操作目标都位于内容范围内。
+        var actions = _actions.Children.OfType<FrameworkElement>().Where(action => action.Visibility == Visibility.Visible).ToArray();
+        foreach (var action in actions) action.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        double requiredWidth = actions.Sum(action => action.DesiredSize.Width) + Math.Max(0, actions.Length - 1) * _actions.Spacing;
+        double availableWidth = _contentScroll.ActualWidth > 0 ? _contentScroll.ViewportWidth : Math.Min(500, Math.Max(0, _root.Size.Width - 64));
+        _actions.Orientation = _root.Size.Width < 640 || requiredWidth > availableWidth ? Orientation.Vertical : Orientation.Horizontal;
+        _contentScroll.MaxHeight = Math.Clamp(_root.Size.Height - 200, 80, 520);
+        _text.MaxHeight = Math.Clamp(_root.Size.Height * 0.4, 96, 280);
+    }
+
+    private void UpdateCopyState() => _copy.IsEnabled = !_closed && !_busy && _text.Text.Length > 0;
+
+    private void ClearCopyNotice()
+    {
+        _copyNoticeKey = string.Empty;
+        _copyNotice.Text = string.Empty;
+        _copyNotice.Visibility = Visibility.Collapsed;
+    }
+
+    private void CopyLoadedContent(object sender, RoutedEventArgs args)
+    {
+        if (_closed || _busy || _text.Text.Length == 0) return;
+        bool copied = false;
+        try
+        {
+            var data = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
+            // Copy the original loaded pages; the native multiline editor normalizes display line endings.
+            // 复制已加载分页原文；原生多行编辑框会归一化显示换行。
+            data.SetText(_loaded.ToString());
+            Clipboard.SetContent(data);
+            copied = true;
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
+        _copyNoticeKey = copied ? "已复制" : "复制失败，请重试。";
+        _copyNotice.Text = UiText.Get(_copyNoticeKey);
+        _copyNotice.Visibility = Visibility.Visible;
     }
 
     private void Status(string key, string details = "")
@@ -96,6 +163,7 @@ public sealed class ToolResultDialog : IDisposable
     {
         if (_closed || _busy || _lifetime.IsCancellationRequested) return;
         _busy = true; _more.IsEnabled = _media.IsEnabled = false;
+        UpdateCopyState(); ClearCopyNotice();
         try
         {
             var page = await _api.GetToolResultPageAsync(_conversationId, _reference, _nextOffset, cancellationToken: _lifetime.Token);
@@ -106,13 +174,14 @@ public sealed class ToolResultDialog : IDisposable
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception error) { if (!_closed) Status("工具结果读取失败，请重试。", error is GatewayApiException ? " " + error.Message : ""); }
-        finally { if (!_closed) { _busy = false; _more.IsEnabled = true; _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024; } }
+        finally { if (!_closed) { _busy = false; _more.IsEnabled = true; _media.IsEnabled = _reference.Bytes <= 8 * 1024 * 1024; UpdateCopyState(); } }
     }
 
     private async Task LoadResourcesAsync()
     {
         if (_closed || _busy || _reference.Bytes > 8 * 1024 * 1024) return;
         _busy = true; _media.IsEnabled = _more.IsEnabled = false;
+        UpdateCopyState(); ClearCopyNotice();
         try
         {
             var response = await _api.GetToolResultAsync(_conversationId, _reference, _lifetime.Token);
@@ -143,7 +212,7 @@ public sealed class ToolResultDialog : IDisposable
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception error) { if (!_closed) Status("工具结果读取失败，请重试。", error is GatewayApiException ? " " + error.Message : ""); }
-        finally { if (!_closed) { _busy = false; _media.IsEnabled = true; _more.IsEnabled = true; } }
+        finally { if (!_closed) { _busy = false; _media.IsEnabled = true; _more.IsEnabled = true; UpdateCopyState(); } }
     }
 
     private async Task AddImageAsync(JsonElement block)
@@ -154,7 +223,7 @@ public sealed class ToolResultDialog : IDisposable
         { AddNotice("此媒体类型暂不支持直接预览。"); return; }
         try
         {
-            var bitmap = await ToolResultImageDecoder.DecodeAsync(block, _lifetime.Token);
+            var bitmap = await ToolResultImageDecoder.DecodeAsync(block, _lifetime.Token, maximumPreviewDimension: 1024);
             if (!_closed && !_lifetime.IsCancellationRequested) _resources.Children.Add(new Image { Source = bitmap, MaxHeight = 260 });
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
@@ -174,6 +243,9 @@ public sealed class ToolResultDialog : IDisposable
     public void Dispose()
     {
         if (_closed) return;
-        _closed = true; _lifetime.Cancel(); _lifetime.Dispose(); UiText.LanguageChanged -= LanguageChanged;
+        _closed = true; _root.Changed -= RootChanged;
+        _contentScroll.SizeChanged -= ContentSizeChanged;
+        _copy.IsEnabled = false; _copy.Click -= CopyLoadedContent;
+        _lifetime.Cancel(); _lifetime.Dispose(); UiText.LanguageChanged -= LanguageChanged;
     }
 }

@@ -22,6 +22,7 @@ public partial class App : Application
     private readonly bool _officialToolsOnly = Environment.GetCommandLineArgs().Contains("--official-tools-only", StringComparer.Ordinal);
     private readonly bool _computerToolsOnly = Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal);
     private readonly bool _browserOnly = Environment.GetCommandLineArgs().Contains("--browser-only", StringComparer.Ordinal);
+    private readonly bool _managementLayoutOnly = Environment.GetCommandLineArgs().Contains("--management-layout-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -45,6 +46,7 @@ public partial class App : Application
         _anchor.AppWindow.Hide();
         _window = new ToolManagementWindow(_api, Guid.NewGuid());
         _root = (FrameworkElement)_window.Content;
+        AttachManagementPresentationChecks();
         _window.Activate();
         _ = RunAsync();
     }
@@ -73,6 +75,30 @@ public partial class App : Application
     {
         try
         {
+            if (_managementLayoutOnly)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled,
+                    "management layout fixture loads only isolated configuration");
+                var initialServers = Element<ListView>("AgentServerList");
+                initialServers.SelectedItem = initialServers.Items[0];
+                await WaitAsync(() => Element<TextBox>("AgentServerIdBox").Text == "example", "management fixture selects its stable server identity");
+                _window!.ShowSection(skills: true);
+                await WaitForVisibleManagementSectionAsync(skills: true);
+                var initialSkills = Element<ListView>("AgentSkillList");
+                initialSkills.SelectedItem = initialSkills.Items[0];
+                await WaitAsync(() => Element<TextBox>("AgentSkillPreviewBox").Text.Contains("Example skill"),
+                    "management fixture selects a literal skill preview");
+                _window.ShowSection(skills: false);
+                await WaitForVisibleManagementSectionAsync(skills: false);
+                await CheckManagementSearchAndLayoutAsync();
+                _window.ShowSection(skills: true);
+                await WaitForVisibleManagementSectionAsync(skills: true);
+                await CheckSkillSearchAndSectionAsync();
+                Check(_unhandled is null && _api.Connections == 0 && _api.Saves == 0,
+                    "layout and filtering have no execution, saving or unhandled error side effects");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native management layout UI checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_browserOnly)
             {
                 await CheckBrowserSettingsAsync();
@@ -110,6 +136,7 @@ public partial class App : Application
             Check(command.Text == "example-mcp" && Element<TextBox>("AgentServerIdBox").IsReadOnly, "native server selection fills identity and command");
             Check(!NativeUi.IsVisible(Element<TextBox>("AgentServerArgsBox")) && !NativeUi.IsVisible(Element<TextBox>("AgentServerCwdBox")) &&
                 !NativeUi.IsVisible(Element<TextBlock>("AgentServerTrustLabel")), "default MCP view keeps arguments, paths and technical notes out of the main form");
+            await CheckManagementSearchAndLayoutAsync();
             await NativeWindowCapture.CaptureAsync(_window!, Path.Combine(_directory, "servers-simple-zh.png"));
             NativeUi.SetText(command, "cancelled-fixture-edit");
             await SettleAsync();
@@ -129,8 +156,9 @@ public partial class App : Application
             NativeUi.SetText(Element<TextBox>("AgentServerArgsBox"), "[\"--stdio\",\"fixture\"]");
             Element<CheckBox>("AgentServerEnabledBox").IsChecked = true;
             _api.ConflictNextSave = true;
+            int conflictReadsBefore = _api.Reads;
             NativeUi.Invoke(Button("AgentSaveServerButton"));
-            await WaitAsync(() => _api.Reads == 2 && Button("AgentSaveServerButton").IsEnabled, "conflict reload finishes without automatically saving again");
+            await WaitAsync(() => _api.Reads == conflictReadsBefore + 1 && Button("AgentSaveServerButton").IsEnabled, "conflict reload finishes without automatically saving again");
             Check(_api.Saves == 1 && command.Text == "example-mcp-updated" && _window.HasPendingChanges, "configuration conflict preserves the editor");
             NativeUi.Invoke(Button("AgentSaveServerButton"));
             await WaitAsync(() => _api.Saves == 2 && !_window.HasPendingChanges, "explicit save accepts the refreshed revision");
@@ -163,6 +191,7 @@ public partial class App : Application
             skills.SelectedItem = skills.Items[0];
             await WaitAsync(() => Element<TextBox>("AgentSkillPreviewBox").Text.Replace("\r\n", "\n").Replace('\r', '\n') == _api.PreviewText, "native skill selection reads its preview");
             Check(Element<TextBox>("AgentSkillPreviewBox").IsReadOnly && _api.Connections == 0 && _api.Saves == 3, "skill script text remains an unexecuted read-only preview");
+            await CheckSkillSearchAndSectionAsync();
             await Task.Delay(500);
             await NativeWindowCapture.CaptureAsync(_window!, Path.Combine(_directory, "skills-simple-en.png"));
             Element<CheckBox>("AgentSkillEnabledBox").IsChecked = false;
@@ -231,6 +260,7 @@ public partial class App : Application
             await CheckApprovalAsync();
             await CheckMcpToolsAsync();
             await CheckResultAsync();
+            await CheckDialogPolishAsync();
             await CheckExpandedManagementAsync();
             await CheckStorageRowsAsync();
             tabs.SelectedIndex = 1;

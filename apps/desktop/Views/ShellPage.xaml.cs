@@ -37,6 +37,7 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        InitializePresentationActions();
         Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
         ConversationMessages.ToolResultRequested += ToolResultRequested;
@@ -67,12 +68,15 @@ public sealed partial class ShellPage : Page
         _layout = _layoutStateService.Load();
         UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
-        ApplyLayout();
         InitializeModelPicker();
         InitializePermissionPicker();
+        // Present the current mode before awaiting the gateway; loading must not replace a user's later choice.
+        // 等待网关前呈现当前模式；目录返回后不能覆盖用户在加载期间选择的模式和草稿。
+        SetPrimaryMode(ViewModel.IsChatMode);
         await InitializeProjectsAsync();
         if (_projectViewClosed || !IsLoaded) return;
-        SetPrimaryMode(false);
+        UpdateWorkspacePickerVisibility();
+        UpdateSendButtonState();
     }
 
     private void ApplyLayout()
@@ -81,13 +85,7 @@ public sealed partial class ShellPage : Page
         _applyingLayout = true;
         try
         {
-            double sidebar = _layout.SidebarCollapsed
-                ? SidebarCollapsed
-                : Math.Clamp(_layout.SidebarWidth, SidebarMin, SidebarMax);
-
-            SidebarColumn.Width = new GridLength(sidebar);
-            RecentArea.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
-            ChatWorkSwitcher.Visibility = _layout.SidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            ApplySidebarPresentation();
             TopWorkspaceRow.Height = new GridLength(0);
             TopWorkspaceGrip.Visibility = Visibility.Collapsed;
             UpdateWorkspacePickerVisibility();
@@ -105,7 +103,15 @@ public sealed partial class ShellPage : Page
                 ? maximumComposerHeight
                 : Math.Max(_layout.ComposerHeight, _autoComposerHeight);
             ComposerHost.EditorHeight = Math.Clamp(requestedComposerHeight, minimumComposerHeight, maximumComposerHeight);
-            ModelPickerButton.MaxWidth = Math.Max(64, ComposerHost.Width - 250);
+            // Measure the current localized actions instead of reserving a fixed label budget.
+            // 测量当前语言下的操作区，避免为权限文字预留固定宽度。
+            SelectedPermissionLabel.Visibility = ComposerHost.Width < 480 ? Visibility.Collapsed : Visibility.Visible;
+            ComposerToolbarLeft.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            double toolbarChrome = ComposerToolbar.Margin.Left + ComposerToolbar.Margin.Right
+                + ComposerModelArea.Margin.Left + ComposerModelArea.Margin.Right
+                + SendButton.Width + ComposerModelArea.ColumnSpacing
+                + ModelPickerButton.Margin.Left + ModelPickerButton.Margin.Right;
+            ModelPickerButton.MaxWidth = Math.Max(36, ComposerHost.Width - ComposerToolbarLeft.DesiredSize.Width - toolbarChrome);
             UpdateAdaptiveContentLayout(available);
         }
         finally { _applyingLayout = false; }
@@ -123,18 +129,19 @@ public sealed partial class ShellPage : Page
         // Scale gently around the reference layout while keeping compact windows usable.
         // 围绕参考布局缓慢缩放，同时保证小窗口仍可使用。
         double scale = Math.Clamp(Math.Min(width / 1100, height / 720), 0.76, 1.12);
-        LogoHost.Width = 176 * scale;
-        LogoHost.Height = 132 * scale;
-        KynxaLogo.Width = 353 * scale;
-        KynxaLogo.Height = 235 * scale;
-        MainContentHost.Spacing = Math.Clamp(22 + ((height - 520) * 0.04), 22, 42);
+        LogoHost.Width = 164 * scale;
+        LogoHost.Height = 122 * scale;
+        KynxaLogo.Width = 328 * scale;
+        KynxaLogo.Height = 219 * scale;
+        MainContentHost.Spacing = 12;
+        LogoHost.Margin = new Thickness(0, 0, 0, Math.Clamp(18 + ((height - 520) * 0.03), 18, 32) - 12);
 
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
 
         MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
         // The transcript fills the remaining grid column as the work panel resizes.
         // 工作面板调整宽度时，聊天填满网格中剩余的列空间。
-        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 40);
+        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 64);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
         AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
@@ -156,6 +163,12 @@ public sealed partial class ShellPage : Page
 
     private void SidebarToggle_Click(object sender, RoutedEventArgs e)
     {
+        if (_isCompactLayout)
+        {
+            _temporarySidebarOpen = !_temporarySidebarOpen;
+            ApplyLayout();
+            return;
+        }
         _layout.SidebarCollapsed = !_layout.SidebarCollapsed;
         ApplyLayout();
         SaveLayout();
@@ -496,6 +509,7 @@ public sealed partial class ShellPage : Page
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        UpdateSendButtonState();
         // Match the editor's reserved scrollbar lane so wrapping never runs beneath it.
         // 与输入区预留的滚动条通道对齐，避免换行文本延伸到滚动条下。
         double availableTextWidth = Math.Max(120, PromptTextBox.ActualWidth - 88);

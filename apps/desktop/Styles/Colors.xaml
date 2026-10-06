@@ -13,6 +13,7 @@
     <Color x:Key="KynxaSendColor">#262626</Color>
     <Color x:Key="KynxaSendHoverColor">#404040</Color>
     <Color x:Key="KynxaSendPressedColor">#171717</Color>
+    <Color x:Key="KynxaSendDisabledColor">#E2E4E8</Color>
     <Color x:Key="KynxaOnlineColor">#03C027</Color>
     <Color x:Key="KynxaComposerBorderColor">#14000000</Color>
     <Color x:Key="KynxaComposerActionColor">#F5F5F5</Color>
@@ -36,6 +37,8 @@
     <SolidColorBrush x:Key="KynxaSendBrush" Color="{StaticResource KynxaSendColor}" />
     <SolidColorBrush x:Key="KynxaSendHoverBrush" Color="{StaticResource KynxaSendHoverColor}" />
     <SolidColorBrush x:Key="KynxaSendPressedBrush" Color="{StaticResource KynxaSendPressedColor}" />
+    <SolidColorBrush x:Key="KynxaSendDisabledBrush" Color="{StaticResource KynxaSendDisabledColor}" />
+    <SolidColorBrush x:Key="KynxaComposerFooterBrush" Color="#FAFAFA" />
     <SolidColorBrush x:Key="KynxaOnlineBrush" Color="{StaticResource KynxaOnlineColor}" />
     <SolidColorBrush x:Key="KynxaComposerBorderBrush" Color="{StaticResource KynxaComposerBorderColor}" />
     <SolidColorBrush x:Key="KynxaComposerActionBrush" Color="{StaticResource KynxaComposerActionColor}" />
