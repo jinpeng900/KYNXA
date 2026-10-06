@@ -9,7 +9,7 @@ indent_size = 4
 
 # Windows PowerShell 5 reads Chinese source reliably with a UTF-8 BOM.
 # Windows PowerShell 5 读取中文脚本需 UTF-8 BOM，避免解析破坏。
-[apps/desktop/Build/prepare-vc-runtime.ps1]
+[apps/desktop/Build/{prepare-vc-runtime,prepare-node-runtime,prepare-toolhost-notices,filter-runtime-pri-layout}.ps1]
 charset = utf-8-bom
 
 [*.{json,yml,yaml}]

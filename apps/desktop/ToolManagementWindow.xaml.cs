@@ -35,6 +35,7 @@ public sealed partial class ToolManagementWindow : Window
     private AgentTool? _editingTool;
     private bool _toolDirty;
     private AgentSkill? _editingSkill;
+    private AgentSkill[] _skills = [];
     private bool _skillDirty;
     private McpCatalogResponse _catalog = new([], []);
     private McpConnectionDiagnostic[] _connections = [];
@@ -71,13 +72,94 @@ public sealed partial class ToolManagementWindow : Window
 
     public bool HasPendingChanges => _busy || _serverDirty || _directoriesDirty || _toolDirty || _skillDirty;
 
+    public void ShowSection(bool skills)
+    {
+        if (_closed || _dialogOpen) return;
+        // Both editors stay alive; switching the visible section does not discard any draft.
+        // 两个编辑器始终保留；只切换可见页签，不丢弃任何草稿。
+        AgentTabs.SelectedIndex = skills ? 1 : 0;
+    }
+
     public void CloseForOwner()
     {
         _allowClose = true;
         Close();
     }
 
-    private async void AgentRoot_Loaded(object sender, RoutedEventArgs e) => await LoadAsync();
+    private async void AgentRoot_Loaded(object sender, RoutedEventArgs e)
+    {
+        ApplyAdaptiveLayout(AgentRoot.ActualWidth);
+        await LoadAsync();
+    }
+
+    private void AgentRoot_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_api is null || _closed) return;
+        ApplyAdaptiveLayout(e.NewSize.Width);
+    }
+
+    private void ApplyAdaptiveLayout(double width)
+    {
+        bool narrow = width > 0 && width < 780;
+        var full = new GridLength(1, GridUnitType.Star);
+        double listHeight = narrow ? Math.Clamp(AgentRoot.ActualHeight * 0.22, 92, 180) : double.PositiveInfinity;
+        // Keep long forms reachable in short stacked windows; the controls retain their state when reparented.
+        // 短窗采用上下布局时，将额外操作并入可滚动表单；迁移控件父级不重建草稿或展开状态。
+        if (narrow && !AgentServerEditorBody.Children.Contains(AgentConnectionPanel))
+        {
+            AgentServersGrid.Children.Remove(AgentConnectionPanel);
+            AgentServerEditorBody.Children.Insert(0, AgentConnectionPanel);
+        }
+        else if (!narrow && AgentServerEditorBody.Children.Contains(AgentConnectionPanel))
+        {
+            AgentServerEditorBody.Children.Remove(AgentConnectionPanel);
+            AgentServersGrid.Children.Add(AgentConnectionPanel);
+        }
+        if (narrow && !AgentSkillEditorBody.Children.Contains(AgentSkillDirectoriesExpander))
+        {
+            AgentSkillsGrid.Children.Remove(AgentSkillDirectoriesExpander);
+            AgentSkillEditorBody.Children.Insert(0, AgentSkillDirectoriesExpander);
+        }
+        else if (!narrow && AgentSkillEditorBody.Children.Contains(AgentSkillDirectoriesExpander))
+        {
+            AgentSkillEditorBody.Children.Remove(AgentSkillDirectoriesExpander);
+            AgentSkillsGrid.Children.Add(AgentSkillDirectoriesExpander);
+        }
+        AgentContentGrid.Margin = narrow ? new Thickness(16, 14, 16, 16) : new Thickness(24, 14, 24, 24);
+        AgentServersGrid.ColumnDefinitions[0].Width = narrow ? full : new GridLength(240);
+        AgentServersGrid.ColumnDefinitions[1].Width = narrow ? new GridLength(0) : full;
+        AgentServersGrid.ColumnSpacing = narrow ? 0 : 20;
+        AgentServersGrid.RowDefinitions[1].Height = narrow ? GridLength.Auto : full;
+        AgentServersGrid.RowDefinitions[2].Height = narrow ? full : GridLength.Auto;
+        AgentServersGrid.RowDefinitions[3].Height = new GridLength(0);
+        AgentServerListPanel.MaxHeight = listHeight;
+        Grid.SetColumn(AgentServerEditor, narrow ? 0 : 1);
+        Grid.SetRow(AgentServerEditor, narrow ? 2 : 1);
+        Grid.SetColumn(AgentConnectionPanel, narrow ? 0 : 1);
+        Grid.SetRow(AgentConnectionPanel, narrow ? 3 : 2);
+
+        AgentSkillsGrid.ColumnDefinitions[0].Width = narrow ? full : new GridLength(240);
+        AgentSkillsGrid.ColumnDefinitions[1].Width = narrow ? new GridLength(0) : full;
+        AgentSkillsGrid.ColumnSpacing = narrow ? 0 : 20;
+        AgentSkillsGrid.RowDefinitions[2].Height = narrow ? GridLength.Auto : full;
+        AgentSkillsGrid.RowDefinitions[3].Height = narrow ? full : new GridLength(0);
+        AgentSkillListPanel.MaxHeight = listHeight;
+        Grid.SetColumn(AgentSkillEditor, narrow ? 0 : 1);
+        Grid.SetRow(AgentSkillEditor, narrow ? 3 : 2);
+
+        AgentServerToolbar.ColumnDefinitions[0].Width = narrow ? full : new GridLength(140);
+        AgentServerToolbar.ColumnDefinitions[1].Width = full;
+        AgentServerToolbar.ColumnDefinitions[2].Width = narrow ? new GridLength(0) : GridLength.Auto;
+        AgentServerToolbar.ColumnDefinitions[3].Width = narrow ? new GridLength(0) : GridLength.Auto;
+        AgentServerToolbar.RowDefinitions[1].Height = narrow ? GridLength.Auto : new GridLength(0);
+        Grid.SetRow(AgentAddPresetButton, narrow ? 1 : 0);
+        Grid.SetColumn(AgentAddPresetButton, narrow ? 0 : 2);
+        Grid.SetRow(AgentNewServerButton, narrow ? 1 : 0);
+        Grid.SetColumn(AgentNewServerButton, narrow ? 1 : 3);
+        var orientation = width > 0 && width < 500 ? Orientation.Vertical : Orientation.Horizontal;
+        AgentServerActions.Orientation = AgentConnectionActions.Orientation = AgentSkillActions.Orientation = orientation;
+        AgentDirectoryActions.Orientation = AgentToolActions.Orientation = orientation;
+    }
 
     private void Language_Changed(object? sender, EventArgs e)
     {
@@ -119,7 +201,9 @@ public sealed partial class ToolManagementWindow : Window
         AgentLoadingRing.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
         AgentRefreshButton.IsEnabled = AgentConnectButton.IsEnabled = !value;
         AgentServerEditor.IsEnabled = AgentServerList.IsEnabled = AgentNewServerButton.IsEnabled = !value && _config is not null;
-        AgentAddDirectoryButton.IsEnabled = AgentRemoveDirectoryButton.IsEnabled = !value && _config is not null;
+        AgentServerSearchBox.IsEnabled = AgentSkillSearchBox.IsEnabled = !value;
+        AgentAddDirectoryButton.IsEnabled = !value && _config is not null;
+        AgentRemoveDirectoryButton.IsEnabled = !value && _config is not null && AgentDirectoryList.SelectedItem is string;
         AgentSaveDirectoriesButton.IsEnabled = !value && _config is not null && _directoriesDirty;
         AgentImportSkillButton.IsEnabled = !value && _config is not null;
         var editingServer = _config?.McpServers.FirstOrDefault(server => server.Id == _editingServerId);
@@ -129,6 +213,7 @@ public sealed partial class ToolManagementWindow : Window
         bool canRestore = official && editingServer?.Overridden == true && OfficialPresetFor(editingServer) is not null;
         AgentRestoreServerButton.Visibility = canRestore ? Visibility.Visible : Visibility.Collapsed;
         AgentRestoreServerButton.IsEnabled = !value && canRestore;
+        RefreshServerSaveAvailability();
         AgentToolList.IsEnabled = !value;
         AgentToolEnabledBox.IsEnabled = !value && SelectedToolServer() is not null;
         AgentSaveToolButton.IsEnabled = !value && _toolDirty && SelectedToolServer() is not null;
@@ -142,6 +227,15 @@ public sealed partial class ToolManagementWindow : Window
         AgentCancelServerButton.IsEnabled = AgentCancelSkillButton.IsEnabled = !value;
         AgentCancelServerButton.Visibility = _serverDirty ? Visibility.Visible : Visibility.Collapsed;
         AgentCancelSkillButton.Visibility = _skillDirty ? Visibility.Visible : Visibility.Collapsed;
+        AgentClearServerFiltersButton.IsEnabled = AgentClearSkillSearchButton.IsEnabled = !value;
+        AgentPendingLabel.Visibility = value || _serverDirty || _directoriesDirty || _toolDirty || _skillDirty
+            ? Visibility.Visible : Visibility.Collapsed;
+        UiLocalization.Bind(AgentPendingLabel, TextBlock.TextProperty, value ? "正在处理，请稍候。" : "还有未保存的修改");
+    }
+
+    private void RefreshServerSaveAvailability()
+    {
+        AgentSaveServerButton.IsEnabled = !_busy && _config is not null && (_editingServerId is null || _serverDirty);
     }
 
     private void AcceptConfig(AgentConfig config, bool replaceDirectories)
@@ -181,7 +275,7 @@ public sealed partial class ToolManagementWindow : Window
             var tools = await toolsTask;
             AcceptTools(tools.Tools);
             AcceptConnections(tools.Connections);
-            FillServer(_servers.FirstOrDefault(server => server.Id == _editingServerId));
+            FillServer(_config!.McpServers.FirstOrDefault(server => server.Id == _editingServerId));
             AgentStatusBar.IsOpen = false;
             _noticeKey = null;
             if (tools.Errors is { Length: > 0 }) ConnectionErrors(tools.Errors);
@@ -244,6 +338,7 @@ public sealed partial class ToolManagementWindow : Window
         _serverDirty = false;
         _updating = false;
         RenderServerSource();
+        RefreshFilteredHints();
         RefreshConnectionStatus(); SetBusy(_busy);
     }
 
@@ -287,11 +382,78 @@ public sealed partial class ToolManagementWindow : Window
     {
         bool wasUpdating = _updating;
         _updating = true;
+        string query = AgentServerSearchBox.Text.Trim();
         _servers.Clear();
         foreach (var server in _config?.McpServers ?? [])
-            if (_serverSourceIndex == 0 || (_serverSourceIndex == 1) == IsOfficial(server)) _servers.Add(server);
+            if ((_serverSourceIndex == 0 || (_serverSourceIndex == 1) == IsOfficial(server)) &&
+                (query.Length == 0 || server.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    server.Id.Contains(query, StringComparison.OrdinalIgnoreCase))) _servers.Add(server);
         AgentServerList.SelectedItem = _servers.FirstOrDefault(server => server.Id == _editingServerId);
         _updating = wasUpdating;
+        UiLocalization.Bind(AgentServerEmptyLabel, TextBlock.TextProperty,
+            (_config?.McpServers.Length ?? 0) == 0 ? "尚无 MCP 服务，请添加服务或预设。" : "没有匹配的服务，请换个关键词或清除筛选。");
+        AgentServerEmptyLabel.Visibility = _servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AgentServerEmptyPanel.Visibility = AgentServerEmptyLabel.Visibility;
+        AgentClearServerFiltersButton.Visibility = _servers.Count == 0 && (_config?.McpServers.Length ?? 0) > 0 &&
+            (query.Length > 0 || _serverSourceIndex != 0) ? Visibility.Visible : Visibility.Collapsed;
+        RefreshFilteredHints();
+    }
+
+    private void ServerSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_api is null || _closed) return;
+        RefreshServerList();
+    }
+
+    private void ClearServerFilters_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _closed) return;
+        AgentServerSearchBox.Text = string.Empty;
+        AgentServerSourceBox.SelectedIndex = 0;
+        AgentServerSearchBox.Focus(FocusState.Programmatic);
+    }
+
+    private void SkillSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_api is null || _closed) return;
+        RefreshSkillList();
+    }
+
+    private void ClearSkillSearch_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _closed) return;
+        AgentSkillSearchBox.Text = string.Empty;
+        AgentSkillSearchBox.Focus(FocusState.Programmatic);
+    }
+
+    private void RefreshSkillList()
+    {
+        bool wasUpdating = _updating;
+        _updating = true;
+        string query = AgentSkillSearchBox.Text.Trim();
+        var visibleSkills = _skills.Where(skill => query.Length == 0 ||
+            skill.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+            skill.Id.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        AgentSkillList.ItemsSource = visibleSkills;
+        AgentSkillList.SelectedItem = visibleSkills.FirstOrDefault(skill => skill.Id == _editingSkill?.Id);
+        _updating = wasUpdating;
+        UiLocalization.Bind(AgentSkillEmptyLabel, TextBlock.TextProperty,
+            _skills.Length == 0 ? "尚无可用技能。" : "没有匹配的技能，请换个关键词或清除搜索。");
+        AgentSkillEmptyLabel.Visibility = visibleSkills.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AgentSkillEmptyPanel.Visibility = AgentSkillEmptyLabel.Visibility;
+        AgentClearSkillSearchButton.Visibility = visibleSkills.Length == 0 && _skills.Length > 0 && query.Length > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        RefreshFilteredHints();
+    }
+
+    private void RefreshFilteredHints()
+    {
+        // Visible list selection is a projection; hidden editors keep their stable identity and unsaved fields.
+        // 可见列表选择只是展示投影；被隐藏的编辑器仍保留稳定身份及未保存字段。
+        AgentServerFilteredHint.Visibility = _editingServerId is not null && !_servers.Any(server => server.Id == _editingServerId)
+            ? Visibility.Visible : Visibility.Collapsed;
+        AgentSkillFilteredHint.Visibility = _editingSkill is not null && !AgentSkillList.Items.OfType<AgentSkill>().Any(skill => skill.Id == _editingSkill.Id)
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SelectServer(McpServerConfig server)
@@ -307,20 +469,13 @@ public sealed partial class ToolManagementWindow : Window
         FillServer(server);
     }
 
-    private async void ServerSource_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ServerSource_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_api is null || _updating || _closed) return;
         int selected = AgentServerSourceBox.SelectedIndex;
         if (selected < 0 || selected == _serverSourceIndex) return;
-        if (_serverDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
-        {
-            _updating = true; AgentServerSourceBox.SelectedIndex = _serverSourceIndex; _updating = false;
-            return;
-        }
-        if (_closed) return;
         _serverSourceIndex = selected;
         RefreshServerList();
-        FillServer(_servers.FirstOrDefault(server => server.Id == _editingServerId));
     }
 
     private static void BindListSource(ContainerContentChangingEventArgs args, string name, string key)
@@ -393,9 +548,8 @@ public sealed partial class ToolManagementWindow : Window
     {
         string? id = _editingSkill?.Id;
         _updating = true;
-        AgentSkillList.ItemsSource = skills;
-        AgentSkillList.SelectedItem = skills.FirstOrDefault(skill => skill.Id == id);
-        _editingSkill = AgentSkillList.SelectedItem as AgentSkill;
+        _skills = skills;
+        _editingSkill = skills.FirstOrDefault(skill => skill.Id == id);
         if (_editingSkill?.Id != id)
         {
             _previewGeneration++;
@@ -403,6 +557,7 @@ public sealed partial class ToolManagementWindow : Window
             AgentSkillSourceLabel.Text = AgentSkillPreviewBox.Text = string.Empty;
         }
         _updating = false;
+        RefreshSkillList();
         if (discardDraft || _editingSkill is null) FillSkillState(_editingSkill);
         else RenderSkillDiagnostics();
     }
@@ -604,6 +759,25 @@ public sealed partial class ToolManagementWindow : Window
         _serverDirty = ReadEditor() != _savedEditor;
         SetBusy(_busy);
     }
+
+    private void Server_TextChanging(TextBox sender, TextBoxTextChangingEventArgs e)
+    {
+        if (_updating || _api is null || _closed) return;
+        if (ReferenceEquals(sender, AgentBrowserEndpointBox) && _browserSettings is null) return;
+        // Refresh the save gate before text rendering; defer browser fields and visual layout to TextChanged.
+        // 文字渲染前同步更新保存按钮；浏览器字段刷新及视觉布局仍由 TextChanged 完成。
+        if (ReferenceEquals(sender, AgentBrowserEndpointBox) && _browserSettings is not null)
+        {
+            _browserSettingsEdited = true;
+        }
+        else if (ReferenceEquals(sender, AgentServerArgsBox) || ReferenceEquals(sender, AgentServerCommandBox) ||
+            ReferenceEquals(sender, AgentServerEnvRefsBox))
+        {
+            _browserSettingsEdited = false;
+        }
+        _serverDirty = ReadEditor() != _savedEditor;
+        RefreshServerSaveAvailability();
+    }
     private void Server_EnabledChanged(object sender, RoutedEventArgs e)
     { if (!_updating && _api is not null) { _serverDirty = ReadEditor() != _savedEditor; SetBusy(_busy); } }
 
@@ -616,6 +790,12 @@ public sealed partial class ToolManagementWindow : Window
         if (_closed || folder is null || _directories.Contains(folder.Path, StringComparer.OrdinalIgnoreCase)) return;
         _directories.Add(folder.Path);
         _directoriesDirty = true;
+        SetBusy(_busy);
+    }
+
+    private void Directory_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_api is null || _updating || _closed) return;
         SetBusy(_busy);
     }
 
@@ -647,12 +827,13 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_updating || _closed) return;
         if (_skillDirty && !await ConfirmAsync("放弃未保存的修改？", "当前编辑尚未保存。", "放弃修改"))
-        { _updating = true; AgentSkillList.SelectedItem = _editingSkill; _updating = false; return; }
+        { _updating = true; AgentSkillList.SelectedItem = AgentSkillList.Items.OfType<AgentSkill>().FirstOrDefault(skill => skill.Id == _editingSkill?.Id); _updating = false; return; }
         _previewGeneration++;
         _preview?.Cancel();
         AgentSkillSourceLabel.Text = AgentSkillPreviewBox.Text = string.Empty;
         _editingSkill = AgentSkillList.SelectedItem as AgentSkill;
         FillSkillState(_editingSkill);
+        RefreshFilteredHints();
         if (_editingSkill is not { } skill) return;
         AgentSkillSourceLabel.Text = skill.Source;
         if (skill.Status == "unavailable" || AgentTabs.SelectedIndex != 1) return;
@@ -685,6 +866,7 @@ public sealed partial class ToolManagementWindow : Window
             var preview = await _api.GetSkillAsync(skill.Id, _conversationId, source.Token);
             if (_closed || source.IsCancellationRequested || generation != _previewGeneration) return;
             AgentSkillSourceLabel.Text = preview.Source;
+            ToolTipService.SetToolTip(AgentSkillSourceLabel, preview.Source);
             AgentSkillPreviewBox.Text = preview.Content;
         }
         catch (OperationCanceledException) when (source.IsCancellationRequested) { }
@@ -696,6 +878,7 @@ public sealed partial class ToolManagementWindow : Window
     {
         _updating = true; _skillDirty = false;
         AgentSkillNameLabel.Text = skill?.Name ?? string.Empty;
+        ToolTipService.SetToolTip(AgentSkillNameLabel, skill?.Name);
         UiLocalization.Bind(AgentSkillSourceTypeLabel, TextBlock.TextProperty, skill is null ? string.Empty : SkillSourceKey(skill));
         AgentSkillEnabledBox.IsChecked = skill is not null && !(_config?.DisabledSkills ?? []).Contains(skill.Id, StringComparer.Ordinal);
         RenderSkillDiagnostics();

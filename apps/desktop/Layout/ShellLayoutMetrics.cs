@@ -7,6 +7,7 @@ namespace KYNXA_Desktop.Layout;
 public static class ShellLayoutMetrics
 {
     public const double SidebarDefault = 240;
+    public const double CompactSidebarBreakpoint = 980;
     public const double SidebarCollapsed = 56;
     public const double SidebarMin = 200;
     public const double SidebarMax = 360;
@@ -16,7 +17,7 @@ public static class ShellLayoutMetrics
     public const double ComposerWidthDefault = 824;
     public const double ComposerWidthMin = 620;
     public const double ComposerWidthMax = 1040;
-    public const double ComposerHeightDefault = 110;
+    public const double ComposerHeightDefault = 104;
     public const double ComposerHeightMin = 96;
     public const double ComposerAutoHeightMax = 210;
     public const double ComposerHeightMax = 420;

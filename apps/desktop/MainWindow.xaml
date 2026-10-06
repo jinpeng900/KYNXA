@@ -25,6 +25,7 @@
                 Foreground="{StaticResource KynxaTextBrush}"
                 Text="KYNXA" />
             <Button
+                Click="MoreOptions_Click"
                 Width="32"
                 Height="32"
                 Margin="82,0,0,0"

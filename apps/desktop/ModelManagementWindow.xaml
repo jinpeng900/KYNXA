@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:services="using:KYNXA_Desktop.Services"
     Title="KYNXA">
-    <Grid Background="{StaticResource KynxaMainBrush}">
+    <Grid x:Name="WindowRoot" Background="{StaticResource KynxaMainBrush}" Loaded="WindowRoot_Loaded">
         <Grid.Resources>
             <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#888888" />
             <SolidColorBrush x:Key="ComboBoxBorderBrushFocused" Color="#888888" />
@@ -48,30 +48,50 @@
                 <TextBlock services:UiLocalization.Text="模型管理" />
             </StackPanel>
         </Grid>
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="212" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-            <Grid x:Name="ProviderPanel" Background="{StaticResource KynxaSidebarBrush}" Padding="16,20,12,18">
+        <Grid x:Name="ManagementLayout" Grid.Row="1" SizeChanged="ManagementLayout_SizeChanged">
+            <Grid.RowDefinitions><RowDefinition x:Name="CompactConnectionsRow" Height="0" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition x:Name="ConnectionsColumn" Width="212" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Grid x:Name="ProviderPanel" Grid.Row="1" Background="{StaticResource KynxaSidebarBrush}" Padding="16,20,12,18">
                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                <StackPanel Spacing="7" Margin="8,0,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <StackPanel x:Name="ConnectionsHeading" Grid.ColumnSpan="2" Spacing="7" Margin="8,0,0,0">
                     <TextBlock services:UiLocalization.Text="我的连接" FontSize="15" FontWeight="SemiBold" />
                     <TextBlock x:Name="ConnectionCount" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                 </StackPanel>
-                <Grid Grid.Row="1" Margin="0,18,0,12">
+                <Grid x:Name="SavedConnectionsList" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,18,0,12">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="ProviderList" Spacing="4" /></ScrollViewer>
                     <StackPanel x:Name="EmptyConnections" Margin="8,12" Spacing="8" IsHitTestVisible="False">
                         <FontIcon Glyph="&#xE774;" FontSize="24" Foreground="#888888" HorizontalAlignment="Left" />
                         <TextBlock services:UiLocalization.Text="还没有模型连接" TextWrapping="Wrap" />
-                        <TextBlock services:UiLocalization.Text="从右侧选择服务商，&#xA;添加你的第一个模型。" TextWrapping="Wrap" FontSize="12" LineHeight="20" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        <TextBlock services:UiLocalization.Text="选择服务商，&#xA;添加你的第一个模型。" TextWrapping="Wrap" FontSize="12" LineHeight="20" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                     </StackPanel>
                 </Grid>
-                <Button x:Name="NewConnectionButton" Grid.Row="2" HorizontalAlignment="Stretch" Background="White" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="NewConnectionButton_Click">
+                <ComboBox x:Name="CompactConnectionPicker" Grid.Row="1" Visibility="Collapsed" Margin="0,0,8,0"
+                          MinHeight="38" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13"
+                          CornerRadius="8" services:UiLocalization.PlaceholderText="选择已保存连接"
+                          SelectionChanged="CompactConnectionPicker_SelectionChanged" services:UiLocalization.AutomationName="已保存的模型连接">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="services:ModelProvider">
+                            <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" ToolTipService.ToolTip="{x:Bind DisplayName, Mode=OneTime}"
+                                       MaxWidth="320" TextTrimming="CharacterEllipsis" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <Button x:Name="NewConnectionButton" Grid.Row="2" Grid.ColumnSpan="2" HorizontalAlignment="Stretch" Background="White" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="NewConnectionButton_Click">
                     <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE710;" FontSize="12" /><TextBlock services:UiLocalization.Text="添加连接" /></StackPanel>
                 </Button>
             </Grid>
-            <Grid Grid.Column="1" Padding="28,22,28,18" RowSpacing="16">
+            <Grid x:Name="EditorPanel" Grid.Row="1" Grid.Column="1" Padding="28,22,28,18" RowSpacing="16">
                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                 <StackPanel Spacing="7">
-                    <TextBlock x:Name="EditorTitle" FontSize="22" FontWeight="SemiBold" />
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="EditorTitle" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                        <Border x:Name="DraftStateBadge" Grid.Column="1" Background="{StaticResource KynxaReplySurfaceBrush}"
+                                CornerRadius="6" Padding="8,4" VerticalAlignment="Center">
+                            <TextBlock x:Name="DraftStateText" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
+                        </Border>
+                    </Grid>
                     <TextBlock services:UiLocalization.Text="连接你常用的模型，让 KYNXA 帮你完成工作。" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                 </StackPanel>
                 <ScrollViewer x:Name="EditorScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -98,7 +118,8 @@
                         <Border Style="{StaticResource TokenLimitRowStyle}">
                             <StackPanel Spacing="8">
                                 <TextBlock services:UiLocalization.Text="上下文窗口（tokens）" FontWeight="SemiBold" />
-                                <Grid ColumnSpacing="8">
+                                <Grid x:Name="ContextWindowRow" ColumnSpacing="8">
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <ComboBox x:Name="ContextWindowBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="0" SelectionChanged="ContextWindowBox_SelectionChanged" services:UiLocalization.AutomationName="上下文窗口">
                                         <ComboBoxItem Content="8K" Tag="8192" />
@@ -116,7 +137,8 @@
                         <Border Style="{StaticResource TokenLimitRowStyle}">
                             <StackPanel Spacing="8">
                                 <TextBlock services:UiLocalization.Text="最大输出（tokens）" FontWeight="SemiBold" />
-                                <Grid ColumnSpacing="8">
+                                <Grid x:Name="MaxOutputTokensRow" ColumnSpacing="8">
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                     <ComboBox x:Name="MaxOutputTokensBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="6" SelectionChanged="MaxOutputTokensBox_SelectionChanged" services:UiLocalization.AutomationName="最大输出">
                                         <ComboBoxItem Content="4K" Tag="4096" />
@@ -143,7 +165,7 @@
                                 <StackPanel x:Name="ModelOptions" Spacing="4" />
                             </ScrollViewer>
                             <TextBlock x:Name="EmptyModelsHint" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
-                            <Expander services:UiLocalization.Header="手动填写模型 ID" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" FontSize="12">
+                            <Expander x:Name="ManualModelsSection" services:UiLocalization.Header="手动填写模型 ID" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" FontSize="12">
                                 <TextBox x:Name="ModelsBox" AcceptsReturn="True" Height="88" TextWrapping="NoWrap" ScrollViewer.VerticalScrollBarVisibility="Auto" services:UiLocalization.PlaceholderText="每行一个模型 ID" TextChanged="ModelsBox_TextChanged" services:UiLocalization.AutomationName="模型 ID 列表" />
                             </Expander>
                             <TextBlock x:Name="ModelsHint" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />

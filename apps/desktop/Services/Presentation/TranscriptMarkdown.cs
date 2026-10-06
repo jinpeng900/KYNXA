@@ -19,6 +19,9 @@ internal static class TranscriptMarkdown
 {
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics()
+        // Preserve reply line breaks in both streaming and final HTML without rewriting source.
+        // 流式与最终显示均保留回复换行，不改写原文或按编号猜测断行。
+        .UseSoftlineBreakAsHardlineBreak()
         .DisableHtml().Build();
 
     public static string Render(string markdown, bool streaming = false)
@@ -28,6 +31,7 @@ internal static class TranscriptMarkdown
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         var renderer = new HtmlRenderer(writer);
         Pipeline.Setup(renderer);
+        renderer.ObjectRenderers.ReplaceOrAdd<LineBreakInlineRenderer>(new ReplyLineBreakRenderer());
         renderer.ObjectRenderers.ReplaceOrAdd<HtmlMathInlineRenderer>(new FormulaInlineRenderer());
         renderer.ObjectRenderers.ReplaceOrAdd<HtmlMathBlockRenderer>(new FormulaBlockRenderer(streaming));
         renderer.ObjectRenderers.ReplaceOrAdd<CodeBlockRenderer>(new HighlightedCodeRenderer(streaming));
@@ -36,6 +40,22 @@ internal static class TranscriptMarkdown
         renderer.ObjectRenderers.ReplaceOrAdd<HtmlTableRenderer>(new ScrollTableRenderer());
         renderer.Render(document);
         return writer.ToString();
+    }
+
+    private sealed class ReplyLineBreakRenderer : LineBreakInlineRenderer
+    {
+        protected override void Write(HtmlRenderer renderer, LineBreakInline line)
+        {
+            if (renderer.IsLastInContainer) return;
+            if (renderer.EnableHtmlForInline && (line.IsHard || RenderAsHardlineBreak))
+            {
+                // A formatting LF after BR becomes an extra space in selected-text copying.
+                // BR 后附加的 HTML 排版换行会在选区复制中变成额外空格，故只输出换行标签。
+                renderer.Write("<br />");
+                return;
+            }
+            renderer.EnsureLine();
+        }
     }
 
     private static void WriteFormula(HtmlRenderer renderer, string latex, bool display, bool inline = false)

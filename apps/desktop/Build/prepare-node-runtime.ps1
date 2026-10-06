@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$RuntimeIdentifier,
     [Parameter(Mandatory = $true)][string]$CacheDirectory,

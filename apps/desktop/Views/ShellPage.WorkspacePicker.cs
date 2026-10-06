@@ -98,6 +98,7 @@ public sealed partial class ShellPage
             return Task.CompletedTask;
         });
         menu.Content = PickerMenu.WithFixedFooter(projects, actions);
+        ((FrameworkElement)menu.Content).Width = PickerMenu.SetContentWidth(menu, 250, XamlRoot.Size.Width);
         menu.ShowAt(WorkspacePickerButton);
     }
 

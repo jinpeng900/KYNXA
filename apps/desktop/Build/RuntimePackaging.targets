@@ -4,8 +4,10 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway" Command="npm ci --no-audit --no-fund" />
   </Target>
   <Target Name="IncludeGatewayNodeRuntime" BeforeTargets="AssignTargetPaths">
+    <!-- Compose first, then normalize with the single-argument API shared by both MSBuild hosts.
+         先组合路径，再用两种 MSBuild 宿主都支持的单参数 API 规范化。 -->
     <PropertyGroup>
-      <_KynxaNodeCacheDirectory>$([System.IO.Path]::GetFullPath('$(BaseIntermediateOutputPath)node-runtime\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaNodeCacheDirectory>
+      <_KynxaNodeCacheDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)node-runtime\$(RuntimeIdentifier)'))))</_KynxaNodeCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-node-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaNodeCacheDirectory)&quot; -ManifestPath &quot;$(MSBuildProjectDirectory)\Build\node-runtime.json&quot;" />
@@ -41,7 +43,7 @@
   -->
   <Target Name="IncludeBundledEmbeddingModel" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
     <PropertyGroup>
-      <_KynxaEmbeddingCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\embedding\builtin-multilingual', '$(MSBuildProjectDirectory)'))</_KynxaEmbeddingCacheDirectory>
+      <_KynxaEmbeddingCacheDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '..\..\artifacts\runtime\embedding\builtin-multilingual'))))</_KynxaEmbeddingCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway"
           Command="node models/retrieval/prepare-embedding-model.mjs --model-root &quot;$(_KynxaEmbeddingCacheDirectory)&quot;" />
@@ -59,7 +61,7 @@
   -->
   <Target Name="IncludeBundledRerankerModel" BeforeTargets="AssignTargetPaths" DependsOnTargets="EnsureGatewayDependencies">
     <PropertyGroup>
-      <_KynxaRerankerCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\rerank\builtin-multilingual-reranker', '$(MSBuildProjectDirectory)'))</_KynxaRerankerCacheDirectory>
+      <_KynxaRerankerCacheDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '..\..\artifacts\runtime\rerank\builtin-multilingual-reranker'))))</_KynxaRerankerCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway"
           Command="node models/retrieval/prepare-reranker-model.mjs --model-root &quot;$(_KynxaRerankerCacheDirectory)&quot;" />
@@ -74,7 +76,7 @@
   </Target>
   <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(RuntimeIdentifier)' == 'win-x64'">
     <PropertyGroup>
-      <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath('..\..\artifacts\runtime\vc\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaVisualCppCacheDirectory>
+      <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '..\..\artifacts\runtime\vc\$(RuntimeIdentifier)'))))</_KynxaVisualCppCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot;" />
@@ -103,7 +105,7 @@
     <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="Restore;Build"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>
-      <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath('$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)', '$(MSBuildProjectDirectory)'))</_KynxaToolHostNoticesDirectory>
+      <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)'))))</_KynxaToolHostNoticesDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-toolhost-notices.ps1&quot; -AssetsPath &quot;$(MSBuildProjectDirectory)\..\tool-host\obj\project.assets.json&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -OutputDirectory &quot;$(_KynxaToolHostNoticesDirectory)&quot;" />

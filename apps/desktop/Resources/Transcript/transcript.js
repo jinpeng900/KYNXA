@@ -3,8 +3,12 @@
 (() => {
   'use strict';
   const messages = document.getElementById('messages');
+  const jumpButton = document.getElementById('jump-to-latest');
+  const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
+  const COPY_SUCCESS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg>';
   const uiStrings = {
     conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
+    copied: '已复制', copyFailed: '复制失败，请重试。', jumpToLatest: '跳转到最新消息',
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
@@ -25,6 +29,8 @@
     toolAdjustWindow: '调整窗口', toolWindowResize: '调整大小', toolWindowMaximize: '最大化', toolWindowMinimize: '最小化',
     toolWindowRestore: '恢复窗口', toolBackgroundLaunch: '后台启动', toolWindowUnresponsive: '窗口未响应',
     toolViewScreenshot: '查看截图',
+    messageSentAt: '发送时间', replyCreatedAt: '回复创建时间', replyEndedAt: '回复结束时间',
+    localEndTime: '本机记录', timeNotRecorded: '未记录',
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
@@ -36,6 +42,10 @@
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   let anchoringScroll = false, anchorFrame = 0;
+  let bottomNavigationPending = false, navigationGeneration = 0;
+  let nextCopyRequest = 0, copyFeedbackTimer = 0, copyFeedbackEntry = null;
+  const pendingCopies = new Map();
+  const messageTimeFormatters = new Map();
   const liveElapsedEntries = new Set();
   let elapsedTimer = null;
   const send = value => window.chrome?.webview?.postMessage(value);
@@ -45,8 +55,12 @@
       ? Math.floor(Math.max(0, performance.now() - entry.generationStartedAtMs)) : entry.finalDurationMs;
     const text = entry.elapsedMode ? window.KynxaMessagePresentation.elapsedText(durationMs, uiStrings,
       { live: entry.elapsedMode === 'live' }) : '';
-    setToolText(entry.elapsed, text); entry.elapsed.hidden = !text;
-    entry.elapsed.dataset.mode = entry.elapsedMode || '';
+    setToolText(entry.elapsed, text);
+    // Reused snapshots must not mutate unchanged attributes or disturb the cached selection surface.
+    // 复用快照时不重复写入未变属性，保留缓存聊天的选区与展示节点。
+    if (entry.elapsed.hidden !== !text) entry.elapsed.hidden = !text;
+    const mode = entry.elapsedMode || '';
+    if (entry.elapsed.dataset.mode !== mode) entry.elapsed.dataset.mode = mode;
   }
   function synchronizeElapsedTimer() {
     const hasVisibleClock = !document.hidden && [...liveElapsedEntries].some(entry => entry.article.isConnected);
@@ -87,11 +101,46 @@
       else node.remove();
     } else if (text) entry.status.prepend(document.createTextNode(text));
   }
+  function formatMessageTime(value) {
+    if (!Number.isSafeInteger(value) || value <= 0) return uiStrings.timeNotRecorded;
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return uiStrings.timeNotRecorded;
+    const language = document.documentElement.lang === 'en' ? 'en-US' : 'zh-CN';
+    let formatter = messageTimeFormatters.get(language);
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat(language, { calendar: 'gregory', numberingSystem: 'latn',
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+      messageTimeFormatters.set(language, formatter);
+    }
+    const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
+    return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  }
+  function updateMessageMetadata(entry) {
+    const message = entry.message;
+    if (!message) return;
+    const english = document.documentElement.lang === 'en', separator = english ? ': ' : '：';
+    const user = message.role === 'user';
+    const lines = [(user ? uiStrings.messageSentAt : uiStrings.replyCreatedAt) + separator + formatMessageTime(message.createdAtMs)];
+    if (!user) {
+      const streaming = message.streaming === true || message.status === 'streaming';
+      const ended = streaming ? uiStrings.generating : formatMessageTime(message.endRecordedAtMs);
+      const recorded = !streaming && ended !== uiStrings.timeNotRecorded;
+      const qualifier = recorded ? (english ? ` (${uiStrings.localEndTime})` : `（${uiStrings.localEndTime}）`) : '';
+      lines.push(uiStrings.replyEndedAt + qualifier + separator + ended);
+      const elapsed = !streaming ? window.KynxaMessagePresentation.elapsedText(message.durationMs, uiStrings) : '';
+      if (elapsed) lines.push(elapsed);
+    }
+    // Times describe the message without becoming body text, selection content, or a guessed end time.
+    // 时间只描述消息，不进入正文与选区，也不根据耗时猜测结束时刻。
+    const description = lines.join('\n');
+    if (entry.article.title !== description) entry.article.title = description;
+    if (entry.article.getAttribute('aria-description') !== description) entry.article.setAttribute('aria-description', description);
+  }
   function localizeEntry(entry) {
-    entry.copy.title = uiStrings.copy;
-    entry.copy.setAttribute('aria-label', uiStrings.copyMessage);
+    localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
+      updateMessageMetadata(entry);
       setStatusText(entry, statusText(entry.message));
       refreshElapsedText(entry);
     }
@@ -100,6 +149,41 @@
     for (const row of entry.segmentRows?.values() || []) {
       for (const tool of row.toolRows.values()) localizeToolRow(tool);
     }
+  }
+  function localizeCopyButton(entry) {
+    const state = entry.copy.dataset.copyState;
+    entry.copy.title = state === 'success' ? uiStrings.copied : state === 'error' ? uiStrings.copyFailed : uiStrings.copy;
+    entry.copy.setAttribute('aria-label', state === 'success' ? uiStrings.copied : state === 'error' ? uiStrings.copyFailed : uiStrings.copyMessage);
+  }
+  function clearCopyFeedback() {
+    clearTimeout(copyFeedbackTimer);
+    if (copyFeedbackEntry) {
+      delete copyFeedbackEntry.copy.dataset.copyState;
+      copyFeedbackEntry.copy.innerHTML = COPY_ICON;
+      localizeCopyButton(copyFeedbackEntry);
+    }
+    copyFeedbackEntry = null;
+  }
+  function requestCopy(entry) {
+    const requestId = String(++nextCopyRequest);
+    entry.copyRequestId = requestId;
+    while (pendingCopies.size >= 32) pendingCopies.delete(pendingCopies.keys().next().value);
+    pendingCopies.set(requestId, { entry, conversationId });
+    send({ type: 'copy', conversationId, requestId, messageId: entry.message.id, text: copiedMessage(entry.message) });
+  }
+  function acknowledgeCopy(command) {
+    const request = pendingCopies.get(command.requestId);
+    pendingCopies.delete(command.requestId);
+    if (!request || command.conversationId !== conversationId || request.conversationId !== conversationId
+      || request.entry.copyRequestId !== command.requestId || !request.entry.article.isConnected) return;
+    // Show success only after the native host has written the clipboard, and ignore old operations.
+    // 只有原生宿主写入剪贴板后才显示成功，忽略已经过期的操作回执。
+    clearCopyFeedback();
+    copyFeedbackEntry = request.entry;
+    copyFeedbackEntry.copy.dataset.copyState = command.success === true ? 'success' : 'error';
+    copyFeedbackEntry.copy.innerHTML = command.success === true ? COPY_SUCCESS_ICON : COPY_ICON;
+    localizeCopyButton(copyFeedbackEntry);
+    copyFeedbackTimer = setTimeout(clearCopyFeedback, 2200);
   }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
@@ -113,6 +197,9 @@
     document.documentElement.lang = command.language === 'en' ? 'en' : 'zh-CN';
     document.title = uiStrings.conversation;
     messages.setAttribute('aria-label', uiStrings.transcript);
+    jumpButton.textContent = '↓ ' + uiStrings.jumpToLatest;
+    jumpButton.setAttribute('aria-label', uiStrings.jumpToLatest);
+    jumpButton.title = uiStrings.jumpToLatest;
     // Localize only application controls; message DOM and browser selections stay intact.
     // 只本地化应用控件；消息 DOM 与浏览器选择保持不变。
     for (const entry of entries.values()) localizeEntry(entry);
@@ -123,10 +210,14 @@
     // 文案换行可能改变布局；保留用户滚动位置，仅暂停本次布局触发的底部跟随，不修改选择范围。
     if (scrollX !== left || scrollY !== top) scrollTo({ left, top, behavior: 'instant' });
     languageFrame = requestAnimationFrame(() => {
-      languageFrame = requestAnimationFrame(() => { localizingUi = false; });
+      languageFrame = requestAnimationFrame(() => {
+        localizingUi = false;
+        if (bottomNavigationPending) followBottom();
+      });
     });
   }
   const atBottom = () => document.documentElement.scrollHeight - innerHeight - scrollY <= 36;
+  const updateJumpButton = () => { jumpButton.hidden = entries.size === 0 || atBottom(); };
   const activeSelection = () => {
     const selection = getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
@@ -134,11 +225,37 @@
   };
   function followBottom() {
     if (localizingUi || !following || activeSelection() || pointerSelecting) return;
+    const expectedConversation = conversationId, expectedGeneration = navigationGeneration;
     cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
-      if (!localizingUi && following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi) return;
+      if (following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      bottomNavigationPending = false;
+      updateJumpButton();
     });
   }
+  function beginBottomNavigation() {
+    following = true;
+    bottomNavigationPending = true;
+    navigationGeneration++;
+  }
+  function stopFollowing() {
+    following = false;
+    bottomNavigationPending = false;
+    navigationGeneration++;
+  }
+  function jumpToLatest() {
+    // Explicit navigation preserves the selection; selected text continues to freeze transcript updates.
+    // 显式跳转保留选区；已选文字仍继续冻结聊天更新。
+    following = !activeSelection();
+    bottomNavigationPending = false;
+    navigationGeneration++;
+    cancelAnimationFrame(scrollFrame);
+    scrollTo({ top: document.documentElement.scrollHeight, left: scrollX, behavior: 'instant' });
+    updateJumpButton();
+  }
+  jumpButton.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
+  jumpButton.addEventListener('click', jumpToLatest);
   function clearSelection() {
     getSelection()?.removeAllRanges();
     pointerSelecting = false;
@@ -212,13 +329,14 @@
     const actions = document.createElement('div'); actions.className = 'message-actions'; actions.dataset.copyIgnore = '';
     const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-message';
     copy.title = uiStrings.copy; copy.setAttribute('aria-label', uiStrings.copyMessage);
-    copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
+    copy.innerHTML = COPY_ICON;
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
     const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
     const timeline = document.createElement('div'); timeline.className = 'assistant-timeline'; timeline.hidden = true;
     const entry = { article, content, elapsed, body, status, actions, copy, retry,
       tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null };
-    copy.addEventListener('click', () => send({ type: 'copy', conversationId, text: copiedMessage(entry.message) }));
+    copy.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
+    copy.addEventListener('click', () => requestCopy(entry));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
     actions.append(copy, retry); content.append(elapsed, timeline, body, status); article.append(content, actions);
     return entry;
@@ -226,10 +344,11 @@
   function updateMessage(entry, message) {
     const old = entry.message;
     updateElapsedState(entry, message);
-    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode']
+    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode', 'createdAtMs', 'endRecordedAtMs']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
+    updateMessageMetadata(entry);
     const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -420,7 +539,8 @@
   }
   function openConversation(id) {
     if (conversationId === id) return;
-    pending = null; clearSelection(); following = true;
+    pendingCopies.clear(); clearCopyFeedback();
+    pending = null; clearSelection(); beginBottomNavigation();
     // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
     // and expanded reasoning instead of rebuilding every element.
     // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
@@ -446,6 +566,7 @@
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
+    updateJumpButton();
     liveElapsedEntries.clear();
     for (const entry of entries.values()) if (entry.elapsedMode === 'live') {
       liveElapsedEntries.add(entry); refreshElapsedText(entry);
@@ -458,7 +579,7 @@
     const changedConversation = conversationId !== snapshot.conversationId;
     if (changedConversation) openConversation(snapshot.conversationId);
     if (changedConversation || snapshot.openAtBottom) {
-      pending = null; clearSelection(); following = true;
+      pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
       // Timing is outside selected prose. Terminal metadata stops the clock even while body convergence is deferred.
@@ -486,6 +607,7 @@
     }
     restoreScrollAnchor(anchors);
     applying = false;
+    updateJumpButton();
     synchronizeElapsedTimer();
     followBottom();
     document.fonts.ready.then(followBottom);
@@ -608,7 +730,7 @@
     event.clipboardData.setData('text/html', html.innerHTML);
   });
   document.addEventListener('selectionchange', () => {
-    if (activeSelection()) following = false;
+    if (activeSelection()) stopFollowing();
     else scheduleFlush();
   });
   document.addEventListener('pointerdown', event => { if (event.button === 0) pointerSelecting = true; });
@@ -623,24 +745,35 @@
   });
   window.addEventListener('pagehide', () => { if (elapsedTimer !== null) clearInterval(elapsedTimer); elapsedTimer = null; });
   window.addEventListener('scroll', () => {
-    if (!applying && !localizingUi && !anchoringScroll) following = !activeSelection() && !pointerSelecting && atBottom();
+    // Clearing the old DOM may queue a scroll event until after the new long chat is rendered.
+    // Keep explicit navigation alive until its first bottom frame; real upward input cancels it immediately.
+    // 清空旧 DOM 产生的滚动事件可能在新长聊天渲染后才到达；首个底部帧前保留显式导航，真实上滚输入立即撤销。
+    if (!applying && !localizingUi && !anchoringScroll && !bottomNavigationPending)
+      following = !activeSelection() && !pointerSelecting && atBottom();
+    updateJumpButton();
   }, { passive: true });
-  window.addEventListener('wheel', event => { if (event.deltaY < 0) following = false; }, { passive: true });
-  window.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false; });
+  window.addEventListener('wheel', event => { if (event.deltaY < 0) stopFollowing(); }, { passive: true });
+  window.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) stopFollowing(); });
   messages.addEventListener('click', event => {
     const link = event.target.closest('a[href]');
     if (!link) return;
     event.preventDefault();
     try { const url = new URL(link.getAttribute('href')); if (['http:', 'https:', 'mailto:'].includes(url.protocol)) send({ type: 'link', conversationId, url: url.href }); } catch { }
   });
-  new ResizeObserver(followBottom).observe(messages);
+  new ResizeObserver(() => { updateJumpButton(); followBottom(); }).observe(messages);
+  window.addEventListener('resize', () => { updateJumpButton(); followBottom(); });
   window.chrome?.webview?.addEventListener('message', event => {
     const command = event.data;
     if (command?.type === 'initializeUi') initializeUi(command);
     else if (command?.type === 'render') applyTranscript(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
-    else if (command?.type === 'beforeSend') { following = atBottom() && !activeSelection(); followBottom(); }
+    else if (command?.type === 'copyResult') acknowledgeCopy(command);
+    else if (command?.type === 'jumpToLatest') jumpToLatest();
+    else if (command?.type === 'beforeSend') {
+      if (atBottom() && !activeSelection()) { following = true; followBottom(); }
+      else stopFollowing();
+    }
   });
   window.applyTranscript = applyTranscript;
   window.transcriptSelectionText = selectionText;

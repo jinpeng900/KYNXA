@@ -26,10 +26,13 @@ public sealed class StorageLocationRow : Grid
         ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         LocationLabel = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center };
         UiLocalization.Bind(LocationLabel, TextBlock.TextProperty, label);
         PathText = new TextBlock { FontFamily = font, FontSize = 13, TextWrapping = TextWrapping.NoWrap,
-            TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
+            TextTrimming = TextTrimming.CharacterEllipsis, IsTextSelectionEnabled = true,
+            VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
         AutomationProperties.SetAutomationId(PathText, pathAutomationId);
         ChangeButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(10, 5, 10, 5),
             CornerRadius = new CornerRadius(8), VerticalAlignment = VerticalAlignment.Center,
@@ -39,7 +42,21 @@ public sealed class StorageLocationRow : Grid
         Grid.SetColumn(PathText, 1);
         Grid.SetColumn(ChangeButton, 2);
         Children.Add(LocationLabel); Children.Add(PathText); Children.Add(ChangeButton);
+        SizeChanged += (_, args) => UpdateLayoutForWidth(args.NewSize.Width);
         SetPath(path);
+    }
+
+    private void UpdateLayoutForWidth(double width)
+    {
+        bool compact = width < 420;
+        ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+        ColumnDefinitions[1].Width = compact ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
+        ColumnDefinitions[2].Width = compact ? new GridLength(0) : GridLength.Auto;
+        SetColumn(ChangeButton, compact ? 1 : 2);
+        SetRow(PathText, compact ? 1 : 0);
+        SetColumn(PathText, compact ? 0 : 1);
+        SetColumnSpan(PathText, compact ? 2 : 1);
+        PathText.Margin = compact ? new Thickness(0, 8, 0, 0) : new Thickness(0);
     }
 
     public void SetPath(string path)

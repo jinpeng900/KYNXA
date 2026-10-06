@@ -10,6 +10,10 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private double _workPanelWidthBeforeDrag;
+    private Guid? _workPanelConversationId;
+    private Guid? _workPanelProjectId;
+    private bool _workPanelIsChatMode;
+    private bool _emptyWorkPanelRequested;
 
     private static string? UserMountedFolder(ProjectState? project) =>
         ProjectMountPresentation.UserFolder(project, StoragePaths.DesktopDirectory);
@@ -27,19 +31,31 @@ public sealed partial class ShellPage
         bool hasSpace = CanShowWorkPanel(available, MainRegion.ActualHeight);
         SuspendUnselectedWorkViewers(_layout.PreviewVisible && hasSpace);
         SynchronizeWorkTabs();
+        Guid? projectId = ViewModel.IsChatMode ? null : _selectedWorkProjectId;
+        if (_workPanelConversationId != ActiveChatId || _workPanelProjectId != projectId || _workPanelIsChatMode != ViewModel.IsChatMode)
+        {
+            _workPanelConversationId = ActiveChatId;
+            _workPanelProjectId = projectId;
+            _workPanelIsChatMode = ViewModel.IsChatMode;
+            _emptyWorkPanelRequested = false;
+        }
         bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
         bool canOpen = (isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder) && hasSpace;
-        bool visible = canOpen && _layout.PreviewVisible;
+        // A folder header alone does not need a preview column. Empty opening belongs to the mode/project/chat scope.
+        // 仅有目录标题时不占用预览列；空面板请求属于当前模式、项目与会话，未创建聊天时也不会跨项目泄漏。
+        bool visible = canOpen && _layout.PreviewVisible && (WorkTabs.HasOpenTabs || _emptyWorkPanelRequested);
         double panelWidth = visible ? GetWorkPanelWidth(available, _layout.PreviewWidth) : 0;
         double gap = visible ? WorkPanelGap : 0;
 
         PreviewColumn.Width = new GridLength(panelWidth);
         PreviewGripColumn.Width = new GridLength(gap);
         WorkContextPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        SuspendUnselectedWorkViewers(visible);
         PresentSelectedWorkTab(visible);
         WorkPanelGrip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         OpenWorkPanelButton.Visibility = canOpen && !visible ? Visibility.Visible : Visibility.Collapsed;
-        ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 56 : 24, 0);
+        ConversationActionsButton.Margin = new Thickness(0, 8, canOpen && !visible ? 48 : 12, 0);
+        ConversationTitle.Margin = new Thickness(24, 16, canOpen && !visible ? 88 : 52, 0);
 
         // Automatic hiding never changes the user's explicit open/closed preference.
         // 自动隐藏不改变用户明确选择的展开或关闭偏好。
@@ -75,6 +91,7 @@ public sealed partial class ShellPage
 
     private void OpenWorkPanelButton_Click(object sender, RoutedEventArgs e)
     {
+        _emptyWorkPanelRequested = !WorkTabs.HasOpenTabs;
         _layout.PreviewVisible = true;
         ApplyLayout();
         SaveLayout();
@@ -82,6 +99,7 @@ public sealed partial class ShellPage
 
     private void CloseWorkPanelButton_Click(object sender, RoutedEventArgs e)
     {
+        _emptyWorkPanelRequested = false;
         _layout.PreviewVisible = false;
         ApplyLayout();
         SaveLayout();
