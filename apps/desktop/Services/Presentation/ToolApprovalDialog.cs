@@ -18,19 +18,29 @@ public static class ToolApprovalDialog
         if (tool.Name == "terminal.host.run") AddHostTerminalOperation(content, tool);
         else if (ComputerToolPresentation.Supports(tool.Name)) AddComputerOperation(content, tool);
         else AddStandardOperation(content, tool);
-        var dialog = new ContentDialog { XamlRoot = root, Content = new ScrollViewer { Content = content, MaxHeight = 460 },
+        var scroll = new ScrollViewer { Name = "ToolApprovalContentScroll", Content = content,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        void UpdateHeight() => scroll.MaxHeight = Math.Clamp(root.Size.Height - 200, 80, 460);
+        void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => UpdateHeight();
+        var dialog = new ContentDialog { XamlRoot = root, Content = scroll,
             DefaultButton = ContentDialogButton.None,
             PrimaryButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"],
             CloseButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
         UiLocalization.Bind(dialog, ContentDialog.TitleProperty, "批准这次工具操作？");
         UiLocalization.Bind(dialog, ContentDialog.PrimaryButtonTextProperty, "批准一次");
         UiLocalization.Bind(dialog, ContentDialog.CloseButtonTextProperty, "拒绝");
+        // Reserve space for the decision buttons in short windows; detach when this particular approval closes.
+        // 短窗口为决定按钮留出空间；这次审批关闭时解除尺寸监听。
+        dialog.Opened += (_, _) => { root.Changed += RootChanged; UpdateHeight(); };
+        dialog.Closed += (_, _) => root.Changed -= RootChanged;
+        UpdateHeight();
         return dialog;
     }
 
     private static void AddStandardOperation(StackPanel content, ToolActivity tool)
     {
-        content.Children.Add(new TextBlock { Name = "ToolApprovalName", Text = tool.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        content.Children.Add(new TextBlock { Name = "ToolApprovalName", Text = tool.Name, TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         var summary = new TextBlock { Text = tool.Summary, TextWrapping = TextWrapping.Wrap };
         const string SensitiveReadNotice = "读取可能含密钥的文件，批准后内容可能进入工具记录并发送给当前模型。";
         if (tool.Summary == SensitiveReadNotice)
@@ -47,7 +57,8 @@ public static class ToolApprovalDialog
         }
         AddLabel(content, "工作范围");
         if (tool.WorkspaceRoot is { } workspace)
-            content.Children.Add(new TextBlock { Name = "ToolApprovalWorkspace", Text = workspace, TextWrapping = TextWrapping.Wrap });
+            content.Children.Add(new TextBlock { Name = "ToolApprovalWorkspace", Text = workspace, TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true });
         else AddLabel(content, "范围未提供", "ToolApprovalWorkspace");
         AddLabel(content, tool.OutsideWorkspace is true ? "此操作超出工作目录。" :
             tool.OutsideWorkspace is false ? "此操作位于工作目录内。" : "此工具未提供本地文件范围。", "ToolApprovalScope");

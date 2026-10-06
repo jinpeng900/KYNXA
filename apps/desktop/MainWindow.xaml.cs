@@ -13,6 +13,12 @@ namespace KYNXA_Desktop;
 /// </summary>
 public sealed partial class MainWindow : Window
 {
+    private void MoreOptions_Click(object sender, RoutedEventArgs e)
+    {
+        if (RootFrame.Content is ShellPage page && sender is FrameworkElement anchor)
+            page.ShowNavigationMenu(anchor);
+    }
+
     public MainWindow()
     {
         InitializeComponent();

@@ -43,8 +43,13 @@ public sealed partial class ShellPage
 
     private void UpdateSendButtonState()
     {
+        if (SendButton is null) return;
         bool active = ActiveChatId is Guid id && _pendingReplies.ContainsKey(id);
-        SendButton.IsEnabled = active || !_sendingPrompt;
+        SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
+            && !string.IsNullOrWhiteSpace(PromptTextBox.Text));
+        // SVG strokes do not inherit Button.Foreground; keep the disabled arrow readable explicitly.
+        // SVG 描边不继承 Button.Foreground；显式选择禁用箭头，保证空输入时仍清晰可见。
+        SendArrow.Source = (ImageSource)Application.Current.Resources[SendButton.IsEnabled ? "IconSend" : "IconSendDisabled"];
         SendArrow.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SendButton, active ? UiText.Get("停止生成") : UiText.Get("发送"));
@@ -175,6 +180,7 @@ public sealed partial class ShellPage
                         pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
                         pending.Message.Error = update.Error ?? string.Empty;
                         pending.Message.DurationMs = update.DurationMs;
+                        MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
                         break;
                 }
                 pending.Dirty = true;
@@ -205,6 +211,7 @@ public sealed partial class ShellPage
             }
             if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
             {
+                MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
                 FlushReply(pending, final: true);
                 _pendingReplies.Remove(pending.ConversationId);
             }
@@ -282,6 +289,7 @@ public sealed partial class ShellPage
         pending.Message.Reasoning = pending.Reasoning.ToString();
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Message.Status = "interrupted";
+        MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
         pending.Presentation.Refresh();
         pending.Cancellation.Cancel();
         RenderProjects();

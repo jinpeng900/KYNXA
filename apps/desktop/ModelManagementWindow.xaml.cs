@@ -34,6 +34,7 @@ public sealed partial class ModelManagementWindow : Window
     public ModelManagementWindow()
     {
         InitializeComponent();
+        InitializeDraftPresentation();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(ModelTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
@@ -42,11 +43,16 @@ public sealed partial class ModelManagementWindow : Window
             AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
             AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
         }
+        UpdateWindowMinimumSize();
         SizeAndCenterWindow();
+        AppWindow.Closing += ModelWindow_Closing;
         Closed += (_, _) =>
         {
             _closed = true;
             UiText.LanguageChanged -= UiText_LanguageChanged;
+            AppWindow.Closing -= ModelWindow_Closing;
+            if (_windowXamlRoot is not null) _windowXamlRoot.Changed -= WindowXamlRoot_Changed;
+            _discardDialog?.Hide();
             _lifetime.Cancel();
             _lifetime.Dispose();
             _api.Dispose();
@@ -89,9 +95,12 @@ public sealed partial class ModelManagementWindow : Window
             ? UiText.Get("修改配置后保存，即可在聊天中使用。切换服务商将新建一份配置。")
             : UiText.Get((PresetBox.SelectedItem as ModelPreset)?.Hint ?? "选好服务商，填写密钥后保存。");
         UpdateProviderLabels();
+        CompactConnectionPicker.PlaceholderText = UiText.Get(_editing is null ? "添加新的连接" : "选择已保存连接");
         UpdateEndpointHints();
         UpdateModelCount();
         UpdateModelLabels();
+        UpdateDiscardDialogLanguage();
+        UpdateDraftPresentation();
         RenderStatus();
     }
 
@@ -116,7 +125,7 @@ public sealed partial class ModelManagementWindow : Window
 
     // The composer opens the same preset-first setup page.
     // 输入区使用同一套以服务商预设为入口的配置页面。
-    public void ShowCustomModels() => ApplyPreset(ModelPresets.All[0]);
+    public void ShowCustomModels() => _ = BeginNewConnectionAsync();
 
     private async Task InitializeAsync()
     {
@@ -129,6 +138,7 @@ public sealed partial class ModelManagementWindow : Window
             // 加载已有连接之后才分配新 ID，避免与现有连接冲突。
             if (_editing is null && PresetBox.SelectedItem is ModelPreset preset)
                 ProviderIdBox.Text = NewId(preset.Id);
+            CaptureSavedForm();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception error) { if (!_closed) SetStatus(() => FriendlyError(error), true); }
@@ -165,11 +175,17 @@ public sealed partial class ModelManagementWindow : Window
                     ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 234, 233))
                     : new SolidColorBrush(Microsoft.UI.Colors.Transparent)
             };
+            ToolTipService.SetToolTip(button, provider.DisplayName);
             _providerLabels.Add((provider, count, button));
-            button.Click += (_, _) => SelectProvider(provider);
+            button.Click += async (_, _) =>
+            {
+                if (_busy || _editing?.ProviderId == provider.ProviderId) return;
+                if (await ConfirmDiscardAsync("切换连接")) SelectProvider(provider);
+            };
             ProviderList.Children.Add(button);
         }
         UpdateProviderLabels();
+        SyncConnectionPicker();
     }
 
     private void UpdateProviderLabels()
@@ -189,6 +205,7 @@ public sealed partial class ModelManagementWindow : Window
 
     private void ApplyPreset(ModelPreset preset)
     {
+        _appliedPreset = preset;
         _applyingPreset = true;
         _automaticContextWindow = true;
         try
@@ -218,6 +235,7 @@ public sealed partial class ModelManagementWindow : Window
         SetStatus(preset.Hint);
         RenderProviders();
         RenderModelOptions();
+        CaptureSavedForm();
     }
 
     private void SelectProvider(ModelProvider provider)
@@ -228,6 +246,7 @@ public sealed partial class ModelManagementWindow : Window
         PresetBox.SelectedItem = ModelPresets.All.FirstOrDefault(candidatePreset =>
             candidatePreset.BaseUrl.TrimEnd('/') == provider.BaseUrl.TrimEnd('/')) ?? ModelPresets.All[^1];
         _changingPreset = false;
+        _appliedPreset = PresetBox.SelectedItem as ModelPreset;
         _discoveredModels = provider.Models;
         ModelSearchBox.Text = "";
         SetProtocol(provider.Protocol);
@@ -247,14 +266,19 @@ public sealed partial class ModelManagementWindow : Window
         SetStatus("已加载连接，可修改名称、密钥或模型列表。");
         RenderProviders();
         RenderModelOptions();
+        CaptureSavedForm();
     }
 
-    private void PresetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void PresetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!_changingPreset && PresetBox.SelectedItem is ModelPreset preset) ApplyPreset(preset);
+        if (_changingPreset || PresetBox.SelectedItem is not ModelPreset preset) return;
+        _changingPreset = true;
+        try { PresetBox.SelectedItem = _appliedPreset; }
+        finally { _changingPreset = false; }
+        if (!_busy && await ConfirmDiscardAsync("切换服务商")) ApplyPreset(preset);
     }
 
-    private void NewConnectionButton_Click(object sender, RoutedEventArgs e) => ApplyPreset(ModelPresets.All[0]);
+    private async void NewConnectionButton_Click(object sender, RoutedEventArgs e) => await BeginNewConnectionAsync();
 
     private void BaseUrlBox_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -377,12 +401,15 @@ public sealed partial class ModelManagementWindow : Window
 
     private static int ReadTokenChoice(ComboBox choice, TextBox customValue, Func<int, int> validate, string errorKey)
     {
-        string value = choice.SelectedItem is ComboBoxItem { Tag: "custom" }
+        bool custom = choice.SelectedItem is ComboBoxItem { Tag: "custom" };
+        Control field = custom ? customValue : choice;
+        string value = custom
             ? customValue.Text.Trim()
             : (choice.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
         if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int tokens))
-            throw new InvalidOperationException(UiText.Get(errorKey));
-        return validate(tokens);
+            throw new ModelFormValidationException(UiText.Get(errorKey), field);
+        try { return validate(tokens); }
+        catch (InvalidOperationException error) { throw new ModelFormValidationException(error.Message, field); }
     }
 
     private void ModelSearchBox_TextChanged(object sender, TextChangedEventArgs e) => RenderModelOptions();
@@ -409,11 +436,17 @@ public sealed partial class ModelManagementWindow : Window
             var detail = ModelCatalog.Describe(id);
             if (search.Length > 0 && !$"{detail.Name} {id}".Contains(search, StringComparison.OrdinalIgnoreCase)) continue;
             var content = new StackPanel { Spacing = 3 };
-            content.Children.Add(new TextBlock { Text = detail.Name, FontSize = 13,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            var nameLabel = new TextBlock { Text = detail.Name, FontSize = 13,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
+            ToolTipService.SetToolTip(nameLabel, detail.Name);
+            content.Children.Add(nameLabel);
             if (detail.Name != id)
-                content.Children.Add(new TextBlock { Text = id, FontSize = 11, TextWrapping = TextWrapping.Wrap,
-                    Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] });
+            {
+                var idLabel = new TextBlock { Text = id, FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis,
+                    Foreground = (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"] };
+                ToolTipService.SetToolTip(idLabel, id);
+                content.Children.Add(idLabel);
+            }
             var option = new CheckBox { Content = content, IsChecked = selected.Contains(id),
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new Thickness(10, 8, 10, 8), CornerRadius = new CornerRadius(8) };
@@ -445,6 +478,24 @@ public sealed partial class ModelManagementWindow : Window
         // A collapsed manual editor may defer TextChanged; checkbox selection is authoritative now.
         // 折叠的手动编辑器可能延后 TextChanged；此时以复选框的当前选择为准。
         UpdateAutomaticContextWindow();
+        UpdateDraftPresentation();
+    }
+
+    private sealed class ModelFormValidationException(string message, Control field) : InvalidOperationException(message)
+    {
+        public Control Field { get; } = field;
+    }
+
+    private void FocusInvalidField(Exception error)
+    {
+        if (_closed || error is not ModelFormValidationException validation) return;
+        // Reveal the original field without clearing drafts or changing any validation and request rules.
+        // 显示原错误字段，不清空草稿，也不改变校验或请求规则。
+        if (ReferenceEquals(validation.Field, ProviderIdBox)) AdvancedSettings.IsExpanded = true;
+        if (ReferenceEquals(validation.Field, ModelsBox)) ManualModelsSection.IsExpanded = true;
+        EditorScroll.UpdateLayout();
+        validation.Field.StartBringIntoView();
+        validation.Field.Focus(FocusState.Programmatic);
     }
 
     private ModelConnection Form(bool requireModels)
@@ -453,35 +504,37 @@ public sealed partial class ModelManagementWindow : Window
         string id = ProviderIdBox.Text.Trim();
         string name = NameBox.Text.Trim();
         string url = BaseUrlBox.Text.Trim().TrimEnd('/');
-        if (name.Length is < 1 or > 80) throw new InvalidOperationException("请填写连接名称（最多 80 个字符）。");
+        if (name.Length is < 1 or > 80) throw new ModelFormValidationException("请填写连接名称（最多 80 个字符）。", NameBox);
         if (!Regex.IsMatch(id, "^[a-z][a-z0-9-]{1,39}$"))
-            throw new InvalidOperationException("请在高级设置中填写有效的连接 ID：2–40 位小写字母、数字或连字符。");
+            throw new ModelFormValidationException("请在高级设置中填写有效的连接 ID：2–40 位小写字母、数字或连字符。", ProviderIdBox);
         if (_editing is null && _providers.Any(candidateProvider => candidateProvider.ProviderId == id))
-            throw new InvalidOperationException("连接 ID 已存在，请修改高级设置中的 ID，或在左侧编辑已有连接。");
+            throw new ModelFormValidationException("连接 ID 已存在，请修改高级设置中的 ID，或在左侧编辑已有连接。", ProviderIdBox);
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != "https" && uri.Scheme != "http"))
-            throw new InvalidOperationException("请填写有效的服务地址。");
+            throw new ModelFormValidationException("请填写有效的服务地址。", BaseUrlBox);
         if (uri.Scheme == "http" && !ModelPresets.IsLocalEndpoint(uri))
-            throw new InvalidOperationException("公网服务请使用 HTTPS；本机和局域网服务可使用 HTTP。");
+            throw new ModelFormValidationException("公网服务请使用 HTTPS；本机和局域网服务可使用 HTTP。", BaseUrlBox);
         if (string.IsNullOrWhiteSpace(ApiKeyBox.Password) && !ModelPresets.IsLocalEndpoint(uri) &&
             (_editing is not { HasApiKey: true } || _editing.BaseUrl.TrimEnd('/') != url))
-            throw new InvalidOperationException("请填写此服务的 API Key。");
+            throw new ModelFormValidationException("请填写此服务的 API Key。", ApiKeyBox);
         var models = ModelIds();
-        if (requireModels && models.Length == 0) throw new InvalidOperationException("请先获取模型，或手动填写模型 ID。");
+        if (requireModels && models.Length == 0) throw new ModelFormValidationException("请先获取模型，或手动填写模型 ID。", ModelsBox);
         return new(id, name, url, models, string.IsNullOrWhiteSpace(ApiKeyBox.Password) ? null : ApiKeyBox.Password.Trim(),
             (string)((ComboBoxItem)ProtocolBox.SelectedItem).Tag, ContextWindowTokens(), MaxOutputTokens());
     }
 
     private void SetBusy(bool busy)
     {
+        _busy = busy;
         EditorForm.IsHitTestVisible = ProviderPanel.IsHitTestVisible = !busy;
         PresetBox.IsEnabled = NameBox.IsEnabled = ApiKeyBox.IsEnabled = ModelsBox.IsEnabled =
             BaseUrlBox.IsEnabled = ProviderIdBox.IsEnabled = NewConnectionButton.IsEnabled = ProtocolBox.IsEnabled =
             ModelSearchBox.IsEnabled = ContextWindowBox.IsEnabled = CustomContextWindowBox.IsEnabled =
-            MaxOutputTokensBox.IsEnabled = CustomMaxOutputTokensBox.IsEnabled = !busy;
+            MaxOutputTokensBox.IsEnabled = CustomMaxOutputTokensBox.IsEnabled = CompactConnectionPicker.IsEnabled = !busy;
         foreach (var option in ModelOptions.Children.OfType<CheckBox>()) option.IsEnabled = !busy;
         foreach (var child in ProviderList.Children.OfType<Button>()) child.IsEnabled = !busy;
         ProbeButton.IsEnabled = SaveButton.IsEnabled = !busy;
         BusyIndicator.IsActive = busy;
+        UpdateDraftPresentation();
     }
 
     private void SetStatus(string key, bool error = false) => SetStatus(() => UiText.Get(key), error);
@@ -532,7 +585,11 @@ public sealed partial class ModelManagementWindow : Window
                 ? string.Format(UiText.Get("已获取 {0} 个模型 · {1} ms。勾选需要的模型后保存。"), result.Models.Length, result.LatencyMs)
                 : UiText.Get("服务已连接，未返回模型列表；已保留现有 ID，可手动填写后保存。"));
         }
-        catch (Exception error) { SetStatus(() => string.Format(UiText.Get("获取失败：{0} 可保留预设 ID 直接保存。"), FriendlyError(error)), true); }
+        catch (Exception error)
+        {
+            SetStatus(() => string.Format(UiText.Get("获取失败：{0} 可保留预设 ID 直接保存。"), FriendlyError(error)), true);
+            FocusInvalidField(error);
+        }
         finally { if (!_closed) SetBusy(false); }
     }
 
@@ -552,7 +609,11 @@ public sealed partial class ModelManagementWindow : Window
             RenderProviders();
             SetStatus(() => string.Format(UiText.Get("已保存 {0}。返回聊天页，选择模型即可使用。"), provider.DisplayName));
         }
-        catch (Exception error) { SetStatus(() => string.Format(UiText.Get("保存失败：{0}"), FriendlyError(error)), true); }
+        catch (Exception error)
+        {
+            SetStatus(() => string.Format(UiText.Get("保存失败：{0}"), FriendlyError(error)), true);
+            FocusInvalidField(error);
+        }
         finally { if (!_closed) SetBusy(false); }
     }
 }

@@ -38,7 +38,7 @@ public sealed partial class ShellPage
         SelectedPermissionLabel.Foreground = PermissionBrush(option.Mode);
         SelectedPermissionIcon.Source = (ImageSource)Application.Current.Resources[option.Icon];
         AutomationProperties.SetName(PermissionPickerButton, string.Format(UiText.Get("权限：{0}"), option.Label));
-        ToolTipService.SetToolTip(PermissionPickerButton, option.Description);
+        ToolTipService.SetToolTip(PermissionPickerButton, $"{option.Label}\n{option.Description}");
     }
 
     private static Brush PermissionBrush(string mode) => (Brush)Application.Current.Resources[
@@ -46,6 +46,7 @@ public sealed partial class ShellPage
 
     private void PermissionPickerButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_chatClosing || HasPresentationModal() || XamlRoot is null) return;
         var menu = PickerMenu.Create(FlyoutPlacementMode.TopEdgeAlignedLeft, "KynxaPermissionFlyoutPresenterStyle");
         var options = new StackPanel();
         var buttons = new List<Button>();
@@ -107,7 +108,14 @@ public sealed partial class ShellPage
             buttons.Add(button);
             options.Children.Add(button);
         }
-        menu.Content = options;
+        var scroll = new ScrollViewer
+        {
+            Content = options, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = Math.Max(80, XamlRoot.Size.Height - 48),
+            Width = PickerMenu.SetContentWidth(menu, 374, XamlRoot.Size.Width)
+        };
+        menu.Content = scroll;
         menu.Opened += (_, _) => buttons[Array.FindIndex(PermissionOptions, option => option.Mode == _layout.PermissionMode)]
             .Focus(FocusState.Programmatic);
         menu.ShowAt(PermissionPickerButton);
