@@ -12,7 +12,10 @@
         <!-- Sidebar slot
              侧栏区域。
         -->
-        <Grid Grid.Column="0" Background="{StaticResource KynxaSidebarBrush}">
+        <Button x:Name="SidebarScrim" Grid.ColumnSpan="3" Canvas.ZIndex="15" Visibility="Collapsed"
+                Background="#22000000" BorderThickness="0" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                Click="SidebarScrim_Click" services:UiLocalization.AutomationName="收起侧栏" />
+        <Grid x:Name="SidebarPane" Grid.Column="0" Canvas.ZIndex="20" Background="{StaticResource KynxaSidebarBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
                 <RowDefinition Height="Auto" />
@@ -22,6 +25,11 @@
             </Grid.RowDefinitions>
 
             <Grid x:Name="GlobalSidebarHeader" Margin="8,0">
+                <Button x:Name="CompactSidebarButton" Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Center"
+                        Style="{StaticResource KynxaIconButtonStyle}" Click="SidebarToggle_Click"
+                        services:UiLocalization.AutomationName="展开侧栏" services:UiLocalization.ToolTip="展开侧栏">
+                    <FontIcon Glyph="&#xE700;" FontSize="17" />
+                </Button>
                 <!-- Kimi medium segmented control: 36 high, 2 inset, equal 32-high halves.
                      采用 Kimi 风格中号分段控件：总高 36、内缩 2，两半等宽且各高 32。
                 -->
@@ -61,17 +69,17 @@
 
             <StackPanel x:Name="GlobalNavigationArea" Grid.Row="1" HorizontalAlignment="Stretch">
 
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                <Button Click="KnowledgeNavigation_Click" services:UiLocalization.AutomationName="知识库" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconKnowledge}" /><TextBlock Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" FontSize="14" services:UiLocalization.Text="知识库" /></Grid>
                 </Button>
 
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                <Button Click="ConnectionsNavigation_Click" services:UiLocalization.AutomationName="连接" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconConnect}" /><TextBlock Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" FontSize="14" services:UiLocalization.Text="连接" /></Grid>
                 </Button>
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                <Button Click="ScheduleNavigation_Click" services:UiLocalization.AutomationName="定时任务" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconScheduledTask}" /><TextBlock Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" FontSize="14" services:UiLocalization.Text="定时任务" /></Grid>
                 </Button>
-                <Button Style="{StaticResource KynxaNavigationButtonStyle}">
+                <Button Click="SkillsNavigation_Click" services:UiLocalization.AutomationName="技能" Style="{StaticResource KynxaNavigationButtonStyle}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Image Width="18" Height="18" HorizontalAlignment="Left" Source="{StaticResource IconSkills}" /><TextBlock Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center" FontSize="14" services:UiLocalization.Text="技能" /></Grid>
                 </Button>
                 <Button Click="ModelManagementButton_Click" Style="{StaticResource KynxaNavigationButtonStyle}">
@@ -295,13 +303,16 @@
                                             <ToolTipService.ToolTip>
                                                 <ToolTip>
                                                     <StackPanel Spacing="6" MaxWidth="320">
-                                                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" TextWrapping="Wrap" />
                                                         <StackPanel Orientation="Horizontal" Spacing="7" Visibility="{x:Bind MountedFolderVisibility, Mode=OneWay}"
                                                                     AutomationProperties.HelpText="{x:Bind MountedFolderTooltip, Mode=OneWay}">
                                                             <FontIcon Glyph="&#xE8B7;" FontSize="13" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                                                             <TextBlock Text="{x:Bind MountedFolderName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                                        Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                                                         </StackPanel>
+                                                        <TextBlock Text="{x:Bind MountedFolderTooltip, Mode=OneWay}" TextWrapping="Wrap"
+                                                                   Visibility="{x:Bind MountedFolderVisibility, Mode=OneWay}"
+                                                                   Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12" />
                                                     </StackPanel>
                                                 </ToolTip>
                                             </ToolTipService.ToolTip>
@@ -403,13 +414,20 @@
             </Grid>
 
 
-            <Grid Grid.Row="4" Margin="14,0,10,0">
+            <Grid x:Name="SidebarFooter" Grid.Row="4" Margin="14,0,10,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
                 <Button Style="{StaticResource KynxaIconButtonStyle}" Click="StorageSettings_Click" services:UiLocalization.AutomationName="设置" services:UiLocalization.ToolTip="设置"><Image Width="20" Height="20" Source="{StaticResource IconSettings}" /></Button>
-                <Grid Grid.Column="2" services:UiLocalization.ToolTip="设备在线">
+                <Button x:Name="HistorySearchButton" Grid.Column="1" HorizontalAlignment="Center"
+                        Style="{StaticResource KynxaIconButtonStyle}" Click="HistorySearch_Click"
+                        services:UiLocalization.AutomationName="搜索会话" services:UiLocalization.ToolTip="搜索会话 Ctrl+F">
+                    <FontIcon Glyph="&#xE721;" FontSize="17" />
+                </Button>
+                <Button x:Name="ModelStatusButton" Grid.Column="2" Style="{StaticResource KynxaIconButtonStyle}" Click="ModelStatusButton_Click">
+                    <Grid>
                     <Image Width="20" Height="20" Source="{StaticResource IconDeviceStatus}" />
-                    <Ellipse Width="8" Height="8" Margin="0,0,0,2" HorizontalAlignment="Right" VerticalAlignment="Bottom" Fill="{StaticResource KynxaOnlineBrush}" Stroke="{StaticResource KynxaSidebarBrush}" StrokeThickness="1.5" />
-                </Grid>
+                    <Ellipse x:Name="ModelStatusDot" Width="8" Height="8" Margin="0,0,0,2" HorizontalAlignment="Right" VerticalAlignment="Bottom" Fill="#999999" Stroke="{StaticResource KynxaSidebarBrush}" StrokeThickness="1.5" />
+                    </Grid>
+                </Button>
             </Grid>
         </Grid>
 
@@ -420,7 +438,7 @@
         -->
         <Grid x:Name="MainRegion" Grid.Column="2" Background="{StaticResource KynxaMainBrush}" SizeChanged="MainRegion_SizeChanged">
             <Grid.RowDefinitions>
-                <RowDefinition x:Name="TopWorkspaceRow" Height="96" />
+                <RowDefinition x:Name="TopWorkspaceRow" Height="0" />
                 <RowDefinition Height="0" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
@@ -431,7 +449,7 @@
                 <Grid x:Name="TopToolbarSlot" HorizontalAlignment="Right" />
             </Grid>
 
-            <controls:ResizeGrip x:Name="TopWorkspaceGrip" Grid.Row="1" Axis="Vertical" CancelRequested="TopWorkspaceGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="TopWorkspaceGrip_DragDelta" DragStarted="TopWorkspaceGrip_DragStarted" ResetRequested="TopWorkspaceGrip_ResetRequested" />
+            <controls:ResizeGrip x:Name="TopWorkspaceGrip" Grid.Row="1" Visibility="Collapsed" Axis="Vertical" CancelRequested="TopWorkspaceGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="TopWorkspaceGrip_DragDelta" DragStarted="TopWorkspaceGrip_DragStarted" ResetRequested="TopWorkspaceGrip_ResetRequested" />
 
             <Grid Grid.Row="2">
                 <Grid.ColumnDefinitions>
@@ -451,6 +469,16 @@
                     <TextBlock x:Name="ConversationTitle" Margin="24,16" VerticalAlignment="Top"
                                FontSize="14" Foreground="{StaticResource KynxaSecondaryTextBrush}"
                                TextTrimming="CharacterEllipsis" Visibility="Collapsed" />
+                    <Button x:Name="ConversationActionsButton" HorizontalAlignment="Right" VerticalAlignment="Top"
+                            Margin="0,8,48,0" Style="{StaticResource KynxaCompactIconButtonStyle}" Click="ConversationActions_Click"
+                            services:UiLocalization.AutomationName="会话操作" services:UiLocalization.ToolTip="会话操作">
+                        <FontIcon Glyph="&#xE712;" FontSize="15" />
+                    </Button>
+                    <Border x:Name="ActionFeedbackHost" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Top"
+                            Margin="16,54,16,0" Padding="12,8" CornerRadius="8" MaxWidth="420" Canvas.ZIndex="12"
+                            Background="{StaticResource KynxaSurfaceBrush}" IsHitTestVisible="False">
+                        <TextBlock x:Name="ActionFeedbackText" FontSize="12" TextWrapping="Wrap" />
+                    </Border>
                     <Button x:Name="OpenWorkPanelButton" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Top"
                             Margin="0,8,12,0" Canvas.ZIndex="2"
                             Style="{StaticResource KynxaCompactIconButtonStyle}" Click="OpenWorkPanelButton_Click"
@@ -460,7 +488,7 @@
                         </Image>
                     </Button>
                     <controls:ConversationTranscript x:Name="ConversationMessages" Visibility="Collapsed" HorizontalAlignment="Stretch" />
-                    <Grid x:Name="ChatAmbientLayer" IsHitTestVisible="False" Opacity="0.5">
+                    <Grid x:Name="ChatAmbientLayer" IsHitTestVisible="False" Opacity="0.32">
                         <Ellipse x:Name="AmbientLargeWave" Width="870" Height="310" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveBrush}" StrokeThickness="50" />
                         <Ellipse x:Name="AmbientSoftWave" Width="720" Height="250" HorizontalAlignment="Center" VerticalAlignment="Center" Stroke="{StaticResource KynxaAmbientWaveSoftBrush}" StrokeThickness="34" />
                     </Grid>
@@ -472,16 +500,16 @@
 
 
 
-                    <StackPanel x:Name="MainContentHost" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="32">
-                        <Grid x:Name="LogoHost" Width="176" Height="132" HorizontalAlignment="Center">
+                    <StackPanel x:Name="MainContentHost" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
+                        <Grid x:Name="LogoHost" Width="176" Height="132" Margin="0,0,0,20" HorizontalAlignment="Center">
                             <Image x:Name="KynxaLogo" Width="353" Height="235" HorizontalAlignment="Center" VerticalAlignment="Center" Source="{StaticResource KynxaLogoImage}" Stretch="Uniform" />
                         </Grid>
 
-                        <controls:ComposerSurface x:Name="ComposerHost" services:UiLocalization.AutomationName="对话输入区">
+                        <controls:ComposerSurface x:Name="ComposerHost" IsFooterVisible="True" services:UiLocalization.AutomationName="对话输入区">
                             <controls:ComposerSurface.Body>
                                 <Grid>
                                     <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
-                                    <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='向 KYNXA 提问任何问题...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
+                                    <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                         <TextBox.Resources>
                                             <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
                                             <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
@@ -498,10 +526,15 @@
                                         <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="" />
                                     </Button>
 
-                                    <Grid Grid.Row="1" Margin="12,0,12,6">
+                                    <Grid x:Name="ComposerToolbar" Grid.Row="1" Margin="12,0,12,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                                        <StackPanel HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
-                                            <Button Style="{StaticResource KynxaComposerAddButtonStyle}" services:UiLocalization.ToolTip="添加"><Image Width="20" Height="20" Source="{StaticResource IconAdd}" /></Button>
+                                        <StackPanel x:Name="ComposerToolbarLeft" HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
+                                            <Border Background="Transparent" services:UiLocalization.ToolTip="附件上传尚未开放，可直接粘贴文本或在项目菜单关联文件夹。">
+                                                <Button x:Name="ComposerAddButton" IsEnabled="False" Style="{StaticResource KynxaComposerAddButtonStyle}"
+                                                        services:UiLocalization.AutomationName="附件上传尚未开放">
+                                                    <Image Width="20" Height="20" Source="{StaticResource IconAdd}" Opacity="0.55" />
+                                                </Button>
+                                            </Border>
                                             <Button x:Name="PermissionPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
                                                     Click="PermissionPickerButton_Click" AutomationProperties.Name="{services:UiText Key='权限：请求批准'}">
                                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
@@ -511,7 +544,7 @@
                                                 </StackPanel>
                                             </Button>
                                         </StackPanel>
-                                        <Grid Grid.Column="1" Margin="12,0,0,0" ColumnSpacing="4">
+                                        <Grid x:Name="ComposerModelArea" Grid.Column="1" Margin="12,0,0,0" ColumnSpacing="4">
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                             <Button x:Name="ModelPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
                                                     HorizontalAlignment="Right"
@@ -525,14 +558,15 @@
                                                               Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                                                 </Grid>
                                             </Button>
-                                            <Button Grid.Column="1" Style="{StaticResource KynxaComposerSendButtonStyle}" x:Name="SendButton" AutomationProperties.Name="{services:UiText Key='发送'}" Click="SendButton_Click" ToolTipService.ToolTip="{services:UiText Key='发送'}">
+                                            <Button Grid.Column="1" Style="{StaticResource KynxaComposerSendButtonStyle}" x:Name="SendButton" IsEnabled="False" AutomationProperties.Name="{services:UiText Key='发送'}" Click="SendButton_Click" ToolTipService.ToolTip="{services:UiText Key='发送'}">
                                                 <Button.Resources>
                                                     <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="KynxaSendHoverBrush" />
                                                     <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="KynxaSendPressedBrush" />
+                                                    <StaticResource x:Key="ButtonBackgroundDisabled" ResourceKey="KynxaSendDisabledBrush" />
                                                 </Button.Resources>
                                                 <Grid>
-                                                    <Image x:Name="SendArrow" Width="20" Height="20" Source="{StaticResource IconSend}" />
-                                                    <FontIcon x:Name="StopReplyIcon" Glyph="&#xE71A;" FontSize="14" Visibility="Collapsed" />
+                                                    <Image x:Name="SendArrow" Width="20" Height="20" Source="{StaticResource IconSendDisabled}" />
+                                                    <FontIcon x:Name="StopReplyIcon" Glyph="&#xE71A;" FontSize="14" Foreground="White" Visibility="Collapsed" />
                                                 </Grid>
                                             </Button>
                                         </Grid>
@@ -544,7 +578,7 @@
                                 </Grid>
                             </controls:ComposerSurface.Body>
                             <controls:ComposerSurface.Footer>
-                                <Button x:Name="WorkspacePickerButton" Visibility="Collapsed" MaxWidth="240"
+                                <Button x:Name="WorkspacePickerButton" IsEnabled="False" MaxWidth="240"
                                         Style="{StaticResource KynxaWorkspacePickerButtonStyle}"
                                         Click="WorkspacePickerButton_Click" AutomationProperties.Name="{services:UiText Key='选择工作区'}" services:UiLocalization.ToolTip="选择工作区">
                                     <Grid ColumnSpacing="6">
@@ -557,6 +591,8 @@
                                 </Button>
                             </controls:ComposerSurface.Footer>
                         </controls:ComposerSurface>
+                        <TextBlock services:UiLocalization.Text="Enter 发送 · Shift+Enter 换行" FontSize="11"
+                                   Foreground="{StaticResource KynxaSecondaryTextBrush}" HorizontalAlignment="Center" />
                     </StackPanel>
                 </Grid>
                 <controls:ResizeGrip x:Name="WorkPanelGrip" Grid.Column="1" Axis="Horizontal" Width="10" Visibility="Collapsed"
@@ -579,8 +615,9 @@
                             <controls:ConversationWorkTabs x:Name="WorkTabs" />
                             <Grid Grid.Row="1">
                                 <controls:ConversationScreenshotsPanel x:Name="ScreenshotPanel" />
-                                <TextBlock x:Name="WorkTabEmptyHint" Text="{services:UiText Key='没有打开的内容'}"
+                                <TextBlock x:Name="WorkTabEmptyHint" Text="{services:UiText Key='暂无预览内容。工具返回截图后会在此显示。'}"
                                            Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12"
+                                           TextWrapping="Wrap" TextAlignment="Center" MaxWidth="240"
                                            HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
                             </Grid>
                         </Grid>

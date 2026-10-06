@@ -21,6 +21,7 @@
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageTimePresentation.cs" Link="MessageTimePresentation.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/MathMarkdown.cs" Link="MathMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />

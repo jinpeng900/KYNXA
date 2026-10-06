@@ -2,6 +2,7 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -34,13 +35,14 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(24) };
     private readonly Button _fit = new() { Name = "ScreenshotViewerFit", MinWidth = 0 };
     private readonly Button _actual = new() { Name = "ScreenshotViewerActual", Content = "100%", MinWidth = 0 };
+    private readonly Button _retry = new() { Name = "ScreenshotViewerRetry", MinWidth = 0, IsEnabled = false, Visibility = Visibility.Collapsed };
     private readonly Button _close = new() { Name = "ScreenshotViewerClose", Content = new FontIcon { Glyph = "\uE8BB", FontSize = 12 }, MinWidth = 0 };
     private DecodedToolImage? _decoded;
     private XamlRoot? _observedRoot;
     private Point? _dragStart;
     private double _dragHorizontal, _dragVertical;
     private double _imageBaseScale = 1;
-    private bool _fitToWindow = true, _shown, _closed, _disposed;
+    private bool _fitToWindow = true, _shown, _closed, _disposed, _busy;
     private string _noticeKey = "正在读取工具结果…";
 
     public ScreenshotViewerWindow(IAgentApi api, ConversationScreenshotSource source, CancellationToken cancellationToken = default)
@@ -54,7 +56,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         var title = new TextBlock { Name = "ScreenshotViewerTitle", VerticalAlignment = VerticalAlignment.Center };
         UiLocalization.Bind(title, TextBlock.TextProperty, "截图预览"); toolbar.Children.Add(title);
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        foreach (var button in new[] { _fit, _actual, _close })
+        foreach (var button in new[] { _retry, _fit, _actual, _close })
         {
             if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var resource) && resource is Style quiet) button.Style = quiet;
             actions.Children.Add(button);
@@ -64,6 +66,8 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         Grid.SetRow(_notice, 1); _root.Children.Add(_notice); _notice.IsHitTestVisible = false;
         Content = _root;
         _fit.Click += FitClicked; _actual.Click += ActualClicked; _close.Click += CloseClicked;
+        _retry.Click += RetryClicked;
+        AutomationProperties.SetLiveSetting(_notice, AutomationLiveSetting.Polite);
         _scroll.SizeChanged += ViewportChanged;
         _scroll.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(WheelChanged), true);
         _scroll.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(DragPressed), true);
@@ -87,6 +91,11 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
 
     private async Task LoadAsync()
     {
+        if (_closed || _disposed || _busy || _lifetime.IsCancellationRequested) return;
+        // A retry reads the same validated archive identity. It never invokes a new screenshot operation.
+        // 重试只读取同一个已验证的归档身份，绝不重新执行截图操作。
+        _busy = true; _retry.IsEnabled = false;
+        _noticeKey = "正在读取工具结果…"; RefreshLanguage(); _notice.Visibility = Visibility.Visible;
         var token = _lifetime.Token;
         try
         {
@@ -94,6 +103,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
             var decoded = await archive.DecodeAsync(0, token);
             if (_closed || token.IsCancellationRequested) return;
             _decoded = decoded; _image.Source = decoded.Bitmap; _notice.Visibility = Visibility.Collapsed;
+            _retry.Visibility = Visibility.Collapsed;
             UpdateImageSize(); FitImage(); _fit.IsEnabled = _actual.IsEnabled = true;
             _close.Focus(FocusState.Programmatic);
         }
@@ -101,8 +111,22 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         catch (Exception)
         {
             if (!_closed && !token.IsCancellationRequested)
-            { _noticeKey = "图片无法预览。"; RefreshLanguage(); _notice.Visibility = Visibility.Visible; }
+            { _noticeKey = "图片无法预览。"; _retry.Visibility = Visibility.Visible; RefreshLanguage(); _notice.Visibility = Visibility.Visible; }
         }
+        finally
+        {
+            _busy = false;
+            if (!_closed && !_disposed)
+            {
+                _retry.IsEnabled = _retry.Visibility == Visibility.Visible && !token.IsCancellationRequested;
+                if (_retry.IsEnabled) _retry.Focus(FocusState.Programmatic);
+            }
+        }
+    }
+
+    private async void RetryClicked(object sender, RoutedEventArgs args)
+    {
+        if (_retry.IsEnabled) await LoadAsync();
     }
 
     private void RootLoaded(object sender, RoutedEventArgs args)
@@ -110,7 +134,8 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         if (_closed) return;
         _observedRoot = _root.XamlRoot;
         if (_observedRoot is not null) _observedRoot.Changed += RootChanged;
-        UpdateImageSize(); FitImage(); _close.Focus(FocusState.Programmatic);
+        UpdateImageSize(); FitImage();
+        (_retry.IsEnabled ? _retry : _close).Focus(FocusState.Programmatic);
     }
 
     private void UpdateImageSize()
@@ -186,15 +211,19 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     {
         if (_closed) return;
         Title = UiText.Get("截图预览"); _fit.Content = UiText.Get("适应窗口"); _notice.Text = UiText.Get(_noticeKey);
+        _retry.Content = UiText.Get("重新读取");
         _fit.IsEnabled = _actual.IsEnabled = _decoded is not null;
         AutomationProperties.SetName(_fit, UiText.Get("适应窗口"));
         AutomationProperties.SetName(_actual, UiText.Get("原始尺寸")); AutomationProperties.SetName(_close, UiText.Get("关闭"));
         ToolTipService.SetToolTip(_actual, UiText.Get("原始尺寸")); ToolTipService.SetToolTip(_close, UiText.Get("关闭"));
+        AutomationProperties.SetName(_retry, UiText.Get("重新读取已保存的截图"));
+        ToolTipService.SetToolTip(_retry, UiText.Get("重新读取已保存的截图"));
     }
 
     private void WindowClosed(object sender, WindowEventArgs args)
     {
         _closed = true; _lifetime.Cancel(); _dragStart = null; _scroll.ReleasePointerCaptures();
+        _retry.IsEnabled = false;
         _image.Source = null; _decoded = null;
         if (_observedRoot is not null) _observedRoot.Changed -= RootChanged;
         _observedRoot = null; UiText.LanguageChanged -= LanguageChanged; _completion.TrySetResult();
@@ -203,6 +232,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true; if (!_closed) Close(); _cancellation.Dispose(); _lifetime.Dispose();
+        _disposed = true; _retry.IsEnabled = false;
+        if (!_closed) Close(); _retry.Click -= RetryClicked; _cancellation.Dispose(); _lifetime.Dispose();
     }
 }

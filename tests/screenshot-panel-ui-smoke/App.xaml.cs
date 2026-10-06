@@ -96,6 +96,7 @@ public partial class App : Application
             await CheckResponsiveScreenshotAsync();
             await CheckShellScreenshotRoutingAsync();
             await CheckScreenshotViewerAsync();
+            await CheckScreenshotRetryAsync();
             await CheckBrowserScreenshotsAsync();
             var first = Screenshot("shot-a-1"); var second = Screenshot("shot-a-2");
             var row = Message(_chatA, first, second);

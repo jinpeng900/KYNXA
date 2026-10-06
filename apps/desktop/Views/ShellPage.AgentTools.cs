@@ -9,13 +9,18 @@ public sealed partial class ShellPage
     private readonly AgentApiClient _agentApiClient = new();
     private ToolManagementWindow? _toolManagementWindow;
 
-    private void OpenAgentTools()
+    private void OpenAgentTools(bool skills = false)
     {
-        if (!_projectsReady || StoragePaths.IsMigrating || _projectActionPending || _sendingPrompt) return;
+        if (!_projectsReady || StoragePaths.IsMigrating || _projectActionPending || _sendingPrompt)
+        {
+            ShowActionFeedback(UiText.Get("正在准备或保存数据，请稍后打开工具与技能。"));
+            return;
+        }
         if (_toolManagementWindow is { } existing)
         {
             if (existing.AppWindow.Presenter is OverlappedPresenter presenter) presenter.Restore();
             existing.Activate();
+            existing.ShowSection(skills);
             return;
         }
         var active = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
@@ -32,5 +37,6 @@ public sealed partial class ShellPage
             _toolManagementWindow = null;
         };
         window.Activate();
+        window.ShowSection(skills);
     }
 }

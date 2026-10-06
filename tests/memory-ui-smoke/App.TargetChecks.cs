@@ -113,15 +113,29 @@ public partial class App
         await OpenEntryAsync(0);
         Guid selectedId = _viewModel.SelectedEntry!.Id;
         string content = ContentBox.Text;
+        string language = UiText.Language;
+        UiText.Initialize("en");
         foreach (int width in new[] { 600, 960, 1600 })
         {
             _window!.AppWindow.Resize(new SizeInt32(width, 900));
             await SettleAsync();
             CheckControlBounds(width);
+            foreach (string id in new[] { "MemoryScopeChatButton", "MemoryScopeProjectButton", "MemoryScopeUserButton" })
+            {
+                var button = Button(id);
+                var label = (TextBlock)button.Content;
+                var labelBounds = label.TransformToVisual(button).TransformBounds(new Windows.Foundation.Rect(
+                    0, 0, label.ActualWidth, label.ActualHeight));
+                Check(labelBounds.Right <= button.ActualWidth + 1 && labelBounds.Bottom <= button.ActualHeight + 1 &&
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == label.Text,
+                    "localized memory scope text and accessible name remain complete at width " + width);
+            }
             Check(ContentBox.Text == content && _viewModel.SelectedEntry?.Id == selectedId,
                 "native resize preserves the selected entry and editor text at width " + width);
             await CaptureAsync("09-layout-" + width);
         }
+        UiText.Initialize(language);
+        await SettleAsync();
         var presenter = (OverlappedPresenter)_window!.AppWindow.Presenter;
         presenter.Minimize(false);
         await WaitAsync(() => presenter.State == OverlappedPresenterState.Minimized, "native memory window minimizes");

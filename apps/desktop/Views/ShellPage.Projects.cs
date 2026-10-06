@@ -403,6 +403,7 @@ public sealed partial class ShellPage
     {
         if (!_projectsReady || _projectActionPending) return;
         _projectActionPending = true;
+        UpdateSendButtonState();
         try { await action(); }
         catch (Exception error)
         {
@@ -424,7 +425,11 @@ public sealed partial class ShellPage
             catch (Exception) { /* Preserve the current display if the catalog itself is unavailable. 中文：正式目录本身不可用时，保留当前展示。 */ }
             await ShowProjectErrorAsync(UiText.Get("项目操作未完成"), error.Message);
         }
-        finally { _projectActionPending = false; }
+        finally
+        {
+            _projectActionPending = false;
+            UpdateSendButtonState();
+        }
     }
 
     private async Task ShowProjectErrorAsync(string title, string message) => await new ContentDialog

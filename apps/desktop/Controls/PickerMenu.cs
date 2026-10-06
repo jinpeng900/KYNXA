@@ -19,6 +19,17 @@ internal static class PickerMenu
         Placement = placement, FlyoutPresenterStyle = (Style)Application.Current.Resources[style]
     };
 
+    public static double SetContentWidth(Flyout flyout, double requestedWidth, double viewportWidth)
+    {
+        // Match this popup's content plus its existing padding and border; leave shared menu styles unchanged.
+        // 匹配当前菜单的内容宽度及既有内边距、边框，不改变共用菜单样式。
+        double presenterWidth = Math.Min(requestedWidth + 14, Math.Max(0, viewportWidth - 32));
+        var presenterStyle = new Style(typeof(FlyoutPresenter)) { BasedOn = flyout.FlyoutPresenterStyle };
+        presenterStyle.Setters.Add(new Setter(FrameworkElement.WidthProperty, presenterWidth));
+        flyout.FlyoutPresenterStyle = presenterStyle;
+        return Math.Max(0, presenterWidth - 14);
+    }
+
     public static ListView CreateList(string id, string name, string style = "KynxaModelListItemStyle",
         ListViewSelectionMode selection = ListViewSelectionMode.Single)
     {

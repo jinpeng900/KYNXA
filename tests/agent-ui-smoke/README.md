@@ -1,5 +1,11 @@
 # Agent native UI smoke
 
+For the focused search, draft retention and responsive layout check, build the same project, then start `AgentUiSmoke.exe --management-layout-only`. Results use the same temporary-directory pointer. The fixture waits for the target Pivot item and a completed render frame before taking narrow-window screenshots; grid coordinates alone do not prove the selected page is visible. Native fixtures must run sequentially.
+
+The management checks also exercise real filter-reset buttons without losing dirty drafts, a delayed configuration read with live busy status, saved-form save availability, 480 × 540 DIP short windows, scroll access to server actions, directory selection and full-path tooltips. Narrow windows move connection controls and the directory expander into their existing form scroll areas; widening restores the original owners and state. `management-short-mcp-en.png` and `management-short-skills-en.png` capture the isolated English short-window states.
+
+`App.DialogPolishChecks.cs` checks long tool names and workspace paths in a short English approval dialog, scrollable content and no default approval. Result checks cover loading/empty copy availability, real clipboard success feedback, exact Unicode/TeX/indentation and original line endings, language changes, appended pages, bounded image decoding and narrow/wide action placement. Only native TextBox display comparisons normalize CR line endings; clipboard comparisons retain the exact loaded source. Clipboard contention and the operating-system failure branch are not simulated.
+
 Run from the repository root:
 
 ```powershell

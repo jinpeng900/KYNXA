@@ -30,6 +30,8 @@ confirmations, archived and unavailable source states, archived-project CRUD,
 empty/error states, a 409 conflict preserving input, late results during rapid
 scope/context changes and after close, live Chinese/English switching, and native
 window resizing at 600/960/1600 pixels plus minimize/maximize/restore.
+English scope buttons are checked at each physical width for their real labels,
+automation names, and native bounds, confirming that the text fits inside its button.
 
 Results and previews are written beneath `%TEMP%/kynxa-memory-ui-smoke-*`. The
 latest result location is recorded in `%TEMP%/kynxa-memory-ui-smoke-latest.txt`.

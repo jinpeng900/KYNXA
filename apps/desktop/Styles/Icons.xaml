@@ -20,6 +20,7 @@
     <SvgImageSource x:Key="IconQuickMode" UriSource="ms-appx:///Resources/UI/Icons/quick-mode.svg" />
     <SvgImageSource x:Key="IconModelSelect" UriSource="ms-appx:///Resources/UI/Icons/model-select.svg" />
     <SvgImageSource x:Key="IconSend" UriSource="ms-appx:///Resources/UI/Icons/send-arrow.svg" />
+    <SvgImageSource x:Key="IconSendDisabled" UriSource="ms-appx:///Resources/UI/Icons/send-arrow-disabled.svg" />
     <SvgImageSource x:Key="IconSettings" UriSource="ms-appx:///Resources/UI/Icons/settings.svg" />
     <SvgImageSource x:Key="IconChat" UriSource="ms-appx:///Resources/UI/Icons/chat.svg" />
     <SvgImageSource x:Key="IconDeviceStatus" UriSource="ms-appx:///Resources/UI/Icons/device-status.svg" />

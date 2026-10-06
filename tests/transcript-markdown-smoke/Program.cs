@@ -8,7 +8,26 @@ void Check(bool condition, string description)
     if (!condition) throw new InvalidOperationException(description);
     checks++;
 }
-string Text(string html) => WebUtility.HtmlDecode(Regex.Replace(html, "<[^>]+>", string.Empty));
+string Text(string html) => WebUtility.HtmlDecode(Regex.Replace(Regex.Replace(html, "<br\\s*/?>", "\n"), "<[^>]+>", string.Empty));
+
+// Chat replies preserve actual source line breaks without guessing numbered boundaries.
+// 聊天回复保留原文的真实换行，不通过猜测编号来拆分正文。
+string numberedLines = string.Join("\n", Enumerable.Range(1, 400).Select(index => $"{index:000} 软件工程测试检查项"));
+string multiline = TranscriptMarkdown.Render(numberedLines);
+Check(Regex.Matches(multiline, "<br\\s*/?>").Count == 399, "Numbered reply retains each of its 400 source lines.");
+Check(Text(multiline).TrimEnd('\r', '\n') == numberedLines, "Line-break presentation preserves the numbered source text.");
+Check(Regex.Matches(TranscriptMarkdown.Render(numberedLines.Replace("\n", "\r\n")), "<br\\s*/?>").Count == 399,
+    "Windows CRLF replies retain the same visible line breaks.");
+Check(Regex.Matches(TranscriptMarkdown.Render("001 第一项\n002 第二项\n003 第", true), "<br\\s*/?>").Count == 2,
+    "Streaming partial lines use the same line-break presentation as completed replies.");
+Check(!TranscriptMarkdown.Render("001 第一项 002 第二项").Contains("<br"), "Single-line replies are not split by guessed number patterns.");
+Check(Regex.Matches(TranscriptMarkdown.Render("第一段\n续行\n\n第二段"), "<p>").Count == 2,
+    "Blank lines still delimit Markdown paragraphs.");
+Check(Regex.Matches(TranscriptMarkdown.Render("第一行  \n第二行\\\n第三行"), "<br\\s*/?>").Count == 2,
+    "Explicit Markdown hard breaks are not duplicated.");
+string wrappedList = TranscriptMarkdown.Render("- 第一项\n  继续解释\n- 第二项");
+Check(Regex.Matches(wrappedList, "<li>").Count == 2 && Regex.Matches(wrappedList, "<br\\s*/?>").Count == 1,
+    "Soft breaks within a list item retain list structure.");
 
 string table = TranscriptMarkdown.Render("""
 Before.

@@ -52,7 +52,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
     }
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
-        ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs, long? GenerationElapsedMs);
+        ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
+        long? GenerationElapsedMs, long? CreatedAtMs, long? EndRecordedAtMs);
     private sealed record ToolDisplayRevision(WeakReference<ToolActivity> Source, long Revision);
 
     public Task Ready => _ready.Task;
@@ -60,6 +61,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public event EventHandler<Guid>? RetryRequested;
     public event EventHandler<ToolResultRequest>? ToolResultRequested;
     public event EventHandler? ConversationChanged;
+    public event EventHandler<string>? ActionFeedbackRequested;
 
     public ConversationTranscript()
     {
@@ -98,6 +100,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     public void BeforeSend() => Post(new { type = "beforeSend" });
     public void ClearSelection() => Post(new { type = "clearSelection" });
+    public void JumpToLatest() => Post(new { type = "jumpToLatest" });
     private void LanguageChanged(object? sender, EventArgs e)
     {
         if (_disposed) return;
@@ -119,6 +122,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
             {
                 conversation = UiText.Get("对话"), transcript = UiText.Get("聊天记录"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
+                copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),
+                messageSentAt = UiText.Get("发送时间"), replyCreatedAt = UiText.Get("回复创建时间"),
+                replyEndedAt = UiText.Get("回复结束时间"), localEndTime = UiText.Get("本机记录"), timeNotRecorded = UiText.Get("未记录"),
                 reasoning = UiText.Get("思考过程"), thinking = UiText.Get("正在思考…"),
                 reasoningDuration = UiText.Get("思考过程 · {0} 秒"), stopped = UiText.Get("已停止生成"),
                 interrupted = UiText.Get("回复中断，请重试。"),
@@ -255,16 +261,35 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     }
                     break;
                 case "copy":
-                    if (MatchesConversation(message) && message.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
-                    {
-                        var data = new DataPackage();
-                        data.SetText(text.GetString() ?? "");
-                        Clipboard.SetContent(data);
-                    }
+                    CopyMessage(message);
                     break;
             }
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or System.Runtime.InteropServices.COMException) { }
+    }
+
+    private void CopyMessage(JsonElement message)
+    {
+        if (!MatchesConversation(message) || !message.TryGetProperty("requestId", out var request) || request.ValueKind != JsonValueKind.String
+            || string.IsNullOrEmpty(request.GetString()) || request.GetString()!.Length > 80
+            || !message.TryGetProperty("messageId", out var messageId) || !Guid.TryParse(messageId.GetString(), out var parsedId)
+            || !_messages.Any(row => row.Message.Id == parsedId)
+            || !message.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String) return;
+
+        bool succeeded = false;
+        try
+        {
+            var clipboardContent = new DataPackage();
+            clipboardContent.SetText(text.GetString() ?? "");
+            Clipboard.SetContent(clipboardContent);
+            succeeded = true;
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
+
+        // A browser click is only a request; acknowledge the actual clipboard result for this chat and operation.
+        // 浏览器点击仅代表请求；回执绑定当前聊天与本次操作，反映剪贴板实际结果。
+        Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
+        ActionFeedbackRequested?.Invoke(this, UiText.Get(succeeded ? "已复制" : "复制失败，请重试。"));
     }
 
     private bool MatchesConversation(JsonElement message) => message.TryGetProperty("conversationId", out var id)
@@ -299,7 +324,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
                     visible.Tools, segments, visible.Mode, row.Message.DurationMs,
                     row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
-                        ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null);
+                        ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null,
+                    row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
+                    MessageTimePresentation.GetEnd(row.Message)?.ToUnixTimeMilliseconds());
             }).ToArray();
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
             var previousCaches = new CachedHtml?[snapshots.Length];
@@ -350,6 +377,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     reasoningSeconds = item.Row.ReasoningSeconds, status = item.Row.Status,
                     presentationMode = item.Row.Mode, durationMs = item.Row.DurationMs,
                     generationElapsedMs = item.Row.GenerationElapsedMs,
+                    createdAtMs = item.Row.CreatedAtMs, endRecordedAtMs = item.Row.EndRecordedAtMs,
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                     assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                         round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
