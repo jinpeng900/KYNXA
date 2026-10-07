@@ -155,6 +155,11 @@ export class RetrievalIndex {
     return this._request('scopeVersion', { scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
   }
 
+  prepareVectors({ scopeKeys, ann, signal }) {
+    return this._request('prepareVectors', { scopeKeys: retrievalScopeKeys(scopeKeys),
+      ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }) }, signal);
+  }
+
   status() { return this._request('status'); }
 
   close() {

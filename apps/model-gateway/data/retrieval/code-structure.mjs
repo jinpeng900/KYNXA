@@ -5,7 +5,8 @@ import { MAX_SOURCE_CHARACTERS, retrievalFailure } from './retrieval-contracts.m
 
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = '0.3.1';
-export const CODE_PARSER_VERSION = `vscode-tree-sitter-wasm-${PACKAGE_VERSION}:units-v3`;
+const CSHARP_GRAMMAR_VERSION = '0.23.5';
+export const CODE_PARSER_VERSION = `vscode-tree-sitter-wasm-${PACKAGE_VERSION}:csharp-${CSHARP_GRAMMAR_VERSION}:units-v3`;
 const MAX_VISITED_NODES = 100_000;
 const MAX_DECLARATIONS = 10_000;
 const MAX_UNITS = 5000;
@@ -61,7 +62,16 @@ async function languageFor(language) {
     pending = runtime().then(async api => {
       // Buffer-backed loading uses only the fixed packaged assets, never URL fetching or a compiler.
       // 只从固定随包资产读取字节加载语法，不进行 URL 获取或调用编译器。
-      const bytes = await readFile(join(api.wasmRoot, `tree-sitter-${GRAMMARS[language]}.wasm`));
+      let grammarPath = join(api.wasmRoot, `tree-sitter-${GRAMMARS[language]}.wasm`);
+      if (language === 'csharp') {
+        // The runtime's bundled C# grammar predates collection expressions; load the upstream WASM directly.
+        // runtime 内置的 C# 语法早于集合表达式；直接加载上游 WASM，保留原文、诊断及 UTF16 位置。
+        const manifestPath = require.resolve('tree-sitter-c-sharp/package.json');
+        if (require(manifestPath).version !== CSHARP_GRAMMAR_VERSION)
+          throw retrievalFailure('Unsupported packaged C# grammar version. / 随包 C# 语法版本不受支持。', 'CODE_PARSER_VERSION_UNSUPPORTED');
+        grammarPath = join(dirname(manifestPath), 'tree-sitter-c_sharp.wasm');
+      }
+      const bytes = await readFile(grammarPath);
       return { Parser: api.Parser, language: await api.Language.load(bytes) };
     }).catch(error => { languages.delete(language); throw error; });
     languages.set(language, pending);

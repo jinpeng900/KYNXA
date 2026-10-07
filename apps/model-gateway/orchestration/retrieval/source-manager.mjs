@@ -44,7 +44,7 @@ export class SourceIndexService {
         signal.throwIfAborted();
         if (settings.local.enabled === false)
           throw toolFailure('本地检索已停用，不能恢复索引任务。', 'RETRIEVAL_DISABLED', 409);
-        return { settings, sources, checkpoint, scopes,
+        return { settings, sources, checkpoint, scopes, preparationFailures: this.indexer.preparationFailures,
           loadSource: (source, ownedSignal) => (source.sourceType === 'work-file' ? mounted : registered).loadSource(source, ownedSignal),
           isCurrent: (source, ownedSignal) => (source.sourceType === 'work-file' ? mounted : registered).isCurrent?.(source, ownedSignal) };
       },
@@ -70,8 +70,15 @@ export class SourceIndexService {
         }
       },
       refreshSources: projectId => { this.sync.mountedCache.delete(projectId); this.sync.markChanged(projectId, null); },
-      finalizeSources: (snapshot, signal) => this.indexer.prune({ scopes: snapshot.scopes,
-        identities: new Set(snapshot.sources.map(source => source.sourceId)) }, signal, { sourceTypes: ['knowledge', 'work-file'] }) });
+      finalizeSources: async (snapshot, signal) => {
+        await this.indexer.prune({ scopes: snapshot.scopes,
+          identities: new Set(snapshot.sources.map(source => source.sourceId)) }, signal, { sourceTypes: ['knowledge', 'work-file'] });
+        if (snapshot.preparationFailures === this.indexer.preparationFailures)
+          await this.cacheCorpus(snapshot.sources, snapshot.scopes, snapshot.settings, signal);
+        // Warm stable generations only after derivation ends, not after every embedding batch.
+        // 仅在派生结束后预热稳定代次，不能每个嵌入批次都取消并重建大型图。
+        await this.index.prepareVectors?.({ scopeKeys: snapshot.scopes, ann: snapshot.settings.local.ann, signal });
+      } });
   }
 
   initialize() { return this.lifecycle.initialize(); }
@@ -82,6 +89,7 @@ export class SourceIndexService {
   conversationSources(...args) { return this.sync.conversationSources(...args); }
   mountedSources(...args) { return this.sync.mountedSources(...args); }
   mountedSnapshot(...args) { return this.sync.mountedSnapshot(...args); }
+  foregroundMountedSnapshot(...args) { return this.sync.foregroundMountedSnapshot(...args); }
   upsert(...args) { return this.indexer.upsert(...args); }
   invalidateMounted(projectId) { this.sync.mountedCache.delete(projectId?.toLowerCase() ?? null); }
 
@@ -118,16 +126,20 @@ export class SourceIndexService {
     const corpusSources = snapshot.sources.filter(source => ['knowledge', 'work-file'].includes(source.sourceType));
     const otherSources = snapshot.sources.filter(source => !['knowledge', 'work-file'].includes(source.sourceType));
     const key = sourceIdentity(corpusScopes);
-    const signature = sourceIdentity(this.indexer.preparationVersion(), snapshot.settings.local,
-      snapshot.settings.projectIndexing, [...corpusSources].sort((left, right) => left.sourceId.localeCompare(right.sourceId))
-        .map(source => [source.sourceId, source.contentHash, source.sourceRevision, source.bindingRevision,
-          source.scopeKey, source.sourceType, source.title, source.locator, source.parserVersion, source.chunkerVersion,
-          source.tokenizerVersion, source.embeddingInputVersion, source.structure]));
+    const signature = this.corpusSignature(corpusSources, snapshot.settings);
     const version = corpusVersion(await this.index.scopeVersion({ scopeKeys: corpusScopes, signal }));
     const previous = this.corpusSyncCache.get(key);
     const cached = previous?.signature === signature && previous.version === version;
     let canCacheCorpus = cached;
-    if (!cached) {
+    if (!cached && (snapshot.sourceScan?.backgroundPending || corpusSources.length > 512)) {
+      // Large cold corpora are derived by durable jobs. Incomplete discovery must never prune unseen sources.
+      // 大型冷语料由持久作业派生；目录发现未完成时绝不能裁掉尚未发现的来源。
+      const projectId = snapshot.relationship?.isFolderlessWorkspace ? null
+        : snapshot.relationship?.projectId ?? snapshot.settings.projectId ?? null;
+      await this.rebuild({ projectId });
+      canCacheCorpus = false;
+      snapshot.indexingPending = true;
+    } else if (!cached) {
       // Only complete corpus metadata plus the actual database epoch can skip synchronization; chat messages remain separate.
       // 只有完整语料元信息和真实数据库代次共同一致才跳过同步，聊天消息仍独立处理。
       if (previous && previous.version !== version)
@@ -149,6 +161,23 @@ export class SourceIndexService {
       const currentVersion = corpusVersion(await this.index.scopeVersion({ scopeKeys: corpusScopes, signal }));
       this.corpusSyncCache.set(key, { signature, version: currentVersion });
     }
+    while (this.corpusSyncCache.size > 32) this.corpusSyncCache.delete(this.corpusSyncCache.keys().next().value);
+  }
+
+  corpusSignature(sources, settings) {
+    return sourceIdentity(this.indexer.preparationVersion(), settings.local, settings.projectIndexing,
+      [...sources].sort((left, right) => left.sourceId.localeCompare(right.sourceId)).map(source => [source.sourceId,
+        source.contentHash, source.sourceRevision, source.bindingRevision, source.scopeKey, source.sourceType,
+        source.title, source.locator, source.parserVersion, source.chunkerVersion, source.tokenizerVersion,
+        source.embeddingInputVersion, source.structure]));
+  }
+
+  async cacheCorpus(sources, scopes, settings, signal) {
+    if (!this.index.scopeVersion) return;
+    const version = corpusVersion(await this.index.scopeVersion({ scopeKeys: scopes, signal }));
+    const key = sourceIdentity(scopes);
+    this.corpusSyncCache.delete(key);
+    this.corpusSyncCache.set(key, { signature: this.corpusSignature(sources, settings), version });
     while (this.corpusSyncCache.size > 32) this.corpusSyncCache.delete(this.corpusSyncCache.keys().next().value);
   }
 
@@ -219,7 +248,8 @@ export class SourceIndexService {
     if (!this.closure) this.closure = (async () => {
       this.beginClose();
       const releasing = Promise.resolve().then(() => releaseInference?.());
-      const draining = Promise.allSettled([...this.operations.values(), this.lifecycle.drain()]);
+      const draining = Promise.allSettled([...this.operations.values(), ...this.sync.mountedOperations.values(),
+        ...this.sync.foregroundContinuations.values(), this.lifecycle.drain()]);
       const [release, drained] = await Promise.allSettled([releasing, draining]);
       if (release.status === 'rejected') throw release.reason;
       if (drained.status === 'rejected') throw drained.reason;

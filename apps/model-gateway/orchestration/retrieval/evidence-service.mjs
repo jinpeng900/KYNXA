@@ -26,7 +26,7 @@ export class RetrievalEvidenceService {
       return { prompt: '', references: [], evidenceAssessment: assessEvidence([], query), plan: route };
     const promptTokens = Math.max(0, Math.min(route.evidenceTokens, maximumTokens ?? route.evidenceTokens));
     const reservedTokens = estimateTokens(EVIDENCE_NOTICE) + 120;
-    const result = await this.search(context, { query: route.query, limit: 6, taskType: route.taskType,
+    const result = await this.search(context, { query: route.query, domain: route.domain, limit: 6, taskType: route.taskType,
       maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
     { signal, modelReferences: Boolean(this.resultStore) });
     const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: result.evidenceAssessment });

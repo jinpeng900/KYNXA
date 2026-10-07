@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,6 +12,7 @@ import { MemoryService } from '../data/memory-service.mjs';
 import { RetrievalCoordinator } from '../orchestration/retrieval/coordinator.mjs';
 import { buildRetrievalIntent, retrievalPlan } from '../orchestration/retrieval/query-plan.mjs';
 import { toolFixture, parsed } from './tool-fixture.mjs';
+import { createRetrievalEvaluationDataset, retrievalEvaluationReport } from '../../../tests/retrieval-benchmark/metrics.mjs';
 
 const source = (sourceId, filename, text, extra = {}) => ({ sourceId, scopeKey: 'user', sourceType: 'work-file',
   title: filename, locator: { relativePath: filename }, text, ...extra });
@@ -43,11 +45,13 @@ test('code queries reach automatic retrieval and exact file names are not mistak
 
 test('real parser worker preserves declaration ranges, raw text and a bounded reusable derivation', async t => {
   const { structures } = await indexFixture(t);
-  const text = 'namespace Kynxa;\r\nclass JobIndex {\r\n  public bool CancelJob() { return true; }\r\n}\r\n';
+  const text = 'namespace Kynxa;\r\nclass JobIndex(string name) {\r\n  private readonly List<string> _jobs = [];\r\n' +
+    '  public bool CancelJob() { return true; }\r\n}\r\n';
   const input = source('job-index', 'JobIndex.cs', text);
   const first = await structures.parse(input);
   assert.equal(first.structure.language, 'csharp');
   assert.equal(first.structure.parseStatus, 'parsed');
+  assert.match(first.structure.parserVersion, /csharp-0\.23\.5/);
   const method = first.chunks.find(chunk => chunk.structure.symbolName === 'CancelJob');
   assert.ok(method);
   assert.equal(method.text, text.slice(method.startOffset, method.endOffset));
@@ -182,20 +186,37 @@ function comparisonCorpus() {
     // 干扰资料是真实的文档提及，不把说明文字当作可执行声明；标签来自自造原文中的独立返回标记。
     for (let number = 0; number < 6; number++) documents.push(source(`guide-${owner}-${number}`, `${owner}-guide-${number}.md`,
       `# ${qualified}\n\n${qualified} ${name} ${owner} definition reference. ${qualified} ${qualified}.`));
-    queries.push({ query: `${qualified} definition`, symbol: qualified, targetId: owner, marker, kind: 'code' });
-    queries.push({ query: `在 ${filename} 中找到 ${name} 定义`, path: filename, symbol: name, targetId: owner, marker, kind: 'code' });
+    const gold = [{ sourceId: owner, evidence: [marker] }];
+    queries.push({ queryId: `${owner}:definition`, query: `${qualified} definition`, symbol: qualified, gold, kind: 'code' });
+    queries.push({ queryId: `${owner}:path`, query: `在 ${filename} 中找到 ${name} 定义`, path: filename, symbol: name, gold, kind: 'code' });
   }
   for (const [name, body] of [['取消作业', '取消前记录已经完成的批次，未提交的任务才停止。'],
     ['并发发布', '两个写入不能覆盖同一来源的版本。'], ['依赖安装', '安装前检查运行环境和依赖是否存在。'], ['任务恢复', '恢复之前先核验执行回执。']]) {
     const sourceId = `document-${name}`, marker = `${name}的独立证据`;
     documents.push(source(sourceId, `${name}.md`, `# ${name}\n\n${body}\n\n## 验证\n\n${marker}：${body}\n`));
-    queries.push({ query: `${name}的独立证据`, targetId: sourceId, marker, kind: 'knowledge' });
+    queries.push({ queryId: sourceId, query: `${name}的独立证据`, gold: [{ sourceId, evidence: [marker] }], kind: 'knowledge' });
   }
+  const joinedSources = [['handover-owner', 'handover Owner receipt: Rowan.'],
+    ['handover-condition', 'handover Required condition receipt: verified backup.']];
+  for (const [sourceId, text] of joinedSources) documents.push(source(sourceId, `${sourceId}.md`, text));
+  queries.push({ queryId: 'multi-source-evidence', query: 'handover receipt', kind: 'knowledge',
+    gold: joinedSources.map(([sourceId, evidence]) => ({ sourceId, evidence: [evidence] })) });
+  queries.push({ queryId: 'absent-evidence', query: 'zzragunavailabledevelopment20261008zz',
+    kind: 'knowledge', gold: [], noAnswer: true });
   return { documents, queries };
 }
 
-test('fixed local comparison reports independent evidence hits and warm latency for old and structured pipelines', async t => {
+test('fixed local comparison reports paired development evidence, no-answer results and observed latency', async t => {
   const { structures, legacy, upgraded } = await indexFixture(t), corpus = comparisonCorpus();
+  const dataset = createRetrievalEvaluationDataset({ datasetId: 'controlled-structure', datasetVersion: 'development-v2',
+    partition: 'development', sources: corpus.documents, queries: corpus.queries });
+  const artifactDirectory = fileURLToPath(new URL('../../../artifacts/verification/rag-structure-20261008/', import.meta.url));
+  await mkdir(artifactDirectory, { recursive: true });
+  const output = await mkdtemp(join(artifactDirectory, 'development-'));
+  const snapshot = JSON.stringify({ datasetId: dataset.identity.datasetId, datasetVersion: dataset.identity.datasetVersion,
+    partition: dataset.identity.partition, sources: corpus.documents.map(({ sourceId, text }) => ({ sourceId, text })),
+    queries: dataset.queries }, null, 2) + '\n';
+  await writeFile(join(output, 'dataset.json'), snapshot, { flag: 'wx' });
   const started = performance.now(), prepared = [];
   for (const input of corpus.documents) {
     const parsedSource = await structures.parse(input);
@@ -204,34 +225,37 @@ test('fixed local comparison reports independent evidence hits and warm latency 
   await Promise.all([legacy.upsertSources(corpus.documents), upgraded.upsertSources(prepared)]);
   const preparationMs = performance.now() - started;
   const score = async (index, structured) => {
-    let hits1 = 0, hits5 = 0;
-    const latencies = [], rows = [];
+    const observations = [];
     for (const gold of corpus.queries) {
       const started = performance.now();
-      const result = await index.search({ query: gold.query, scopeKeys: ['user'], limit: 5,
-        ...(structured ? { retrievalIntent: buildRetrievalIntent(gold.query,
-          { domain: gold.kind, symbol: gold.symbol, path: gold.path }) } : {}) });
-      latencies.push(performance.now() - started);
-      const hit = item => item.sourceId === gold.targetId && item.excerpt.includes(gold.marker);
-      const rank = result.items.findIndex(hit);
-      if (rank === 0) hits1++;
-      if (rank >= 0) hits5++;
-      rows.push({ query: gold.query, expectedSourceId: gold.targetId, relevantEvidenceRank: rank < 0 ? null : rank + 1 });
+      try {
+        const result = await index.search({ query: gold.query, scopeKeys: ['user'], limit: 5,
+          ...(structured ? { retrievalIntent: buildRetrievalIntent(gold.query,
+            { domain: gold.kind, symbol: gold.symbol, path: gold.path }) } : {}) });
+        observations.push({ queryId: gold.queryId, status: 'completed', durationMs: performance.now() - started,
+          items: result.items.map(({ sourceId, excerpt }) => ({ sourceId, excerpt })),
+          diagnosticCodes: result.degradedReason ? ['EVALUATION_SEARCH_DEGRADED'] : [] });
+      } catch (error) {
+        observations.push({ queryId: gold.queryId, status: 'failed', durationMs: performance.now() - started,
+          diagnosticCodes: [typeof error.code === 'string' && error.code.trim() ? error.code : 'EVALUATION_SEARCH_FAILED'] });
+      }
     }
-    latencies.sort((left, right) => left - right);
-    return { queries: corpus.queries.length, evidenceHitAt1: hits1 / corpus.queries.length,
-      evidenceHitAt5: hits5 / corpus.queries.length, p50Ms: latencies[Math.floor(latencies.length * 0.5)],
-      p95Ms: latencies[Math.min(latencies.length - 1, Math.ceil(latencies.length * 0.95) - 1)], rows };
+    return observations;
   };
-  const baseline = await score(legacy, false), structured = await score(upgraded, true);
-  assert.equal(structured.evidenceHitAt5, 1, 'all independent code/doc markers must be retrievable');
-  assert.ok(structured.evidenceHitAt1 >= baseline.evidenceHitAt1);
-  const artifactDirectory = fileURLToPath(new URL('../../../artifacts/verification/rag-structure-20261007/', import.meta.url));
-  await mkdir(artifactDirectory, { recursive: true });
-  await writeFile(join(artifactDirectory, 'retrieval-comparison.json'), JSON.stringify({
-    benchmark: 'controlled-structure-regression-v1', scope: 'synthetic local component comparison; not a public benchmark or model/Agent success score',
+  const evaluation = retrievalEvaluationReport(dataset, { baseline: await score(legacy, false), structured: await score(upgraded, true) });
+  const { baseline, structured } = evaluation.methods;
+  await writeFile(join(output, 'retrieval-comparison.json'), JSON.stringify({
+    benchmark: 'controlled-structure-regression-v2', scope: 'synthetic local development component comparison; not heldout/model/Agent performance',
     model: null, embeddings: 'disabled equally in both arms', vectorBackend: false,
+    latencyMeasurement: 'One search per query and method, including failed attempts; cache state is not classified',
     corpusSources: corpus.documents.length, queries: corpus.queries.length,
-    gold: 'independent literal evidence markers in fixture source, not parser-produced labels', preparationMs, baseline, structured
-  }, null, 2));
+    datasetSnapshot: { filename: 'dataset.json', sha256: createHash('sha256').update(snapshot).digest('hex') },
+    gold: 'independent source IDs and literal evidence spans, including multi-source and no-answer cases', preparationMs, evaluation
+  }, null, 2), { flag: 'wx' });
+  assert.equal(structured.counts.completed, corpus.queries.length);
+  assert.equal(structured.counts.failed, 0);
+  assert.equal(structured.counts.skipped, 0);
+  assert.equal(structured.metrics.allEvidenceAt5.value, 1, 'all independent code/doc spans must be retrievable');
+  assert.ok(structured.metrics.evidenceHitAt1.value >= baseline.metrics.evidenceHitAt1.value);
+  assert.equal(structured.noAnswerEmptyResult.value, 1);
 });

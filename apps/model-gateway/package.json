@@ -20,6 +20,7 @@
     "html-to-text": "10.0.0",
     "ignore": "7.0.12",
     "sqlite-vec": "0.1.9",
+    "tree-sitter-c-sharp": "0.23.5",
     "usearch": "2.26.4",
     "yaml": "2.9.1"
   },

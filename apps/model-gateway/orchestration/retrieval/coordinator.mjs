@@ -117,7 +117,7 @@ export class RetrievalCoordinator {
     const messages = this._beforeCurrentMessage(await this.conversations.readMessages(relationship.conversationId), context);
     const [library, mounted] = await Promise.all([
       this.sourceService.librarySnapshot(scopes, settings, signal),
-      this.sourceService.mountedSnapshot(relationship.isFolderlessWorkspace ? null : relationship.projectId, settings, signal)
+      this.sourceService.foregroundMountedSnapshot(relationship.isFolderlessWorkspace ? null : relationship.projectId, settings, signal)
     ]);
     const sources = [...library.sources, ...this.sourceService.conversationSources(relationship, memory.entries, messages, settings), ...mounted.sources];
     // Keep source identities in the request; corpus bodies are hydrated only for changed derivations or current reads.
@@ -126,7 +126,9 @@ export class RetrievalCoordinator {
       : source.sourceType === 'work-file' ? mounted.loadSource(source, ownedSignal) : Promise.resolve(source);
     const isCurrent = (source, ownedSignal) => source.sourceType === 'knowledge' ? library.isCurrent(source, ownedSignal)
       : source.sourceType === 'work-file' ? mounted.isCurrent(source, ownedSignal) : Promise.resolve(true);
+    const priorUser = messages.filter(message => message.Role === 'user' && (!message.Status || message.Status === 'completed')).at(-1);
     return { relationship, settings, scopes, sources, loadSource, isCurrent,
+      taskContext: context.message ?? priorUser?.Content,
       identities: new Map(sources.map(source => [source.sourceId, source])),
       ...(mounted.scan ? { sourceScan: mounted.scan } : {}) };
   }
@@ -237,11 +239,11 @@ export class RetrievalCoordinator {
           !Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > 16384)
         throw retrievalFailure('Invalid query or evidence budget. / 检索查询、数量或证据预算无效。');
       validateEvidenceGap(gap);
-      const retrievalIntent = buildRetrievalIntent(query, { domain, symbol, path });
       const withModelReferences = items => modelReferences
         ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(archiveId, index + 1) })) : items;
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
+      const retrievalIntent = buildRetrievalIntent(query, { domain, symbol, path, taskContext: snapshot.taskContext });
       if (!snapshot.settings.local.enabled) return { items: [], strategy: 'disabled', vectorAvailable: false,
         evidenceAssessment: assessEvidence([], query) };
       let acquisition = this.acquisitions.get(context);
@@ -315,6 +317,7 @@ export class RetrievalCoordinator {
         retrievalIntent, ann: snapshot.settings.local.ann,
         queryVector: embedded?.vector, embeddingProfileId: embedded?.profileId,
         embeddingModelVersion: embeddingVersion(embedded?.modelVersion), embeddingSpaceId: embedded?.embeddingSpaceId, signal });
+      if (snapshot.indexingPending) result.indexingPending = true;
       if (embeddingDiagnostic) result.embeddingDiagnostic = embeddingDiagnostic;
       // Search is bounded evidence acquisition, never an exhaustive symbol-reference enumeration.
       // 搜索只提供有界候选证据，不能冒充对符号引用的穷举。
@@ -323,12 +326,13 @@ export class RetrievalCoordinator {
       // Targeted current reads replace the second whole-library/history/tree snapshot.
       // 只回读命中来源并复核其版本，避免第二次全量资料、聊天和目录扫描。
       const candidateCount = result.items.length, freshChecks = new Map();
-      const unique = deduplicateCandidates(result.items, { existingContext });
+      const unique = deduplicateCandidates(result.items, { existingContext, retrievalIntent });
       const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal);
       let current = reranked.items, selected;
       const invalidSourceIds = new Set();
       do {
-        selected = selectCandidates(current, { query, limit, maximumTokens, requiresSourceRead });
+        selected = selectCandidates(current, { query, retrievalIntent, taskContext: snapshot.taskContext,
+          limit, maximumTokens, requiresSourceRead });
         const pending = selected.items.map(item => this._fresh(item, snapshot, signal, freshChecks, context));
         const checked = await Promise.allSettled(pending);
         signal?.throwIfAborted();
@@ -337,7 +341,7 @@ export class RetrievalCoordinator {
         const stale = selected.items.filter((_, index) => !checked[index].value);
         if (!stale.length) break;
         for (const item of stale) invalidSourceIds.add(item.sourceId);
-        const available = deduplicateCandidates(result.items.filter(item => !invalidSourceIds.has(item.sourceId)), { existingContext }).items;
+        const available = deduplicateCandidates(result.items.filter(item => !invalidSourceIds.has(item.sourceId)), { existingContext, retrievalIntent }).items;
         const rankedReferences = new Set(current.map(item => item.sourceRef));
         // A stale preferred copy must not hide an independently valid duplicate source.
         // 优先副本失效后，仍允许原候选池中其他有效来源的同文副本补位。

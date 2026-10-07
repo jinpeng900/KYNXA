@@ -817,6 +817,66 @@ test('the first foreground synchronization after a completed restart restores le
   assert.equal((await restarted.jobs.get(job.jobId)).status, 'completed');
 });
 
+test('large cold corpus synchronization schedules a job without blocking chat or pruning incomplete discovery', async t => {
+  const f = await fixture(t);
+  let corpusGeneration = 1, admitted = 0;
+  f.index.scopeVersion = async ({ scopeKeys }) => ({ indexEpoch: 'fixture',
+    scopes: scopeKeys.map(scopeKey => ({ scopeKey, corpusGeneration })) });
+  f.service.rebuild = async () => { admitted++; return { jobId: 'owned-job' }; };
+  const corpus = Array.from({ length: 513 }, (_, number) => ({ sourceId: `large-${number}`, scopeKey: 'user',
+    sourceType: 'knowledge', title: `File ${number}`, contentHash: hashText(`Body ${number}`),
+    sourceRevision: 1, locator: { relativePath: `file-${number}.md` } }));
+  const message = { sourceId: 'current-message', scopeKey: 'chat:test', sourceType: 'message',
+    title: 'user', locator: { messageId: 'current-message' }, text: 'Current formal message.', sourceRevision: 1 };
+  const snapshot = () => ({ sources: [...corpus, message], settings: f.settings,
+    scopes: ['user', 'chat:test'], sourceScan: { backgroundPending: true }, loadSource: () => {
+      throw new Error('Cold corpus bodies must not be loaded by foreground synchronization.');
+    } });
+  const prunedTypes = [], prune = f.service.indexer.prune.bind(f.service.indexer);
+  f.service.indexer.prune = (input, signal, options) => { prunedTypes.push(...options.sourceTypes); return prune(input, signal, options); };
+  const first = snapshot();
+  await f.service.syncFormalSources(first);
+  assert.equal(first.indexingPending, true);
+  assert.equal(admitted, 1);
+  assert.deepEqual(f.publications, ['current-message']);
+  assert.equal(prunedTypes.includes('knowledge') || prunedTypes.includes('work-file'), false);
+  // The completed background publication installs the same metadata/version proof used by foreground queries.
+  // 后台提交完成后建立与前台相同的元信息和版本证明，避免每个查询重新调度整库。
+  await f.service.lifecycle.finalizeSources({ sources: corpus, scopes: ['user'], settings: f.settings,
+    preparationFailures: f.service.indexer.preparationFailures });
+  const warm = snapshot();
+  delete warm.sourceScan;
+  await f.service.syncFormalSources(warm);
+  assert.equal(admitted, 1);
+  assert.equal(warm.indexingPending, undefined);
+  corpusGeneration++;
+  const changed = snapshot();
+  await f.service.syncFormalSources(changed);
+  assert.equal(changed.indexingPending, true);
+  assert.equal(admitted, 2);
+});
+
+test('one actual-tokenizer oversize rejection preserves all valid peer embeddings without cutting source text', async t => {
+  const calls = [];
+  const f = await fixture(t, { embeddings: { status: () => ({ state: 'ready' }), embedDocuments: async texts => {
+    calls.push([...texts]);
+    const index = texts.findIndex(text => text.startsWith('oversized'));
+    if (index >= 0) throw Object.assign(new Error('Actual tokenizer input exceeded 512 tokens.'), {
+      code: 'EMBEDDING_INPUT_TOO_LONG', details: { index, tokenCount: 513, maxInputTokens: 512 } });
+    return { profileId: 'fixture', vectors: texts.map(() => [1, 0]) };
+  } } });
+  const original = ['valid Chinese 中文', 'oversized 中文'.repeat(50), 'valid code Cobalt.Apply()', 'oversized raw'.repeat(50)];
+  const diagnostics = [];
+  const result = await f.service.indexer.embedBoundedDocuments(original, {}, code => diagnostics.push(code));
+  assert.deepEqual(result.vectors, [[1, 0], null, [1, 0], null]);
+  assert.deepEqual([...result.rejectedPositions], [1, 3]);
+  assert.deepEqual(calls.at(-1), [original[0], original[2]]);
+  assert.ok(calls.every(batch => batch.every(text => original.includes(text))));
+  assert.deepEqual(diagnostics, ['EMBEDDING_INPUT_TOO_LONG', 'EMBEDDING_INPUT_TOO_LONG']);
+  const empty = await f.service.indexer.embedBoundedDocuments([original[1]], {}, () => {});
+  assert.deepEqual(empty.vectors, [null]);
+});
+
 test('a rebuilt SQLite epoch invalidates a warm corpus synchronization proof even when source descriptors did not change', async t => {
   const f = await resumableFixture(t);
   const indexing = f.createService();

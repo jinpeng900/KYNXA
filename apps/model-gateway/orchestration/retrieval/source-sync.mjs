@@ -35,6 +35,8 @@ export class SourceSyncService {
     this.watchers = new Map();
     this.mountedStates = new Map();
     this.mountedOperations = new Map();
+    this.foregroundContinuations = new Map();
+    this.shutdown = new AbortController();
     this.closed = false;
   }
 
@@ -130,6 +132,52 @@ export class SourceSyncService {
       if (this.mountedOperations.get(projectId) === pending) this.mountedOperations.delete(projectId);
     }).catch(() => {});
     return pending;
+  }
+
+  async foregroundMountedSnapshot(projectId, settings, signal) {
+    signal?.throwIfAborted();
+    if (this.closed) throw toolFailure('资料同步已经关闭。', 'RETRIEVAL_CLOSED', 409);
+    if (!settings.projectIndexing?.mountedFolder) return this.mountedSnapshot(projectId, settings, signal);
+    projectId = projectId?.toLowerCase() ?? null;
+    // Continue owned discovery after the short foreground grace period, never abandon its errors or lifecycle.
+    // 前台短暂等待后由服务继续拥有目录发现，异常和关闭生命周期不能被丢弃。
+    const pending = this.mountedOperations.get(projectId) ?? this.mountedSnapshot(projectId, settings, this.shutdown.signal);
+    let timeout;
+    const result = await Promise.race([pending, new Promise(resolveDeadline => {
+      timeout = setTimeout(() => resolveDeadline(null), 100);
+    })]).finally(() => clearTimeout(timeout));
+    signal?.throwIfAborted();
+    if (this.closed) throw toolFailure('资料同步已经关闭。', 'RETRIEVAL_CLOSED', 409);
+    if (result) return result;
+    if (!this.foregroundContinuations.has(projectId)) {
+      const continuation = pending.then(() => {
+        this.lastDiscoveryError = undefined;
+        if (!this.closed) return this.onFolderChanged?.(projectId);
+      }).catch(error => {
+        if (error.name !== 'AbortError') this.lastDiscoveryError = error.code ?? 'RETRIEVAL_DISCOVERY_FAILED';
+      }).finally(() => {
+        if (this.foregroundContinuations.get(projectId) === continuation) this.foregroundContinuations.delete(projectId);
+      });
+      this.foregroundContinuations.set(projectId, continuation);
+    }
+    const project = await this.getProject(projectId);
+    signal?.throwIfAborted();
+    if (!project?.FolderPath) return { sources: [], scan: { backgroundPending: true }, loadSource: async source => source };
+    const root = resolve(project.FolderPath), bindingRevision = settings.projectIndexing.bindingRevision;
+    await inspectLocalPath(root);
+    const state = this.mountedStates.get(projectId);
+    const validState = state?.root === root && state.bindingRevision === bindingRevision;
+    const metadata = validState ? new Map(state.files) : new Map();
+    const limits = sourceLimits(settings);
+    const withinBudget = metadata.size <= limits.maximumFiles &&
+      [...metadata.values()].reduce((sum, file) => sum + file.textBytes, 0) <= limits.maximumBytes;
+    const sources = withinBudget ? [...metadata.values()].map(file => ({
+      sourceId: sourceIdentity('work-file', projectId, root, file.relativePath), scopeKey: `project:${projectId}`,
+      sourceType: 'work-file', title: file.relativePath, locator: { path: resolve(root, file.relativePath), relativePath: file.relativePath, root },
+      storedBytes: file.textBytes, contentHash: file.contentHash, sourceRevision: file.contentHash, bindingRevision })) : [];
+    return this.snapshotFor(sources, projectId, root, bindingRevision, settings,
+      { backgroundPending: true, fileReads: 0, reusedFiles: sources.length, scannedFiles: 0,
+        ...(this.lastDiscoveryError ? { diagnosticCode: this.lastDiscoveryError } : {}) }, metadata);
   }
 
   async captureMounted(projectId, settings, signal) {
@@ -313,6 +361,7 @@ export class SourceSyncService {
 
   close() {
     this.closed = true;
+    this.shutdown.abort();
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
     this.libraryCache.clear();

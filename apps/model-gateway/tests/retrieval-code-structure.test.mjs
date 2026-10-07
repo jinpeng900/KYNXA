@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { codeLanguageForSource, parseCodeStructure, CODE_PARSER_VERSION } from '../data/retrieval/code-structure.mjs';
 import { chunkStructuredSource } from '../data/retrieval/retrieval-text.mjs';
@@ -67,6 +68,70 @@ test('C# generics, overloads, namespaces and nested functions retain exact UTF16
   assert.ok(result.units.filter(unit => unit.symbolName === 'Outer').length >= 2);
   assert.ok(result.units.some(unit => unit.symbolName === 'Convert' && unit.qualifiedName === 'Example.Core.Box.Convert'));
   assert.equal(result.units.some(unit => unit.symbolName === 'Fake' || unit.symbolName === 'StringFake'), false);
+  assertRanges(text, result);
+});
+
+test('modern C# collection expressions, primary constructors, generic records and raw strings parse original text offline', async () => {
+  const text = ['// 😀 modern syntax keeps UTF16 offsets', 'namespace Example.Modern;',
+    'public sealed record Envelope<T>(T Value) where T : class;',
+    'public sealed class Store<T>(string name) where T : class', '{',
+    '  private readonly List<T> _empty = [];',
+    '  public int[] Values => [1, 2, 3];',
+    '  public int[] Spread(int[] values) => [0, ..values, 4];',
+    '  public U Convert<U>(U value) => value;',
+    '  public string Read() => """',
+    '    class Ghost { void Fake() { } } [] 😀',
+    '    """;',
+    '  public string Template() => $$"""{{name}} [1] class StringGhost {}""";', '}'].join('\r\n');
+  const input = source('Store.cs', text), originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => { fetches++; throw new Error('Structure parsing must not fetch resources.'); };
+  try {
+    const result = await parseCodeStructure(input);
+    assert.equal(result.parseStatus, 'parsed');
+    assert.deepEqual(result.diagnosticCodes, []);
+    assert.match(result.parserVersion, /csharp-0\.23\.5/);
+    assert.equal(input.text, text);
+    assert.ok(result.units.some(unit => unit.kind === 'record' && unit.qualifiedName === 'Example.Modern.Envelope'));
+    const store = result.units.filter(unit => unit.qualifiedName === 'Example.Modern.Store');
+    assert.ok(store.length >= 2);
+    assert.ok(store.every(unit => unit.unitStartOffset === text.indexOf('public sealed class Store<T>(string name)') &&
+      unit.unitEndOffset === text.length));
+    for (const symbolName of ['Values', 'Spread', 'Convert', 'Read', 'Template']) {
+      const unit = result.units.find(item => item.symbolName === symbolName);
+      assert.equal(unit.parentSymbol, 'Example.Modern.Store');
+      assert.equal(unit.qualifiedName, `Example.Modern.Store.${symbolName}`);
+    }
+    const spread = result.units.find(unit => unit.symbolName === 'Spread');
+    assert.equal(text.slice(spread.startOffset, spread.endOffset), 'public int[] Spread(int[] values) => [0, ..values, 4];');
+    assert.equal(result.units.some(unit => ['Ghost', 'Fake', 'StringGhost'].includes(unit.symbolName)), false);
+    assertRanges(text, result);
+    assert.equal(fetches, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('the real ProjectStore source retains its class and method ranges with a collection initializer', async () => {
+  const text = await readFile(new URL('../../desktop/Services/Data/ProjectStore.cs', import.meta.url), 'utf8');
+  const input = source('ProjectStore.cs', text), result = await parseCodeStructure(input);
+  assert.equal(result.parseStatus, 'parsed');
+  assert.deepEqual(result.diagnosticCodes, []);
+  assert.equal(input.text, text);
+  const projectStore = result.units.filter(unit => unit.qualifiedName === 'KYNXA_Desktop.Services.ProjectStore');
+  assert.ok(projectStore.length >= 2);
+  assert.ok(projectStore.every(unit => unit.unitStartOffset === text.indexOf('public sealed class ProjectStore(') &&
+    unit.unitEndOffset === text.lastIndexOf('}') + 1));
+  assert.ok(result.units.some(unit => unit.symbolName === 'LoadAsync' && unit.parentSymbol === 'KYNXA_Desktop.Services.ProjectStore'));
+  assert.ok(result.units.some(unit => unit.symbolName === 'ReadAsync' && unit.parentSymbol === 'KYNXA_Desktop.Services.ProjectStore'));
+  assertRanges(text, result);
+});
+
+test('modern C# still reports genuine collection syntax errors and retains independently valid methods', async () => {
+  const text = 'namespace Example; class Broken(string name) { int[] Values => [1, ???]; int Good() => 2; }';
+  const result = await parseCodeStructure(source('Broken.cs', text));
+  assert.equal(result.parseStatus, 'partial');
+  assert.ok(result.diagnosticCodes.includes('CODE_SYNTAX_ERROR'));
+  assert.ok(result.units.some(unit => unit.symbolName === 'Good' && unit.qualifiedName === 'Example.Broken.Good'));
+  assert.equal(result.units.some(unit => unit.symbolName === 'Values'), false);
   assertRanges(text, result);
 });
 

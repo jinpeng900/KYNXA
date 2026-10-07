@@ -287,3 +287,45 @@ test('native recursive watching ignores nested managed manifest writes but obser
   assert.equal((await changed.loadSource(changed.sources[0])).text, 'Updated native source.');
   service.close();
 });
+
+test('foreground discovery does not await a slow scan and saved descriptors still require current source hashes', async t => {
+  let scheduled = 0;
+  const f = await fixture(t, { onFolderChanged: () => { scheduled++; } });
+  const path = join(f.workspace, 'source.md');
+  await writeFile(path, 'Original foreground source.');
+  const service = f.create();
+  const original = await service.mountedSnapshot('project-a', f.settings);
+  let releaseScan;
+  const gate = new Promise(resolveScan => { releaseScan = resolveScan; });
+  const capture = service.captureMounted.bind(service);
+  service.captureMounted = async (...args) => { await gate; return capture(...args); };
+  const foreground = await service.foregroundMountedSnapshot('project-a', f.settings);
+  assert.equal(foreground.scan.backgroundPending, true);
+  assert.equal(foreground.sources[0].sourceId, original.sources[0].sourceId);
+  assert.equal(scheduled, 0);
+  await writeFile(path, 'Changed while discovery is running.');
+  await assert.rejects(foreground.loadSource(foreground.sources[0]), { code: 'STALE_RETRIEVAL_SOURCE' });
+  releaseScan();
+  await Promise.all([...service.foregroundContinuations.values()]);
+  assert.equal(scheduled, 1);
+  assert.equal(service.foregroundContinuations.size, 0);
+});
+
+test('closing deferred discovery aborts its owned scan and prevents a late rebuild', async t => {
+  let scheduled = 0;
+  const f = await fixture(t, { onFolderChanged: () => { scheduled++; } });
+  const service = f.create();
+  let observedSignal;
+  service.captureMounted = (_id, _settings, signal) => {
+    observedSignal = signal;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  };
+  const foreground = await service.foregroundMountedSnapshot('project-a', f.settings);
+  assert.equal(foreground.scan.backgroundPending, true);
+  assert.equal(foreground.sources.length, 0);
+  service.close();
+  assert.equal(observedSignal.aborted, true);
+  await Promise.allSettled([...service.foregroundContinuations.values()]);
+  assert.equal(scheduled, 0);
+  assert.equal(service.foregroundContinuations.size, 0);
+});

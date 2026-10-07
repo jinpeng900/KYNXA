@@ -6,8 +6,8 @@
 
 - 模型：`Xenova/multilingual-e5-small`，固定 revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`，ONNX q8，384 维。基础 `intfloat/multilingual-e5-small` 模型卡声明 MIT，原始模型卡、转换说明及许可原文随包保留。
 - `embedding-profile.mjs` 是权重、分词、版本、哈希及下载来源的唯一清单。模型资产约 136 MB，位于忽略的 `artifacts/runtime/embedding/builtin-multilingual` 构建缓存；构建目标仅按校验生成的资产白名单复制到安装目录的 `runtime/embedding/builtin-multilingual`，缓存中的其他文件不随包提供。
-- 默认 CPU 推理，每实例一个按需 worker，最多两条计算线程，不需要 Python、Docker、GPU 或远端 API。原生 ONNX Runtime 和 SQLite 向量扩展由锁定的 npm 依赖随包提供。
-- 应用运行阶段禁止远端模型、CDN/WASM 回退及所有 worker 内 `fetch`。默认模型目录只读；没有权重、校验失败或 native 初始化失败时明确报告错误，由检索流程保留关键词能力，不伪造向量或自动上传文本。
+- 默认 CPU 推理，每模型一个按需独立 Node 进程，最多两条计算线程，不需要 Python、Docker、GPU 或远端 API。原生 ONNX Runtime 和 SQLite 向量扩展由锁定的 npm 依赖随包提供。
+- 应用运行阶段禁止远端模型、CDN/WASM 回退及所有 推理进程内 `fetch`。默认模型目录只读；没有权重、校验失败或 native 初始化失败时明确报告错误，由检索流程保留关键词能力，不伪造向量或自动上传文本。
 - 原生 `sqlite-vec@0.1.9` npm 分发支持 Windows x64；Windows arm64 的完整向量链路需要另行编译与发布验收，不声称已支持。
 - Windows x64 同时包含 ONNX 所需的四个 app-local VC 核心运行库。`Build/vc-runtime.json` 固定原始 Microsoft 签名文件版本与摘要；`prepare-vc-runtime.ps1` 只从正式版 Visual Studio Redist 或已经校验的构建缓存取得文件，不复制系统目录 DLL。原始 Microsoft Runtime 许可随包提供。构建机首次需要有许可的对应 Redist；安装用户不需要另下载或安装 VC。
 
@@ -19,7 +19,7 @@
 `RETRIEVAL_MODEL_PROFILE_UNSUPPORTED`，不能因为配置格式合法就偷偷换成默认模型。
 
 服务构造和每次推理均可显式传入 `profileId`，`status(profileId)` 报告所请求配置的真实支持情况。
-`ready` 且 `assetVerification: pending` 表示文件存在并等待首次 worker 完整校验，不能当成已验证权重；
+`ready` 且 `assetVerification: pending` 表示文件存在并等待首次推理进程完整校验，不能当成已验证权重；
 校验通过且加载成功才报告 `loaded: true` 和 `assetVerification: verified`。推理失败不会伪造模型就绪。
 
 ```js
@@ -34,7 +34,7 @@ const status = embedding.status();
 await embedding.close();
 ```
 
-查询按模型卡添加 `query: `，文档添加 `passage: `；均使用平均池化和归一化。每批最多 64 条，worker 每组处理四条。每条最多 512 个 token，包含前缀及特殊 token；超长返回 `EMBEDDING_INPUT_TOO_LONG` 和实际计数，不静默截断。调用方应拆分来源或保留词法检索。取消结果不会污染后续请求；关闭等待原生调用结束并释放 ONNX 会话，不强行终止 worker。
+查询按模型卡添加 `query: `，文档添加 `passage: `；均使用平均池化和归一化。每批最多 64 条，推理进程每组处理四条。每条最多 512 个 token，包含前缀及特殊 token；超长返回 `EMBEDDING_INPUT_TOO_LONG` 和实际计数，不静默截断。调用方应拆分来源或保留词法检索。取消结果不会污染后续请求；关闭先等待原生调用结束及释放确认；超时回收本服务拥有的进程并报告退役失败。
 
 缓存和索引必须同时记录 `profileId` 与 `modelVersion`，不能因为 builtin ID 未变就复用不同权重的向量。相似度分数不是回答正确率；阈值需要按中英文、代码和资料评测集验证。
 
@@ -43,9 +43,9 @@ await embedding.close();
 以及权重和分词器等运行资产哈希。来源分块与 `embeddingInputVersion` 由 Data 单独管理；
 模型空间不借用资料派生版本，也不能仅靠维数一致混用其他模型向量。
 
-worker 请求按独立递增 ID 配对。取消只拒绝所属请求，晚到结果不改变后续请求；发送失败立即清理等待项。
+推理 IPC 请求按独立递增 ID 配对。取消只拒绝所属请求，晚到结果不改变后续请求；发送失败立即清理等待项。
 重排模型载入失败会报告原始资源错误并自然退役，过期 `ready` 通知不能把错误状态恢复成就绪。
-关闭等待模型释放确认，不强制终止正在执行原生 ONNX 的线程。
+关闭等待模型释放确认，超时仅终止本服务拥有的独立进程并等待退出，不影响网关进程中的原生状态。
 
 ## 可选离线重排
 
@@ -76,3 +76,5 @@ node --test tests/retrieval-embedding.test.mjs
 构建并发使用操作系统持有的独占锁，进程被终止也会自动释放。`bundle-files.txt`、VC 的运行库清单和构建日志仅用于构建；安装包只保留清单指定的模型、运行库及许可证，不复制遗留锁或多余缓存文件。
 
 本轮已验证 Debug x64 构建输出中自己的 Node、模型资产和 native 依赖能生成 384 维向量；四个 VC 核心 DLL 实际从输出包内加载。此结果不替代正式安装器、空白 Windows 机器和 Windows arm64 的发布验收。
+
+原生嵌入和重排分属独立进程，避免同一个 Node 进程中多个 ONNX worker 共享原生状态；任一子进程崩溃会拒绝其待处理请求，由检索协调器保留词法能力。父进程断开会触发退役及有界看门狗。输入过长仍按真实 tokenizer 拒绝；索引器只剔除被明确定位的超限块并继续同批合法块，保留原文和缺失向量诊断。

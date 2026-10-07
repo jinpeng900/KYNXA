@@ -1,20 +1,20 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { Worker } from 'node:worker_threads';
+import { createNativeInferenceProcess } from './native-inference-process.mjs';
 import { BUILTIN_RERANKER_PROFILE, defaultRerankerModelRoot } from './reranker-profile.mjs';
 import { resolveRetrievalModelProfile, retrievalModelMetadata, unavailableProfileStatus } from './model-registry.mjs';
 
 const failure = (message, code) => Object.assign(new Error(message), { code });
 const aborted = () => Object.assign(failure('Reranking cancelled.', 'RERANK_CANCELLED'), { name: 'AbortError' });
 
-/** A lazy, offline native worker; optional reranking never changes canonical evidence or its permissions.
- * 按需加载的离线原生 worker；可选重排不改变正式证据、来源身份或权限。 */
+/** A lazy, offline native process; optional reranking never changes canonical evidence or its permissions.
+ * 按需加载的离线原生进程；可选重排不改变正式证据、来源身份或权限。 */
 export class RerankerService {
   #worker; #exit; #closing; #sequence = 0; #pending = new Map();
   #closed = false; #loaded = false; #phase = 'stopped'; #state; #errorCode;
   #profile; #workerFactory; #assetVerification = 'pending';
   constructor({ modelRoot = defaultRerankerModelRoot(), cpuThreads = 2, timeoutMs = 60000, closeTimeoutMs = 30000,
-    profileId = BUILTIN_RERANKER_PROFILE.id, workerFactory = (url, options) => new Worker(url, options) } = {}) {
+    profileId = BUILTIN_RERANKER_PROFILE.id, workerFactory = createNativeInferenceProcess } = {}) {
     this.#profile = resolveRetrievalModelProfile('reranker', profileId);
     this.#workerFactory = workerFactory;
     this.modelRoot = resolve(modelRoot);
@@ -76,9 +76,11 @@ export class RerankerService {
   }
   #metadata() { return retrievalModelMetadata(this.#profile); }
   #fail(error) {
-    this.#state = error.code === 'RERANK_ASSET_MISSING' ? 'unavailable' : 'error';
-    this.#errorCode = error.code ?? 'RERANK_WORKER_FAILED'; this.#loaded = false;
-    if (error.code === 'RERANK_ASSET_INVALID' || error.code === 'RERANK_ASSET_MISSING') this.#assetVerification = 'failed';
+    if (!this.#closed) {
+      this.#state = error.code === 'RERANK_ASSET_MISSING' ? 'unavailable' : 'error';
+      this.#errorCode = error.code ?? 'RERANK_WORKER_FAILED'; this.#loaded = false;
+      if (error.code === 'RERANK_ASSET_INVALID' || error.code === 'RERANK_ASSET_MISSING') this.#assetVerification = 'failed';
+    }
     for (const pending of this.#pending.values()) { pending.cleanup(); pending.rejectResult(error); }
     this.#pending.clear();
   }
@@ -94,8 +96,9 @@ export class RerankerService {
       this.#fail(error); throw error;
     }
     this.#worker = worker;
-    let resolveExit, acknowledged = false;
-    this.#exit = new Promise(resolveResult => { resolveExit = resolveResult; });
+    let resolveExit, rejectExit, acknowledged = false;
+    this.#exit = new Promise((resolveResult, rejectResult) => { resolveExit = resolveResult; rejectExit = rejectResult; });
+    this.#exit.catch(() => {});
     worker.on('message', message => {
       if (this.#worker !== worker || !message || typeof message !== 'object') return;
       if (message.type === 'phase') { if (!this.#closed) this.#phase = message.phase; return; }
@@ -107,7 +110,10 @@ export class RerankerService {
       }
       if (message.type === 'fatal') { this.#fail(failure(message.message, message.code)); return; }
       if (message.type === 'closed') { acknowledged = message.disposed === true; return; }
-      if (message.type === 'shutdown-error') { this.#fail(failure('Reranker shutdown failed.', 'RERANK_CLOSE_FAILED')); return; }
+      if (message.type === 'shutdown-error') {
+        const error = failure('Reranker shutdown failed.', 'RERANK_CLOSE_FAILED');
+        rejectExit(error); this.#fail(error); return;
+      }
       if (message.type === 'idle') {
         if (!this.#pending.size && !this.#closed && message.throughId >= this.#sequence) {
           this.#phase = 'idle';
@@ -126,12 +132,12 @@ export class RerankerService {
       }
     });
     worker.on('error', error => this.#fail(failure(error.message, 'RERANK_WORKER_FAILED')));
-    worker.on('exit', exitCode => {
+    worker.on('exit', (exitCode, signal) => {
       resolveExit({ exitCode, acknowledged });
       if (this.#worker !== worker) return;
       this.#worker = undefined; this.#phase = 'stopped';
-      if (!this.#closed && this.#state !== 'error' && this.#state !== 'unavailable')
-        this.#fail(failure('Reranker worker exited.', 'RERANK_WORKER_FAILED'));
+      if (!this.#closed && (this.#pending.size || (this.#state !== 'error' && this.#state !== 'unavailable')))
+        this.#fail(failure(`Reranker process exited (${signal ?? exitCode}).`, 'RERANK_WORKER_FAILED'));
     });
   }
   close() {
@@ -146,16 +152,28 @@ export class RerankerService {
   async #drain() {
     const worker = this.#worker;
     if (!worker) { this.#state = 'unavailable'; return; }
-    this.#state = 'closing'; worker.ref();
+    this.#state = 'closing'; this.#phase = 'closing'; worker.ref();
     let timer;
     try {
-      worker.postMessage({ type: 'close' });
+      // A fatal load may already be draining after IPC disconnect; the exit receipt decides retirement.
+      // 加载失败可能已在 IPC 断开后排空；退役结果由释放回执和退出状态决定。
+      try { worker.postMessage({ type: 'close' }); } catch {}
       const result = await Promise.race([this.#exit, new Promise((resolveResult, rejectResult) => {
         timer = setTimeout(() => rejectResult(failure('Reranker shutdown timed out.', 'RERANK_CLOSE_TIMEOUT')), this.closeTimeoutMs);
       })]);
       if (result.exitCode !== 0 || !result.acknowledged) throw failure('Reranker was not safely retired.', 'RERANK_CLOSE_FAILED');
       this.#state = 'unavailable';
-    } catch (error) { this.#fail(error); throw error; }
+    } catch (error) {
+      this.#state = 'error'; this.#errorCode = error.code ?? 'RERANK_CLOSE_FAILED';
+      this.#fail(error);
+      try { await worker.terminate?.(); }
+      catch {
+        const terminationError = failure('Reranker process could not be safely reaped.', 'RERANK_CLOSE_FAILED');
+        this.#errorCode = terminationError.code;
+        this.#fail(terminationError); throw terminationError;
+      }
+      throw error;
+    }
     finally { clearTimeout(timer); }
   }
 }

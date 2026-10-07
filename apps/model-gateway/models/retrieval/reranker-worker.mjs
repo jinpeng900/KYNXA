@@ -1,8 +1,9 @@
-import { parentPort, workerData } from 'node:worker_threads';
+import { openNativeInferencePort } from './native-inference-port.mjs';
 import { BUILTIN_RERANKER_PROFILE } from './reranker-profile.mjs';
 import { verifyEmbeddingAsset } from './embedding-assets.mjs';
 import { resolveRetrievalModelProfile } from './model-registry.mjs';
 
+const { parentPort, workerData } = await openNativeInferencePort();
 const profile = resolveRetrievalModelProfile('reranker', workerData.profileId ?? BUILTIN_RERANKER_PROFILE.id);
 
 let tokenizer, model, loadPromise, shutdownPromise;
@@ -82,8 +83,8 @@ function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
   for (const id of active) cancelled.add(id);
-  // Retire the native session after the queued call settles; never terminate an ONNX worker.
-  // 等待队列中的原生调用结束后再退役会话，不强行终止 ONNX worker。
+  // Normally retire the native session after the queued call settles; the owner bounds shutdown.
+  // 正常关闭时等待队列中的原生调用结束后再退役会话，所有者负责限制关闭时长。
   shutdownPromise = queue.then(async () => {
     await model?.dispose(); model = undefined; tokenizer = undefined;
     parentPort.postMessage({ type: 'closed', disposed: true });

@@ -1,8 +1,9 @@
-import { parentPort, workerData } from 'node:worker_threads';
+import { openNativeInferencePort } from './native-inference-port.mjs';
 import { BUILTIN_EMBEDDING_PROFILE } from './embedding-profile.mjs';
 import { verifyEmbeddingBundle } from './embedding-assets.mjs';
 import { resolveRetrievalModelProfile } from './model-registry.mjs';
 
+const { parentPort, workerData } = await openNativeInferencePort();
 const profile = resolveRetrievalModelProfile('embedding', workerData.profileId ?? BUILTIN_EMBEDDING_PROFILE.id);
 
 const BATCH_SIZE = 4;
@@ -28,7 +29,7 @@ function shutdown() {
   closing = true;
   for (const id of activeRequestIds) cancelledRequests.add(id);
   // The queue includes the current native call. Dispose its session only after that call settles.
-  // 队列包含当前原生调用；先等待调用结束，再释放对应会话，避免强杀线程导致 ONNX 原生崩溃。
+  // 队列包含当前原生调用；先等待调用结束，再释放对应会话，正常关闭保持有序释放。
   shutdownPromise = queue.then(async () => {
     await extractor?.dispose();
     extractor = undefined;
@@ -37,8 +38,8 @@ function shutdown() {
     parentPort.off('message', receiveMessage);
     parentPort.close();
   }).catch(() => {
-    // Failed disposal cannot claim a safe exit or permit storage migration.
-    // 释放失败不能宣称安全退出或允许存储迁移；保持通道以报告失败，不强杀原生线程。
+    // Failed disposal cannot claim a safe exit; the owner reaps this isolated process.
+    // 释放失败不能宣称安全退出；报告失败后由所有者回收此隔离进程。
     parentPort.postMessage({ type: 'shutdown-error' });
   });
   return shutdownPromise;
