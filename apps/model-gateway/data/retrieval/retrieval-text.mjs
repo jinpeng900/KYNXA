@@ -1,11 +1,14 @@
-import { hashText, validateSource } from './retrieval-contracts.mjs';
+import { hashText, validateSource, retrievalFailure } from './retrieval-contracts.mjs';
 
 export const TOKENIZER_VERSION = 'han-bigram-code-tf-v2';
 export const CHUNKER_VERSION = 'structure-lines-v1';
 export const EMBEDDING_TEXT_VERSION = 'source-context-v1';
+export const STRUCTURED_CHUNKER_VERSION = 'structured-units-v1';
+export const STRUCTURED_EMBEDDING_TEXT_VERSION = 'structure-context-v1';
 const MAX_CHUNK_CHARACTERS = 384;
 const MAX_EMBEDDING_CONTEXT_CHARACTERS = 128;
 const chunkSections = new WeakMap();
+const sourceHeadingMaps = new WeakMap();
 
 /** Deterministic Han bigrams and identifier terms; original text is never rewritten.
  * 确定性中文二元词与代码标识符分词，始终保留原文。 */
@@ -68,16 +71,39 @@ export function embeddingTextForChunk(source, chunk, { maxChars = 512 } = {}) {
   if (typeof source?.title === 'string' && source.title.trim()) metadata.push(`Title: ${metadataValue(source.title)}`);
   if (typeof source?.locator?.relativePath === 'string' && source.locator.relativePath.trim())
     metadata.push(`Path: ${metadataValue(source.locator.relativePath)}`);
-  if (typeof source?.text === 'string') {
+  if (chunk?.structure) {
+    const structuralMetadata = [];
+    if (typeof chunk.structure.sectionTitle === 'string' && chunk.structure.sectionTitle.trim())
+      structuralMetadata.push(`Section: ${metadataValue(chunk.structure.sectionTitle)}`);
+    if (typeof chunk.structure.symbolName === 'string' && chunk.structure.symbolName.trim())
+      structuralMetadata.push(`Symbol: ${metadataValue(chunk.structure.symbolName)}`);
+    else if (typeof chunk.structure.qualifiedName === 'string' && chunk.structure.qualifiedName.trim())
+      structuralMetadata.push(`Symbol: ${metadataValue(chunk.structure.qualifiedName)}`);
+    if (typeof chunk.structure.parentSymbol === 'string' && chunk.structure.parentSymbol.trim())
+      structuralMetadata.push(`Parent: ${metadataValue(chunk.structure.parentSymbol)}`);
+    if (chunk.structure.domain === 'code') metadata.unshift(...structuralMetadata);
+    else metadata.push(...structuralMetadata);
+  }
+  if (!chunk?.structure && typeof source?.text === 'string') {
     const prepared = chunkSections.get(chunk);
     let section = prepared?.text === source.text ? prepared.sectionTitle : undefined;
     // Generated chunks carry a linear heading map; supplied chunks fall back to their real source text.
     // 自有分块携带线性扫描得到的小节映射；外部传入分块则从真实原文补查，避免逐块扫描整份长文档。
     if (section === undefined) {
-      for (const heading of source.text.matchAll(/^#{1,6}\s+(.+)$/gm)) {
-        if (heading.index > offset) break;
-        section = heading[1].trim();
+      // Worker-cloned chunks cannot carry WeakMap entries; cache headings once per source instead.
+      // worker 克隆的分块不携带 WeakMap 信息，标题映射按来源只扫描一次，避免版本计算退化为平方复杂度。
+      let headingMap = sourceHeadingMaps.get(source);
+      if (headingMap?.text !== source.text) {
+        headingMap = { text: source.text, headings: [...source.text.matchAll(/^#{1,6}\s+(.+)$/gm)] };
+        sourceHeadingMaps.set(source, headingMap);
       }
+      let lower = 0, upper = headingMap.headings.length;
+      while (lower < upper) {
+        const middle = Math.floor((lower + upper) / 2);
+        if (headingMap.headings[middle].index <= offset) lower = middle + 1;
+        else upper = middle;
+      }
+      section = lower > 0 ? headingMap.headings[lower - 1][1].trim() : undefined;
     }
     if (typeof section === 'string' && section.trim()) metadata.push(`Section: ${metadataValue(section)}`);
   }
@@ -141,5 +167,103 @@ export function chunkSource(input, { maxChars = MAX_CHUNK_CHARACTERS } = {}) {
     if (boundary - start > maxChars / 2) append(boundary);
   }
   append(text.length);
+  return chunks;
+}
+
+function splitsSurrogatePair(text, offset) {
+  return offset > 0 && offset < text.length && /[\uD800-\uDBFF]/u.test(text[offset - 1]) &&
+    /[\uDC00-\uDFFF]/u.test(text[offset]);
+}
+
+/** Assemble bounded chunks within real parser units, adding honest context for unparsed gaps.
+ * 在真实解析单元内组装有界分块，未被解析器覆盖的原文以明确的上下文块补齐。 */
+export function chunkStructuredSource(input, structure, { maxChars = MAX_CHUNK_CHARACTERS, checkCancelled } = {}) {
+  const source = validateSource(input), text = source.text;
+  if (!Number.isSafeInteger(maxChars) || maxChars < 64 || maxChars > 8000) throw new RangeError('Invalid chunk size.');
+  if (!structure || !['code', 'knowledge'].includes(structure.domain) ||
+      !(structure.language === null || typeof structure.language === 'string' && structure.language.length <= 64) ||
+      !['parsed', 'partial', 'unavailable'].includes(structure.parseStatus) || !Array.isArray(structure.units))
+    throw retrievalFailure('Invalid parsed source structure. / 来源解析结构无效。', 'INVALID_RETRIEVAL_STRUCTURE');
+  checkCancelled?.();
+  for (const unit of structure.units) if (!unit || typeof unit !== 'object' || Array.isArray(unit))
+    throw retrievalFailure('Invalid parser unit. / 解析单元无效。', 'INVALID_RETRIEVAL_STRUCTURE');
+  const units = [...structure.units].sort((left, right) => left.startOffset - right.startOffset || left.endOffset - right.endOffset);
+  const chunks = [];
+  const sourcePrefix = hashText(source.sourceId).slice(0, 24);
+  let cursor = 0, lineOffset = 0, lineNumber = 1;
+  const lineAt = offset => {
+    for (; lineOffset < offset; lineOffset++) if (text[lineOffset] === '\n') lineNumber++;
+    return lineNumber;
+  };
+  const metadataFor = unit => {
+    // A parent may own disjoint fragments while its read-back range still spans the real full declaration.
+    // 父级可拥有不重叠片段，回读范围仍指向真实完整声明，不扩大实际分块的正文范围。
+    const unitStartOffset = unit.unitStartOffset === undefined ? unit.startOffset : unit.unitStartOffset;
+    const unitEndOffset = unit.unitEndOffset === undefined ? unit.endOffset : unit.unitEndOffset;
+    if (!Number.isSafeInteger(unitStartOffset) || !Number.isSafeInteger(unitEndOffset) || unitStartOffset < 0 ||
+        unitStartOffset > unit.startOffset || unitEndOffset < unit.endOffset || unitEndOffset > text.length ||
+        unitEndOffset <= unitStartOffset || splitsSurrogatePair(text, unitStartOffset) || splitsSurrogatePair(text, unitEndOffset))
+      throw retrievalFailure('Declaration range does not contain its fragment. / 声明完整范围没有覆盖片段。', 'INVALID_RETRIEVAL_STRUCTURE');
+    const metadata = { domain: structure.domain, language: structure.language, kind: unit.kind,
+      unitStartOffset, unitEndOffset, parseStatus: structure.parseStatus };
+    for (const key of ['symbolName', 'qualifiedName', 'parentSymbol', 'sectionTitle']) {
+      const value = unit[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'string' || value.length > 512 || /[\x00-\x1f]/u.test(value))
+        throw retrievalFailure('Invalid structural label. / 结构标签无效。', 'INVALID_RETRIEVAL_STRUCTURE');
+      if (value.trim()) metadata[key] = value;
+    }
+    if (unit.sectionPath !== undefined) {
+      if (!Array.isArray(unit.sectionPath) || unit.sectionPath.length > 6 ||
+          unit.sectionPath.some(value => typeof value !== 'string' || value.length > 512 || /[\x00-\x1f]/u.test(value)))
+        throw retrievalFailure('Invalid section hierarchy. / 章节层级无效。', 'INVALID_RETRIEVAL_STRUCTURE');
+      metadata.sectionPath = [...unit.sectionPath];
+    }
+    return metadata;
+  };
+  const appendUnit = unit => {
+    const metadata = metadataFor(unit);
+    if (unit.startLine !== undefined && unit.startLine !== lineAt(unit.startOffset))
+      throw retrievalFailure('Parser fragment line does not match raw text. / 解析片段起始行与原文不符。', 'INVALID_RETRIEVAL_STRUCTURE');
+    let start = unit.startOffset;
+    while (start < unit.endOffset) {
+      checkCancelled?.();
+      let end = Math.min(unit.endOffset, start + maxChars);
+      if (splitsSurrogatePair(text, end)) end--;
+      if (end < unit.endOffset) {
+        // Search only this bounded slice; scanning back to zero for every chunk is quadratic.
+        // 只在当前有界片段内查换行，逐块向文档起点反向查找会退化为平方复杂度。
+        const newline = text.slice(start, end).lastIndexOf('\n');
+        if (newline > maxChars / 2) end = start + newline + 1;
+      }
+      const startLine = lineAt(start), endLine = lineAt(end);
+      const content = text.slice(start, end);
+      if (content.trim()) {
+        const chunkHash = hashText(content), chunkIndex = chunks.length;
+        const structureHash = hashText(JSON.stringify(metadata)).slice(0, 16);
+        chunks.push({ chunkId: `${sourcePrefix}:${chunkHash.slice(0, 24)}:${structureHash}:${chunkIndex}`,
+          chunkIndex, text: content, chunkHash, startOffset: start, endOffset: end, startLine, endLine,
+          lexicalText: lexicalText(`${source.title} ${source.locator.relativePath ?? ''} ${content}`),
+          chunkerVersion: STRUCTURED_CHUNKER_VERSION, tokenizerVersion: TOKENIZER_VERSION,
+          structure: { ...metadata } });
+      }
+      start = end;
+    }
+    if (unit.endLine !== undefined && unit.endLine !== lineAt(unit.endOffset))
+      throw retrievalFailure('Parser fragment line does not match raw text. / 解析片段结束行与原文不符。', 'INVALID_RETRIEVAL_STRUCTURE');
+  };
+  for (const unit of units) {
+    checkCancelled?.();
+    if (!unit || !Number.isSafeInteger(unit.startOffset) || !Number.isSafeInteger(unit.endOffset) ||
+        unit.startOffset < cursor || unit.endOffset <= unit.startOffset || unit.endOffset > text.length ||
+        splitsSurrogatePair(text, unit.startOffset) || splitsSurrogatePair(text, unit.endOffset) ||
+        typeof unit.kind !== 'string' || !/^[a-z][a-z-]{0,63}$/u.test(unit.kind))
+      throw retrievalFailure('Parser unit ranges overlap or mismatch the source. / 解析单元范围重叠或与原文不符。', 'INVALID_RETRIEVAL_STRUCTURE');
+    if (unit.startOffset > cursor) appendUnit({ kind: 'context', startOffset: cursor, endOffset: unit.startOffset });
+    appendUnit(unit);
+    cursor = unit.endOffset;
+  }
+  if (cursor < text.length) appendUnit({ kind: 'context', startOffset: cursor, endOffset: text.length });
+  checkCancelled?.();
   return chunks;
 }

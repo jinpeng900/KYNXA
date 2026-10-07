@@ -57,7 +57,7 @@ test('independent extension config and skills leave conversations/results in for
   const output = await run('filesystem.list', { path: f.workspace });
   assert.ok(output.resultRef, 'full tool output remains stored by formal conversation service');
   const result = await service.results.get(ctx, output.resultRef.id);
-  assert.equal(result.structuredContent.path, f.workspace);
+  assert.equal(result.structuredContent.path, await realpath(f.workspace));
   await f.conversations.withConversationStorage(f.conversationId, async relationship => {
     const document = JSON.parse(await readFile(join(relationship.sessionDirectory, 'tool-results', output.resultRef.id + '.json'), 'utf8'));
     assert.equal(document.conversationId, f.conversationId);

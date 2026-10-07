@@ -4,7 +4,7 @@ import { currentBrowserInstructionText } from './browser-sessions.mjs';
 import { toolFailure } from '../platform/tool-paths.mjs';
 
 const browserName = '(?:浏览器|\\bbrowser\\b|\\b(?:chrome|msedge|edge|firefox|chromium|brave)\\b|\\bgoogle\\b\\s*(?:浏览器|\\bbrowser\\b))';
-const browserControlAction = '(?:打开|开启|启动|操作|控制|显示|切换|激活|截图|截屏|截取|缩放|放大|缩小|调整|最小化|最大化|恢复|点击|填写|输入|\\b(?:open|launch|start|operate|control|show|capture|screenshot|focus|activate|resize|zoom|click|fill|type)\\b)';
+const browserControlAction = '(?:打开|开启|启动|操作|控制|显示|切换|激活|截图|截屏|截取|缩放|放大|缩小|调整|最小化|最大化|恢复|刷新|重新加载|关闭|滚动|点击|填写|输入|\\b(?:open|launch|start|operate|control|show|capture|screenshot|focus|activate|resize|zoom|reload|refresh|close|scroll|click|fill|type)\\b)';
 const browserModifiers = '(?:(?:本机|本地|当前|已打开|我的|自己的|云端|远程|the|my|local|current|remote|cloud)\\s*)*';
 const actionBeforeBrowser = new RegExp(`${browserControlAction}[^，。；,.!?;\\n]{0,24}(${browserName})`, 'giu');
 const browserBeforeAction = new RegExp(`(${browserName})([^，。；,.!?;\\n]{0,16})${browserControlAction}`, 'giu');
@@ -18,13 +18,18 @@ const informationalQuestion = /怎么|如何|怎样|\bhow\b/iu;
 const explicitExecutionRequest = /(?:帮我|替我|请你)\s*(?:实际|直接)?\s*(?:用|使用|操作|执行|演示|打开|启动|截图|截屏)|(?:请\s*)?(?:实际|直接)\s*(?:演示|操作|执行|用|使用)|\b(?:please\s+)?(?:actually\s+demonstrate|demonstrate|help\s+me\s+use|do\s+this\s+for\s+me)\b/iu;
 const localBrowserForbidden = new RegExp(`(?:不要|别|不必|禁止|不能|不许|不允许|不希望|避免|无需|do not|don't|never|without)[^，。；,.!?;\\n]{0,24}(?:打开|开启|启动|操作|使用|用|开|open|launch|start|use|operate|control)[^，。；,.!?;\\n]{0,16}${browserName}|(?:不用|不使用)[^，。；,.!?;\\n]{0,16}${browserName}`, 'iu');
 const browserExecutables = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe', 'chromium.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe']);
+const browserExecutableNames = new Map([['chrome', 'chrome.exe'], ['edge', 'msedge.exe'], ['firefox', 'firefox.exe'],
+  ['chromium', 'chromium.exe'], ['brave', 'brave.exe'], ['opera', 'opera.exe'], ['vivaldi', 'vivaldi.exe']]);
 
-/** Only a bare retry may retain the immediately preceding browser task.
- * 仅不带新任务的重试可以延续紧邻浏览器任务；新搜索或引用文本不能继承本机浏览器权限。
+/** A continuation describes a page action; unrelated research does not retain browser control.
+ * 后续消息可以描述页面操作；无关资料检索不能继承浏览器控制。
  */
 export function isBrowserTaskFollowUp(message = '') {
-  return /^(?:再来|继续|重试|再次尝试|再次尝试打开|再试(?:一次)?|再试试|再尝试(?:一次)?|再次打开|打不开|还是打不开|try again|retry|continue)[。.!！?？\s]*$/iu
-    .test(currentBrowserInstructionText(message).trim());
+  const text = currentBrowserInstructionText(message).trim();
+  if (informationalQuestion.test(text) && !explicitExecutionRequest.test(text)) return false;
+  if (researchPrefix.test(text) && !/(?:当前|这个|该|本页).{0,8}(?:网页|页面|网站|标签)|作业|账户|账号|二维码/u.test(text)) return false;
+  return /^(?:再来|继续|重试|再次尝试|再次尝试打开|再试(?:一次)?|再试试|再尝试(?:一次)?|再次打开|打不开|还是打不开|try again|retry|continue)[。.!！?？\s]*$/iu.test(text) ||
+    /(?:打开|进入|访问|登录|登陆|刷新|关闭|滚动|截图|截屏|点击|填写|输入|切换|查看|读取|open|navigate|log\s*in|sign\s*in|refresh|reload|close|scroll|screenshot|click|fill|type).{0,60}(?:网站|网页|页面|标签|网址|https?:\/\/|学习通|账户|账号|作业|二维码|按钮|输入框|当前|这个|page|tab|website|url|account|form|button)|^(?:向上|向下|往上|往下)?(?:滚动|刷新|关闭当前页面)|^(?:截图|截屏|填写|输入|登录|登陆)/iu.test(text);
 }
 
 function clauseRequestsBrowserOperation(clause) {
@@ -52,25 +57,42 @@ function clauseRequestsBrowserOperation(clause) {
 
 function currentBrowserIntent(message) {
   const text = currentBrowserInstructionText(message);
-  const clauses = text.split(/[，。；,.!?;\n]/u), localForbidden = localBrowserForbidden.test(text);
+  const clauses = text.split(/[，。；,.!?;\n]/u);
   let explicitBrowserTask = false, allowLocalBrowser = false;
+  const excludedBrowserExecutables = [];
   for (const clause of clauses) {
-    if (localBrowserForbidden.test(clause) || !clauseRequestsBrowserOperation(clause)) continue;
+    if (localBrowserForbidden.test(clause)) {
+      for (const [name, executable] of browserExecutableNames)
+        if (new RegExp(`\\b${name}\\b`, 'iu').test(clause)) excludedBrowserExecutables.push(executable);
+      continue;
+    }
+    if (!clauseRequestsBrowserOperation(clause)) continue;
     explicitBrowserTask = true;
     const remoteOnly = /(?:云端|远程).{0,12}(?:浏览器|chrome|edge)|\b(?:remote|cloud)\s+browser\b/iu.test(clause) &&
       !/(?:本机|本地|我的|自己的).{0,12}(?:浏览器|chrome|edge)|\blocal\s+browser\b/iu.test(clause);
     allowLocalBrowser ||= !remoteOnly;
   }
-  return { allowLocalBrowser: allowLocalBrowser && !localForbidden, explicitBrowserTask };
+  // Negative clauses constrain their own object. A ban on a new window or on
+  // Chrome must not cancel a positive instruction to use the current page/Edge.
+  // 否定分句限定自身对象；禁止新窗口或 Chrome 不得取消使用当前页面/Edge 的正向指令。
+  return { allowLocalBrowser, explicitBrowserTask, ...(excludedBrowserExecutables.length
+    ? { excludedBrowserExecutables: [...new Set(excludedBrowserExecutables)] } : {}) };
 }
 
 export function inferBrowserTaskIntent(message = '', previousUserMessages = []) {
   const current = currentBrowserIntent(message);
-  if (!isBrowserTaskFollowUp(message)) return { ...current, inherited: false };
-  for (const previous of previousUserMessages.slice(-3).reverse()) {
-    if (isBrowserTaskFollowUp(previous)) continue;
-    return { ...currentBrowserIntent(previous), inherited: true };
+  const text = currentBrowserInstructionText(message);
+  if (!isBrowserTaskFollowUp(message) || new RegExp(browserName, 'iu').test(text)) return { ...current, inherited: false };
+  let active;
+  const history = [...previousUserMessages];
+  if (history.at(-1) === message) history.pop();
+  for (const previous of history) {
+    const intent = currentBrowserIntent(previous);
+    if (intent.explicitBrowserTask && (new RegExp(browserName, 'iu').test(currentBrowserInstructionText(previous)) ||
+        !isBrowserTaskFollowUp(previous) || !active)) active = intent;
+    else if (!isBrowserTaskFollowUp(previous)) active = undefined;
   }
+  if (active) return { ...active, inherited: true };
   return { ...current, inherited: false };
 }
 
@@ -80,7 +102,24 @@ export function inferBrowserTaskIntent(message = '', previousUserMessages = []) 
 export function canUseBrowserServer(context, server) {
   if (!context || !server || !browserConnection(server)) return true;
   const intent = context.browserTaskIntent ?? inferBrowserTaskIntent(context.message);
+  if (intent.excludedBrowserExecutables?.includes(configuredBrowserExecutable(server))) return false;
   return intent.allowLocalBrowser || isBackgroundBrowserConnection(server);
+}
+
+function configuredBrowserExecutable(server) {
+  const args = server.args ?? [];
+  for (let index = 0; index < args.length; index++) {
+    const option = String(args[index]);
+    if (/^--(?:executablePath|executable-path|browserExecutablePath|browser)(?:=|$)/u.test(option)) {
+      const value = option.includes('=') ? option.slice(option.indexOf('=') + 1) : args[index + 1];
+      if (typeof value !== 'string') continue;
+      const executable = win32.basename(value).toLowerCase();
+      if (browserExecutables.has(executable)) return executable;
+      if (value.toLowerCase() === 'msedge') return 'msedge.exe';
+      if (browserExecutableNames.has(value.toLowerCase())) return browserExecutableNames.get(value.toLowerCase());
+    }
+  }
+  return browserConnection(server)?.engine === 'chrome-devtools' ? 'chrome.exe' : 'chromium.exe';
 }
 
 export function assertBrowserServerAllowed(context, server) {
@@ -93,6 +132,8 @@ export function isBrowserApplicationPath(appPath) {
 }
 
 export function assertBrowserLaunchAllowed(context, appPath) {
-  if (isBrowserApplicationPath(appPath) && !(context.browserTaskIntent ?? inferBrowserTaskIntent(context.message)).allowLocalBrowser)
+  const intent = context.browserTaskIntent ?? inferBrowserTaskIntent(context.message);
+  if (isBrowserApplicationPath(appPath) && (!intent.allowLocalBrowser ||
+      intent.excludedBrowserExecutables?.includes(win32.basename(appPath).toLowerCase())))
     throw toolFailure('只有用户明确要求打开或操作本机浏览器时才能启动浏览器；普通网页搜索使用后台检索。', 'BROWSER_TASK_NOT_AUTHORIZED', 403);
 }

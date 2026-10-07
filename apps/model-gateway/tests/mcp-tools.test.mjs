@@ -97,7 +97,8 @@ test('MCP process startup failure is visible without breaking builtin file tools
     command: join(f.root, 'missing-node.exe'), args: [], enabled: true }] });
   const tools = await f.service.catalog(ctx, { connectMcp: true });
   assert.ok(tools.some(value => value.name === 'filesystem.read')); assert.equal(tools.some(value => value.name.startsWith('mcp.')), false);
-  assert.match(await f.service.systemPrompt(ctx), /MCP servers are unavailable: missing/);
+  assert.equal(f.service.mcp.errors.get('missing'), 'MCP_COMMAND_NOT_FOUND');
+  assert.match(await f.service.systemPrompt(ctx), /MCP connection diagnostics: missing \(MCP_COMMAND_NOT_FOUND\)/);
   assert.equal((await f.run(ctx, 'filesystem.mkdir', { path: 'still-works' })).isError, false);
 });
 

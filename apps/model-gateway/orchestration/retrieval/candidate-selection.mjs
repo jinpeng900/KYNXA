@@ -46,7 +46,11 @@ export function deduplicateCandidates(items, { existingContext = [] } = {}) {
   const seenChunks = new Set(), seenText = new Set(), kept = [];
   const existing = contextTexts(existingContext);
   let duplicateCount = 0, alreadyPresentCount = 0;
-  for (const item of items) {
+  // Verified symbol/file intersections precede optional scores and identical copies in other files.
+  // 已核实的符号与文件交集优先于可选重排分数和其他文件中的同文副本。
+  const prioritized = items.some(item => item.exactTargetMatch === true)
+    ? [...items].sort((left, right) => Number(right.exactTargetMatch === true) - Number(left.exactTargetMatch === true)) : items;
+  for (const item of prioritized) {
     const text = normalizedText(item.excerpt);
     if (!text) continue;
     const chunkKey = `${item.scopeKey}:${item.sourceId}:${item.chunkId ?? item.sourceRef ?? text}`;
@@ -64,7 +68,7 @@ export function deduplicateCandidates(items, { existingContext = [] } = {}) {
 
 export function evidenceRecord(item, reference) {
   return { reference, sourceRef: item.modelSourceRef ?? item.sourceRef, title: item.title, scope: item.scopeKey,
-    locator: item.locator, excerpt: item.excerpt };
+    locator: item.locator, ...(item.structure ? { structure: item.structure } : {}), excerpt: item.excerpt };
 }
 
 export function evidenceItemTokens(item, reference = 1) {
@@ -109,7 +113,9 @@ export function selectCandidates(items, { query = '', limit = 6, maximumTokens =
   const relevanceWeight = Math.max(0, Math.min(1, lambda));
   while (candidates.length && selected.length < limit) {
     let bestIndex = 0, bestScore = -Infinity;
+    const hasExactTarget = candidates.some(candidate => candidate.item.exactTargetMatch === true);
     for (const [index, candidate] of candidates.entries()) {
+      if (hasExactTarget && candidate.item.exactTargetMatch !== true) continue;
       const score = relevanceWeight * candidate.relevance - (1 - relevanceWeight) * candidate.similarity;
       if (score > bestScore) { bestIndex = index; bestScore = score; }
     }

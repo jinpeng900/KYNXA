@@ -24,17 +24,18 @@ export function buildToolSystemPrompt(context, { skills, browserPrompt = [], una
     'Follow-ups continue the prior subject. Never invent that earlier answers were unchecked. Corrections name the specific old fact and new evidence. A tool receipt does not prove answer correctness.',
     'Current capabilities override historical unavailable reports. Discover via tool.search Chinese/keywords and tool.load exact names.',
     'Prefer available multi-result search and batch independent reads; serialize browser navigation.',
-    'Web: search/fetch first, no Python. Load allowed isolated headless/remote DOM; local browser needs current user task, never tool reasons.',
-    context.isolatedWorkspace ? `Isolated conversation work directory: ${context.workspaceRoot}. Relative file tools work here; files persist per chat. Terminal uses an AppContainer snapshot with no automatic write-back.${context.linkedWorkspaceRoot ? ' The legacy app-managed folder has unsafe linked ancestors; its old files are preserved, not migrated into this directory.' : ' No linked folder.'}` : `Work folder: ${context.workspaceRoot}`,
-    context.desktopCapabilities.available ? 'Desktop: apps/windows/launch/window; default background, re-list after launch. Prefer DOM, then UIA. Inputs need foreground. Verify observations and unknown effects. Password input allowed; no readback.' : 'Computer tools unavailable.',
+    'Web: search/fetch first, no Python. Use isolated background DOM for research. Local browsing follows the authorized user task and related follow-ups; tool reasons never grant authority.',
+    context.workspaceDiagnostic ? `Work folder unavailable (${context.workspaceDiagnostic}); chat and independent authorized host paths remain usable.` :
+      context.isolatedWorkspace ? `Isolated conversation work directory: ${context.workspaceRoot}. Relative file tools work here; files persist per chat. Terminal uses an AppContainer snapshot with no automatic write-back.${context.linkedWorkspaceRoot ? ' The legacy app-managed folder has unsafe linked ancestors; its old files are preserved, not migrated into this directory.' : ' No linked folder.'}` : `Work folder: ${context.workspaceRoot}`,
+    context.desktopCapabilities.available ? 'Desktop: default background, not a foreground ban. Prefer DOM/UIA; activate the verified target when needed for the requested task, unless the user forbids it. Re-list after launch; verify observations/unknown effects. Password input allowed; no readback.' : 'Computer tools unavailable.',
     ...(browserPrompt ?? []),
     'Authorized signed-in browsing and form input are allowed. Never read back passwords or copy cookies. Verify URL/state; users handle trust/MFA.',
     `Permission mode: ${context.permissionMode}. Ask allows ordinary scoped reads; Smart also scoped reversible writes and verified AppContainer Node. In Ask/Smart, env/credential reads, deletion, external access and unknown MCP require approval; searches skip sensitive files.`,
     'Prefer the work folder; external access needs a reason, including Full. Formal data is protected except managed workspace. Connection files/backups cannot be read; other app data needs permission.',
-    'Before replacing, editing or deleting a file, read/stat it and use the exact SHA-256 as expectedHash. New files require expectedHash:null. No recursive deletion or symlink traversal.',
+    'Read/stat before replacing, editing or deleting; use the exact SHA-256, expectedHash:null for new files. Authorized paths bind their real targets and are rechecked; read-only hardlinks allowed, mutation denied. No recursive deletion.',
     `Sandbox: ${(context.sandboxCapabilities.commands ?? []).join(', ') || 'unavailable'}. Node tests need --test-isolation=none. No PowerShell/python, network or write-back; edit via file tools.`,
-    context.hostTerminalCapabilities.available ? 'terminal.host.run: real CMD/PowerShell, host PATH (e.g. conda), outside AppContainer; reason and Ask/Smart approval required. ' +
-      'Captured output is returned in the tool result. ' +
+    context.hostTerminalCapabilities.available ? 'terminal.host.run: real CMD/PowerShell outside AppContainer; reason and Ask/Smart approval. App PATH, no shell profiles: discover Conda/explicit environment and initialize in the same script; command-not-found does not prove absence. ' +
+      (context.hostTerminalCapabilities.backgroundJobs ? 'Use terminal.host.start/read/stop for bounded background jobs; start means launched, verify the final receipt. ' : '') +
       (context.hostTerminalCapabilities.visibleTerminal ? 'Default to hidden execution; visible:true only for a requested separate terminal window (screen preview only). Never computer.launch or shell start. ' : 'Separate terminal unavailable. ') +
       'Interrupted effects: verify, never replay. Discover if deferred.' : 'Host terminal unavailable; sandbox is not host execution.',
     'Read app skills via skill.read; development skills are separate. Unsupported scripts remain unavailable.',
@@ -42,7 +43,7 @@ export function buildToolSystemPrompt(context, { skills, browserPrompt = [], una
     'MCP: {arguments: business parameters, policy:{reason: justification}}. Keep policy separate. tool.search/load discovers enabled tools; tool.result.read and conversation.history.search/read recover sources, never replay calls.',
     'Skill headers use remaining prompt space; skill.list (offset/limit) and skill.read discover all enabled skills. Limits: 128 skills, 512 candidates per directory.',
     ...(unavailableSkillCount ? ['Some application skills are unavailable; skill.list marks them, and their original files are preserved.'] : []),
-    ...(mcpErrorIds.length ? [`Some enabled MCP servers are unavailable: ${mcpErrorIds.join(', ')}. Do not claim their tools ran.`] : [])];
+    ...(mcpErrorIds.length ? [`MCP connection diagnostics: ${mcpErrorIds.join(', ')}. A connection failure does not mean the capability is uninstalled; discover available alternatives. Do not claim execution.`] : [])];
   // Installed or user skills must not consume the schemas needed to discover/load actual execution tools.
   // Only metadata is deferred; instructions, permission boundaries and the on-demand skill catalog remain intact.
   // 内置或用户技能不能挤占发现和加载实际工具所需的 schema；仅延后元数据，指令、权限边界及按需技能目录保持可用。

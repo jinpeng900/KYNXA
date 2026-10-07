@@ -1,0 +1,283 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve, sep } from 'node:path';
+import { test } from 'node:test';
+import { RetrievalIndex, chunkSource } from '../data/retrieval/index.mjs';
+import { validateAnnOptions } from '../data/retrieval/ann-store.mjs';
+
+async function fixture(t, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-ann-'));
+  const index = new RetrievalIndex({ root, ...options });
+  t.after(async () => {
+    await index.close().catch(() => {});
+    const suffix = relative(resolve(tmpdir()), resolve(root));
+    assert.ok(suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`));
+    await rm(root, { recursive: true, force: true });
+  });
+  return { root, index };
+}
+
+function source(sourceId, vector, extra = {}) {
+  return { sourceId, scopeKey: 'project:one', sourceType: 'code', title: sourceId,
+    text: `export const ${sourceId.replace(/-/gu, '_')} = true;`, sourceRevision: 1,
+    locator: { relativePath: `${sourceId}.mjs` }, embeddingProfileId: 'fixture',
+    embeddingModelVersion: 'v1', embeddingSpaceId: 'a'.repeat(64), vectors: [vector], ...extra };
+}
+
+const search = (index, extra = {}) => index.search({ query: 'querynotincorpus', scopeKeys: ['project:one'],
+  queryVector: [1, 0], embeddingProfileId: 'fixture', embeddingModelVersion: 'v1', embeddingSpaceId: 'a'.repeat(64),
+  ann: { mode: 'ann' }, limit: 20, ...extra });
+
+test('local ANN prefilters scope, embedding space, model version and domain before top candidates', async t => {
+  const { index } = await fixture(t);
+  const forbidden = Array.from({ length: 60 }, (_, number) => source(`private-${number}`, [1, 0], { scopeKey: 'project:other' }));
+  await index.upsertSources([...forbidden, source('allowed', [0.8, 0.2]),
+    source('wrong-space', [1, 0], { embeddingSpaceId: 'b'.repeat(64) }),
+    source('wrong-version', [1, 0], { embeddingModelVersion: 'v2' }),
+    source('wrong-domain', [1, 0], { sourceType: 'document' })]);
+  const result = await search(index, { retrievalIntent: { domain: 'code' } });
+  assert.equal(result.semanticBackend, 'ann');
+  assert.deepEqual(result.items.map(item => item.sourceId), ['allowed']);
+  assert.equal((await index.status()).ann.built, 1);
+  assert.equal(result.degradedReason, undefined);
+});
+
+test('ANN mutation updates loaded graphs and formal deletion prevents stale native results', async t => {
+  const { index } = await fixture(t);
+  const first = source('nearest', [1, 0]), second = source('second', [0, 1]);
+  await index.upsertSources([first, second]);
+  const initial = await search(index);
+  assert.equal(initial.items[0].sourceId, 'nearest');
+  const built = (await index.status()).ann.built;
+  await index.upsertSources([{ ...first, text: 'export const nearest = false;', sourceRevision: 2, vectors: [[-1, 0]] }]);
+  assert.equal((await search(index)).items[0].sourceId, 'second');
+  assert.equal((await index.status()).ann.built, built);
+  assert.ok((await index.status()).ann.updated >= 1);
+  assert.ok((await index.status()).ann.descriptorCache.invalidated >= 1);
+  await assert.rejects(() => index.read({ sourceRef: initial.items[0].sourceRef, scopeKeys: ['project:one'] }), { code: 'STALE_RETRIEVAL_SOURCE' });
+  await index.removeSource('second', { scopeKeys: ['project:one'] });
+  assert.deepEqual((await search(index)).items.map(item => item.sourceId), ['nearest']);
+  await index.invalidateScope('project:one');
+  assert.equal((await search(index)).items.length, 0);
+  assert.equal((await index.status()).ann.cachedShards, 0);
+});
+
+test('persisted ANN caches reload only for current epoch, graph hash, space and generation', async t => {
+  const { root, index } = await fixture(t);
+  await index.upsertSources([source('persistent', [1, 0]), source('other', [0, 1])]);
+  await search(index);
+  await index.close();
+  const reopened = new RetrievalIndex({ root });
+  try {
+    assert.equal((await search(reopened)).items[0].sourceId, 'persistent');
+    assert.equal((await reopened.status()).ann.loaded, 1);
+    assert.equal((await reopened.status()).ann.built, 0);
+  } finally { await reopened.close(); }
+  const files = await readdir(join(root, 'Index', 'ann'));
+  const graph = join(root, 'Index', 'ann', files.find(name => name.endsWith('.usearch')));
+  const bytes = await readFile(graph);
+  bytes[bytes.length - 1] ^= 1;
+  await writeFile(graph, bytes);
+  const rebuilt = new RetrievalIndex({ root });
+  try {
+    assert.equal((await search(rebuilt)).items[0].sourceId, 'persistent');
+    assert.equal((await rebuilt.status()).ann.loaded, 0);
+    assert.equal((await rebuilt.status()).ann.built, 1);
+    await rebuilt.upsertSources([source('persistent', [0, 1], { sourceRevision: 2, text: 'changed contents' })]);
+  } finally { await rebuilt.close(); }
+  const changed = new RetrievalIndex({ root });
+  try {
+    const result = await search(changed);
+    assert.ok(result.items.every(item => item.sourceId !== 'persistent' || item.excerpt === 'changed contents'));
+    assert.equal((await changed.status()).ann.loaded, 1);
+  } finally { await changed.close(); }
+});
+
+test('auto routing stays exact for small shards, activates ANN for large shards and opt-out is honored', async t => {
+  const { index } = await fixture(t, { ann: { threshold: 3 } });
+  await index.upsertSources([source('one', [1, 0]), source('two', [0, 1])]);
+  assert.equal((await search(index, { ann: { mode: 'auto' } })).semanticBackend, 'exact');
+  await index.upsertSources([source('three', [0.3, 0.7]), source('four', [-1, 0])]);
+  assert.equal((await search(index, { ann: { mode: 'auto' } })).semanticBackend, 'ann');
+  assert.equal((await search(index, { ann: { mode: 'off' } })).semanticBackend, 'exact');
+  assert.equal((await search(index, { ann: { mode: 'exact' } })).semanticBackend, 'exact');
+  const disabled = await fixture(t, { vectorEnabled: false });
+  await disabled.index.upsertSources([source('disabled', [1, 0])]);
+  const fallback = await search(disabled.index);
+  assert.equal(fallback.semanticBackend, null);
+  assert.equal(fallback.degradedReason, 'RETRIEVAL_VECTOR_DISABLED');
+  assert.equal((await disabled.index.status()).ann.built, 0);
+});
+
+test('bounded graph cache evicts owned native shards while unauthorized data never occupies a query graph', async t => {
+  const { index } = await fixture(t, { ann: { maxCachedShards: 1 } });
+  await index.upsertSources([source('one', [1, 0]), source('two', [0, 1], { scopeKey: 'project:two' })]);
+  await search(index, { ann: { mode: 'ann', maxCachedShards: 1 } });
+  await search(index, { scopeKeys: ['project:two'], ann: { mode: 'ann', maxCachedShards: 1 } });
+  assert.equal((await index.status()).ann.cachedShards, 1);
+  assert.equal((await index.status()).ann.cachedVectors, 1);
+  assert.deepEqual((await search(index, { ann: { mode: 'ann', maxCachedShards: 1 } })).items.map(item => item.sourceId), ['one']);
+  assert.ok((await index.status()).ann.loaded >= 1);
+});
+
+test('ANN resource failures preserve lexical results and return truthful degradation without executing native builds', async t => {
+  const { index } = await fixture(t);
+  const document = source('bounded', null, { text: 'bounded lexical evidence\n'.repeat(300), vectors: undefined });
+  document.chunks = chunkSource(document, { maxChars: 80 });
+  document.vectors = document.chunks.map(() => Array.from({ length: 4096 }, (_, number) => number === 0 ? 1 : 0));
+  await index.upsertSources([document]);
+  const result = await search(index, { query: 'lexical evidence', queryVector: document.vectors[0],
+    ann: { mode: 'ann', maxShardBytes: 1024 * 1024, exactScanLimit: 1 } });
+  assert.ok(result.items.length > 0);
+  assert.equal(result.strategy, 'lexical');
+  assert.equal(result.degradedReason, 'RETRIEVAL_ANN_RESOURCE_LIMIT');
+  assert.equal((await index.status()).ann.built, 0);
+  const metadata = (await index.listSources({ scopeKeys: ['project:one'] }))[0];
+  assert.equal(metadata.chunkCount, document.chunks.length);
+  assert.equal(metadata.vectorChunks, document.chunks.length);
+  assert.equal(metadata.vectorDimensions, 4096);
+  assert.equal(metadata.embeddingSpaceId, 'a'.repeat(64));
+});
+
+test('ANN rejects malformed options before starting a worker or crossing the persistence boundary', async t => {
+  assert.throws(() => validateAnnOptions({ mode: 'cloud' }), { code: 'INVALID_RETRIEVAL_ANN' });
+  assert.throws(() => validateAnnOptions({ threshold: 0 }), { code: 'INVALID_RETRIEVAL_ANN' });
+  assert.throws(() => validateAnnOptions({ dependencyPath: 'malicious.dll' }), { code: 'INVALID_RETRIEVAL_ANN' });
+  const { index } = await fixture(t);
+  assert.throws(() => search(index, { ann: { maxCachedShards: -1 } }), { code: 'INVALID_RETRIEVAL_ANN' });
+  assert.throws(() => search(index, { ann: null }), { code: 'INVALID_RETRIEVAL_ANN' });
+  assert.throws(() => search(index, { ann: [] }), { code: 'INVALID_RETRIEVAL_ANN' });
+  assert.equal(index.worker, null);
+});
+
+test('cancelled cold ANN builds release partial graph ownership and later retrieval can recover', async t => {
+  const { index } = await fixture(t);
+  const rows = Array.from({ length: 70 }, (_, number) => source(`cancel-${number}`, [Math.cos(number), Math.sin(number)]));
+  await index.upsertSources(rows);
+  const controller = new AbortController();
+  const pending = search(index, { signal: controller.signal });
+  const timer = setTimeout(() => controller.abort(), 20);
+  try { await assert.rejects(pending, { name: 'AbortError' }); }
+  finally { clearTimeout(timer); }
+  assert.equal((await index.status()).ann.cachedShards, 0);
+  assert.equal((await search(index)).semanticBackend, 'ann');
+  assert.equal((await index.status()).ann.cachedShards, 1);
+});
+
+test('owned native helper crash degrades to authorized exact retrieval without losing stored vectors', async t => {
+  const { index } = await fixture(t);
+  await index.upsertSources([source('crash-proof', [1, 0])]);
+  await search(index);
+  const status = await index.status();
+  assert.ok(status.ann.helperPid > 0 && status.ann.helperPid !== process.pid);
+  assert.ok(status.ann.helperRssBytes > 0);
+  process.kill(status.ann.helperPid);
+  await new Promise(resolveExit => setTimeout(resolveExit, 60));
+  const result = await search(index);
+  assert.equal(result.semanticBackend, 'exact');
+  assert.equal(result.degradedReason, 'RETRIEVAL_ANN_WORKER_EXITED');
+  assert.equal(result.items[0].sourceId, 'crash-proof');
+  assert.equal((await index.status()).vectorChunks, 1);
+  assert.equal((await index.status()).ann.state, 'unavailable');
+});
+
+test('SQLite rebuild changes the epoch so an older persisted ANN graph cannot be revived', async t => {
+  const { root, index } = await fixture(t);
+  await index.upsertSources([source('epoch-target', [1, 0]), source('epoch-second', [0, 1])]);
+  await search(index);
+  await index.close();
+  await rm(join(root, 'Index', 'retrieval.sqlite'));
+  const rebuilt = new RetrievalIndex({ root });
+  try {
+    await rebuilt.upsertSources([source('epoch-target', [-1, 0]), source('epoch-second', [0, 1])]);
+    assert.equal((await search(rebuilt)).items[0].sourceId, 'epoch-second');
+    assert.equal((await rebuilt.status()).ann.loaded, 0);
+    assert.equal((await rebuilt.status()).ann.built, 1);
+    assert.equal((await rebuilt.status()).ann.descriptorCache.hits, 0);
+    assert.equal((await rebuilt.status()).ann.descriptorCache.misses, 1);
+  } finally { await rebuilt.close(); }
+});
+
+test('scalar shard descriptors reuse only current authorized scope, domain and model identity', async t => {
+  const { index } = await fixture(t);
+  await index.upsertSources([source('allowed', [1, 0]),
+    source('private', [1, 0], { scopeKey: 'project:other' }),
+    source('space-other', [1, 0], { embeddingSpaceId: 'b'.repeat(64) }),
+    source('version-other', [1, 0], { embeddingModelVersion: 'v2' }),
+    source('document-other', [1, 0], { sourceType: 'document' })]);
+  const codeQuery = { retrievalIntent: { domain: 'code' } };
+  assert.deepEqual((await search(index, codeQuery)).items.map(item => item.sourceId), ['allowed']);
+  assert.equal((await index.status()).ann.descriptorCache.misses, 1);
+  assert.deepEqual((await search(index, { ...codeQuery, ann: { mode: 'exact' } })).items.map(item => item.sourceId), ['allowed']);
+  assert.equal((await index.status()).ann.descriptorCache.hits, 1);
+  assert.deepEqual((await search(index, { ...codeQuery, scopeKeys: ['project:other'] })).items.map(item => item.sourceId), ['private']);
+  assert.deepEqual((await search(index, { ...codeQuery, embeddingSpaceId: 'b'.repeat(64) })).items.map(item => item.sourceId), ['space-other']);
+  assert.deepEqual((await search(index, { ...codeQuery, embeddingModelVersion: 'v2' })).items.map(item => item.sourceId), ['version-other']);
+  assert.deepEqual((await search(index, { retrievalIntent: { domain: 'knowledge' } })).items.map(item => item.sourceId), ['document-other']);
+  const before = (await index.status()).ann.descriptorCache;
+  await index.upsertSources([source('allowed-new', [1, 0])]);
+  const updated = await search(index, codeQuery);
+  assert.equal(updated.items.length, 2);
+  assert.ok(updated.items.every(item => item.scopeKey === 'project:one'));
+  assert.ok((await index.status()).ann.descriptorCache.misses > before.misses);
+  await index.removeSource('allowed-new', { scopeKeys: ['project:one'] });
+  assert.deepEqual((await search(index, codeQuery)).items.map(item => item.sourceId), ['allowed']);
+  await index.invalidateScope('project:one');
+  assert.equal((await search(index, codeQuery)).items.length, 0);
+});
+
+test('negative descriptor entries are bounded and cannot revive when a matching model space is published', async t => {
+  const { index } = await fixture(t, { ann: { mode: 'exact' } });
+  await index.upsertSources([source('existing', [1, 0])]);
+  for (let number = 0; number < 70; number++)
+    assert.equal((await search(index, { ann: { mode: 'exact' }, embeddingModelVersion: `missing-${number}` })).items.length, 0);
+  const status = await index.status();
+  assert.equal(status.ann.descriptorCache.entries, 64);
+  assert.ok(status.ann.descriptorCache.payloadBytes <= 8 * 1024 * 1024);
+  assert.equal((await search(index, { ann: { mode: 'exact' }, embeddingModelVersion: 'missing-69' })).items.length, 0);
+  assert.equal((await index.status()).ann.descriptorCache.hits, 1);
+  await index.upsertSources([source('new-model-match', [1, 0], { embeddingModelVersion: 'missing-69' })]);
+  assert.deepEqual((await search(index, { ann: { mode: 'exact' }, embeddingModelVersion: 'missing-69' })).items.map(item => item.sourceId), ['new-model-match']);
+  assert.equal((await index.status()).ann.descriptorCache.entries, 1);
+});
+
+test('lowering a loaded ANN shard budget releases its owned helper before exact fallback', async t => {
+  const { index } = await fixture(t);
+  const document = source('loaded-budget', null, { text: 'budget source contents\n'.repeat(300), vectors: undefined });
+  document.chunks = chunkSource(document, { maxChars: 80 });
+  const vector = Array.from({ length: 4096 }, (_, number) => number === 0 ? 1 : 0);
+  document.vectors = document.chunks.map(() => vector);
+  await index.upsertSources([document]);
+  const normal = await search(index, { queryVector: vector });
+  assert.equal(normal.semanticBackend, 'ann');
+  const before = (await index.status()).ann;
+  assert.ok(before.cachedVectors > 0 && before.helperPid);
+  const reduced = await search(index, { queryVector: vector, ann: { mode: 'ann', maxShardBytes: 1024 * 1024 } });
+  assert.equal(reduced.semanticBackend, 'exact');
+  assert.equal(reduced.degradedReason, 'RETRIEVAL_ANN_RESOURCE_LIMIT');
+  const after = (await index.status()).ann;
+  assert.equal(after.cachedShards, 0);
+  assert.equal(after.cachedVectors, 0);
+  assert.equal(after.helperPid, null);
+  assert.equal(after.helperRssBytes, 0);
+  assert.throws(() => process.kill(before.helperPid, 0), { code: 'ESRCH' });
+  assert.equal((await index.status()).vectorChunks, document.chunks.length);
+});
+
+test('lowering cached shard count closes the oversized owner and reloads compliant graphs under the new limit', async t => {
+  const { index } = await fixture(t);
+  await index.upsertSources([source('cached-one', [1, 0]), source('cached-two', [0, 1], { scopeKey: 'project:two' })]);
+  await search(index);
+  await search(index, { scopeKeys: ['project:two'] });
+  const before = (await index.status()).ann;
+  assert.equal(before.cachedShards, 2);
+  const reduced = await search(index, { scopeKeys: ['project:two'], ann: { mode: 'ann', maxCachedShards: 1 } });
+  assert.equal(reduced.items[0].sourceId, 'cached-two');
+  const after = (await index.status()).ann;
+  assert.equal(after.cachedShards, 1);
+  assert.equal(after.cachedVectors, 1);
+  assert.notEqual(after.helperPid, before.helperPid);
+  assert.ok(after.loaded >= 1);
+  assert.throws(() => process.kill(before.helperPid, 0), { code: 'ESRCH' });
+});

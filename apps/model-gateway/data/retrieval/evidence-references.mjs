@@ -7,7 +7,7 @@ export const MAX_EVIDENCE_REFERENCES = 60;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
 const IDENTITY_FIELDS = new Set(['sourceId', 'contentHash', 'sourceRevision', 'chunkId', 'chunkHash',
-  'indexSnapshotId', 'scopeSnapshots', 'modelSourceRef', 'canonicalSourceRef', 'evidenceArchiveId']);
+  'derivationSignature', 'indexSnapshotId', 'scopeSnapshots', 'modelSourceRef', 'canonicalSourceRef', 'evidenceArchiveId']);
 const invalid = () => retrievalFailure('Invalid evidence reference. / 证据引用无效。', 'INVALID_EVIDENCE_REFERENCE');
 const sameId = (left, right) => validateId(left).toLowerCase() === validateId(right).toLowerCase();
 
@@ -46,7 +46,7 @@ export function validatedEvidenceReference(item) {
         descriptor.chunkId.length > 256 || /[\x00-\x1f]/.test(descriptor.chunkId) || !HASH.test(descriptor.chunkHash ?? '')))) throw invalid();
   const encoded = item.sourceRef.slice(5);
   if (!/^[A-Za-z0-9_-]+$/.test(encoded) || Buffer.from(encoded, 'base64url').toString('base64url') !== encoded) throw invalid();
-  for (const key of ['sourceId', 'scopeKey', 'sourceRevision', 'contentHash', 'chunkId', 'chunkHash']) {
+  for (const key of ['sourceId', 'scopeKey', 'sourceRevision', 'contentHash', 'chunkId', 'chunkHash', 'derivationSignature']) {
     if (Object.hasOwn(item, key) && JSON.stringify(item[key]) !== JSON.stringify(descriptor[key])) throw invalid();
   }
   return descriptor;

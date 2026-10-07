@@ -10,6 +10,7 @@ internal sealed record HostTerminalRequest
     public string? Cwd { get; init; }
     public int TimeoutMs { get; init; } = 30000;
     public bool Visible { get; init; }
+    public bool BackgroundJob { get; init; }
     public int? KeepOpenMs { get; init; }
 }
 

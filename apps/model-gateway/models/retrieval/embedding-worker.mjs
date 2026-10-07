@@ -1,6 +1,9 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { BUILTIN_EMBEDDING_PROFILE } from './embedding-profile.mjs';
 import { verifyEmbeddingBundle } from './embedding-assets.mjs';
+import { resolveRetrievalModelProfile } from './model-registry.mjs';
+
+const profile = resolveRetrievalModelProfile('embedding', workerData.profileId ?? BUILTIN_EMBEDDING_PROFILE.id);
 
 const BATCH_SIZE = 4;
 const cancelledRequests = new Set();
@@ -44,7 +47,7 @@ function shutdown() {
 async function loadExtractor(id) {
   checkCancelled(id);
   phase('verifying-assets');
-  await verifyEmbeddingBundle(workerData.modelRoot);
+  await verifyEmbeddingBundle(workerData.modelRoot, { profile, checkCancelled: () => checkCancelled(id) });
   checkCancelled(id);
   phase('loading-runtime');
   const { env, pipeline } = await import('@huggingface/transformers');
@@ -61,7 +64,7 @@ async function loadExtractor(id) {
   extractor = await pipeline('feature-extraction', workerData.modelRoot, {
     local_files_only: true,
     device: 'cpu',
-    dtype: BUILTIN_EMBEDDING_PROFILE.dtype,
+    dtype: profile.dtype,
     session_options: { intraOpNumThreads: workerData.cpuThreads, interOpNumThreads: 1 },
   });
   if (!closing) parentPort.postMessage({ type: 'ready' });
@@ -79,7 +82,7 @@ async function embed(message) {
     throw error;
   }));
   if (isCancelled(message.id)) return;
-  const prefix = message.kind === 'query' ? BUILTIN_EMBEDDING_PROFILE.queryPrefix : BUILTIN_EMBEDDING_PROFILE.documentPrefix;
+  const prefix = message.kind === 'query' ? profile.queryPrefix : profile.documentPrefix;
   const inputs = message.texts.map(text => `${prefix}${text}`);
   // Count the same prefixed input before the pipeline's default truncation can act.
   // 先对实际带前缀输入计数；超过模型位置上限明确报错，不让管线默认截断悄悄丢掉正文。
@@ -89,9 +92,9 @@ async function embed(message) {
     if (isCancelled(message.id)) return;
     const tokens = activeExtractor.tokenizer(inputs[index], { padding: false, truncation: false, return_tensor: false });
     const tokenCount = tokens.input_ids.length;
-    if (tokenCount > BUILTIN_EMBEDDING_PROFILE.maxInputTokens) {
+    if (tokenCount > profile.maxInputTokens) {
       throw Object.assign(new Error('Embedding input exceeds 512 tokens. Split the source first.'), {
-        code: 'EMBEDDING_INPUT_TOO_LONG', details: { index, tokenCount, maxInputTokens: BUILTIN_EMBEDDING_PROFILE.maxInputTokens },
+        code: 'EMBEDDING_INPUT_TOO_LONG', details: { index, tokenCount, maxInputTokens: profile.maxInputTokens },
       });
     }
   }
@@ -105,7 +108,7 @@ async function embed(message) {
     try {
       if (isCancelled(message.id)) return;
       const batchVectors = output.tolist();
-      if (batchVectors.some(vector => vector.length !== BUILTIN_EMBEDDING_PROFILE.dimensions || !vector.every(Number.isFinite))) {
+      if (batchVectors.some(vector => vector.length !== profile.dimensions || !vector.every(Number.isFinite))) {
         throw Object.assign(new Error('The embedding model returned invalid vectors.'), { code: 'EMBEDDING_INVALID_VECTOR' });
       }
       vectors.push(...batchVectors);

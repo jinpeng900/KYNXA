@@ -1,3 +1,5 @@
+import { wireCatalog } from '../models/tool-protocols.mjs';
+
 const computerAliases = {
   windows: 'windows window list 窗口 窗口列表 当前窗口',
   apps: 'apps applications programs chrome edge firefox 浏览器 软件 应用 程序 软件列表 本机浏览器',
@@ -10,7 +12,7 @@ const computerAliases = {
   click: 'click mouse 点击 鼠标',
   scroll: 'scroll wheel 滚动 鼠标',
   drag: 'drag mouse 拖动 拖拽 鼠标',
-  type: 'type input keyboard 输入 键盘 文本',
+  type: 'type input fill enter text paste caret focused field keyboard 输入 键入 填写 填入 填进 粘贴 光标 输入框 键盘 文本',
   key: 'key shortcut keyboard 按键 快捷键 键盘'
 };
 
@@ -25,7 +27,7 @@ function normalized(value, maximum = 200) {
 export function toolDiscoveryCategory(tool) {
   const name = normalized(tool?.name, 256), description = normalized(tool?.description, 2000);
   if (name.startsWith('computer.')) return 'computer';
-  if (name === 'terminal.host.run') return 'host-terminal';
+  if (name.startsWith('terminal.host.')) return 'host-terminal';
   if (name === 'terminal.run') return 'sandbox-terminal';
   if (name === 'web.fetch') return 'web-fetch';
   if (/playwright|chrome[-_.]?devtools|puppeteer|(?:^|[._-])browser(?:[._-]|$)/.test(name) ||
@@ -40,7 +42,8 @@ function aliases(tool) {
   const name = normalized(tool.name, 256), category = toolDiscoveryCategory(tool);
   if (category === 'computer') return 'computer desktop local host 本机 本地 桌面 桌面控制 ' +
     (computerAliases[name.slice('computer.'.length)] ?? '');
-  if (category === 'host-terminal') return 'host terminal local terminal visible terminal cmd powershell conda 本机终端 本地终端 可见终端 显示终端 终端窗口 宿主终端 本机命令 本地命令 命令提示符';
+  if (category === 'host-terminal') return 'host terminal local terminal visible terminal background process job cmd powershell conda 本机终端 本地终端 可见终端 显示终端 终端窗口 宿主终端 本机命令 本地命令 命令提示符 后台进程 后台任务 监控进程 ' +
+    ({ start: 'start launch 启动 运行', read: 'read inspect poll output 读取 查看 输出 状态', stop: 'stop cancel terminate 停止 关闭 终止 取消' }[name.split('.').at(-1)] ?? '');
   if (category === 'sandbox-terminal') return 'sandbox terminal node 沙箱终端 隔离终端 运行代码 执行代码';
   if (category === 'web-search') return 'web search internet 搜索 联网 搜索网页 查资料 查证';
   if (category === 'web-fetch') return 'web fetch public webpage read url 页面 网页 网站 阅读网页 读取网页 网页内容 网址 获取正文';
@@ -53,7 +56,7 @@ function aliases(tool) {
   if (/evaluate|script/.test(name)) value += ' evaluate script javascript 脚本 执行脚本';
   if (/screenshot|capture/.test(name)) value += ' screenshot capture 截图 截屏';
   if (/click/.test(name)) value += ' click 点击';
-  if (/type|fill/.test(name)) value += ' type fill 输入 填写';
+  if (/type|fill/.test(name)) value += ' type fill input enter text paste caret focused field 输入 键入 填写 填入 填进 粘贴 光标 输入框';
   return value;
 }
 
@@ -77,12 +80,14 @@ export function searchTools(descriptors, query = '') {
   if (!text) return enabled;
   const terms = queryTerms(text);
   const identityQuery = /^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$/.test(text);
+  const wireIdentityQuery = /^k_[a-z0-9_]+_[a-f0-9]{8}$/.test(text);
   return enabled.map((tool, index) => {
     const name = normalized(tool.name, 256), description = normalized(tool.description, 8000), alias = aliases(tool);
     // A complete dotted tool identity is not a bag of generic provider/name words.
     // If that identity is absent or disabled, unrelated tools must not look like replacements.
     // 完整带点工具身份不能拆成通用名称关键词；该身份缺失或禁用时，不能把无关工具当成替代项。
     if (identityQuery && !name.includes(text)) return { tool, index, score: 0 };
+    if (wireIdentityQuery) return { tool, index, score: normalized(wireCatalog([tool])[0].wireName, 256) === text ? 100000 : 0 };
     let score = name === text ? 100000 : name.includes(text) ? 10000 : 0;
     if (description.includes(text) || alias.includes(text)) score += 1000;
     let matches = 0;
@@ -108,7 +113,8 @@ function currentSignals(message) {
       /\b(?:latest|current|recent|today|news|official|released?|announced?|search|who|when|price|weather)\b|\blook\s+up\b/.test(text),
     docs: /文档|接口|代码|编程|开发|框架|库的|库怎么/.test(text) ||
       /\b(?:api|sdk|docs?|documentation|library|libraries|framework|programming|code|typescript|python|dotnet|winui|react)\b/.test(text),
-    desktop: /截图|截屏|屏幕|鼠标|键盘|桌面|打开软件|打开应用|控制本机|浏览器|记事本|计算器|打开界面|可见窗口|调整窗口|窗口大小|最大化|最小化|恢复窗口/.test(text) ||
+    desktop: /截图|截屏|屏幕|鼠标|键盘|光标|输入框|桌面|打开软件|打开应用|控制本机|浏览器|记事本|计算器|打开界面|可见窗口|调整窗口|窗口大小|最大化|最小化|恢复窗口/.test(text) ||
+      /(?:输入|键入|填写|填入|填进|粘贴).{0,24}(?:窗口|界面|页面|输入框)|\b(?:type|enter|paste)\b.{0,40}\b(?:caret|focused field|text field|input field)\b/.test(text) ||
       /(?:打开|访问|浏览|查看|看看).{0,30}(?:网站|网页|网址|页面)/.test(text) ||
       /(?:打开|启动|显示|使用|控制).{0,30}(?:chrome|edge|firefox|google)|\b(?:open|launch|show|use|control)\s+(?:the\s+)?(?:local\s+)?(?:chrome|edge|firefox|google)\b/.test(text) ||
       /(?:打开|访问|浏览|查看|看看|\bopen\b|\bvisit\b).{0,40}(?:[a-z0-9-]+\.)+[a-z]{2,}/.test(text) ||
@@ -116,6 +122,7 @@ function currentSignals(message) {
       /\b(?:screenshot|desktop|mouse|browser|notepad|calculator|launch|computer)\b/.test(text),
     browser, remoteBrowser,
     hostTerminal: /本机终端|本地终端|本机命令|本地命令|宿主终端|conda|powershell|cmd|命令提示符/.test(text) ||
+      /后台.{0,12}(?:终端|进程|任务)|(?:终端|进程).{0,12}(?:后台|监控)|\b(?:background|persistent)\s+(?:terminal|process|job)\b/.test(text) ||
       /\b(?:host|local|visible)\b.*\b(?:terminal|command)\b|\bterminal\b.*\b(?:window|visible)\b/.test(text) ||
       /(?:打开|显示|可见|可以看到|看得到).{0,20}终端|终端.{0,20}(?:窗口|可见|可以看到|看得到)/.test(text),
     url: /https?:\/\/\S+/i.test(text) };

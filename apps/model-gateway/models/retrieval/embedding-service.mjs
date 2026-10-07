@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { BUILTIN_EMBEDDING_PROFILE, defaultEmbeddingModelRoot } from './embedding-profile.mjs';
+import { resolveRetrievalModelProfile, retrievalModelMetadata, unavailableProfileStatus } from './model-registry.mjs';
 
 const MAX_PENDING_REQUESTS = 32;
 const MAX_BATCH_DOCUMENTS = 64;
@@ -21,11 +22,6 @@ function abortedError() {
   const error = new EmbeddingError('Embedding request was cancelled.', 'EMBEDDING_CANCELLED');
   error.name = 'AbortError';
   return error;
-}
-
-function resultMetadata() {
-  return { profileId: BUILTIN_EMBEDDING_PROFILE.id, modelVersion: BUILTIN_EMBEDDING_PROFILE.modelVersion,
-    dimensions: BUILTIN_EMBEDDING_PROFILE.dimensions };
 }
 
 function validateTexts(texts) {
@@ -59,39 +55,49 @@ export class EmbeddingService {
   #loaded = false;
   #closed = false;
   #errorCode;
+  #profile;
+  #workerFactory;
+  #assetVerification = 'pending';
 
   constructor({ modelRoot = defaultEmbeddingModelRoot(), cpuThreads = 2, timeoutMs = 120_000,
-    closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS } = {}) {
+    closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS, profileId = BUILTIN_EMBEDDING_PROFILE.id,
+    workerFactory = (url, options) => new Worker(url, options) } = {}) {
+    this.#profile = resolveRetrievalModelProfile('embedding', profileId);
+    this.#workerFactory = workerFactory;
     this.#modelRoot = resolve(modelRoot);
     this.#cpuThreads = Math.max(1, Math.min(2, Number.isInteger(cpuThreads) ? cpuThreads : 2));
     this.#timeoutMs = Math.max(1000, Math.min(300_000, Number.isFinite(timeoutMs) ? timeoutMs : 120_000));
     this.#closeTimeoutMs = Math.max(1, Math.min(300_000,
       Number.isFinite(closeTimeoutMs) ? closeTimeoutMs : DEFAULT_CLOSE_TIMEOUT_MS));
-    this.#state = BUILTIN_EMBEDDING_PROFILE.files.every(asset => existsSync(join(this.#modelRoot, asset.path))) ? 'ready' : 'unavailable';
+    this.#state = this.#profile.files.every(asset => existsSync(join(this.#modelRoot, asset.path))) ? 'ready' : 'unavailable';
     if (this.#state === 'unavailable') this.#errorCode = 'EMBEDDING_ASSET_MISSING';
   }
 
-  status() {
-    return { ...resultMetadata(), state: this.#state, loaded: this.#loaded, local: true, network: false,
-      maxInputTokens: BUILTIN_EMBEDDING_PROFILE.maxInputTokens, cpuThreads: this.#cpuThreads,
+  status(profileId = this.#profile.id) {
+    if (profileId !== this.#profile.id) return unavailableProfileStatus('embedding', profileId);
+    return { ...retrievalModelMetadata(this.#profile), state: this.#state, loaded: this.#loaded, supported: true,
+      local: true, network: false, assetVerification: this.#assetVerification,
+      maxInputTokens: this.#profile.maxInputTokens, cpuThreads: this.#cpuThreads,
       pendingRequests: this.#pending.size, workerPhase: this.#workerPhase,
       ...(this.#errorCode ? { errorCode: this.#errorCode } : {}) };
   }
 
-  async embedQuery(text, { signal } = {}) {
+  async embedQuery(text, { signal, profileId = this.#profile.id } = {}) {
+    resolveRetrievalModelProfile('embedding', profileId);
     validateTexts([text]);
     const vectors = await this.#request('query', [text], signal);
-    return { ...resultMetadata(), vector: vectors[0] };
+    return { ...retrievalModelMetadata(this.#profile), vector: vectors[0] };
   }
 
-  async embedDocuments(texts, { signal } = {}) {
+  async embedDocuments(texts, { signal, profileId = this.#profile.id } = {}) {
+    resolveRetrievalModelProfile('embedding', profileId);
     validateTexts(texts);
     if (!texts.length) {
       if (this.#closed) throw new EmbeddingError('Embedding service is closed.', 'EMBEDDING_CLOSED');
       if (signal?.aborted) throw abortedError();
-      return { ...resultMetadata(), vectors: [] };
+      return { ...retrievalModelMetadata(this.#profile), vectors: [] };
     }
-    return { ...resultMetadata(), vectors: await this.#request('document', texts, signal) };
+    return { ...retrievalModelMetadata(this.#profile), vectors: await this.#request('document', texts, signal) };
   }
 
   #startWorker() {
@@ -99,8 +105,8 @@ export class EmbeddingService {
     this.#state = 'loading';
     let worker;
     try {
-      worker = new Worker(new URL('./embedding-worker.mjs', import.meta.url), {
-        workerData: { modelRoot: this.#modelRoot, cpuThreads: this.#cpuThreads },
+      worker = this.#workerFactory(new URL('./embedding-worker.mjs', import.meta.url), {
+        workerData: { modelRoot: this.#modelRoot, cpuThreads: this.#cpuThreads, profileId: this.#profile.id },
         // Do not inherit debugger or test runner flags into the inference worker.
         // 推理 worker 不继承调试器或测试运行器参数，避免额外进程行为。
         execArgv: [],
@@ -118,6 +124,7 @@ export class EmbeddingService {
     // 模型加载失败可能在调用方要求关闭前启动退出，先观察拒绝，避免产生未处理的 Promise。
     this.#workerExit.catch(() => {});
     worker.on('message', message => {
+      if (this.#worker !== worker || !message || typeof message !== 'object') return;
       if (message.type === 'phase') {
         if (!this.#closed) this.#workerPhase = message.phase;
         return;
@@ -141,9 +148,10 @@ export class EmbeddingService {
         return;
       }
       if (message.type === 'ready') {
-        if (this.#closed) return;
+        if (this.#closed || this.#state === 'error' || this.#state === 'unavailable') return;
         this.#state = 'ready';
         this.#loaded = true;
+        this.#assetVerification = 'verified';
         this.#errorCode = undefined;
         return;
       }
@@ -155,7 +163,12 @@ export class EmbeddingService {
       if (!request) return;
       this.#pending.delete(message.id);
       request.cleanup();
-      if (message.type === 'result') request.resolve(message.vectors);
+      if (message.type === 'result') {
+        if (!Array.isArray(message.vectors) || message.vectors.length !== request.expectedCount ||
+            message.vectors.some(vector => !Array.isArray(vector) || vector.length !== this.#profile.dimensions || !vector.every(Number.isFinite)))
+          request.reject(new EmbeddingError('The embedding worker returned invalid vectors.', 'EMBEDDING_INVALID_VECTOR'));
+        else request.resolve(message.vectors);
+      }
       else request.reject(new EmbeddingError(message.message, message.code, message.details));
     });
     worker.on('error', error => this.#failWorker(new EmbeddingError(error.message, 'EMBEDDING_WORKER_FAILED')));
@@ -174,6 +187,7 @@ export class EmbeddingService {
       this.#state = error.code === 'EMBEDDING_ASSET_MISSING' ? 'unavailable' : 'error';
       this.#errorCode = error.code;
       this.#loaded = false;
+      if (error.code === 'EMBEDDING_ASSET_INVALID' || error.code === 'EMBEDDING_ASSET_MISSING') this.#assetVerification = 'failed';
     }
     for (const request of this.#pending.values()) {
       request.cleanup();
@@ -206,10 +220,12 @@ export class EmbeddingService {
         clearTimeout(timer);
         signal?.removeEventListener('abort', abort);
       };
-      this.#pending.set(id, { resolve: resolveRequest, reject: rejectRequest, cleanup });
+      this.#pending.set(id, { resolve: resolveRequest, reject: rejectRequest, cleanup, expectedCount: texts.length });
       signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
       timer = setTimeout(() => cancel(new EmbeddingError('Local embedding request timed out.', 'EMBEDDING_TIMEOUT')), this.#timeoutMs);
-      worker.postMessage({ type: 'embed', id, kind, texts });
+      try { worker.postMessage({ type: 'embed', id, kind, texts }); }
+      catch { cancel(new EmbeddingError('Local embedding request could not be dispatched.', 'EMBEDDING_WORKER_FAILED')); }
     });
   }
 

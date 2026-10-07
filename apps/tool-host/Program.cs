@@ -22,7 +22,7 @@ internal static class Program
             using JsonDocument document = JsonDocument.Parse(input);
             string? operation = document.RootElement.TryGetProperty("operation", out JsonElement value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString() : null;
-            if (operation is "host_terminal_capabilities" or "host_terminal" or "host_terminal_visible")
+            if (operation is "host_terminal_capabilities" or "host_terminal" or "host_terminal_visible" or "host_terminal_job")
             {
                 hostTerminalRequest = true;
                 if (operation == "host_terminal_capabilities")

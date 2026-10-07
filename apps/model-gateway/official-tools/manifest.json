@@ -130,7 +130,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "6ff5cbc109038a5fd8e466acf4d0cf399849a85b7475a72c253043d1187e9a58"
+          "sha256": "95391c509b065ca8931a23ed5430d5062e2f1d8e0290ff418ed19234be7d15ef"
         }
       ]
     },
@@ -172,6 +172,9 @@
     "skill.run",
     "terminal.run",
     "terminal.host.run",
+    "terminal.host.start",
+    "terminal.host.read",
+    "terminal.host.stop",
     "tool.search",
     "tool.load",
     "tool.result.read",

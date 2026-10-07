@@ -1,36 +1,55 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { BUILTIN_RERANKER_PROFILE } from './reranker-profile.mjs';
 import { verifyEmbeddingAsset } from './embedding-assets.mjs';
+import { resolveRetrievalModelProfile } from './model-registry.mjs';
+
+const profile = resolveRetrievalModelProfile('reranker', workerData.profileId ?? BUILTIN_RERANKER_PROFILE.id);
 
 let tokenizer, model, loadPromise, shutdownPromise;
 let queue = Promise.resolve(), closing = false;
 let lastReceivedId = 0;
 const cancelled = new Set(), active = new Set();
 const isCancelled = id => closing || cancelled.has(id);
-const phase = value => parentPort.postMessage({ type: 'phase', phase: value });
+const phase = value => { if (!closing) parentPort.postMessage({ type: 'phase', phase: value }); };
 
-async function loadModel() {
+function checkCancelled(id) {
+  if (isCancelled(id)) throw Object.assign(new Error('Reranking cancelled.'), { code: 'RERANK_CANCELLED' });
+}
+
+async function loadModel(id) {
+  checkCancelled(id);
   phase('verifying-assets');
-  for (const asset of BUILTIN_RERANKER_PROFILE.files) {
+  for (const asset of profile.files) {
+    checkCancelled(id);
     if (!await verifyEmbeddingAsset(workerData.modelRoot, asset))
       throw Object.assign(new Error('Reranker asset integrity verification failed.'), { code: 'RERANK_ASSET_INVALID' });
+    checkCancelled(id);
   }
   const { env, AutoTokenizer, AutoModelForSequenceClassification } = await import('@huggingface/transformers');
+  checkCancelled(id);
   env.allowRemoteModels = false; env.allowLocalModels = true;
   env.useFSCache = false; env.useBrowserCache = false; env.useCustomCache = false;
   globalThis.fetch = async () => { throw Object.assign(new Error('Reranker networking is disabled.'), { code: 'RERANK_NETWORK_DISABLED' }); };
   phase('loading-model');
   tokenizer = await AutoTokenizer.from_pretrained(workerData.modelRoot, { local_files_only: true });
+  checkCancelled(id);
   model = await AutoModelForSequenceClassification.from_pretrained(workerData.modelRoot, {
-    local_files_only: true, dtype: BUILTIN_RERANKER_PROFILE.dtype, device: 'cpu',
+    local_files_only: true, dtype: profile.dtype, device: 'cpu',
     session_options: { intraOpNumThreads: workerData.cpuThreads, interOpNumThreads: 1 },
   });
-  parentPort.postMessage({ type: 'ready' });
+  if (!closing) parentPort.postMessage({ type: 'ready' });
 }
 
 async function rank(message) {
   if (isCancelled(message.id)) return;
-  await (loadPromise ??= loadModel());
+  await (loadPromise ??= loadModel(message.id).catch(error => {
+    loadPromise = undefined;
+    if (error.code === 'RERANK_CANCELLED') throw error;
+    const code = error.code === 'ENOENT' ? 'RERANK_ASSET_MISSING' : error.code ?? 'RERANK_RUNTIME_UNAVAILABLE';
+    parentPort.postMessage({ type: 'fatal', code, message: 'The pinned local reranker could not be loaded.' });
+    shutdown();
+    throw error;
+  }));
   if (isCancelled(message.id)) return;
   const scores = [];
   let truncatedInputsCount = 0;
@@ -38,11 +57,11 @@ async function rank(message) {
     await new Promise(resolve => setImmediate(resolve));
     if (isCancelled(message.id)) return;
     const raw = tokenizer(message.query, { text_pair: text, padding: false, truncation: false, return_tensor: false });
-    if (raw.input_ids.length > BUILTIN_RERANKER_PROFILE.maxInputTokens) truncatedInputsCount++;
+    if (raw.input_ids.length > profile.maxInputTokens) truncatedInputsCount++;
     // Only the ranking preview is bounded; the original passage and its source reference stay intact.
     // 只限制重排预览长度；正式片段与回源引用保持完整，并显式返回发生截短的数量。
     const inputs = tokenizer(message.query, { text_pair: text, padding: true, truncation: true,
-      max_length: BUILTIN_RERANKER_PROFILE.maxInputTokens });
+      max_length: profile.maxInputTokens });
     let output;
     try {
       phase('inference');
@@ -62,6 +81,7 @@ async function rank(message) {
 function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
+  for (const id of active) cancelled.add(id);
   // Retire the native session after the queued call settles; never terminate an ONNX worker.
   // 等待队列中的原生调用结束后再退役会话，不强行终止 ONNX worker。
   shutdownPromise = queue.then(async () => {

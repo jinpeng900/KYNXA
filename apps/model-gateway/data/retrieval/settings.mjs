@@ -3,14 +3,19 @@ import { join, relative, resolve, sep } from 'node:path';
 import { atomicJson } from '../../platform/atomic-json.mjs';
 import { validateId } from '../../platform/conversation-id.mjs';
 import { RETRIEVAL_SCHEMA_VERSION, requireKeys, retrievalFailure, retrievalRecord } from './retrieval-contracts.mjs';
+import { DEFAULT_ANN_OPTIONS, validateAnnOptions } from './ann-store.mjs';
 
 const queues = new Map();
-const MAX_SETTINGS_BYTES = 128 * 1024;
+const MAX_SETTINGS_BYTES = 8 * 1024 * 1024;
+
+export const DEFAULT_INDEXING_LIMITS = Object.freeze({ maximumFiles: 20000, maximumSourceBytes: 2 * 1024 * 1024,
+  maximumTotalBytes: 512 * 1024 * 1024, maximumEntries: 200000, batchSize: 32 });
+export const DEFAULT_ANN_SETTINGS = DEFAULT_ANN_OPTIONS;
 
 export const DEFAULT_RETRIEVAL_SETTINGS = Object.freeze({
   schemaVersion: RETRIEVAL_SCHEMA_VERSION, revision: 0,
   local: Object.freeze({ enabled: true, semantic: 'auto', vectorBackend: 'sqlite',
-    embeddingProfileId: 'builtin-multilingual', rerankProfileId: null }),
+    embeddingProfileId: 'builtin-multilingual', rerankProfileId: null, indexing: DEFAULT_INDEXING_LIMITS, ann: DEFAULT_ANN_SETTINGS }),
   web: Object.freeze({ mode: 'auto', providerId: 'auto', depth: 'standard', language: 'auto', browserRead: 'auto' }),
   cache: Object.freeze({ memoryLimitBytes: 64 * 1024 * 1024, diskLimitBytes: 512 * 1024 * 1024 })
 });
@@ -38,16 +43,38 @@ function integer(value, minimum, maximum, name) {
   return value;
 }
 
+export function validateIndexingLimits(value = {}, { partial = false } = {}) {
+  requireKeys(value, Object.keys(DEFAULT_INDEXING_LIMITS), 'indexing limits');
+  const ranges = { maximumFiles: [1, 100000], maximumSourceBytes: [1, 2 * 1024 * 1024],
+    maximumTotalBytes: [1, 8 * 1024 * 1024 * 1024], maximumEntries: [1, 2000000], batchSize: [1, 128] };
+  const clean = Object.fromEntries(Object.entries(value).map(([name, item]) => [name, integer(item, ...ranges[name], name)]));
+  return partial ? clean : { ...DEFAULT_INDEXING_LIMITS, ...clean };
+}
+
+function annPatch(value) {
+  try { validateAnnOptions(value); }
+  catch (error) { throw retrievalFailure(error.message); }
+  return { ...value };
+}
+
+function mergeLocal(base = {}, patch = {}) {
+  return { ...base, ...patch,
+    ...(base.indexing || patch.indexing ? { indexing: { ...base.indexing, ...patch.indexing } } : {}),
+    ...(base.ann || patch.ann ? { ann: { ...base.ann, ...patch.ann } } : {}) };
+}
+
 function settingsPatch(value) {
   requireKeys(value, ['local', 'web', 'cache'], 'retrieval settings');
   const result = {};
   if (value.local !== undefined) {
-    requireKeys(value.local, ['enabled', 'semantic', 'vectorBackend', 'embeddingProfileId', 'rerankProfileId'], 'local');
+    requireKeys(value.local, ['enabled', 'semantic', 'vectorBackend', 'embeddingProfileId', 'rerankProfileId', 'indexing', 'ann'], 'local');
     const local = {};
     for (const [name, item] of Object.entries(value.local)) {
       if (name === 'enabled') local[name] = boolean(item, name);
       else if (name === 'semantic') local[name] = choice(item, ['auto', 'off'], name);
       else if (name === 'vectorBackend') local[name] = choice(item, ['sqlite'], name);
+      else if (name === 'indexing') local[name] = validateIndexingLimits(item, { partial: true });
+      else if (name === 'ann') local[name] = annPatch(item);
       else local[name] = reference(item, name, true);
     }
     result.local = local;
@@ -74,7 +101,7 @@ function settingsPatch(value) {
 }
 
 function mergeSettings(base, patch) {
-  return { ...base, local: { ...base.local, ...patch.local }, web: { ...base.web, ...patch.web },
+  return { ...base, local: mergeLocal(base.local, patch.local), web: { ...base.web, ...patch.web },
     cache: { ...base.cache, ...patch.cache } };
 }
 
@@ -98,7 +125,7 @@ function projectPatch(value) {
     }
     if (value.indexingSources.knowledgeIds !== undefined) {
       const ids = value.indexingSources.knowledgeIds;
-      if (!Array.isArray(ids) || ids.length > 1000) throw retrievalFailure('Invalid knowledge selection. / 资料选择列表无效。');
+      if (!Array.isArray(ids) || ids.length > 100000) throw retrievalFailure('Invalid knowledge selection. / 资料选择列表无效。');
       indexingSources.knowledgeIds = [...new Set(ids.map(id => reference(id, 'knowledgeId')))];
     }
     result.indexingSources = indexingSources;
@@ -178,6 +205,16 @@ export class RetrievalSettingsStore {
     return validateDocument(value, projectId);
   }
 
+  async _write(filename, value) {
+    // Persist only settings that the same reader can reopen; oversize updates preserve the previous revision.
+    // 仅提交同一读取器可以重新打开的配置，超限更新保留已有文件与版本。
+    if (Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`) > MAX_SETTINGS_BYTES)
+      throw retrievalFailure('Retrieval settings exceed the storage limit. / 检索配置超过存储上限，原文件已保留。',
+        'RETRIEVAL_SETTINGS_LIMIT', 413);
+    await this._safe(filename, true);
+    await atomicJson(filename, value);
+  }
+
   async _run(filename, operation) {
     const pending = (queues.get(filename) ?? Promise.resolve()).catch(() => {}).then(operation);
     queues.set(filename, pending);
@@ -229,8 +266,7 @@ export class RetrievalSettingsStore {
       if (current.revision !== mutation.expectedRevision)
         throw retrievalFailure('Retrieval settings changed. / 检索配置已被修改，请刷新后重试。', 'RETRIEVAL_SETTINGS_CONFLICT', 409);
       const next = { ...mergeSettings(current, mutation.patch), revision: current.revision + 1 };
-      await this._safe(filename, true);
-      await atomicJson(filename, next);
+      await this._write(filename, next);
       return next;
     });
   }
@@ -246,13 +282,13 @@ export class RetrievalSettingsStore {
       const next = { ...current, revision: current.revision + 1,
         overrides: Object.fromEntries(['local', 'web', 'cache'].filter(name => mutation.patch.overrides?.[name] !== null &&
           (current.overrides[name] || mutation.patch.overrides?.[name]))
-          .map(name => [name, { ...current.overrides[name], ...mutation.patch.overrides?.[name] }])),
+          .map(name => [name, name === 'local' ? mergeLocal(current.overrides[name], mutation.patch.overrides?.[name])
+            : { ...current.overrides[name], ...mutation.patch.overrides?.[name] }])),
         indexingSources: { ...current.indexingSources, ...mutation.patch.indexingSources,
           mountedFolder: { ...current.indexingSources.mountedFolder, ...mutation.patch.indexingSources?.mountedFolder } } };
       if (current.indexingSources.mountedFolder.enabled !== next.indexingSources.mountedFolder.enabled)
         next.indexingSources.mountedFolder.bindingRevision++;
-      await this._safe(filename, true);
-      await atomicJson(filename, next);
+      await this._write(filename, next);
       return next;
     });
   }

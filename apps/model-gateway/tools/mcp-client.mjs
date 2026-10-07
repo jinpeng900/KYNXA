@@ -5,6 +5,7 @@ import { createMcpTransport, mcpFailure } from './mcp-transport.mjs';
 import { objectInput, toolFailure } from '../platform/tool-paths.mjs';
 import { archiveBrowserScreenshot } from './browser-artifacts.mjs';
 import { BrowserSessionRegistry, browserOperation } from './browser-sessions.mjs';
+import { connectionConfiguration } from './tool-configuration.mjs';
 
 const executionNotDispatched = Symbol('mcp-execution-not-dispatched');
 
@@ -167,7 +168,30 @@ export class McpToolClients {
     this.resetOperation = null;
     this.browserSessions = new BrowserSessionRegistry();
     this.browserApprovals = new WeakMap();
+    this.browserRecoveries = new WeakMap();
     this.diagnosticRevisions = new WeakMap();
+    this.connectionOwners = new Map();
+    this.serverResets = new Map();
+    this.serverGenerations = new Map();
+    this.serverPolicies = new Map();
+  }
+
+  /** Update execution policy synchronously without changing transport ownership.
+   * 同步更新执行策略，不改变传输所有权或重启已有连接。
+   */
+  updateServerPolicies(servers) {
+    const configured = new Map(servers.map(server => [server.id, structuredClone(server)]));
+    for (const id of new Set([...this.serverPolicies.keys(), ...this.servers.keys()]))
+      this.serverPolicies.set(id, configured.get(id) ?? { id, enabled: false });
+    for (const [id, server] of configured) this.serverPolicies.set(id, server);
+  }
+
+  _assertServerToolPolicy(descriptor, connection) {
+    const policy = this.serverPolicies.get(descriptor.serverId) ?? connection.artifactContext?.server;
+    if (policy?.enabled === false)
+      throw toolFailure('此 MCP 服务已停用，请使用当前启用服务。', 'MCP_NOT_ENABLED', 409);
+    if (policy?.disabledTools?.includes(descriptor.toolName))
+      throw toolFailure('此 MCP 工具已停用，请使用当前启用工具。', 'TOOL_DISABLED', 409);
   }
 
   _ownsDiagnosis(connection) {
@@ -223,22 +247,29 @@ export class McpToolClients {
         this.errors.set(connection.serverId, 'MCP_PROCESS_CLEANUP_FAILED');
         throw this._cleanupFailure();
       }
-      if (this.connections.get(key) === operation) this.connections.delete(key);
+      if (this.connections.get(key) === operation) {
+        this.connections.delete(key); this.connectionOwners.delete(key);
+      }
     });
     return connection.closeOperation;
   }
 
   _key(server, context) {
-    return createHash('sha256').update(JSON.stringify([server, context?.workspaceRoot ?? null, this.extensionRoot ?? context?.extensionRoot ?? null])).digest('hex');
+    return createHash('sha256').update(JSON.stringify([connectionConfiguration(server), context?.workspaceRoot ?? null,
+      this.extensionRoot ?? context?.extensionRoot ?? null])).digest('hex');
   }
 
   async _connect(server, context) {
     this._assertConnectionGeneration(this.connectionGeneration);
+    if (this.serverResets.has(server.id))
+      throw toolFailure('此 MCP 服务配置正在更新，请重新准备此服务调用。', 'MCP_CATALOG_CHANGED', 409);
     if (this.failedClosures.size) throw this._cleanupFailure();
     const key = this._key(server, context);
     if (this.connections.has(key)) return this.connections.get(key);
     if (this.connections.size >= MAX_CONNECTIONS) throw toolFailure('MCP 连接已达上限，请刷新连接。', 'MCP_CONNECTION_CAPACITY', 409);
     this.servers.set(server.id, structuredClone(server));
+    if (!this.serverPolicies.has(server.id)) this.serverPolicies.set(server.id, structuredClone(server));
+    this.connectionOwners.set(key, server.id);
     const state = { serverId: server.id, transport: server.transport ?? 'stdio', state: 'connecting', toolCount: 0,
       resourceCapabilities: { resources: false, templates: false }, generation: (this.states.get(server.id)?.generation ?? 0) + 1 };
     this.states.set(server.id, state);
@@ -302,6 +333,7 @@ export class McpToolClients {
           if (connection.closing) return; // The explicit owner records success/failure before releasing its reference. 显式所有者先记录清理成功或失败，再释放自己拥有的引用。
           if (this.connections.get(key) !== operation) return;
           this.connections.delete(key); state.state = 'disconnected'; state.toolCount = 0; state.code = 'MCP_CONNECTION_LOST';
+          this.connectionOwners.delete(key);
           this.browserSessions.remove(key);
           this.errors.set(server.id, state.code);
         };
@@ -318,7 +350,9 @@ export class McpToolClients {
     this.connections.set(key, operation);
     try { return await operation; }
     catch (error) {
-      if (this.connections.get(key) === operation) this.connections.delete(key);
+      if (this.connections.get(key) === operation) {
+        this.connections.delete(key); this.connectionOwners.delete(key);
+      }
       this.errors.set(server.id, error.code ?? 'MCP_CONNECTION_FAILED');
       state.state = error.code === 'MCP_AUTH_REQUIRED' ? 'auth-required' : 'error'; state.code = error.code;
       throw error;
@@ -330,8 +364,14 @@ export class McpToolClients {
     this._assertConnectionGeneration(generation);
     const tools = [];
     const servers = config.mcpServers.filter(server => server.enabled);
+    const serverGenerations = new Map(servers.map(server => [server.id, this.serverGenerations.get(server.id) ?? 0]));
+    const assertServerCurrent = server => {
+      if (this.serverResets.has(server.id) || (this.serverGenerations.get(server.id) ?? 0) !== serverGenerations.get(server.id))
+        throw toolFailure('此 MCP 服务目录在发现期间变化，请重新准备此服务调用。', 'MCP_CATALOG_CHANGED', 409);
+    };
     const discover = async server => {
       this._assertConnectionGeneration(generation);
+      assertServerCurrent(server);
       this.servers.set(server.id, structuredClone(server));
       if (!this.states.has(server.id)) this.states.set(server.id, { serverId: server.id, transport: server.transport ?? 'stdio', state: 'disconnected',
         toolCount: 0, resourceCapabilities: { resources: false, templates: false }, generation: 0 });
@@ -341,11 +381,14 @@ export class McpToolClients {
       try {
         const connection = await this._connect(server, context);
         this._assertConnectionGeneration(generation);
+        assertServerCurrent(server);
         if (refresh && existing && !connection.closed) await connection.refreshCatalog();
         this._assertConnectionGeneration(generation);
+        assertServerCurrent(server);
         if (!connection.closed) return connection.tools;
       } catch (error) {
         this._assertConnectionGeneration(generation);
+        assertServerCurrent(server);
         this.errors.set(server.id, error.code ?? 'MCP_CONNECTION_FAILED');
       }
       return [];
@@ -395,9 +438,14 @@ export class McpToolClients {
    */
   async validateExecution(descriptor, input) {
     if (this.failedClosures.size) throw this._cleanupFailure();
+    if (this.serverResets.has(descriptor.serverId))
+      throw toolFailure('此 MCP 服务配置正在更新，请重新准备此服务调用。', 'MCP_CATALOG_CHANGED', 409);
     const pending = this.connections.get(descriptor.key);
     if (!pending) throw toolFailure('MCP 工具尚未连接或配置已变化，请刷新。', 'MCP_NOT_CONNECTED', 409);
     const connection = await pending;
+    this._assertServerToolPolicy(descriptor, connection);
+    if (this.serverResets.has(descriptor.serverId))
+      throw toolFailure('此 MCP 服务配置正在更新，请重新准备此服务调用。', 'MCP_CATALOG_CHANGED', 409);
     const args = serverArguments(input);
     if (connection.closed) throw toolFailure('MCP 连接已中断，请手动重新连接。', 'MCP_NOT_CONNECTED', 409);
     const current = connection.tools?.find(tool => tool.name === descriptor.name);
@@ -415,7 +463,15 @@ export class McpToolClients {
     const knownServer = this.servers.get(descriptor.serverId) ?? (await this.connections.get(descriptor.key))?.artifactContext?.server;
     if (!browserOperation(descriptor, knownServer)) return structuredClone(input);
     const { connection, args } = await this.validateExecution(descriptor, input);
-    const prepared = this.browserSessions.prepare(descriptor, args, connection.artifactContext?.server, options);
+    let prepared;
+    try { prepared = this.browserSessions.prepare(descriptor, args, connection.artifactContext?.server, options); }
+    catch (error) {
+      const recovery = this.browserSessions.observationRecovery(descriptor, args, connection.artifactContext?.server, options, error.code);
+      if (!recovery || !this._browserObservationTools(connection, recovery)) throw error;
+      const envelope = structuredClone(input);
+      this.browserRecoveries.set(envelope, { connection, ...recovery });
+      return envelope;
+    }
     const envelope = { ...structuredClone(input), arguments: prepared.args };
     this.browserApprovals.set(envelope, { connection, identity: this.browserSessions.approvalIdentity(prepared) });
     return envelope;
@@ -423,8 +479,85 @@ export class McpToolClients {
 
   browserDiagnostics(sessionId) { return this.browserSessions.diagnostics(sessionId); }
 
+  _browserObservationTools(connection, recovery) {
+    const policy = this.serverPolicies.get(connection.serverId ?? connection.artifactContext?.server?.id) ?? connection.artifactContext?.server;
+    if (policy?.enabled === false) return undefined;
+    const disabled = new Set(policy?.disabledTools ?? []);
+    const find = name => connection.tools?.find(tool => tool.operation === 'tools/call' && tool.toolName === name && !disabled.has(name));
+    const listing = find(recovery.engine === 'playwright' ? 'browser_tabs' : 'list_pages');
+    const snapshot = find(recovery.engine === 'playwright' ? 'browser_snapshot' : 'take_snapshot');
+    return listing && snapshot ? { listing, snapshot } : undefined;
+  }
+
+  async _recoverBrowserObservation(descriptor, args, connection, recovery, options, signal) {
+    const plan = this.browserSessions.observationRecovery(descriptor, args, connection.artifactContext?.server,
+      options, recovery.tabId == null ? 'BROWSER_TAB_ID_REQUIRED' : 'BROWSER_STALE_REFERENCE');
+    if (!plan || plan.tabId !== recovery.tabId || plan.connectionSelectedTabId !== recovery.connectionSelectedTabId)
+      throw toolFailure('等待期间浏览器目标已变化，请重新读取当前任务页面。', 'BROWSER_TAB_CHANGED', 409);
+    const tools = this._browserObservationTools(connection, recovery);
+    if (!tools) throw toolFailure('此连接缺少页面发现或快照工具，请刷新工具目录。', 'MCP_CATALOG_CHANGED', 409);
+    const observations = [];
+    if (recovery.tabId == null) {
+      const listingArgs = recovery.engine === 'playwright' ? { action: 'list' } : {};
+      const prepared = this.browserSessions.prepare(tools.listing, listingArgs, connection.artifactContext.server, options);
+      const listing = await this._executePrepared(tools.listing, prepared.args, connection, signal, prepared);
+      observations.push(listing.canonical);
+      if (listing.isError || !listing.browser?.targetVerified || (recovery.url && listing.browser.url !== recovery.url))
+        throw toolFailure('当前浏览器页面与原快照不一致，请选择任务页面并重新读取。', 'BROWSER_TAB_CHANGED', 409);
+    }
+    signal?.throwIfAborted();
+    const snapshotArgs = tools.snapshot.originalInputSchema?.properties?.pageId && recovery.tabId != null
+      ? { pageId: Number(recovery.tabId) } : {};
+    const prepared = this.browserSessions.prepare(tools.snapshot, snapshotArgs, connection.artifactContext.server, options);
+    const snapshot = await this._executePrepared(tools.snapshot, prepared.args, connection, signal, prepared);
+    if (snapshot.isError) return snapshot;
+    observations.push(snapshot.canonical);
+    // A new snapshot never authorizes blindly remapping an old element reference.
+    // Preserve a paired receipt and let the next model step select the fresh ref.
+    // 新快照不得授权盲目映射旧元素引用；保存配对回执，让下一模型步骤选择新引用。
+    const notice = 'Browser target and fresh snapshot recovered. The original action was not executed. Select the intended element from this fresh snapshot and call the action again.';
+    const canonical = { content: [{ type: 'text', text: notice }, ...(snapshot.canonical.content ?? [])], isError: true,
+      structuredContent: { code: 'BROWSER_REFERENCE_REFRESHED', originalActionExecuted: false, observations, browser: snapshot.browser } };
+    return { content: `${notice}\n\n${snapshot.content}`, canonical, browser: snapshot.browser, isError: true,
+      code: 'BROWSER_REFERENCE_REFRESHED', outsideWorkspace: true };
+  }
+
+  /** Dispose only changed servers; unrelated connections and pending calls retain ownership.
+   * 仅清理配置变化的服务；其他连接与待执行调用保留自身所有权。
+   */
+  async resetServers(serverIds) {
+    if (this.resetOperation) { await this.resetOperation; return; }
+    const ids = [...new Set(serverIds)];
+    const operations = ids.map(serverId => {
+      if (this.serverResets.has(serverId)) return this.serverResets.get(serverId);
+      this.serverGenerations.set(serverId, (this.serverGenerations.get(serverId) ?? 0) + 1);
+      const pending = [...this.connections.entries()].filter(([key]) => this.connectionOwners.get(key) === serverId);
+      let resetting;
+      resetting = Promise.resolve().then(async () => {
+        const closed = await Promise.allSettled(pending.map(async ([key, startup]) => {
+          let connection;
+          try { connection = await startup; } catch { return; }
+          await this._closeConnection(key, connection);
+        }));
+        if (closed.some(item => item.status === 'rejected') || [...this.failedClosures.values()].some(item => item.serverId === serverId))
+          throw this._cleanupFailure();
+        for (const [key, startup] of pending) {
+          if (this.connections.get(key) === startup) this.connections.delete(key);
+          this.connectionOwners.delete(key);
+        }
+        this.states.delete(serverId); this.errors.delete(serverId); this.servers.delete(serverId);
+      }).finally(() => { if (this.serverResets.get(serverId) === resetting) this.serverResets.delete(serverId); });
+      this.serverResets.set(serverId, resetting);
+      return resetting;
+    });
+    await Promise.all(operations);
+  }
+
   async execute(descriptor, input, signal, browserOptions = {}) {
-    const { connection, args } = await this.validateExecution(descriptor, input);
+    let validated;
+    try { validated = await this.validateExecution(descriptor, input); }
+    catch (error) { throw markExecutionNotDispatched(error); }
+    const { connection, args } = validated;
     if (!browserOperation(descriptor, connection.artifactContext?.server))
       return this._executePrepared(descriptor, args, connection, signal);
     // A selected-page protocol shares state even across distinct conversations.
@@ -441,6 +574,12 @@ export class McpToolClients {
         const approval = this.browserApprovals.get(input);
         if (approval && approval.connection !== current.connection)
           throw toolFailure('审批期间浏览器连接已替换，请重新准备调用和审批。', 'BROWSER_CONNECTION_CHANGED', 409);
+        const recovery = this.browserRecoveries.get(input);
+        if (recovery) {
+          if (recovery.connection !== current.connection)
+            throw toolFailure('审批期间浏览器连接已替换，请重新准备调用和审批。', 'BROWSER_CONNECTION_CHANGED', 409);
+          return await this._recoverBrowserObservation(descriptor, current.args, current.connection, recovery, browserOptions, signal);
+        }
         prepared = this.browserSessions.prepare(descriptor, current.args, current.connection.artifactContext?.server, browserOptions);
         this.browserSessions.verifyApprovalIdentity(approval?.identity, prepared);
       } catch (error) { throw markExecutionNotDispatched(error); }
@@ -452,6 +591,8 @@ export class McpToolClients {
   }
 
   async _executePrepared(descriptor, args, connection, signal, prepared) {
+    try { this._assertServerToolPolicy(descriptor, connection); }
+    catch (error) { throw markExecutionNotDispatched(error); }
     const diagnosticRevision = this.diagnosticRevisions.get(connection.diagnosticState) ?? 0;
     const timeoutMs = prepared?.browser?.timeoutMs ?? 30000;
     const options = { signal, timeout: timeoutMs, maxTotalTimeout: timeoutMs, cacheMode: 'refresh' };
@@ -532,6 +673,7 @@ export class McpToolClients {
     const pending = [...this.connections.entries()];
     let operation;
     operation = Promise.resolve().then(async () => {
+      await Promise.all([...this.serverResets.values()]);
       const settled = await Promise.allSettled(pending.map(async ([key, startup]) => {
         let connection;
         try { connection = await startup; }
@@ -544,6 +686,7 @@ export class McpToolClients {
       // 只释放本次重置拥有的引用；即使以后调整调度，重置完成前仍禁止新连接。
       for (const [key, startup] of pending) if (this.connections.get(key) === startup) this.connections.delete(key);
       this.errors.clear(); this.states.clear(); this.servers.clear();
+      this.connectionOwners.clear();
     }).finally(() => { if (this.resetOperation === operation) this.resetOperation = null; });
     this.resetOperation = operation;
     return operation;

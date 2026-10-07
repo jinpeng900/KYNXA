@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { BUILTIN_RERANKER_PROFILE, defaultRerankerModelRoot } from './reranker-profile.mjs';
+import { resolveRetrievalModelProfile, retrievalModelMetadata, unavailableProfileStatus } from './model-registry.mjs';
 
 const failure = (message, code) => Object.assign(new Error(message), { code });
 const aborted = () => Object.assign(failure('Reranking cancelled.', 'RERANK_CANCELLED'), { name: 'AbortError' });
@@ -11,25 +12,31 @@ const aborted = () => Object.assign(failure('Reranking cancelled.', 'RERANK_CANC
 export class RerankerService {
   #worker; #exit; #closing; #sequence = 0; #pending = new Map();
   #closed = false; #loaded = false; #phase = 'stopped'; #state; #errorCode;
-  constructor({ modelRoot = defaultRerankerModelRoot(), cpuThreads = 2, timeoutMs = 60000, closeTimeoutMs = 30000 } = {}) {
+  #profile; #workerFactory; #assetVerification = 'pending';
+  constructor({ modelRoot = defaultRerankerModelRoot(), cpuThreads = 2, timeoutMs = 60000, closeTimeoutMs = 30000,
+    profileId = BUILTIN_RERANKER_PROFILE.id, workerFactory = (url, options) => new Worker(url, options) } = {}) {
+    this.#profile = resolveRetrievalModelProfile('reranker', profileId);
+    this.#workerFactory = workerFactory;
     this.modelRoot = resolve(modelRoot);
     this.cpuThreads = Math.max(1, Math.min(2, Number.isInteger(cpuThreads) ? cpuThreads : 2));
     this.timeoutMs = Math.max(1000, Math.min(300000, Number.isFinite(timeoutMs) ? timeoutMs : 60000));
     this.closeTimeoutMs = Math.max(1, Math.min(300000, Number.isFinite(closeTimeoutMs) ? closeTimeoutMs : 30000));
-    this.#state = BUILTIN_RERANKER_PROFILE.files.every(asset => existsSync(join(this.modelRoot, asset.path))) ? 'ready' : 'unavailable';
+    this.#state = this.#profile.files.every(asset => existsSync(join(this.modelRoot, asset.path))) ? 'ready' : 'unavailable';
     if (this.#state === 'unavailable') this.#errorCode = 'RERANK_ASSET_MISSING';
   }
-  status() {
-    return { profileId: BUILTIN_RERANKER_PROFILE.id, modelVersion: BUILTIN_RERANKER_PROFILE.modelVersion,
-      state: this.#state, loaded: this.#loaded, local: true, network: false, workerPhase: this.#phase,
-      maxInputTokens: BUILTIN_RERANKER_PROFILE.maxInputTokens, pendingRequests: this.#pending.size,
+  status(profileId = this.#profile.id) {
+    if (profileId !== this.#profile.id) return unavailableProfileStatus('reranker', profileId);
+    return { ...this.#metadata(), state: this.#state, loaded: this.#loaded, supported: true,
+      local: true, network: false, workerPhase: this.#phase, assetVerification: this.#assetVerification,
+      maxInputTokens: this.#profile.maxInputTokens, pendingRequests: this.#pending.size,
       ...(this.#errorCode ? { errorCode: this.#errorCode } : {}) };
   }
-  async rerank({ query, candidates, signal, limit = 20 }) {
+  async rerank({ query, candidates, signal, limit = 20, profileId = this.#profile.id }) {
+    resolveRetrievalModelProfile('reranker', profileId);
     if (this.#closed) throw failure('Reranker is closed.', 'RERANK_CLOSED');
     if (signal?.aborted) throw aborted();
     if (typeof query !== 'string' || !query.trim() || query.length > 2048 || !Array.isArray(candidates) ||
-        candidates.length > 60 || !Number.isInteger(limit) || limit < 1 || limit > BUILTIN_RERANKER_PROFILE.maxCandidates)
+        candidates.length > 60 || !Number.isInteger(limit) || limit < 1 || limit > this.#profile.maxCandidates)
       throw failure('Invalid reranker request.', 'RERANK_INVALID_INPUT');
     const items = candidates.slice(0, limit);
     const texts = items.map(item => item.excerpt ?? item.text);
@@ -54,37 +61,59 @@ export class RerankerService {
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
       this.#pending.set(id, { resolveResult, rejectResult, cleanup });
       signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
       try { worker.postMessage({ type: 'rerank', id, query, texts }); }
       catch (error) { cancel(failure(error.message, 'RERANK_WORKER_FAILED')); }
     });
-    if (!Array.isArray(result.scores) || result.scores.length !== items.length || result.scores.some(score => !Number.isFinite(score) || score < 0 || score > 1))
+    if (!Array.isArray(result.scores) || result.scores.length !== items.length ||
+        result.scores.some(score => !Number.isFinite(score) || score < 0 || score > 1) ||
+        !Number.isInteger(result.truncatedInputsCount) || result.truncatedInputsCount < 0 || result.truncatedInputsCount > items.length)
       throw failure('Invalid reranker response.', 'RERANK_INVALID_RESULT');
     const ranked = items.map((item, index) => ({ ...item, rerankScore: result.scores[index], originalRank: index }))
       .sort((left, right) => right.rerankScore - left.rerankScore || left.originalRank - right.originalRank)
       .map(({ originalRank, ...item }, index) => ({ ...item, rerankRank: index + 1 }));
     return { items: [...ranked, ...candidates.slice(limit)], ...this.#metadata(), truncatedInputsCount: result.truncatedInputsCount };
   }
-  #metadata() { return { profileId: BUILTIN_RERANKER_PROFILE.id, modelVersion: BUILTIN_RERANKER_PROFILE.modelVersion }; }
+  #metadata() { return retrievalModelMetadata(this.#profile); }
   #fail(error) {
-    this.#state = 'error'; this.#errorCode = error.code ?? 'RERANK_WORKER_FAILED';
+    this.#state = error.code === 'RERANK_ASSET_MISSING' ? 'unavailable' : 'error';
+    this.#errorCode = error.code ?? 'RERANK_WORKER_FAILED'; this.#loaded = false;
+    if (error.code === 'RERANK_ASSET_INVALID' || error.code === 'RERANK_ASSET_MISSING') this.#assetVerification = 'failed';
     for (const pending of this.#pending.values()) { pending.cleanup(); pending.rejectResult(error); }
     this.#pending.clear();
   }
   #start() {
     if (this.#worker) return;
     this.#state = 'loading'; this.#phase = 'starting';
-    const worker = new Worker(new URL('./reranker-worker.mjs', import.meta.url), { execArgv: [],
-      workerData: { modelRoot: this.modelRoot, cpuThreads: this.cpuThreads } });
+    let worker;
+    try {
+      worker = this.#workerFactory(new URL('./reranker-worker.mjs', import.meta.url), { execArgv: [],
+        workerData: { modelRoot: this.modelRoot, cpuThreads: this.cpuThreads, profileId: this.#profile.id } });
+    } catch {
+      const error = failure('The local reranker worker could not start.', 'RERANK_WORKER_FAILED');
+      this.#fail(error); throw error;
+    }
     this.#worker = worker;
     let resolveExit, acknowledged = false;
     this.#exit = new Promise(resolveResult => { resolveExit = resolveResult; });
     worker.on('message', message => {
-      if (message.type === 'phase') { this.#phase = message.phase; return; }
-      if (message.type === 'ready') { if (!this.#closed) { this.#state = 'ready'; this.#loaded = true; } return; }
+      if (this.#worker !== worker || !message || typeof message !== 'object') return;
+      if (message.type === 'phase') { if (!this.#closed) this.#phase = message.phase; return; }
+      if (message.type === 'ready') {
+        if (!this.#closed && this.#state !== 'error' && this.#state !== 'unavailable') {
+          this.#state = 'ready'; this.#loaded = true; this.#errorCode = undefined; this.#assetVerification = 'verified';
+        }
+        return;
+      }
+      if (message.type === 'fatal') { this.#fail(failure(message.message, message.code)); return; }
       if (message.type === 'closed') { acknowledged = message.disposed === true; return; }
       if (message.type === 'shutdown-error') { this.#fail(failure('Reranker shutdown failed.', 'RERANK_CLOSE_FAILED')); return; }
       if (message.type === 'idle') {
-        if (!this.#pending.size && !this.#closed && message.throughId >= this.#sequence) { this.#phase = 'idle'; worker.unref(); }
+        if (!this.#pending.size && !this.#closed && message.throughId >= this.#sequence) {
+          this.#phase = 'idle';
+          if (!this.#loaded && this.#state === 'loading') this.#state = 'ready';
+          worker.unref();
+        }
         return;
       }
       const pending = this.#pending.get(message.id);
@@ -98,13 +127,17 @@ export class RerankerService {
     });
     worker.on('error', error => this.#fail(failure(error.message, 'RERANK_WORKER_FAILED')));
     worker.on('exit', exitCode => {
-      resolveExit({ exitCode, acknowledged }); this.#worker = undefined; this.#phase = 'stopped';
-      if (!this.#closed) this.#fail(failure('Reranker worker exited.', 'RERANK_WORKER_FAILED'));
+      resolveExit({ exitCode, acknowledged });
+      if (this.#worker !== worker) return;
+      this.#worker = undefined; this.#phase = 'stopped';
+      if (!this.#closed && this.#state !== 'error' && this.#state !== 'unavailable')
+        this.#fail(failure('Reranker worker exited.', 'RERANK_WORKER_FAILED'));
     });
   }
   close() {
     if (this.#closing) return this.#closing;
     this.#closed = true; this.#loaded = false;
+    this.#errorCode = 'RERANK_CLOSED';
     for (const pending of this.#pending.values()) { pending.cleanup(); pending.rejectResult(failure('Reranker closing.', 'RERANK_CLOSED')); }
     this.#pending.clear();
     this.#closing = this.#drain();
