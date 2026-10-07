@@ -11,6 +11,14 @@ dotnet run --project tests/native-host-terminal-smoke/HostTerminalDecoderSmoke.c
 
 `KYNXA_HOST_TERMINAL_SMOKE_TOOL_HOST` may name an absolute packaged helper to test. All scripts, writable files and descendant processes belong to independent temporary fixtures. No existing user application window, user profile or project script is controlled by these checks; visible checks create and screenshot only their own console.
 
+Controlled hidden background jobs use `host_terminal_job` with `backgroundJob:true` after negotiating `backgroundJobs:true`. Their deadline is at most six hours (`maximumJobTimeoutMs`), while ordinary captured/visible runs retain the 120-second limit. The gateway provides chat-owned start/read/stop tools, keeps bounded output with explicit paging cursors, and awaits native process-tree cleanup on stop or gateway shutdown. Closing a single model request does not stop the job. Restart does not replay jobs; interactive stdin and crash-resumable process sessions are not implemented.
+
+The independent background fixture verifies a completed task with a deadline above 120 seconds, streamed output, exact cwd, and cancellation of an owned child process tree without opening a console:
+
+```powershell
+node --test tests/native-host-terminal-smoke/background-jobs.test.mjs
+```
+
 The native protocol accepts `host_terminal_capabilities`, or `host_terminal` with `shell`, `script`, `cwd`, and `timeoutMs`. Scripts are limited to 16,384 characters; timeouts are 100–120,000 milliseconds. CMD disables AutoRun with `/d /s /c`. PowerShell uses `-NoProfile -NonInteractive -Command`; the original script is parsed as a separate script block after UTF-8 output initialization. The source variable exists only in the child environment and is removed before executing the script.
 
 Execution emits a `host_terminal_started` JSON line and one terminal JSON line. A normal exit, including a nonzero exit code, is `completed:true`. Cancellation, timeout and output-limit interruption after startup are `completed:false,outcome:"unknown"`; successful Job cleanup does not imply that host side effects were rolled back. The sole Job handle is not inherited, and kill-on-close covers helper termination. The Node broker must bound simultaneous helper invocations; the native Job separately limits each process tree to 32 processes.

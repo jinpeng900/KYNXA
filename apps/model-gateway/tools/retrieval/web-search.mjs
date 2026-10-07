@@ -11,6 +11,12 @@ export const isPublicSearchTool = descriptor => Boolean(providerKind(descriptor)
 export const isPublicFetchTool = descriptor => descriptor.name === 'web.fetch' ||
   /^mcp\.(?:official-)?fetch(?:-[1-9]\d*)?\.fetch$/u.test(descriptor.name);
 
+function assertStageBudget(stage, kind) {
+  if (performance.now() - stage.started >= stage.durationMs ||
+      (kind === 'query' ? stage.queryCount >= stage.queries : stage.pageCount >= stage.pages))
+    throw toolFailure('本次网页检索预算已用完，请根据已有证据回答或说明不足；其他代码任务可继续。', 'WEB_STAGE_BUDGET_EXHAUSTED', 409);
+}
+
 export function isAutomaticBrowserRead(context, descriptor) {
   if ((context.browserTaskIntent ?? inferBrowserTaskIntent(context.message)).explicitBrowserTask) return false;
   return /^mcp\.(?:official-)?(?:chrome-devtools|playwright)(?:-[1-9]\d*)?\.(?:take_snapshot|evaluate_script|browser_snapshot|browser_evaluate)$/u.test(descriptor.name);
@@ -53,7 +59,7 @@ export class WebSearchTool {
   async settings(context) {
     return this.tools.retrieval ? this.tools.retrieval.effective(context.projectId) : { web: { mode: 'auto', depth: 'standard', providerId: 'auto' } };
   }
-  async take(context, kind) {
+  async check(context, kind) {
     const settings = await this.settings(context);
     if (settings.web.mode === 'off') throw toolFailure('网页检索已关闭。', 'WEB_SEARCH_DISABLED', 409);
     let stage = this.stages.get(context);
@@ -61,14 +67,19 @@ export class WebSearchTool {
       stage = { ...limits[settings.web.depth], started: performance.now(), queryCount: 0, pageCount: 0, seen: new Set() };
       this.stages.set(context, stage);
     }
-    if (performance.now() - stage.started >= stage.durationMs || (kind === 'query' ? stage.queryCount >= stage.queries : stage.pageCount >= stage.pages))
-      throw toolFailure('本次网页检索预算已用完，请根据已有证据回答或说明不足；其他代码任务可继续。', 'WEB_STAGE_BUDGET_EXHAUSTED', 409);
-    if (kind === 'query') stage.queryCount++; else stage.pageCount++;
+    assertStageBudget(stage, kind);
     return { settings, remainingMs: Math.max(1, stage.durationMs - (performance.now() - stage.started)), stage };
+  }
+  async take(context, kind) {
+    const checked = await this.check(context, kind);
+    // Recheck and consume synchronously after awaited settings so concurrent dispatches cannot exceed the stage budget.
+    // 异步读取配置后同步复核并扣除次数，防止并发派发越过阶段预算；准备失败和复用读取不消耗额度。
+    assertStageBudget(checked.stage, kind);
+    if (kind === 'query') checked.stage.queryCount++; else checked.stage.pageCount++;
+    return checked;
   }
   async run(context, input, options) {
     const { settings } = await this.settingsAndCheck(context);
-    if (!this.tools.retrieval) await this.take(context, 'query');
     const snapshot = this.tools.catalogs.get(context);
     const candidates = [...(snapshot?.descriptors.values() ?? [])].filter(isPublicSearchTool);
     const descriptor = candidates.find(item => settings.web.providerId === 'auto' || item.serverId === settings.web.providerId);

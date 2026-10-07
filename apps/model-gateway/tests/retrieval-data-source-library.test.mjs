@@ -46,6 +46,47 @@ test('single-source reads enforce authorized scope, revision, deletion and actua
   assert.equal(await library.readSource(entry.id, { scopeKeys: ['user'] }), null);
 });
 
+test('lightweight registry descriptions do not open snapshot bodies and scoped capacity remains configurable', async t => {
+  const { library } = await fixture(t);
+  const source = name => ({ path: `${name}.md`, title: name, text: `Public ${name}` });
+  const first = await library.add([source('first')], { limits: { maximumFiles: 2, maximumTotalBytes: 64 } });
+  const originalReader = library._readEntry.bind(library);
+  let reads = 0;
+  library._readEntry = (...args) => { reads++; return originalReader(...args); };
+  const described = await library.describeSources(['user']);
+  assert.equal(reads, 0);
+  assert.equal(described.sources.length, 1);
+  assert.equal(described.sources[0].text, undefined);
+  assert.equal(described.sources[0].contentHash, first.sources[0].contentHash);
+  const captured = library.registryCache.document;
+  await library.describeSources(['user']);
+  assert.equal(library.registryCache.document, captured);
+  await library.add([source('second')], { limits: { maximumFiles: 2, maximumTotalBytes: 64 } });
+  await assert.rejects(library.add([source('failed-third')], { limits: { maximumFiles: 2, maximumTotalBytes: 64 } }),
+    { code: 'RETRIEVAL_LIBRARY_LIMIT' });
+  assert.equal((await library.describeSources(['user'])).sources.length, 2);
+  await assert.rejects(library.describeSources(['user'], { limits: { maximumFiles: 1 } }),
+    { code: 'RETRIEVAL_LIBRARY_LIMIT' });
+  assert.equal((await library.describeSources(['user'])).sources.length, 2);
+  assert.equal(reads, 0);
+  assert.equal((await library.readSource(first.sources[0].id, { scopeKeys: ['user'] })).text, 'Public first');
+  assert.equal(reads, 1);
+  await library.remove(first.sources[0].id, { expectedRevision: 1 });
+  assert.equal((await library.describeSources(['user'])).sources.some(item => item.sourceId === first.sources[0].id), false);
+});
+
+test('oversized registry updates preserve readable committed sources', async t => {
+  const { root, library, conversations } = await fixture(t);
+  const committed = await library.add([{ path: 'existing.md', text: 'committed evidence' }]);
+  const previous = await readFile(join(root, 'Knowledge', 'catalog.json'), 'utf8');
+  await assert.rejects(library.add([{ path: 'oversized-metadata.md', title: 'x'.repeat(32 * 1024 * 1024), text: 'new evidence' }]),
+    { code: 'RETRIEVAL_LIBRARY_LIMIT' });
+  assert.equal(await readFile(join(root, 'Knowledge', 'catalog.json'), 'utf8'), previous);
+  const reopened = new SourceLibrary({ root, conversationStore: conversations });
+  assert.equal((await reopened.describeSources(['user'])).sources.length, 1);
+  assert.equal((await reopened.readSource(committed.sources[0].id, { scopeKeys: ['user'] })).text, 'committed evidence');
+});
+
 test('project descriptions expose the folder without loading sibling messages and archived sources stay unavailable', async t => {
   const { conversations, library, root } = await fixture(t);
   const relationship = await conversations.describeProject('work-a');

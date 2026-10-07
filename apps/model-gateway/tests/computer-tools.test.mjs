@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile, symlink, rename, mkdir } from 'node:fs/promises';
+import { readFile, symlink, rename, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { toolFixture, pendingApproval, approve, parsed } from './tool-fixture.mjs';
@@ -36,9 +36,17 @@ function desktopFixture() {
   } };
 }
 
+async function fixtureApplication(fixture, name = 'app.exe') {
+  const appPath = join(fixture.workspace, name);
+  // Only filesystem identity is real; the mocked desktop runner never launches this file.
+  // 仅创建真实文件身份；模拟桌面执行器不会运行此文件。
+  await writeFile(appPath, 'Synthetic application metadata for path and approval binding.');
+  return appPath;
+}
+
 test('desktop launch defaults to background before approval and retains explicit foreground choices', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
-  const args = { appPath: 'C:\\Synthetic\\app.exe', reason: target.reason };
+  const args = { appPath: await fixtureApplication(f), reason: target.reason };
   const context = await f.context('ask');
   const pending = await pendingApproval(f.service, context, f.call('computer.launch', args));
   assert.equal(pending.event.tool.arguments.background, true);
@@ -58,7 +66,9 @@ test('background browser render options are approved exactly, bounded and absent
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
   const context = await f.service.createContext(f.conversationId,
     { requestId: randomUUID(), permissionMode: 'ask', message: '打开本机浏览器并保持后台' });
-  const browser = { appPath: 'C:\\Synthetic\\Chrome\\chrome.exe', args: ['--user-data-dir=C:\\Synthetic\\isolated'], reason: target.reason };
+  const userDataArgument = `--user-data-dir=${join(f.root, 'isolated')}`;
+  const browser = { appPath: await fixtureApplication(f, 'chrome.exe'), args: [userDataArgument], reason: target.reason };
+  const edgePath = await fixtureApplication(f, 'msedge.exe'), editorPath = await fixtureApplication(f, 'editor.exe');
   const flag = '--disable-backgrounding-occluded-windows';
   const pending = await pendingApproval(f.service, context, f.call('computer.launch', browser));
   assert.deepEqual(pending.event.tool.arguments.args, [...browser.args, flag]);
@@ -66,14 +76,14 @@ test('background browser render options are approved exactly, bounded and absent
   approve(f.service, context, pending.event.tool);
   assert.equal((await pending.result).isError, false);
   assert.deepEqual(desktopRunner.calls[0].args.args, [...browser.args, flag]);
-  assert.deepEqual(browser.args, ['--user-data-dir=C:\\Synthetic\\isolated']);
+  assert.deepEqual(browser.args, [userDataArgument]);
   const full = await f.service.createContext(f.conversationId,
     { requestId: randomUUID(), permissionMode: 'full', message: '打开本机浏览器' });
-  assert.equal((await f.run(full, 'computer.launch', { ...browser, appPath: 'C:\\Synthetic\\msedge.exe', args: [flag] })).isError, false);
+  assert.equal((await f.run(full, 'computer.launch', { ...browser, appPath: edgePath, args: [flag] })).isError, false);
   assert.deepEqual(desktopRunner.calls[1].args.args, [flag]);
   assert.equal((await f.run(full, 'computer.launch', { ...browser, background: false })).isError, false);
   assert.deepEqual(desktopRunner.calls[2].args.args, browser.args);
-  assert.equal((await f.run(full, 'computer.launch', { ...browser, appPath: 'C:\\Synthetic\\editor.exe' })).isError, false);
+  assert.equal((await f.run(full, 'computer.launch', { ...browser, appPath: editorPath })).isError, false);
   assert.deepEqual(desktopRunner.calls[3].args.args, browser.args);
   const bounded = await f.run(full, 'computer.launch', { ...browser, args: Array.from({ length: 32 }, (_, index) => `--fixture-${index}`) });
   assert.equal(bounded.isError, true);
@@ -82,10 +92,11 @@ test('background browser render options are approved exactly, bounded and absent
 
 test('Ask and Smart desktop reads and effects require an approval; Full still requires valid reason/schema', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
+  const appPath = await fixtureApplication(f);
   for (const mode of ['ask', 'smart']) {
     const context = await f.context(mode);
     for (const action of ['windows', 'apps', 'screenshot', 'read', 'activate', 'move', 'click', 'scroll', 'drag', 'type', 'key', 'launch']) {
-      const args = action === 'windows' || action === 'apps' ? { reason: target.reason } : action === 'launch' ? { appPath: 'C:\\Synthetic\\app.exe', reason: target.reason }
+      const args = action === 'windows' || action === 'apps' ? { reason: target.reason } : action === 'launch' ? { appPath, reason: target.reason }
         : { ...target, ...(['move', 'click', 'scroll', 'drag'].includes(action) ? { x: 12, y: 14 } : {}),
           ...(action === 'scroll' ? { delta: -120 } : {}), ...(action === 'drag' ? { endX: 24, endY: 28 } : {}),
           ...(action === 'type' ? { text: 'Synthetic text' } : {}), ...(action === 'key' ? { key: 'ENTER' } : {}) };
@@ -106,7 +117,7 @@ test('Ask and Smart desktop reads and effects require an approval; Full still re
   assert.equal(desktopRunner.calls.length, 1);
 });
 
-test('approved desktop identity and input are immutable and scope/config changes stop execution', async t => {
+test('approved desktop identity and input are immutable; scope changes stop execution while unrelated skill settings do not', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner }), context = await f.context();
   const call = f.call('computer.type', { ...target, text: 'original synthetic text' });
   const pending = await pendingApproval(f.service, context, call);
@@ -124,7 +135,7 @@ test('approved desktop identity and input are immutable and scope/config changes
   const config = await f.service.getConfig();
   await f.service.updateConfig({ ...config, expectedRevision: config.revision, skillDirectories: [join(f.root, 'SyntheticSkills')] });
   approve(f.service, next, configPending.event.tool);
-  assert.equal((await configPending.result).code, 'AGENT_CONFIG_CHANGED'); assert.equal(desktopRunner.calls.length, 1);
+  assert.equal((await configPending.result).status, 'completed'); assert.equal(desktopRunner.calls.length, 2);
 });
 
 test('completed desktop effects are archived despite late cancellation; in-flight unknown effects stay unknown', async t => {
@@ -172,15 +183,16 @@ test('a missing native desktop host never invokes MCP or pretends to use an AppC
 
 test('explicit background instructions block foreground fallback and are normalized before approval', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
+  const appPath = await fixtureApplication(f);
   const context = await f.service.createContext(f.conversationId, { requestId: randomUUID(), permissionMode: 'full',
     message: '保持后台操作，不要切到前台。' });
   for (const [action, args] of [['activate', target], ['type', { ...target, text: 'synthetic' }],
-    ['window', { ...target, mode: 'maximize' }], ['launch', { appPath: 'C:\\Synthetic\\app.exe', background: false, reason: target.reason }]])
+    ['window', { ...target, mode: 'maximize' }], ['launch', { appPath, background: false, reason: target.reason }]])
     assert.equal((await f.run(context, `computer.${action}`, args)).code, 'DESKTOP_FOREGROUND_FORBIDDEN');
   assert.equal(desktopRunner.calls.length, 0);
   assert.equal((await f.run(context, 'computer.read', target)).status, 'completed');
   const ask = await f.service.createContext(f.conversationId, { requestId: randomUUID(), message: '后台运行浏览器。' });
-  const launch = f.call('computer.launch', { appPath: 'C:\\Synthetic\\app.exe', reason: target.reason });
+  const launch = f.call('computer.launch', { appPath, reason: target.reason });
   const pending = await pendingApproval(f.service, ask, launch);
   assert.equal(pending.event.tool.arguments.background, true);
   launch.arguments.background = false; pending.event.tool.arguments.background = false;

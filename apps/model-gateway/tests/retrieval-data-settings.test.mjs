@@ -40,6 +40,33 @@ test('global defaults are lazy, local-only and bounded; CAS persists through res
   assert.equal((await conversations.catalog()).Chats.length, 0);
 });
 
+test('capacity and ANN settings inherit deeply without changing old model and UI fields', async t => {
+  const { settings, conversations } = await fixture(t);
+  const initial = await settings.getGlobal();
+  assert.equal(initial.local.indexing.maximumFiles, 20000);
+  assert.equal(initial.local.ann.mode, 'auto');
+  const global = await settings.patchGlobal({ expectedRevision: 0,
+    patch: { local: { indexing: { maximumFiles: 40000 }, ann: { expansionSearch: 256 } } } });
+  assert.equal(global.local.indexing.maximumSourceBytes, 2097152);
+  await settings.patchProject('work-a', { expectedRevision: 0,
+    patch: { overrides: { local: { indexing: { maximumTotalBytes: 1073741824 }, ann: { mode: 'exact' } } } } });
+  await settings.patchProject('work-a', { expectedRevision: 1,
+    patch: { overrides: { local: { indexing: { batchSize: 16 } } } } });
+  const effective = await settings.getEffective('work-a');
+  assert.equal(effective.local.indexing.maximumFiles, 40000);
+  assert.equal(effective.local.indexing.maximumTotalBytes, 1073741824);
+  assert.equal(effective.local.indexing.batchSize, 16);
+  assert.equal(effective.local.ann.mode, 'exact');
+  assert.equal(effective.local.ann.expansionSearch, 256);
+  assert.equal(effective.local.vectorBackend, 'sqlite');
+  const reopened = new RetrievalSettingsStore({ conversationStore: conversations });
+  assert.deepEqual((await reopened.getEffective('work-a')).local, effective.local);
+  for (const patch of [{ indexing: { maximumFiles: 100001 } }, { indexing: { batchSize: 0 } },
+    { ann: { mode: 'remote' } }, { ann: { threshold: 0 } }, { ann: { maxShardBytes: 1 } }])
+    await assert.rejects(async () => settings.patchGlobal({ expectedRevision: 1, patch: { local: patch } }), { code: 'INVALID_RETRIEVAL_INPUT' });
+  assert.equal((await settings.getGlobal()).revision, 1);
+});
+
 test('project overrides inherit global settings, clear explicitly and cannot supply permissions or binding revisions', async t => {
   const { settings } = await fixture(t);
   assert.equal((await settings.getEffective('work-a')).projectIndexing.mountedFolder, false);
@@ -60,6 +87,20 @@ test('project overrides inherit global settings, clear explicitly and cannot sup
   await assert.rejects(() => settings.patchProject('folderless', { expectedRevision: 0,
     patch: { indexingSources: { mountedFolder: { enabled: true } } } }), { code: 'RETRIEVAL_FOLDER_UNAVAILABLE' });
   await assert.rejects(() => settings.getProject('missing-project'), { code: 'PROJECT_NOT_FOUND' });
+});
+
+test('large valid source selections reopen and oversized settings preserve the committed revision', async t => {
+  const { settings, conversations } = await fixture(t);
+  const knowledgeIds = Array.from({ length: 100000 }, (_, number) => `source-${String(number).padStart(24, '0')}`);
+  await settings.patchProject('work-a', { expectedRevision: 0, patch: { indexingSources: { knowledgeIds } } });
+  const reopened = new RetrievalSettingsStore({ conversationStore: conversations });
+  assert.equal((await reopened.getProject('work-a')).indexingSources.knowledgeIds.length, 100000);
+  const oversized = Array.from({ length: 50000 }, (_, number) => `long-${String(number).padStart(6, '0')}-${'x'.repeat(180)}`);
+  await assert.rejects(settings.patchProject('work-a', { expectedRevision: 1,
+    patch: { indexingSources: { knowledgeIds: oversized } } }), { code: 'RETRIEVAL_SETTINGS_LIMIT' });
+  const preserved = await reopened.getProject('work-a');
+  assert.equal(preserved.revision, 1);
+  assert.deepEqual(preserved.indexingSources.knowledgeIds, knowledgeIds);
 });
 
 test('unknown fields, executable references, large cache budgets and future configuration preserve existing files', async t => {

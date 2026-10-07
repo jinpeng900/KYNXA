@@ -14,6 +14,13 @@ const browserTools = [remote('mcp.chrome-devtools.list_pages'), remote('mcp.chro
 const descriptors = [...builtinDescriptors, ...browserTools];
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const names = tools => tools.map(tool => tool.name);
+const nativeCapabilities = {
+  desktopRunner: { capabilities: async () => ({ available: true, boundary: 'host-desktop',
+    operations: builtinDescriptors.filter(tool => tool.name.startsWith('computer.')).map(tool => tool.name.slice('computer.'.length)) }),
+    run: async () => assert.fail('tool discovery must not perform desktop actions') },
+  hostTerminalRunner: { capabilities: async () => ({ available: true, boundary: 'host-terminal', shells: ['cmd', 'powershell'], backgroundJobs: true }),
+    run: async () => assert.fail('tool discovery must not execute a host command') }
+};
 
 test('actual failed Chinese and multiword searches find enabled host and browser tools', () => {
   assert.ok(names(searchTools(descriptors, '浏览器')).includes('computer.launch'));
@@ -23,6 +30,18 @@ test('actual failed Chinese and multiword searches find enabled host and browser
   assert.equal(searchTools(descriptors, '网页截图')[0].name, 'mcp.playwright.browser_take_screenshot');
   assert.ok(names(searchTools(descriptors, '打开本机浏览器')).includes('computer.launch'));
   assert.deepEqual(searchTools(descriptors, '绝无此项功能'), []);
+});
+
+test('ordinary Chinese typing requests discover and select existing desktop input schemas', () => {
+  for (const query of ['将文字键入光标所在的位置', '把你好填进记事本', '在输入框填写内容', '粘贴到当前窗口']) {
+    assert.ok(names(searchTools(descriptors, query)).includes('computer.type'), query);
+    const catalog = new ModelToolCatalog(descriptors, { protocol: protocols[0], tokenBudget: 16000, message: query });
+    assert.ok(catalog.selected.some(tool => tool.name === 'computer.type'), query);
+  }
+  assert.ok(names(searchTools([...descriptors, remote('mcp.playwright.browser_fill_form')], '填写输入框'))
+    .includes('mcp.playwright.browser_fill_form'));
+  assert.equal(toolSelectionSignals('写一个处理输入文本的函数').desktop, false,
+    'code input is not automatically desktop input');
 });
 
 test('exact identities outrank partial metadata, disabled tools stay absent and paging order is stable', () => {
@@ -37,13 +56,46 @@ test('exact identities outrank partial metadata, disabled tools stay absent and 
   assert.deepEqual(source, before);
 });
 
+test('wire aliases load only exact enabled tools and one unavailable item cannot suppress valid screenshot loading', () => {
+  const disabled = { ...remote('mcp.synthetic.disabled_screenshot'), enabled: false };
+  const catalog = new ModelToolCatalog([...descriptors, disabled], { protocol: protocols[0], tokenBudget: 16000 });
+  const screenshot = builtinDescriptors.find(tool => tool.name === 'computer.screenshot');
+  const alias = wireCatalog([screenshot])[0].wireName;
+  assert.deepEqual(catalog.resolveNames([alias, 'missing.tool']), ['computer.screenshot', 'missing.tool']);
+  const result = catalog.load(['mcp.unconnected.browser_screenshot', alias, 'computer.screenshot']);
+  assert.deepEqual(result.loaded, ['computer.screenshot']);
+  assert.deepEqual(result.unavailable, [{ name: 'mcp.unconnected.browser_screenshot', code: 'TOOL_NOT_FOUND' }]);
+  assert.ok(catalog.wire().some(tool => tool.name === 'computer.screenshot'));
+  assert.deepEqual(names(searchTools([...descriptors, disabled], alias)), ['computer.screenshot']);
+  const disabledAlias = wireCatalog([disabled])[0].wireName;
+  assert.deepEqual(searchTools([...descriptors, disabled], disabledAlias), []);
+  const before = structuredClone(catalog.selected);
+  assert.throws(() => catalog.load([disabledAlias, alias.replace(/.$/, alias.endsWith('a') ? 'b' : 'a')]), { code: 'TOOL_NOT_FOUND' });
+  assert.deepEqual(catalog.selected, before, 'unknown or disabled aliases never mutate the usable selection');
+});
+
 test('tool classifications distinguish host control, host shell and browser automation without availability claims', () => {
   assert.equal(toolDiscoveryCategory({ name: 'computer.launch' }), 'computer');
   assert.equal(toolDiscoveryCategory({ name: 'terminal.host.run' }), 'host-terminal');
+  for (const action of ['start', 'read', 'stop'])
+    assert.equal(toolDiscoveryCategory({ name: `terminal.host.${action}` }), 'host-terminal');
   assert.equal(toolDiscoveryCategory({ name: 'terminal.run' }), 'sandbox-terminal');
   assert.equal(toolDiscoveryCategory({ name: 'mcp.playwright.browser_navigate' }), 'browser');
   assert.equal(toolDiscoveryCategory({ name: 'browser.local.read' }), 'browser');
   assert.equal(toolDiscoveryCategory({ name: 'mcp.exa.web_search_exa' }), 'web-search');
+});
+
+test('background host jobs are discoverable for terminal tasks and deferred during unrelated conversations', () => {
+  for (const protocol of protocols) {
+    const unrelated = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '你好' });
+    assert.ok(!unrelated.selected.some(tool => tool.name.startsWith('terminal.host.')));
+    const background = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '启动后台终端进程并监控输出' });
+    for (const action of ['start', 'read', 'stop']) {
+      const name = `terminal.host.${action}`;
+      assert.ok(background.selected.some(tool => tool.name === name));
+      assert.ok(names(searchTools(descriptors, '后台进程')).includes(name));
+    }
+  }
 });
 
 for (const protocol of protocols) test(`${protocol}: browser followups retain relevant schemas with explicit new tasks resetting the subject`, () => {
@@ -143,7 +195,7 @@ test('tiny budgets keep discovery and allow loading individual capabilities with
 });
 
 test('tool.search exposes ranked bilingual matches through the real service with ordinary pagination', async t => {
-  const f = await toolFixture(t), ctx = await f.context('full');
+  const f = await toolFixture(t, nativeCapabilities), ctx = await f.context('full');
   await f.service.catalog(ctx);
   const host = parsed(await f.run(ctx, 'tool.search', { query: '本机终端', limit: 1 }));
   assert.equal(host.tools[0].name, 'terminal.host.run'); assert.equal(host.offset, 0);
@@ -151,4 +203,17 @@ test('tool.search exposes ranked bilingual matches through the real service with
   assert.ok(browser.total > 1); assert.equal(browser.hasMore, true);
   const second = parsed(await f.run(ctx, 'tool.search', { query: '浏览器', offset: browser.nextOffset, limit: 1 }));
   assert.notEqual(browser.tools[0].name, second.tools[0].name);
+});
+
+test('broker tool loading retains a valid screenshot schema beside an unavailable browser tool without executing either', async t => {
+  const f = await toolFixture(t, nativeCapabilities), context = await f.context('full');
+  await f.service.catalog(context);
+  f.service.configureModelCatalog(context, { protocol: protocols[0], tokenBudget: 16000, message: '截图' });
+  const screenshot = builtinDescriptors.find(tool => tool.name === 'computer.screenshot');
+  const alias = wireCatalog([screenshot])[0].wireName;
+  const result = parsed(await f.run(context, 'tool.load', { names: [alias, 'mcp.unconnected.browser_screenshot'] }));
+  assert.deepEqual(result.loaded, ['computer.screenshot']);
+  assert.deepEqual(result.unavailable, [{ name: 'mcp.unconnected.browser_screenshot', code: 'TOOL_NOT_FOUND' }]);
+  assert.ok(f.service.modelCatalog(context).some(tool => tool.name === 'computer.screenshot'));
+  assert.equal(f.service.mcp.connections.size, 0, 'loading cannot start an absent provider or perform desktop actions');
 });

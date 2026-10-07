@@ -1,9 +1,8 @@
 import { spawn } from 'node:child_process';
 import { isAbsolute, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { realpath } from 'node:fs/promises';
 import { findNativeToolHost } from './tool-host-path.mjs';
-import { inspectLocalPath, toolFailure } from '../platform/tool-paths.mjs';
+import { bindLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
 
 const boundary = 'host-terminal';
 const maxTransportBytes = 2 * 1024 * 1024;
@@ -33,7 +32,7 @@ export class HostTerminalRunner {
     this.pendingCount = 0;
   }
 
-  async _invoke(request, signal, timeoutMs, onOutput) {
+  async _invoke(request, signal, timeoutMs, onOutput, onStarted) {
     this.shutdown.signal.throwIfAborted(); signal?.throwIfAborted();
     if (this.pendingCount >= 8) throw toolFailure('本机终端并发已达上限，请稍后重试。', 'HOST_TERMINAL_CAPACITY', 429);
     this.pendingCount++;
@@ -41,7 +40,7 @@ export class HostTerminalRunner {
     try {
       const host = await findNativeToolHost(this.toolHostPath, 'HOST_TERMINAL_UNAVAILABLE');
       this.shutdown.signal.throwIfAborted(); signal?.throwIfAborted();
-      operation = this.invoke(host, request, signal, timeoutMs, onOutput);
+      operation = this.invoke(host, request, signal, timeoutMs, onOutput, onStarted);
       this.active.add(operation);
       return await operation;
     } finally { this.active.delete(operation); this.pendingCount--; }
@@ -60,23 +59,27 @@ export class HostTerminalRunner {
     }
   }
 
-  async run({ shell, script, cwd, timeoutMs = 30000, visible = false, keepOpenMs }, signal, onOutput) {
+  async run({ shell, script, cwd, timeoutMs = 30000, visible = false, keepOpenMs, backgroundJob = false,
+    pathBinding }, signal, onOutput, onStarted) {
     if (!['cmd', 'powershell'].includes(shell) || typeof script !== 'string' || !script.trim() ||
-        script.length > 16384 || script.includes('\0') || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000)
+        script.length > 16384 || script.includes('\0') || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 ||
+        timeoutMs > (backgroundJob ? 21600000 : 120000))
       throw toolFailure('本机终端的命令或超时参数无效。', 'HOST_TERMINAL_INVALID_REQUEST');
-    if (typeof visible !== 'boolean' || (keepOpenMs !== undefined && (!visible ||
+    if (typeof visible !== 'boolean' || typeof backgroundJob !== 'boolean' || backgroundJob && visible || (keepOpenMs !== undefined && (!visible ||
         !Number.isSafeInteger(keepOpenMs) || keepOpenMs < 0 || keepOpenMs > 30000)))
       throw toolFailure('本机终端窗口参数无效。', 'HOST_TERMINAL_INVALID_REQUEST');
     const holdMs = keepOpenMs ?? (visible ? 5000 : 0);
     if (typeof cwd !== 'string' || !isAbsolute(cwd) || /^\\\\/.test(cwd) || /[\0\r\n]/.test(cwd))
       throw toolFailure('本机终端需要有效的绝对本地目录。', 'HOST_TERMINAL_INVALID_WORKSPACE');
     cwd = resolve(cwd);
-    if (!(await inspectLocalPath(cwd)).isDirectory())
+    pathBinding ??= await bindLocalPath(cwd);
+    if (pathBinding.path !== cwd && pathBinding.requestedPath !== cwd)
+      throw toolFailure('本机终端工作目录身份不匹配。', 'HOST_TERMINAL_INVALID_WORKSPACE');
+    if (!(await revalidateLocalPathBinding(pathBinding)).isDirectory())
       throw toolFailure('本机终端工作目录不存在。', 'HOST_TERMINAL_INVALID_WORKSPACE');
     // .NET expands Windows short paths in its receipt; send the canonical identity too.
     // .NET 会在回执中展开 Windows 短路径，因此也发送规范化身份用于核验。
-    cwd = await realpath(cwd);
-    await inspectLocalPath(cwd);
+    cwd = pathBinding.path;
     const combined = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
     combined.throwIfAborted();
     // Older helpers ignore unknown fields. Check before dispatch so a visible request cannot execute hidden.
@@ -87,10 +90,19 @@ export class HostTerminalRunner {
       if (!current.available || current.protocolVersion !== 2 || current.visibleTerminal !== true)
         throw toolFailure('当前原生助手不支持可见终端，请更新后重试。', 'HOST_TERMINAL_VISIBLE_UNAVAILABLE', 503);
     }
+    if (backgroundJob) {
+      const current = await this.capabilities();
+      combined.throwIfAborted();
+      if (!current.available || current.backgroundJobs !== true || !Number.isSafeInteger(current.maximumJobTimeoutMs) ||
+          current.maximumJobTimeoutMs < 100 || current.maximumJobTimeoutMs > 21600000 || timeoutMs > current.maximumJobTimeoutMs)
+        throw toolFailure('当前原生助手不支持受控后台终端任务，请更新后重试。', 'HOST_TERMINAL_BACKGROUND_UNAVAILABLE', 503);
+    }
+    await revalidateLocalPathBinding(pathBinding);
     // A distinct operation also fails closed if the helper is replaced after discovery: old helpers reject it.
     // 使用独立操作名，即使发现能力后助手被替换，旧助手也会拒绝请求而不降级执行。
-    const value = await this._invoke({ operation: visible ? 'host_terminal_visible' : 'host_terminal', shell, script, cwd, timeoutMs,
-      ...(visible ? { visible: true, keepOpenMs: holdMs } : {}) }, combined, timeoutMs + 10000, onOutput);
+    const value = await this._invoke({ operation: backgroundJob ? 'host_terminal_job' : visible ? 'host_terminal_visible' : 'host_terminal',
+      shell, script, cwd, timeoutMs, ...(backgroundJob ? { backgroundJob: true } : {}),
+      ...(visible ? { visible: true, keepOpenMs: holdMs } : {}) }, combined, timeoutMs + 10000, onOutput, onStarted);
     if (!validEnvelope(value)) throw toolFailure('本机终端回执无效。', 'HOST_TERMINAL_INVALID_RESULT', 502);
     if (value.completed === true) {
       if (value.shell !== shell || value.cwd !== cwd || !Number.isInteger(value.exitCode) ||
@@ -113,7 +125,7 @@ export class HostTerminalRunner {
   async close() { this.shutdown.abort(); await Promise.allSettled([...this.active]); }
 }
 
-function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
+function invokeHostTerminal(host, request, signal, timeoutMs, onOutput, onStarted) {
   signal?.throwIfAborted();
   return new Promise((resolvePromise, reject) => {
     const child = spawn(host, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
@@ -139,7 +151,12 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
       let item;
       try { item = JSON.parse(line); } catch { return; }
       if (!validEnvelope(item)) return;
-      if (item.event === 'host_terminal_started' && Number.isInteger(item.processId) && item.processId > 0) startedReceipt = item;
+      if (item.event === 'host_terminal_started' && Number.isInteger(item.processId) && item.processId > 0) {
+        if (startedReceipt) return stop(toolFailure('本机终端重复启动回执。', 'HOST_TERMINAL_INVALID_RESULT', 502));
+        startedReceipt = item;
+        try { onStarted?.(item); }
+        catch { stop(toolFailure('本机终端任务启动回执无法保存。', 'HOST_TERMINAL_INVALID_RESULT', 502)); }
+      }
       else if (item.event === 'host_terminal_output') {
         const replace = item.stream === 'console' && item.replace === true;
         const text = replace ? item.text : item.delta;
@@ -195,6 +212,6 @@ function invokeHostTerminal(host, request, signal, timeoutMs, onOutput) {
     signal?.addEventListener('abort', cancel, { once: true });
     if (signal?.aborted) return cancel();
     child.stdin.write(JSON.stringify(request) + '\n');
-    dispatched = ['host_terminal', 'host_terminal_visible'].includes(request.operation);
+    dispatched = ['host_terminal', 'host_terminal_visible', 'host_terminal_job'].includes(request.operation);
   });
 }

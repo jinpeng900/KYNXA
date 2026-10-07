@@ -29,7 +29,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
   const observations = new ToolProgressGuard();
   const readFailures = new ToolReadFailureGuard();
   let summarizeOnly = false;
-  let unavailableRounds = 0;
+  let consecutiveUnavailableRounds = 0;
   let finalizingUnavailable = false;
   const deadline = AbortSignal.timeout(progress.limits.maxDurationMs);
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -126,9 +126,10 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         await saveActivity(completed);
         emit({ type: 'tool_result', tool: completed });
         await progress.save('continuing', { toolCallId: call.id });
-        if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code))
+        if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code) &&
+            !(result.code === 'AGENT_CONFIG_CHANGED' && result.recoverable === true && result.executed === false))
           throw Object.assign(new StreamFailure(result.content, 'interrupted'), { code: result.code });
-        if (call.name === 'terminal.host.run' && result.status === 'unknown')
+        if (['terminal.host.run', 'terminal.host.start', 'terminal.host.stop'].includes(call.name) && result.status === 'unknown')
           throw Object.assign(new StreamFailure('本机命令结果尚未确认，已保留执行记录。请核验已执行的操作后再继续。', 'interrupted'),
             { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
         if (call.name.startsWith('computer.') && !isDesktopObservation(call.name) && result.status === 'unknown')
@@ -173,13 +174,23 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       const state = observations.observeRound(results);
       const failures = readFailures.observeRound(results);
-      if (results.some(item => item.result.code === 'MODEL_TOOL_UNAVAILABLE')) {
-        unavailableRounds++;
-        finalizingUnavailable = unavailableRounds >= 2;
+      const hasUnavailableCall = results.some(item => item.result.code === 'MODEL_TOOL_UNAVAILABLE');
+      const hasSuccessfulCall = results.some(({ result }) => !result.isError &&
+        (!result.status || result.status === 'completed'));
+      // A recovered lookup or completed operation breaks the failure streak; old mistakes cannot disable later work.
+      // 已恢复的发现或成功操作会打断失败连续次数，旧错误不能使后续正常工作失去工具。
+      consecutiveUnavailableRounds = hasUnavailableCall && !hasSuccessfulCall ? consecutiveUnavailableRounds + 1 : 0;
+      if (hasUnavailableCall) {
+        finalizingUnavailable = consecutiveUnavailableRounds >= 2;
         summarizeOnly = finalizingUnavailable;
         messages.push({ role: 'user', content: finalizingUnavailable
           ? '[KYNXA_UNAVAILABLE_TOOL_FINAL] Unavailable calls were not executed. Tools are disabled for this final response. Give a normal final answer based on verified evidence, with a concrete limitation if needed. Do not invent success or a user cancellation.'
           : '[KYNXA_UNAVAILABLE_TOOL_RECOVERY] An undeclared tool was not executed. Use only exact names in the current declarations; discover and explicitly load a permitted deferred tool if needed. Exhausted web tools cannot be re-enabled by discovery. If evidence is sufficient, answer now. This is runtime feedback, not a new user task.' });
+      }
+      if (results.some(({ result }) => result.code === 'AGENT_CONFIG_CHANGED' && result.recoverable === true && result.executed === false)) {
+        // Only a broker-confirmed pre-dispatch revocation can recover; uncertain effects or global invalidation still stop.
+        // 仅权限代理确认派发前撤销的单项能力可恢复，结果不确定的副作用或全局失效仍停止。
+        messages.push({ role: 'user', content: '[KYNXA_TOOL_CONFIGURATION_RECOVERY] A tool capability changed before dispatch and was not executed. That previous capability remains revoked. Other unchanged tools are available: use tool.search and tool.load to discover a permitted alternative, or explain the specific blocker using verified results. Do not replay through the revoked tool or invent a user cancellation.' });
       }
       if (state.repeated) progress.observeNoProgress();
       if (failures.repeated) progress.observeNoProgress();

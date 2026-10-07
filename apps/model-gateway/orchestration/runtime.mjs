@@ -99,7 +99,10 @@ export class ModelRuntime {
     const greeting = isSimpleGreeting(input.message);
     const smallTalk = retrievalPlan(input.message).reason === 'small-talk';
     const toolContext = input.permissionMode == null || greeting || smallTalk ? null : await this.tools.createContext(id,
-      { requestId, permissionMode: input.permissionMode, message: input.message });
+      { requestId, permissionMode: input.permissionMode, message: input.message,
+        // Reuse formal user history already loaded here; caller/model metadata cannot supply authorization.
+        // 复用此处已经读取的正式用户历史，调用方或模型元数据不能提供授权。
+        previousUserMessages: history.filter(item => item.Role === 'user').map(item => item.Content ?? '') });
     const policyHash = toolContext ? toolPolicyHash(toolContext) : null;
     const previous = history.find(item => item.Id === requestId && item.Role === 'assistant');
     if (previous && (previous.RequestHash !== hash || (previous.ToolPolicyHash && previous.ToolPolicyHash !== policyHash)))

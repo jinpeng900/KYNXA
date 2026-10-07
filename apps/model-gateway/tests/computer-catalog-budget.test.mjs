@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { ModelStore } from '../models/store.mjs';
 import { ModelRuntime } from '../orchestration/runtime.mjs';
@@ -24,6 +26,8 @@ for (const protocol of protocols) test(`${protocol}: an unchanged 8K connection 
     run: async action => { actions.push(action); return { value: { completed: true, action, boundary: 'host-desktop' }, isError: false }; }
   };
   const f = await toolFixture(t, { desktopRunner });
+  const fixtureApplication = join(f.workspace, 'fixture.exe');
+  await writeFile(fixtureApplication, 'Synthetic executable metadata; never launched.');
   const models = new ModelStore({ dataHome: f.dataHome });
   await models.save({ providerId: 'small-window-fixture', displayName: 'Small window fixture', protocol,
     baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'FAKE_LOCAL_TEST_ONLY', models: ['synthetic-desktop'], contextWindowTokens: 8192 });
@@ -54,7 +58,7 @@ for (const protocol of protocols) test(`${protocol}: an unchanged 8K connection 
       assert.deepEqual(parsed(loaded).loaded, [name]);
       assert.ok(verifyCatalog().some(tool => tool.name === name));
       const args = action === 'windows' || action === 'apps' ? { reason: target.reason }
-        : action === 'launch' ? { appPath: 'C:\\Synthetic\\fixture.exe', reason: target.reason } : target;
+        : action === 'launch' ? { appPath: fixtureApplication, reason: target.reason } : target;
       const result = await f.run(prepared.toolContext, name, args, { interactive: false });
       assert.equal(result.status, 'completed', result.content); assert.ok(result.resultRef);
     }
@@ -82,7 +86,7 @@ test('large catalogs preserve ordinary code/web selection and desktop discovery 
       assert.deepEqual(catalog.selected, before);
     }
     const desktop = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message: '打开记事本并截图' });
-    assert.equal(desktop.selected.length, builtinDescriptors.filter(tool => tool.name !== 'terminal.host.run').length);
+    assert.equal(desktop.selected.length, builtinDescriptors.filter(tool => !tool.name.startsWith('terminal.host.')).length);
     assert.ok(desktop.selected.some(tool => tool.name === 'computer.launch'));
   }
 });

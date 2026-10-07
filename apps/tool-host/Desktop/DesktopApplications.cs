@@ -11,8 +11,8 @@ internal static class DesktopApplications
     private static readonly HashSet<string> BlockedExecutableNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "cmd", "powershell", "powershell_ise", "pwsh", "wscript", "cscript", "mshta", "rundll32", "regsvr32",
-        "node", "nodejs", "python", "pythonw", "py", "pypy", "pypy3", "dotnet", "bash", "sh", "wsl",
-        "wt", "windowsterminal", "openconsole", "conhost", "java", "javaw", "msiexec", "installutil"
+        "node", "nodejs", "python", "py", "pypy", "pypy3", "dotnet", "bash", "sh", "wsl",
+        "wt", "windowsterminal", "openconsole", "conhost", "java", "msiexec", "installutil"
     };
     private static readonly string[] BlockedLaunchArguments = ["-e", "--eval", "--execute", "--command", "-command", "-encodedcommand",
         "-enc", "--renderer-cmd-prefix", "--utility-cmd-prefix", "--load-extension", "--no-sandbox"];
@@ -27,7 +27,7 @@ internal static class DesktopApplications
             if (!Path.IsPathFullyQualified(path) || !File.Exists(path) || IsBlockedExecutable(path)) return;
             try
             {
-                if (!IsGuiExecutable(path)) return;
+                if (!IsApplicationExecutable(path)) return;
                 paths.TryAdd(Path.GetFullPath(path), new { name = displayName ?? Path.GetFileNameWithoutExtension(path), appPath = Path.GetFullPath(path) });
             }
             catch (IOException) { }
@@ -58,13 +58,14 @@ internal static class DesktopApplications
     {
         string path = request.AppPath ?? "";
         if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\", StringComparison.Ordinal) || !File.Exists(path)
-            || IsBlockedExecutable(path) || !IsGuiExecutable(path))
-            throw new DesktopException("DESKTOP_LAUNCH_BLOCKED", "Launch requires an existing absolute GUI executable; command interpreters and terminal launchers are not allowed.");
+            || IsBlockedExecutable(path) || !IsApplicationExecutable(path))
+            throw new DesktopException("DESKTOP_LAUNCH_BLOCKED", "Launch requires an existing absolute application executable; command interpreters and terminal launchers use the host terminal.");
         if (request.Args is null || request.Args.Length > 64 || request.Args.Any(argument => argument is null || argument.Length > 2048
             || argument.Contains('\0') || BlockedLaunchArguments.Any(blocked => argument.Equals(blocked, StringComparison.OrdinalIgnoreCase)
                 || argument.StartsWith(blocked + "=", StringComparison.OrdinalIgnoreCase))
             || argument.StartsWith("javascript:", StringComparison.OrdinalIgnoreCase) || argument.StartsWith("vbscript:", StringComparison.OrdinalIgnoreCase)))
             throw new DesktopException("DESKTOP_LAUNCH_BLOCKED", "Launch arguments contain an unsupported script or command execution mode.");
+        ValidateWindowedRuntimeEntry(path, request.Args);
         string executable = Path.GetFullPath(path);
         var commandLine = new StringBuilder(string.Join(" ", new[] { executable }.Concat(request.Args).Select(QuoteArgument)));
         if (commandLine.Length >= 32767)
@@ -82,9 +83,9 @@ internal static class DesktopApplications
         var process = new NativeMethods.ProcessInformation();
         try
         {
-            // GUI applications must never inherit this helper's gateway IPC pipes.
+            // Launched applications must never inherit this helper's gateway IPC pipes.
             // Their lifetime is independent of the launch receipt; no shell or job is involved.
-            // GUI 应用不得继承辅助进程的网关 IPC 管道；其生命周期独立于启动回执，不经过 shell 或作业对象。
+            // 已启动应用不得继承辅助进程的网关 IPC 管道；其生命周期独立于启动回执，不经过 shell 或作业对象。
             if (!NativeMethods.CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false,
                 NativeMethods.CreateNoWindow, IntPtr.Zero, Path.GetDirectoryName(executable)!, ref startupInformation, out process))
                 throw new DesktopException("DESKTOP_LAUNCH_FAILED", new Win32Exception(Marshal.GetLastWin32Error()).Message);
@@ -127,20 +128,41 @@ internal static class DesktopApplications
     {
         if (!string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase)) return true;
         string name = Path.GetFileNameWithoutExtension(path);
-        if (BlockedExecutableNames.Contains(name) || name.StartsWith("python", StringComparison.OrdinalIgnoreCase)) return true;
+        if (BlockedExecutableNames.Contains(name) || IsBlockedPythonRuntime(name)) return true;
         try
         {
             string? original = FileVersionInfo.GetVersionInfo(path).OriginalFilename;
             return original is not null && (BlockedExecutableNames.Contains(Path.GetFileNameWithoutExtension(original))
-                || Path.GetFileNameWithoutExtension(original).StartsWith("python", StringComparison.OrdinalIgnoreCase));
+                || IsBlockedPythonRuntime(Path.GetFileNameWithoutExtension(original)));
         }
         catch (IOException) { return true; }
     }
 
-    private static bool IsGuiExecutable(string path)
+    private static bool IsBlockedPythonRuntime(string name) => name.StartsWith("python", StringComparison.OrdinalIgnoreCase)
+        && !name.Equals("pythonw", StringComparison.OrdinalIgnoreCase);
+
+    private static void ValidateWindowedRuntimeEntry(string path, string[] arguments)
     {
-        // PE subsystem 2 is a GUI app. Consoles and script launchers use the separately approved terminal channels.
-        // PE 子系统 2 表示 GUI 应用；控制台和脚本启动器使用另行批准的终端通道。
+        string name = Path.GetFileNameWithoutExtension(path);
+        string? original = FileVersionInfo.GetVersionInfo(path).OriginalFilename;
+        string identity = original is null ? name : Path.GetFileNameWithoutExtension(original);
+        bool pythonWindowed = name.Equals("pythonw", StringComparison.OrdinalIgnoreCase) || identity.Equals("pythonw", StringComparison.OrdinalIgnoreCase);
+        bool javaWindowed = name.Equals("javaw", StringComparison.OrdinalIgnoreCase) || identity.Equals("javaw", StringComparison.OrdinalIgnoreCase);
+        if (!pythonWindowed && !javaWindowed) return;
+        string? entry = pythonWindowed && arguments.Length >= 1 ? arguments[0]
+            : javaWindowed && arguments.Length >= 2 && arguments[0] == "-jar" ? arguments[1] : null;
+        // Windowed runtimes can launch an explicit file entry, never an inline command or implicit module.
+        // 窗口运行时只接受明确的文件入口，不允许内联命令或隐式模块执行。
+        if (entry is null || !Path.IsPathFullyQualified(entry) || entry.StartsWith(@"\\", StringComparison.Ordinal) || !File.Exists(entry)
+            || (pythonWindowed && Path.GetExtension(entry).ToLowerInvariant() is not (".py" or ".pyw"))
+            || (javaWindowed && !Path.GetExtension(entry).Equals(".jar", StringComparison.OrdinalIgnoreCase)))
+            throw new DesktopException("DESKTOP_LAUNCH_BLOCKED", "A windowed runtime requires an existing absolute .py/.pyw or -jar .jar application entry; use the host terminal for commands.");
+    }
+
+    private static bool IsApplicationExecutable(string path)
+    {
+        // Some desktop apps (for example Blender) use the console subsystem despite presenting a GUI.
+        // 部分桌面应用（例如 Blender）使用控制台子系统，不能仅凭 PE 子系统就拒绝合法应用。
         using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new BinaryReader(stream);
         if (stream.Length < 96 || reader.ReadUInt16() != 0x5a4d) return false;
@@ -151,6 +173,6 @@ internal static class DesktopApplications
         stream.Position = headerOffset + 24; ushort optionalHeaderMagic = reader.ReadUInt16();
         if (optionalHeaderMagic is not 0x10b and not 0x20b) return false;
         stream.Position = headerOffset + 24 + 68;
-        return reader.ReadUInt16() == 2;
+        return reader.ReadUInt16() is 2 or 3;
     }
 }

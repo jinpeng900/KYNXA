@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { link, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { AgentConfigRepository } from '../tools/agent-config.mjs';
@@ -89,14 +89,17 @@ test('Smart deletion needs approval, is never recursive, and Full outside access
   assert.ok(standalone.isolatedWorkspace && standalone.workspaceRoot);
 });
 
-test('file tools reject links, hardlinks, binary/oversized text and bounded results stay within UI limit', async t => {
+test('authorized links bind scope, hardlinks stay readonly, and binary/oversized text stays bounded', async t => {
   const f = await toolFixture(t), ctx = await f.context('full'), outside = join(f.root, 'outside');
   await mkdir(outside); await writeFile(join(outside, 'private.txt'), 'private');
   await symlink(outside, join(f.workspace, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
-  assert.equal((await f.run(ctx, 'filesystem.read', { path: 'linked/private.txt' })).code, 'UNSAFE_TOOL_PATH');
-  assert.equal((await f.run(ctx, 'filesystem.write', { path: 'linked/new.txt', content: 'bad', expectedHash: null })).code, 'UNSAFE_TOOL_PATH');
+  assert.equal((await f.run(ctx, 'filesystem.read', { path: 'linked/private.txt' })).code, 'OUTSIDE_WORKSPACE_REASON_REQUIRED');
+  assert.equal((await f.run(ctx, 'filesystem.write', { path: 'linked/new.txt', content: 'bad', expectedHash: null })).code, 'OUTSIDE_WORKSPACE_REASON_REQUIRED');
+  assert.equal(parsed(await f.run(ctx, 'filesystem.read', { path: 'linked/private.txt', reason: 'Read the explicitly selected linked sibling.' })).content, 'private');
   await link(join(outside, 'private.txt'), join(f.workspace, 'hardlinked.txt'));
-  assert.equal((await f.run(ctx, 'filesystem.read', { path: 'hardlinked.txt' })).code, 'UNSAFE_TOOL_PATH');
+  const hardlinked = parsed(await f.run(ctx, 'filesystem.read', { path: 'hardlinked.txt' }));
+  assert.equal(hardlinked.content, 'private');
+  assert.equal((await f.run(ctx, 'filesystem.write', { path: 'hardlinked.txt', content: 'bad', expectedHash: hardlinked.sha256 })).code, 'UNSAFE_TOOL_PATH');
   if (process.platform === 'win32') for (const path of ['D:ambiguous.txt', 'NUL.txt', 'note.txt:stream', 'folder.'])
     assert.equal((await f.run(ctx, 'filesystem.read', { path })).code, 'UNSAFE_TOOL_PATH');
   await writeFile(join(f.workspace, 'binary.dat'), Buffer.from([0xff, 0x00]));
@@ -108,7 +111,7 @@ test('file tools reject links, hardlinks, binary/oversized text and bounded resu
   assert.equal(bounded.isError, false); assert.ok(bounded.content.length <= 65536); assert.match(bounded.content, /truncated/);
   assert.equal((await f.run(ctx, 'filesystem.write', { path: 'ill-formed.txt', content: '\ud800', expectedHash: null })).isError, true);
   const search = parsed(await f.run(ctx, 'filesystem.search', { query: 'private' }));
-  assert.deepEqual(search.matches, []); assert.ok(search.skipped >= 3);
+  assert.deepEqual(search.matches.map(match => match.path), ['hardlinked.txt']); assert.ok(search.skipped >= 3);
 });
 
 test('search is bounded, skips nested formal Data and credential files, while Full can explicitly read other Data text', async t => {
@@ -181,7 +184,7 @@ test('default Desktop/Projects managed work uses normal scoped CRUD and passes t
   assert.equal(parsed(await f.run(ctx, 'filesystem.search', { query: 'updated' })).matches.length, 1);
   assert.equal(parsed(await f.run(ctx, 'filesystem.list', { path: 'files' })).entries[0].name, 'note.txt');
   assert.equal((await f.run(ctx, 'terminal.run', { command: 'node', args: ['-e', 'console.log(1)'] }, { interactive: false })).isError, false);
-  assert.equal(terminal[0].trustedManagedWorkspace, true); assert.equal(terminal[0].workspaceRoot, managed);
+  assert.equal(terminal[0].trustedManagedWorkspace, true); assert.equal(terminal[0].workspaceRoot, await realpath(managed));
   const rename = await f.conversations.catalog(); rename.Projects[0].Name = 'Renamed managed work'; await f.conversations.saveCatalog(rename);
   assert.equal(parsed(await f.run(ctx, 'filesystem.stat', { path: 'files/note.txt' })).sha256, edited.sha256);
   const deletion = await pendingApproval(f.service, ctx, f.call('filesystem.delete', { path: 'files/note.txt', expectedHash: edited.sha256 }));
@@ -295,7 +298,7 @@ test('Smart terminal uses verified AppContainer runner only, with no unsupported
   const f = await toolFixture(t, { sandboxRunner }), smart = await f.context('smart'), abort = new AbortController();
   const result = await f.run(smart, 'terminal.run', { command: 'node', args: ['-e', 'console.log(1)'] }, { signal: abort.signal, interactive: false });
   assert.equal(result.sandbox, 'appcontainer'); assert.equal(result.isError, false);
-  assert.deepEqual(calls[0].input, { workspaceRoot: f.workspace, command: 'node', args: ['-e', 'console.log(1)'], timeoutMs: 30000, trustedManagedWorkspace: false });
+  assert.deepEqual(calls[0].input, { workspaceRoot: await realpath(f.workspace), command: 'node', args: ['-e', 'console.log(1)'], timeoutMs: 30000, trustedManagedWorkspace: false });
   assert.equal(calls[0].signal, abort.signal);
   assert.equal((await f.run(smart, 'terminal.run', { command: 'powershell', args: [] })).isError, true); assert.equal(calls.length, 1);
   assert.equal((await f.run(smart, 'terminal.run', { command: 'cmd', args: ['/c', 'echo unbounded'] })).isError, true); assert.equal(calls.length, 1);

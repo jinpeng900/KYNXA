@@ -9,6 +9,18 @@ import { sourceWindow } from '../data/retrieval/source-window.mjs';
 
 const document = '# Introduction\r\nPublic background.\r\n## Safety review\r\nReviewer: Mara Chen.\r\n```md\r\n# Fake code heading\r\n```\r\n### Checklist\r\nSigned checklist.\r\n## Launch\r\nLaunch date is undecided.\r\n';
 
+test('limited chapter parsing falls back to an anchored window without inventing a final section boundary', () => {
+  const text = '# x\n\n'.repeat(6000) + '# Final\n\nINDEPENDENT_FINAL_EVIDENCE\n';
+  const anchorOffset = text.indexOf('INDEPENDENT_FINAL_EVIDENCE');
+  const result = sourceWindow(text, { mode: 'section', anchorOffset, beforeCharacters: 0, limit: 256 });
+  assert.equal(result.window.mode, 'window');
+  assert.equal(result.window.section, undefined);
+  assert.equal(result.window.sectionUnavailable, true);
+  assert.equal(result.window.navigationTruncated, true);
+  assert.deepEqual(result.window.diagnosticCodes, ['DOCUMENT_STRUCTURE_LIMIT']);
+  assert.equal(result.text, text.slice(anchorOffset));
+});
+
 test('sections use real Markdown hierarchy and exact original offsets while excluding fenced headings', () => {
   const anchorOffset = document.indexOf('Mara Chen'), result = sourceWindow(document, { mode: 'section', anchorOffset });
   assert.equal(result.window.mode, 'section'); assert.equal(result.window.section.title, 'Safety review');

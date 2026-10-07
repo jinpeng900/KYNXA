@@ -7,6 +7,8 @@ import { EmbeddingService } from '../models/retrieval/embedding-service.mjs';
 import { BUILTIN_EMBEDDING_PROFILE, defaultEmbeddingModelRoot } from '../models/retrieval/embedding-profile.mjs';
 import { verifyEmbeddingBundle } from '../models/retrieval/embedding-assets.mjs';
 import { prepareEmbeddingModel } from '../models/retrieval/prepare-embedding-model.mjs';
+import { RetrievalStructureService } from '../data/retrieval/structure-service.mjs';
+import { embeddingTextForChunk } from '../data/retrieval/retrieval-text.mjs';
 
 const cosine = (left, right) => left.reduce((sum, value, index) => sum + value * right[index], 0);
 
@@ -86,6 +88,25 @@ test('bundled CPU model embeds Chinese/English, preserves prefixes, and remains 
     const scores = documents.vectors.map(vector => cosine(vector, query.vector));
     assert.equal(scores.indexOf(Math.max(...scores)), 0, 'both languages find the Chinese account document');
   }
+  const structures = new RetrievalStructureService();
+  t.after(() => structures.close());
+  const passages = [];
+  for (const [filename, text] of [
+    ['account-guide.md', '# Account Settings\n\n## Password Recovery\n\nWhen you forget your account password, select Reset Password in Account Settings.'],
+    ['weather-guide.md', '# Weather Guide\n\n## Forecast\n\nThe weather forecast says tomorrow will be sunny.']
+  ]) {
+    const source = { sourceId: filename, scopeKey: 'user', sourceType: 'document', title: filename,
+      locator: { relativePath: filename }, text };
+    const prepared = await structures.parse(source);
+    const chunk = prepared.chunks.find(item => item.structure.kind === 'paragraph');
+    assert.ok(chunk);
+    passages.push(embeddingTextForChunk(source, chunk));
+  }
+  const structuralVectors = await service.embedDocuments(passages);
+  const chineseQuery = await service.embedQuery('如何重置账户密码？');
+  const structuralScores = structuralVectors.vectors.map(vector => cosine(vector, chineseQuery.vector));
+  assert.equal(structuralScores.indexOf(Math.max(...structuralScores)), 0,
+    'real local vectors preserve Chinese-to-English retrieval with structural headers');
   await assert.rejects(service.embedQuery('中文句子 '.repeat(600)), error => error.code === 'EMBEDDING_INPUT_TOO_LONG'
     && error.details.tokenCount > error.details.maxInputTokens);
   const controller = new AbortController();

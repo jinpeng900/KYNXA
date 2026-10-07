@@ -36,7 +36,7 @@ for (const scope of ['managed-compact', 'managed-dashed', 'folderless', 'unlinke
       assert.equal(ctx.sandboxCapabilities.available, true, ctx.sandboxCapabilities.reason);
       assert.equal(ctx.managedWorkspace, true);
       assert.equal(ctx.isolatedWorkspace, !scope.startsWith('managed-'));
-      if (expected && scope !== 'legacy-linked') assert.equal(ctx.workspaceRoot, expected);
+      if (expected && scope !== 'legacy-linked') assert.equal(ctx.workspaceRoot, await realpath(expected));
       else assert.ok(ctx.workspaceRoot.startsWith(join(await realpath(f.dataHome), 'Workspaces') + '\\'));
       if (scope === 'legacy-linked') {
         assert.equal(ctx.linkedWorkspaceRoot, expected);

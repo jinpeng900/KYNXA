@@ -13,6 +13,7 @@ internal static class HostTerminalRunner
 {
     private const int MaximumOutputBytes = 256 * 1024;
     private const int MaximumProcesses = 32;
+    private const int MaximumBackgroundTimeoutMs = 6 * 60 * 60 * 1000;
 
     internal static object Capabilities()
     {
@@ -25,6 +26,7 @@ internal static class HostTerminalRunner
             maximumProcesses = MaximumProcesses, minimumTimeoutMs = 100, maximumTimeoutMs = 120000,
             maxScriptCharacters = HostTerminalRequest.MaximumScriptCharacters,
             visibleTerminal = true, maxKeepOpenMs = 30000, defaultKeepOpenMs = 5000,
+            backgroundJobs = true, maximumJobTimeoutMs = MaximumBackgroundTimeoutMs,
             outputEvents = true,
             visibleOutput = "bounded-console-screen-snapshot",
             outputEncoding = new { cmd = "utf-8-or-oem-per-line", powershell = "utf-8" }
@@ -114,16 +116,21 @@ internal static class HostTerminalRunner
     private static void Validate(HostTerminalRequest request)
     {
         if (!OperatingSystem.IsWindows()) throw new HostTerminalException("HOST_TERMINAL_UNAVAILABLE", "Host terminal execution requires Windows.");
-        if (request.Operation is not ("host_terminal" or "host_terminal_visible") ||
+        if (request.Operation is not ("host_terminal" or "host_terminal_visible" or "host_terminal_job") ||
             (request.Operation == "host_terminal_visible" && !request.Visible) || request.Shell is not ("cmd" or "powershell"))
             throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "The host terminal accepts only cmd or powershell.");
+        // Background jobs have a distinct negotiated operation; normal calls keep their short lifetime.
+        // 后台任务使用单独协商的操作，普通调用仍保留较短生命周期与完整进程树清理。
+        if ((request.Operation == "host_terminal_job") != request.BackgroundJob || request.BackgroundJob && request.Visible)
+            throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "Background jobs must use their hidden dedicated operation.");
         if (string.IsNullOrWhiteSpace(request.Script) || request.Script.Length > HostTerminalRequest.MaximumScriptCharacters || request.Script.Contains('\0'))
             throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "A bounded nonempty script without NUL characters is required.");
         if (string.IsNullOrWhiteSpace(request.Cwd) || !Path.IsPathFullyQualified(request.Cwd) || request.Cwd.StartsWith("\\\\", StringComparison.Ordinal) ||
             !Directory.Exists(request.Cwd))
             throw new HostTerminalException("HOST_TERMINAL_INVALID_WORKSPACE", "An existing absolute local working directory is required.");
-        if (request.TimeoutMs is < 100 or > 120000)
-            throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "Timeout must be between 100 and 120000 milliseconds.");
+        int maximumTimeoutMs = request.BackgroundJob ? MaximumBackgroundTimeoutMs : 120000;
+        if (request.TimeoutMs < 100 || request.TimeoutMs > maximumTimeoutMs)
+            throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", $"Timeout must be between 100 and {maximumTimeoutMs} milliseconds.");
         if (request.KeepOpenMs is < 0 or > 30000 || (!request.Visible && request.KeepOpenMs.HasValue))
             throw new HostTerminalException("HOST_TERMINAL_INVALID_REQUEST", "Keep-open must be between 0 and 30000 milliseconds and requires visible mode.");
         string executable = ShellPath(request.Shell);

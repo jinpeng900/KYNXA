@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process';
 import { basename, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { findNativeToolHost } from './tool-host-path.mjs';
-import { inspectLocalPath, toolFailure } from '../platform/tool-paths.mjs';
+import { bindLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
 import { computerKeyNames } from '../official-tools/Tools/computer.mjs';
 
 const actions = new Set(['windows', 'apps', 'screenshot', 'read', 'launch', 'window', 'activate', 'move', 'click', 'scroll', 'drag', 'type', 'key']);
-const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:w|\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
+const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
 const maxStdoutBytes = 8 * 1024 * 1024;
 const definiteLaunchFailures = new Set(['DESKTOP_LAUNCH_BLOCKED', 'DESKTOP_LAUNCH_FAILED', 'DESKTOP_INVALID_REQUEST',
   'DESKTOP_UNAVAILABLE', 'DESKTOP_BUSY', 'DESKTOP_CANCELLED', 'DESKTOP_ACCESS_DENIED']);
@@ -65,11 +65,13 @@ export class DesktopRunner {
       throw toolFailure('不支持此按键组合。', 'DESKTOP_INVALID_KEY');
     if (action === 'launch' && arguments_.background !== undefined && typeof arguments_.background !== 'boolean')
       throw toolFailure('后台启动选项必须为布尔值。', 'DESKTOP_INVALID_REQUEST');
+    let launchBinding;
     if (action === 'launch') {
       const path = arguments_.appPath;
       if (typeof path !== 'string' || !isAbsolute(path) || /^\\\\/.test(path) || !/\.exe$/i.test(path) || shells.test(basename(path)))
         throw toolFailure('打开软件需要本地应用 .exe 路径；命令解释器请使用对应的终端工具。', 'DESKTOP_INVALID_APPLICATION');
-      const info = await inspectLocalPath(path);
+      launchBinding = await bindLocalPath(path, { allowHardLinks: true });
+      const info = await revalidateLocalPathBinding(launchBinding);
       if (!info.isFile()) throw toolFailure('应用路径不是本地程序文件。', 'DESKTOP_INVALID_APPLICATION');
     } else if (!['windows', 'apps'].includes(action)) {
       if (typeof arguments_.windowId !== 'string' || !/^[1-9]\d{0,19}$/.test(arguments_.windowId) ||
@@ -77,6 +79,7 @@ export class DesktopRunner {
         throw toolFailure('请使用 computer.windows 返回的窗口与进程身份。', 'DESKTOP_INVALID_TARGET');
     }
     const { reason, ...parameters } = arguments_;
+    if (launchBinding) parameters.appPath = launchBinding.path;
     const combined = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
     let value;
     try { value = await this._invoke({ operation: 'desktop', action, ...parameters }, combined,

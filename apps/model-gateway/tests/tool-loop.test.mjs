@@ -9,6 +9,7 @@ import { after, test } from 'node:test';
 import { ConversationStore } from '../data/conversations.mjs';
 import { ModelStore } from '../models/store.mjs';
 import { ModelRuntime } from '../orchestration/runtime.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { readSse } from '../models/streaming.mjs';
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { wireCatalog } from '../models/tool-protocols.mjs';
@@ -422,7 +423,97 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     assert.ok(JSON.stringify(next.messages).includes(saved.Content), 'the honest final limitation remains in future history');
     await f.runtime.tools.releaseContext(next.toolContext);
   });
+
+  test(`${protocol}: recovered tool execution resets undeclared-call failures before a later recovery`, async t => {
+    const f = await fixture(t, protocol), dispatched = [];
+    const originalExecute = f.runtime.tools.execute.bind(f.runtime.tools);
+    f.runtime.tools.execute = async (...args) => { dispatched.push(args[1].name); return originalExecute(...args); };
+    f.setPlan((body, marker, round) => {
+      if (round === 1 || round === 3)
+        return withCallId(protocol, nativeTool(protocol, `unavailable_${round}`, {}), `missing_${round}`);
+      if (round === 2 || round === 4) {
+        const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+        assert.ok(descriptor, 'a recovered round must retain tools for a later unrelated lookup failure');
+        return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
+      }
+      return nativeText(protocol, `Both recoveries preserved the verified result ${marker}`);
+    });
+    assert.ok((await f.runtime.reply(f.input)).includes(f.marker));
+    assert.equal(f.seen.length, 5);
+    assert.deepEqual(dispatched, ['filesystem.read', 'filesystem.read']);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed');
+    assert.deepEqual(saved.ToolActivities.map(item => item.status), ['error', 'completed', 'error', 'completed']);
+    assert.equal(saved.ToolRun.diagnostics.executedToolCalls, 2);
+  });
+
+  test(`${protocol}: a mixed round with a completed tool does not count as a failed recovery round`, async t => {
+    const f = await fixture(t, protocol);
+    f.setPlan((body, marker, round) => {
+      if (round === 2) return withCallId(protocol, nativeTool(protocol, 'unavailable_later', {}), 'missing_2');
+      if (round >= 4) return nativeText(protocol, `Mixed-round progress retained ${marker}`);
+      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      assert.ok(descriptor, 'successful work in a mixed round breaks the unavailable-call streak');
+      const read = withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
+      if (round === 3) return read;
+      const mixed = withCallId(protocol, nativeTool(protocol, 'unavailable_first', {}), 'missing_1');
+      if (protocol === 'anthropic-messages') mixed.content.push(read.content.find(item => item.type === 'tool_use'));
+      else if (protocol === 'openai-responses') mixed.output.push(read.output.find(item => item.type === 'function_call'));
+      else mixed.choices[0].message.tool_calls.push(read.choices[0].message.tool_calls[0]);
+      return mixed;
+    });
+    assert.ok((await f.runtime.reply(f.input)).includes(f.marker));
+    assert.equal(f.seen.length, 4);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed');
+    assert.deepEqual(saved.ToolActivities.map(item => item.status), ['error', 'completed', 'error', 'completed']);
+  });
+
+  test(`${protocol}: a broker-confirmed pre-dispatch capability revocation preserves the remaining tool loop`, async t => {
+    const f = await fixture(t, protocol);
+    const originalExecute = f.runtime.tools.execute.bind(f.runtime.tools);
+    let calls = 0;
+    f.runtime.tools.execute = async (...args) => ++calls === 1
+      ? { content: 'This capability was revoked before dispatch.', isError: true, status: 'error',
+        code: 'AGENT_CONFIG_CHANGED', recoverable: true, executed: false }
+      : originalExecute(...args);
+    f.setPlan((body, marker, round) => {
+      if (round >= 3) return nativeText(protocol, `Continued safely with ${marker}`);
+      if (round === 2) assert.match(JSON.stringify(body.messages ?? body.input), /KYNXA_TOOL_CONFIGURATION_RECOVERY/);
+      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
+    });
+    assert.ok((await f.runtime.reply(f.input)).includes(f.marker));
+    assert.equal(f.seen.length, 3); assert.equal(calls, 2);
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed');
+    assert.equal(saved.ToolActivities[0].code, 'AGENT_CONFIG_CHANGED');
+    assert.equal(saved.ToolActivities[1].status, 'completed');
+  });
 }
+
+test('configuration failures without a broker-confirmed non-execution proof still stop the loop', async t => {
+  const f = await fixture(t);
+  f.runtime.tools.execute = async () => ({ content: 'Global configuration invalidation.', isError: true,
+    status: 'error', code: 'AGENT_CONFIG_CHANGED' });
+  await assert.rejects(f.runtime.reply(f.input), { code: 'AGENT_CONFIG_CHANGED' });
+  assert.equal(f.seen.length, 1);
+  assert.equal((await f.conversations.readMessages(f.input.conversationId)).at(-1).Status, 'interrupted');
+});
+
+for (const action of ['run', 'start', 'stop']) test(`unknown terminal.host.${action} effects save their receipt and stop without replay`, async () => {
+  let rounds = 0, executions = 0;
+  const saved = [], call = { id: 'unknown-host-effect', name: `terminal.host.${action}`, arguments: {} };
+  await assert.rejects(runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
+    inputBudgetTokens: 32000, declarations: [], emit: () => {}, saveActivity: async activity => saved.push(activity),
+    service: { execute: async () => { executions++; return { content: 'A dispatched host effect has an unknown outcome.',
+      isError: true, status: 'unknown', code: 'TOOL_TIMED_OUT' }; } },
+    requestTurn: async () => { rounds++; return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
+      content: '', tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: '{}' } }] }] }; }
+  }), { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
+  assert.equal(rounds, 1); assert.equal(executions, 1);
+  assert.equal(saved.at(-1).status, 'unknown'); assert.equal(saved.at(-1).name, call.name);
+});
 
 test('a round decodes its exact declared catalog when availability changes while the response is generated', async t => {
   const f = await fixture(t);

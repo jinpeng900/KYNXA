@@ -13,12 +13,21 @@
 
 ## 接口
 
+`model-registry.mjs` 只登记已经实现的本地推理：`builtin-multilingual` 嵌入与
+`builtin-multilingual-reranker` 重排。`resolveRetrievalModelProfile(kind, profileId)` 返回固定模型、版本、
+维数、输入投影、语言和资产摘要；未知、跨类型或 `null` profile 返回
+`RETRIEVAL_MODEL_PROFILE_UNSUPPORTED`，不能因为配置格式合法就偷偷换成默认模型。
+
+服务构造和每次推理均可显式传入 `profileId`，`status(profileId)` 报告所请求配置的真实支持情况。
+`ready` 且 `assetVerification: pending` 表示文件存在并等待首次 worker 完整校验，不能当成已验证权重；
+校验通过且加载成功才报告 `loaded: true` 和 `assetVerification: verified`。推理失败不会伪造模型就绪。
+
 ```js
-const embedding = new EmbeddingService();
-const query = await embedding.embedQuery(text, { signal });
+const embedding = new EmbeddingService({ profileId: 'builtin-multilingual' });
+const query = await embedding.embedQuery(text, { signal, profileId: 'builtin-multilingual' });
 // { vector, profileId, modelVersion, dimensions }
 // 查询向量及固定模型版本。
-const documents = await embedding.embedDocuments(texts, { signal });
+const documents = await embedding.embedDocuments(texts, { signal, profileId: 'builtin-multilingual' });
 // { vectors, profileId, modelVersion, dimensions }
 // 文档向量数组及固定模型版本。
 const status = embedding.status();
@@ -28,6 +37,15 @@ await embedding.close();
 查询按模型卡添加 `query: `，文档添加 `passage: `；均使用平均池化和归一化。每批最多 64 条，worker 每组处理四条。每条最多 512 个 token，包含前缀及特殊 token；超长返回 `EMBEDDING_INPUT_TOO_LONG` 和实际计数，不静默截断。调用方应拆分来源或保留词法检索。取消结果不会污染后续请求；关闭等待原生调用结束并释放 ONNX 会话，不强行终止 worker。
 
 缓存和索引必须同时记录 `profileId` 与 `modelVersion`，不能因为 builtin ID 未变就复用不同权重的向量。相似度分数不是回答正确率；阈值需要按中英文、代码和资料评测集验证。
+
+结果还包含 `embeddingSpaceId`、`inputProjectionVersion`、`modelAssetSignature` 和 `assetSignature`。
+向量空间 ID 为 SHA-256 的 64 位小写十六进制值，绑定实际模型、版本、维数、E5 前缀、平均池化、L2 归一化，
+以及权重和分词器等运行资产哈希。来源分块与 `embeddingInputVersion` 由 Data 单独管理；
+模型空间不借用资料派生版本，也不能仅靠维数一致混用其他模型向量。
+
+worker 请求按独立递增 ID 配对。取消只拒绝所属请求，晚到结果不改变后续请求；发送失败立即清理等待项。
+重排模型载入失败会报告原始资源错误并自然退役，过期 `ready` 通知不能把错误状态恢复成就绪。
+关闭等待模型释放确认，不强制终止正在执行原生 ONNX 的线程。
 
 ## 可选离线重排
 
