@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { Worker } from 'node:worker_threads';
+import { createNativeInferenceProcess } from './native-inference-process.mjs';
 import { BUILTIN_EMBEDDING_PROFILE, defaultEmbeddingModelRoot } from './embedding-profile.mjs';
 import { resolveRetrievalModelProfile, retrievalModelMetadata, unavailableProfileStatus } from './model-registry.mjs';
 
@@ -38,8 +38,8 @@ function validateTexts(texts) {
   }
 }
 
-// One lazily loaded worker owns the CPU model. The gateway remains responsive.
-// CPU 模型由按需加载的独立 worker 持有；哈希校验、分词和推理不阻塞网关与流式展示。
+// One lazily loaded process owns the CPU model and its process-global native runtime.
+// CPU 模型及进程级原生运行时由按需加载的独立进程持有；校验、分词和推理不阻塞网关。
 export class EmbeddingService {
   #modelRoot;
   #cpuThreads;
@@ -61,7 +61,7 @@ export class EmbeddingService {
 
   constructor({ modelRoot = defaultEmbeddingModelRoot(), cpuThreads = 2, timeoutMs = 120_000,
     closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS, profileId = BUILTIN_EMBEDDING_PROFILE.id,
-    workerFactory = (url, options) => new Worker(url, options) } = {}) {
+    workerFactory = createNativeInferenceProcess } = {}) {
     this.#profile = resolveRetrievalModelProfile('embedding', profileId);
     this.#workerFactory = workerFactory;
     this.#modelRoot = resolve(modelRoot);
@@ -172,13 +172,13 @@ export class EmbeddingService {
       else request.reject(new EmbeddingError(message.message, message.code, message.details));
     });
     worker.on('error', error => this.#failWorker(new EmbeddingError(error.message, 'EMBEDDING_WORKER_FAILED')));
-    worker.on('exit', exitCode => {
+    worker.on('exit', (exitCode, signal) => {
       resolveExit({ exitCode, shutdownAcknowledged });
       if (this.#worker !== worker) return;
       this.#worker = undefined;
       this.#workerPhase = 'stopped';
-      if (!this.#closed && this.#state !== 'error' && this.#state !== 'unavailable')
-        this.#failWorker(new EmbeddingError(`Embedding worker exited (${exitCode}).`, 'EMBEDDING_WORKER_FAILED'));
+      if (!this.#closed && (this.#pending.size || (this.#state !== 'error' && this.#state !== 'unavailable')))
+        this.#failWorker(new EmbeddingError(`Embedding process exited (${signal ?? exitCode}).`, 'EMBEDDING_WORKER_FAILED'));
     });
   }
 
@@ -250,7 +250,9 @@ export class EmbeddingService {
     worker.ref();
     let timer;
     try {
-      worker.postMessage({ type: 'close' });
+      // A fatal load may have already disconnected IPC; still observe its acknowledged exit.
+      // 加载失败可能已断开 IPC；仍观察其释放回执和退出结果，避免把正常排空误报为失败。
+      try { worker.postMessage({ type: 'close' }); } catch {}
       const result = await Promise.race([this.#workerExit, new Promise((resolve, reject) => {
         timer = setTimeout(() => reject(new EmbeddingError(
           'Local embedding shutdown timed out; storage remains unavailable until safe retirement.',
@@ -262,11 +264,16 @@ export class EmbeddingService {
     } catch (error) {
       this.#state = 'error';
       this.#errorCode = error.code ?? 'EMBEDDING_CLOSE_FAILED';
+      try { await worker.terminate?.(); }
+      catch {
+        this.#errorCode = 'EMBEDDING_CLOSE_FAILED';
+        throw new EmbeddingError('Local embedding process could not be safely reaped.', this.#errorCode);
+      }
       throw error;
     } finally {
       clearTimeout(timer);
-      // Never terminate a thread running ONNX. A timeout rejects retirement while natural drain continues.
-      // 不强制终止正在运行 ONNX 的线程；超时使退役失败，worker 仍继续自然排空和释放资源。
+      // A timed-out owned process is reaped before retirement reports failure.
+      // 关闭超时时先回收本服务拥有的进程，再报告退役失败，避免残留模型污染后续存储操作。
     }
   }
 }

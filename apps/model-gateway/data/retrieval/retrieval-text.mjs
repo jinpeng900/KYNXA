@@ -9,11 +9,55 @@ const MAX_CHUNK_CHARACTERS = 384;
 const MAX_EMBEDDING_CONTEXT_CHARACTERS = 128;
 const chunkSections = new WeakMap();
 const sourceHeadingMaps = new WeakMap();
+const TECHNICAL_QUERY_CONCEPTS = [
+  [['取消', '中断', '终止'], ['cancel', 'cancellation', 'cancelled', 'abort', 'aborted', 'terminate']],
+  [['恢复', '续传'], ['resume', 'resumed', 'restore', 'recovery']],
+  [['重试'], ['retry', 'retries']],
+  [['超时'], ['timeout', 'timedout']],
+  [['并发'], ['concurrency', 'concurrent']],
+  [['队列'], ['queue', 'queued']],
+  [['检查点', '断点'], ['checkpoint', 'checkpoints']],
+  [['索引'], ['index', 'indexing', 'indexed']],
+  [['缓存'], ['cache', 'cached', 'caching']],
+  [['权限', '审批'], ['permission', 'permissions', 'approval', 'authorize', 'authorization']],
+  [['绑定', '挂载'], ['binding', 'bound', 'mount', 'mounted']],
+  [['持久化', '存储', '保存'], ['persist', 'persisted', 'persistence', 'storage', 'store', 'save', 'saved']],
+  [['序列化'], ['serialize', 'serialization']],
+  [['压缩'], ['compact', 'compaction', 'compression']],
+  [['分块'], ['chunk', 'chunks', 'chunking']],
+  [['分词'], ['tokenizer', 'tokenization']],
+  [['嵌入'], ['embedding', 'embeddings']],
+  [['重排'], ['rerank', 'reranking']],
+  [['上下文'], ['context']],
+  [['引用', '调用方'], ['reference', 'references', 'caller', 'callers']],
+  [['配置', '设置'], ['configuration', 'config', 'settings']],
+  [['内存'], ['memory']],
+  [['磁盘'], ['disk']],
+];
 
 /** Deterministic Han bigrams and identifier terms; original text is never rewritten.
  * 确定性中文二元词与代码标识符分词，始终保留原文。 */
 export function lexicalTerms(text, maximumTerms = 20000) {
   return collectLexicalTerms(text, maximumTerms, true);
+}
+
+/** Small technical language bridges expand queries only; originals, hashes and source token frequency stay unchanged.
+ * 少量技术词语言桥接只扩展查询，原文、哈希和来源词频始终保持不变，不冒充通用翻译。
+ */
+export function retrievalQueryTerms(text, { maximumTerms = 64, domain = 'mixed' } = {}) {
+  const terms = lexicalTerms(text, maximumTerms), seen = new Set(terms);
+  for (const aliases of retrievalQueryConcepts(text, { domain })) for (const alias of aliases) {
+    if (terms.length >= maximumTerms) return terms;
+    if (!seen.has(alias)) { seen.add(alias); terms.push(alias); }
+  }
+  return terms;
+}
+
+export function retrievalQueryConcepts(text, { domain = 'mixed' } = {}) {
+  if (domain === 'knowledge') return [];
+  const input = String(text).normalize('NFKC'), terms = new Set(lexicalTerms(input, 512));
+  return TECHNICAL_QUERY_CONCEPTS.filter(([phrases, aliases]) =>
+    phrases.some(phrase => input.includes(phrase)) || aliases.some(alias => terms.has(alias))).map(([, aliases]) => [...aliases]);
 }
 
 function collectLexicalTerms(text, maximumTerms, shouldDeduplicate) {
@@ -114,10 +158,10 @@ export function embeddingTextForChunk(source, chunk, { maxChars = 512 } = {}) {
   return truncateCharacters(context ? `${context}\n\n${body}` : body, maxChars);
 }
 
-export function matchExpression(query) {
+export function matchExpression(query, options = {}) {
   // User punctuation never becomes executable FTS query syntax.
   // 用户的标点不作为 FTS 查询运算符执行。
-  const terms = lexicalTerms(query, 64);
+  const terms = retrievalQueryTerms(query, { ...options, maximumTerms: 64 });
   const hasHanBigrams = terms.some(term => /^\p{Script=Han}{2}$/u.test(term));
   return terms.filter(term => !hasHanBigrams || !/^\p{Script=Han}$/u.test(term))
     .map(term => `"${term.replace(/"/g, '""')}"`).join(' OR ');

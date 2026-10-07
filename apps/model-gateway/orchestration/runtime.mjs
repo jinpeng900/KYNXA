@@ -151,7 +151,10 @@ export class ModelRuntime {
       // Reserve most of the real input window for dialogue, code and tool pairs; route evidence by task.
       // 按任务分配证据预算，使用 token 而非字符计算；为对话、代码与完整工具配对保留大部分真实输入窗口。
       const evidenceBudgetTokens = Math.max(0, Math.min(8192, Math.floor(context.metrics.inputBudgetTokens * .12)));
-      const evidencePlan = retrievalPlan(input.message, { history: history.filter(item => item.Id !== userId), maximumTokens: evidenceBudgetTokens });
+      const retrievalHistory = history.filter(item => item.Id !== userId);
+      const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
+      const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
+        taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
       if (evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0) {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,

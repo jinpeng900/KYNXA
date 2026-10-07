@@ -7,6 +7,7 @@ import { test } from 'node:test';
 
 const serviceModule = new URL('../models/retrieval/embedding-service.mjs', import.meta.url).href;
 const profileModule = new URL('../models/retrieval/embedding-profile.mjs', import.meta.url).href;
+const processModule = new URL('../models/retrieval/native-inference-process.mjs', import.meta.url).href;
 
 async function isolatedEmbeddingCheck(t, scenario) {
   const home = await mkdtemp(join(tmpdir(), 'kynxa-embedding-shutdown-'));
@@ -19,17 +20,19 @@ async function isolatedEmbeddingCheck(t, scenario) {
   // 原生生命周期问题必须表现为测试子进程退出结果，不能拖垮整个测试运行器。
   const source = String.raw`
     import assert from 'node:assert/strict';
-    import { Worker } from 'node:worker_threads';
     import { mkdir, writeFile } from 'node:fs/promises';
     import { join } from 'node:path';
-    const [serviceModule, profileModule, scenario, home] = process.argv.slice(1);
+    const [serviceModule, profileModule, processModule, scenario, home] = process.argv.slice(1);
     const { EmbeddingService } = await import(serviceModule);
     const { BUILTIN_EMBEDDING_PROFILE } = await import(profileModule);
+    const { createNativeInferenceProcess } = await import(processModule);
     let forcedTerminations = 0;
-    Worker.prototype.terminate = () => {
-      forcedTerminations++;
-      throw new Error('Embedding shutdown must not forcibly terminate its native worker.');
-    };
+    const createService = (options = {}) => new EmbeddingService({ ...options, workerFactory: (url, workerOptions) => {
+      const worker = createNativeInferenceProcess(url, workerOptions);
+      const terminate = worker.terminate.bind(worker);
+      worker.terminate = () => { forcedTerminations++; return terminate(); };
+      return worker;
+    } });
     const waitForPhase = async (service, phase) => {
       const deadline = Date.now() + 30000;
       while (service.status().workerPhase !== phase) {
@@ -40,7 +43,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
     const outcome = promise => promise.then(() => ({ completed: true }), error => ({ code: error.code }));
     let report;
     if (scenario === 'load-close') {
-      const service = new EmbeddingService();
+      const service = createService();
       const pending = outcome(service.embedQuery('A synthetic request closed during native model loading.'));
       await waitForPhase(service, 'loading-model');
       const close = service.close();
@@ -52,7 +55,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
       assert.equal(service.status().state, 'unavailable');
       report = { scenario, safelyDrained: true, clientRejected: true };
     } else if (scenario === 'inference-close') {
-      const service = new EmbeddingService();
+      const service = createService();
       assert.equal((await service.embedQuery('Warm the real offline CPU model.')).vector.length, 384);
       const passage = 'A passage about local retrieval and account password recovery. '.repeat(30);
       const running = outcome(service.embedDocuments(Array(64).fill(passage)));
@@ -69,7 +72,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
       await assert.rejects(service.embedQuery('Cannot reopen a retired service.'), { code: 'EMBEDDING_CLOSED' });
       report = { scenario, safelyDrained: true, runningAndQueuedRejected: true };
     } else if (scenario === 'cancel-verification') {
-      const service = new EmbeddingService();
+      const service = createService();
       const controller = new AbortController();
       const pending = outcome(service.embedQuery('Cancel while verifying pinned local assets.', { signal: controller.signal }));
       await waitForPhase(service, 'verifying-assets');
@@ -81,7 +84,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
       await service.close();
       report = { scenario, cancelledBeforeNativeLoad: true, laterRequestWorks: true };
     } else if (scenario === 'close-timeout') {
-      const service = new EmbeddingService({ closeTimeoutMs: 1 });
+      const service = createService({ closeTimeoutMs: 1 });
       const pending = outcome(service.embedQuery('A request closed before its worker finishes starting.'));
       const close = service.close();
       assert.equal(service.close(), close);
@@ -92,24 +95,24 @@ async function isolatedEmbeddingCheck(t, scenario) {
       await waitForPhase(service, 'stopped');
       assert.equal(service.close(), close, 'a previous timeout cannot become a false successful retirement');
       await assert.rejects(service.close(), { code: 'EMBEDDING_CLOSE_TIMEOUT' });
-      report = { scenario, timeoutReported: true, eventuallyDrainedWithoutForce: true };
+      report = { scenario, timeoutReported: true, ownedProcessReaped: true };
     } else if (scenario === 'asset-failure') {
       const root = join(home, 'synthetic-invalid-model');
       for (const asset of BUILTIN_EMBEDDING_PROFILE.files) {
         await mkdir(join(root, asset.path, '..'), { recursive: true });
         await writeFile(join(root, asset.path), 'synthetic invalid asset');
       }
-      const service = new EmbeddingService({ modelRoot: root });
+      const service = createService({ modelRoot: root });
       await assert.rejects(service.embedQuery('The invalid model cannot load.'), { code: 'EMBEDDING_ASSET_INVALID' });
       await service.close();
       assert.equal(service.status().workerPhase, 'stopped');
       report = { scenario, failedWorkerNaturallyClosed: true };
     } else throw new Error('Unknown isolated embedding scenario.');
-    assert.equal(forcedTerminations, 0);
+    assert.equal(forcedTerminations, scenario === 'close-timeout' ? 1 : 0);
     process.stdout.write(JSON.stringify({ ...report, forcedTerminations }));
   `;
   const child = spawn(process.execPath, ['--no-warnings', '--unhandled-rejections=strict', '--input-type=module', '-e', source,
-    serviceModule, profileModule, scenario, home], {
+    serviceModule, profileModule, processModule, scenario, home], {
     env: { ...process.env, USERPROFILE: home, HOME: home, KYNXA_DATA_HOME: join(home, 'Data'),
       KYNXA_MODEL_HOME: '', KYNXA_EXTENSION_HOME: join(home, 'Extensions') },
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
@@ -134,7 +137,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
   assert.equal(stderr.trim(), '');
   const report = JSON.parse(stdout);
   assert.equal(report.scenario, scenario);
-  assert.equal(report.forcedTerminations, 0);
+  assert.equal(report.forcedTerminations, scenario === 'close-timeout' ? 1 : 0);
   return report;
 }
 

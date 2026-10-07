@@ -482,7 +482,7 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
   const domainRank = requestedDomain ? `CASE WHEN ${domainExpression}='${requestedDomain}' THEN 0 ELSE 1 END` : 'CASE WHEN 1 THEN 0 END';
   const authorizedParameters = [...scopes, ...(requestedDomain ? [requestedDomain] : [])];
   cancelled(flag);
-  const expression = matchExpression(query);
+  const expression = matchExpression(query, { domain: intent?.domain });
   let lexical = [];
   // Materialize the narrow FTS result once; fetch text and vectors only for authorized top candidates.
   // 窄 FTS 结果只物化一次；范围筛选及排序后才读取候选正文与向量，避免逐分块重复 FTS 扫描。
@@ -746,6 +746,12 @@ function status() {
     jobs: Object.fromEntries(database.prepare('SELECT state,count(*) AS count FROM index_jobs GROUP BY state').all().map(row => [row.state, row.count])) };
 }
 
+function prepareVectors({ scopeKeys, ann }, flag) {
+  cancelled(flag);
+  if (!vectorAvailable) return vectorSearch.status();
+  return vectorSearch.prepareScopes(retrievalScopeKeys(scopeKeys), ann);
+}
+
 async function close() {
   if (!database) return { closed: true };
   const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
@@ -765,7 +771,7 @@ parentPort.on('message', message => {
     const flag = message.cancelBuffer ? new Int32Array(message.cancelBuffer) : null;
     try {
       cancelled(flag);
-      const operations = { upsertSources, search, read, readWindow, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, status, close };
+      const operations = { upsertSources, search, read, readWindow, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, status, close };
       const operation = operations[message.method];
       if (!operation || !database) throw retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
       const result = await operation(message.input ?? {}, flag);

@@ -76,7 +76,7 @@ export class RetrievalVectorSearch {
 
   async updateSources(oldRows, sourceIds, changedScopes) {
     this._invalidateDescriptors(changedScopes);
-    if (!changedScopes.length || !this.ann.shards.size) return;
+    if (!changedScopes.length) return;
     try {
       await this.ann.updateSources(oldRows, this.sourceRows(sourceIds), changedScopes, scopeKey =>
         this.database.prepare('SELECT generation FROM scope_snapshots WHERE scope_key=?').get(scopeKey)?.generation ?? 0);
@@ -86,8 +86,25 @@ export class RetrievalVectorSearch {
     }
   }
 
+  prepareScopes(scopeKeys, ann) {
+    const options = ann === undefined ? this.lastOptions ?? this.options : validateAnnOptions({ ...this.options, ...ann });
+    if (options.mode === 'off' || options.mode === 'exact') return this.ann.status();
+    const descriptors = this.database.prepare(`SELECT s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,
+      c.embedding_space_id,${RETRIEVAL_DOMAIN_SQL} AS domain,count(*) AS count,COALESCE(ss.generation,0) AS generation
+      FROM chunks c JOIN sources s ON s.source_id=c.source_id LEFT JOIN scope_snapshots ss ON ss.scope_key=s.scope_key
+      WHERE s.scope_key IN (${scopeKeys.map(() => '?').join(',')}) AND c.vector IS NOT NULL
+      GROUP BY s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,c.embedding_space_id,domain`)
+      .all(...scopeKeys);
+    for (const descriptor of descriptors) {
+      try { this.ann.warm(descriptor, options); }
+      catch (error) { this.ann.lastError = error.code ?? 'RETRIEVAL_ANN_BUILD_FAILED'; }
+    }
+    return this.ann.status();
+  }
+
   async invalidateScopes(scopeKeys) {
     this._invalidateDescriptors(scopeKeys);
+    this.ann.builds.cancelScopes(scopeKeys);
     for (const [key, entry] of this.ann.shards) if (scopeKeys.includes(entry.identity.scopeKey)) {
       this.ann.shards.delete(key); this.ann.counters.invalidated++;
       await this.ann._request('drop', { key }).catch(() => {});
@@ -104,8 +121,9 @@ export class RetrievalVectorSearch {
     let degradedReason = null;
     let exactScannedChunks = 0;
     const matches = [], backends = new Set();
-    const exactCandidates = descriptor => {
-      const limit = options.mode === 'off' ? 50000 : options.exactScanLimit;
+    const exactCandidates = (descriptor, fallback = false) => {
+      const limit = fallback ? Math.min(50000, options.threshold, options.exactScanLimit)
+        : options.mode === 'off' ? 50000 : options.exactScanLimit;
       if (exactScannedChunks + descriptor.count > limit) { degradedReason ??= 'RETRIEVAL_VECTOR_SCAN_LIMIT'; return; }
       exactScannedChunks += descriptor.count;
       // The graph domain is an exact prefilter, including a separate legacy unknown-domain shard.
@@ -142,7 +160,9 @@ export class RetrievalVectorSearch {
       } catch (error) {
         if (error.name === 'AbortError') throw error;
         degradedReason ??= error.code ?? 'RETRIEVAL_ANN_FAILED';
-        exactCandidates(descriptor);
+        // A pending large graph cannot be replaced by an equally expensive full foreground scan.
+        // 大图未就绪时不能改为同样昂贵的前台全扫描；保留词法通道和真实准备状态。
+        if (descriptor.count <= options.threshold || error.code !== 'RETRIEVAL_ANN_BUILD_PENDING') exactCandidates(descriptor, true);
       }
     }
     checkCancelled();

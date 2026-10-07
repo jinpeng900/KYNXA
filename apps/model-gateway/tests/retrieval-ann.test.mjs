@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { RetrievalIndex, chunkSource } from '../data/retrieval/index.mjs';
-import { validateAnnOptions } from '../data/retrieval/ann-store.mjs';
+import { LocalAnnStore, validateAnnOptions } from '../data/retrieval/ann-store.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-ann-'));
@@ -119,6 +121,98 @@ test('bounded graph cache evicts owned native shards while unauthorized data nev
   assert.equal((await index.status()).ann.cachedVectors, 1);
   assert.deepEqual((await search(index, { ann: { mode: 'ann', maxCachedShards: 1 } })).items.map(item => item.sourceId), ['one']);
   assert.ok((await index.status()).ann.loaded >= 1);
+});
+
+test('ordinary cache replacement reaps its actual native process across repeated project switches', async t => {
+  const { index } = await fixture(t, { ann: { maxCachedShards: 1 } });
+  await index.upsertSources([source('one', [1, 0]), source('two', [0, 1], { scopeKey: 'project:two' })]);
+  let previousPid;
+  for (const scope of ['project:one', 'project:two', 'project:one', 'project:two']) {
+    const result = await search(index, { scopeKeys: [scope], ann: { mode: 'ann', maxCachedShards: 1 } });
+    assert.ok(result.items.every(item => item.scopeKey === scope));
+    const status = (await index.status()).ann;
+    assert.equal(status.cachedShards, 1);
+    if (previousPid) {
+      assert.notEqual(status.helperPid, previousPid);
+      assert.throws(() => process.kill(previousPid, 0), { code: 'ESRCH' });
+    }
+    previousPid = status.helperPid;
+  }
+  assert.equal((await index.status()).ann.recycled, 3);
+});
+
+test('cold graph building returns pending immediately and observes generation changes before publication', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-ann-background-'));
+  const database = new DatabaseSync(':memory:');
+  database.exec(`CREATE TABLE scope_snapshots(scope_key TEXT,generation INTEGER);
+    INSERT INTO scope_snapshots VALUES('project:one',1);
+    CREATE TABLE sources(source_id TEXT,scope_key TEXT,structure_json TEXT,source_type TEXT);
+    INSERT INTO sources VALUES('cold','project:one','','code');
+    CREATE TABLE chunks(id INTEGER,source_id TEXT,vector BLOB,embedding_profile_id TEXT,dimensions INTEGER,
+      embedding_model_version TEXT,embedding_space_id TEXT,structure_domain TEXT);`);
+  const insert = database.prepare('INSERT INTO chunks VALUES(?,?,?,?,?,?,?,?)');
+  for (let id = 1; id <= 1280; id++) insert.run(id, 'cold', new Uint8Array(new Float32Array([1, 0]).buffer),
+    'fixture', 2, 'v1', 'a'.repeat(64), 'code');
+  const ann = new LocalAnnStore({ database, directory: root, epoch: 'fixture' });
+  t.after(async () => { await ann.close(); database.close();
+    const suffix = relative(resolve(tmpdir()), resolve(root));
+    assert.ok(suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`));
+    await rm(root, { recursive: true, force: true });
+  });
+  const descriptor = { scope_key: 'project:one', embedding_profile_id: 'fixture', dimensions: 2,
+    embedding_model_version: 'v1', embedding_space_id: 'a'.repeat(64), domain: 'code', count: 1280, generation: 1 };
+  const options = validateAnnOptions({ threshold: 1024, mode: 'ann' });
+  let releaseBatch, firstBatchStarted;
+  const batchStarted = new Promise(resolveBatch => { firstBatchStarted = resolveBatch; });
+  const batchGate = new Promise(resolveBatch => { releaseBatch = resolveBatch; });
+  const originalRequest = ann._request.bind(ann);
+  ann._request = async (method, input) => {
+    if (method === 'add') { firstBatchStarted(); await batchGate; }
+    return originalRequest(method, input);
+  };
+  await assert.rejects(ann.search(descriptor, [1, 0], 4, options, () => {}), { code: 'RETRIEVAL_ANN_BUILD_PENDING' });
+  assert.equal(ann.status().pendingBuilds, 1);
+  await batchStarted;
+  // The SQLite owner is usable while a native batch is paused; stale work cannot publish afterward.
+  // 原生批次暂停期间 SQLite 所有者仍可用，随后过期的建图作业不能发布。
+  assert.equal(database.prepare('SELECT count(*) AS count FROM chunks').get().count, 1280);
+  database.exec('UPDATE scope_snapshots SET generation=2');
+  ann.builds.cancelScopes(['project:one']);
+  releaseBatch();
+  await ann.builds.drain();
+  assert.equal(ann.status().cachedShards, 0);
+  assert.equal(ann.status().helperPid, null);
+  const updated = { ...descriptor, generation: 2 };
+  ann.warm(updated, options);
+  const deadline = performance.now() + 5000;
+  while (ann.status().pendingBuilds && performance.now() < deadline) await delay(10);
+  assert.equal(ann.status().pendingBuilds, 0);
+  assert.equal(ann.status().failedBuilds, 0);
+  assert.equal(ann.status().cachedVectors, 1280);
+  assert.equal((await ann.search(updated, [1, 0], 4, options, () => {})).length, 4);
+});
+
+test('automatic prebuild preserves foreground lexical evidence and becomes queryable after a bounded job', async t => {
+  const { index } = await fixture(t, { ann: { threshold: 1024 } });
+  const document = source('cold-auto', null);
+  document.text = 'export const lexicalEvidence = true;\n'.repeat(3500);
+  document.chunks = chunkSource(document, { maxChars: 80 });
+  document.vectors = document.chunks.map(() => [1, 0]);
+  await index.upsertSources([document]);
+  const disabled = await index.prepareVectors({ scopeKeys: ['project:one'], ann: { mode: 'off' } });
+  assert.equal(disabled.pendingBuilds, 0);
+  const prepared = await index.prepareVectors({ scopeKeys: ['project:one'] });
+  assert.equal(prepared.pendingBuilds, 1);
+  const first = await search(index, { query: 'lexicalEvidence', ann: { mode: 'auto' } });
+  assert.ok(first.items.length > 0);
+  if (first.semanticBackend === null) assert.equal(first.degradedReason, 'RETRIEVAL_ANN_BUILD_PENDING');
+  const deadline = performance.now() + 5000;
+  let status;
+  do { status = (await index.status()).ann; if (status.pendingBuilds) await delay(10); }
+  while (status.pendingBuilds && performance.now() < deadline);
+  assert.equal(status.pendingBuilds, 0);
+  assert.equal(status.failedBuilds, 0);
+  assert.equal((await search(index, { ann: { mode: 'auto' } })).semanticBackend, 'ann');
 });
 
 test('ANN resource failures preserve lexical results and return truthful degradation without executing native builds', async t => {

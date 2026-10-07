@@ -80,3 +80,9 @@ Selected `chunkPrecision` uses document-level public qrels: a chunk from a relev
 Warm latency uses one query at a time after model/index warmup, including fresh query embedding for the end-to-end hybrid entry. It excludes web and answer generation. Five synthetic no-gold identifiers test whether retrieval returns unrelated neighbours; no answers are generated, so this cannot be called a hallucination rate. All fixtures are public or synthetic; results do not prove Chinese/code/memory answer quality.
 
 热态耗时在模型与索引预热后逐条测量，混合完整检索包含重新计算查询向量，排除联网和回答生成。五条无答案标识仅诊断是否仍返回无关邻居，不能称为幻觉率。数据均为公开或合成，不能据此证明中文、代码或长期记忆回答质量。
+
+## 可复用的冻结评测合同
+
+`metrics.mjs` 的 `createRetrievalEvaluationDataset` 固定数据集 ID、版本、development/heldout 标签、语料/查询/金标 SHA-256 和配对身份。金标可以包含多来源与多段真实字面证据；证据必须存在于原文。先保存数据集快照，再运行检索，报告附快照路径与独立校验哈希。标签为 heldout 并不证明数据从未用于调参，必须另外管理留出流程。
+
+`retrievalEvaluationReport` 同时记录 sourceRecall、evidenceRecall、evidenceHit、allEvidence、负例空结果、失败/跳过/诊断，以及包含失败尝试的延迟。失败计入计划分母，缺失或跳过使完整得分保持未知，不能仅报成功子集。无答案空结果只验证检索行为，不测生成拒答或幻觉。开发对照仍是开发回归，不与 BEIR、真实 Agent 或竞品成绩混称。

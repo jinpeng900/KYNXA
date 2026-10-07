@@ -74,6 +74,33 @@ export class SourceIndexer {
 
   preparationVersion() { return preparationVersion(this.structures) ?? null; }
 
+  async embedBoundedDocuments(texts, options, recordDiagnostic) {
+    const positions = texts.map((_, index) => index), rejectedPositions = new Set();
+    for (let attempt = 0; attempt <= texts.length; attempt++) {
+      options.signal?.throwIfAborted();
+      if (!positions.length) return { vectors: texts.map(() => null), rejectedPositions };
+      try {
+        const receipt = await this.embeddings.embedDocuments(positions.map(index => texts[index]), options);
+        if (!Array.isArray(receipt.vectors) || receipt.vectors.length !== positions.length)
+          throw toolFailure('嵌入批次长度不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
+        const vectors = texts.map(() => null);
+        receipt.vectors.forEach((vector, index) => { vectors[positions[index]] = vector; });
+        return { ...receipt, vectors, rejectedPositions };
+      } catch (error) {
+        const index = error.details?.index;
+        if (error.code !== 'EMBEDDING_INPUT_TOO_LONG' || !Number.isSafeInteger(index) || index < 0 || index >= positions.length)
+          throw error;
+        // Real tokenizer rejection affects only its own block, never every otherwise valid block in the batch.
+        // 真实分词器的超限拒绝只影响对应块，不能连带丢弃同批其他合法块，也不截断原文或伪造向量。
+        rejectedPositions.add(positions[index]);
+        positions.splice(index, 1);
+        this.lastEmbeddingError = error.code;
+        recordDiagnostic(error.code);
+      }
+    }
+    throw toolFailure('嵌入输入筛选未正常结束。', 'EMBEDDING_PROFILE_MISMATCH', 409);
+  }
+
   async restore(sources, settings, records, signal) {
     const scopes = [...new Set(sources.map(source => source.scopeKey))];
     if (!scopes.length || !records.length) return;
@@ -251,13 +278,15 @@ export class SourceIndexer {
             signal?.throwIfAborted();
             const slice = chunks.slice(chunkOffset, chunkOffset + MAX_EMBEDDING_BATCH_CHUNKS);
             try {
-              const embedded = await this.embeddings.embedDocuments(slice.map(item => embeddingTextForChunk(source, item)), { signal, profileId });
+              const embedded = await this.embedBoundedDocuments(slice.map(item => embeddingTextForChunk(source, item)),
+                { signal, profileId }, recordDiagnostic);
               signal?.throwIfAborted();
               if (!compatibleEmbeddingContract({ ...status, profileId }, embedded) ||
                   firstEmbeddingReceipt && !compatibleEmbeddingContract(firstEmbeddingReceipt, embedded) ||
                   !Array.isArray(embedded.vectors) || embedded.vectors.length !== slice.length)
                 throw toolFailure('嵌入结果与所选模型或批次不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
-              for (const vector of embedded.vectors) {
+              for (const [index, vector] of embedded.vectors.entries()) {
+                if (vector === null && embedded.rejectedPositions.has(index)) continue;
                 const expectedDimensions = status.dimensions ?? embedded.dimensions ?? vectorDimensions;
                 if (!(Array.isArray(vector) || vector instanceof Float32Array) || !vector.length ||
                     expectedDimensions !== undefined && vector.length !== expectedDimensions ||

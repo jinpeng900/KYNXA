@@ -3,7 +3,8 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
-import { evidenceMetrics, latencySummary, meanMetrics, retrievalMetrics, verifyMetricExamples } from './metrics.mjs';
+import { createRetrievalEvaluationDataset, evidenceMetrics, latencySummary, meanMetrics, retrievalEvaluationReport,
+  retrievalMetrics, verifyMetricExamples } from './metrics.mjs';
 import { BenchmarkVectorCache } from './vector-cache.mjs';
 
 test('Independent manual metric examples include graded qrels and duplicate documents', () => {
@@ -25,6 +26,87 @@ test('Evidence metrics keep the actual chunk budget instead of replacing duplica
     relevantChunks: 2, chunkPrecision: 2 / 3 });
   assert.deepEqual(evidenceMetrics([], grades), { recall: 0, hit: 0, selectedChunks: 0,
     uniqueDocuments: 0, repeatedDocumentSlots: 0, relevantChunks: 0, chunkPrecision: 0 });
+});
+
+const evaluationSources = [{ sourceId: 'a', text: 'Alpha first evidence. Alpha second evidence.' },
+  { sourceId: 'b', text: 'Beta independent evidence.' }];
+const evaluationQuery = { queryId: 'joined', query: 'Combine Alpha and Beta.', gold: [
+  { sourceId: 'a', evidence: ['Alpha first evidence.', 'Alpha second evidence.'] },
+  { sourceId: 'b', evidence: ['Beta independent evidence.'] }] };
+const evaluationDataset = (extra = {}) => createRetrievalEvaluationDataset({ datasetId: 'paired-synthetic',
+  datasetVersion: 'v1', partition: 'development', sources: evaluationSources, queries: [evaluationQuery], ...extra });
+
+test('frozen evaluation identities track original source, query, gold, version and development partition', () => {
+  const identity = evaluationDataset().identity;
+  assert.equal(identity.partition, 'development');
+  assert.equal(identity.corpusSha256, evaluationDataset({ sources: [...evaluationSources].reverse() }).identity.corpusSha256);
+  for (const change of [{ datasetVersion: 'v2' }, { partition: 'heldout' },
+    { sources: [{ ...evaluationSources[0], text: evaluationSources[0].text + ' Changed.' }, evaluationSources[1]] },
+    { queries: [{ ...evaluationQuery, query: 'A different question.' }] },
+    { queries: [{ ...evaluationQuery, gold: [evaluationQuery.gold[1]] }] }])
+    assert.notEqual(identity.pairingId, evaluationDataset(change).identity.pairingId);
+  assert.throws(() => { evaluationDataset().queries[0].gold[0].evidence.push('invented'); }, TypeError);
+  assert.throws(() => evaluationDataset({ queries: [evaluationQuery, evaluationQuery] }));
+  assert.throws(() => evaluationDataset({ queries: [{ ...evaluationQuery, gold: [{ sourceId: 'a', evidence: ['invented'] }] }] }));
+  assert.throws(() => evaluationDataset({ queries: [{ queryId: 'missing', query: 'No answer', gold: [] }] }));
+  const indentedEvidence = '  public int Read() => 1;';
+  const indented = evaluationDataset({ sources: [{ sourceId: 'snippet', text: indentedEvidence + '\r\n' }],
+    queries: [{ queryId: 'snippet', query: ' Find Read. ', gold: [{ sourceId: 'snippet', evidence: [indentedEvidence] }] }] });
+  assert.equal(indented.queries[0].gold[0].evidence[0], indentedEvidence);
+});
+
+test('paired reports distinguish multiple source and evidence coverage from negative results and diagnostics', () => {
+  const dataset = evaluationDataset({ queries: [evaluationQuery,
+    { queryId: 'absent', query: 'Unavailable synthetic project?', gold: [], noAnswer: true },
+    { ...evaluationQuery, queryId: 'diagnostic', diagnosticOnly: true }] });
+  const report = retrievalEvaluationReport(dataset, { baseline: [
+    { queryId: 'joined', status: 'completed', durationMs: 2, items: [
+      { sourceId: 'a', excerpt: evaluationSources[0].text }, { sourceId: 'a', excerpt: evaluationSources[0].text }] },
+    { queryId: 'absent', status: 'completed', durationMs: 3, items: [{ sourceId: 'a', excerpt: 'Unrelated Alpha content.' }] },
+    { queryId: 'diagnostic', status: 'failed', durationMs: 13, diagnosticCodes: ['SYNTHETIC_FAILURE'] }], structured: [
+    { queryId: 'joined', status: 'completed', durationMs: 1, items: evaluationSources.map(source => ({ sourceId: source.sourceId, excerpt: source.text })) },
+    { queryId: 'absent', status: 'completed', durationMs: 4, items: [] }] });
+  assert.equal(report.dataset.partition, 'development');
+  assert.equal(report.methods.baseline.metrics.sourceRecallAt5.value, .5);
+  assert.equal(report.methods.baseline.metrics.evidenceRecallAt5.value, 2 / 3);
+  assert.equal(report.methods.baseline.metrics.evidenceHitAt5.value, 1);
+  assert.equal(report.methods.baseline.metrics.allEvidenceAt5.value, 0);
+  assert.equal(report.methods.structured.metrics.allEvidenceAt5.value, 1);
+  assert.equal(report.methods.baseline.noAnswerEmptyResult.value, 0);
+  assert.equal(report.methods.structured.noAnswerEmptyResult.value, 1);
+  assert.equal(report.methods.baseline.counts.failed, 1);
+  assert.equal(report.methods.baseline.latency.allAttempts.maximumMs, 13);
+  assert.equal(report.methods.baseline.latency.completed.maximumMs, 3);
+  assert.equal(report.methods.structured.counts.skipped, 1);
+  assert.deepEqual(report.methods.structured.rows[2].diagnosticCodes, ['EVALUATION_NOT_RUN']);
+  assert.equal(report.methods.baseline.rows[0].pairId, report.methods.structured.rows[0].pairId);
+});
+
+test('failed attempts retain metric denominators while skipped queries leave complete results unknown', () => {
+  const dataset = evaluationDataset({ queries: ['complete', 'failed', 'skipped'].map(queryId => ({ ...evaluationQuery, queryId })) });
+  const completed = { queryId: 'complete', status: 'completed', durationMs: 2, items: [{ sourceId: 'a', excerpt: evaluationSources[0].text }] };
+  const failed = { queryId: 'failed', status: 'failed', durationMs: 5, diagnosticCodes: ['SEARCH_FAILED'] };
+  const partial = retrievalEvaluationReport(dataset, { measured: [completed, failed] }).methods.measured;
+  assert.deepEqual(partial.counts, { planned: 3, attempted: 2, completed: 1, failed: 1, skipped: 1,
+    answerable: 3, noAnswer: 0, diagnosticOnly: 0 });
+  assert.equal(partial.metrics.evidenceHitAt5.value, null);
+  assert.equal(partial.metrics.evidenceHitAt5.completedOnlyValue, 1);
+  assert.equal(partial.metrics.evidenceHitAt5.denominator, 3);
+  assert.equal(partial.metrics.evidenceHitAt5.unresolved, 1);
+  const failedOnly = retrievalEvaluationReport(dataset, { measured: [completed, failed,
+    { ...failed, queryId: 'skipped' }] }).methods.measured;
+  assert.equal(failedOnly.metrics.evidenceHitAt5.value, 1 / 3);
+  assert.throws(() => retrievalEvaluationReport(dataset, { measured: [completed, completed] }));
+  assert.throws(() => retrievalEvaluationReport(dataset, { measured: [{ ...failed, diagnosticCodes: [] }] }));
+  assert.throws(() => retrievalEvaluationReport(dataset, { measured: [{ ...completed, durationMs: NaN }] }));
+});
+
+test('a source hit without the independent literal evidence cannot pass evidence checks', () => {
+  const report = retrievalEvaluationReport(evaluationDataset(), { measured: [{ queryId: 'joined', status: 'completed',
+    durationMs: 1, items: evaluationSources.map(source => ({ sourceId: source.sourceId, excerpt: 'Other content.' })) }] });
+  assert.equal(report.methods.measured.metrics.sourceRecallAt5.value, 1);
+  assert.equal(report.methods.measured.metrics.evidenceHitAt5.value, 0);
+  assert.equal(report.methods.measured.rows[0].relevantEvidenceRank, null);
 });
 
 test('Vector cache rejects changed input/version/model and corrupted binary receipts', async () => {
