@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export const RETRIEVAL_SCHEMA_VERSION = 1;
-export const RETRIEVAL_INDEX_SCHEMA_VERSION = 3;
+export const RETRIEVAL_INDEX_SCHEMA_VERSION = 5;
 export const MAX_SOURCE_CHARACTERS = 2 * 1024 * 1024;
 export const MAX_QUERY_CHARACTERS = 4000;
 
@@ -17,6 +17,84 @@ export function retrievalRecord(value, label = 'Retrieval value') {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw retrievalFailure(`${label} must be an object. / 检索配置必须是对象。`);
   return value;
+}
+
+/** Extraction identity refers to original bytes; page ranges address the stored, real extracted text.
+ * 提取身份绑定原始文件字节；页范围指向保存的实际抽取正文，不生成伪装成原文的页说明。 */
+export function validateSourceExtraction(value, textLength) {
+  retrievalRecord(value, 'Source extraction');
+  requireKeys(value, ['format', 'version', 'rawContentHash', 'pageCount', 'pages'], 'Source extraction');
+  if (!['pdf', 'docx'].includes(value.format) || typeof value.version !== 'string' || !value.version ||
+      value.version.length > 256 || /[\x00-\x1f]/u.test(value.version) ||
+      typeof value.rawContentHash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.rawContentHash))
+    throw retrievalFailure('Invalid document extraction identity. / 文档提取身份无效。', 'INVALID_RETRIEVAL_EXTRACTION');
+  const result = { format: value.format, version: value.version, rawContentHash: value.rawContentHash };
+  if (value.format === 'docx') {
+    if (value.pageCount !== undefined || value.pages !== undefined)
+      throw retrievalFailure('DOCX text extraction cannot claim rendered page positions. / DOCX 文本提取不能声称已得到渲染页码。', 'INVALID_RETRIEVAL_EXTRACTION');
+    return result;
+  }
+  if (!Number.isSafeInteger(value.pageCount) || value.pageCount < 1 || value.pageCount > 100 ||
+      !Array.isArray(value.pages) || value.pages.length !== value.pageCount)
+    throw retrievalFailure('Invalid PDF page ranges. / PDF 页范围无效。', 'INVALID_RETRIEVAL_EXTRACTION');
+  let previousEnd = 0;
+  const pages = value.pages.map((page, index) => {
+    requireKeys(page, ['page', 'startOffset', 'endOffset'], 'PDF page range');
+    if (page.page !== index + 1 || !Number.isSafeInteger(page.startOffset) || !Number.isSafeInteger(page.endOffset) ||
+        page.startOffset < previousEnd || page.endOffset < page.startOffset || page.endOffset > MAX_SOURCE_CHARACTERS ||
+        textLength !== undefined && page.endOffset > textLength)
+      throw retrievalFailure('PDF page range differs from extracted text. / PDF 页范围与提取正文不匹配。', 'INVALID_RETRIEVAL_EXTRACTION');
+    previousEnd = page.endOffset;
+    return { page: page.page, startOffset: page.startOffset, endOffset: page.endOffset };
+  });
+  return { ...result, pageCount: value.pageCount, pages };
+}
+
+export function sourceFileRevision(file) {
+  if (file.fileWindow) {
+    const window = validateSourceFileWindow(file.fileWindow);
+    return hashText(JSON.stringify([window.rawContentHash, window.startOffset, window.endOffset, window.contentHash]));
+  }
+  if (file.extraction === undefined) return file.contentHash;
+  const extraction = validateSourceExtraction(file.extraction);
+  return hashText(JSON.stringify([file.contentHash, extraction.version, extraction.rawContentHash, extraction.pages ?? null]));
+}
+
+export function validateSourceFileWindow(value, textLength) {
+  retrievalRecord(value, 'Source file window');
+  requireKeys(value, ['version', 'encoding', 'offsetUnit', 'startOffset', 'endOffset', 'startLine', 'endLine',
+    'startByte', 'endByte', 'contentHash', 'textBytes', 'rawContentHash', 'textContentHash', 'totalCharacters', 'metadata'], 'source file window');
+  if (value.version !== 'text-file-window-v1' || !['utf-8', 'utf-16le'].includes(value.encoding) || value.offsetUnit !== 'utf16-code-units' ||
+      ['contentHash', 'rawContentHash', 'textContentHash'].some(key => !/^[a-f0-9]{64}$/u.test(value[key] ?? '')) ||
+      ['startOffset', 'endOffset', 'startByte', 'endByte', 'startLine', 'endLine', 'textBytes', 'totalCharacters']
+        .some(key => !Number.isSafeInteger(value[key]) || value[key] < 0) || value.endOffset <= value.startOffset ||
+      value.endByte <= value.startByte || value.endOffset - value.startOffset > 128 * 1024 || value.endByte - value.startByte > 512 * 1024 ||
+      value.textBytes > 512 * 1024 || value.startLine < 1 || value.endLine < value.startLine ||
+      value.endOffset > value.totalCharacters || textLength !== undefined && textLength !== value.endOffset - value.startOffset ||
+      !value.metadata || ['sizeBytes', 'mtimeMs', 'ctimeMs', 'device', 'inode'].some(key => !Number.isFinite(value.metadata[key])) ||
+      !Number.isSafeInteger(value.metadata.sizeBytes) || ['sizeBytes', 'device', 'inode'].some(key => value.metadata[key] < 0) ||
+      value.endByte > value.metadata.sizeBytes)
+    throw retrievalFailure('Invalid source file window. / 来源文件窗口无效。', 'INVALID_RETRIEVAL_WINDOW');
+  return structuredClone(value);
+}
+
+/** Model evidence carries only the relevant document pages, not the complete internal extraction manifest.
+ * 模型证据只携带命中片段的文档页码，不反复发送完整内部提取清单。 */
+export function sourceEvidenceLocator(locator, { startOffset, endOffset } = {}) {
+  if (locator.fileWindow) {
+    const window = validateSourceFileWindow(locator.fileWindow), { fileWindow, ...result } = locator;
+    return { ...result, fileWindow: window, offsetBasis: 'source-window',
+      ...(Number.isSafeInteger(startOffset) ? { originalStartOffset: window.startOffset + startOffset } : {}),
+      ...(Number.isSafeInteger(endOffset) ? { originalEndOffset: window.startOffset + endOffset } : {}) };
+  }
+  if (locator.extraction === undefined) return locator;
+  const { extraction: original, ...result } = locator, extraction = validateSourceExtraction(original);
+  if (extraction.format === 'pdf' && Number.isSafeInteger(startOffset) && Number.isSafeInteger(endOffset)) {
+    const pages = extraction.pages.filter(page => page.startOffset < endOffset && page.endOffset > startOffset);
+    if (pages.length) { result.startPage = pages[0].page; result.endPage = pages.at(-1).page; }
+  }
+  return { ...result, documentFormat: extraction.format,
+    ...(extraction.pageCount === undefined ? {} : { pageCount: extraction.pageCount }) };
 }
 
 export function requireKeys(value, allowed, label) {

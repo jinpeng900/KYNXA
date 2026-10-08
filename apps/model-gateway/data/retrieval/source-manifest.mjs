@@ -4,11 +4,35 @@ import { open } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { atomicJson } from '../../platform/atomic-json.mjs';
 import { ensureLocalDirectory, inspectLocalPath, toolFailure } from '../../platform/tool-paths.mjs';
+import { validateSourceExtraction, validateSourceFileWindow } from './retrieval-contracts.mjs';
 
 const SCHEMA_VERSION = 1;
 const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
 const MAX_MANIFEST_FILES = 100000;
 const META_FIELDS = ['sizeBytes', 'mtimeMs', 'ctimeMs', 'device', 'inode'];
+
+function validateWindows(file) {
+  if (file.windows === undefined) return undefined;
+  if (!Array.isArray(file.windows) || !file.windows.length || file.windows.length > 4096)
+    throw toolFailure('索引窗口清单损坏，原记录已保留。', 'INVALID_RETRIEVAL_MANIFEST', 409);
+  const windows = file.windows.map(window => validateSourceFileWindow(window));
+  let offset = 0, byte = windows[0].startByte, textBytes = 0, line = 1;
+  if (!(['utf-8'].includes(windows[0].encoding) ? [0, 3] : [2]).includes(byte))
+    throw toolFailure('索引窗口起点无效。', 'INVALID_RETRIEVAL_MANIFEST', 409);
+  for (const window of windows) {
+    // Window descriptors cover exactly one version of the original file, without gaps or reordered offsets.
+    // 窗口描述必须连续覆盖同一原文件版本，不能复用有缺口、乱序或不同版本的偏移。
+    if (window.startOffset !== offset || window.startByte !== byte || window.startLine !== line ||
+        window.textContentHash !== file.contentHash || window.encoding !== windows[0].encoding ||
+        window.rawContentHash !== windows[0].rawContentHash || window.totalCharacters !== windows[0].totalCharacters ||
+        META_FIELDS.some(field => window.metadata[field] !== file.metadata[field]))
+      throw toolFailure('索引窗口版本或偏移无效。', 'INVALID_RETRIEVAL_MANIFEST', 409);
+    offset = window.endOffset; byte = window.endByte; line = window.endLine; textBytes += window.textBytes;
+  }
+  if (offset !== windows[0].totalCharacters || byte !== file.metadata.sizeBytes || textBytes !== file.textBytes)
+    throw toolFailure('索引窗口未完整覆盖原文件。', 'INVALID_RETRIEVAL_MANIFEST', 409);
+  return windows;
+}
 
 function validateBinding(binding) {
   if (!binding || typeof binding.projectId !== 'string' || !binding.projectId || binding.projectId.length > 256 ||
@@ -27,12 +51,15 @@ function validateFiles(files) {
         isAbsolute(file.relativePath) || /[\x00-\x1f]/u.test(file.relativePath) ||
         file.relativePath.split(/[\\/]/u).some(part => ['.', '..', ''].includes(part)) || names.has(file.relativePath) ||
         typeof file.contentHash !== 'string' || !/^[a-f0-9]{64}$/u.test(file.contentHash) ||
-        !Number.isSafeInteger(file.textBytes) || file.textBytes < 0 || file.textBytes > 8 * 1024 * 1024 ||
+        !Number.isSafeInteger(file.textBytes) || file.textBytes < 0 || file.textBytes > 1024 * 1024 * 1024 ||
         !file.metadata || META_FIELDS.some(field => !Number.isFinite(file.metadata[field])) ||
         ['sizeBytes', 'device', 'inode'].some(field => file.metadata[field] < 0))
       throw toolFailure('索引文件清单损坏，原记录已保留。', 'INVALID_RETRIEVAL_MANIFEST', 409);
     names.add(file.relativePath);
+    const windows = validateWindows(file);
     return { relativePath: file.relativePath, contentHash: file.contentHash, textBytes: file.textBytes,
+      ...(file.extraction === undefined ? {} : { extraction: validateSourceExtraction(file.extraction) }),
+      ...(windows === undefined ? {} : { windows }),
       metadata: Object.fromEntries(META_FIELDS.map(field => [field, file.metadata[field]])) };
   });
 }
@@ -76,6 +103,10 @@ export class SourceManifestStore {
       signal?.throwIfAborted();
       const document = { schemaVersion: SCHEMA_VERSION, binding: validateBinding(binding), files: validateFiles(files),
         scannedAt: new Date().toISOString() };
+      // New extraction metadata must not produce a manifest that the same bounded reader cannot reopen.
+      // 新增提取元信息不能写出本读取器下次无法打开的清单；超限保留此前有效文件。
+      if (Buffer.byteLength(`${JSON.stringify(document, null, 2)}\n`) > MAX_MANIFEST_BYTES)
+        throw toolFailure('索引清单超过存储预算，原清单已保留。', 'INVALID_RETRIEVAL_MANIFEST', 413);
       await ensureLocalDirectory(this.folder);
       const path = this.pathFor(document.binding);
       await inspectLocalPath(path, { allowMissing: true });

@@ -83,10 +83,10 @@ export class AssistantSegments {
     this.emit({ ...event, segmentId: segment.id });
   }
 
-  finish(turn) {
+  finish(turn, { final = !turn.calls.length } = {}) {
     this.stopThinking();
     Object.assign(this.current, { content: turn.content, reasoning: turn.reasoning,
-      phase: turn.calls.length ? 'commentary' : 'final_answer', status: 'completed' });
+      phase: final ? 'final_answer' : 'commentary', status: 'completed' });
     this.publish();
   }
 

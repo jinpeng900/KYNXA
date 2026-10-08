@@ -2,19 +2,37 @@ import { openNativeInferencePort } from './native-inference-port.mjs';
 import { BUILTIN_EMBEDDING_PROFILE } from './embedding-profile.mjs';
 import { verifyEmbeddingBundle } from './embedding-assets.mjs';
 import { resolveRetrievalModelProfile } from './model-registry.mjs';
+import { fitEmbeddingDocuments } from './embedding-document-fit.mjs';
+import { executeInferenceBatches, isInferenceMemoryPressure, loadAuditedGpuInferenceBackend, loadVerifiedInferenceBackend } from './inference-backend.mjs';
+import { InferenceAdmission } from './inference-admission.mjs';
 
 const { parentPort, workerData } = await openNativeInferencePort();
 const profile = resolveRetrievalModelProfile('embedding', workerData.profileId ?? BUILTIN_EMBEDDING_PROFILE.id);
 
-const BATCH_SIZE = 4;
 const cancelledRequests = new Set();
 const activeRequestIds = new Set();
+const admission = new InferenceAdmission(workerData.requestLimits);
 let extractor;
 let loadPromise;
+let tokenizer;
+let tokenizerPromise;
 let queue = Promise.resolve();
 let closing = false;
 let shutdownPromise;
 let latestRequestId = 0;
+let activeBudget = { device: 'cpu', cpuThreads: workerData.cpuThreads ?? 1, batchSize: 1, batchTokenBudget: 512 };
+let loadedBudget;
+let lastMeasurementAt = 0;
+const processBaselineBytes = process.memoryUsage().rss;
+let workloadPeakBytes = 0;
+
+function memoryMeasurement(backend) {
+  // This process owns one inference workload; the delta includes its native runtime and tokenizer.
+  // 此进程只拥有一项推理工作负载；增量包含原生运行时与 tokenizer，不冒充精确权重内存。
+  workloadPeakBytes = Math.max(workloadPeakBytes, Math.max(0, process.memoryUsage().rss - processBaselineBytes));
+  return { backend, processId: process.pid, workloadMemoryDeltaBytes: workloadPeakBytes,
+    memoryMeasurementSource: 'isolated-native-process-delta' };
+}
 
 const isCancelled = id => closing || cancelledRequests.has(id);
 const yieldToMessages = () => new Promise(resolve => setImmediate(resolve));
@@ -34,6 +52,8 @@ function shutdown() {
     await extractor?.dispose();
     extractor = undefined;
     loadPromise = undefined;
+    tokenizer = undefined;
+    tokenizerPromise = undefined;
     parentPort.postMessage({ type: 'closed', disposed: true });
     parentPort.off('message', receiveMessage);
     parentPort.close();
@@ -45,41 +65,102 @@ function shutdown() {
   return shutdownPromise;
 }
 
-async function loadExtractor(id) {
+async function loadTokenizer(id) {
   checkCancelled(id);
   phase('verifying-assets');
   await verifyEmbeddingBundle(workerData.modelRoot, { profile, checkCancelled: () => checkCancelled(id) });
   checkCancelled(id);
   phase('loading-runtime');
-  const { env, pipeline } = await import('@huggingface/transformers');
+  const { env, AutoTokenizer } = await import('@huggingface/transformers');
   checkCancelled(id);
   env.allowRemoteModels = false;
   env.allowLocalModels = true;
   env.useFSCache = false;
   env.useBrowserCache = false;
   env.useCustomCache = false;
-  // Native CPU inference needs no CDN/WASM, remote model, or writable model cache.
-  // 原生 CPU 推理不需要 CDN/WASM、远端模型或可写模型缓存；所有 fetch 都明确拒绝。
+  // Native inference needs no CDN/WASM, remote model, or writable model cache.
+  // 原生推理不需要 CDN/WASM、远端模型或可写模型缓存；所有 fetch 都明确拒绝。
   globalThis.fetch = async () => { throw Object.assign(new Error('Embedding runtime networking is disabled.'), { code: 'EMBEDDING_NETWORK_DISABLED' }); };
+  phase('loading-tokenizer');
+  const activeTokenizer = await AutoTokenizer.from_pretrained(workerData.modelRoot, { local_files_only: true });
+  checkCancelled(id);
+  tokenizer = activeTokenizer;
+  if (!closing) parentPort.postMessage({ type: 'tokenizer-ready' });
+  return tokenizer;
+}
+
+function reportLoadFailure(error) {
+  if (closing || error.code === 'EMBEDDING_CANCELLED') return;
+  const code = error.code === 'ENOENT' ? 'EMBEDDING_ASSET_MISSING' : error.code ?? 'EMBEDDING_RUNTIME_UNAVAILABLE';
+  parentPort.postMessage({ type: 'fatal', code, message: 'The bundled local embedding model could not be loaded.' });
+  shutdown();
+}
+
+async function getTokenizer(id) {
+  checkCancelled(id);
+  return tokenizer ?? await (tokenizerPromise ??= loadTokenizer(id).catch(error => {
+    tokenizerPromise = undefined;
+    reportLoadFailure(error);
+    throw error;
+  }));
+}
+
+async function loadExtractor(id) {
+  const activeTokenizer = await getTokenizer(id);
+  checkCancelled(id);
+  const { AutoModel, FeatureExtractionPipeline } = await import('@huggingface/transformers');
+  checkCancelled(id);
   phase('loading-model');
-  extractor = await pipeline('feature-extraction', workerData.modelRoot, {
-    local_files_only: true,
-    device: 'cpu',
-    dtype: profile.dtype,
-    session_options: { intraOpNumThreads: workerData.cpuThreads, interOpNumThreads: 1 },
+  const backendLoader = profile.requiredDevice ? loadAuditedGpuInferenceBackend : loadVerifiedInferenceBackend;
+  const { model, status } = await backendLoader({ ...activeBudget, dtype: profile.dtype, dimensions: profile.dimensions }, {
+    load: options => AutoModel.from_pretrained(workerData.modelRoot, { local_files_only: true, ...options }),
+    probe: async candidate => {
+      const pipeline = new FeatureExtractionPipeline({ task: 'feature-extraction', model: candidate, tokenizer: activeTokenizer });
+      const texts = profile.requiredDevice ? [
+        `${profile.queryPrefix}How do I reset an account password?`,
+        `${profile.queryPrefix}如何重置账户密码？`,
+        `${profile.documentPrefix}function resolveEvidence(sourceId) { return sources.get(sourceId); }`,
+      ] : [`${profile.queryPrefix}local inference compatibility probe`];
+      const output = await pipeline(texts, { pooling: 'mean', normalize: true });
+      try { return output.tolist().flat(); } finally { output.dispose(); }
+    },
+    checkCancelled: () => checkCancelled(id),
+    listProviders: async () => (await import('onnxruntime-node')).listSupportedBackends(),
   });
-  if (!closing) parentPort.postMessage({ type: 'ready' });
+  // The tokenizer that sized document slices also owns the unchanged feature-extraction pipeline.
+  // 生成分块预算的 tokenizer 同时供原有特征提取管线使用，保证测量与实际推理输入一致。
+  extractor = new FeatureExtractionPipeline({ task: 'feature-extraction', model, tokenizer: activeTokenizer });
+  if (status.device === 'cpu') {
+    const { activationMemoryBytes, hiddenSize, attentionHeads, deviceId, ...remainingBudget } = activeBudget;
+    activeBudget = { ...remainingBudget, ...activeBudget.cpuFallbackBatchBudget, device: 'cpu', gpuMemoryBytes: 0 };
+  }
+  loadedBudget = { ...activeBudget, device: status.device };
+  activeBudget = loadedBudget;
+  if (status.device === 'cpu' && activeBudget.diagnostic) status.diagnostic ??= activeBudget.diagnostic;
+  if (!closing) parentPort.postMessage({ type: 'ready', inferenceBackend: status });
+  if (!closing) parentPort.postMessage({ type: 'measurement', feedback: {
+    ...memoryMeasurement(status.device), phase: 'cold-load', unit: 'tokens' } });
   return extractor;
 }
 
-async function embed(message) {
+async function embed(message, canRecoverGpuMemory = true) {
   if (isCancelled(message.id)) return;
+  const requestedBudget = message.resourceBudget ?? activeBudget;
+  if (extractor && (requestedBudget.cpuThreads !== loadedBudget.cpuThreads || requestedBudget.device !== loadedBudget.device ||
+      requestedBudget.deviceId !== loadedBudget.deviceId)) {
+    // Thread counts are native session settings, so change them only between completed requests.
+    // 线程数属于原生会话设置，只在上一请求完整结束后重建，不能中途更换正在运行的会话。
+    const reason = requestedBudget.device !== loadedBudget.device || requestedBudget.deviceId !== loadedBudget.deviceId
+      ? 'approved-backend-changed' : 'approved-thread-count-changed';
+    parentPort.postMessage({ type: 'adjustment', adjustment: { reason, boundary: 'completed-request',
+      requiresSessionRebuild: true, from: { device: loadedBudget.device, cpuThreads: loadedBudget.cpuThreads },
+      to: { device: requestedBudget.device, cpuThreads: requestedBudget.cpuThreads } } });
+    await extractor.dispose(); extractor = undefined; loadPromise = undefined;
+  }
+  activeBudget = requestedBudget;
   const activeExtractor = extractor ?? await (loadPromise ??= loadExtractor(message.id).catch(error => {
     loadPromise = undefined;
-    if (error.code === 'EMBEDDING_CANCELLED') throw error;
-    const code = error.code === 'ENOENT' ? 'EMBEDDING_ASSET_MISSING' : error.code ?? 'EMBEDDING_RUNTIME_UNAVAILABLE';
-    parentPort.postMessage({ type: 'fatal', code, message: 'The bundled local embedding model could not be loaded.' });
-    shutdown();
+    reportLoadFailure(error);
     throw error;
   }));
   if (isCancelled(message.id)) return;
@@ -88,36 +169,69 @@ async function embed(message) {
   // Count the same prefixed input before the pipeline's default truncation can act.
   // 先对实际带前缀输入计数；超过模型位置上限明确报错，不让管线默认截断悄悄丢掉正文。
   phase('tokenizing');
+  const tokenLengths = [];
   for (let index = 0; index < inputs.length; index += 1) {
     if (index % 8 === 0) await yieldToMessages();
     if (isCancelled(message.id)) return;
     const tokens = activeExtractor.tokenizer(inputs[index], { padding: false, truncation: false, return_tensor: false });
     const tokenCount = tokens.input_ids.length;
+    tokenLengths.push(tokenCount);
     if (tokenCount > profile.maxInputTokens) {
       throw Object.assign(new Error('Embedding input exceeds 512 tokens. Split the source first.'), {
         code: 'EMBEDDING_INPUT_TOO_LONG', details: { index, tokenCount, maxInputTokens: profile.maxInputTokens },
       });
     }
   }
-  const vectors = [];
-  for (let offset = 0; offset < inputs.length; offset += BATCH_SIZE) {
-    await yieldToMessages();
-    if (isCancelled(message.id)) return;
-    const batch = inputs.slice(offset, offset + BATCH_SIZE);
-    phase('inference');
-    const output = await activeExtractor(batch, { pooling: 'mean', normalize: true });
-    try {
-      if (isCancelled(message.id)) return;
-      const batchVectors = output.tolist();
-      if (batchVectors.some(vector => vector.length !== profile.dimensions || !vector.every(Number.isFinite))) {
-        throw Object.assign(new Error('The embedding model returned invalid vectors.'), { code: 'EMBEDDING_INVALID_VECTOR' });
+  const totalInputTokens = tokenLengths.reduce((sum, count) => sum + count, 0);
+  if (totalInputTokens > admission.limits.maxBatchInputTokens)
+    throw Object.assign(new Error('Embedding batch exceeds its configured token budget.'), {
+      code: 'EMBEDDING_INPUT_TOO_LONG', details: { totalInputTokens, maxBatchInputTokens: admission.limits.maxBatchInputTokens },
+    });
+  let vectors;
+  try { vectors = await executeInferenceBatches(inputs, { ...activeBudget, tokenLengths, yieldToMessages,
+    checkCancelled: () => checkCancelled(message.id),
+    onPressure: diagnostic => parentPort.postMessage({ type: 'resource-pressure', diagnostic: { ...diagnostic,
+      backend: activeBudget.device, boundary: 'completed-native-batch', requiresSessionRebuild: false } }),
+    onMeasurement: feedback => {
+      if (feedback.progress === 1 || performance.now() - lastMeasurementAt >= 250) {
+        lastMeasurementAt = performance.now(); parentPort.postMessage({ type: 'measurement',
+          feedback: { ...feedback, ...memoryMeasurement(activeBudget.device) } });
       }
-      vectors.push(...batchVectors);
-    } finally {
-      output.dispose();
-    }
+    },
+    infer: async batch => {
+      phase('inference');
+      const output = await activeExtractor(batch, { pooling: 'mean', normalize: true });
+      try {
+        const batchVectors = output.tolist();
+        if (batchVectors.some(vector => vector.length !== profile.dimensions || !vector.every(Number.isFinite)))
+          throw Object.assign(new Error('The embedding model returned invalid vectors.'), { code: 'EMBEDDING_INVALID_VECTOR' });
+        return batchVectors;
+      } finally { output.dispose(); }
+    },
+  }); } catch (error) {
+    checkCancelled(message.id);
+    if (profile.requiredDevice || !canRecoverGpuMemory || activeBudget.device === 'cpu' || !isInferenceMemoryPressure(error)) throw error;
+    // Read-only vectors can be recomputed once on the reserved CPU after the GPU session is disposed.
+    // GPU 减批仍不足时，先释放其会话，再用已预留的 CPU 重算一次只读向量；取消绝不自动续跑。
+    await extractor.dispose(); extractor = undefined; loadPromise = undefined;
+    const { activationMemoryBytes, hiddenSize, attentionHeads, deviceId, ...remainingBudget } = activeBudget;
+    const cpuBudget = { ...remainingBudget, ...activeBudget.cpuFallbackBatchBudget,
+      device: 'cpu', gpuMemoryBytes: 0, diagnostic: { code: 'GPU_MEMORY_INSUFFICIENT' } };
+    return embed({ ...message, resourceBudget: cpuBudget }, false);
   }
   if (!isCancelled(message.id)) parentPort.postMessage({ type: 'result', id: message.id, vectors });
+}
+
+async function fitDocuments(message) {
+  if (isCancelled(message.id)) return;
+  const activeTokenizer = await getTokenizer(message.id);
+  phase('tokenizing');
+  const documents = await fitEmbeddingDocuments(message.documents, {
+    countTokens: text => activeTokenizer(text, { padding: false, truncation: false, return_tensor: false }).input_ids.length,
+    documentPrefix: profile.documentPrefix, maxInputTokens: profile.maxInputTokens,
+    checkCancelled: () => checkCancelled(message.id), yieldToMessages,
+  });
+  if (!isCancelled(message.id)) parentPort.postMessage({ type: 'result', id: message.id, documents });
 }
 
 function receiveMessage(message) {
@@ -129,18 +243,22 @@ function receiveMessage(message) {
     if (activeRequestIds.has(message.id)) cancelledRequests.add(message.id);
     return;
   }
-  if (message.type !== 'embed') return;
+  if (!['embed', 'fit-documents'].includes(message.type)) return;
   if (closing) {
     parentPort.postMessage({ type: 'error', id: message.id, code: 'EMBEDDING_CLOSED', message: 'Embedding worker is closing.' });
     return;
   }
   latestRequestId = message.id;
-  if (activeRequestIds.size >= 32) {
+  let ticket;
+  try {
+    admission.setResourceBudget(message.resourceBudget?.memoryBytes);
+    ticket = admission.reserve(message.type === 'fit-documents' ? message.documents : message.texts);
+  } catch {
     parentPort.postMessage({ type: 'error', id: message.id, code: 'EMBEDDING_BUSY', message: 'Embedding worker queue is full.' });
     return;
   }
   activeRequestIds.add(message.id);
-  queue = queue.then(() => embed(message)).catch(error => {
+  queue = queue.then(() => message.type === 'fit-documents' ? fitDocuments(message) : embed(message)).catch(error => {
     if (!isCancelled(message.id)) {
       parentPort.postMessage({ type: 'error', id: message.id, message: error.message,
         code: error.code ?? 'EMBEDDING_FAILED', ...(error.details ? { details: error.details } : {}) });
@@ -148,6 +266,8 @@ function receiveMessage(message) {
   }).finally(() => {
     cancelledRequests.delete(message.id);
     activeRequestIds.delete(message.id);
+    admission.release(ticket);
+    parentPort.postMessage({ type: 'settled', id: message.id });
     if (!closing && !activeRequestIds.size) parentPort.postMessage({ type: 'idle', throughId: latestRequestId });
   });
 }

@@ -39,7 +39,7 @@ test('embedding validates batches and handles cancellation/close before worker s
   await assert.rejects(service.embedQuery('test', { signal: controller.signal }), { name: 'AbortError' });
   await assert.rejects(service.embedQuery(''), { code: 'EMBEDDING_INVALID_INPUT' });
   await assert.rejects(service.embedQuery('a'.repeat(16_385)), { code: 'EMBEDDING_INPUT_TOO_LONG' });
-  await assert.rejects(service.embedDocuments(Array(65).fill('test')), { code: 'EMBEDDING_INVALID_INPUT' });
+  await assert.rejects(service.embedDocuments(Array(service.status().requestLimits.maxBatchDocuments + 1).fill('test')), { code: 'EMBEDDING_INVALID_INPUT' });
   assert.deepEqual((await service.embedDocuments([])).vectors, []);
   assert.equal(service.status().loaded, false);
   await service.close();
@@ -116,5 +116,6 @@ test('bundled CPU model embeds Chinese/English, preserves prefixes, and remains 
   assert.equal((await service.embedQuery('取消之后仍然可用')).vector.length, 384);
   assert.equal(service.status().state, 'ready');
   assert.equal(service.status().network, false);
-  assert.equal(service.status().cpuThreads, 2);
+  assert.ok(service.status().cpuThreads >= 1 && service.status().cpuThreads <= 32);
+  assert.equal(service.status().inferenceBackend.cpuThreads, service.status().cpuThreads);
 });

@@ -17,7 +17,7 @@ import { chunkStructuredSource, embeddingTextForChunk, STRUCTURED_CHUNKER_VERSIO
 
 test('local model registry describes only executable pinned implementations and stable vector spaces', () => {
   const profiles = listRetrievalModelProfiles();
-  assert.equal(profiles.length, 2);
+  assert.equal(profiles.length, 4);
   const embedding = resolveRetrievalModelProfile('embedding', 'builtin-multilingual');
   const reranker = resolveRetrievalModelProfile('reranker', 'builtin-multilingual-reranker');
   assert.equal(embedding.modelVersion, BUILTIN_EMBEDDING_PROFILE.modelVersion);
@@ -36,7 +36,19 @@ test('local model registry describes only executable pinned implementations and 
   assert.equal(reranker.embeddingSpaceId, undefined, 'ranking scores are not embedding vectors');
   assert.throws(() => { embedding.inputProjection.queryPrefix = 'changed'; }, TypeError);
   profiles.pop();
-  assert.equal(listRetrievalModelProfiles().length, 2, 'caller changes cannot remove registered implementations');
+  assert.equal(listRetrievalModelProfiles().length, 4, 'caller changes cannot remove registered implementations');
+});
+
+test('audited GPU profiles share pinned assets but never share the legacy CPU vector space', () => {
+  const cpu = resolveRetrievalModelProfile('embedding', 'builtin-multilingual');
+  const gpu = resolveRetrievalModelProfile('embedding', 'builtin-multilingual-dml-q8');
+  assert.equal(cpu.embeddingSpaceId, '6e803abd83b13b2c491ccfafd8723aab46672ad6a985da4cc19a103a2ffc24a2');
+  assert.notEqual(gpu.embeddingSpaceId, cpu.embeddingSpaceId);
+  assert.equal(gpu.modelAssetSignature, cpu.modelAssetSignature);
+  assert.equal(gpu.requiredDevice, 'dml');
+  assert.equal(gpu.dtype, cpu.dtype);
+  assert.throws(() => new EmbeddingService({ profileId: gpu.id, devicePreference: 'cpu' }), { code: 'EMBEDDING_GPU_REQUIRED' });
+  assert.throws(() => new RerankerService({ profileId: 'builtin-multilingual-reranker-dml-q8', devicePreference: 'cpu' }), { code: 'RERANK_GPU_REQUIRED' });
 });
 
 test('unknown, wrong-kind and null profiles cannot silently become the default model', async () => {
@@ -49,7 +61,10 @@ test('unknown, wrong-kind and null profiles cannot silently become the default m
   try {
     await assert.rejects(embedding.embedQuery('source', { profileId: 'other' }), invalid);
     await assert.rejects(embedding.embedDocuments([], { profileId: null }), invalid);
+    await assert.rejects(embedding.embedQuery('source', { profileId: 'builtin-multilingual-dml-q8' }), invalid);
+    await assert.rejects(embedding.fitDocuments([], { profileId: 'builtin-multilingual-dml-q8' }), invalid);
     await assert.rejects(reranker.rerank({ query: 'source', candidates: [], profileId: 'other' }), invalid);
+    await assert.rejects(reranker.rerank({ query: 'source', candidates: [], profileId: 'builtin-multilingual-reranker-dml-q8' }), invalid);
     assert.deepEqual(embedding.status('other'), { profileId: 'other', kind: 'embedding', state: 'unavailable',
       loaded: false, supported: false, local: true, network: false, errorCode: invalid.code });
     assert.equal(reranker.status(null).supported, false);
@@ -83,7 +98,8 @@ async function syntheticSourcePublication({ status, receipt }) {
   const indexer = new SourceIndexer({ embeddings: { status: () => ({ state: 'ready', ...status }),
     embedDocuments: async texts => ({ vectors: texts.map(() => [1, 0]), ...receipt(++calls, texts) }) },
     library: { readSource: async () => ({ ...source, contentHash: hashText(source.text) }) },
-    index: { upsertSources: async sources => { publications.push(...sources); } }, serialize: operation => operation(),
+    index: { upsertSources: async sources => { publications.push(...sources);
+      return { sources: sources.map(source => ({ sourceId: source.sourceId })) }; } }, serialize: operation => operation(),
     effectiveSettings: async () => settings, getProject: async () => null });
   const progress = [];
   const report = await indexer.upsert([source], settings, undefined, (count, value) => progress.push({ count, report: value }));
@@ -136,7 +152,9 @@ test('semantic publication reports partial coverage and the actual failed batch 
   assert.equal(semantic.vectorChunks, 32);
   assert.ok(semantic.totalChunks > semantic.vectorChunks);
   assert.deepEqual(semantic.diagnosticCodes, ['EMBEDDING_TIMEOUT']);
-  assert.deepEqual(result.progress[0].report, result.report, 'committed progress includes its scoped coverage receipt');
+  assert.deepEqual(result.progress[0].report.semantic, result.report.semantic, 'committed progress includes its scoped semantic coverage');
+  assert.deepEqual(result.progress[0].report.coverage, result.report.coverage, 'committed progress includes its scoped source coverage');
+  assert.equal(result.progress[0].report.checkpointSources[0].vectorChunks, 32, 'the checkpoint records only acknowledged vectors');
 });
 
 test('semantic reports are request-scoped and never repeat a prior job error after recovery', async () => {
@@ -181,6 +199,22 @@ test('a newly embedded source rejected at publication never counts uncommitted v
   assert.equal(skipped.semantic.vectorChunks, 0);
   assert.equal(skipped.semantic.skippedChunks, skipped.semantic.totalChunks);
   assert.equal(result.publications.length, 1, 'freshness rejection does not publish another source');
+});
+
+test('missing or incomplete publication receipts never report committed coverage or populate reuse caches', async () => {
+  const result = await syntheticSourcePublication({ status: {}, receipt: () => ({}) });
+  for (const receipt of [undefined, { sources: [] }, { sources: [{ sourceId: 'another-source' }] }]) {
+    result.indexer.invalidate(result.source.sourceId);
+    result.indexer.index.upsertSources = async () => receipt;
+    const unverified = await result.indexer.upsert([result.source], result.settings);
+    assert.equal(unverified.semantic.vectorChunks, 0);
+    assert.equal(unverified.coverage.lexical, 0);
+    assert.equal(unverified.coverage.partial, 1);
+    assert.equal(unverified.coverage.complete, false);
+    assert.equal(unverified.coverage.sources[0].lexical, 'unverified');
+    assert.equal(unverified.coverage.sources[0].errorCode, 'RETRIEVAL_PUBLICATION_UNVERIFIED');
+    assert.equal(result.indexer.fingerprints.size, 0);
+  }
 });
 
 test('disabled semantics and unsupported profiles report their actual states without leaking arbitrary error text', async () => {
@@ -364,7 +398,8 @@ test('semantic preparation reuse checks the current model and source revision be
   embeddings: { status: () => metadata, embedDocuments: async texts => {
     embeddingCalls++; return { ...metadata, vectors: texts.map(() => Array(metadata.dimensions).fill(1)) };
   } }, library: { readSource: async () => ({ ...source, contentHash: hashText(source.text) }) },
-  effectiveSettings: async () => settings, serialize: operation => operation(), index: { upsertSources: async () => {} } });
+  effectiveSettings: async () => settings, serialize: operation => operation(),
+  index: { upsertSources: async sources => ({ sources: sources.map(item => ({ sourceId: item.sourceId })) }) } });
   await indexer.upsert([source], settings);
   const cached = await indexer.upsert([source], settings);
   assert.equal(parseCalls, 1);
@@ -396,7 +431,7 @@ test('unavailable parsing never becomes a permanent preparation hit and undeclar
     return preparedDocument(input);
   } };
   const indexer = new SourceIndexer({ structures, embeddings: { status: () => ({ state: 'unavailable' }) },
-    index: { upsertSources: async () => {} } });
+    index: { upsertSources: async sources => ({ sources: sources.map(item => ({ sourceId: item.sourceId })) }) } });
   await indexer.upsert([source], settings, undefined, undefined, { semantic: false });
   await indexer.upsert([source], settings, undefined, undefined, { semantic: false });
   assert.equal(parseCalls, 2);

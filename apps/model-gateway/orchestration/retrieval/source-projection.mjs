@@ -41,6 +41,8 @@ export function projectEvidence(items, maximumCharacters = 10000, { maximumToken
   const empty = { prompt: '', items: [], usedTokens: 0 };
   if (!items.length || maximumCharacters <= 0 || maximumTokens <= 0) return empty;
   const lines = [EVIDENCE_NOTICE];
+  if (assessment?.missingEvidence?.length) lines.push(`Unresolved retrieval requirements (not a correctness verdict): ${
+    JSON.stringify(assessment.missingEvidence.slice(0, 6))}. Read or search these gaps before claiming coverage. / 尚缺证据，需回读或补查；这不是正确性结论。`);
   if (assessment?.state === 'weak') lines.push('Evidence support is unverified by direct query wording; semantic or cross-language matches may still be relevant. Read the relevant source or obtain additional evidence before making unsupported claims. / 词面匹配不足以核实证据支持，语义或跨语言命中仍可能相关；需要时回读来源或补充证据，不把缺失的信息补成事实。');
   else if (assessment?.requiresSourceRead) lines.push('These are bounded excerpts; read the surrounding source before relying on omitted conditions or cross-section details. / 摘录有范围限制，涉及省略条件或跨段细节时先回读来源。');
   const header = lines.join('\n');

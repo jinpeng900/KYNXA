@@ -1,6 +1,7 @@
 import { hashText, retrievalFailure, validateChunkStructure, validateStructureDescriptor } from './retrieval-contracts.mjs';
 import { CHUNKER_VERSION, TOKENIZER_VERSION, EMBEDDING_TEXT_VERSION,
-  embeddingTextForChunk, lexicalText } from './retrieval-text.mjs';
+  lexicalText } from './retrieval-text.mjs';
+import { embeddingInputForChunk } from './token-chunks.mjs';
 
 export const DEFAULT_PARSER_VERSION = 'plain-text-v1';
 export const DERIVATION_VERSION = 'source-derivation-v1';
@@ -14,7 +15,7 @@ function versionTag(value, fallback, label) {
 
 /** Canonical metadata prevents object property ordering from changing a durable derivation.
  * 元信息按键排序，避免对象属性顺序改变持久派生身份。 */
-function canonicalMetadata(value) {
+export function canonicalMetadata(value) {
   if (Array.isArray(value)) return value.map(canonicalMetadata);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort()
     .map(key => [key, canonicalMetadata(value[key])]));
@@ -48,7 +49,7 @@ export function deriveSourceVersion(source, chunks, { checkCancelled = () => {},
       tokenizerVersion: versionTag(chunk.tokenizerVersion, versions.tokenizerVersion, 'tokenizer'),
       lexicalHash: hashText(lexicalText(`${source.title} ${source.locator.relativePath ?? ''} ${chunk.text}`)) });
     embeddingChunks.push({ ...topology, chunkerVersion: versionTag(chunk.chunkerVersion, versions.chunkerVersion, 'chunker'),
-      inputHash: hashText(embeddingTextForChunk(source, chunk, { maxChars: embeddingMaxCharacters })) });
+      inputHash: hashText(embeddingInputForChunk(source, chunk, { maxChars: embeddingMaxCharacters })) });
   }
   checkCancelled();
   const metadata = { sourceId: source.sourceId, scopeKey: source.scopeKey, contentHash: source.contentHash,

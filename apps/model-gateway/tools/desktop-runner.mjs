@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { findNativeToolHost } from './tool-host-path.mjs';
 import { bindLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
 import { computerKeyNames } from '../official-tools/Tools/computer.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 
 const actions = new Set(['windows', 'apps', 'screenshot', 'read', 'launch', 'window', 'activate', 'move', 'click', 'scroll', 'drag', 'type', 'key']);
 const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
@@ -16,17 +17,23 @@ const definiteLaunchFailures = new Set(['DESKTOP_LAUNCH_BLOCKED', 'DESKTOP_LAUNC
  * 桌面操作有独立协议和宿主边界，不经过终端沙箱执行。
  */
 export class DesktopRunner {
-  constructor({ toolHostPath, invoke } = {}) {
+  constructor({ toolHostPath, invoke, resourceService } = {}) {
     this.toolHostPath = toolHostPath;
     this.invoke = invoke ?? invokeDesktopHost;
     this.shutdown = new AbortController();
     this.active = new Set();
+    this.resources = resourceService;
   }
 
   async _invoke(request, signal, timeoutMs) {
     const host = await findNativeToolHost(this.toolHostPath, 'DESKTOP_UNAVAILABLE');
     this.shutdown.signal.throwIfAborted(); signal?.throwIfAborted();
-    const operation = this.invoke(host, request, signal, timeoutMs);
+    const invoke = lease => this.invoke(host, request, signal, timeoutMs, undefined, processId => {
+      if (lease) this.resources.registerExecutor?.(lease.leaseId, { processId }).catch(() => {});
+    });
+    const operation = request.operation === 'desktop_capabilities' ? invoke(null) :
+      runResourceTask(this.resources, { cpuThreads: 1, memoryBytes: request.action === 'screenshot'
+        ? 192 * 1024 * 1024 : 32 * 1024 * 1024 }, invoke, { signal });
     this.active.add(operation);
     try { return await operation; }
     finally { this.active.delete(operation); }
@@ -130,10 +137,11 @@ export class DesktopRunner {
 
 // The optional process factory is an isolated transport-test seam, never a model/tool parameter.
 // 可选进程工厂只用于隔离传输测试，不属于模型或工具参数。
-export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess = spawn) {
+export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess = spawn, onStarted) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawnProcess(host, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    if (child.pid) onStarted?.(child.pid);
     const stdoutDecoder = new StringDecoder('utf8');
     let stdoutBuffer = '', stdoutBytes = 0, stderrBytes = 0, stopError, settled = false, hardStop, drainTimer;
     let replyFrame, frameCount = 0, exited = false, spawned = false, submitted = false, invalidTransport;

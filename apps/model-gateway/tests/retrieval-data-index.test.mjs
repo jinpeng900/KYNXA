@@ -378,15 +378,21 @@ test('narrow lexical candidates preserve reference ordering and filter scopes be
   await index.upsertSources(documents);
   const database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'), { readOnly: true });
   try {
-    const reference = database.prepare(`SELECT c.chunk_id,bm25(chunk_fts) AS lexical_rank FROM chunk_fts
-      JOIN chunks c ON c.id=chunk_fts.rowid JOIN sources s ON s.source_id=c.source_id
-      WHERE chunk_fts MATCH ? AND s.scope_key IN (?)
+    // An independent FTS corpus is the oracle for scoped BM25, not the polluted shared corpus.
+    // 以独立 FTS 语料作为范围 BM25 的参考，不能继续以受无关资料污染的共享统计作为标准。
+    database.exec(`CREATE VIRTUAL TABLE temp.authorized_fts USING fts5(lexical_text,tokenize='unicode61');
+      INSERT INTO temp.authorized_fts(rowid,lexical_text) SELECT c.id,c.lexical_text FROM chunks c
+      JOIN sources s ON s.source_id=c.source_id WHERE s.scope_key='project:a'`);
+    const reference = database.prepare(`SELECT c.chunk_id,bm25(authorized_fts) AS lexical_rank FROM authorized_fts
+      JOIN chunks c ON c.id=authorized_fts.rowid
+      WHERE authorized_fts MATCH ?
       ORDER BY CASE WHEN instr(lower(c.text),lower(?)) > 0 THEN 0 ELSE 1 END,lexical_rank,c.chunk_id LIMIT 40`);
     for (const query of ['alpha beta', 'alpha', '" OR alpha:*']) {
-      const expected = reference.all(matchExpression(query), 'project:a', query);
+      const expected = reference.all(matchExpression(query), query);
       const actual = await index.search({ query, scopeKeys: ['project:a'], limit: 60 });
       assert.deepEqual(actual.items.map(item => item.chunkId), expected.map(row => row.chunk_id));
-      assert.deepEqual(actual.items.map(item => item.lexicalScore), expected.map(row => row.lexical_rank));
+      for (const [position, item] of actual.items.entries())
+        assert.ok(Math.abs(item.lexicalScore - expected[position].lexical_rank) < 1e-18);
       assert.ok(actual.items.every(item => item.scopeKey === 'project:a'));
       assert.deepEqual(actual.items.map(item => item.lexicalRank), expected.map((_, position) => position + 1));
     }
@@ -395,5 +401,43 @@ test('narrow lexical candidates preserve reference ordering and filter scopes be
     controller.abort();
     await assert.rejects(cancelledSearch, { name: 'AbortError' });
     assert.equal((await index.search({ query: 'alpha', scopeKeys: ['project:a'], limit: 60 })).items.length, 30);
+  } finally { database.close(); }
+});
+
+test('unrelated scope publications cannot change authorized BM25 scores or candidate ordering', async t => {
+  const { index } = await fixture(t, { vectorEnabled: false });
+  await index.upsertSources([
+    source('scoped-alpha', 'project:isolated', 'alpha '.repeat(18) + 'beta'),
+    source('scoped-beta', 'project:isolated', 'beta '.repeat(18) + 'alpha'),
+    source('scoped-filler', 'project:isolated', 'unrelated filler '.repeat(25))
+  ]);
+  const search = () => index.search({ query: 'alpha OR beta', scopeKeys: ['project:isolated'] });
+  const ranked = result => result.items.map(item => [item.chunkId, item.lexicalRank, item.lexicalScore]);
+  const original = ranked(await search());
+  await index.upsertSources(Array.from({ length: 45 }, (_, position) =>
+    source(`unrelated-${position}`, 'project:unrelated', 'alpha '.repeat(40) + 'irrelevant')));
+  assert.deepEqual(ranked(await search()), original);
+  await index.invalidateScope('project:unrelated');
+  assert.deepEqual(ranked(await search()), original);
+  // Authorized edits invalidate statistics even when an earlier request populated the cache.
+  // 已授权语料编辑仍须使统计缓存失效，不能因之前查询过而保留旧平均长度和词频。
+  await index.upsertSources([source('scoped-filler', 'project:isolated', 'beta '.repeat(80), { sourceRevision: 2 })]);
+  assert.notDeepEqual(ranked(await search()), original);
+});
+
+test('vector publication retains scoped lexical statistics while real conversation text invalidates them', async t => {
+  const { root, index } = await fixture(t);
+  const document = source('lexical-stats-corpus', 'project:stats', 'Stable evidence original', { sourceType: 'knowledge' });
+  await index.upsertSources([document]);
+  const database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'), { readOnly: true });
+  try {
+    const lexicalGeneration = () => database.prepare('SELECT value FROM retrieval_metadata WHERE key=?').get('lexical_generation:project:stats').value;
+    const original = lexicalGeneration();
+    await index.search({ query: 'evidence', scopeKeys: ['project:stats'] });
+    await index.upsertSources([{ ...document, embeddingProfileId: 'fixture', vectors: [[1, 0]] }]);
+    assert.equal(lexicalGeneration(), original);
+    await index.upsertSources([source('lexical-stats-message', 'project:stats', 'New evidence from conversation', { sourceType: 'message' })]);
+    assert.notEqual(lexicalGeneration(), original);
+    assert.ok((await index.search({ query: 'evidence', scopeKeys: ['project:stats'] })).items.some(item => item.sourceId === 'lexical-stats-message'));
   } finally { database.close(); }
 });

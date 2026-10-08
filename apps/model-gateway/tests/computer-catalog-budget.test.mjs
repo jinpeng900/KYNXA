@@ -8,7 +8,7 @@ import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
 import { estimateTokens } from '../models/context.mjs';
-import { estimateToolMessageTokens, toolDeclarations } from '../models/tool-protocols.mjs';
+import { estimateToolMessageTokens, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
@@ -86,7 +86,27 @@ test('large catalogs preserve ordinary code/web selection and desktop discovery 
       assert.deepEqual(catalog.selected, before);
     }
     const desktop = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message: '打开记事本并截图' });
-    assert.equal(desktop.selected.length, builtinDescriptors.filter(tool => !tool.name.startsWith('terminal.host.')).length);
+    assert.ok(desktop.selected.length <= builtinDescriptors.filter(tool => !tool.name.startsWith('terminal.host.')).length);
     assert.ok(desktop.selected.some(tool => tool.name === 'computer.launch'));
+    for (const name of discovery) assert.ok(desktop.selected.some(tool => tool.name === name));
+    assert.ok(estimateTokens(JSON.stringify(toolDeclarations(protocol, desktop.wire()))) <= 16000);
+  }
+});
+
+for (const protocol of protocols) test(`${protocol}: device inspection reserves the host shell within the unchanged schema budget`, () => {
+  const required = builtinDescriptors.filter(tool => [...discovery, 'terminal.host.run'].includes(tool.name));
+  const tokenBudget = estimateTokens(JSON.stringify(toolDeclarations(protocol, wireCatalog(required))));
+  const catalog = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget, message: '查看我的IP和DNS配置' });
+  for (const name of [...discovery, 'terminal.host.run'])
+    assert.ok(catalog.selected.some(tool => tool.name === name), name);
+  assert.ok(!catalog.selected.some(tool => tool.name.startsWith('computer.')));
+  assert.ok(estimateTokens(JSON.stringify(toolDeclarations(protocol, catalog.wire()))) <= tokenBudget);
+  const disabled = builtinDescriptors.map(tool => tool.name === 'terminal.host.run' ? { ...tool, enabled: false } : tool);
+  const unavailable = new ModelToolCatalog(disabled, { protocol, tokenBudget, message: '查看我的IP和DNS配置' });
+  assert.ok(!unavailable.selected.some(tool => tool.name === 'terminal.host.run'));
+  assert.throws(() => unavailable.load(['terminal.host.run']), { code: 'TOOL_NOT_FOUND' });
+  for (const message of ['查询8.8.8.8的归属', '解释DNS工作原理']) {
+    const publicTask = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message });
+    assert.ok(!publicTask.selected.some(tool => tool.name.startsWith('terminal.host.')), message);
   }
 });

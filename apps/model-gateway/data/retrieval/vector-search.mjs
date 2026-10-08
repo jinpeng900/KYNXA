@@ -7,21 +7,55 @@ const MAX_DESCRIPTOR_CACHE_BYTES = 8 * 1024 * 1024;
 /** Exact and approximate channels share the same authorized SQLite corpus and model identity.
  * 精确与近似通道共享同一已授权 SQLite 语料及模型身份，不混用向量空间或跨范围召回。 */
 export class RetrievalVectorSearch {
-  constructor({ database, directory, epoch, options }) {
+  constructor({ database, directory, epoch, options, resourceService }) {
     this.database = database;
+    this.vectorTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type='view' AND name='retrieval_vector_rows'").get()
+      ? 'retrieval_vector_rows' : 'chunks';
     this.options = validateAnnOptions(options);
-    this.ann = new LocalAnnStore({ database, directory, epoch });
+    this.ann = new LocalAnnStore({ database, directory, epoch, resourceService, vectorTable: this.vectorTable });
     this.descriptorCache = new Map();
     this.descriptorCacheBytes = 0;
     this.descriptorCacheCounters = { hits: 0, misses: 0, invalidated: 0 };
+    this.partitionCache = new Map();
+    this.exactLatencyMs = null;
   }
 
   _invalidateDescriptors(scopeKeys) {
+    this.partitionCache.clear();
     for (const [key, entry] of this.descriptorCache) if (entry.scopeKeys.some(scopeKey => scopeKeys.includes(scopeKey))) {
       this.descriptorCache.delete(key);
       this.descriptorCacheBytes -= entry.bytes;
       this.descriptorCacheCounters.invalidated++;
     }
+  }
+
+  _partitionDescriptors(descriptors, options) {
+    if (!options.adaptive) return descriptors;
+    const result = [];
+    for (const descriptor of descriptors) {
+      const perVector = descriptor.dimensions * 4 + options.connectivity * 16 + 256;
+      const vectorsPerShard = Math.max(1, Math.floor(options.maxShardBytes / perVector));
+      if (descriptor.count <= vectorsPerShard) { result.push(descriptor); continue; }
+      const segments = Math.ceil(descriptor.count / vectorsPerShard);
+      const key = JSON.stringify([descriptor, vectorsPerShard]);
+      let parts = this.partitionCache.get(key);
+      if (!parts) {
+        // Partition only the authorized space. Key ranges are version-bound and never overlap.
+        // 只对已授权向量空间分片；键区间绑定当前版本、互不重叠，不混用不同模型空间。
+        parts = this.database.prepare(`WITH authorized AS MATERIALIZED (
+          SELECT c.id,ntile(?) OVER (ORDER BY c.id) AS segment FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
+          WHERE s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=?
+          AND c.embedding_space_id=? AND ${RETRIEVAL_DOMAIN_SQL}=? AND c.vector IS NOT NULL)
+          SELECT min(id) AS minimumId,max(id) AS maximumId,count(*) AS count FROM authorized GROUP BY segment ORDER BY segment`)
+          .all(segments, descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
+            descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain)
+          .map(part => ({ ...descriptor, ...part, partitioned: true }));
+        this.partitionCache.set(key, parts);
+        while (this.partitionCache.size > 64) this.partitionCache.delete(this.partitionCache.keys().next().value);
+      }
+      result.push(...parts);
+    }
+    return result;
   }
 
   _descriptors({ scopeKeys, embeddingProfileId, dimensions, embeddingModelVersion, embeddingSpaceId, requestedDomain }) {
@@ -48,7 +82,7 @@ export class RetrievalVectorSearch {
       ...(embeddingModelVersion === undefined ? [] : [embeddingModelVersion]), ...(embeddingSpaceId === undefined ? [] : [embeddingSpaceId])];
     const descriptors = this.database.prepare(`SELECT s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,
       c.embedding_space_id,${RETRIEVAL_DOMAIN_SQL} AS domain,count(*) AS count,
-      COALESCE(ss.generation,0) AS generation FROM chunks c JOIN sources s ON s.source_id=c.source_id
+      COALESCE(ss.generation,0) AS generation FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
       LEFT JOIN scope_snapshots ss ON ss.scope_key=s.scope_key
       WHERE s.scope_key IN (${placeholders})${domainFilter} AND c.embedding_profile_id=? AND c.dimensions=?
       AND c.vector IS NOT NULL${versionFilter}
@@ -70,7 +104,7 @@ export class RetrievalVectorSearch {
   sourceRows(sourceIds) {
     if (!sourceIds.length || !this.ann.shards.size) return [];
     return this.database.prepare(`SELECT c.id,c.vector,c.embedding_profile_id,c.dimensions,c.embedding_model_version,
-      c.embedding_space_id,s.scope_key,${RETRIEVAL_DOMAIN_SQL} AS domain FROM chunks c JOIN sources s ON s.source_id=c.source_id
+      c.embedding_space_id,s.scope_key,${RETRIEVAL_DOMAIN_SQL} AS domain FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
       WHERE c.source_id IN (${sourceIds.map(() => '?').join(',')}) AND c.vector IS NOT NULL`).all(...sourceIds);
   }
 
@@ -86,16 +120,17 @@ export class RetrievalVectorSearch {
     }
   }
 
-  prepareScopes(scopeKeys, ann) {
+  async prepareScopes(scopeKeys, ann) {
     const options = ann === undefined ? this.lastOptions ?? this.options : validateAnnOptions({ ...this.options, ...ann });
+    await this.ann.enforceBudget(options);
     if (options.mode === 'off' || options.mode === 'exact') return this.ann.status();
     const descriptors = this.database.prepare(`SELECT s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,
       c.embedding_space_id,${RETRIEVAL_DOMAIN_SQL} AS domain,count(*) AS count,COALESCE(ss.generation,0) AS generation
-      FROM chunks c JOIN sources s ON s.source_id=c.source_id LEFT JOIN scope_snapshots ss ON ss.scope_key=s.scope_key
+      FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id LEFT JOIN scope_snapshots ss ON ss.scope_key=s.scope_key
       WHERE s.scope_key IN (${scopeKeys.map(() => '?').join(',')}) AND c.vector IS NOT NULL
       GROUP BY s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,c.embedding_space_id,domain`)
       .all(...scopeKeys);
-    for (const descriptor of descriptors) {
+    for (const descriptor of this._partitionDescriptors(descriptors, options)) {
       try { this.ann.warm(descriptor, options); }
       catch (error) { this.ann.lastError = error.code ?? 'RETRIEVAL_ANN_BUILD_FAILED'; }
     }
@@ -104,42 +139,45 @@ export class RetrievalVectorSearch {
 
   async invalidateScopes(scopeKeys) {
     this._invalidateDescriptors(scopeKeys);
-    this.ann.builds.cancelScopes(scopeKeys);
-    for (const [key, entry] of this.ann.shards) if (scopeKeys.includes(entry.identity.scopeKey)) {
-      this.ann.shards.delete(key); this.ann.counters.invalidated++;
-      await this.ann._request('drop', { key }).catch(() => {});
-    }
+    await this.ann.invalidateScopes(scopeKeys);
   }
 
-  async search({ scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, requestedDomain, ann }, checkCancelled) {
+  async search({ scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, requestedDomain, ann,
+    channelCandidates = MAX_CHANNEL_CANDIDATES }, checkCancelled) {
+    const candidateLimit = Math.max(1, Math.min(160, channelCandidates));
     const options = validateAnnOptions({ ...this.options, ...ann });
     this.lastOptions = options;
     await this.ann.enforceBudget(options);
     checkCancelled();
-    const descriptors = this._descriptors({ scopeKeys, embeddingProfileId, dimensions: queryVector.length,
-      embeddingModelVersion, embeddingSpaceId, requestedDomain });
+    const descriptors = this._partitionDescriptors(this._descriptors({ scopeKeys, embeddingProfileId, dimensions: queryVector.length,
+      embeddingModelVersion, embeddingSpaceId, requestedDomain }), options);
     let degradedReason = null;
     let exactScannedChunks = 0;
     const matches = [], backends = new Set();
     const exactCandidates = (descriptor, fallback = false) => {
-      const limit = fallback ? Math.min(50000, options.threshold, options.exactScanLimit)
+      const limit = fallback ? Math.min(options.adaptive && (this.exactLatencyMs ?? 0) < 25 ? 250000 : 50000, options.exactScanLimit)
         : options.mode === 'off' ? 50000 : options.exactScanLimit;
       if (exactScannedChunks + descriptor.count > limit) { degradedReason ??= 'RETRIEVAL_VECTOR_SCAN_LIMIT'; return; }
       exactScannedChunks += descriptor.count;
+      const started = performance.now();
       // The graph domain is an exact prefilter, including a separate legacy unknown-domain shard.
       // 图所属领域必须精确预筛选；旧数据的未知领域使用独立分片，保持兼容且不污染明确领域。
       const rows = this.database.prepare(`WITH authorized AS MATERIALIZED (
-        SELECT c.id,c.chunk_id,c.vector FROM chunks c JOIN sources s ON s.source_id=c.source_id
+        SELECT c.id,c.chunk_id,c.vector FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
         WHERE s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=?
-        AND c.embedding_space_id=? AND ${RETRIEVAL_DOMAIN_SQL}=? AND c.vector IS NOT NULL),
+        AND c.embedding_space_id=? AND ${RETRIEVAL_DOMAIN_SQL}=? AND c.vector IS NOT NULL
+        AND c.id>=? AND c.id<=?),
         distances AS MATERIALIZED (SELECT id,chunk_id,vec_distance_cosine(vector,?) AS distance FROM authorized),
         candidates AS MATERIALIZED (SELECT id,chunk_id,distance FROM distances WHERE distance IS NOT NULL
           AND distance>=-1.7976931348623157e308 AND distance<=1.7976931348623157e308
-          ORDER BY distance,chunk_id LIMIT ${MAX_CHANNEL_CANDIDATES})
+          ORDER BY distance,chunk_id LIMIT ${candidateLimit})
         SELECT candidates.*,(SELECT count(*) FROM distances WHERE distance IS NULL
           OR distance<-1.7976931348623157e308 OR distance>1.7976931348623157e308) AS invalid_distance_count FROM candidates`)
         .all(descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions, descriptor.embedding_model_version,
-          descriptor.embedding_space_id, descriptor.domain, new Uint8Array(new Float32Array(queryVector).buffer));
+          descriptor.embedding_space_id, descriptor.domain, descriptor.minimumId ?? 0, descriptor.maximumId ?? Number.MAX_SAFE_INTEGER,
+          new Uint8Array(new Float32Array(queryVector).buffer));
+      const elapsed = performance.now() - started;
+      this.exactLatencyMs = this.exactLatencyMs === null ? elapsed : this.exactLatencyMs * 0.8 + elapsed * 0.2;
       if (rows.length ? rows[0].invalid_distance_count : descriptor.count) degradedReason ??= 'RETRIEVAL_VECTOR_DISTANCE_INVALID';
       matches.push(...rows.map(row => ({ id: row.id, distance: row.distance,
         identity: descriptor, domainRank: requestedDomain && descriptor.domain !== requestedDomain ? 1 : 0 })));
@@ -152,7 +190,7 @@ export class RetrievalVectorSearch {
       const shouldApproximate = options.mode === 'ann' || options.mode === 'auto' && descriptor.count > options.threshold;
       if (!shouldApproximate) { exactCandidates(descriptor); continue; }
       try {
-        const rows = await this.ann.search(descriptor, queryVector, MAX_CHANNEL_CANDIDATES, options, checkCancelled);
+        const rows = await this.ann.search(descriptor, queryVector, candidateLimit, options, checkCancelled);
         matches.push(...rows.filter(row => Number.isFinite(row.distance)).map(row => ({ ...row,
           identity: descriptor, domainRank: requestedDomain && descriptor.domain !== requestedDomain ? 1 : 0 })));
         if (rows.some(row => !Number.isFinite(row.distance))) degradedReason ??= 'RETRIEVAL_VECTOR_DISTANCE_INVALID';
@@ -167,13 +205,13 @@ export class RetrievalVectorSearch {
     }
     checkCancelled();
     const ranked = matches.sort((a, b) => a.domainRank - b.domainRank || a.distance - b.distance || a.id - b.id)
-      .slice(0, MAX_CHANNEL_CANDIDATES);
+      .slice(0, candidateLimit);
     const items = [];
     const getRow = this.database.prepare(`SELECT c.*,s.scope_key,s.source_type,s.title,s.locator,s.content_hash,s.source_revision,
       s.binding_revision,s.active_generation,s.derivation_signature,${RETRIEVAL_DOMAIN_SQL} AS actual_domain
-      FROM chunks c JOIN sources s ON s.source_id=c.source_id WHERE c.id=?`);
+      FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id WHERE c.id=? AND c.embedding_space_id=? AND c.embedding_model_version=? AND c.embedding_profile_id=?`);
     for (const match of ranked) {
-      const row = getRow.get(match.id);
+      const row = getRow.get(match.id, match.identity.embedding_space_id, match.identity.embedding_model_version, match.identity.embedding_profile_id);
       // SQLite authorization is rechecked as a defence against a corrupt or stale derived graph.
       // SQLite 再次核验身份，防止损坏或过期派生图返回无效键；正确图已在检索前完成范围筛选。
       if (!row || !scopeKeys.includes(row.scope_key) || row.embedding_profile_id !== embeddingProfileId || row.dimensions !== queryVector.length ||
@@ -188,10 +226,11 @@ export class RetrievalVectorSearch {
     return { items, degradedReason, semanticBackend: backends.size > 1 ? 'mixed' : [...backends][0] ?? null };
   }
 
-  status() { return { ...this.ann.status(), options: this.lastOptions ?? this.options,
+  status() { return { ...this.ann.status(), options: this.lastOptions ?? this.options, exactLatencyMs: this.exactLatencyMs,
     descriptorCache: { entries: this.descriptorCache.size, payloadBytes: this.descriptorCacheBytes, ...this.descriptorCacheCounters } }; }
   close() {
     this.descriptorCache.clear(); this.descriptorCacheBytes = 0;
+    this.partitionCache.clear();
     return this.ann.close();
   }
 }

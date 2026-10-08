@@ -72,8 +72,9 @@ for (const kind of ['embedding', 'reranker']) {
     const setup = await fixture(t, kind, 'crash');
     const first = request(kind, setup.service);
     const second = request(kind, setup.service);
+    const resultsPending = Promise.allSettled([first, second]);
+    const results = await resultsPending;
     assert.notEqual(setup.inferenceProcess.pid, process.pid);
-    const results = await Promise.allSettled([first, second]);
     assert.ok(results.every(result => result.status === 'rejected'
       && result.reason.code === (kind === 'embedding' ? 'EMBEDDING_WORKER_FAILED' : 'RERANK_WORKER_FAILED')));
     assert.equal(setup.service.status().pendingRequests, 0);

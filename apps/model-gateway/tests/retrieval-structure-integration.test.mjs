@@ -126,15 +126,18 @@ test('imported code uses real broker search, unit read and stale-source rejectio
     ['RETRIEVAL_SOURCE_NOT_FOUND', 'STALE_RETRIEVAL_SOURCE'].includes(error.code));
 });
 
-test('cancelled and timed-out parsing remains bounded until acknowledged; failures close without stale caches', async () => {
+test('cancelled parsing stays bounded until acknowledged and timeout retires the worker before recovery', async () => {
   class PausedWorker extends EventEmitter {
     calls = [];
     postMessage(value) { this.calls.push(value); }
     ref() {}
     unref() {}
-    async terminate() { this.emit('exit', 0); return 0; }
+    terminated = 0;
+    async terminate() { this.terminated++; this.emit('exit', 0); return 0; }
   }
-  const worker = new PausedWorker(), structures = new RetrievalStructureService({ workerFactory: () => worker, timeoutMs: 10 });
+  const workers = [], structures = new RetrievalStructureService({ workerFactory: () => {
+    const worker = new PausedWorker(); workers.push(worker); return worker;
+  }, timeoutMs: 10 });
   try {
     for (let index = 0; index < 32; index++) {
       const controller = new AbortController();
@@ -142,6 +145,7 @@ test('cancelled and timed-out parsing remains bounded until acknowledged; failur
       const rejected = assert.rejects(pending, { name: 'AbortError' });
       controller.abort(); await rejected;
     }
+    const worker = workers[0];
     assert.equal(worker.calls.length, 32);
     assert.equal(structures.status().pendingRequests, 0);
     assert.equal(structures.status().inFlightRequests, 32);
@@ -150,20 +154,83 @@ test('cancelled and timed-out parsing remains bounded until acknowledged; failur
     for (const call of worker.calls) worker.emit('message', { id: call.id, result: { structure: { parseStatus: 'parsed' }, chunks: [] } });
     assert.equal(structures.status().cacheEntries, 0);
     await assert.rejects(structures.parse(source('timeout', 'doc.md', 'New text')), { code: 'STRUCTURE_PARSE_TIMED_OUT' });
-    assert.equal(structures.status().inFlightRequests, 1);
+    await structures.retiring;
+    assert.equal(worker.terminated, 1);
+    assert.equal(structures.status().inFlightRequests, 0);
+    assert.equal(structures.worker, null);
     worker.emit('message', { id: worker.calls.at(-1).id, error: { code: 'ABORT_ERR', name: 'AbortError', message: 'Cancelled' } });
     assert.equal(structures.status().inFlightRequests, 0);
     const pending = structures.parse(source('failed', 'doc.md', 'Text'));
     const rejected = assert.rejects(pending, { code: 'STRUCTURE_WORKER_FAILED' });
-    worker.emit('error', new Error('Synthetic worker failure')); await rejected;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(workers.length, 2);
+    workers[1].emit('error', new Error('Synthetic worker failure')); await rejected;
     assert.equal(structures.status().state, 'unavailable');
     assert.equal(structures.status().cacheEntries, 0);
-    await assert.rejects(structures.parse(source('later', 'doc.md', 'Text')), { code: 'STRUCTURE_WORKER_FAILED' });
+    // This intentionally paused replacement still times out, but permanent failure no longer blocks a fresh request.
+    // 此夹具的替代 worker 仍故意暂停并超时，但后续新请求不再被一次旧故障永久阻断。
+    await assert.rejects(structures.parse(source('later', 'doc.md', 'Text')), { code: 'STRUCTURE_PARSE_TIMED_OUT' });
+    assert.equal(structures.status().workerRestarts, 2);
   } finally { await structures.close(); }
   const unavailable = new RetrievalStructureService({ workerFactory: () => { throw new Error('Synthetic startup failure'); } });
   await assert.rejects(unavailable.parse(source('missing', 'doc.md', 'Text')), { code: 'STRUCTURE_WORKER_FAILED' });
   assert.equal(unavailable.status().workerStarted, false);
   await unavailable.close();
+});
+
+test('parser worker exit permits a bounded fresh request while stale events and cancelled requests never replay', async () => {
+  class RecoverableWorker extends EventEmitter {
+    calls = [];
+    terminated = 0;
+    postMessage(value) { this.calls.push(value); }
+    ref() {}
+    unref() {}
+    async terminate() { this.terminated++; this.emit('exit', 0); return 0; }
+    complete() { this.emit('message', { id: this.calls.at(-1).id,
+      result: { structure: { parseStatus: 'parsed' }, chunks: [] } }); }
+  }
+  const workers = [], structures = new RetrievalStructureService({ workerFactory: () => {
+    const worker = new RecoverableWorker(); workers.push(worker); return worker;
+  } });
+  try {
+    const old = structures.parse(source('old', 'old.md', 'Old original'));
+    const rejected = assert.rejects(old, { code: 'STRUCTURE_WORKER_EXITED' });
+    workers[0].emit('exit', 1); await rejected;
+    const cancelled = new AbortController(); cancelled.abort();
+    await assert.rejects(structures.parse(source('cancelled', 'cancelled.md', 'Cancelled'), { signal: cancelled.signal }), { name: 'AbortError' });
+    assert.equal(workers.length, 1);
+    const fresh = structures.parse(source('fresh', 'fresh.md', 'Fresh original'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(workers.length, 2); assert.equal(workers[0].terminated, 1);
+    assert.equal(workers[0].calls.length, 1); assert.equal(workers[1].calls.length, 1);
+    workers[0].emit('error', new Error('Late old error')); workers[0].complete();
+    workers[1].complete(); await fresh;
+    assert.equal(structures.status().state, 'idle'); assert.equal(structures.status().workerRestarts, 1);
+    workers[1].emit('exit', 1);
+    const second = structures.parse(source('second', 'second.md', 'Second recovery'));
+    await new Promise(resolve => setImmediate(resolve));
+    workers[2].complete(); await second;
+    workers[2].emit('exit', 1);
+    await assert.rejects(structures.parse(source('bounded', 'bounded.md', 'No further worker')), { code: 'STRUCTURE_WORKER_EXITED' });
+    assert.equal(workers.length, 3); assert.equal(structures.status().workerRestarts, 2);
+  } finally { await structures.close(); }
+  await assert.rejects(structures.parse(source('closed', 'closed.md', 'No revival')), { code: 'STRUCTURE_SERVICE_CLOSED' });
+});
+
+test('a terminated real parser worker can parse a later source in a replacement process', async () => {
+  const structures = new RetrievalStructureService();
+  try {
+    const first = await structures.parse(source('real-first', 'first.js', 'function first() { return 1; }'));
+    assert.equal(first.structure.parseStatus, 'parsed');
+    const oldWorker = structures.worker;
+    await oldWorker.terminate();
+    assert.equal(structures.status().state, 'unavailable');
+    const second = await structures.parse(source('real-second', 'second.js', 'function second() { return 2; }'));
+    assert.notEqual(structures.worker, oldWorker);
+    assert.equal(second.structure.parseStatus, 'parsed');
+    assert.ok(second.chunks.some(chunk => chunk.structure.symbolName === 'second'));
+    assert.equal(structures.status().workerRestarts, 1);
+  } finally { await structures.close(); }
 });
 
 function comparisonCorpus() {

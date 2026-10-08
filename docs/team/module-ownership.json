@@ -13,13 +13,15 @@
     "apps/desktop-preview",
     "apps/mock-backend",
     "apps/shared",
-    "apps/tool-host"
+    "apps/tool-host",
+    "apps/resource-service"
   ],
-  "sourceExtensions": [".mjs", ".js", ".cs", ".ps1", ".csproj", ".xaml", ".html", ".css"],
-  "excludedDirectoryNames": ["node_modules", "bin", "obj", "tests", ".git"],
+  "sourceExtensions": [".mjs", ".js", ".cs", ".rs", ".ps1", ".csproj", ".xaml", ".html", ".css"],
+  "excludedDirectoryNames": ["node_modules", "bin", "obj", "target", "tests", ".git"],
   "ownershipRules": [
     { "prefix": "apps/model-gateway/orchestration/", "role": "A" },
     { "prefix": "apps/model-gateway/platform/", "role": "A" },
+    { "prefix": "apps/resource-service/", "role": "A" },
     { "prefix": "apps/model-gateway/models/", "role": "C" },
     { "prefix": "apps/model-gateway/tools/", "role": "D" },
     { "prefix": "apps/model-gateway/official-tools/", "role": "D" },
@@ -89,7 +91,7 @@
   },
   "coverageNotes": [
     "Production inventory is limited to listed apps source scopes; generated outputs, dependencies and tests are excluded / 生产清单仅覆盖列出的 apps 源码范围，排除生成产物、依赖和测试",
-    "All six implemented apps are inventoried, including desktop UI/resources/build projects and preview/mock code; hypothetical Rust components are not added / 覆盖六个现有 apps，包括桌面 UI/资源/构建工程及预览/模拟代码，不加入设计中未实现的 Rust 组件",
+    "All seven implemented apps are inventoried, including the Rust resource service, desktop UI/resources/build projects and preview/mock code / 覆盖七个现有 apps，包括 Rust 资源服务、桌面 UI/资源/构建工程及预览/模拟代码",
     "Bundled vendor UI assets are counted under B stewardship without authorizing edits to third-party source / 内置第三方 UI 资源统计为 B 的维护范围，不授权修改第三方原文",
     "Gateway checks cover static import, export-from and literal new URL(relative, import.meta.url); dynamic import, require, computed paths, template interpolation and regex ambiguity are outside this lexical scanner / 网关检查覆盖静态导入、重导出与字面量相对资源；动态导入、require、计算路径、模板插值及正则歧义不在词法扫描范围",
     "Role labels are local responsibility identifiers, not Git account names / 角色标记是本地职责标识，不是 Git 账号"

@@ -4,7 +4,7 @@ import { basename, join } from 'node:path';
 import { atomicJson } from '../../platform/atomic-json.mjs';
 import { validateId } from '../../platform/conversation-id.mjs';
 import { ensureLocalDirectory, inspectLocalPath, toolFailure } from '../../platform/tool-paths.mjs';
-import { retrievalScopeKeys } from './retrieval-contracts.mjs';
+import { retrievalScopeKeys, validateSourceExtraction, validateSourceFileWindow } from './retrieval-contracts.mjs';
 import { validateIndexingLimits } from './settings.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -48,6 +48,8 @@ export class SourceLibrary {
           !['ready', 'deleted'].includes(source.status) || !Number.isSafeInteger(source.revision))
         throw toolFailure('资料登记损坏，原文件已保留。', 'CORRUPT_RETRIEVAL_LIBRARY', 500);
       if (source.scope === 'project') validateId(source.projectId);
+      if (source.extraction !== undefined) validateSourceExtraction(source.extraction);
+      if (source.fileWindow !== undefined) validateSourceFileWindow(source.fileWindow);
     }
     const after = await inspectLocalPath(this.file);
     if (identity !== JSON.stringify([after.dev, after.ino, after.size, after.mtimeMs, after.ctimeMs]))
@@ -100,7 +102,8 @@ export class SourceLibrary {
       signal?.throwIfAborted();
       const resourceLimits = validateIndexingLimits(limits);
       const target = await this._target(scope, projectId), document = await this._read({ mutable: true });
-      if (!Array.isArray(files) || !files.length || files.length > 512)
+      const isStream = typeof files?.[Symbol.asyncIterator] === 'function';
+      if (!isStream && (!Array.isArray(files) || !files.length || files.length > 512))
         throw toolFailure('没有可导入的文本资料或数量过大。', 'INVALID_RETRIEVAL_SOURCE', 400);
       const added = [];
       const ownedFiles = [];
@@ -109,12 +112,16 @@ export class SourceLibrary {
         let scopeBytes = document.sources.filter(entry => entry.status !== 'deleted' && entry.scope === target.scope &&
           entry.projectId === target.projectId).reduce((total, entry) => total + (entry.storedBytes ?? 0), 0);
         let scopeCount = document.sources.filter(entry => entry.status !== 'deleted' && entry.scope === target.scope && entry.projectId === target.projectId).length;
-        for (const file of files) {
+        for await (const file of files) {
           signal?.throwIfAborted();
-          if (typeof file.text !== 'string' || Buffer.byteLength(file.text) > resourceLimits.maximumSourceBytes)
+          if (typeof file.text !== 'string' || Buffer.byteLength(file.text) > Math.min(resourceLimits.maximumSourceBytes, 2 * 1024 * 1024))
             throw toolFailure('资料文本过大。', 'INVALID_RETRIEVAL_SOURCE', 400);
+          const extraction = file.extraction === undefined ? undefined : validateSourceExtraction(file.extraction, file.text.length);
+          const fileWindow = file.fileWindow === undefined ? undefined : validateSourceFileWindow(file.fileWindow, file.text.length);
           const existing = document.sources.find(entry => entry.status !== 'deleted' && entry.scope === target.scope &&
-            entry.projectId === target.projectId && entry.originalPath === file.path && entry.contentHash === hash(file.text));
+            entry.projectId === target.projectId && entry.originalPath === file.path && entry.contentHash === hash(file.text) &&
+            JSON.stringify(entry.extraction) === JSON.stringify(extraction) &&
+            JSON.stringify(entry.fileWindow) === JSON.stringify(fileWindow));
           if (existing) { added.push(existing); continue; }
           const storedBytes = Buffer.byteLength(file.text);
           if (++scopeCount > resourceLimits.maximumFiles || (scopeBytes += storedBytes) > resourceLimits.maximumTotalBytes)
@@ -129,9 +136,11 @@ export class SourceLibrary {
           try { await handle.writeFile(file.text, { encoding: 'utf8', signal }); }
           finally { await handle.close(); }
           const entry = { id, ...target, title: file.title || basename(file.path), originalPath: file.path,
-            revision: 1, storedBytes, contentHash: hash(file.text), status: 'ready', createdAt: new Date().toISOString() };
+            revision: 1, storedBytes, contentHash: hash(file.text), status: 'ready', createdAt: new Date().toISOString(),
+            ...(extraction === undefined ? {} : { extraction }), ...(fileWindow === undefined ? {} : { fileWindow }) };
           document.sources.push(entry); added.push(entry);
         }
+        if (!added.length) throw toolFailure('没有成功读取的可导入资料。', 'RETRIEVAL_IMPORT_EMPTY', 400);
         await this._target(scope, projectId);
         signal?.throwIfAborted();
         document.revision++;
@@ -157,7 +166,9 @@ export class SourceLibrary {
     signal?.throwIfAborted();
     if (hash(text) !== entry.contentHash) throw toolFailure('导入资料已被意外更改。', 'STALE_RETRIEVAL_SOURCE', 409);
     return { sourceId: entry.id, scopeKey: scopeKey(entry), sourceType: 'knowledge', title: entry.title,
-      locator: { knowledgeId: entry.id, name: entry.title, relativePath: basename(entry.originalPath) },
+      locator: { knowledgeId: entry.id, name: entry.title, relativePath: basename(entry.originalPath),
+        ...(entry.extraction === undefined ? {} : { extraction: validateSourceExtraction(entry.extraction, text.length) }),
+        ...(entry.fileWindow === undefined ? {} : { fileWindow: validateSourceFileWindow(entry.fileWindow, text.length) }) },
       text, contentHash: entry.contentHash, sourceRevision: entry.revision };
   }
 
@@ -213,15 +224,17 @@ export class SourceLibrary {
 
   /** Describe authorized sources without reading or retaining the corpus text.
    * 只列出已授权来源元信息，不读取或驻留整个语料的正文。 */
-  describeSources(scopeKeys, { signal, limits } = {}) {
+  describeSources(scopeKeys, { signal, limits, allowPartial = false } = {}) {
     const scopes = retrievalScopeKeys(scopeKeys);
     const resourceLimits = validateIndexingLimits(limits);
     return this._enqueue(async () => {
       signal?.throwIfAborted();
       const document = await this._read(), sources = [], projects = new Map(), usage = new Map();
+      const coverage = { complete: true, discovered: 0, admitted: 0, skipped: 0, limits: [] };
       for (const entry of document.sources) {
         signal?.throwIfAborted();
         if (entry.status === 'deleted' || !scopes.includes(scopeKey(entry))) continue;
+        coverage.discovered++;
         if (entry.scope === 'project') {
           if (!projects.has(entry.projectId)) {
             try { await this._target(entry.scope, entry.projectId); projects.set(entry.projectId, true); }
@@ -230,15 +243,25 @@ export class SourceLibrary {
           if (!projects.get(entry.projectId)) continue;
         }
         const scope = scopeKey(entry), current = usage.get(scope) ?? { files: 0, bytes: 0 };
-        current.files++; current.bytes += entry.storedBytes ?? 0; usage.set(scope, current);
-        if (current.files > resourceLimits.maximumFiles || current.bytes > resourceLimits.maximumTotalBytes ||
-            (entry.storedBytes ?? 0) > resourceLimits.maximumSourceBytes)
-          throw toolFailure('已登记资料超过当前索引预算，原文已保留。', 'RETRIEVAL_LIBRARY_LIMIT', 413);
+        const proposed = { files: current.files + 1, bytes: current.bytes + (entry.storedBytes ?? 0) };
+        const dimension = (entry.storedBytes ?? 0) > resourceLimits.maximumSourceBytes ? 'maximumSourceBytes' :
+          proposed.files > resourceLimits.maximumFiles ? 'maximumFiles' : proposed.bytes > resourceLimits.maximumTotalBytes ? 'maximumTotalBytes' : null;
+        if (dimension) {
+          if (!allowPartial) throw toolFailure('已登记资料超过当前索引预算，原文已保留。', 'RETRIEVAL_LIBRARY_LIMIT', 413);
+          coverage.complete = false; coverage.skipped++;
+          if (coverage.limits.length < 8 && !coverage.limits.some(item => item.dimension === dimension && item.scopeKey === scope))
+            coverage.limits.push({ dimension, limit: resourceLimits[dimension], observed: dimension === 'maximumSourceBytes' ?
+              entry.storedBytes : dimension === 'maximumFiles' ? proposed.files : proposed.bytes, scopeKey: scope });
+          continue;
+        }
+        usage.set(scope, proposed); coverage.admitted++;
         sources.push({ sourceId: entry.id, scopeKey: scopeKey(entry), sourceType: 'knowledge', title: entry.title,
-          locator: { knowledgeId: entry.id, name: entry.title, relativePath: basename(entry.originalPath) },
+          locator: { knowledgeId: entry.id, name: entry.title, relativePath: basename(entry.originalPath),
+            ...(entry.extraction === undefined ? {} : { extraction: validateSourceExtraction(entry.extraction) }),
+            ...(entry.fileWindow === undefined ? {} : { fileWindow: validateSourceFileWindow(entry.fileWindow) }) },
           contentHash: entry.contentHash, sourceRevision: entry.revision, storedBytes: entry.storedBytes ?? 0 });
       }
-      return { revision: document.revision, sources };
+      return { revision: document.revision, sources, coverage };
     });
   }
 

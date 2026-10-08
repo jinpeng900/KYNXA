@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { codeLanguageForSource, parseCodeStructure, CODE_PARSER_VERSION } from '../data/retrieval/code-structure.mjs';
 import { chunkStructuredSource } from '../data/retrieval/retrieval-text.mjs';
+import { RetrievalStructureService } from '../data/retrieval/structure-service.mjs';
 
 const require = createRequire(import.meta.url);
 const source = (filename, text, extra = {}) => ({ sourceId: 'synthetic-code', scopeKey: 'user', sourceType: 'work-file', title: filename,
@@ -135,6 +136,126 @@ test('modern C# still reports genuine collection syntax errors and retains indep
   assertRanges(text, result);
 });
 
+test('Python decorators, generic classes, async methods, aliases and nested definitions keep exact original ranges', async () => {
+  const text = ['# 😀 def CommentGhost(): pass', '@traced', 'class Store[T]:',
+    '    def __init__(self):', '        self.label = "def StringGhost(): pass"',
+    '    @staticmethod', '    async def read(value: T) -> T:', '        def inner(argument):',
+    '            return argument', '        return inner(value)',
+    'def standalone():', '    return "class OtherGhost: pass"', 'type Alias[T] = list[T]'].join('\r\n');
+  const result = await parseCodeStructure(source('store.py', text));
+  assert.equal(result.parseStatus, 'parsed');
+  assert.equal(result.language, 'python');
+  const store = result.units.filter(unit => unit.symbolName === 'Store');
+  assert.ok(store.length);
+  assert.ok(store.every(unit => unit.kind === 'class' && unit.unitStartOffset === text.indexOf('@traced') &&
+    unit.unitEndOffset === text.indexOf('\r\ndef standalone')));
+  const constructor = result.units.find(unit => unit.kind === 'constructor');
+  assert.equal(constructor.qualifiedName, 'Store.__init__');
+  const read = result.units.find(unit => unit.qualifiedName === 'Store.read');
+  assert.equal(read.kind, 'method');
+  assert.equal(read.unitStartOffset, text.indexOf('@staticmethod'));
+  assert.equal(result.units.find(unit => unit.symbolName === 'inner').parentSymbol, 'Store.read');
+  assert.ok(result.units.some(unit => unit.kind === 'function' && unit.qualifiedName === 'standalone'));
+  assert.ok(result.units.some(unit => unit.kind === 'type' && unit.symbolName === 'Alias'));
+  assert.equal(result.units.some(unit => /Ghost/u.test(unit.symbolName ?? '')), false);
+  assertRanges(text, result);
+});
+
+test('Go packages, generic receiver methods, interface signatures and grouped aliases keep declared ownership', async () => {
+  const text = ['// 😀 func CommentGhost() {}', 'package example',
+    'type Store[T any] struct { Value T }', 'type Reader interface { Read() string }',
+    'type (Name = string; Number int)',
+    'func (s *Store[T]) Read() T { return s.Value }',
+    'func (s Store[T]) Write(value T) T { return value }',
+    'func Build[T any](value T) *Store[T] { return &Store[T]{Value: value} }',
+    'const note = `func StringGhost() {} 😀`'].join('\r\n');
+  const result = await parseCodeStructure(source('store.go', text));
+  assert.equal(result.parseStatus, 'parsed');
+  assert.equal(result.language, 'go');
+  assert.ok(result.units.some(unit => unit.kind === 'struct' && unit.qualifiedName === 'example.Store'));
+  for (const name of ['Read', 'Write']) {
+    const method = result.units.find(unit => unit.qualifiedName === `example.Store.${name}`);
+    assert.equal(method.kind, 'method');
+    assert.equal(method.parentSymbol, 'example.Store');
+  }
+  assert.ok(result.units.some(unit => unit.kind === 'method' && unit.qualifiedName === 'example.Reader.Read'));
+  for (const name of ['Name', 'Number']) assert.ok(result.units.some(unit => unit.kind === 'type' && unit.qualifiedName === `example.${name}`));
+  assert.ok(result.units.some(unit => unit.kind === 'function' && unit.qualifiedName === 'example.Build'));
+  const declaration = result.units.find(unit => unit.qualifiedName === 'example.Store');
+  assert.equal(text.slice(declaration.unitStartOffset, declaration.unitEndOffset), 'type Store[T any] struct { Value T }');
+  assert.equal(result.units.some(unit => /Ghost/u.test(unit.symbolName ?? '')), false);
+  assertRanges(text, result);
+});
+
+test('Rust modules, traits, inherent and trait impls, attributes and nested functions preserve source declarations', async () => {
+  const text = ['// 😀 fn CommentGhost() {}', 'mod outer {', '    #[derive(Clone)]',
+    '    pub struct Store<T> { value: T }', '    pub trait Reader { fn read(&self) -> i32; }',
+    '    impl<T> Store<T> { pub fn read(&self) -> &T { &self.value } }',
+    '    impl Reader for Store<i32> { fn read(&self) -> i32 { self.value } }',
+    '    fn build<T>(value: T) -> Store<T> {', '        fn inner() -> i32 { 1 }',
+    '        let note = r#"fn StringGhost() {} 😀"#;', '        Store { value }', '    }',
+    '    type Alias<T> = Vec<T>;', '    macro_rules! generated { () => { fn MacroGhost() {} } }', '}'].join('\r\n');
+  const result = await parseCodeStructure(source('store.rs', text));
+  assert.equal(result.parseStatus, 'parsed');
+  assert.equal(result.language, 'rust');
+  assert.ok(result.units.some(unit => unit.kind === 'module' && unit.qualifiedName === 'outer'));
+  const declaration = result.units.find(unit => unit.kind === 'struct');
+  assert.equal(declaration.qualifiedName, 'outer.Store');
+  assert.equal(declaration.unitStartOffset, text.indexOf('#[derive(Clone)]'));
+  assert.equal(result.units.filter(unit => unit.qualifiedName === 'outer.Store.read').length, 2);
+  assert.ok(result.units.some(unit => unit.kind === 'trait' && unit.qualifiedName === 'outer.Reader'));
+  assert.ok(result.units.some(unit => unit.kind === 'method' && unit.qualifiedName === 'outer.Reader.read'));
+  assert.equal(result.units.find(unit => unit.symbolName === 'inner').parentSymbol, 'outer.build');
+  assert.ok(result.units.some(unit => unit.kind === 'type' && unit.qualifiedName === 'outer.Alias'));
+  assert.equal(result.units.some(unit => /Ghost/u.test(unit.symbolName ?? '')), false, 'strings, comments and unexpanded macro tokens do not declare functions');
+  assertRanges(text, result);
+});
+
+test('Python, Go and Rust remain offline and keep genuine syntax errors as partial evidence', async () => {
+  const cases = [['sample.py', 'def good():\r\n    return 1\r\ndef broken(:\r\n    pass', 'good'],
+    ['sample.go', 'package example\r\nfunc good() int { return 1 }\r\nfunc broken( { ???', 'example.good'],
+    ['sample.rs', 'fn good() -> i32 { 1 }\r\nfn broken( { ???', 'good']];
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => { fetches++; throw new Error('Structure parsing must remain offline.'); };
+  try {
+    for (const [filename, text, qualifiedName] of cases) {
+      const input = source(filename, text), result = await parseCodeStructure(input);
+      assert.equal(result.parseStatus, 'partial');
+      assert.ok(result.diagnosticCodes.includes('CODE_SYNTAX_ERROR'));
+      assert.ok(result.units.some(unit => unit.qualifiedName === qualifiedName));
+      assert.equal(input.text, text);
+      assertRanges(text, result);
+    }
+    assert.equal(fetches, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('the real structure worker dispatches Python, Go and Rust ASTs while message sources and unsupported code stay explicit', async () => {
+  const structures = new RetrievalStructureService();
+  try {
+    for (const [filename, language, text, qualifiedName] of [
+      ['worker.py', 'python', '# 😀\r\nclass Store:\r\n    def read(self):\r\n        return 1', 'Store.read'],
+      ['worker.go', 'go', '// 😀\r\npackage example\r\ntype Store struct {}\r\nfunc (s *Store) Read() int { return 1 }', 'example.Store.Read'],
+      ['worker.rs', 'rust', '// 😀\r\nstruct Store;\r\nimpl Store { fn read(&self) -> i32 { 1 } }', 'Store.read']]) {
+      const result = await structures.parse(source(filename, text));
+      assert.equal(result.structure.domain, 'code');
+      assert.equal(result.structure.language, language);
+      assert.equal(result.structure.parseStatus, 'parsed');
+      assert.match(result.parserVersion, /units-v4/);
+      const method = result.chunks.find(chunk => chunk.structure.qualifiedName === qualifiedName);
+      assert.ok(method);
+      assert.equal(method.text, text.slice(method.startOffset, method.endOffset));
+      assert.ok(structures.status().languages.includes(language));
+    }
+    const message = await structures.parse(source('message.py', 'def Ghost(): pass', { sourceType: 'message' }));
+    assert.notEqual(message.structure.domain, 'code');
+    const unsupported = await structures.parse(source('worker.java', 'class Unsupported {}'));
+    assert.equal(unsupported.structure.parseStatus, 'unavailable');
+    assert.deepEqual(unsupported.structure.diagnosticCodes, ['UNSUPPORTED_CODE_LANGUAGE']);
+  } finally { await structures.close(); }
+});
+
 test('JavaScript class and bound-object methods keep nested ownership without overlapping parent bodies', async () => {
   const text = 'class Box { constructor() {} run(value) { function inner(input) { return input; } return inner(value); } }\n' +
     'const object = { read(value) { return value; }, nested: (value) => value };\nclass Empty {}';
@@ -173,7 +294,10 @@ test('unsupported sources stay explicit and chat or memory titles cannot turn in
   assert.equal(codeLanguageForSource({ text: '', title: 'file.tsx' }), 'tsx');
   assert.equal(codeLanguageForSource(source('notes.cs', '', { sourceType: 'message' })), null);
   assert.equal(codeLanguageForSource(source('notes.ts', '', { sourceType: 'memory' })), null);
-  const result = await parseCodeStructure(source('unsupported.py', 'def ignored(): pass'));
+  for (const [extension, language] of [['.py', 'python'], ['.pyi', 'python'], ['.go', 'go'], ['.rs', 'rust']])
+    assert.equal(codeLanguageForSource(source(`file${extension}`, '')), language);
+  assert.equal(codeLanguageForSource(source('notes.py', '', { sourceType: 'message' })), null);
+  const result = await parseCodeStructure(source('unsupported.java', 'class Ignored {}'));
   assert.equal(result.parseStatus, 'unavailable');
   assert.deepEqual(result.diagnosticCodes, ['CODE_LANGUAGE_UNSUPPORTED']);
   assert.deepEqual(result.units, []);

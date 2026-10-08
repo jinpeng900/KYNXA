@@ -6,19 +6,25 @@ import { EMBEDDING_TEXT_VERSION } from '../../data/retrieval/retrieval-text.mjs'
 import { MAX_QUERY_CHARACTERS, retrievalFailure } from '../../data/retrieval/retrieval-contracts.mjs';
 import { SourceLibrary } from '../../data/retrieval/source-library.mjs';
 import { RetrievalJobStore } from '../../data/retrieval/job-store.mjs';
-import { EmbeddingService } from '../../models/retrieval/embedding-service.mjs';
+import { EmbeddingRouter } from '../../models/retrieval/embedding-router.mjs';
 import { RerankerService } from '../../models/retrieval/reranker-service.mjs';
-import { readSourceFile } from '../../tools/retrieval/source-reader.mjs';
+import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
+import { sourceFileRevision } from '../../data/retrieval/retrieval-contracts.mjs';
 import { validateId } from '../../platform/conversation-id.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
 import { sourceIdentity, visibleScopes, projectConversationSources } from './source-projection.mjs';
-import { RETRIEVAL_CANDIDATE_LIMIT, selectCandidates, deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
+import { selectCandidates, deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
 import { EvidenceAcquisition, validateEvidenceGap } from './evidence-acquisition.mjs';
-import { SourceIndexService } from './source-manager.mjs';
+import { SourceIndexService, sourceScanSummary } from './source-manager.mjs';
 import { RetrievalEvidenceService } from './evidence-service.mjs';
-import { retrievalPlan, buildRetrievalIntent } from './query-plan.mjs';
+import { retrievalPlan, buildRetrievalIntent, planEvidenceAcquisition, hasExactRetrievalTarget } from './query-plan.mjs';
 import { listRetrievalModelProfiles, resolveRetrievalModelProfile } from '../../models/retrieval/model-registry.mjs';
 import { allocateEvidenceArchiveId, evidenceSourceRef, EvidenceReferenceStore } from '../../data/retrieval/evidence-references.mjs';
+import { ResourceBudgetService } from '../../platform/resources/resource-client.mjs';
+import { runResourceTask } from '../../platform/resources/resource-task.mjs';
+import { retrievalBudget } from './retrieval-budget.mjs';
+import { TaskExperienceStore } from '../../data/retrieval/task-experience-store.mjs';
+import { EmbeddingSpacePolicy } from './embedding-space-policy.mjs';
 
 const embeddingVersion = modelVersion => modelVersion ? `${modelVersion}|${EMBEDDING_TEXT_VERSION}` : undefined;
 
@@ -30,26 +36,37 @@ function hasModelMetadataMismatch(expected, result) {
 /** Application coordinator composes E-owned storage, C-owned inference and D-owned file reads.
  * 应用协调层组合数据存储、嵌入推理和工具文件读取，不改变正式会话或记忆归属。 */
 export class RetrievalCoordinator {
-  constructor({ conversations, memory, tools, index, embeddings, reranker, structures, excludedRoots = [] }) {
+  constructor({ conversations, memory, tools, index, embeddings, reranker, structures, resources, evaluationPolicy, excludedRoots = [] }) {
     this.conversations = conversations; this.memory = memory; this.tools = tools;
     this.settings = new RetrievalSettingsStore({ root: conversations.root, conversationStore: conversations });
-    this.index = index ?? new RetrievalIndex({ root: conversations.root });
-    this.structures = structures ?? new RetrievalStructureService();
-    this.embeddings = embeddings ?? new EmbeddingService();
-    this.reranker = reranker === undefined ? new RerankerService() : reranker;
+    this.resources = resources ?? new ResourceBudgetService();
+    this.ownsResources = !resources;
+    // Only the offline evaluator injects this policy; public settings and model arguments cannot change it.
+    // 仅离线评测构造器注入消融策略，公开设置及模型参数不能修改此策略。
+    this.evaluationPolicy = evaluationPolicy ? Object.freeze({ ...evaluationPolicy }) : null;
+    this.index = index ?? new RetrievalIndex({ root: conversations.root, resourceService: this.resources });
+    this.structures = structures ?? new RetrievalStructureService({ resourceService: this.resources });
+    this.embeddings = embeddings ?? new EmbeddingRouter({ resourceService: this.resources });
+    this.spacePolicy = new EmbeddingSpacePolicy({ resources: this.resources,
+      embeddings: { status: profileId => this.embeddings.status(profileId) }, index: this.index });
+    this.reranker = reranker === undefined ? new RerankerService({ resourceService: this.resources }) : reranker;
     this.library = new SourceLibrary({ root: conversations.root, conversationStore: conversations });
     this.evidenceReferences = tools.results ? new EvidenceReferenceStore({ conversationStore: conversations, resultStore: tools.results }) : null;
     this.jobs = new RetrievalJobStore(conversations.root);
+    this.experiences = new TaskExperienceStore(conversations.root);
     this.excludedRoots = [conversations.root, ...excludedRoots].filter(Boolean);
     this.acquisitions = new WeakMap();
     this.queue = Promise.resolve(); this.closed = false;
     this.shutdown = new AbortController();
     this.sourceService = new SourceIndexService({ library: this.library, index: this.index, jobs: this.jobs,
+      resourceService: this.resources,
       structures: { parse: (...args) => this.structures.parse(...args), version: () => this.structures.derivationVersion,
         status: () => this.structures.status?.(), identity: () => this.structures },
       embeddings: { status: (...args) => this.embeddings.status(...args),
+        ...(typeof this.embeddings.fitDocuments === 'function' ? { fitDocuments: (...args) => this.embeddings.fitDocuments(...args) } : {}),
         embedDocuments: (...args) => this.embeddings.embedDocuments(...args) }, getProject: id => this._project(id),
-      validateProject: id => this.conversations.describeProject(id), effectiveSettings: id => this.effective(id),
+      validateProject: id => this.conversations.describeProject(id), effectiveSettings: async id =>
+        this.spacePolicy.indexingSettings(await this.effective(id), this.shutdown.signal),
       serialize: operation => this._serialize(operation), excludedRoots: this.excludedRoots });
     // Compatibility views reference the sole owner; they never create a second job or cache state.
     // 兼容视图引用唯一所有者，不建立第二份作业或缓存状态。
@@ -57,7 +74,9 @@ export class RetrievalCoordinator {
     this.evidenceService = new RetrievalEvidenceService({ search: (...args) => this.search(...args),
       scopeSnapshot: (...args) => this._scopeSnapshot(...args), isFresh: (...args) => this._fresh(...args),
       assertCurrent: (...args) => this._assertCurrent(...args), serialize: operation => this._serialize(operation),
-      getResultStore: () => this.tools.results, signalFor: signal => this._signal(signal), isClosed: () => this.closed });
+      getResultStore: () => this.tools.results, signalFor: signal => this._signal(signal), isClosed: () => this.closed,
+      index: this.index, getAcquisition: context => this.acquisitions.get(context), getReferenceStore: () => this.evidenceReferences,
+      experiences: this.experiences, getTaskVerification: context => this.tools.taskVerificationFor?.(context), evaluationPolicy: this.evaluationPolicy });
   }
 
   async initialize() {
@@ -72,15 +91,29 @@ export class RetrievalCoordinator {
 
   async effective(projectId) { return this.settings.getEffective(projectId); }
 
+  _planEvidence(input) {
+    if (this.evaluationPolicy?.gaps !== false) return planEvidenceAcquisition(input);
+    return { channels: ['lexical', ...(input.semanticEnabled && input.embeddingStatus?.loaded ? ['vector'] : [])],
+      shouldEmbed: Boolean(input.semanticEnabled && input.embeddingStatus?.loaded),
+      shouldRerank: ['complex', 'research'].includes(input.taskType) && input.items?.length > 1 && input.rerankerStatus?.state === 'ready',
+      next: 'baseline-retrieval', sufficiency: 'not-evaluated', gapPlanningDisabled: true };
+  }
+
   async status() {
     await this.initialize();
     const settings = await this.effective();
     const indexed = await this.index.status(), embedding = this.embeddings.status(settings.local.embeddingProfileId);
+    const jobs = await this.jobs.list();
     return { ...indexed, backend: 'sqlite', sourceCount: indexed.sources, chunkCount: indexed.chunks,
       embedding: { ...embedding, available: ['ready', 'loading'].includes(embedding.state) },
+      configuredEmbeddingProfileId: settings.local.embeddingProfileId,
+      embeddingProfiles: this.modelProfiles().filter(profile => profile.kind === 'embedding').map(profile => this.embeddings.status(profile.id)),
       reranking: settings.local.rerankProfileId ? this.reranker?.status(settings.local.rerankProfileId) ?? { state: 'unavailable', loaded: false }
         : { state: 'disabled', loaded: false },
-      modelProfiles: this.modelProfiles(), parsing: this.structures.status?.(), jobs: await this.jobs.list() };
+      modelProfiles: this.modelProfiles(), parsing: this.structures.status?.(), jobs,
+      resources: await this.resources.snapshot(), vectorSpacePolicy: this.spacePolicy.status(jobs),
+      externalModels: this.externalModelStatus?.() ?? [],
+      deployment: { platform: 'windows', gpu: 'single-nvidia-dml-verified', otherPlatformsSupported: false } };
   }
 
   async _project(projectId) {
@@ -130,7 +163,7 @@ export class RetrievalCoordinator {
     return { relationship, settings, scopes, sources, loadSource, isCurrent,
       taskContext: context.message ?? priorUser?.Content,
       identities: new Map(sources.map(source => [source.sourceId, source])),
-      ...(mounted.scan ? { sourceScan: mounted.scan } : {}) };
+      ...(library.scan || mounted.scan ? { sourceScan: sourceScanSummary(library, mounted) } : {}) };
   }
 
   async _fresh(item, snapshot, signal, checks = new Map(), context = {}) {
@@ -147,6 +180,9 @@ export class RetrievalCoordinator {
     if (item.derivationSignature && !(await this.index.verifyReference({
       sourceRef: item.sourceRef, scopeKeys: snapshot.scopes, signal })).current) return false;
     let source = snapshot.identities.get(item.sourceId) ?? item;
+    if (snapshot.sourceScan?.coverage?.complete === false && !snapshot.identities.has(item.sourceId) &&
+      ['knowledge', 'work-file'].includes(item.sourceType)) return false;
+    if (source.unavailable) return false;
     if (source.sourceType === 'knowledge') {
       source = await this.library.readSource(item.sourceId, { scopeKeys: snapshot.scopes, sourceRevision: item.sourceRevision, signal });
     } else if (source.sourceType === 'memory' || source.sourceType === 'message') {
@@ -170,7 +206,13 @@ export class RetrievalCoordinator {
           snapshot.settings.projectIndexing.bindingRevision !== source.bindingRevision ||
           !project?.FolderPath || resolve(project.FolderPath) !== source.locator.root) return false;
       try {
-        const fresh = (await readSourceFile(source.locator.path, { root: source.locator.root, excludedRoots: this.excludedRoots, signal })).contentHash === source.contentHash;
+        const options = { root: source.locator.root, excludedRoots: this.excludedRoots,
+          maximumSourceBytes: snapshot.settings.local.indexing?.maximumSourceBytes, resourceService: this.resources, signal };
+        const file = source.locator.fileWindow
+          ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow, options)
+          : await readSourceFile(source.locator.path, options);
+        const fresh = file.contentHash === source.contentHash &&
+          (!source.locator.fileWindow && source.locator.extraction === undefined && file.extraction === undefined || sourceFileRevision(file) === source.sourceRevision);
         if (!fresh) this.sourceService.invalidateMounted(source.scopeKey.slice('project:'.length));
         return fresh;
       }
@@ -196,8 +238,13 @@ export class RetrievalCoordinator {
     }
   }
 
-  async _rerank(context, query, candidates, snapshot, taskType, signal) {
-    if (!['complex', 'research'].includes(taskType) || !snapshot.settings.local.rerankProfileId || !this.reranker || candidates.length < 2)
+  async _rerank(context, query, candidates, snapshot, taskType, signal, decision) {
+    decision ??= this._planEvidence({ query, items: candidates, taskType,
+      rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+    if (['complex', 'research'].includes(taskType) && snapshot.settings.local.rerankProfileId && this.reranker &&
+        decision?.rerankReason === 'optional-model-not-ready')
+      return { items: candidates, diagnostic: this.reranker.status(snapshot.settings.local.rerankProfileId).errorCode ?? 'RERANK_UNAVAILABLE' };
+    if (!decision?.shouldRerank || !snapshot.settings.local.rerankProfileId || !this.reranker || candidates.length < 2)
       return { items: candidates };
     try { resolveRetrievalModelProfile('reranker', snapshot.settings.local.rerankProfileId); }
     catch (error) { return { items: candidates, diagnostic: error.code }; }
@@ -229,21 +276,32 @@ export class RetrievalCoordinator {
     }
   }
 
-  search(context, { query, gap, domain, symbol, path, limit = 6, taskType = 'lookup', maximumTokens = 8192, existingContext = [], requiresSourceRead = false },
-    { signal, modelReferences = false, archiveId = modelReferences ? allocateEvidenceArchiveId() : undefined } = {}) {
+  search(context, { query, gap, domain, symbol, path, limit, taskType = 'lookup', maximumTokens, existingContext = [], requiresSourceRead = false },
+    { signal, modelReferences = false, archiveId = modelReferences ? allocateEvidenceArchiveId() : undefined,
+      allowColdInference = true } = {}) {
     signal = this._signal(signal);
-    return this._serialize(async () => {
+    return this._serialize(() => runResourceTask(this.resources, { taskId: `retrieval:${context.requestId ?? context.conversationId}`,
+      workspaceId: context.projectId ?? context.conversationId, memoryBytes: 8 * 1024 * 1024 }, async lease => {
+      const budget = { ...retrievalBudget({ taskType, suggestions: lease?.suggestions, limit, maximumTokens }),
+        ...this.evaluationPolicy?.fixedBudget };
+      budget.maximumTokens = Math.min(budget.maximumTokens, maximumTokens ?? 32768);
+      limit = budget.limit; maximumTokens = budget.maximumTokens;
       if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
       if (typeof query !== 'string' || !query.trim() || query.length > MAX_QUERY_CHARACTERS ||
           !Number.isSafeInteger(limit) || limit < 1 || limit > 60 ||
-          !Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > 16384)
+          !Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > 32768)
         throw retrievalFailure('Invalid query or evidence budget. / 检索查询、数量或证据预算无效。');
       validateEvidenceGap(gap);
+      if (maximumTokens === 0) return { items: [], strategy: 'context-budget-exhausted', vectorAvailable: false,
+        budget, evidenceAssessment: { ...assessEvidence([], query), reason: 'no-remaining-model-context' },
+        acquisition: { shouldContinue: false, next: 'answer-with-current-evidence-or-state-the-context-limit' } };
       const withModelReferences = items => modelReferences
         ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(archiveId, index + 1) })) : items;
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
       const retrievalIntent = buildRetrievalIntent(query, { domain, symbol, path, taskContext: snapshot.taskContext });
+      if (retrievalIntent.path && this.evaluationPolicy?.gaps !== false) this.sourceService.lifecycle.prioritize?.(
+        snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, retrievalIntent.path);
       if (!snapshot.settings.local.enabled) return { items: [], strategy: 'disabled', vectorAvailable: false,
         evidenceAssessment: assessEvidence([], query) };
       let acquisition = this.acquisitions.get(context);
@@ -252,11 +310,11 @@ export class RetrievalCoordinator {
           retrievalPlan(context.message ?? query).taskType === 'research' });
         this.acquisitions.set(context, acquisition);
       }
-      const ticket = acquisition.prepare({ query, gap,
+      const ticket = this.evaluationPolicy?.gaps === false ? { gap: query, explicitGap: false, entry: { searches: 0 }, cached: undefined } : acquisition.prepare({ query, gap,
         snapshotKey: sourceIdentity(snapshot.scopes, snapshot.settings, snapshot.sources.map(source =>
           [source.sourceId, source.sourceRevision, source.contentHash, source.bindingRevision, source.locator])),
         cacheKey: [query.normalize('NFKC').trim().toLowerCase(), limit, taskType, maximumTokens, requiresSourceRead, modelReferences,
-          retrievalIntent, sourceIdentity(existingContext)] });
+          retrievalIntent, allowColdInference, sourceIdentity(existingContext)] });
       // Optional inference health is checked live; a previous success must not hide a failed reranker.
       // 可选推理服务的健康状态需要实时检查，不能以历史成功掩盖重排服务失败。
       if (ticket.cached && snapshot.settings.local.rerankProfileId && ['complex', 'research'].includes(taskType))
@@ -288,46 +346,89 @@ export class RetrievalCoordinator {
       // 前台请求只同步词法原文；导入资料和工作向量由后台任务生成，不等整段聊天嵌入完成。
       await this.sourceService.syncFormalSources(snapshot, signal);
       let embedded, embeddingDiagnostic;
-      const profileId = snapshot.settings.local.embeddingProfileId;
-      if (snapshot.sources.length && snapshot.settings.local.semantic !== 'off' && profileId !== null) {
-        try {
-          const profile = resolveRetrievalModelProfile('embedding', profileId);
-          embedded = await this.embeddings.embedQuery(query, { signal, profileId });
-          const status = this.embeddings.status(profileId);
-          // Registered model/space identity determines dimensions; legacy seams may omit optional metadata.
-          // 注册模型或空间身份确定维数；旧接口可省略可选元信息，但声明的维数必须与实际向量一致。
-          const registeredModel = status.embeddingSpaceId === profile.embeddingSpaceId || embedded.embeddingSpaceId === profile.embeddingSpaceId ||
-            status.modelVersion === profile.modelVersion || embedded.modelVersion === profile.modelVersion;
-          const expectedDimensions = registeredModel ? profile.dimensions : status.dimensions;
-          if (embedded.profileId !== profileId || status.embeddingSpaceId && embedded.embeddingSpaceId !== status.embeddingSpaceId ||
-              hasModelMetadataMismatch(status, embedded) ||
-              !(Array.isArray(embedded.vector) || embedded.vector instanceof Float32Array) ||
-              expectedDimensions !== undefined && status.dimensions !== undefined && status.dimensions !== expectedDimensions ||
-              expectedDimensions !== undefined && (embedded.vector.length !== expectedDimensions ||
-                embedded.dimensions !== undefined && embedded.dimensions !== expectedDimensions) ||
-              embedded.dimensions !== undefined && embedded.vector.length !== embedded.dimensions)
-            throw retrievalFailure('Embedding result belongs to another model space. / 嵌入结果不属于所选模型空间。', 'RETRIEVAL_MODEL_SPACE_MISMATCH', 409);
-        } catch (error) {
-          if (signal.aborted) throw error;
-          embedded = undefined;
-          embeddingDiagnostic = error.code ?? 'EMBEDDING_FAILED';
+      const space = await this.spacePolicy.select(snapshot.settings, snapshot.scopes, signal);
+      let profileId = space.profileId;
+      if (space.canMigrate && this.evaluationPolicy?.resources !== false) this.spacePolicy.schedule(
+        snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, space.targetProfileId,
+        () => this.sourceService.rebuild({ projectId: snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId,
+          signal: this.shutdown.signal }));
+      const status = this.embeddings.status(profileId);
+      const semanticEnabled = snapshot.settings.local.semantic !== 'off' && profileId !== null;
+      // Exact paths/symbols start with current lexical/structural evidence, without waiting for model loading.
+      // 精确路径或符号先使用当前词法及结构证据，不等待模型加载；可选冷模型不阻塞自动上下文准备。
+      let lexical;
+      if (retrievalIntent.path || retrievalIntent.symbol || !allowColdInference && status.loaded === false)
+        lexical = await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
+          retrievalIntent, ann: snapshot.settings.local.ann, signal });
+      if (lexical && (retrievalIntent.path || retrievalIntent.symbol)) {
+        const targets = lexical.items.filter(item => hasExactRetrievalTarget(item, retrievalIntent));
+        const checks = new Map(), staleSources = new Set();
+        for (const item of targets) {
+          signal.throwIfAborted();
+          if (!await this._fresh(item, snapshot, signal, checks, context)) staleSources.add(item.sourceId);
+        }
+        lexical.items = lexical.items.filter(item => !staleSources.has(item.sourceId));
+      }
+      const initialDecision = this._planEvidence({ query, gap, intent: retrievalIntent, items: lexical?.items,
+        taskType, semanticEnabled, embeddingStatus: { ...status,
+          ...(allowColdInference && status.state === 'ready' ? { loaded: true } : {}) } });
+      if (snapshot.sources.length && initialDecision.shouldEmbed) {
+        for (const candidateProfile of [...new Set([profileId, space.fallbackProfileId].filter(Boolean))]) {
+          profileId = candidateProfile;
+          try {
+            const profile = resolveRetrievalModelProfile('embedding', profileId);
+            embedded = await this.embeddings.embedQuery(query, { signal, profileId });
+            const status = this.embeddings.status(profileId);
+            // Registered model/space identity determines dimensions; legacy seams may omit optional metadata.
+            // 注册模型或空间身份确定维数；旧接口可省略可选元信息，但声明的维数必须与实际向量一致。
+            const registeredModel = status.embeddingSpaceId === profile.embeddingSpaceId || embedded.embeddingSpaceId === profile.embeddingSpaceId ||
+              status.modelVersion === profile.modelVersion || embedded.modelVersion === profile.modelVersion;
+            const expectedDimensions = registeredModel ? profile.dimensions : status.dimensions;
+            if (embedded.profileId !== profileId || status.embeddingSpaceId && embedded.embeddingSpaceId !== status.embeddingSpaceId ||
+                hasModelMetadataMismatch(status, embedded) ||
+                !(Array.isArray(embedded.vector) || embedded.vector instanceof Float32Array) ||
+                expectedDimensions !== undefined && status.dimensions !== undefined && status.dimensions !== expectedDimensions ||
+                expectedDimensions !== undefined && (embedded.vector.length !== expectedDimensions ||
+                  embedded.dimensions !== undefined && embedded.dimensions !== expectedDimensions) ||
+                embedded.dimensions !== undefined && embedded.vector.length !== embedded.dimensions)
+              throw retrievalFailure('Embedding result belongs to another model space. / 嵌入结果不属于所选模型空间。', 'RETRIEVAL_MODEL_SPACE_MISMATCH', 409);
+            break;
+          } catch (error) {
+            if (signal.aborted) throw error;
+            embedded = undefined;
+            embeddingDiagnostic = error.code ?? 'EMBEDDING_FAILED';
+          }
         }
       }
-      const result = await this.index.search({ query, scopeKeys: snapshot.scopes, limit: RETRIEVAL_CANDIDATE_LIMIT,
+      const result = lexical && !embedded ? lexical : await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
         retrievalIntent, ann: snapshot.settings.local.ann,
         queryVector: embedded?.vector, embeddingProfileId: embedded?.profileId,
         embeddingModelVersion: embeddingVersion(embedded?.modelVersion), embeddingSpaceId: embedded?.embeddingSpaceId, signal });
       if (snapshot.indexingPending) result.indexingPending = true;
+      if (snapshot.indexingPartial || snapshot.sourceScan?.coverage?.complete === false) {
+        result.indexingPartial = true; result.sourceCoverage = snapshot.sourceScan?.coverage;
+      }
+      result.vectorSpacePolicy = { profileId: embedded?.profileId ?? null, targetProfileId: space.targetProfileId,
+        state: space.state, compatibleFallback: embedded && embedded.profileId !== space.targetProfileId,
+        ...(embeddingDiagnostic ? { diagnostic: embeddingDiagnostic } : {}) };
+      if (semanticEnabled && !initialDecision.shouldEmbed && !lexical?.items.some(item => hasExactRetrievalTarget(item, retrievalIntent)))
+        result.embeddingDiagnostic = status.errorCode ?? 'EMBEDDING_PREPARATION_PENDING';
       if (embeddingDiagnostic) result.embeddingDiagnostic = embeddingDiagnostic;
       // Search is bounded evidence acquisition, never an exhaustive symbol-reference enumeration.
       // 搜索只提供有界候选证据，不能冒充对符号引用的穷举。
-      result.coverage = { ...result.coverage, operation: 'search', complete: false, candidateLimit: RETRIEVAL_CANDIDATE_LIMIT };
+      result.coverage = { ...result.coverage, operation: 'search', complete: false, candidateLimit: budget.fusedCandidates };
+      result.budget = budget;
       result.items = withModelReferences(result.items);
       // Targeted current reads replace the second whole-library/history/tree snapshot.
       // 只回读命中来源并复核其版本，避免第二次全量资料、聊天和目录扫描。
       const candidateCount = result.items.length, freshChecks = new Map();
       const unique = deduplicateCandidates(result.items, { existingContext, retrievalIntent });
-      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal);
+      const candidateAssessment = assessEvidence(unique.items, query, { requiresSourceRead, retrievalIntent });
+      const rerankDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
+        items: unique.items, assessment: candidateAssessment,
+        rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal, rerankDecision);
+      result.rerankDecision = { executed: Boolean(reranked.rerank), reason: rerankDecision.rerankReason };
       let current = reranked.items, selected;
       const invalidSourceIds = new Set();
       do {
@@ -364,9 +465,17 @@ export class RetrievalCoordinator {
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
       result.evidenceState = { authorization: 'checked', freshness: 'current', conclusion: 'not-verified' };
-      result.acquisition = acquisition.observe(ticket, result);
+      result.acquisition = this.evaluationPolicy?.gaps === false ? { state: 'disabled', remainingSearches: 0,
+        remainingGapSearches: 0 } : acquisition.observe(ticket, result);
+      const nextDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
+        items: result.items, assessment: result.evidenceAssessment, indexingPending: result.indexingPending,
+        remainingSearches: Math.min(result.acquisition.remainingSearches, result.acquisition.remainingGapSearches),
+        newEvidenceCount: result.acquisition.newEvidenceCount });
+      result.acquisition.decision = this.evaluationPolicy?.gaps === false ? nextDecision :
+        acquisition.applyProgressDecision(nextDecision, result.acquisition);
+      result.acquisition.next = result.acquisition.decision.next;
       return result;
-    });
+    }, { signal }));
   }
 
   read(context, { sourceRef, offset = 0, limit = 8000, mode = 'page', anchorOffset, beforeCharacters = 384, gap }, { signal } = {}) {
@@ -389,8 +498,10 @@ export class RetrievalCoordinator {
         throw toolFailure('资料已更改或撤销，请重新检索。', 'STALE_RETRIEVAL_SOURCE', 409);
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
+      const acquisition = this.acquisitions.get(context);
       return { ...item, ...(canonicalSourceRef !== sourceRef ? { sourceRef } : {}),
-        evidenceDecision: { sufficiency: 'not-evaluated', missingInformation: gap ?? null,
+        evidenceDecision: acquisition?.observeRead(item, { gap, mode, sourceRef: canonicalSourceRef }) ?? { sufficiency: 'not-evaluated',
+          missingInformation: gap ?? null, sourceVersionChecked: true, contentRead: true,
           next: 'answer-if-this-context-supports-the-requested-facts-otherwise-name-the-remaining-gap' } };
     });
   }
@@ -399,9 +510,14 @@ export class RetrievalCoordinator {
     return signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
   }
 
+  relations(...args) { return this.evidenceService.relations(...args); }
+  assess(...args) { return this.evidenceService.assess(...args); }
+  experience(...args) { return this.evidenceService.experience(...args); }
+
   modelProfiles() { return listRetrievalModelProfiles(); }
   evidence(...args) { return this.evidenceService.prepare(...args); }
   finalizeEvidence(...args) { return this.evidenceService.finalize(...args); }
+  validateFinal(...args) { return this.evidenceService.validateFinal(...args); }
   importSource(input, options) { return this.sourceService.import(input, options); }
   removeSource(id, input, options) { return this.sourceService.remove(id, input, options); }
   rebuild(options) { return this.sourceService.rebuild(options); }
@@ -415,6 +531,7 @@ export class RetrievalCoordinator {
   async _close() {
     this.closed = true;
     this.shutdown.abort();
+    await this.spacePolicy.close();
     const closures = await Promise.allSettled([this.sourceService.close({
       releaseInference: async () => {
         const released = await Promise.allSettled([this.embeddings.close(), this.reranker?.close(), this.structures.close?.()]);
@@ -423,7 +540,8 @@ export class RetrievalCoordinator {
       }
     }), this.queue.catch(() => {})]);
     const indexClosure = await Promise.allSettled([this.index.close()]);
-    const failure = [...closures, ...indexClosure].find(item => item.status === 'rejected' && item.reason?.name !== 'AbortError');
+    const resourceClosure = await Promise.allSettled([this.ownsResources ? this.resources.close() : Promise.resolve()]);
+    const failure = [...closures, ...indexClosure, ...resourceClosure].find(item => item.status === 'rejected' && item.reason?.name !== 'AbortError');
     if (failure) throw failure.reason;
   }
 }

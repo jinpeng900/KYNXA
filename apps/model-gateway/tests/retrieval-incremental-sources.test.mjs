@@ -170,15 +170,21 @@ test('lowered budgets invalidate hot mounted snapshots and force complete resour
   const initial = await service.mountedSnapshot('project-a', f.settings);
   assert.equal(initial.sources.length, 2);
   f.settings.local.indexing.maximumFiles = 1;
-  await assert.rejects(service.mountedSnapshot('project-a', f.settings), { code: 'RETRIEVAL_SCAN_LIMIT' });
+  const fileLimited = await service.mountedSnapshot('project-a', f.settings);
+  assert.equal(fileLimited.sources.length, 1);
+  assert.equal(fileLimited.scan.coverage.complete, false);
+  assert.equal(fileLimited.scan.coverage.limit.dimension, 'files');
   f.settings.local.indexing.maximumFiles = 20000;
   f.settings.local.indexing.maximumTotalBytes = 1;
-  await assert.rejects(service.mountedSnapshot('project-a', f.settings), { code: 'RETRIEVAL_SCAN_LIMIT' });
+  const byteLimited = await service.mountedSnapshot('project-a', f.settings);
+  assert.equal(byteLimited.sources.length, 0);
+  assert.equal(byteLimited.scan.coverage.complete, false);
+  assert.equal(byteLimited.scan.coverage.limit.dimension, 'bytes');
   f.settings.local.indexing.maximumTotalBytes = 536870912;
   f.settings.local.indexing.maximumSourceBytes = 8;
   const smaller = await service.mountedSnapshot('project-a', f.settings);
   assert.deepEqual(smaller.sources.map(source => source.title), ['small.md']);
-  assert.equal(smaller.scan.fileReads, 0);
+  assert.equal((await smaller.loadSource(smaller.sources[0])).text, 'Small.');
 });
 
 test('polling fallback schedules reconciliation, invalidates snapshots, and stops after close', async t => {
@@ -328,4 +334,37 @@ test('closing deferred discovery aborts its owned scan and prevents a late rebui
   await Promise.allSettled([...service.foregroundContinuations.values()]);
   assert.equal(scheduled, 0);
   assert.equal(service.foregroundContinuations.size, 0);
+});
+
+test('a fast document discovery failure reports its diagnostic without interrupting foreground chat or trusting stale sources', async t => {
+  const f = await fixture(t), service = f.create(), path = join(f.workspace, 'source.md');
+  await writeFile(path, 'Previously verified ordinary source.');
+  const original = await service.mountedSnapshot('project-a', f.settings);
+  const capture = service.captureMounted.bind(service);
+  service.captureMounted = async () => { throw Object.assign(new Error('Synthetic malformed document.'), { code: 'DOCUMENT_PARSE_FAILED' }); };
+  const foreground = await service.foregroundMountedSnapshot('project-a', f.settings);
+  assert.equal(foreground.scan.backgroundPending, true);
+  assert.equal(foreground.scan.diagnosticCode, 'DOCUMENT_PARSE_FAILED');
+  assert.equal(foreground.sources[0].sourceId, original.sources[0].sourceId);
+  assert.equal(await foreground.isCurrent(foreground.sources[0]), true);
+  await writeFile(path, 'The original source has actually changed.');
+  assert.equal(await foreground.isCurrent(foreground.sources[0]), false);
+  await Promise.allSettled([...service.foregroundContinuations.values()]);
+  await assert.rejects(service.mountedSnapshot('project-a', f.settings), { code: 'DOCUMENT_PARSE_FAILED' });
+  service.captureMounted = capture;
+  service.markChanged('project-a', 'source.md');
+  const recovered = await service.foregroundMountedSnapshot('project-a', f.settings);
+  assert.equal((await recovered.loadSource(recovered.sources[0])).text, 'The original source has actually changed.');
+  assert.equal(service.lastDiscoveryError, undefined, 'successful recovery cannot leave an obsolete discovery failure');
+});
+
+test('an unavailable mount returns honest pending diagnostics to chat while the explicit index scan still fails', async t => {
+  const f = await fixture(t), service = f.create();
+  f.project.FolderPath = join(f.workspace, 'unavailable');
+  const foreground = await service.foregroundMountedSnapshot('project-a', f.settings);
+  assert.equal(foreground.scan.backgroundPending, true);
+  assert.equal(foreground.scan.diagnosticCode, 'ENOENT');
+  assert.deepEqual(foreground.sources, []);
+  await Promise.allSettled([...service.foregroundContinuations.values()]);
+  await assert.rejects(service.mountedSnapshot('project-a', f.settings), { code: 'ENOENT' });
 });

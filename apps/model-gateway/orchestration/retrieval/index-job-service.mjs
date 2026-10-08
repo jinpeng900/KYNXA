@@ -1,5 +1,13 @@
 import { validateId } from '../../platform/conversation-id.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
+import { normalizeRetrievalPath } from '../../data/retrieval/retrieval-contracts.mjs';
+
+// Full per-source coverage lives in SQLite; job history keeps only counts and a bounded recent view.
+// 完整来源覆盖保存在 SQLite；作业历史只保留统计及有界近期视图。
+function coverageSummary(coverage) {
+  return { ...coverage, sources: (coverage.sources ?? []).slice(-50), failures: (coverage.failures ?? []).slice(-50),
+    reportTruncated: Boolean(coverage.reportTruncated) || (coverage.sources?.length ?? 0) > 50 || (coverage.failures?.length ?? 0) > 50 };
+}
 
 /** Owns scheduled indexing and durable terminal states, without owning model/index resources.
  * 拥有索引调度与持久终态，不接管模型服务或索引资源的释放权。 */
@@ -18,6 +26,31 @@ export class IndexJobService {
     this.executionQueue = Promise.resolve();
     this.closed = false;
     this.lastFailure = undefined;
+    this.taskPriorities = new Map();
+  }
+
+  prioritiesFor(projectId) {
+    const key = projectId?.toLowerCase() ?? null;
+    const running = [...this.active.values()].find(job => job.projectId === key && !job.controller.signal.aborted);
+    if (running?.priorities) return running.priorities;
+    let priorities = this.taskPriorities.get(key);
+    if (!priorities) {
+      priorities = { revision: 0, paths: new Set() };
+      this.taskPriorities.set(key, priorities);
+      while (this.taskPriorities.size > 32) this.taskPriorities.delete(this.taskPriorities.keys().next().value);
+    }
+    return priorities;
+  }
+
+  prioritize(projectId, path) {
+    if (this.closed || !path) return;
+    const priorities = this.prioritiesFor(projectId);
+    const normalized = normalizeRetrievalPath(path);
+    if (!priorities.paths.has(normalized)) {
+      priorities.paths.add(normalized);
+      while (priorities.paths.size > 16) priorities.paths.delete(priorities.paths.values().next().value);
+      priorities.revision++;
+    }
   }
 
   initialize() {
@@ -31,7 +64,7 @@ export class IndexJobService {
     const controller = new AbortController();
     const active = { jobId: job.jobId, projectId: job.projectId, controller, acceptingRefresh: true,
       needsRefresh: false, recovered, completedSources: job.completedSources, totalSources: job.totalSources,
-      suspend: false, cancelledByUser: false, hasStarted: false };
+      suspend: false, cancelledByUser: false, hasStarted: false, priorities: this.prioritiesFor(job.projectId) };
     const abort = () => {
       active.cancelledByUser = true;
       active.suspend = false;
@@ -134,18 +167,37 @@ export class IndexJobService {
         const semanticProgress = semantic => ({ ...semantic, priorDiagnosticCodes: [...priorDiagnosticCodes] });
         let acknowledgedSources = 0;
         const report = await this.publishSources(prepared.sources, prepared.settings, signal, (completedSources, progress) => {
-          for (const source of prepared.sources.slice(acknowledgedSources, completedSources)) completedSourceIds.add(source.sourceId);
+          if (progress?.processedSourceIds) for (const sourceId of progress.processedSourceIds) completedSourceIds.add(sourceId);
+          else for (const source of prepared.sources.slice(acknowledgedSources, completedSources)) completedSourceIds.add(source.sourceId);
           acknowledgedSources = completedSources;
           active.completedSources = Math.max(active.completedSources, completedSourceIds.size);
           const patch = { completedSources: active.completedSources,
+            ...(progress?.coverage ? { coverage: coverageSummary(progress.coverage) } : {}),
             ...(progress?.semantic ? { semantic: semanticProgress(progress.semantic) } : {}) };
           if (prepared.checkpoint && progress?.checkpointSources?.length) {
             return this.jobs.commitBatch(active.jobId, { ...prepared.checkpoint, updatedAt: new Date().toISOString() },
               progress.checkpointSources, patch).then(receipt => { active.hasCheckpoint = true; return receipt; });
           }
           return this.jobs.update(active.jobId, patch);
-        }, { loadSource: prepared.loadSource, isCurrent: prepared.isCurrent });
+        }, { loadSource: prepared.loadSource, isCurrent: prepared.isCurrent,
+          priorities: active.priorities });
         signal.throwIfAborted();
+        if (report?.coverage || prepared.sourceScan?.coverage) {
+          const coverage = report?.coverage ?? { discovered: prepared.sources.length, lexical: 0, semantic: 0,
+            failed: 0, skipped: 0, partial: 0, complete: false, sources: [] };
+          const scan = prepared.sourceScan;
+          const failures = scan?.failures ?? [];
+          active.coverage = { ...coverage,
+            discovered: Math.max(coverage.discovered, scan?.coverage?.discovered ?? 0),
+            failed: Math.max(coverage.failed, scan?.coverage?.failed ?? failures.length),
+            skipped: Math.max(coverage.skipped, scan?.coverage?.skipped ?? 0),
+            partial: coverage.partial ?? 0, failures: failures.slice(0, 50), sources: (coverage.sources ?? []).slice(-50),
+            complete: coverage.complete && scan?.coverage?.complete !== false && !failures.length && !scan?.truncated && !scan?.backgroundPending,
+            ...(scan?.coverage?.limit ? { limit: scan.coverage.limit } : {}),
+            ...(scan?.coverage?.limits ? { limits: scan.coverage.limits.slice(0, 50) } : {}),
+            reportTruncated: failures.length > 50 || (coverage.sources?.length ?? 0) > 50 || Boolean(coverage.reportTruncated) };
+          await this.jobs.update(active.jobId, { coverage: active.coverage });
+        }
         await this.finalizeSources?.(prepared, signal);
         if (report?.semantic) {
           previousPassDiagnostics = report.semantic.diagnosticCodes;
@@ -162,7 +214,8 @@ export class IndexJobService {
       // Seal admission synchronously before terminal persistence; newer dirtiness starts a successor job.
       // 终态落盘前同步封闭追加入口，此后到来的来源变更另起后继作业，不恢复已结束状态。
       active.acceptingRefresh = false;
-      await this.jobs.update(active.jobId, { status: 'completed', finishedAt: new Date().toISOString() });
+      const partial = active.coverage && (!active.coverage.complete || active.coverage.failed || active.coverage.skipped);
+      await this.jobs.update(active.jobId, { status: partial ? 'partial' : 'completed', finishedAt: new Date().toISOString() });
     } catch (error) {
       const suspended = signal.aborted && !active.cancelledByUser && active.suspend && (active.hasCheckpoint || active.recovered);
       await this.jobs.update(active.jobId, { status: suspended ? 'paused' : signal.aborted ? 'cancelled' : 'failed',
@@ -196,6 +249,7 @@ export class IndexJobService {
 
   beginClose() {
     this.closed = true;
+    this.taskPriorities.clear();
     for (const active of this.active.values()) {
       // Shutdown may resume only derived indexing; explicit cancellation remains terminal.
       // 关闭时仅允许派生索引恢复，用户明确取消仍保留终态。

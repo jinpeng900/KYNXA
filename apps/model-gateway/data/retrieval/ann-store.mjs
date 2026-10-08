@@ -5,16 +5,18 @@ import { fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
 import { retrievalFailure } from './retrieval-contracts.mjs';
 import { AnnBuildQueue } from './ann-build-queue.mjs';
+import { runResourceTask } from '../../platform/resources/resource-task.mjs';
 
 const ANN_PACKAGE_VERSION = '2.26.4';
 const ANN_CACHE_VERSION = 1;
 const MAX_MANIFEST_BYTES = 65536;
+const NATIVE_RETRY_WINDOW_MS = 60000;
 const DOMAIN_SQL = `CASE WHEN c.structure_domain<>'' THEN c.structure_domain
   WHEN s.structure_json<>'' THEN json_extract(s.structure_json,'$.domain')
   WHEN s.source_type='code' THEN 'code' WHEN s.source_type IN ('document','memory','conversation','web') THEN 'knowledge' ELSE '' END`;
 
 export { DOMAIN_SQL as RETRIEVAL_DOMAIN_SQL };
-export const DEFAULT_ANN_OPTIONS = Object.freeze({ mode: 'auto', threshold: 50000, maxCachedShards: 4,
+export const DEFAULT_ANN_OPTIONS = Object.freeze({ mode: 'auto', adaptive: true, threshold: 50000, maxCachedShards: 4,
   maxShardBytes: 256 * 1024 * 1024, connectivity: 16, expansionAdd: 128, expansionSearch: 128, exactScanLimit: 1000000 });
 
 export function validateAnnOptions(input = {}) {
@@ -23,7 +25,9 @@ export function validateAnnOptions(input = {}) {
   const bounds = { threshold: [1, 1000000], maxCachedShards: [1, 16], maxShardBytes: [1024 * 1024, 1024 * 1024 * 1024],
     connectivity: [4, 64], expansionAdd: [16, 2048], expansionSearch: [16, 2048], exactScanLimit: [1, 1000000] };
   for (const [key, value] of Object.entries(input)) {
-    if (key === 'mode') {
+    if (key === 'adaptive') {
+      if (typeof value !== 'boolean') throw retrievalFailure('Invalid adaptive ANN setting. / 自适应向量预算无效。', 'INVALID_RETRIEVAL_ANN');
+    } else if (key === 'mode') {
       if (!['auto', 'off', 'ann', 'exact'].includes(value))
         throw retrievalFailure('Invalid ANN mode. / 本地向量索引模式无效。', 'INVALID_RETRIEVAL_ANN');
     } else if (!bounds[key] || !Number.isSafeInteger(value) || value < bounds[key][0] || value > bounds[key][1])
@@ -60,39 +64,59 @@ function fileHash(path) {
 /** Scope, model space and domain select a graph before any approximate Top-K operation.
  * 近似 Top-K 之前按范围、模型空间和领域选择独立图；SQLite 保持正式向量与身份的权威。 */
 export class LocalAnnStore {
-  constructor({ directory, epoch, database }) {
+  constructor({ directory, epoch, database, now = Date.now, resourceService, isolatedBuilder = false,
+    processFactory = fork, requestTimeoutMs = 30000, vectorTable = 'chunks' }) {
+    if (!['chunks', 'retrieval_vector_rows'].includes(vectorTable)) throw retrievalFailure('Invalid vector view. / 向量视图无效。');
+    this.vectorTable = vectorTable;
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 30000)
+      throw retrievalFailure('Invalid ANN timeout. / 向量计算期限无效。', 'INVALID_RETRIEVAL_ANN');
+    this.rootDirectory = directory;
+    this.resources = resourceService;
+    this.isolatedBuilder = isolatedBuilder;
+    this.resourceLease = null;
+    this.resourceTaskId = randomUUID();
     this.directory = join(directory, 'ann');
     this.epoch = epoch;
     this.database = database;
     this.shards = new Map();
+    this.preparedOnDisk = new Map();
     this.child = null;
+    this.processFactory = processFactory;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.retiring = null;
+    this.retiringChild = null;
+    this.closingChild = null;
+    this.resourceContext = null;
     this.requests = new Map();
     this.sequence = 0;
-    this.builds = new AnnBuildQueue();
+    this.builds = new AnnBuildQueue({ now });
+    this.ownerQueue = Promise.resolve();
+    this.now = now;
     this.closed = false;
     this.helperMemory = { rssBytes: 0, observedPeakRssBytes: 0 };
     this.nativeError = null;
+    this.nativeRetry = { attempts: 0, windowStartedAt: 0, retryAt: 0 };
     this.lastError = null;
     this.counters = { built: 0, loaded: 0, updated: 0, invalidated: 0, cacheMisses: 0, recycled: 0 };
   }
 
   _native() {
     if (this.child) return this.child;
-    if (this.nativeError) throw this.nativeError;
+    if (this.retiring) throw retrievalFailure('ANN helper is retiring. / 向量进程正在退出。', 'RETRIEVAL_ANN_RETIREMENT_PENDING');
+    if (this.closed) throw retrievalFailure('ANN store is closed. / 向量索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
+    if (this.resources && !this.resourceLease) throw retrievalFailure('ANN memory has not been reserved. / 尚未取得向量进程内存预约。',
+      'RETRIEVAL_ANN_RESOURCE_LIMIT');
+    if (this.nativeError && this.now() < this.nativeRetry.retryAt) throw this.nativeError;
     checkStorage(this.directory, true);
     if (!existsSync(this.directory)) mkdirSync(this.directory, { mode: 0o700 });
-    const child = fork(fileURLToPath(new URL('./ann-worker.mjs', import.meta.url)), [], {
+    const child = this.processFactory(fileURLToPath(new URL('./ann-worker.mjs', import.meta.url)), [], {
       cwd: this.directory, windowsHide: true, execArgv: [], serialization: 'advanced', stdio: ['ignore', 'ignore', 'ignore', 'ipc']
     });
     this.child = child;
-    const fail = error => {
-      this.nativeError = Object.assign(error, { code: error.code ?? 'RETRIEVAL_ANN_UNAVAILABLE' });
-      for (const request of this.requests.values()) { clearTimeout(request.timeout); request.reject(this.nativeError); }
-      this.requests.clear(); this.child = null;
-      this.shards.clear();
-      this.helperMemory.rssBytes = 0;
-    };
+    if (this.resourceLease && child.pid) this.resources.registerExecutor?.(this.resourceLease.leaseId,
+      { processId: child.pid }).catch(() => {});
     child.on('message', message => {
+      if (this.child !== child) return;
       if (Number.isSafeInteger(message.memory?.rssBytes) && Number.isSafeInteger(message.memory?.observedPeakRssBytes))
         this.helperMemory = { rssBytes: message.memory.rssBytes,
           observedPeakRssBytes: Math.max(this.helperMemory.observedPeakRssBytes, message.memory.observedPeakRssBytes) };
@@ -100,23 +124,163 @@ export class LocalAnnStore {
       if (!request) return;
       this.requests.delete(message.id); clearTimeout(request.timeout);
       if (message.error) request.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
-      else request.resolve(message.result);
+      else { this.nativeError = null; request.resolve(message.result); }
       if (!this.requests.size) { child.unref(); child.channel?.unref(); }
     });
-    child.on('error', fail);
-    child.on('exit', code => { if (this.child === child) fail(retrievalFailure(`ANN helper exited (${code}). / 向量计算进程已退出。`, 'RETRIEVAL_ANN_WORKER_EXITED')); });
+    child.on('error', error => this._failNative(child, error));
+    child.on('exit', code => {
+      if (this.child !== child) return;
+      if (this.closingChild === child) this._retireChild(child).catch(() => {});
+      else this._failNative(child, retrievalFailure(`ANN helper exited (${code}). / 向量计算进程已退出。`, 'RETRIEVAL_ANN_WORKER_EXITED'));
+    });
     child.unref(); child.channel?.unref();
     return child;
   }
 
-  _request(method, input) {
+  _failNative(child, error) {
+    if (this.child !== child) return;
+    this.nativeError = Object.assign(error, { code: error.code ?? 'RETRIEVAL_ANN_UNAVAILABLE' });
+    const now = this.now();
+    if (!this.nativeRetry.attempts || now - this.nativeRetry.windowStartedAt >= NATIVE_RETRY_WINDOW_MS)
+      this.nativeRetry = { attempts: 0, windowStartedAt: now, retryAt: 0 };
+    this.nativeRetry.attempts++;
+    this.nativeRetry.retryAt = this.nativeRetry.attempts >= 3 ? this.nativeRetry.windowStartedAt + NATIVE_RETRY_WINDOW_MS
+      : now + 1000 * 2 ** (this.nativeRetry.attempts - 1);
+    this.shards.clear();
+    this._retireChild(child, this.nativeError, true).catch(() => {});
+  }
+
+  _retireChild(child, error, kill = false) {
+    if (this.retiringChild === child) return this.retiring;
+    const reservation = this._takeReservation();
+    const requests = [...this.requests.values()];
+    for (const request of requests) clearTimeout(request.timeout);
+    this.requests.clear();
+    this.child = null;
+    this.retiringChild = child;
+    if (this.closingChild === child) this.closingChild = null;
+    // Capture ownership before waiting: a late exit can release only this child's reservation.
+    // 等待前快照所有权，晚到的退出只能释放此旧进程的预约，不能读取替代进程的 lease。
+    const exited = new Promise(resolveExit => {
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) { resolveExit(); return; }
+      const timeout = setTimeout(() => child.kill(), 1000);
+      timeout.unref?.();
+      child.once('exit', () => { clearTimeout(timeout); resolveExit(); });
+      if (kill) child.kill();
+    });
+    const retirement = exited.then(async () => {
+      this.helperMemory.rssBytes = 0;
+      await this._releaseReservation(reservation);
+    }).finally(() => {
+      for (const request of requests) request.reject(error ?? retrievalFailure(
+        'ANN helper was closed. / 向量进程已关闭。', 'RETRIEVAL_ANN_WORKER_EXITED'));
+      if (this.retiring === retirement) { this.retiring = null; this.retiringChild = null; }
+    });
+    this.retiring = retirement;
+    return retirement;
+  }
+
+  async _waitForRetirement() {
+    if (!this.retiring) return;
+    let timeout;
+    try {
+      await Promise.race([this.retiring, new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(retrievalFailure('ANN helper has not exited yet. / 向量旧进程尚未退出。',
+          'RETRIEVAL_ANN_RETIREMENT_PENDING')), 5000);
+        timeout.unref?.();
+      })]);
+    } finally { clearTimeout(timeout); }
+  }
+
+  _withOwner(operation) {
+    // Serialize short lifecycle sections, while background builds yield between bounded batches.
+    // 仅串行化短生命周期片段，后台建图在有界批次之间释放所有者，前台不会等待整个大图。
+    const result = this.ownerQueue.catch(() => {}).then(operation);
+    this.ownerQueue = result.catch(() => {});
+    return result;
+  }
+
+  async resourceOptions(options, descriptor, kind, signal) {
+    if (!this.resources) return options;
+    await this._waitForRetirement();
+    if (this.nativeError && this.now() < this.nativeRetry.retryAt) throw this.nativeError;
+    this.resourceContext = { options, descriptor: { ...descriptor }, kind };
+    const incomingBytes = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
+    if (this.resourceLease && incomingBytes + 96 * 1024 * 1024 > this.resourceLease.memoryBytes) {
+      await this._withOwner(async () => {
+        for (const entry of this.shards.values()) await this._persist(entry);
+        this.shards.clear(); await this._releaseHelper(); await this._releaseReservation();
+      });
+    }
+    if (!this.resourceLease) {
+      const snapshot = await this.resources.snapshot({ signal });
+      const available = snapshot.hardware?.memory?.availableBytes ?? snapshot.memory?.availableBytes ??
+        snapshot.budget?.memoryBytes ?? 512 * 1024 * 1024;
+      const estimate = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
+      const target = this.isolatedBuilder ? estimate + 96 * 1024 * 1024 : Math.max(estimate * 2, available / 8);
+      const memoryBytes = Math.floor(Math.min(2 * 1024 ** 3, available / 3, Math.max(128 * 1024 * 1024, target)));
+      const lease = await this.resources.acquire({ taskId: `ann:${randomUUID()}`, workspaceId: descriptor.scope_key,
+        kind, cpuThreads: 0, memoryBytes, ttlMs: 30000, waitMs: 10000 }, { signal });
+      if (lease.status !== 'granted') throw retrievalFailure('ANN is waiting for resource capacity. / 向量图等待可用资源。',
+        'RETRIEVAL_ANN_RESOURCE_LIMIT');
+      this.resourceLease = lease;
+      this.resourceRenewal = setInterval(() => this.resources.renew(lease.leaseId, { ttlMs: 30000 }).catch(() => {}), 10000);
+      this.resourceRenewal.unref?.();
+    }
+    if (!options.adaptive) return options;
+    const cacheBytes = Math.max(1024 * 1024, this.resourceLease.memoryBytes - 96 * 1024 * 1024);
+    const shardBytes = Math.max(1024 * 1024, Math.min(1024 ** 3, cacheBytes / (this.isolatedBuilder ? 1 : 2)));
+    const maxShardBytes = options.maxShardBytes === DEFAULT_ANN_OPTIONS.maxShardBytes ? Math.floor(shardBytes) :
+      Math.min(options.maxShardBytes, Math.floor(cacheBytes));
+    const estimatedShardBytes = Math.max(1024 * 1024, descriptor.count *
+      (descriptor.dimensions * 4 + options.connectivity * 16 + 256));
+    const maxCachedShards = options.maxCachedShards === DEFAULT_ANN_OPTIONS.maxCachedShards
+      ? Math.max(1, Math.min(16, Math.floor(cacheBytes / estimatedShardBytes))) :
+        Math.min(options.maxCachedShards, Math.max(1, Math.floor(cacheBytes / maxShardBytes)));
+    this.adaptiveOptions = { ...options, maxShardBytes, maxCachedShards };
+    return this.adaptiveOptions;
+  }
+
+  _takeReservation() {
+    const reservation = { lease: this.resourceLease, renewal: this.resourceRenewal };
+    this.resourceLease = null; this.resourceRenewal = null;
+    return reservation;
+  }
+
+  async _releaseReservation(reservation = this._takeReservation()) {
+    clearInterval(reservation.renewal);
+    const lease = reservation.lease;
+    if (lease) await this.resources.release(lease.leaseId);
+  }
+
+  async _request(method, input) {
+    await this._waitForRetirement();
+    if (this.resources && !this.child && !this.resourceLease && this.resourceContext) {
+      const { options, descriptor, kind } = this.resourceContext;
+      await this.resourceOptions(options, descriptor, kind);
+    }
+    if (this.resources && ['add', 'search', 'load', 'save'].includes(method))
+      return runResourceTask(this.resources, { taskId: `ann:${this.resourceTaskId}:${method}`, kind: this.isolatedBuilder ? 'background' : 'foreground',
+        cpuThreads: this.isolatedBuilder ? 32 : 4, memoryBytes: 0, waitMs: 10000 },
+        async lease => {
+          this.parentBuildQueue?.configure(lease?.suggestions?.annBuildConcurrency ?? lease?.cpuThreads ?? 1);
+          const started = performance.now();
+          const result = await this._sendRequest(method, { ...input, threads: lease?.cpuThreads ?? 1 });
+          if (lease && method === 'add') await this.resources.report?.(lease.leaseId, {
+            throughputPerSecond: input.keys.length * 1000 / Math.max(1, performance.now() - started), queueDepth: this.requests.size }).catch(() => {});
+          return result;
+        });
+    return this._sendRequest(method, input);
+  }
+
+  _sendRequest(method, input) {
     const child = this._native(), id = ++this.sequence;
     if (this.requests.size >= 32) return Promise.reject(retrievalFailure('ANN helper queue is full. / 向量计算队列已满。', 'RETRIEVAL_ANN_QUEUE_FULL'));
     return new Promise((resolveResult, reject) => {
       const timeout = setTimeout(() => {
         const error = retrievalFailure('ANN computation timed out. / 向量计算超时。', 'RETRIEVAL_ANN_TIMEOUT');
-        this.requests.delete(id); reject(error); child.kill();
-      }, 30000);
+        this._failNative(child, error);
+      }, this.requestTimeoutMs);
       timeout.unref();
       this.requests.set(id, { resolve: resolveResult, reject, timeout });
       child.ref(); child.channel?.ref();
@@ -124,7 +288,7 @@ export class LocalAnnStore {
         if (!error) return;
         const request = this.requests.get(id);
         if (!request) return;
-        this.requests.delete(id); clearTimeout(timeout); reject(error);
+        this._failNative(child, error);
       });
     });
   }
@@ -133,6 +297,7 @@ export class LocalAnnStore {
     return { schemaVersion: ANN_CACHE_VERSION, packageVersion: ANN_PACKAGE_VERSION, epoch: this.epoch,
       scopeKey: descriptor.scope_key, profileId: descriptor.embedding_profile_id, dimensions: descriptor.dimensions,
       modelVersion: descriptor.embedding_model_version, spaceId: descriptor.embedding_space_id, domain: descriptor.domain,
+      ...(descriptor.partitioned ? { minimumId: descriptor.minimumId, maximumId: descriptor.maximumId } : {}),
       metric: 'cos', quantization: 'f32', connectivity: options.connectivity,
       expansionAdd: options.expansionAdd, expansionSearch: options.expansionSearch };
   }
@@ -149,7 +314,7 @@ export class LocalAnnStore {
     try {
       checkStorage(paths.graph); checkStorage(paths.manifest);
       await this._request('save', { key: entry.key, filename: basename(temporary) });
-      if (entry.generation !== generation || entry.count !== count || this.database.prepare(
+      if (entry.owner !== this.child || entry.generation !== generation || entry.count !== count || this.database.prepare(
         'SELECT generation FROM scope_snapshots WHERE scope_key=?').get(entry.identity.scopeKey)?.generation !== generation)
         throw retrievalFailure('ANN cache changed during save. / 向量缓存在保存期间已变化。', 'RETRIEVAL_ANN_STALE_BUILD');
       checkStorage(temporary);
@@ -194,15 +359,29 @@ export class LocalAnnStore {
   }
 
   async enforceBudget(options) {
+    if (options.adaptive && this.adaptiveOptions) options = { ...options,
+      maxShardBytes: options.maxShardBytes === DEFAULT_ANN_OPTIONS.maxShardBytes ? this.adaptiveOptions.maxShardBytes :
+        Math.min(options.maxShardBytes, this.adaptiveOptions.maxShardBytes),
+      maxCachedShards: options.maxCachedShards === DEFAULT_ANN_OPTIONS.maxCachedShards ? this.adaptiveOptions.maxCachedShards :
+        Math.min(options.maxCachedShards, this.adaptiveOptions.maxCachedShards) };
     const entries = [...this.shards.values()];
     const fits = entry => entry.count * (entry.identity.dimensions * 4 + entry.identity.connectivity * 16 + 256) <= options.maxShardBytes;
     const incompatibleBuild = [...this.builds.jobs.values()].some(job => job.descriptor.count *
-      (job.descriptor.dimensions * 4 + options.connectivity * 16 + 256) > options.maxShardBytes);
-    if (!incompatibleBuild && entries.length <= options.maxCachedShards && entries.every(fits)) return;
+      (job.descriptor.dimensions * 4 + (job.descriptor.buildConnectivity ?? options.connectivity) * 16 + 256) > options.maxShardBytes ||
+      job.descriptor.buildMaxShardBytes > options.maxShardBytes || job.descriptor.buildMaxCachedShards > options.maxCachedShards);
+    const unusedOwner = (options.mode === 'off' || options.mode === 'exact') && (entries.length || this.builds.jobs.size || this.child);
+    if (!unusedOwner && !incompatibleBuild && entries.length <= options.maxCachedShards && entries.every(fits)) return;
+    // Drain before acquiring the owner: the cancelled batch may itself be waiting for this lock.
+    // 先等待被取消批次结束，再获取所有者锁；批次本身可能正在等待此锁，反序会死锁。
     await this.builds.drain();
+    return this._withOwner(() => this._enforceBudget(options));
+  }
+
+  async _enforceBudget(options) {
+    const fits = entry => entry.count * (entry.identity.dimensions * 4 + entry.identity.connectivity * 16 + 256) <= options.maxShardBytes;
     // Retain compliant disk graphs, then release the owned process; a dropped native reference alone does not bound RSS.
     // 保留合预算的磁盘图后关闭已拥有的进程；只撤销原生引用不能保证释放进程内存。
-    for (const entry of entries.filter(fits).reverse().slice(0, options.maxCachedShards)) {
+    for (const entry of [...this.shards.values()].filter(fits).reverse().slice(0, options.maxCachedShards)) {
       entry.options = options;
       try { await this._persist(entry); }
       catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
@@ -221,17 +400,25 @@ export class LocalAnnStore {
     checkStorage(this.directory, true); checkStorage(paths.manifest); checkStorage(paths.graph);
     if (!existsSync(paths.manifest) || !existsSync(paths.graph)) return false;
     if (lstatSync(paths.manifest).size > MAX_MANIFEST_BYTES || lstatSync(paths.graph).size > options.maxShardBytes) return false;
+    let attemptedLoad = false, loadedSuccessfully = false;
     try {
       const metadata = JSON.parse(readFileSync(paths.manifest, 'utf8'));
       if (JSON.stringify(metadata.identity) !== JSON.stringify(entry.identity) || metadata.generation !== entry.generation || metadata.count !== count)
         return false;
       const hash = fileHash(paths.graph);
       if (metadata.graphHash !== hash) return false;
+      attemptedLoad = true;
       const loaded = await this._request('load', { key: entry.key, filename: basename(paths.graph) });
       if (loaded.count !== count || loaded.dimensions !== entry.identity.dimensions) return false;
+      loadedSuccessfully = true;
       this.counters.loaded++;
       return true;
     } catch { return false; }
+    finally {
+      // A mismatched native graph may retain large allocations even after its JS reference is replaced.
+      // 原生图的数量或维度不匹配时，即使替换 JS 引用也可能保留大量内存，须退出实际所有者。
+      if (attemptedLoad && !loadedSuccessfully) await this._discardEntry(entry);
+    }
   }
 
   async _evict(options, incoming = true) {
@@ -242,6 +429,7 @@ export class LocalAnnStore {
       try { await this._persist(entry); } catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
     }
     this.shards.clear();
+    this._cancelOwnedBuild();
     await this._releaseHelper();
     this.counters.recycled++;
   }
@@ -249,45 +437,65 @@ export class LocalAnnStore {
   _entry(descriptor, options) {
     const identity = this._identity(descriptor, options);
     const key = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
-    return { key, identity, descriptor, options, generation: descriptor.generation, count: descriptor.count, dirty: false };
+    return { key, identity, descriptor: { ...descriptor }, options, generation: descriptor.generation, count: descriptor.count, dirty: false };
   }
 
   _assertBuildCurrent(entry, signal) {
     signal?.throwIfAborted();
-    if (this.closed || this.database.prepare('SELECT generation FROM scope_snapshots WHERE scope_key=?')
-      .get(entry.identity.scopeKey)?.generation !== entry.generation)
-      throw Object.assign(new Error('ANN build superseded. / 向量建图版本已被替换。'), { name: 'AbortError', code: 'ABORT_ERR' });
+    if (entry.owner && entry.owner !== this.child && this.nativeError) throw this.nativeError;
+    if (this.closed || entry.owner && entry.owner !== this.child || this.database.prepare('SELECT generation FROM scope_snapshots WHERE scope_key=?')
+      .get(entry.identity.scopeKey)?.generation !== entry.generation) {
+      if (signal) throw Object.assign(new Error('ANN build superseded. / 向量建图版本已被替换。'), { name: 'AbortError', code: 'ABORT_ERR' });
+      throw retrievalFailure('ANN graph was replaced. / 向量图已被替换。', 'RETRIEVAL_ANN_STALE_BUILD', 409);
+    }
   }
 
   async _prepareEntry(entry, checkCancelled, job) {
-    this.shards.delete(entry.key);
-    await this._evict(entry.options);
     const { descriptor, key } = entry;
     const create = () => this._request('create', { key, dimensions: descriptor.dimensions,
       connectivity: entry.options.connectivity, expansionAdd: entry.options.expansionAdd, expansionSearch: entry.options.expansionSearch });
     try {
-      checkCancelled();
-      await create();
-      if (!await this._load(entry, descriptor.count, entry.options)) {
+      const loaded = await this._withOwner(async () => {
+        checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+        const previous = this.shards.get(key);
+        if (previous) await this._discardEntry(previous, true);
+        await this._evict(entry.options);
         await create();
+        entry.owner = this.child;
+        if (job) job.owner = entry.owner;
+        const loaded = await this._load(entry, descriptor.count, entry.options);
+        if (!loaded) {
+          await create(); entry.owner = this.child;
+          if (job) job.owner = entry.owner;
+        }
+        checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+        return loaded;
+      });
+      if (!loaded) {
         // Keyset pages leave no SQLite cursor or transaction open across native computation.
         // 键集分页保证等待原生计算期间不持有 SQLite 游标或事务，前台读写可继续执行。
-        const rows = this.database.prepare(`SELECT c.id,c.vector FROM chunks c JOIN sources s ON s.source_id=c.source_id
+        const rows = this.database.prepare(`SELECT c.id,c.vector FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
           WHERE s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=?
-          AND c.embedding_space_id=? AND ${DOMAIN_SQL}=? AND c.vector IS NOT NULL AND c.id>? ORDER BY c.id LIMIT 256`);
+          AND c.embedding_space_id=? AND ${DOMAIN_SQL}=? AND c.vector IS NOT NULL AND c.id>? AND c.id>=? AND c.id<=?
+          ORDER BY c.id LIMIT 256`);
         let lastId = 0, completedVectors = 0;
         for (;;) {
-          checkCancelled();
-          this._assertBuildCurrent(entry, job?.controller.signal);
-          const batch = rows.all(descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
-            descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain, lastId);
-          if (!batch.length) break;
-          await this._request('add', { key, keys: BigUint64Array.from(batch, row => BigInt(row.id)),
-            vectors: batch.map(row => vectorFromBlob(row.vector)) });
-          await this._checkResidentBudget(entry.options);
-          lastId = batch.at(-1).id;
-          completedVectors += batch.length;
-          if (job) job.completedVectors = completedVectors;
+          const added = await this._withOwner(async () => {
+            checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+            const batch = rows.all(descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
+              descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain, lastId,
+              descriptor.minimumId ?? 0, descriptor.maximumId ?? Number.MAX_SAFE_INTEGER);
+            if (!batch.length) return 0;
+            await this._request('add', { key, keys: BigUint64Array.from(batch, row => BigInt(row.id)),
+              vectors: batch.map(row => vectorFromBlob(row.vector)) });
+            await this._checkResidentBudget(entry.options);
+            checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+            lastId = batch.at(-1).id;
+            completedVectors += batch.length;
+            if (job) job.completedVectors = completedVectors;
+            return batch.length;
+          });
+          if (!added) break;
           // Yield between bounded batches; a full cold graph must not monopolize the index owner.
           // 在有界批次间让出执行权，冷图构建不能独占索引所有者。
           await new Promise(resolveTurn => setImmediate(resolveTurn));
@@ -295,23 +503,43 @@ export class LocalAnnStore {
         this._assertBuildCurrent(entry, job?.controller.signal);
         if (completedVectors !== descriptor.count) throw retrievalFailure('ANN build changed during publication. / 向量建图发布时数量已变化。', 'RETRIEVAL_ANN_STALE_BUILD');
         entry.dirty = true;
-        this.counters.built++;
       }
-      checkCancelled();
-      this._assertBuildCurrent(entry, job?.controller.signal);
-      await this._checkResidentBudget(entry.options);
-      this.shards.set(key, entry);
-      try { await this._persist(entry); }
-      catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+      await this._withOwner(async () => {
+        checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+        await this._checkResidentBudget(entry.options);
+        this.shards.set(key, entry);
+        try { await this._persist(entry); }
+        catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+        checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
+        if (!loaded) this.counters.built++;
+      });
     } catch (error) {
-      if (this.child) await this._request('drop', { key }).catch(() => {});
-      if (!this.shards.size && this.child) await this._releaseHelper();
+      await this._withOwner(() => this._discardEntry(entry, !job));
       throw error;
     }
   }
 
+  _cancelOwnedBuild() {
+    for (const job of this.builds.active.values()) if (job.owner === this.child) job.controller.abort();
+  }
+
+  async _discardEntry(entry, cancelBuild = false) {
+    if (this.shards.get(entry.key) === entry) this.shards.delete(entry.key);
+    if (!entry.owner || this.child !== entry.owner) return;
+    // Retiring the actual helper releases partial native graphs even when other shards are cached.
+    // 退出实际计算进程，确保部分原生图在存在其他缓存分片时也释放，不依赖延迟 GC。
+    for (const retained of this.shards.values()) {
+      try { await this._persist(retained); }
+      catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+    }
+    this.shards.clear();
+    if (cancelBuild) this._cancelOwnedBuild();
+    await this._releaseHelper();
+    this.counters.recycled++;
+  }
+
   async _checkResidentBudget(options) {
-    const rssBudget = 128 * 1024 * 1024 + options.maxCachedShards * options.maxShardBytes;
+    const rssBudget = this.resourceLease?.memoryBytes ?? 128 * 1024 * 1024 + options.maxCachedShards * options.maxShardBytes;
     if (this.helperMemory.rssBytes <= rssBudget) return;
     this.shards.clear();
     await this._releaseHelper();
@@ -323,13 +551,43 @@ export class LocalAnnStore {
     if (this.closed || options.mode === 'off' || options.mode === 'exact' ||
         descriptor.count <= Math.max(1024, options.threshold)) return;
     const estimatedBytes = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
-    if (estimatedBytes > options.maxShardBytes) return;
+    if (estimatedBytes > options.maxShardBytes && !this.resources) return;
     const entry = this._entry(descriptor, options);
+    if (this.preparedOnDisk.get(entry.key) === entry.generation) return;
     if (this.shards.get(entry.key)?.generation === entry.generation) return;
-    this.builds.enqueue(entry.key, descriptor, job => this._prepareEntry(entry, () => this._assertBuildCurrent(entry, job.controller.signal), job));
+    this._enqueue(entry);
+  }
+
+  _enqueue(entry) {
+    if (this.nativeError && this.now() < this.nativeRetry.retryAt) throw this.nativeError;
+    const descriptor = { ...entry.descriptor, buildBudgetKey: JSON.stringify([entry.options.maxShardBytes, entry.options.maxCachedShards]),
+      buildMaxShardBytes: entry.options.maxShardBytes, buildMaxCachedShards: entry.options.maxCachedShards,
+      buildConnectivity: entry.options.connectivity };
+    const accepted = this.builds.enqueue(entry.key, descriptor, async job => {
+      if (!this.resources) return this._prepareEntry(entry, () => this._assertBuildCurrent(entry, job.controller.signal), job);
+      // Independent native owners permit real bounded parallel builds; SQLite remains on its single thread.
+      // 独立原生所有者支持真正有界并行建图；SQLite 仍由单线程拥有，不并行提交事务。
+      const builder = new LocalAnnStore({ directory: this.rootDirectory, epoch: this.epoch, database: this.database,
+        now: this.now, resourceService: this.resources, isolatedBuilder: true, vectorTable: this.vectorTable });
+      builder.parentBuildQueue = this.builds;
+      try {
+        const options = await builder.resourceOptions(entry.options, entry.descriptor, 'background', job.controller.signal);
+        const isolatedEntry = builder._entry(entry.descriptor, options);
+        await builder._prepareEntry(isolatedEntry, () => builder._assertBuildCurrent(isolatedEntry, job.controller.signal), job);
+        this.counters.built += builder.counters.built;
+        this.backgroundObservedPeakRssBytes = Math.max(this.backgroundObservedPeakRssBytes ?? 0, builder.helperMemory.observedPeakRssBytes);
+        this.preparedOnDisk.set(entry.key, entry.generation);
+        while (this.preparedOnDisk.size > 128) this.preparedOnDisk.delete(this.preparedOnDisk.keys().next().value);
+      } finally { await builder.close(); }
+    });
+    if (!accepted) {
+      const failure = this.builds.failure(entry.key, descriptor);
+      throw retrievalFailure('ANN build is waiting before retry. / 向量建图失败后正在等待重试。', failure?.code ?? 'RETRIEVAL_ANN_BUILD_PENDING');
+    }
   }
 
   async search(descriptor, query, limit, options, checkCancelled) {
+    options = await this.resourceOptions(options, descriptor, 'foreground');
     await this.enforceBudget(options);
     const estimatedBytes = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
     if (estimatedBytes > options.maxShardBytes)
@@ -338,43 +596,58 @@ export class LocalAnnStore {
     let entry = this.shards.get(key);
     if (entry && entry.generation !== descriptor.generation) {
       await this.builds.drain();
-      this.shards.delete(key);
-      await this._evict({ ...options, maxCachedShards: 0 }, false);
-      if (this.child) await this._releaseHelper();
+      await this._withOwner(async () => {
+        this.shards.delete(key);
+        await this._evict({ ...options, maxCachedShards: 0 }, false);
+        if (this.child) await this._releaseHelper();
+      });
       entry = null;
       this.counters.invalidated++;
     }
     if (!entry) {
       this.counters.cacheMisses++;
-      if (descriptor.count > Math.max(1024, options.threshold) || this.builds.running) {
-        this.builds.enqueue(key, descriptor, job => this._prepareEntry(requested,
-          () => this._assertBuildCurrent(requested, job.controller.signal), job));
+      if ((descriptor.count > Math.max(1024, options.threshold) || this.builds.running) &&
+          this.preparedOnDisk.get(key) !== descriptor.generation) {
+        this._enqueue(requested);
         throw retrievalFailure('ANN graph is being prepared in the background. / 向量图正在后台准备。', 'RETRIEVAL_ANN_BUILD_PENDING');
       }
       entry = requested;
       await this._prepareEntry(entry, checkCancelled);
-    } else {
+    }
+    return this._withOwner(async () => {
+      checkCancelled(); this._assertBuildCurrent(entry);
+      if (this.shards.get(key) !== entry)
+        throw retrievalFailure('ANN graph was replaced. / 向量图已被替换。', 'RETRIEVAL_ANN_BUILD_PENDING');
       entry.options = options;
       this.shards.delete(key); this.shards.set(key, entry);
       await this._evict(options, false);
-    }
-    checkCancelled();
-    const matches = await this._request('search', { key, query: new Float32Array(query), limit: Math.min(limit, descriptor.count) });
-    const result = Array.from(matches.keys, (key, index) => ({ id: Number(key), distance: matches.distances[index] }));
-    // A cache failure must not change a successfully computed retrieval result.
-    // 缓存写入失败不能改变已计算的检索结果，诊断保留真实失败状态。
-    try { await this._persist(entry); this.lastError = null; }
-    catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
-    return result;
+      const matches = await this._request('search', { key, query: new Float32Array(query), limit: Math.min(limit, descriptor.count) });
+      checkCancelled(); this._assertBuildCurrent(entry);
+      const result = Array.from(matches.keys, (key, index) => ({ id: Number(key), distance: matches.distances[index] }));
+      // A cache failure must not change a successfully computed retrieval result.
+      // 缓存写入失败不能改变已计算的检索结果，诊断保留真实失败状态。
+      try { await this._persist(entry); this.lastError = null; }
+      catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+      return result;
+    });
   }
 
   async updateSources(oldRows, newRows, changedScopes, generationForScope) {
     this.builds.cancelScopes(changedScopes);
+    return this._withOwner(() => this._updateSources(oldRows, newRows, changedScopes, generationForScope));
+  }
+
+  async _updateSources(oldRows, newRows, changedScopes, generationForScope) {
     const belongs = (entry, row) => row.scope_key === entry.identity.scopeKey && row.embedding_profile_id === entry.identity.profileId &&
       row.dimensions === entry.identity.dimensions && row.embedding_model_version === entry.identity.modelVersion &&
       row.embedding_space_id === entry.identity.spaceId && row.domain === entry.identity.domain;
     for (const [key, entry] of this.shards) {
       if (!changedScopes.includes(entry.identity.scopeKey)) continue;
+      if (entry.descriptor.partitioned) {
+        this.preparedOnDisk.delete(key);
+        await this._discardEntry(entry, true);
+        continue;
+      }
       try {
         const removed = oldRows.filter(row => belongs(entry, row)).map(row => BigInt(row.id));
         if (removed.length) await this._request('remove', { key, keys: BigUint64Array.from(removed) });
@@ -389,34 +662,50 @@ export class LocalAnnStore {
         this.counters.updated++;
         await this._checkResidentBudget(entry.options);
       } catch (error) {
-        this.shards.delete(key); await this._request('drop', { key }).catch(() => {}); this.counters.invalidated++;
+        await this._discardEntry(entry, true); this.counters.invalidated++;
         this.lastError = error.code ?? 'RETRIEVAL_ANN_UPDATE_FAILED';
       }
     }
+  }
+
+  async invalidateScopes(scopes) {
+    this.builds.cancelScopes(scopes);
+    return this._withOwner(async () => {
+      const entries = [...this.shards.values()].filter(entry => scopes.includes(entry.identity.scopeKey));
+      for (const entry of entries) { this.shards.delete(entry.key); this.counters.invalidated++; }
+      if (entries.length) await this._discardEntry(entries[0], true);
+    });
   }
 
   status() { return { backend: 'usearch', packageVersion: ANN_PACKAGE_VERSION, state: this.nativeError ? 'unavailable' : this.child ? 'ready' : 'idle',
     ...this.builds.status(),
     cachedShards: this.shards.size, cachedVectors: [...this.shards.values()].reduce((sum, entry) => sum + entry.count, 0),
     ...this.counters, helperPid: this.child?.pid ?? null, helperRssBytes: this.helperMemory.rssBytes,
-    helperObservedPeakRssBytes: this.helperMemory.observedPeakRssBytes, errorCode: this.nativeError?.code ?? this.lastError }; }
+    helperObservedPeakRssBytes: this.helperMemory.observedPeakRssBytes,
+    backgroundObservedPeakRssBytes: this.backgroundObservedPeakRssBytes ?? 0,
+    adaptiveOptions: this.adaptiveOptions ?? null,
+    nativeRetryAt: this.nativeError ? this.nativeRetry.retryAt : null, errorCode: this.nativeError?.code ?? this.lastError }; }
 
   async close() {
     this.closed = true;
     await this.builds.close();
-    for (const entry of this.shards.values()) {
-      try { await this._persist(entry); } catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
-    }
-    this.shards.clear();
-    await this._releaseHelper();
+    await this._withOwner(async () => {
+      for (const entry of this.shards.values()) {
+        try { await this._persist(entry); } catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+      }
+      this.shards.clear();
+      await this._releaseHelper();
+    });
+    await this._waitForRetirement();
+    await this._releaseReservation();
   }
 
   async _releaseHelper() {
-    if (!this.child) return;
+    if (!this.child) { await this._waitForRetirement(); return; }
     const child = this.child;
+    this.closingChild = child;
     await this._request('close', {}).catch(() => child.kill());
-    this.child = null;
-    await new Promise(resolveExit => { if (child.exitCode !== null) resolveExit(); else child.once('exit', resolveExit); });
-    this.helperMemory.rssBytes = 0;
+    if (this.child === child) await this._retireChild(child);
+    else await this._waitForRetirement();
   }
 }

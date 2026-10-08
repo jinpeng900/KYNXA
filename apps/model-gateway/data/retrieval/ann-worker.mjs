@@ -39,15 +39,17 @@ process.on('message', ({ id, method, input }) => {
         if (!(input.keys instanceof BigUint64Array) || input.keys.length > 256 || !Array.isArray(input.vectors) || input.vectors.length !== input.keys.length ||
             input.vectors.some(vector => !(vector instanceof Float32Array) || vector.length !== index.dimensions() || !vector.every(Number.isFinite)))
           throw new Error('Invalid ANN vector batch.');
-        index.add(input.keys, input.vectors, 1); result = { count: index.size() };
+        const threads = Number.isSafeInteger(input.threads) ? Math.max(1, Math.min(32, input.threads)) : 1;
+        index.add(input.keys, input.vectors, threads); result = { count: index.size() };
       } else if (method === 'remove') {
         if (!(input.keys instanceof BigUint64Array) || input.keys.length > 1000000) throw new Error('Invalid ANN removal batch.');
         index.remove(input.keys); result = { count: index.size() };
       }
       else if (method === 'search') {
         if (!(input.query instanceof Float32Array) || input.query.length !== index.dimensions() || !input.query.every(Number.isFinite) ||
-            !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 60) throw new Error('Invalid ANN query.');
-        const matches = index.search(input.query, input.limit, 1);
+            !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 160) throw new Error('Invalid ANN query.');
+        const threads = Number.isSafeInteger(input.threads) ? Math.max(1, Math.min(32, input.threads)) : 1;
+        const matches = index.search(input.query, input.limit, threads);
         result = { keys: matches.keys, distances: matches.distances };
       } else if (method === 'load' || method === 'save') {
         if (!filenamePattern.test(input.filename)) throw new Error('Invalid ANN cache filename.');

@@ -1,6 +1,8 @@
 import { watch } from 'node:fs';
 import { relative, resolve } from 'node:path';
-import { readSourceFile, readSourceTree, sameSourceMetadata, scanSourcePaths, scanSourceTree } from '../../tools/retrieval/source-reader.mjs';
+import { readSourceFile, readSourceTree, sameSourceMetadata, scanSourcePaths, scanSourceTree,
+  sourceExtractionVersion, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
+import { sourceFileRevision } from '../../data/retrieval/retrieval-contracts.mjs';
 import { SourceManifestStore } from '../../data/retrieval/source-manifest.mjs';
 import { validateIndexingLimits } from '../../data/retrieval/settings.mjs';
 import { inspectLocalPath, toolFailure, within } from '../../platform/tool-paths.mjs';
@@ -17,11 +19,32 @@ function sourceLimits(settings) {
     maximumBytes: indexing.maximumTotalBytes, maximumEntries: indexing.maximumEntries };
 }
 
+function mountedDescriptors(files, projectId, root, bindingRevision, failures = []) {
+  const failed = new Map(failures.map(item => [item.relativePath, item.errorCode]));
+  const failedDirectories = failures.filter(item => item.directory);
+  return files.flatMap(file => {
+    const relativePath = file.relativePath ?? relative(root, file.path);
+    const errorCode = failed.get(relativePath) ?? failedDirectories.find(item =>
+      item.relativePath === '' || relativePath.startsWith(`${item.relativePath}/`) || relativePath.startsWith(`${item.relativePath}\\`))?.errorCode;
+    const common = { scopeKey: `project:${projectId}`, sourceType: 'work-file', title: file.title ?? relativePath,
+      bindingRevision, ...(errorCode ? { unavailable: true, errorCode } : {}) };
+    const locator = { path: resolve(root, relativePath), relativePath, root,
+      ...(file.extraction === undefined ? {} : { extraction: file.extraction }) };
+    if (file.windows) return file.windows.map(window => ({ ...common,
+      sourceId: sourceIdentity('work-file', projectId, root, relativePath, window.startOffset),
+      locator: { ...locator, fileWindow: window }, storedBytes: window.textBytes, contentHash: window.contentHash,
+      sourceRevision: sourceFileRevision({ contentHash: window.contentHash, fileWindow: window }) }));
+    return [{ ...common, sourceId: sourceIdentity('work-file', projectId, root, relativePath), locator,
+      ...(file.text === undefined ? {} : { text: file.text }), storedBytes: file.textBytes,
+      contentHash: file.contentHash, sourceRevision: sourceFileRevision(file) }];
+  });
+}
+
 /** Owns source snapshots and folder notifications, never the authoritative source registry.
  * 管理来源快照与文件夹通知，不拥有或替代正式来源登记。 */
 export class SourceSyncService {
   constructor({ library, getProject, excludedRoots = [], readTree = readSourceTree, onFolderChanged,
-    manifest = library.root ? new SourceManifestStore(library.root) : null, watchFactory = watch }) {
+    manifest = library.root ? new SourceManifestStore(library.root) : null, watchFactory = watch, resourceService }) {
     this.library = library;
     this.getProject = getProject;
     this.excludedRoots = excludedRoots;
@@ -29,6 +52,7 @@ export class SourceSyncService {
     this.onFolderChanged = onFolderChanged;
     this.manifest = manifest;
     this.watchFactory = watchFactory;
+    this.resources = resourceService;
     this.libraryCache = new Map();
     this.conversationCache = new Map();
     this.mountedCache = new Map();
@@ -69,7 +93,8 @@ export class SourceSyncService {
     if (cached?.revision === catalog.revision && performance.now() - cached.capturedAt < SOURCE_CACHE_TTL_MS) return cached.sources;
     const sources = await this.library.readAll(scopes, { signal });
     signal?.throwIfAborted();
-    const memoryBytes = sources.reduce((total, source) => total + source.text.length * 2, 0);
+    const memoryBytes = sources.reduce((total, source) => total + source.text.length * 2 +
+      JSON.stringify(source.locator ?? {}).length * 2 + 512, 0);
     if (!this.closed) this.libraryCache.set(key, { revision: catalog.revision, capturedAt: performance.now(), sources, memoryBytes });
     this.trimCaches(settings.cache.memoryLimitBytes);
     return sources;
@@ -83,9 +108,9 @@ export class SourceSyncService {
       // 旧接缝已经提供完整正式正文；生产元信息路径仍使用下面的真实来源校验。
       return { sources, loadSource: async source => source, isCurrent: async () => true };
     }
-    const described = await this.library.describeSources(scopes, { signal, limits: settings.local.indexing });
+    const described = await this.library.describeSources(scopes, { signal, limits: settings.local.indexing, allowPartial: true });
     const sources = Array.isArray(described) ? described : described.sources;
-    const scan = { loadedFiles: 0 };
+    const scan = { loadedFiles: 0, ...(described.coverage ? { coverage: described.coverage } : {}) };
     return { sources, scan, isCurrent: async (source, ownedSignal) => {
       ownedSignal?.throwIfAborted();
       return this.library.isActive ? this.library.isActive(source.sourceId, source.sourceRevision)
@@ -143,12 +168,21 @@ export class SourceSyncService {
     // 前台短暂等待后由服务继续拥有目录发现，异常和关闭生命周期不能被丢弃。
     const pending = this.mountedOperations.get(projectId) ?? this.mountedSnapshot(projectId, settings, this.shutdown.signal);
     let timeout;
-    const result = await Promise.race([pending, new Promise(resolveDeadline => {
+    const foreground = pending.catch(error => {
+      signal?.throwIfAborted();
+      if (this.closed || this.shutdown.signal.aborted) throw error;
+      // Optional discovery failure remains a failed index job, never an interruption of an unrelated user conversation.
+      // 可选来源发现失败仍由索引任务明确记录，不能中断无关用户对话；已有来源仍须逐项复核当前状态。
+      this.lastDiscoveryError = error.name === 'AbortError' ? 'RETRIEVAL_DISCOVERY_CANCELLED'
+        : error.code ?? 'RETRIEVAL_DISCOVERY_FAILED';
+      return null;
+    });
+    const result = await Promise.race([foreground, new Promise(resolveDeadline => {
       timeout = setTimeout(() => resolveDeadline(null), 100);
     })]).finally(() => clearTimeout(timeout));
     signal?.throwIfAborted();
     if (this.closed) throw toolFailure('资料同步已经关闭。', 'RETRIEVAL_CLOSED', 409);
-    if (result) return result;
+    if (result) { this.lastDiscoveryError = undefined; return result; }
     if (!this.foregroundContinuations.has(projectId)) {
       const continuation = pending.then(() => {
         this.lastDiscoveryError = undefined;
@@ -164,19 +198,22 @@ export class SourceSyncService {
     signal?.throwIfAborted();
     if (!project?.FolderPath) return { sources: [], scan: { backgroundPending: true }, loadSource: async source => source };
     const root = resolve(project.FolderPath), bindingRevision = settings.projectIndexing.bindingRevision;
-    await inspectLocalPath(root);
+    try { await inspectLocalPath(root); }
+    catch (error) {
+      signal?.throwIfAborted();
+      return { sources: [], scan: { backgroundPending: true, diagnosticCode: error.code ?? 'RETRIEVAL_DISCOVERY_FAILED' },
+        loadSource: async source => source };
+    }
     const state = this.mountedStates.get(projectId);
     const validState = state?.root === root && state.bindingRevision === bindingRevision;
-    const metadata = validState ? new Map(state.files) : new Map();
+    const metadata = validState ? new Map(state.discoveryFiles ?? state.files) : new Map();
     const limits = sourceLimits(settings);
     const withinBudget = metadata.size <= limits.maximumFiles &&
       [...metadata.values()].reduce((sum, file) => sum + file.textBytes, 0) <= limits.maximumBytes;
-    const sources = withinBudget ? [...metadata.values()].map(file => ({
-      sourceId: sourceIdentity('work-file', projectId, root, file.relativePath), scopeKey: `project:${projectId}`,
-      sourceType: 'work-file', title: file.relativePath, locator: { path: resolve(root, file.relativePath), relativePath: file.relativePath, root },
-      storedBytes: file.textBytes, contentHash: file.contentHash, sourceRevision: file.contentHash, bindingRevision })) : [];
+    const sources = withinBudget ? mountedDescriptors([...metadata.values()], projectId, root, bindingRevision) : [];
     return this.snapshotFor(sources, projectId, root, bindingRevision, settings,
       { backgroundPending: true, fileReads: 0, reusedFiles: sources.length, scannedFiles: 0,
+        coverage: { discovered: metadata.size, readable: metadata.size, complete: false },
         ...(this.lastDiscoveryError ? { diagnosticCode: this.lastDiscoveryError } : {}) }, metadata);
   }
 
@@ -209,7 +246,9 @@ export class SourceSyncService {
     if (cached?.root === root && cached.bindingRevision === bindingRevision && cached.limitsKey === limitsKey &&
         unchangedState)
       return this.snapshotFor(cached.sources, projectId, root, bindingRevision, settings, { fileReads: 0, reusedFiles: cached.sources.length,
-        scannedFiles: 0, visitedEntries: 0, bytesRead: 0, cached: true }, cached.metadataFiles);
+        scannedFiles: 0, visitedEntries: 0, bytesRead: 0, cached: true,
+        ...(cached.scanStats?.failures ? { failures: cached.scanStats.failures, failedFiles: cached.scanStats.failedFiles } : {}),
+        ...(cached.scanStats?.coverage ? { coverage: cached.scanStats.coverage } : {}) }, cached.metadataFiles);
     const binding = { projectId, root, bindingRevision };
     let state = this.mountedStates.get(projectId);
     if (!state || state.root !== root || state.bindingRevision !== bindingRevision) {
@@ -217,25 +256,31 @@ export class SourceSyncService {
       try { stored = await this.manifest?.read(binding, { signal }); }
       catch (error) { if (signal?.aborted) throw error; stored = null; }
       state = { root, bindingRevision, files: new Map((stored?.files ?? []).map(file => [file.relativePath, file])),
+        failureCache: new Map(),
         generation: 0, dirtyPaths: new Set(), fullScan: true, limitsKey, capturedAt: performance.now(),
-        memoryBytes: (stored?.files.length ?? 0) * 768 };
+        memoryBytes: (stored?.files ?? []).reduce((total, file) => total + JSON.stringify(file).length * 2 + 256, 0) };
       this.mountedStates.set(projectId, state);
     }
     if (state.limitsKey !== limitsKey) state.fullScan = true;
     const generation = state.generation, dirtyPaths = new Set(state.dirtyPaths), stats = {};
-    const options = { ...limits, root, excludedRoots: this.excludedRoots, signal,
-      previousFiles: state.files, changedPaths: dirtyPaths, stats };
+    const options = { ...limits, root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources,
+      previousFiles: state.files, changedPaths: dirtyPaths, stats, failureCache: state.failureCache, allowPartial: true };
     let files;
     if (this.readTree !== readSourceTree) {
       files = await this.readTree(root, options);
       stats.fileReads = files.length; stats.reusedFiles = 0; stats.scannedFiles = files.length;
     } else {
       const next = state.fullScan || !dirtyPaths.size ? new Map() : new Map(state.files);
+      // Discovery publishes only verified descriptors; callers still see a partial view until the scan settles.
+      // 目录发现只逐步提供已复核描述，扫描结束前调用方始终收到部分覆盖状态。
+      state.discoveryFiles = next;
       const scan = async iterable => {
         for await (const file of iterable) {
           const relativePath = relative(root, file.path);
           if (file.missing) next.delete(relativePath);
-          else next.set(relativePath, { relativePath, contentHash: file.contentHash, textBytes: file.textBytes, metadata: file.metadata });
+          else if (file.failed) continue;
+          else next.set(relativePath, { relativePath, contentHash: file.contentHash, textBytes: file.textBytes, metadata: file.metadata,
+            ...(file.extraction === undefined ? {} : { extraction: file.extraction }), ...(file.windows ? { windows: file.windows } : {}) });
         }
       };
       try { await scan(state.fullScan || !dirtyPaths.size ? scanSourceTree(root, options) : scanSourcePaths(root, dirtyPaths, options)); }
@@ -244,27 +289,32 @@ export class SourceSyncService {
         next.clear();
         await scan(scanSourceTree(root, options));
       }
+      // Failed reads are not evidence of deletion; retain old metadata only as unavailable derivation hints.
+      // 读取失败不能证明文件删除，旧元信息只保留为不可用派生线索，不能冒充本轮读取成功。
+      for (const [path, file] of state.files) if (!next.has(path) &&
+        (stats.failures?.some(failure => path === failure.relativePath || path.startsWith(`${failure.relativePath}/`) || path.startsWith(`${failure.relativePath}\\`)))) next.set(path, file);
       const bytes = [...next.values()].reduce((total, file) => total + file.textBytes, 0);
       if (next.size > limits.maximumFiles || bytes > limits.maximumBytes)
         throw toolFailure('挂载资料超过当前来源或字节预算。', 'RETRIEVAL_SCAN_LIMIT', 413);
       await this.manifest?.write(binding, [...next.values()], { signal });
       state.files = next;
-      state.memoryBytes = next.size * 768;
+      state.discoveryFiles = undefined;
+      state.memoryBytes = [...next.values()].reduce((total, file) => total + JSON.stringify(file).length * 2 + 256, 0);
       files = [...next.values()].map(file => ({ ...file, path: resolve(root, file.relativePath), title: file.relativePath }));
     }
     signal?.throwIfAborted();
-    const sources = files.map(file => ({ sourceId: sourceIdentity('work-file', projectId, root, relative(root, file.path)),
-      scopeKey: `project:${projectId}`, sourceType: 'work-file', title: file.title,
-      locator: { path: file.path, relativePath: relative(root, file.path), root }, ...(file.text === undefined ? {} : { text: file.text }),
-      storedBytes: file.textBytes ?? (file.text === undefined ? undefined : Buffer.byteLength(file.text)),
-      contentHash: file.contentHash, sourceRevision: file.contentHash, bindingRevision }));
-    const memoryBytes = sources.reduce((total, source) => total + (source.text?.length ?? 0) * 2 + 512, 0);
+    const sources = mountedDescriptors(files, projectId, root, bindingRevision, stats.failures);
+    stats.coverage = { discovered: stats.discoveredFiles ?? stats.scannedFiles ?? files.length,
+      readable: stats.scannedFiles ?? files.length, failed: stats.failedFiles ?? 0, complete: !stats.failedFiles && !stats.incomplete,
+      ...(stats.limit ? { limit: stats.limit } : {}) };
+    const memoryBytes = sources.reduce((total, source) => total + (source.text?.length ?? 0) * 2 +
+      JSON.stringify(source.locator).length * 2 + 512, 0);
     if (state.generation === generation) { state.dirtyPaths.clear(); state.fullScan = false; }
     state.limitsKey = limitsKey;
     state.capturedAt = performance.now();
     if (!this.closed && memoryBytes <= settings.cache.memoryLimitBytes)
       this.mountedCache.set(projectId, { root, bindingRevision, capturedAt: performance.now(), sources, memoryBytes,
-        metadataFiles: state.files, limitsKey, generation: state.generation });
+        metadataFiles: state.files, limitsKey, generation: state.generation, scanStats: stats });
     this.trimCaches(settings.cache.memoryLimitBytes);
     return this.snapshotFor(sources, projectId, root, bindingRevision, settings, stats, state.files);
   }
@@ -272,30 +322,39 @@ export class SourceSyncService {
   snapshotFor(sources, projectId, root, bindingRevision, settings, scan, metadataFiles) {
     const isCurrent = async (source, signal) => {
       signal?.throwIfAborted();
+      if (source.unavailable) return false;
       const project = await this.getProject(projectId);
       if (this.closed || !project?.FolderPath || resolve(project.FolderPath) !== root || source.bindingRevision !== bindingRevision)
         return false;
       try {
         const expected = metadataFiles?.get(source.locator.relativePath), current = await inspectLocalPath(source.locator.path);
         signal?.throwIfAborted();
-        if (expected && expected.contentHash === source.contentHash)
+        if (source.locator.fileWindow && expected?.windows?.some(window => window.contentHash === source.contentHash && window.startOffset === source.locator.fileWindow.startOffset))
+          return current.isFile() && sameSourceMetadata(source.locator.fileWindow.metadata, { sizeBytes: current.size, mtimeMs: current.mtimeMs,
+            ctimeMs: current.ctimeMs, device: current.dev, inode: current.ino });
+        if (expected && expected.contentHash === source.contentHash && sourceFileRevision(expected) === source.sourceRevision &&
+            (expected.extraction === undefined || expected.extraction.version === sourceExtractionVersion(source.locator.path)))
           return current.isFile() && sameSourceMetadata(expected.metadata, { sizeBytes: current.size, mtimeMs: current.mtimeMs,
             ctimeMs: current.ctimeMs, device: current.dev, inode: current.ino });
-        return (await readSourceFile(source.locator.path,
-          { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal })).contentHash === source.contentHash;
+        const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
+          { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal }) : await readSourceFile(source.locator.path,
+          { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources });
+        return file.contentHash === source.contentHash && sourceFileRevision(file) === source.sourceRevision;
       } catch (error) { if (signal?.aborted) throw error; return false; }
     };
     return { sources, scan, isCurrent, loadSource: async (source, signal) => {
       signal?.throwIfAborted();
+      if (source.unavailable) throw toolFailure('本次来源读取失败，旧派生只保留待修复。', source.errorCode ?? 'RETRIEVAL_SOURCE_FAILED', 409);
       if (this.readTree !== readSourceTree && source.text !== undefined) return source;
       const project = await this.getProject(projectId);
       if (!project?.FolderPath || resolve(project.FolderPath) !== root || source.bindingRevision !== bindingRevision)
         throw toolFailure('挂载文件夹已经变化。', 'STALE_RETRIEVAL_SOURCE', 409);
-      const file = await readSourceFile(source.locator.path,
-        { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal });
+      const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
+        { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal }) : await readSourceFile(source.locator.path,
+        { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources });
       scan.loadedFiles = (scan.loadedFiles ?? 0) + 1;
       scan.loadedBytes = (scan.loadedBytes ?? 0) + file.metadata.sizeBytes;
-      if (file.contentHash !== source.contentHash)
+      if (file.contentHash !== source.contentHash || sourceFileRevision(file) !== source.sourceRevision)
         throw toolFailure('工作文件内容已经变化。', 'STALE_RETRIEVAL_SOURCE', 409);
       return { ...source, text: file.text };
     } };
