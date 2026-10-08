@@ -5,12 +5,18 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { RETRIEVAL_INDEX_SCHEMA_VERSION, hashText, parseSourceReference, retrievalFailure,
   retrievalScopeKeys, sourceReference, validateSource, validateStructureDescriptor, validateChunkStructure,
-  validateRetrievalIntent, normalizeRetrievalPath } from './retrieval-contracts.mjs';
+  validateRetrievalIntent, normalizeRetrievalPath, sourceEvidenceLocator, validateSourceExtraction } from './retrieval-contracts.mjs';
 import { chunkSource, lexicalText, matchExpression, CHUNKER_VERSION, TOKENIZER_VERSION } from './retrieval-text.mjs';
 import { sourceWindow } from './source-window.mjs';
 import { deriveSourceVersion, sourceDerivationVersions } from './derivation-version.mjs';
 import { RetrievalVectorSearch } from './vector-search.mjs';
 import { RETRIEVAL_DOMAIN_SQL } from './ann-store.mjs';
+import { validateEmbeddingProjection } from './token-chunks.mjs';
+import { ScopedLexicalRanker } from './scoped-lexical-rank.mjs';
+import { SourceRelationStore } from './source-relations.mjs';
+import { SourceCoverageStore } from './source-coverage.mjs';
+import { RetrievalVectorSpaces } from './vector-spaces.mjs';
+import { createResourceWorkerClient } from '../../platform/resources/resource-worker-client.mjs';
 
 const root = resolve(workerData.root);
 const directory = join(root, 'Index');
@@ -18,7 +24,8 @@ const filename = join(directory, 'retrieval.sqlite');
 const identityDirectory = join(root, 'Retrieval');
 const identityPath = join(identityDirectory, 'source-identities.json');
 const CHUNK_ROW_COLUMNS = 'c.*, s.scope_key, s.source_type, s.title, s.locator, s.content_hash, s.source_revision, s.binding_revision, s.active_generation, s.derivation_signature';
-let database, vectorSearch, vectorAvailable = false, vectorVersion = null, vectorError = null;
+const resourceService = workerData.resourceBridge ? createResourceWorkerClient(parentPort) : null;
+let database, lexicalRanker, relationStore, coverageStore, vectorSpaces, vectorSearch, vectorAvailable = false, vectorVersion = null, vectorError = null;
 
 function checkPath(path, isDirectory = false) {
   if (!existsSync(path)) return;
@@ -50,11 +57,15 @@ function isCorpusSource(sourceType) {
   return sourceType === 'knowledge' || sourceType === 'work-file';
 }
 
-function nextGeneration(scopeKey, { corpusChanged = false } = {}) {
+function nextGeneration(scopeKey, { corpusChanged = false, lexicalChanged = true } = {}) {
   const value = generation() + 1;
   database.prepare("UPDATE retrieval_metadata SET value = ? WHERE key = 'generation'").run(String(value));
   database.prepare('INSERT INTO scope_snapshots(scope_key, generation) VALUES (?, ?) ON CONFLICT(scope_key) DO UPDATE SET generation = excluded.generation')
     .run(scopeKey, value);
+  // Attaching vectors must not force a full lexical-statistics rescan in each foreground query.
+  // 追加向量不能使每次前台查询都重新扫描词法统计；独立代次只随词法派生改变。
+  if (lexicalChanged) database.prepare('INSERT INTO retrieval_metadata(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run(`lexical_generation:${scopeKey}`, String(value));
   // Vector publication and conversation updates must not invalidate unchanged corpus bodies.
   // 向量发布和对话更新仍推进检索代次，但不能使未改变的资料原文缓存失效。
   const corpusKey = `corpus_generation:${scopeKey}`;
@@ -95,7 +106,8 @@ async function openDatabase() {
       embedding_model_version TEXT NOT NULL DEFAULT '', embedding_space_id TEXT NOT NULL DEFAULT '',
       structure_json TEXT NOT NULL DEFAULT '', structure_domain TEXT NOT NULL DEFAULT '',
       symbol_name TEXT NOT NULL DEFAULT '', qualified_name TEXT NOT NULL DEFAULT '',
-      parse_status TEXT NOT NULL DEFAULT '', unit_start_offset INTEGER, unit_end_offset INTEGER);
+      parse_status TEXT NOT NULL DEFAULT '', unit_start_offset INTEGER, unit_end_offset INTEGER,
+      embedding_projection TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source_id, chunk_index);
     CREATE INDEX IF NOT EXISTS chunks_profile ON chunks(embedding_profile_id, dimensions);
     CREATE TABLE IF NOT EXISTS scope_snapshots (scope_key TEXT PRIMARY KEY, generation INTEGER NOT NULL);
@@ -117,7 +129,7 @@ async function openDatabase() {
       if (!sourceColumns.has(column)) database.exec(`ALTER TABLE sources ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
     }
     const chunkColumns = new Set(database.prepare('PRAGMA table_info(chunks)').all().map(row => row.name));
-    for (const column of ['embedding_model_version', 'embedding_space_id', 'structure_json', 'structure_domain', 'symbol_name', 'qualified_name', 'parse_status']) {
+    for (const column of ['embedding_model_version', 'embedding_space_id', 'structure_json', 'structure_domain', 'symbol_name', 'qualified_name', 'parse_status', 'embedding_projection']) {
       if (!chunkColumns.has(column)) database.exec(`ALTER TABLE chunks ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
     }
     for (const column of ['unit_start_offset', 'unit_end_offset']) {
@@ -140,6 +152,7 @@ async function openDatabase() {
   // Existing indexes conservatively inherit their last scope generation once; fresh scopes begin at zero.
   // 既有索引只在首次升级时保守继承范围代次；新范围从零开始，不要求重建数据库。
   database.exec("INSERT OR IGNORE INTO retrieval_metadata(key,value) SELECT 'corpus_generation:' || scope_key,CAST(generation AS TEXT) FROM scope_snapshots");
+  database.exec("INSERT OR IGNORE INTO retrieval_metadata(key,value) SELECT 'lexical_generation:' || scope_key,CAST(generation AS TEXT) FROM scope_snapshots");
   // A deletion ledger is authoritative even after a crash before index cleanup.
   // 明确撤销登记是权威状态，崩溃后也不能保留尚未清掉的派生索引。
   const registry = identities();
@@ -154,6 +167,10 @@ async function openDatabase() {
     }
   });
   await migrateLexicalIndex();
+  lexicalRanker = new ScopedLexicalRanker(database);
+  relationStore = new SourceRelationStore(database);
+  coverageStore = new SourceCoverageStore(database);
+  vectorSpaces = new RetrievalVectorSpaces(database);
   try {
     if (workerData.vectorEnabled === false) throw retrievalFailure('Vector extension disabled. / 已关闭向量扩展。', 'RETRIEVAL_VECTOR_DISABLED');
     const sqliteVec = await import('sqlite-vec');
@@ -168,7 +185,7 @@ async function openDatabase() {
     database.enableLoadExtension(false);
   }
   vectorSearch = new RetrievalVectorSearch({ database, directory,
-    epoch: database.prepare("SELECT value FROM retrieval_metadata WHERE key='index_epoch'").get().value, options: workerData.ann });
+    epoch: database.prepare("SELECT value FROM retrieval_metadata WHERE key='index_epoch'").get().value, options: workerData.ann, resourceService });
 }
 
 async function migrateLexicalIndex() {
@@ -215,7 +232,8 @@ function refreshMigratedDerivation(sourceId) {
       text: chunk.text, startOffset: chunk.start_offset, endOffset: chunk.end_offset,
       startLine: chunk.start_line, endLine: chunk.end_line, chunkerVersion: chunk.chunker_version,
       tokenizerVersion: chunk.tokenizer_version,
-      ...(chunk.structure_json ? { structure: JSON.parse(chunk.structure_json) } : {}) }));
+      ...(chunk.structure_json ? { structure: JSON.parse(chunk.structure_json) } : {}),
+      ...(chunk.embedding_projection ? { embeddingProjection: validateEmbeddingProjection(JSON.parse(chunk.embedding_projection)) } : {}) }));
   const derived = deriveSourceVersion(source, chunks);
   database.prepare('UPDATE sources SET derivation_signature=?,tokenizer_version=? WHERE source_id=?')
     .run(derived.derivationSignature, derived.tokenizerVersion, sourceId);
@@ -257,6 +275,7 @@ function persistIdentities(value) {
 function prepareSource(input, flag) {
   cancelled(flag);
   let source = validateSource(input);
+  if (source.locator.extraction !== undefined) validateSourceExtraction(source.locator.extraction, source.text.length);
   const structure = validateStructureDescriptor(source.structure);
   if (structure) {
     if (source.parserVersion !== undefined && source.parserVersion !== structure.parserVersion)
@@ -292,6 +311,7 @@ function prepareSource(input, flag) {
       throw retrievalFailure('Chunk line or Unicode range is invalid. / 分块行号或 Unicode 边界无效。', 'RETRIEVAL_SOURCE_CHANGED', 409);
     chunkIds.add(chunk.chunkId);
     previousEnd = chunk.endOffset;
+    if (chunk.embeddingProjection !== undefined) chunk.embeddingProjection = validateEmbeddingProjection(chunk.embeddingProjection);
     if (chunk.structure !== undefined) chunks[index] = { ...chunk, structure: validateChunkStructure(chunk.structure, source, chunk) };
   }
   const vectors = input.vectors ?? [];
@@ -381,6 +401,7 @@ async function upsertSources({ sources }, flag) {
       for (const { source, chunks, vectors, dimensions, embeddingSignature } of prepared) {
         cancelled(flag);
         const current = database.prepare('SELECT * FROM sources WHERE source_id = ?').get(source.sourceId);
+        const retainedSpaces = vectorSpaces.capture(source, chunks, current);
         // Content equality is not derivation equality; only identical embedding inputs may retain vectors.
         // 原文相同不代表派生相同；只有嵌入输入和空间兼容时，词法刷新才保留向量。
         const hasNewVectors = vectors.some(vector => vector !== null && vector !== undefined);
@@ -397,12 +418,15 @@ async function upsertSources({ sources }, flag) {
         const existingVectors = previousChunks.some(chunk => chunk.vector !== null);
         if (current?.derivation_signature === source.derivationSignature &&
             (hasNewVectors ? current.embedding_signature === embeddingSignature : !existingVectors || canRetainVectors)) {
+          if (!database.prepare('SELECT 1 FROM source_relations WHERE source_id=? LIMIT 1').get(source.sourceId))
+            relationStore.publish(source, chunks, () => cancelled(flag));
           published.push({ sourceId: source.sourceId, generation: current.active_generation, unchanged: true, sourceRef: sourceReference(source) });
           continue;
         }
         const corpusChanged = (isCorpusSource(source.sourceType) || isCorpusSource(current?.source_type)) &&
           current?.derivation_signature !== source.derivationSignature;
-        const value = nextGeneration(source.scopeKey, { corpusChanged });
+        const value = nextGeneration(source.scopeKey, { corpusChanged,
+          lexicalChanged: current?.derivation_signature !== source.derivationSignature });
         changedScopes.add(source.scopeKey);
         const retainedSignature = !hasNewVectors && canRetainVectors ? current.embedding_signature : '';
         database.prepare(`INSERT INTO sources(source_id,scope_key,source_type,title,locator,text,content_hash,source_revision,binding_revision,active_generation,updated_at,embedding_signature,derivation_signature,embedding_input_signature,parser_version,embedding_input_version,chunker_version,tokenizer_version,structure_json,relative_path)
@@ -421,7 +445,7 @@ async function upsertSources({ sources }, flag) {
             source.chunkerVersion, source.tokenizerVersion, source.structure ? JSON.stringify(source.structure) : '',
             typeof source.locator.relativePath === 'string' ? normalizeRetrievalPath(source.locator.relativePath) : '');
         database.prepare('DELETE FROM chunks WHERE source_id = ?').run(source.sourceId);
-        const insertChunk = database.prepare('INSERT INTO chunks(chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,embedding_profile_id,dimensions,vector,chunker_version,tokenizer_version,embedding_model_version,embedding_space_id,structure_json,structure_domain,symbol_name,qualified_name,parse_status,unit_start_offset,unit_end_offset) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+        const insertChunk = database.prepare('INSERT INTO chunks(chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,embedding_profile_id,dimensions,vector,chunker_version,tokenizer_version,embedding_model_version,embedding_space_id,structure_json,structure_domain,symbol_name,qualified_name,parse_status,unit_start_offset,unit_end_offset,embedding_projection) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
         for (const chunk of chunks) {
           cancelled(flag);
           const vector = vectors[chunk.chunkIndex];
@@ -435,9 +459,12 @@ async function upsertSources({ sources }, flag) {
             vector ? source.embeddingSpaceId ?? '' : retained?.embedding_space_id ?? '',
             chunk.structure ? JSON.stringify(chunk.structure) : '', chunk.structure?.domain ?? '',
             chunk.structure?.symbolName ?? '', chunk.structure?.qualifiedName ?? '', chunk.structure?.parseStatus ?? '',
-            chunk.structure?.unitStartOffset ?? null, chunk.structure?.unitEndOffset ?? null);
+            chunk.structure?.unitStartOffset ?? null, chunk.structure?.unitEndOffset ?? null,
+            chunk.embeddingProjection ? JSON.stringify(chunk.embeddingProjection) : '');
         }
-        published.push({ sourceId: source.sourceId, generation: value, chunks: chunks.length, sourceRef: sourceReference(source) });
+        vectorSpaces.publish(source, chunks, retainedSpaces, createdAt);
+        const relations = relationStore.publish(source, chunks, () => cancelled(flag));
+        published.push({ sourceId: source.sourceId, generation: value, chunks: chunks.length, relations, sourceRef: sourceReference(source) });
       }
       cancelled(flag);
       database.prepare('UPDATE index_jobs SET state = ?, completed_count = ? WHERE job_id = ?').run('completed', sources.length, jobId);
@@ -457,8 +484,11 @@ function publicChunk(row, score = null) {
   const source = { sourceId: row.source_id, scopeKey: row.scope_key, sourceRevision: JSON.parse(row.source_revision), contentHash: row.content_hash,
     ...(row.derivation_signature ? { derivationSignature: row.derivation_signature } : {}) };
   return { ...source, sourceType: row.source_type, title: row.title,
-    locator: { ...JSON.parse(row.locator), startLine: row.start_line, endLine: row.end_line,
-      startOffset: row.start_offset, endOffset: row.end_offset },
+    locator: { ...sourceEvidenceLocator(JSON.parse(row.locator), { startOffset: row.start_offset, endOffset: row.end_offset }),
+      startLine: row.start_line, endLine: row.end_line,
+      ...(JSON.parse(row.locator).fileWindow ? { originalStartLine: JSON.parse(row.locator).fileWindow.startLine + row.start_line - 1,
+        originalEndLine: JSON.parse(row.locator).fileWindow.startLine + row.end_line - 1 } : {}),
+      startOffset: row.start_offset, endOffset: row.end_offset, offsetUnit: 'utf16-code-units' },
     bindingRevision: row.binding_revision, generation: row.active_generation,
     chunkId: row.chunk_id, chunkIndex: row.chunk_index, chunkHash: row.chunk_hash,
     excerpt: row.text, score,
@@ -471,7 +501,9 @@ function publicChunk(row, score = null) {
     sourceRef: sourceReference(source, { chunkId: row.chunk_id, chunkHash: row.chunk_hash }) };
 }
 
-async function search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit = 8 }, flag) {
+async function search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit = 8,
+  channelCandidates = 40 }, flag) {
+  const candidateLimit = Number.isSafeInteger(channelCandidates) ? Math.max(1, Math.min(160, channelCandidates)) : 40;
   const scopes = retrievalScopeKeys(scopeKeys), placeholders = scopes.map(() => '?').join(',');
   const intent = validateRetrievalIntent(retrievalIntent);
   const requestedDomain = intent?.domain !== 'mixed' ? intent?.domain : undefined;
@@ -484,21 +516,10 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
   cancelled(flag);
   const expression = matchExpression(query, { domain: intent?.domain });
   let lexical = [];
-  // Materialize the narrow FTS result once; fetch text and vectors only for authorized top candidates.
-  // 窄 FTS 结果只物化一次；范围筛选及排序后才读取候选正文与向量，避免逐分块重复 FTS 扫描。
-  if (expression) lexical = database.prepare(`WITH matches AS MATERIALIZED (
-    SELECT rowid, bm25(chunk_fts) AS lexical_rank FROM chunk_fts WHERE chunk_fts MATCH ?),
-    candidates AS MATERIALIZED (
-      SELECT c.id, c.chunk_id, m.lexical_rank,
-        CASE WHEN instr(lower(c.text),lower(?)) > 0 THEN 0 ELSE 1 END AS exact_rank, ${domainRank} AS domain_rank
-      FROM matches m JOIN chunks c ON c.id=m.rowid JOIN sources s ON s.source_id=c.source_id
-      WHERE s.scope_key IN (${placeholders})${domainFilter} ORDER BY domain_rank, exact_rank, m.lexical_rank, c.chunk_id LIMIT 40)
-    SELECT ${CHUNK_ROW_COLUMNS}, candidates.lexical_rank FROM candidates
-    JOIN chunks c ON c.id=candidates.id JOIN sources s ON s.source_id=c.source_id
-    ORDER BY candidates.domain_rank, candidates.exact_rank, candidates.lexical_rank, candidates.chunk_id`)
-    .all(expression, query, ...authorizedParameters);
+  if (expression) lexical = lexicalRanker.search({ expression, query, scopes, domain: requestedDomain,
+    columns: CHUNK_ROW_COLUMNS, checkCancelled: () => cancelled(flag), limit: candidateLimit });
   else if (query.trim()) lexical = database.prepare(`SELECT ${CHUNK_ROW_COLUMNS} FROM chunks c JOIN sources s ON s.source_id=c.source_id
-    WHERE s.scope_key IN (${placeholders})${domainFilter} AND instr(lower(c.text),lower(?)) > 0 ORDER BY ${domainRank},c.id LIMIT 40`).all(...authorizedParameters, query.trim());
+    WHERE s.scope_key IN (${placeholders})${domainFilter} AND instr(lower(c.text),lower(?)) > 0 ORDER BY ${domainRank},c.id LIMIT ${candidateLimit}`).all(...authorizedParameters, query.trim());
   let symbols = [], paths = [];
   const escapedPath = intent?.path?.replace(/[\\%_]/gu, character => `\\${character}`);
   const pathPredicate = column => intent?.path?.endsWith('/') ? `${column} LIKE ? ESCAPE '\\'` : `(${column}=? OR ${column} LIKE ? ESCAPE '\\')`;
@@ -517,7 +538,7 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
         AND c.structure_domain='code' AND c.parse_status IN ('parsed','partial') AND (c.symbol_name=? OR c.qualified_name=?${suffixClause})),
       candidates AS MATERIALIZED (SELECT ranked.id,
         ${intent.path ? `CASE WHEN ${pathPredicate('ranked.relative_path')} THEN 0 ELSE 1 END` : 'CASE WHEN 1 THEN 1 END'} AS target_rank
-        FROM ranked WHERE ranked.unit_rank=1 ORDER BY target_rank,ranked.chunk_id LIMIT 40)
+        FROM ranked WHERE ranked.unit_rank=1 ORDER BY target_rank,ranked.chunk_id LIMIT ${candidateLimit})
       SELECT ${CHUNK_ROW_COLUMNS},candidates.target_rank FROM candidates
       JOIN chunks c ON c.id=candidates.id JOIN sources s ON s.source_id=c.source_id
       ORDER BY candidates.target_rank,${domainRank},c.chunk_id`)
@@ -529,7 +550,7 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
       SELECT c.id,ROW_NUMBER() OVER (PARTITION BY c.source_id ORDER BY c.chunk_index) AS source_rank
       FROM chunks c JOIN sources s ON s.source_id=c.source_id WHERE s.scope_key IN (${placeholders})${domainFilter} AND ${pathPredicate('s.relative_path')})
       SELECT ${CHUNK_ROW_COLUMNS} FROM ranked JOIN chunks c ON c.id=ranked.id JOIN sources s ON s.source_id=c.source_id
-      WHERE ranked.source_rank=1 ORDER BY ${domainRank},s.relative_path,c.chunk_id LIMIT 40`)
+      WHERE ranked.source_rank=1 ORDER BY ${domainRank},s.relative_path,c.chunk_id LIMIT ${candidateLimit}`)
       .all(...authorizedParameters, ...pathParameters);
   }
   let semantic = [], degradedReason = null, semanticBackend = null;
@@ -537,7 +558,7 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
     if (!vectorAvailable) degradedReason = vectorError;
     else {
       const vectorResult = await vectorSearch.search({ scopeKeys: scopes, queryVector, embeddingProfileId,
-        embeddingModelVersion, embeddingSpaceId, requestedDomain, ann }, () => cancelled(flag));
+        embeddingModelVersion, embeddingSpaceId, requestedDomain, ann, channelCandidates: candidateLimit }, () => cancelled(flag));
       semantic = vectorResult.items;
       degradedReason = vectorResult.degradedReason;
       semanticBackend = vectorResult.semanticBackend;
@@ -579,6 +600,25 @@ function readSourceRow({ sourceId, sourceRef, scopeKeys }, flag) {
   return { row, id, reference, chunk };
 }
 
+function relations(input, flag) {
+  const scopes = retrievalScopeKeys(input.scopeKeys);
+  let sourceId = input.sourceId;
+  if (input.sourceRef) {
+    const verified = verifyReference(input, flag);
+    if (!verified.current) throw retrievalFailure('Relation source is outdated; search again. / 关系来源引用过期，请重新检索。', verified.reason, 409);
+    sourceId = verified.sourceId;
+  }
+  return relationStore.query({ scopes, sourceId, symbol: input.symbol, kind: input.kind, limit: input.limit }, () => cancelled(flag));
+}
+
+function recordCoverage(input, flag) {
+  return transaction(() => coverageStore.record(input.entries, retrievalScopeKeys(input.scopeKeys), () => cancelled(flag)), flag);
+}
+
+function coverage(input, flag) {
+  return coverageStore.query(retrievalScopeKeys(input.scopeKeys), input, () => cancelled(flag));
+}
+
 /** Verify evidence metadata without loading stored original text or vector blobs.
  * 只核验证据元信息，不加载原文和向量；同文重新派生后旧证据也不能被再次发布。
  */
@@ -603,20 +643,30 @@ function verifyReference({ sourceRef, scopeKeys }, flag) {
     ...(row.derivation_signature ? { derivationSignature: row.derivation_signature } : {}) };
 }
 
-function readMetadata(row, id, chunk) {
+function readMetadata(row, id, chunk, range) {
   const source = { sourceId: id, scopeKey: row.scope_key, sourceRevision: JSON.parse(row.source_revision), contentHash: row.content_hash,
     ...(row.derivation_signature ? { derivationSignature: row.derivation_signature } : {}) };
   return { ...source,
-    sourceType: row.source_type, title: row.title, locator: JSON.parse(row.locator), bindingRevision: row.binding_revision,
+    sourceType: row.source_type, title: row.title, offsetUnit: 'utf16-code-units',
+    locator: { ...sourceEvidenceLocator(JSON.parse(row.locator), range ??
+      { startOffset: chunk?.start_offset ?? 0, endOffset: chunk?.end_offset ?? row.text.length }), offsetUnit: 'utf16-code-units' }, bindingRevision: row.binding_revision,
     ...(row.structure_json ? { structure: JSON.parse(row.structure_json) } : {}),
     sourceRef: sourceReference(source, chunk ? { chunkId: chunk.chunk_id, chunkHash: chunk.chunk_hash } : null) };
 }
 
 function read(input, flag) {
   const { offset = 0, limit = 12000 } = input, { row, id } = readSourceRow(input, flag);
-  const content = row.text.slice(offset, offset + limit);
-  return { ...readMetadata(row, id),
-    text: content, offset, totalCharacters: row.text.length, hasMore: offset + content.length < row.text.length,
+  const splitsPair = position => position > 0 && position < row.text.length &&
+    /[\uD800-\uDBFF]/u.test(row.text[position - 1]) && /[\uDC00-\uDFFF]/u.test(row.text[position]);
+  if (offset > row.text.length || splitsPair(offset))
+    throw retrievalFailure('Offset must be a valid UTF-16 boundary in the current source. / 偏移必须位于当前原文的有效 UTF-16 字符边界。', 'INVALID_RETRIEVAL_OFFSET');
+  let endOffset = Math.min(row.text.length, offset + limit);
+  if (splitsPair(endOffset)) endOffset--;
+  if (endOffset === offset && offset < row.text.length)
+    throw retrievalFailure('The page budget cannot fit one complete character; use at least two UTF-16 code units. / 分页预算无法容纳完整字符，请使用至少两个 UTF-16 单元。', 'INVALID_RETRIEVAL_WINDOW');
+  const content = row.text.slice(offset, endOffset);
+  return { ...readMetadata(row, id, null, { startOffset: offset, endOffset: offset + content.length }),
+    text: content, offset, offsetUnit: 'utf16-code-units', totalCharacters: row.text.length, hasMore: offset + content.length < row.text.length,
     nextOffset: offset + content.length };
 }
 
@@ -625,7 +675,7 @@ function readWindow(input, flag) {
   if (input.mode === 'unit') return readStructuredUnit(row, id, chunk, input, flag);
   const window = sourceWindow(row.text, { ...input, anchorOffset: input.anchorOffset ?? chunk?.start_offset ?? 0,
     ...(input.anchorOffset === undefined && chunk ? { referenceRange: { startOffset: chunk.start_offset, endOffset: chunk.end_offset } } : {}) }, () => cancelled(flag));
-  return { ...readMetadata(row, id, chunk), ...window };
+  return { ...readMetadata(row, id, chunk, { startOffset: window.offset, endOffset: window.nextOffset }), ...window };
 }
 
 /** Expand only the verified matched unit; large units stay bounded and missing structure is explicit.
@@ -635,7 +685,8 @@ function readStructuredUnit(row, id, chunk, input, flag) {
   const metadata = readMetadata(row, id, chunk);
   if (!chunk?.structure_json) {
     const fallback = sourceWindow(row.text, { ...input, mode: 'window', anchorOffset: input.anchorOffset ?? chunk?.start_offset ?? 0 }, () => cancelled(flag));
-    return { ...metadata, ...fallback, unitUnavailable: true };
+    return { ...metadata, locator: sourceEvidenceLocator(JSON.parse(row.locator),
+      { startOffset: fallback.offset, endOffset: fallback.nextOffset }), ...fallback, unitUnavailable: true };
   }
   const structure = validateChunkStructure(JSON.parse(chunk.structure_json), { text: row.text,
     ...(row.structure_json ? { structure: JSON.parse(row.structure_json) } : {}) },
@@ -648,7 +699,8 @@ function readStructuredUnit(row, id, chunk, input, flag) {
     beforeCharacters: shouldReadWholeUnit ? 0 : input.beforeCharacters,
     referenceRange: { startOffset: chunk.start_offset - lower, endOffset: chunk.end_offset - lower } }, () => cancelled(flag));
   const offset = lower + window.offset, nextOffset = lower + window.nextOffset;
-  return { ...metadata, ...window, offset, nextOffset, totalCharacters: row.text.length,
+  return { ...metadata, locator: sourceEvidenceLocator(JSON.parse(row.locator), { startOffset: offset, endOffset: nextOffset }),
+    ...window, offset, nextOffset, totalCharacters: row.text.length,
     window: { ...window.window, mode: 'unit', anchorOffset, startOffset: offset, endOffset: nextOffset,
       unit: { ...structure, startOffset: lower, endOffset: upper },
       referenceRange: { startOffset: chunk.start_offset, endOffset: chunk.end_offset },
@@ -672,6 +724,7 @@ async function removeSource({ sourceId, scopeKeys, permanent = true }) {
   const previousVectors = vectorSearch.sourceRows([sourceId]);
   const result = transaction(() => {
     database.prepare('DELETE FROM sources WHERE source_id=?').run(sourceId);
+    database.prepare('DELETE FROM source_coverage WHERE source_id=? AND scope_key=?').run(sourceId, scope);
     return { removed: Boolean(current), generation: nextGeneration(scope,
       { corpusChanged: isCorpusSource(current?.source_type ?? existing?.sourceType) }), indexSnapshotId: snapshotId() };
   });
@@ -679,10 +732,10 @@ async function removeSource({ sourceId, scopeKeys, permanent = true }) {
   return result;
 }
 
-function listSources({ scopeKeys, sourceType }) {
+function listSources({ scopeKeys, sourceType, sourceId }) {
   const scopes = retrievalScopeKeys(scopeKeys);
-  const filter = sourceType === undefined ? '' : ' AND source_type=?';
-  const parameters = sourceType === undefined ? [] : [sourceType];
+  const filter = (sourceType === undefined ? '' : ' AND source_type=?') + (sourceId === undefined ? '' : ' AND source_id=?');
+  const parameters = [...(sourceType === undefined ? [] : [sourceType]), ...(sourceId === undefined ? [] : [sourceId])];
   return database.prepare(`SELECT source_id AS sourceId,scope_key AS scopeKey,source_type AS sourceType,
     title,locator,content_hash AS contentHash,source_revision AS sourceRevision,binding_revision AS bindingRevision,
     derivation_signature AS derivationSignature,embedding_input_signature AS embeddingInputSignature,
@@ -712,6 +765,7 @@ async function invalidateScope({ scopeKey }) {
   persistIdentities(registry);
   const result = transaction(() => {
     const result = database.prepare('DELETE FROM sources WHERE scope_key=?').run(scopeKey);
+    database.prepare('DELETE FROM source_coverage WHERE scope_key=?').run(scopeKey);
     return { removed: result.changes, generation: nextGeneration(scopeKey, { corpusChanged }), indexSnapshotId: snapshotId(), scopeKey };
   });
   await vectorSearch.invalidateScopes([scopeKey]);
@@ -757,6 +811,7 @@ async function close() {
   const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
   if (checkpoint.busy) throw retrievalFailure('Retrieval index is busy. / 检索索引正被使用，无法安全迁移。', 'RETRIEVAL_INDEX_BUSY', 409);
   await vectorSearch.close();
+  resourceService?.close();
   database.close();
   database = null;
   return { closed: true, checkpointed: true };
@@ -765,13 +820,14 @@ async function close() {
 await openDatabase();
 let operationsQueue = Promise.resolve();
 parentPort.on('message', message => {
+  if (message?.type === 'resource_response') return;
   // One async owner preserves SQLite transaction order across background ANN responses.
   // 异步队列维持单一 SQLite 所有者；等待后台向量结果期间也不能让另一请求交错事务。
   operationsQueue = operationsQueue.catch(() => {}).then(async () => {
     const flag = message.cancelBuffer ? new Int32Array(message.cancelBuffer) : null;
     try {
       cancelled(flag);
-      const operations = { upsertSources, search, read, readWindow, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, status, close };
+      const operations = { upsertSources, search, read, readWindow, relations, recordCoverage, coverage, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, vectorSpaceStatus: input => vectorSpaces.status(retrievalScopeKeys(input.scopeKeys)), status, close };
       const operation = operations[message.method];
       if (!operation || !database) throw retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
       const result = await operation(message.input ?? {}, flag);

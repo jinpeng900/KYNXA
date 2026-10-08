@@ -6,7 +6,7 @@ import { MAX_SOURCE_CHARACTERS, retrievalFailure } from './retrieval-contracts.m
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = '0.3.1';
 const CSHARP_GRAMMAR_VERSION = '0.23.5';
-export const CODE_PARSER_VERSION = `vscode-tree-sitter-wasm-${PACKAGE_VERSION}:csharp-${CSHARP_GRAMMAR_VERSION}:units-v3`;
+export const CODE_PARSER_VERSION = `vscode-tree-sitter-wasm-${PACKAGE_VERSION}:csharp-${CSHARP_GRAMMAR_VERSION}:units-v4`;
 const MAX_VISITED_NODES = 100_000;
 const MAX_DECLARATIONS = 10_000;
 const MAX_UNITS = 5000;
@@ -14,9 +14,11 @@ const MAX_PARSE_TIME_MS = 250;
 const MAX_TRAVERSAL_TIME_MS = 250;
 const MAX_SYMBOL_CHARACTERS = 256;
 const MAX_QUALIFIED_CHARACTERS = 512;
-const GRAMMARS = Object.freeze({ csharp: 'c-sharp', javascript: 'javascript', typescript: 'typescript', tsx: 'tsx' });
+const GRAMMARS = Object.freeze({ csharp: 'c-sharp', javascript: 'javascript', typescript: 'typescript', tsx: 'tsx',
+  python: 'python', go: 'go', rust: 'rust' });
 const EXTENSIONS = new Map([['.cs', 'csharp'], ['.js', 'javascript'], ['.mjs', 'javascript'], ['.cjs', 'javascript'],
-  ['.jsx', 'javascript'], ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'], ['.tsx', 'tsx']]);
+  ['.jsx', 'javascript'], ['.ts', 'typescript'], ['.mts', 'typescript'], ['.cts', 'typescript'], ['.tsx', 'tsx'],
+  ['.py', 'python'], ['.pyi', 'python'], ['.go', 'go'], ['.rs', 'rust']]);
 const TYPE_KINDS = new Map([['class_declaration', 'class'], ['class', 'class'], ['interface_declaration', 'interface'],
   ['struct_declaration', 'struct'], ['record_declaration', 'record'], ['enum_declaration', 'enum'], ['type_alias_declaration', 'type']]);
 const CALLABLE_KINDS = new Map([['function_declaration', 'function'], ['generator_function_declaration', 'function'],
@@ -29,6 +31,8 @@ const CALLABLE_KINDS = new Map([['function_declaration', 'function'], ['generato
 const BINDING_PARENTS = new Set(['variable_declarator', 'pair', 'field_definition', 'public_field_definition']);
 const ANONYMOUS_CALLABLES = new Set(['function_expression', 'generator_function', 'arrow_function', 'lambda_expression']);
 const NAMESPACES = new Set(['namespace_declaration', 'internal_module', 'module']);
+const RUST_TYPE_KINDS = new Map([['struct_item', 'struct'], ['enum_item', 'enum'], ['union_item', 'union'],
+  ['trait_item', 'trait'], ['type_item', 'type'], ['mod_item', 'module'], ['impl_item', 'implementation']]);
 const languages = new Map();
 let runtimePromise;
 
@@ -85,11 +89,64 @@ function bindingName(node) {
   return parent.childForFieldName(parent.type === 'pair' ? 'key' : 'name');
 }
 
-function declaration(node) {
+// Unwrap explicit AST type nodes; these are syntactic names, not compiler import/reference resolution.
+// 只解包明确的 AST 类型节点；记录语法中的名称，不冒充编译器导入或引用解析。
+function namedType(node, depth = 0) {
+  if (!node || depth >= 32) return null;
+  if (['identifier', 'type_identifier', 'primitive_type', 'self', 'crate', 'super'].includes(node.type)) return node.text;
+  if (node.type === 'scoped_type_identifier' || node.type === 'scoped_identifier') {
+    const prefix = namedType(node.childForFieldName('path'), depth + 1);
+    const name = namedType(node.childForFieldName('name'), depth + 1);
+    return prefix && name ? `${prefix}.${name}` : null;
+  }
+  if (['pointer_type', 'reference_type', 'generic_type', 'bracketed_type', 'type'].includes(node.type))
+    return namedType(node.childForFieldName('type') ?? node.firstNamedChild, depth + 1);
+  return null;
+}
+
+function pythonContainer(node) {
+  for (let parent = node.parent; parent; parent = parent.parent)
+    if (['class_definition', 'function_definition'].includes(parent.type)) return parent.type;
+  return null;
+}
+
+function languageDeclaration(node, language) {
+  let kind, startNode = node, symbolName = node.childForFieldName('name')?.text ?? null, parentScopeName, hasError = node.hasError;
+  if (language === 'python' && ['class_definition', 'function_definition', 'type_alias_statement'].includes(node.type)) {
+    kind = node.type === 'type_alias_statement' ? 'type' : node.type === 'class_definition' ? 'class' : pythonContainer(node) === 'class_definition'
+      ? symbolName === '__init__' ? 'constructor' : 'method' : 'function';
+    if (node.type === 'type_alias_statement') symbolName = namedType(node.childForFieldName('left'));
+    if (node.parent?.type === 'decorated_definition') startNode = node.parent;
+    hasError ||= startNode.hasError;
+  } else if (language === 'go' && ['type_spec', 'type_alias', 'method_elem', 'method_declaration'].includes(node.type)) {
+    const declaredType = node.childForFieldName('type');
+    kind = node.type === 'method_elem' || node.type === 'method_declaration' ? 'method'
+      : declaredType?.type === 'struct_type' ? 'struct' : declaredType?.type === 'interface_type' ? 'interface' : 'type';
+    if (node.parent?.type === 'type_declaration' && node.parent.namedChildCount === 1) startNode = node.parent;
+    if (node.type === 'method_declaration')
+      parentScopeName = namedType(node.childForFieldName('receiver')?.firstNamedChild?.childForFieldName('type'));
+  } else if (language === 'rust' && (RUST_TYPE_KINDS.has(node.type) || ['function_item', 'function_signature_item'].includes(node.type))) {
+    const container = node.parent?.type === 'declaration_list' ? node.parent.parent?.type : null;
+    kind = RUST_TYPE_KINDS.get(node.type) ?? (['impl_item', 'trait_item'].includes(container) ? 'method' : 'function');
+    if (node.type === 'impl_item') symbolName = namedType(node.childForFieldName('type'));
+    // Rust attributes are sibling AST nodes; include them in the declaration without scanning string contents.
+    // Rust 属性是相邻 AST 节点；据语法树纳入声明范围，不扫描字符串内容猜测声明。
+    for (let previous = node.previousNamedSibling; previous?.type === 'attribute_item'; previous = previous.previousNamedSibling) {
+      startNode = previous;
+      hasError ||= previous.hasError;
+    }
+  } else return null;
+  return { kind, symbolName, startNode, hasError, unsupportedName: !symbolName,
+    ...(parentScopeName !== undefined ? { parentScopeName } : {}) };
+}
+
+function declaration(node, language) {
   if (!node.isNamed) return null;
+  const specialized = languageDeclaration(node, language);
+  if (specialized) return specialized;
   if (node.type === 'property_signature' && node.parent?.type !== 'interface_body') return null;
   if (node.type === 'method_signature' && !['interface_body', 'class_body'].includes(node.parent?.type)) return null;
-  const isNamespace = NAMESPACES.has(node.type);
+  const isNamespace = NAMESPACES.has(node.type) && Boolean(node.childForFieldName('name'));
   const isObject = node.type === 'object';
   const kind = TYPE_KINDS.get(node.type) ?? CALLABLE_KINDS.get(node.type);
   if (!kind && !isNamespace && !isObject) return null;
@@ -123,13 +180,14 @@ function nestedScope(parent, symbolName, diagnostics) {
 }
 
 function fileNamespace(root, language) {
-  if (language !== 'csharp') return null;
+  if (!['csharp', 'go'].includes(language)) return null;
   const cursor = root.walk();
   let visited = 0;
   try {
     if (!cursor.gotoFirstChild()) return null;
     do {
       const node = cursor.currentNode;
+      if (language === 'go' && node.type === 'package_clause' && !node.hasError) return node.firstNamedChild?.text ?? null;
       if (node.type === 'file_scoped_namespace_declaration') return node.childForFieldName('name')?.text ?? null;
       if (TYPE_KINDS.has(node.type) || node.type === 'namespace_declaration' || ++visited >= MAX_VISITED_NODES) return null;
     } while (cursor.gotoNextSibling());
@@ -165,18 +223,25 @@ async function collectUnits(tree, text, language, signal, diagnostics) {
       const node = cursor.currentNode;
       const parent = frames.at(-1) ?? { scope: initialScope };
       let scope = parent.scope;
-      const info = declaration(node);
+      const info = declaration(node, language);
       if (info) {
         if (info.unsupportedName) diagnostics.add('CODE_STRUCTURE_DYNAMIC_SYMBOL');
-        scope = nestedScope(parent.scope, info.symbolName, diagnostics);
+        let ownerScope = parent.scope;
+        if (info.parentScopeName !== undefined) {
+          // Go receiver methods belong to their declared named type even though they occur at file scope.
+          // Go 接收者方法在文件层声明，仍归属于语法中明确的命名类型；不推测未知接收者的归属。
+          if (!info.parentScopeName) diagnostics.add('CODE_STRUCTURE_DYNAMIC_SYMBOL');
+          ownerScope = nestedScope(parent.scope, info.parentScopeName, diagnostics);
+        }
+        scope = nestedScope(ownerScope, info.symbolName, diagnostics);
         const symbolName = info.symbolName && info.symbolName.length <= MAX_SYMBOL_CHARACTERS ? info.symbolName : undefined;
         if (info.symbolName && !symbolName) diagnostics.add('CODE_STRUCTURE_SYMBOL_LIMIT');
-        if (info.kind && !node.hasError && !node.isMissing) {
+        if (info.kind && !node.hasError && !node.isMissing && !info.hasError && !info.startNode.hasError) {
           const start = info.startNode.startIndex, end = node.endIndex;
           if (isValidRange(text, start, end)) {
             const unit = { kind: info.kind, ...(symbolName ? { symbolName } : {}),
               ...(scope.qualifiedName ? { qualifiedName: scope.qualifiedName } : {}),
-              ...(parent.scope.qualifiedName ? { parentSymbol: parent.scope.qualifiedName } : {}),
+              ...(ownerScope.qualifiedName ? { parentSymbol: ownerScope.qualifiedName } : {}),
               startOffset: start, endOffset: end, startLine: info.startNode.startPosition.row + 1, endLine: node.endPosition.row + 1 };
             declarations.push({ unit, depth: frames.length });
           } else diagnostics.add('CODE_STRUCTURE_INVALID_RANGE');

@@ -2,6 +2,62 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DEFAULT_TOOL_RUN_LIMITS, ToolRunProgress, startRunTimer } from '../orchestration/tool-run.mjs';
+import { runToolLoop } from '../orchestration/tool-loop.mjs';
+import { validateAssistantSegments } from '../platform/assistant-segments.mjs';
+
+test('a draft followed by required validation does not seal final segments before the task finishes', async () => {
+  const events = [], activities = [], checks = [];
+  const turns = [
+    { content: 'Changing the file.', calls: [{ id: 'edit-1', name: 'filesystem.edit', arguments: {} }] },
+    { content: 'Draft before verification.', calls: [] },
+    { content: 'Running the relevant check.', calls: [{ id: 'check-1', name: 'terminal.host.run', arguments: { script: 'node --test check.mjs' } }] },
+    { content: 'Verified final result.', calls: [] }
+  ].map(turn => ({ ...turn, reasoning: '', continuation: [{ role: 'assistant', content: turn.content,
+    ...(turn.calls.length ? { tool_calls: turn.calls.map(call => ({ id: call.id, type: 'function',
+      function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) } : {}) }] }));
+  const result = await runToolLoop({ protocol: 'openai-completions', context: { message: '修复代码并验证' },
+    messages: [], system: '', declarations: [], inputBudgetTokens: 32768,
+    service: { execute: async (_context, call) => {
+      checks.push(call.id);
+      return { status: 'completed', isError: false, content: JSON.stringify({ exitCode: 0 }) };
+    } }, requestTurn: async () => turns.shift(), emit: event => events.push(event),
+    saveActivity: async activity => activities.push({ ...activity }) });
+  assert.equal(result.content, 'Verified final result.');
+  assert.equal(result.taskCompletion.pendingValidation, false);
+  assert.deepEqual(checks, ['edit-1', 'check-1']);
+  assert.deepEqual(validateAssistantSegments(result.assistantSegments).map(segment => segment.phase),
+    ['commentary', 'commentary', 'commentary', 'final_answer']);
+  assert.ok(events.some(event => event.segment?.content === 'Draft before verification.' && event.segment.phase === 'commentary'));
+  assert.equal(activities.filter(activity => activity.status === 'completed').length, 2);
+});
+
+test('validation records require executed commands and a later edit invalidates earlier passed checks', async () => {
+  const states = [], progress = new ToolRunProgress(undefined, state => states.push(state));
+  const receipt = (exitCode, extra = {}) => ({ status: 'completed', isError: exitCode !== 0,
+    content: JSON.stringify({ exitCode, ...extra }) });
+  progress.observeOutcome({ id: 'write-1', name: 'filesystem.write', arguments: {} }, receipt(0));
+  progress.observeOutcome({ id: 'source-only', name: 'knowledge.search', arguments: {} }, receipt(0));
+  progress.observeOutcome({ id: 'not-a-test', name: 'terminal.host.run', arguments: { command: 'echo npm test' } }, receipt(0));
+  await progress.save('continuing');
+  assert.equal(states.at(-1).verification.pendingValidation, true);
+  assert.deepEqual(states.at(-1).verification.receipts, []);
+  progress.observeOutcome({ id: 'failed-test', name: 'terminal.host.run', arguments: { command: 'npm test' } }, receipt(1));
+  progress.observeOutcome({ id: 'timed-out', name: 'terminal.host.run', arguments: { command: 'npm test' } }, receipt(0, { timedOut: true }));
+  assert.equal(progress.checkedMutationRevision, 0);
+  progress.observeOutcome({ id: 'passed-test', name: 'terminal.host.run', arguments: { command: 'node --test test.mjs' } }, receipt(0));
+  await progress.save('continuing');
+  assert.equal(states.at(-1).verification.pendingValidation, false);
+  assert.equal(states.at(-1).verification.receipts.length, 2);
+  assert.equal(states.at(-1).verification.conclusion, 'task-correctness-not-certified');
+  progress.observeOutcome({ id: 'write-2', name: 'filesystem.edit', arguments: {} }, receipt(0));
+  await progress.save('finalizing');
+  assert.equal(states.at(-1).verification.pendingValidation, true);
+  progress.observeOutcome({ id: 'cmd-validation', name: 'terminal.run', arguments: { command: 'cmd', args: ['/d', '/c', 'node --test check.mjs'] } }, receipt(0));
+  assert.equal(progress.verification().pendingValidation, false);
+  progress.observeOutcome({ id: 'latest-failure', name: 'terminal.host.run', arguments: { script: 'node --test check.mjs' } }, receipt(1));
+  assert.equal(progress.verification().state, 'checks-failed');
+  assert.equal(progress.verification().pendingValidation, true);
+});
 
 test('numeric diagnostics distinguish model, execution and approval spans without treating parallel totals as wall time', async () => {
   const saved = [], progress = new ToolRunProgress(undefined, state => saved.push(state));

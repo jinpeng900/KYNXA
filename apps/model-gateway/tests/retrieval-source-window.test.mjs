@@ -110,6 +110,25 @@ test('window source versions, authorization, revocation and cancellation use the
   await assert.rejects(index.upsertSources([{ ...source, sourceRevision: 3 }]), { code: 'RETRIEVAL_SOURCE_REVOKED' });
 });
 
+test('paged reads preserve complete Unicode and old offsets cannot read changed source versions', async t => {
+  const { index } = await fixture(t), source = { sourceId: 'unicode-page', scopeKey: 'user', sourceRevision: 1, text: 'ab😀中文end' };
+  await index.upsertSources([source]);
+  const reference = (await index.search({ query: '中文', scopeKeys: ['user'] })).items[0].sourceRef;
+  const first = await index.read({ sourceRef: reference, scopeKeys: ['user'], offset: 0, limit: 3 });
+  assert.equal(first.text, 'ab'); assert.equal(first.nextOffset, 2); assert.equal(first.offsetUnit, 'utf16-code-units');
+  const next = await index.read({ sourceRef: reference, scopeKeys: ['user'], offset: first.nextOffset, limit: 3 });
+  assert.equal(next.text, '😀中'); assert.equal(next.nextOffset, 5);
+  await assert.rejects(index.read({ sourceRef: reference, scopeKeys: ['user'], offset: 3 }), { code: 'INVALID_RETRIEVAL_OFFSET' });
+  await assert.rejects(index.read({ sourceRef: reference, scopeKeys: ['user'], offset: 20 }), { code: 'INVALID_RETRIEVAL_OFFSET' });
+  await assert.rejects(index.read({ sourceRef: reference, scopeKeys: ['user'], offset: 2, limit: 1 }), { code: 'INVALID_RETRIEVAL_WINDOW' });
+  await index.upsertSources([{ ...source, sourceRevision: 2, text: 'new prefix ' + source.text }]);
+  await assert.rejects(index.read({ sourceRef: reference, scopeKeys: ['user'], offset: first.nextOffset }), { code: 'STALE_RETRIEVAL_SOURCE' });
+  const fresh = (await index.search({ query: '中文', scopeKeys: ['user'] })).items[0];
+  const recovered = await index.readWindow({ sourceRef: fresh.sourceRef, scopeKeys: ['user'] });
+  assert.equal(recovered.text, 'new prefix ' + source.text);
+  assert.equal(recovered.offsetUnit, 'utf16-code-units'); assert.equal(recovered.window.offsetUnit, 'utf16-code-units');
+});
+
 test('default section reads cover a chunk crossing headings and expose navigation instead of guessing its chapter', async t => {
   const { index } = await fixture(t);
   const text = '# Unrelated introduction\n' + 'Background only. '.repeat(22) + '\n## Safety\nReviewer: Mara Chen.\n## Launch\nUndecided.\n';

@@ -6,6 +6,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { supportsSkillExecution, verifiesSkillExecution } from './sandbox-skill.mjs';
 import { findNativeToolHost } from './tool-host-path.mjs';
 import { inspectLocalPath } from '../platform/tool-paths.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 
 const maximumHostOutputBytes = 2 * 1024 * 1024;
 
@@ -30,7 +31,8 @@ export class SandboxRunner {
   #onStarted;
   #conversationWorkspaceHome;
 
-  constructor({ toolHostPath, excludedRoots = [], conversationWorkspaceHome, onStarted } = {}) {
+  constructor({ toolHostPath, excludedRoots = [], conversationWorkspaceHome, onStarted, resourceService } = {}) {
+    this.resources = resourceService;
     this.#toolHostPath = toolHostPath ? resolve(toolHostPath) : null;
     this.#excludedRoots = [...new Set([...excludedRoots,
       ...(process.env.KYNXA_DATA_HOME ? [process.env.KYNXA_DATA_HOME] : [])].map(path => resolve(path)))];
@@ -154,9 +156,16 @@ export class SandboxRunner {
   }
 
   async #invoke(host, request, signal, maximumWaitMs) {
+    if (request.operation === 'capabilities') return this.#invokeNative(host, request, signal, maximumWaitMs);
+    return runResourceTask(this.resources, { cpuThreads: 2, memoryBytes: 64 * 1024 * 1024 },
+      lease => this.#invokeNative(host, request, signal, maximumWaitMs, lease), { signal });
+  }
+
+  async #invokeNative(host, request, signal, maximumWaitMs, lease) {
     if (signal?.aborted) throw abortError();
     return new Promise((resolveResult, reject) => {
       const child = spawn(host, [], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      if (lease && child.pid) this.resources.registerExecutor?.(lease.leaseId, { processId: child.pid }).catch(() => {});
       const decoder = new StringDecoder('utf8');
       let stdoutBytes = 0, pending = '', result, aborted = false, hardStopTimer, settled = false;
       const finish = (error, result) => {

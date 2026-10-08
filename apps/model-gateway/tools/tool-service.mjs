@@ -2,6 +2,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { validateId } from '../platform/conversation-id.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 import { buildToolSystemPrompt } from './tool-system-prompt.mjs';
 import { ToolStorageBoundary } from './tool-storage-boundary.mjs';
 import { changedMcpServerIds, hasToolConfigurationChanged, isConfiguredToolEnabled } from './tool-configuration.mjs';
@@ -17,7 +18,8 @@ import { validatePublicWebUrl } from './web-http-transport.mjs';
 import { needsToolApproval, ToolApprovalRegistry } from './tool-policy.mjs';
 import { bindLocalPath, revalidateLocalPathBinding, boundedInteger, inspectLocalPath, objectInput, resolveToolPath, toolFailure, within } from '../platform/tool-paths.mjs';
 import { ModelToolCatalog } from './tool-catalog.mjs';
-import { searchTools } from './tool-discovery.mjs';
+import { searchTools, toolSelectionSignals } from './tool-discovery.mjs';
+import { resolveToolExecutionEnvironment } from './tool-execution-environment.mjs';
 import { browserConnectionPrompt, isBackgroundBrowserConnection } from './browser-connections.mjs';
 import { assertBrowserLaunchAllowed, assertBrowserServerAllowed, canUseBrowserServer, inferBrowserTaskIntent, isBrowserTaskFollowUp, isBrowserApplicationPath } from './browser-intent-policy.mjs';
 import { ToolResultStore, previewToolResult, publicToolResult } from '../data/tool-result-store.mjs';
@@ -31,7 +33,7 @@ import { isDesktopObservation } from './tool-outcomes.mjs';
 import { inferBrowserInteractionPolicy, isExplicitForegroundForbidden } from './browser-sessions.mjs';
 import { prepareDesktopLaunchArguments } from './desktop-launch-options.mjs';
 import { isSensitiveFilePath } from './sensitive-files.mjs';
-import { projectEvidenceSearchResult } from '../data/retrieval/evidence-references.mjs';
+import { projectEvidenceSearchResult, projectRetrievalModelView } from '../data/retrieval/evidence-references.mjs';
 import { HostTerminalJobs } from './host-terminal-jobs.mjs';
 
 const MAX_TOOL_INPUT_BYTES = 2 * 1024 * 1024;
@@ -43,6 +45,7 @@ const safeErrorCode = (error, fallback = 'TOOL_FAILED') => typeof error?.code ==
 function publicDescriptor(descriptor) {
   return { name: descriptor.name, description: descriptor.description, inputSchema: structuredClone(descriptor.inputSchema), source: descriptor.source,
     ...(descriptor.toolName ? { rawName: descriptor.toolName } : {}), enabled: descriptor.enabled !== false,
+    ...(descriptor.executionEnvironment ? { executionEnvironment: descriptor.executionEnvironment } : {}),
     ...(descriptor.available !== undefined ? { available: descriptor.available,
       ...(descriptor.unavailableCode ? { unavailableCode: descriptor.unavailableCode } : {}) } : {}) };
 }
@@ -127,6 +130,8 @@ export class ToolService {
     this.workspaces = new ConversationWorkspaces({ root: this.dataHome });
     this.approvals = new ToolApprovalRegistry({ ...(approvalTimeoutMs ? { timeoutMs: approvalTimeoutMs } : {}) });
     this.contexts = new WeakSet();
+    this.taskVerifications = new WeakMap();
+    this.evidenceBudgets = new WeakMap();
     this.catalogs = new WeakMap();
     this.stages = new WeakMap();
     this.observationCaches = new WeakMap();
@@ -254,6 +259,7 @@ export class ToolService {
       ...(workspaceBinding ? { workspaceBinding } : {}), ...(workspaceDiagnostic ? { workspaceDiagnostic } : {}),
       managedWorkspace: ownership.managedWorkspace || ownership.workspaceRoot === null, sandboxCapabilities, desktopCapabilities,
       hostTerminalCapabilities: Object.freeze(hostTerminal),
+      toolIntent: Object.freeze(toolSelectionSignals(message, { historySignals: previousUserMessages })),
       browserInteraction: Object.freeze(inferBrowserInteractionPolicy(message)),
       browserTaskIntent: Object.freeze(inferBrowserTaskIntent(message, previousUserMessages)),
       foregroundForbidden: isExplicitForegroundForbidden(message),
@@ -265,6 +271,18 @@ export class ToolService {
 
   _assertContext(context) {
     if (this.closed || !context || !this.contexts.has(context)) throw toolFailure('工具上下文无效或已关闭。', 'INVALID_TOOL_CONTEXT', 409);
+  }
+
+  registerTaskVerification(context, readVerification) {
+    this._assertContext(context);
+    if (typeof readVerification === 'function') this.taskVerifications.set(context, readVerification);
+  }
+
+  taskVerificationFor(context) { this._assertContext(context); return this.taskVerifications.get(context)?.(); }
+
+  setEvidenceBudget(context, maximumTokens) {
+    this._assertContext(context);
+    this.evidenceBudgets.set(context, Math.max(0, Math.min(32768, Math.floor(maximumTokens))));
   }
 
   async listSkills(context, options) {
@@ -291,14 +309,17 @@ export class ToolService {
     const remote = await this.mcp.catalog({ ...config, mcpServers: allowedServers }, context, { connect: connectMcp, refresh: refreshMcpCatalog });
     const effectiveConfig = generation === this.configGeneration ? config : await this.getConfig();
     const all = [...builtinDescriptors.map(tool => ({ ...tool, ...nativeToolAvailability(context, tool) })), ...remote.map(tool => ({ ...tool,
-      enabled: isConfiguredToolEnabled(effectiveConfig, tool) && !hasToolConfigurationChanged(config, effectiveConfig, tool) }))];
+      enabled: isConfiguredToolEnabled(effectiveConfig, tool) && !hasToolConfigurationChanged(config, effectiveConfig, tool) }))]
+      .map(tool => ({ ...tool, executionEnvironment: resolveToolExecutionEnvironment(tool,
+        { servers: effectiveConfig.mcpServers, context }) }));
     const retrievalSettings = context && this.retrieval ? await this.retrieval.effective(context.projectId) : null;
     const servers = new Map(effectiveConfig.mcpServers.map(server => [server.id, server]));
     const descriptors = all.filter(tool => tool.enabled !== false && tool.available !== false && canUseBrowserServer(context, servers.get(tool.serverId)) &&
       (!tool.name.startsWith('knowledge.') || this.retrieval && retrievalSettings?.local.enabled !== false) &&
       (retrievalSettings?.web.browserRead !== 'off' || !isAutomaticBrowserRead(context, tool)) &&
       (retrievalSettings?.web.mode !== 'off' || !(tool.name.startsWith('web.') || isPublicSearchTool(tool) || isPublicFetchTool(tool))));
-    if (context) this.catalogs.set(context, { generation, config: structuredClone(config), descriptors: new Map(descriptors.map(item => [item.name, item])), servers,
+    if (context) this.catalogs.set(context, { generation, config: structuredClone(config), descriptors: new Map(descriptors.map(item => [item.name, item])),
+      inventory: new Map(all.map(item => [item.name, item])), servers,
       browserPrompt: browserConnectionPrompt(effectiveConfig.mcpServers.filter(server => descriptors.some(tool => tool.serverId === server.id))) });
     return (includeDisabled ? all : descriptors).map(publicDescriptor);
   }
@@ -379,6 +400,7 @@ export class ToolService {
     this._assertContext(context);
     const skills = await this.listSkills(context);
     return buildToolSystemPrompt(context, { skills,
+      deviceCapabilities: context.toolIntent?.deviceState ? this.capabilitySnapshot(context) : undefined,
       browserPrompt: this.catalogs.get(context)?.browserPrompt,
       unavailableSkillCount: this.skills.discovery.get(skills)?.unavailableCount,
       mcpErrorIds: [...this.mcp.errors].map(([id, code]) => `${id} (${safeErrorCode({ code }, 'MCP_UNAVAILABLE')})`), maximumTokens });
@@ -386,9 +408,34 @@ export class ToolService {
 
   approve(input) { return this.approvals.approve(input); }
 
+  capabilitySnapshot(context) {
+    this._assertContext(context);
+    const snapshot = this.catalogs.get(context);
+    const names = ['terminal.host.run', 'terminal.run', 'web.fetch', 'computer.windows'];
+    return { checkedBy: 'kynxa-runtime', discoveryRequiresApproval: false, discoveryExecutesCommands: false,
+      scope: 'gateway-host', userDeviceRelationship: 'unverified',
+      tools: names.map(name => {
+        const descriptor = snapshot?.inventory?.get(name) ?? builtinDescriptors.find(item => item.name === name);
+        const availability = nativeToolAvailability(context, descriptor);
+        const available = snapshot?.descriptors.has(name) === true;
+        return { name, state: available ? 'available' : availability.available === false ? 'unavailable' : snapshot ? 'disabled' : 'not-discovered',
+          schema: !snapshot?.model ? 'selection-pending' : snapshot.model.selected.some(tool => tool.name === name) ? 'loaded' : 'deferred',
+          ...(availability.unavailableCode ? { code: availability.unavailableCode } : {}),
+          approval: context.permissionMode === 'full' || ['web.fetch', 'computer.windows'].includes(name)
+            ? 'not-required-by-current-mode' : 'execution-policy-applies' };
+      }) };
+  }
+
+  executionEnvironmentFor(context, name) {
+    const snapshot = this.catalogs.get(context);
+    const descriptor = snapshot?.inventory?.get(name) ?? builtinDescriptors.find(item => item.name === name);
+    return resolveToolExecutionEnvironment(descriptor ?? {}, { servers: [...(snapshot?.servers.values() ?? [])], context });
+  }
+
   async execute(context, call, { signal, emit, interactive = true, onApprovalWait = () => {} } = {}) {
     let outsideWorkspace = false;
     let executionStarted = false;
+    let mcpDispatchAttempted = false;
     let preparedSkill;
     let webStage;
     let webDeadline;
@@ -396,11 +443,13 @@ export class ToolService {
     const originalSignal = signal;
     try {
       this._assertContext(context);
-      await this.storageBoundary.refresh();
       objectInput(call); objectInput(call.arguments);
       if (typeof call.id !== 'string' || !call.id || call.id.length > 128 || /[\0\r\n]/.test(call.id) || typeof call.name !== 'string') throw toolFailure('工具调用身份无效。');
       if (Buffer.byteLength(JSON.stringify(call.arguments)) > MAX_TOOL_INPUT_BYTES) throw toolFailure('工具参数过大。');
       call = { id: call.id, name: call.name, arguments: structuredClone(call.arguments) };
+      // Freeze business arguments before the first asynchronous boundary, including approval-free reads.
+      // 在首个异步边界前固定业务参数，包括无需审批的只读调用。
+      await this.storageBoundary.refresh();
       let snapshot = this.catalogs.get(context);
       const descriptor = snapshot?.descriptors.get(call.name) ?? builtinDescriptors.find(item => item.name === call.name);
       if (!descriptor) throw toolFailure('工具不存在或尚未发现。', 'TOOL_NOT_FOUND', 404);
@@ -601,12 +650,18 @@ export class ToolService {
       else if (call.name.startsWith('knowledge.')) {
         if (!this.retrieval) throw toolFailure('本地检索不可用。', 'RETRIEVAL_UNAVAILABLE', 503);
         if (call.name === 'knowledge.search') {
-          result = await this.retrieval.search(context, call.arguments, { signal, modelReferences: true });
+          const remainingTokens = this.evidenceBudgets.get(context);
+          const argumentsForBudget = remainingTokens === undefined ? call.arguments : { ...call.arguments,
+            maximumTokens: Math.min(call.arguments.maximumTokens ?? 32768, remainingTokens) };
+          result = await this.retrieval.search(context, argumentsForBudget, { signal, modelReferences: true });
           return await this._finishResult(context, call, { value: result, isError: false },
             { archiveId: result.evidenceArchiveId, modelProjection: id =>
               projectEvidenceSearchResult(publicToolResult({ content: [], structuredContent: result, isError: false }), id).structuredContent });
         }
-        result = await this.retrieval.read(context, call.arguments, { signal });
+        const operation = { 'knowledge.read': 'read', 'knowledge.relations': 'relations',
+          'knowledge.assess': 'assess', 'knowledge.experience': 'experience' }[call.name];
+        if (!operation) throw toolFailure('未知检索操作。', 'MODEL_TOOL_UNAVAILABLE', 400);
+        result = await this.retrieval[operation](context, call.arguments, { signal });
       }
       else if (call.name === 'tool.search') {
         // Discovery may recover a changed/failed connection once; never replay a business operation.
@@ -616,8 +671,11 @@ export class ToolService {
           isConfiguredToolEnabled(this.liveConfig ?? snapshot.config, tool) && this.webSearch.available(context, tool)), call.arguments.query ?? '');
         const offset = boundedInteger(call.arguments.offset, 0, 0, 100000);
         const limit = boundedInteger(call.arguments.limit, 10, 1, 20);
-        result = { tools: all.slice(offset, offset + limit).map(publicDescriptor), offset,
+        result = { tools: all.slice(offset, offset + limit).map(tool => ({ ...publicDescriptor(tool),
+          schemaState: snapshot.model?.selected.some(item => item.name === tool.name) ? 'loaded' : 'deferred' })), offset,
           nextOffset: Math.min(all.length, offset + limit), total: all.length, hasMore: offset + limit < all.length };
+        if (toolSelectionSignals(call.arguments.query ?? '').deviceState || context.toolIntent?.deviceState)
+          result.capabilityCheck = this.capabilitySnapshot(context);
       }
       else if (call.name === 'tool.load') {
         if (!snapshot?.model) throw toolFailure('当前请求没有模型工具预算。', 'TOOL_CATALOG_UNAVAILABLE', 409);
@@ -634,8 +692,8 @@ export class ToolService {
           unavailable.some(item => item.code === 'WEB_STAGE_BUDGET_EXHAUSTED') ? 'WEB_STAGE_BUDGET_EXHAUSTED' : 'TOOL_NOT_FOUND', 409);
         result = { ...snapshot.model.load(availableNames), ...(unavailable.length ? { unavailable } : {}) };
       }
-      else if (call.name === 'tool.result.read') result = await this.results.read(context, call.arguments.id,
-        { offset: call.arguments.offset, limit: call.arguments.limit });
+      else if (call.name === 'tool.result.read') result = await (this.results.readModel ?? this.results.read).call(
+        this.results, context, call.arguments.id, { offset: call.arguments.offset, limit: call.arguments.limit });
       else if (call.name.startsWith('conversation.history.'))
         result = await executeHistoryTool(this.conversations, context, call.name, call.arguments, signal);
       else if (call.name === 'skill.list') {
@@ -684,8 +742,15 @@ export class ToolService {
       } else if (call.name.startsWith('computer.')) {
         return await this._finishResult(context, call, { ...await this.desktopRunner.run(call.name.slice('computer.'.length), call.arguments, signal), outsideWorkspace: true });
       } else {
-        const observed = await this.mcp.execute(descriptor, call.arguments, signal,
-          { sessionId: context.conversationId, ...context.browserInteraction });
+        const observed = await runResourceTask(this.resources, { taskId: `mcp:${call.id}`, workspaceId: context.projectId ?? context.conversationId,
+          kind: 'foreground', cpuThreads: 1, memoryBytes: 32 * 1024 * 1024 },
+          () => {
+            // Admission failures precede dispatch; they cannot leave an unknown external mutation.
+            // 资源准入失败发生在派发之前，不能误报成外部变更结果未知。
+            mcpDispatchAttempted = true;
+            return this.mcp.execute(descriptor, call.arguments, signal,
+              { sessionId: context.conversationId, ...context.browserInteraction });
+          }, { signal });
         const finished = await this._finishResult(context, call, observed);
         if (canReuseObservation(call) && !finished.isError && !finished.code) {
           let cache = this.observationCaches.get(context);
@@ -730,27 +795,34 @@ export class ToolService {
       const mayHaveEffect = (callName.startsWith('computer.') && !isDesktopObservation(callName)) ||
         callName.startsWith('mcp.') || ['terminal.run', 'terminal.host.run', 'terminal.host.start', 'terminal.host.stop', 'skill.run'].includes(callName) ||
         (callName.startsWith('filesystem.') && !filesystemReadTools.has(callName));
-      const unknown = !webExpired && executionStarted && mayHaveEffect && !isMcpExecutionNotDispatched(error) &&
+      const notDispatched = !executionStarted || callName.startsWith('mcp.') &&
+        (!mcpDispatchAttempted || isMcpExecutionNotDispatched(error));
+      const unknown = !webExpired && !notDispatched && mayHaveEffect &&
         (cancelled || desktopTimedOut || externalOutcomeLost || error?.outcomeUnknown === true);
       // Failed observations have no write outcome to verify. Archive the failure just like a returned receipt,
       // so the next model turn can change approach without losing the call/result pair.
       // 失败观察没有待核验的写入结果，但仍像正常回执一样归档，使下一轮可调整方法且保留调用和结果配对。
       if (executionStarted && (callName.startsWith('computer.') || callName.startsWith('mcp.')))
         return this._finishResult(context, call, { value: { completed: false, error: { code, message: boundedContent(message) },
-          ...(isMcpExecutionNotDispatched(error) ? { executed: false } : {}),
-          outcome: unknown ? 'unknown' : cancelled ? 'cancelled' : 'failed' }, isError: true, code, ...(unknown ? { status: 'unknown' } : {}), outsideWorkspace });
-      return { content: boundedContent(message), isError: true, code, outsideWorkspace,
+          ...(notDispatched ? { executed: false } : {}),
+          outcome: unknown ? 'unknown' : cancelled ? 'cancelled' : 'failed' }, isError: true, code,
+          ...(notDispatched ? { executed: false } : {}), ...(unknown ? { status: 'unknown' } : {}), outsideWorkspace });
+      const modelMessage = callName.startsWith('knowledge.') ? projectRetrievalModelView({ message }).message : message;
+      return { content: boundedContent(modelMessage), isError: true, code, outsideWorkspace,
+        executionEnvironment: this.executionEnvironmentFor(context, callName),
+        ...(notDispatched ? { executed: false } : {}),
         ...(error.toolConfigurationRevoked === true && !executionStarted ? { executed: false, recoverable: true } : {}),
         ...(unknown ? { status: 'unknown' } : {}) };
     }
   }
 
   async _finishResult(context, call, result, { archiveId, modelProjection } = {}) {
+    const executionEnvironment = this.executionEnvironmentFor(context, call.name);
     const canonical = result.canonical ?? { content: [], structuredContent: result.value,
       isError: Boolean(result.isError), ...(result.code ? { code: result.code } : {}) };
     const status = result.status === 'unknown' ? 'unknown' : result.code === 'TOOL_CANCELLED' ? 'cancelled' : result.isError ? 'error' : 'completed';
     let resultRef, storageError;
-    try { resultRef = await this.results.save(context, call, canonical, { id: archiveId }); }
+    try { resultRef = await this.results.save(context, call, canonical, { id: archiveId, executionEnvironment }); }
     catch (error) { storageError = { code: safeErrorCode(error, 'TOOL_RESULT_SAVE_FAILED'), saved: false }; }
     let content;
     if (storageError) {
@@ -767,12 +839,19 @@ export class ToolService {
       content = result.content.length <= MAX_TOOL_RESULT_CHARS ? result.content
         : previewToolResult(publicToolResult(canonical, { resultRef }), { resultRef, status });
     } else content = previewToolResult(result.value, { resultRef, status });
+    // Every protocol shares this projection boundary; preserve raw paths only in the durable/local receipt.
+    // 三种模型协议共用此投影边界，原始路径只保留在正式归档和本地回执中。
+    if (call.name.startsWith('knowledge.')) {
+      try { content = JSON.stringify(projectRetrievalModelView(JSON.parse(content))); }
+      catch { content = projectRetrievalModelView({ message: content }).message; }
+    }
     // Archive IDs and retry diagnostics change on every call, even when retrieved evidence is identical.
     // 每次调用的归档 ID 和重试诊断都会变化，不能把这些变化当作检索取得了新证据。
     const observedResult = call.name === 'knowledge.search' && Array.isArray(result.value?.items)
       ? { strategy: result.value.strategy, items: result.value.items.map(({ modelSourceRef, ...item }) => item) }
       : publicToolResult(canonical);
-    return { content, isError: Boolean(result.isError), ...(resultRef ? { resultRef } : {}), status,
+    return { content, isError: Boolean(result.isError), ...(resultRef ? { resultRef } : {}), status, executionEnvironment,
+      ...(result.executed === false ? { executed: false } : {}),
       observationHash: observationFingerprint(observedResult),
       ...(result.code || storageError ? { code: result.code ?? 'TOOL_RESULT_SAVE_FAILED' } : {}), ...(result.sandbox ? { sandbox: result.sandbox } : {}),
       ...(result.browser ? { browser: result.browser } : {}),

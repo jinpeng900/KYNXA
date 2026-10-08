@@ -222,7 +222,7 @@ test('ANN resource failures preserve lexical results and return truthful degrada
   document.vectors = document.chunks.map(() => Array.from({ length: 4096 }, (_, number) => number === 0 ? 1 : 0));
   await index.upsertSources([document]);
   const result = await search(index, { query: 'lexical evidence', queryVector: document.vectors[0],
-    ann: { mode: 'ann', maxShardBytes: 1024 * 1024, exactScanLimit: 1 } });
+    ann: { mode: 'ann', adaptive: false, maxShardBytes: 1024 * 1024, exactScanLimit: 1 } });
   assert.ok(result.items.length > 0);
   assert.equal(result.strategy, 'lexical');
   assert.equal(result.degradedReason, 'RETRIEVAL_ANN_RESOURCE_LIMIT');
@@ -347,7 +347,7 @@ test('lowering a loaded ANN shard budget releases its owned helper before exact 
   assert.equal(normal.semanticBackend, 'ann');
   const before = (await index.status()).ann;
   assert.ok(before.cachedVectors > 0 && before.helperPid);
-  const reduced = await search(index, { queryVector: vector, ann: { mode: 'ann', maxShardBytes: 1024 * 1024 } });
+  const reduced = await search(index, { queryVector: vector, ann: { mode: 'ann', adaptive: false, maxShardBytes: 1024 * 1024 } });
   assert.equal(reduced.semanticBackend, 'exact');
   assert.equal(reduced.degradedReason, 'RETRIEVAL_ANN_RESOURCE_LIMIT');
   const after = (await index.status()).ann;

@@ -10,6 +10,64 @@ const IDENTITY_FIELDS = new Set(['sourceId', 'contentHash', 'sourceRevision', 'c
   'derivationSignature', 'indexSnapshotId', 'scopeSnapshots', 'modelSourceRef', 'canonicalSourceRef', 'evidenceArchiveId']);
 const invalid = () => retrievalFailure('Invalid evidence reference. / 证据引用无效。', 'INVALID_EVIDENCE_REFERENCE');
 const sameId = (left, right) => validateId(left).toLowerCase() === validateId(right).toLowerCase();
+const MODEL_PATH_FIELDS = new Set(['path', 'absolutePath', 'sourcePath', 'indexPath', 'cachePath', 'root',
+  'workspaceRoot', 'dataRoot', 'directory', 'filename', 'relativePath']);
+const absoluteLocalPath = value => typeof value === 'string' && /^(?:[a-z]:[\\/]|\\\\|\/|file:\/\/)/iu.test(value);
+
+/** Remove implementation locators from model-only retrieval receipts; original excerpts and archives remain intact.
+ * 仅从模型检索回执移除实现定位路径，原文摘录及正式归档保持完整，引用权限和偏移不受影响。
+ */
+export function projectRetrievalModelView(value) {
+  const knownPaths = new Set();
+  const isErrorReceipt = value?.isError === true;
+  const inspect = (item, depth = 0) => {
+    if (depth > 64) throw invalid();
+    if (!item || typeof item !== 'object') return;
+    for (const [key, child] of Object.entries(item)) {
+      if ((MODEL_PATH_FIELDS.has(key) || key === 'title') && absoluteLocalPath(child)) knownPaths.add(child);
+      inspect(child, depth + 1);
+    }
+  };
+  inspect(value);
+  const redactMessage = text => {
+    for (const path of [...knownPaths].sort((left, right) => right.length - left.length)) text = text.split(path).join('[local-path]');
+    // Native errors commonly quote a path; do not rewrite URLs, evidence text or useful relative paths.
+    // 原生错误通常以引号包裹路径；网址、证据正文和可用的相对路径不作改写。
+    return text.replace(/(['"])(?:[a-z]:[\\/]|\\\\|\/)[^'"\r\n]*\1/giu, "'[local-path]'")
+      .replace(/\((?:[a-z]:[\\/]|\/)[^)\r\n]*\)/giu, '([local-path])')
+      // Unquoted Windows diagnostics may contain spaces. Keep URLs intact and stop at diagnostic separators.
+      // 未加引号的 Windows 错误路径可包含空格；保留网址，并在诊断分隔符处停止，而非改写来源正文。
+      .replace(/(^|[\s("'=,:])(?:[a-z]:[\\/]|\\\\(?:[?.][\\/]|[^\\/\s'";]+[\\/]))[^'"\r\n;)]*/giu,
+        '$1[local-path]');
+  };
+  const walk = (item, key = '', depth = 0) => {
+    if (depth > 64) throw invalid();
+    if (Array.isArray(item)) return item.map(child => walk(child, key, depth + 1));
+    if (!item || typeof item !== 'object') {
+      if (typeof item === 'string' && key === 'title' && absoluteLocalPath(item)) return item.replace(/\\/gu, '/').split('/').filter(Boolean).at(-1) ?? '[local-source]';
+      if (typeof item === 'string' && ['message', 'error', 'reason', 'diagnostic', 'preview', 'stack'].includes(key)) return redactMessage(item);
+      return item;
+    }
+    const entries = [];
+    for (const [childKey, child] of Object.entries(item)) {
+      if (MODEL_PATH_FIELDS.has(childKey) && absoluteLocalPath(child)) continue;
+      let projected;
+      if (childKey === 'fileWindow' && child?.version === 'text-file-window-v1') {
+        projected = Object.fromEntries(['version', 'startOffset', 'endOffset', 'totalCharacters', 'offsetUnit', 'rawContentHash']
+          .map(key => [key, child[key]]));
+      } else if (childKey === 'text' && item.type === 'text' && typeof child === 'string') {
+        try {
+          const parsed = JSON.parse(child);
+          projected = JSON.stringify(isErrorReceipt && typeof parsed === 'string' ? redactMessage(parsed) : walk(parsed, '', depth + 1));
+        }
+        catch { projected = isErrorReceipt ? redactMessage(child) : child; }
+      } else projected = walk(child, childKey, depth + 1);
+      entries.push([childKey, projected]);
+    }
+    return Object.fromEntries(entries);
+  };
+  return walk(value);
+}
 
 export function allocateEvidenceArchiveId() { return randomUUID(); }
 
@@ -60,7 +118,7 @@ function projectPayload(payload, archiveId) {
     return { ...Object.fromEntries(Object.entries(item).filter(([key]) => !IDENTITY_FIELDS.has(key))),
       reference: index + 1, sourceRef: evidenceSourceRef(archiveId, index + 1) };
   });
-  return projected;
+  return projectRetrievalModelView(projected);
 }
 
 /** Model projection is separate from the full durable archive and the local public-view API.
@@ -70,6 +128,7 @@ export function projectEvidenceSearchResult(result, archiveId) {
   // 即使为空结果也校验归档 ID，使草稿与最终视图使用同一固定长度命名空间。
   evidenceSourceRef(archiveId, 1);
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw invalid();
+  if (result.isError === true && !Array.isArray(result.structuredContent?.items)) return projectRetrievalModelView(result);
   if (!Object.hasOwn(result, 'structuredContent')) return projectPayload(result, archiveId);
   const payload = result.structuredContent, projected = projectPayload(payload, archiveId);
   const references = payload.items.map((item, index) => [item.sourceRef, evidenceSourceRef(archiveId, index + 1)]);
@@ -85,7 +144,7 @@ export function projectEvidenceSearchResult(result, archiveId) {
     for (const [canonical, compact] of references) text = text.split(canonical).join(compact);
     return { ...block, text };
   });
-  return { ...result, structuredContent: projected, ...(content ? { content } : {}) };
+  return projectRetrievalModelView({ ...result, structuredContent: projected, ...(content ? { content } : {}) });
 }
 
 function currentScopes(relationship) {

@@ -9,7 +9,10 @@ const coreTool = tool => tool.source === 'builtin' && !tool.name.startsWith('com
 function relevanceScore(tool, signals) {
   const name = tool.name.toLowerCase(), description = String(tool.description ?? '').toLowerCase();
   if (name.startsWith('computer.')) return signals.desktop ? 40 : 0;
-  if (name.startsWith('terminal.host.')) return signals.hostTerminal ? (name === 'terminal.host.run' ? 40 : 32) : 0;
+  if (name.startsWith('terminal.host.')) {
+    if (!signals.hostTerminal) return 0;
+    return name === 'terminal.host.run' ? (signals.deviceState ? 80 : 40) : 32;
+  }
   let score = signals.terms.reduce((sum, word) => sum + (name.includes(word) ? 3 : description.includes(word) ? 1 : 0), 0);
   const docs = /context7|query[-_]docs|resolve[-_]library[-_]id|(?:search|fetch|get)[-_](?:docs|documentation)/.test(name);
   const webSearch = /web[-_]?search|search[-_]?web|search[-_]?news|news[-_]?search/.test(name) || /public web search|search (?:the )?(?:web|internet)/.test(description);
@@ -40,6 +43,9 @@ export class ModelToolCatalog {
     const ordered = this.descriptors.filter(tool => (!tool.name.startsWith('computer.') || signals.desktop) &&
       (!tool.name.startsWith('terminal.host.') || signals.hostTerminal)).sort((left, right) =>
       Number(discoveryNames.has(right.name)) - Number(discoveryNames.has(left.name)) ||
+      // A device inspection needs the real host shell before less relevant builtin schemas fill the budget.
+      // 本机状态查询先保留真实宿主终端，避免其他内置 schema 先占满预算；执行审批保持原规则。
+      (signals.deviceState ? Number(right.name === 'terminal.host.run') - Number(left.name === 'terminal.host.run') : 0) ||
       (signals.remoteBrowser ? Number(toolDiscoveryCategory(right) === 'browser') - Number(toolDiscoveryCategory(left) === 'browser') : 0) ||
       (signals.desktop ? Number(right.name.startsWith('computer.')) - Number(left.name.startsWith('computer.')) : 0) ||
       Number(coreTool(right)) - Number(coreTool(left)) || scores.get(right) - scores.get(left) ||

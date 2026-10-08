@@ -40,6 +40,19 @@ test('runtime clamps a known official model without rewriting configured context
   assert.equal(saved.maxOutputTokens, 262_144);
 });
 
+test('cold local metadata caps the request before loading without rewriting the user context setting', async t => {
+  const { runtime, store } = await fixture(t, { baseUrl: 'http://127.0.0.1:1234/v1', protocol: 'openai-completions',
+    models: ['qwen-local'], contextWindowTokens: 1_048_576, maxOutputTokens: 1024 });
+  runtime.localModels.observe = async () => ({ backend: 'ollama', loaded: false, runtimeContextTokens: null,
+    modelMaximumContextTokens: 40960 });
+  const input = { conversationId: 'cold-local-budget', message: 'Continue the code review', provider: 'budget-test', model: 'qwen-local' };
+  const prepared = await runtime.prepare(input, input.conversationId);
+  assert.equal(prepared.contextMetrics.contextWindowTokens, 40960);
+  assert.equal(prepared.requestOptions.maxOutputTokens, 1024);
+  assert.equal((await store.connectionFor('budget-test')).contextWindowTokens, 1_048_576);
+  assert.equal(runtime.retrieval.embeddings.status().loaded, false);
+});
+
 test('runtime keeps explicit legacy small values and does not infer cloud limits for local aliases', async t => {
   const { runtime } = await fixture(t, { baseUrl: 'http://127.0.0.1:1234/v1', protocol: 'openai-completions',
     models: ['gpt-6-astra'], contextWindowTokens: 8192, maxOutputTokens: 2048 });

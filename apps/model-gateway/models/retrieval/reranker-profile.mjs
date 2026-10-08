@@ -10,7 +10,8 @@ const MODEL_SOURCE = `https://huggingface.co/Xenova/bge-reranker-base/resolve/${
 export const BUILTIN_RERANKER_PROFILE = Object.freeze({
   id: 'builtin-multilingual-reranker', modelId: 'Xenova/bge-reranker-base',
   revision: MODEL_REVISION, modelVersion: `${MODEL_REVISION}:q8`, dtype: 'q8',
-  maxInputTokens: 512, maxCandidates: 32, license: 'MIT',
+  maxInputTokens: 512, maxCandidates: 256, license: 'MIT',
+  hiddenSize: 768, attentionHeads: 12,
   files: Object.freeze([
     { path: 'config.json', url: `${MODEL_SOURCE}/config.json`, bytes: 782, sha256: 'b6575b9d5be20d6747417c8e20c5a0db1636356e0b6d422d7244c628423c4d4c' },
     { path: 'tokenizer_config.json', url: `${MODEL_SOURCE}/tokenizer_config.json`, bytes: 443, sha256: 'a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b' },
@@ -21,6 +22,11 @@ export const BUILTIN_RERANKER_PROFILE = Object.freeze({
     { path: 'CONVERSION_MODEL_CARD.md', url: `${MODEL_SOURCE}/README.md`, bytes: 1135, sha256: '2ccb3f72b5eb6205316c0b9dde944d6f944ec4a87b85706ce07ef9d9d02b4690' },
     { path: 'LICENSE', url: 'https://raw.githubusercontent.com/FlagOpen/FlagEmbedding/c086741f5e117b7b8ce1745ea00b6c262f281a01/LICENSE', bytes: 1065, sha256: '587a673933425dbc36ec61268d3b954051b2d3ef3c9b322ede357976055ffdd5' },
   ].map(Object.freeze)),
+});
+
+export const BUILTIN_GPU_RERANKER_PROFILE = Object.freeze({
+  ...BUILTIN_RERANKER_PROFILE, id: 'builtin-multilingual-reranker-dml-q8',
+  modelVersion: `${MODEL_REVISION}:q8:dml-hybrid-v1`, requiredDevice: 'dml', backendContract: 'audited-dml-hybrid-q8-v1',
 });
 
 export function rerankerBuildCacheRoot() {

@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
+import { attachResourceWorkerBridge } from '../../platform/resources/resource-worker-client.mjs';
 import { MAX_QUERY_CHARACTERS, retrievalFailure, retrievalScopeKeys, retrievalSourceId, validateRetrievalIntent } from './retrieval-contracts.mjs';
 import { validateSourceWindowOptions } from './source-window.mjs';
 import { validatedEvidenceReference } from './evidence-references.mjs';
@@ -17,17 +18,20 @@ function boundedInteger(value, fallback, minimum, maximum) {
 /** SQLite and text work stays in one owned worker, away from SSE and the desktop UI.
  * SQLite 与文本计算由网关拥有的单个 worker 执行，不阻塞 SSE 或桌面界面。 */
 export class RetrievalIndex {
-  constructor({ root, vectorEnabled = true, ann }) {
+  constructor({ root, vectorEnabled = true, ann, resourceService }) {
     if (typeof root !== 'string' || !root.trim()) throw retrievalFailure('A managed data root is required. / 必须提供统一数据根目录。');
     this.root = resolve(root);
     this.vectorEnabled = vectorEnabled;
     this.ann = validateAnnOptions(ann);
+    this.resources = resourceService;
     this.worker = null;
     this.pending = new Map();
     this.sequence = 0;
     this.closed = false;
     this.closing = null;
     this.failed = null;
+    this.restartTimes = [];
+    this.workerRestarts = 0;
   }
 
   _start() {
@@ -36,7 +40,10 @@ export class RetrievalIndex {
       // Test/debug launcher flags can be process-only; this worker needs no custom VM flags.
       // 测试或调试启动参数可能只允许主进程使用，本 worker 无需继承它们。
       execArgv: [],
-      workerData: { root: this.root, vectorEnabled: this.vectorEnabled, ann: this.ann } });
+      workerData: { root: this.root, vectorEnabled: this.vectorEnabled, ann: this.ann, resourceBridge: Boolean(this.resources) } });
+    const worker = this.worker;
+    if (this.resources) attachResourceWorkerBridge(this.worker, this.resources, {
+      context: { taskIdPrefix: 'retrieval-index', kind: 'background' } });
     this.worker.on('message', message => {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -47,12 +54,15 @@ export class RetrievalIndex {
       if (!this.pending.size) this.worker?.unref();
     });
     const fail = error => {
+      if (this.worker !== worker) return;
       this.failed = error;
       for (const pending of this.pending.values()) {
         pending.signal?.removeEventListener('abort', pending.abort);
         pending.reject(error);
       }
       this.pending.clear();
+      this.retiring ??= worker.terminate().then(() => { if (this.worker === worker) this.worker = null; })
+        .catch(() => { this.retirementFailed = true; }).finally(() => { this.retiring = null; });
     };
     this.worker.on('error', fail);
     this.worker.on('exit', code => {
@@ -64,9 +74,28 @@ export class RetrievalIndex {
     this.worker.unref();
   }
 
-  _request(method, input = {}, signal) {
+  async _recover(signal) {
+    if (!this.failed) return;
+    if (!this.recovery) this.recovery = (async () => {
+      await this.retiring;
+      signal?.throwIfAborted();
+      this.restartTimes = this.restartTimes.filter(time => time > Date.now() - 60000);
+      if (this.closed || this.closing || this.retirementFailed || this.restartTimes.length >= 2) throw this.failed;
+      this.restartTimes.push(Date.now()); this.workerRestarts++;
+      this.failed = null;
+    })().finally(() => { this.recovery = null; });
+    await this.recovery;
+  }
+
+  async _request(method, input = {}, signal) {
     if (this.closed || (this.closing && method !== 'close')) return Promise.reject(retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409));
-    if (this.failed) return Promise.reject(this.failed);
+    // Never replay an unknown commit. Only a new caller can reopen the authoritative SQLite log.
+    // 不重放提交结果未知的旧请求；只允许新调用重新打开权威 SQLite，保持原始记录不变。
+    if (this.failed && method !== 'close') await this._recover(signal);
+    if (this.failed && method === 'close') {
+      await this.retiring; this.closed = true;
+      return { closed: true, workerFailed: true };
+    }
     if (signal?.aborted) return Promise.reject(Object.assign(new Error('Retrieval cancelled. / 检索已取消。'), { name: 'AbortError', code: 'ABORT_ERR' }));
     if (this.pending.size >= 256) return Promise.reject(retrievalFailure('Retrieval queue is full. / 检索队列已满。', 'RETRIEVAL_QUEUE_FULL', 503));
     this._start();
@@ -93,11 +122,16 @@ export class RetrievalIndex {
 
   upsertSources(sources, { signal } = {}) { return this._request('upsertSources', { sources }, signal); }
 
-  search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit, signal }) {
+  vectorSpaceStatus({ scopeKeys, signal }) {
+    return this._request('vectorSpaceStatus', { scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
+  }
+
+  search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit, channelCandidates = 40, signal }) {
     if (typeof query !== 'string' || !query.trim() || query.length > MAX_QUERY_CHARACTERS)
       return Promise.reject(retrievalFailure('Invalid retrieval query. / 检索查询为空或过长。'));
     const scopes = retrievalScopeKeys(scopeKeys);
-    limit = boundedInteger(limit, 8, 1, 60);
+    limit = boundedInteger(limit, 8, 1, 192);
+    channelCandidates = boundedInteger(channelCandidates, 40, 1, 160);
     if (queryVector !== undefined && queryVector !== null) {
       if (!(Array.isArray(queryVector) || queryVector instanceof Float32Array) || !queryVector.length || queryVector.length > 4096)
         return Promise.reject(retrievalFailure('Invalid query embedding. / 查询向量或嵌入模型配置无效。'));
@@ -113,7 +147,7 @@ export class RetrievalIndex {
     if (ann !== undefined) validateAnnOptions(ann);
     return this._request('search', { query, scopeKeys: scopes, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId,
       retrievalIntent: validateRetrievalIntent(retrievalIntent),
-      ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }), limit }, signal);
+      ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }), limit, channelCandidates }, signal);
   }
 
   read({ sourceId, sourceRef, scopeKeys, offset, limit, signal }) {
@@ -125,6 +159,22 @@ export class RetrievalIndex {
   verifyReference({ sourceRef, scopeKeys, signal }) {
     validatedEvidenceReference({ sourceRef });
     return this._request('verifyReference', { sourceRef, scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
+  }
+
+  relations({ sourceRef, sourceId, scopeKeys, symbol, kind, limit = 40, signal }) {
+    if (sourceRef) validatedEvidenceReference({ sourceRef });
+    if (sourceId) retrievalSourceId(sourceId);
+    return this._request('relations', { sourceRef, sourceId, scopeKeys: retrievalScopeKeys(scopeKeys), symbol, kind, limit }, signal);
+  }
+
+  recordCoverage({ entries, scopeKeys, signal }) {
+    return this._request('recordCoverage', { entries, scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
+  }
+
+  coverage({ scopeKeys, sourceId, limit = 1000, signal }) {
+    if (sourceId) retrievalSourceId(sourceId);
+    return this._request('coverage', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceId,
+      limit: boundedInteger(limit, 1000, 1, 1000) }, signal);
   }
 
   readWindow({ sourceRef, scopeKeys, mode, anchorOffset, beforeCharacters, limit, signal }) {
@@ -141,10 +191,11 @@ export class RetrievalIndex {
     return this._request('removeSource', { sourceId: retrievalSourceId(sourceId), scopeKeys: retrievalScopeKeys(scopeKeys), permanent }, signal);
   }
 
-  listSources({ scopeKeys, sourceType, signal }) {
+  listSources({ scopeKeys, sourceType, sourceId, signal }) {
     if (sourceType !== undefined && (typeof sourceType !== 'string' || !sourceType || sourceType.length > 100))
       return Promise.reject(retrievalFailure('Invalid source type. / 资料类型无效。'));
-    return this._request('listSources', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceType }, signal);
+    return this._request('listSources', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceType,
+      ...(sourceId === undefined ? {} : { sourceId: retrievalSourceId(sourceId) }) }, signal);
   }
 
   invalidateScope(scopeKey, { signal } = {}) {
@@ -160,24 +211,24 @@ export class RetrievalIndex {
       ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }) }, signal);
   }
 
-  status() { return this._request('status'); }
+  async status() { return { ...await this._request('status'), workerRestarts: this.workerRestarts }; }
 
   close() {
     if (this.closed) return Promise.resolve({ closed: true });
     if (this.closing) return this.closing;
-    if (!this.worker) { this.closed = true; return Promise.resolve({ closed: true }); }
+    if (!this.worker) { this.closed = true; return Promise.resolve(this.retiring).then(() => ({ closed: true })); }
     // Closing revokes queued work before the close message; already committed receipts still settle normally.
     // 发送关闭消息前撤销排队工作，已经提交的批次仍正常交付真实回执。
     for (const pending of this.pending.values()) Atomics.store(pending.cancelFlag, 0, 1);
     this.closing = this._request('close').then(async result => {
       this.closed = true;
-      await this.worker.terminate();
+      await this.worker?.terminate();
       this.worker = null;
       return result;
     }).catch(async error => {
       if (this.failed) {
         this.closed = true;
-        await this.worker.terminate();
+        await this.worker?.terminate();
         this.worker = null;
       }
       this.closing = null;

@@ -32,6 +32,68 @@ test('actual failed Chinese and multiword searches find enabled host and browser
   assert.deepEqual(searchTools(descriptors, '绝无此项功能'), []);
 });
 
+test('device status requests select the host shell without turning inspection into browser control', () => {
+  for (const message of ['我的IP是什么', '查看我的公网IP', '当前网络', '检查当前网络配置', '查看代理设置',
+    '检查 DNS', '列出网卡', '查看本机进程', '列出所有进程', '哪个程序占端口5218', '端口5218被哪个进程占用',
+    'What is my IP?', 'Check my proxy settings', 'show current DNS servers', 'list local processes',
+    'which process is listening on port 5218', 'Which app is using port 3000?', 'list network adapters', 'run ipconfig']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器'], previousToolNames: ['computer.launch'] });
+    assert.equal(signals.deviceState, true, message);
+    assert.equal(signals.hostTerminal, true, message);
+    assert.equal(signals.desktop, false, message);
+    assert.equal(signals.browser, false, message);
+    assert.equal(signals.web, false, message);
+    assert.equal(signals.retainedNames.size, 0, 'a new device task does not carry earlier attempted browser names');
+  }
+});
+
+test('public IP ownership, networking explanations and script generation do not claim device access', () => {
+  for (const message of ['查询8.8.8.8的归属', '看看 IPv6 2001:4860:4860::8888 的归属', '我的IP是8.8.8.8，查归属',
+    'IP和DNS有什么区别', '解释DNS原理', '如何查看当前网络配置', 'ipconfig是什么', '给我一个列出本机进程的脚本',
+    'Who owns IP 8.8.8.8?', 'What is DNS?', 'Explain ipconfig', 'How to configure a proxy?',
+    'write a script to inspect my IP', 'current network industry trends']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器', '查看我的IP'],
+      previousToolNames: ['computer.launch', 'terminal.host.run'] });
+    assert.equal(signals.deviceState, false, message);
+    assert.equal(signals.hostTerminal, false, message);
+    assert.equal(signals.desktop, false, message);
+    assert.equal(signals.retainedNames.size, 0, message);
+  }
+  assert.equal(toolSelectionSignals('Who owns IP 8.8.8.8?').web, true);
+  assert.equal(toolSelectionSignals('打开我的iPad应用').deviceState, false, 'IP is an ASCII word, not part of iPad');
+});
+
+test('a short device retry follows the latest device subject while explicit browser boundaries still apply', () => {
+  for (const message of ['再来', '再查一次', '刷新', '现在呢', 'refresh', 'what about now?']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器', '查看我的IP'],
+      previousToolNames: ['computer.launch', 'mcp.chrome-devtools.list_pages', 'terminal.host.run'] });
+    assert.equal(signals.deviceState, true, message);
+    assert.equal(signals.hostTerminal, true, message);
+    assert.equal(signals.browser, false, message);
+    assert.equal(signals.desktop, false, message);
+    assert.deepEqual([...signals.retainedNames], ['terminal.host.run']);
+  }
+  const combined = toolSelectionSignals('检查我的IP，并给本机桌面截图');
+  assert.equal(combined.deviceState, true); assert.equal(combined.desktop, true);
+  const remote = toolSelectionSignals('在云端浏览器查看我的IP');
+  assert.equal(remote.deviceState, false); assert.equal(remote.hostTerminal, false);
+  assert.equal(remote.remoteBrowser, true); assert.equal(remote.desktop, false);
+  const browserRetry = toolSelectionSignals('再来', { historySignals: ['查看我的IP', '打开Chrome'],
+    previousToolNames: ['computer.launch'] });
+  assert.equal(browserRetry.desktop, true, 'a later browser topic keeps its existing local-browser followup behavior');
+  assert.equal(browserRetry.deviceState, false, 'an older device inspection is not the current browser task');
+});
+
+test('device state search aliases rank the enabled host execution schema and never revive a disabled tool', () => {
+  for (const query of ['我的IP是什么', '当前网络', 'DNS配置', '网卡', '本机进程', '哪个程序占端口',
+    'my ip address', 'current network', 'proxy settings', 'network adapters', 'list processes', 'ipconfig'])
+    assert.equal(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
+  const disabled = descriptors.map(tool => tool.name === 'terminal.host.run' ? { ...tool, enabled: false } : tool);
+  assert.ok(!names(searchTools(disabled, '我的IP')).includes('terminal.host.run'));
+  for (const query of ['查询8.8.8.8的归属', 'Who owns IP 8.8.8.8?', 'IP和DNS区别', 'Explain ipconfig'])
+    assert.notEqual(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
+});
+
 test('ordinary Chinese typing requests discover and select existing desktop input schemas', () => {
   for (const query of ['将文字键入光标所在的位置', '把你好填进记事本', '在输入框填写内容', '粘贴到当前窗口']) {
     assert.ok(names(searchTools(descriptors, query)).includes('computer.type'), query);
@@ -199,6 +261,9 @@ test('tool.search exposes ranked bilingual matches through the real service with
   await f.service.catalog(ctx);
   const host = parsed(await f.run(ctx, 'tool.search', { query: '本机终端', limit: 1 }));
   assert.equal(host.tools[0].name, 'terminal.host.run'); assert.equal(host.offset, 0);
+  const device = parsed(await f.run(ctx, 'tool.search', { query: '我的IP是什么', limit: 1 }));
+  assert.equal(device.tools[0].name, 'terminal.host.run');
+  assert.equal(f.service.mcp.connections.size, 0, 'device tool discovery neither starts a browser provider nor executes a host command');
   const browser = parsed(await f.run(ctx, 'tool.search', { query: '浏览器', limit: 1 }));
   assert.ok(browser.total > 1); assert.equal(browser.hasMore, true);
   const second = parsed(await f.run(ctx, 'tool.search', { query: '浏览器', offset: browser.nextOffset, limit: 1 }));

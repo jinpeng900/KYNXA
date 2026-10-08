@@ -12,7 +12,7 @@ const KNOWLEDGE_DEPENDENCY_PATTERN = /资料|文档|知识|记忆|记得|回忆|
 const ANALYSIS_REQUEST_PATTERN = /分析|解释|讲解|总结|概括|归纳|比较|对比|权衡|架构|方案|研究|调查|综述|审查|评审|诊断|为何|为什么|如何|怎么|怎样|哪里|在哪|何处|何时|什么时候|是否|是什么|有哪些|逻辑|原理|机制|报错原因|缺陷|漏洞|\b(?:explain|analy[sz]e|summari[sz]e|compare|review|inspect|diagnose|investigate|research|architecture|logic|implementation|semantics|why|where|when|which|what\s+(?:is|are|does)|how\s+(?:to|is|are|does|do|can|should)|find\s+(?:bugs?|errors?))\b/iu;
 const EXECUTION_ACTION_PATTERN = /读取|读回|回读|读出|打开|查看|列出|写入|写到|写出|保存|创建|新建|追加|复制|移动|重命名|删除|执行|运行|启动|安装|构建|编译|终端|命令行|\b(?:read|open|list|write|save|create|append|copy|move|rename|delete|execute|run|launch|install|build|compile|terminal|shell)\b/iu;
 const FILE_ACTION_PREFIX_PATTERN = /^(?:(?:请|你|先|然后|再|依次|直接|帮我)*)(读取|读回|回读|读出|打开|查看|列出|写入|写到|写出|保存|创建|新建|追加|复制|移动|重命名|删除)/u;
-const CODE_CONTEXT_PATTERN = /代码|源码|仓库|函数|符号|调用方|调用链|类型定义|源文件|单元测试|\b(?:code|repository|repo|function|symbol|caller|source\s+code|unit\s+tests?)\b|\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|py|rs|go|xaml)\b/iu;
+const CODE_CONTEXT_PATTERN = /代码|源码|仓库|函数|方法|符号|调用方|调用链|类型定义|源文件|单元测试|\b(?:code|repository|repo|function|method|symbol|caller|source\s+code|unit\s+tests?)\b|\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|py|rs|go|xaml)\b/iu;
 const DOCUMENT_CONTEXT_PATTERN = /论文|资料|文档|知识库|章节|笔记|\b(?:papers?|documents?|documentation|docs?|manuals?|knowledge|chapters?|notes?)\b|\.(?:md|txt|pdf|docx)\b/iu;
 const EXTERNAL_CONTEXT_PATTERN = /https?:\/\/|网页|网站|网址|浏览器|联网|上网|天气|新闻|\b(?:web|websites?|browser|online|internet|weather|news)\b/iu;
 const TASK_DETAIL_PATTERN = /取消|中断|恢复|重试|超时|队列|并发|绑定|缓存|索引|权限|审批|持久化|保存|存储|写入|序列化|分块|分词|嵌入|重排|上下文|引用|来源|配置|设置|生命周期|\b(?:cancel\w*|abort\w*|retry|retries|timeout|queue\w*|concurren\w*|binding|cache\w*|index\w*|permission\w*|approval|persist\w*|stor\w*|serializ\w*|chunk\w*|tokeniz\w*|embedding\w*|rerank\w*|context|reference\w*|configuration|settings|lifecycle)\b/iu;
@@ -69,7 +69,7 @@ export function retrievalPlan(message, { history = [], maximumTokens, taskContex
   let taskType = explicitFile ? 'file' : /记忆|回忆|历史|之前|上次|讨论|history|remember|recall|previous/iu.test(originalQuery) ? 'recall' : 'lookup';
   if (/比较|对比|权衡|架构|方案|全面|综述|调查|研究|compare|research|trade.?off/iu.test(originalQuery)) taskType = 'research';
   if (directExecution) taskType = 'execution';
-  const defaultTokens = { recall: 2048, lookup: 4096, file: 6144, research: 8192, execution: 0 }[taskType];
+  const defaultTokens = { recall: 4096, lookup: 8192, file: 12288, research: 16384, execution: 0 }[taskType];
   const evidenceTokens = maximumTokens === undefined ? defaultTokens : Math.max(0, Math.min(defaultTokens, Math.floor(maximumTokens)));
   const priorCharacters = Array.from(String(previous?.Content ?? previous?.content ?? '').trim());
   const priorQuery = priorCharacters.slice(0, Math.max(0, Math.min(256, MAX_QUERY_CHARACTERS - originalQuery.length - 1))).join('');
@@ -85,6 +85,63 @@ export function retrievalPlan(message, { history = [], maximumTokens, taskContex
 }
 
 export function shouldRetrieve(message, options) { return retrievalPlan(message, options).shouldRetrieve; }
+
+export function hasExactRetrievalTarget(item, intent) {
+  if (!intent.path && !intent.symbol) return false;
+  const itemPath = String(item.locator?.relativePath ?? item.title ?? '').replace(/\\/gu, '/').toLowerCase();
+  const pathMatches = !intent.path || itemPath === intent.path.toLowerCase() || itemPath.endsWith(`/${intent.path.toLowerCase()}`);
+  const symbolMatches = !intent.symbol || [item.structure?.symbolName, item.structure?.qualifiedName]
+    .some(symbol => typeof symbol === 'string' && (symbol === intent.symbol || symbol.endsWith(`.${intent.symbol}`)));
+  return item.exactTargetMatch === true || pathMatches && symbolMatches;
+}
+
+/** Plan the next evidence operation from observable gaps, not an inferred answer probability.
+ * 根据可观察的证据缺口规划下一步，不把排序分数或关键词覆盖当作答案正确概率。 */
+export function planEvidenceAcquisition({ query = '', gap, intent = buildRetrievalIntent(query), items = [],
+  assessment, taskType = 'lookup', embeddingStatus, rerankerStatus, semanticEnabled = true,
+  indexingPending = false, remainingSearches = 1, newEvidenceCount, reused = false } = {}) {
+  const exactTarget = items.some(item => hasExactRetrievalTarget(item, intent));
+  const targeted = Boolean(intent.path || intent.symbol);
+  const complex = ['complex', 'research'].includes(taskType);
+  const embeddingReady = embeddingStatus?.state === 'ready' && embeddingStatus.loaded !== false;
+  const rerankerReady = rerankerStatus?.state === 'ready';
+  const missingEvidence = assessment?.missingEvidence ?? [];
+  const channels = targeted ? ['lexical', 'structure'] : ['lexical'];
+  if (semanticEnabled && embeddingReady && !exactTarget) channels.push('vector');
+  const shouldRerank = complex && items.length > 1 && rerankerReady &&
+    !(exactTarget && !missingEvidence.length) &&
+    (assessment?.state !== 'usable' || assessment?.requiresSourceRead || Boolean(gap) || items.length > 6 || missingEvidence.length > 0);
+  const needsRead = items.length > 0 && (assessment?.requiresSourceRead || missingEvidence.length > 0);
+  const noProgress = reused || newEvidenceCount === 0;
+  const budgetExhausted = remainingSearches <= 0;
+  const next = needsRead ? 'read-source' : items.length ? 'evaluate-support-and-answer' :
+    budgetExhausted ? 'state-unresolved-gap' : indexingPending ? 'direct-search-or-read' : 'search-specific-gap';
+  const requiresVerification = /修改|修复|重构|优化|实现|生成|\b(?:fix|modify|refactor|implement|optimi[sz]e|generate)\b/iu.test(query);
+  return { channels, shouldEmbed: semanticEnabled && embeddingReady && !exactTarget,
+    shouldRerank, rerankReason: shouldRerank ? 'ambiguous-or-incomplete-evidence' :
+      !complex ? 'simple-task' : !rerankerReady ? 'optional-model-not-ready' : 'targeted-or-small-evidence-set',
+    missingInformation: gap ?? null, missingEvidence, next,
+    shouldContinueSearch: !budgetExhausted && !noProgress && !needsRead && !items.length,
+    requiresVerification, requiredChecks: requiresVerification ? ['re-read-current-source',
+      intent.domain === 'knowledge' ? 'check-deliverable-against-requirements' : 'run-relevant-validation'] : [],
+    coverage: indexingPending ? 'partial-index' : 'bounded-candidates',
+    sufficiency: 'not-evaluated' };
+}
+
+/** Reorder only admitted source metadata; priority cannot add files or change authorization.
+ * 只调整已接纳来源元信息的顺序，任务优先级不能新增文件或改变授权范围。 */
+export function prioritizeEvidenceSources(sources, priorityPaths = new Set()) {
+  const rank = source => {
+    const path = String(source.locator?.relativePath ?? source.title ?? '').replace(/\\/gu, '/').toLowerCase();
+    const targeted = [...priorityPaths].some(target => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`) ||
+      path.endsWith(`/${target.toLowerCase()}`));
+    if (targeted) return 0;
+    if (/(?:^|\/)(?:readme|agents)(?:\.|$)|(?:^|\/)(?:tests?|src)(?:\/|$)|\.(?:cs|[cm]?js|[cm]?ts|py|rs|go|json|ya?ml|toml)$/iu.test(path)) return 1;
+    return 2;
+  };
+  return sources.map((source, index) => ({ source, index, rank: rank(source) }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index).map(item => item.source);
+}
 
 /** Exact identifiers and paths supplement semantic lookup; neither can expand authorized scopes.
  * 精确标识符与路径补充语义检索，两者均不能扩大授权范围。 */

@@ -4,7 +4,7 @@ import { parseDocumentStructure } from './document-structure.mjs';
 import { chunkStructuredSource, STRUCTURED_CHUNKER_VERSION, STRUCTURED_EMBEDDING_TEXT_VERSION } from './retrieval-text.mjs';
 import { validateSource } from './retrieval-contracts.mjs';
 
-const OTHER_CODE_EXTENSIONS = /\.(?:py|rs|go|java|cpp|c|h|ps1|sql)$/iu;
+const OTHER_CODE_EXTENSIONS = /\.(?:java|cpp|c|h|ps1|sql)$/iu;
 
 function requestSignal(cancelBuffer) {
   const flag = new Int32Array(cancelBuffer);

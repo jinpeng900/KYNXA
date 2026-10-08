@@ -3,6 +3,24 @@
           Inputs="..\model-gateway\package-lock.json" Outputs="..\model-gateway\node_modules\.package-lock.json">
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\model-gateway" Command="npm ci --no-audit --no-fund" />
   </Target>
+  <Target Name="IncludeResourceServiceRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="IncludeGatewayNodeRuntime">
+    <!-- Package the prepared Rust executable and original notices only; developer toolchains never enter the payload.
+         仅打包已准备的 Rust 可执行文件和许可证原文，开发工具链不进入用户安装包。 -->
+    <PropertyGroup>
+      <_KynxaResourceCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\resources\$(RuntimeIdentifier)'))</_KynxaResourceCacheDirectory>
+      <_KynxaRequireResourceRuntime Condition="'$(Configuration)' == 'Release'">--required</_KynxaRequireResourceRuntime>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+          Command="&quot;$(_KynxaNodeRuntimeDirectory)\node.exe&quot; tools/development/prepare-resource-runtime.mjs --runtime &quot;$(RuntimeIdentifier)&quot; --cache &quot;$(_KynxaResourceCacheDirectory)&quot; $(_KynxaRequireResourceRuntime)" />
+    <ReadLinesFromFile File="$(_KynxaResourceCacheDirectory)\bundle-files.txt" Condition="Exists('$(_KynxaResourceCacheDirectory)\bundle-files.txt')">
+      <Output TaskParameter="Lines" ItemName="_KynxaResourceBundleFiles" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <Content Include="@(_KynxaResourceBundleFiles->'$(_KynxaResourceCacheDirectory)\%(Identity)')"
+               Link="runtime\resource\%(_KynxaResourceBundleFiles.Identity)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
   <Target Name="IncludeGatewayNodeRuntime" BeforeTargets="AssignTargetPaths">
     <!-- Compose first, then normalize with the single-argument API shared by both MSBuild hosts.
          先组合路径，再用两种 MSBuild 宿主都支持的单参数 API 规范化。 -->

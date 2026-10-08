@@ -1,5 +1,5 @@
 import { toolFailure } from '../../platform/tool-paths.mjs';
-import { retrievalFailure } from '../../data/retrieval/retrieval-contracts.mjs';
+import { retrievalFailure, parseSourceReference } from '../../data/retrieval/retrieval-contracts.mjs';
 import { evidenceSourceRef } from '../../data/retrieval/evidence-references.mjs';
 import { estimateTokens } from '../../models/context-tokens.mjs';
 import { deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
@@ -10,14 +10,52 @@ import { EVIDENCE_NOTICE, projectEvidence } from './source-projection.mjs';
  * 证据装配负责不透明句柄、有界视图和一次正式归档，来源与查询执行仍由注入服务拥有。 */
 export class RetrievalEvidenceService {
   #preparedEvidence = new WeakMap();
-  constructor({ search, scopeSnapshot, isFresh, assertCurrent, serialize, resultStore, getResultStore, signalFor, isClosed }) {
+  constructor({ search, scopeSnapshot, isFresh, assertCurrent, serialize, resultStore, getResultStore, signalFor, isClosed,
+    index, getAcquisition, getReferenceStore, experiences, getTaskVerification, evaluationPolicy }) {
     this.search = search; this._scopeSnapshot = scopeSnapshot; this._fresh = isFresh;
     this._assertCurrent = assertCurrent; this._serialize = serialize;
+    this.index = index; this.getAcquisition = getAcquisition; this.getReferenceStore = getReferenceStore;
+    this.experiences = experiences; this.getTaskVerification = getTaskVerification;
+    this.evaluationPolicy = evaluationPolicy;
     this.getResultStore = getResultStore ?? (() => resultStore); this.signalFor = signalFor; this.isClosed = isClosed;
   }
 
   get resultStore() { return this.getResultStore(); }
-  async prepare(context, query, { signal, maximumCharacters = 10000, maximumTokens, existingContext = [], history = [], plan,
+
+  async validateFinal(context, { references = [], signal } = {}) {
+    signal = this.signalFor(signal);
+    const reads = [...(this.getAcquisition(context)?.sourceReads.values() ?? [])];
+    if (!references.length && !reads.length) return { current: true, checked: 0, invalidSources: [] };
+    return this._serialize(async () => {
+      const snapshot = await this._scopeSnapshot(context, signal), candidates = new Map(), invalidSources = [], currentReferences = [];
+      for (const record of reads) {
+        try { const descriptor = parseSourceReference(record.sourceRef);
+          candidates.set(`${descriptor.scopeKey}:${descriptor.sourceId}`, { sourceRef: record.sourceRef, sourceId: descriptor.sourceId }); }
+        catch { invalidSources.push({ sourceRef: record.sourceRef, code: 'INVALID_RETRIEVAL_REFERENCE' }); }
+      }
+      for (const reference of references) {
+        const key = `${reference.scopeKey}:${reference.sourceId}`;
+        if (!candidates.has(key)) candidates.set(key, reference);
+      }
+      for (const reference of candidates.values()) {
+        signal?.throwIfAborted();
+        try {
+          const source = await this.index.read({ sourceRef: reference.sourceRef, scopeKeys: snapshot.scopes, limit: 2, signal });
+          if (!await this._fresh(source, snapshot, signal, new Map(), context)) throw Object.assign(new Error('Source changed.'), { code: 'STALE_RETRIEVAL_SOURCE' });
+          currentReferences.push({ ...reference, sourceRef: source.sourceRef, sourceId: source.sourceId, scopeKey: source.scopeKey,
+            sourceRevision: source.sourceRevision, contentHash: source.contentHash });
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          invalidSources.push({ sourceRef: reference.modelSourceRef ?? reference.sourceRef, sourceId: reference.sourceId,
+            code: error.code ?? 'RETRIEVAL_VALIDATION_UNAVAILABLE', next: 're-read-this-source-or-retrieve-its-current-version' });
+        }
+      }
+      await this._assertCurrent(context, snapshot);
+      return { current: invalidSources.length === 0, checked: candidates.size, invalidSources, references: currentReferences,
+        freshnessOnly: true, correctnessCertified: false };
+    });
+  }
+  async prepare(context, query, { signal, maximumCharacters = 65536, maximumTokens, existingContext = [], history = [], plan,
     deferArchive = false } = {}) {
     signal = this.signalFor(signal);
     signal?.throwIfAborted();
@@ -26,9 +64,9 @@ export class RetrievalEvidenceService {
       return { prompt: '', references: [], evidenceAssessment: assessEvidence([], query), plan: route };
     const promptTokens = Math.max(0, Math.min(route.evidenceTokens, maximumTokens ?? route.evidenceTokens));
     const reservedTokens = estimateTokens(EVIDENCE_NOTICE) + 120;
-    const result = await this.search(context, { query: route.query, domain: route.domain, limit: 6, taskType: route.taskType,
+    const result = await this.search(context, { query: route.query, domain: route.domain, taskType: route.taskType,
       maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
-    { signal, modelReferences: Boolean(this.resultStore) });
+    { signal, modelReferences: Boolean(this.resultStore), allowColdInference: false });
     const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: result.evidenceAssessment });
     result.items = projection.items;
     result.evidenceAssessment = assessEvidence(result.items, query, { requiresSourceRead: route.requiresSourceRead,
@@ -95,7 +133,8 @@ export class RetrievalEvidenceService {
             { maximumTokens: Math.min(tokenBudget, state.maximumTokens, state.projectedTokens), assessment });
           const projectedAssessment = assessEvidence(projection.items, state.query,
             { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount });
-          if (assessment.state === projectedAssessment.state && assessment.requiresSourceRead === projectedAssessment.requiresSourceRead) {
+          if (assessment.state === projectedAssessment.state && assessment.requiresSourceRead === projectedAssessment.requiresSourceRead &&
+              JSON.stringify(assessment.missingEvidence) === JSON.stringify(projectedAssessment.missingEvidence)) {
             assessment = projectedAssessment; break;
           }
           items = withFinalReferences(projection.items); assessment = projectedAssessment;
@@ -121,4 +160,104 @@ export class RetrievalEvidenceService {
       }
     });
   }
+  relations(context, input, { signal } = {}) {
+    if (this.evaluationPolicy?.relations === false) throw toolFailure('关系导航在当前消融组禁用。', 'EVALUATION_FEATURE_DISABLED', 409);
+    signal = this.signalFor(signal);
+    return this._serialize(async () => {
+      const snapshot = await this._scopeSnapshot(context, signal);
+      if (!snapshot.settings.local.enabled) throw toolFailure('本地检索已关闭。', 'RETRIEVAL_DISABLED', 409);
+      let sourceRef = input.sourceRef;
+      if (sourceRef?.startsWith('ev1:')) sourceRef = (await this.getReferenceStore().resolve(context, sourceRef,
+        { scopeKeys: snapshot.scopes, signal })).canonicalSourceRef;
+      const result = await this.index.relations({ ...input, sourceRef, scopeKeys: snapshot.scopes, signal });
+      const checks = new Map(), edges = [];
+      for (const edge of result.items ?? result.edges ?? []) {
+        signal.throwIfAborted();
+        const source = await this.index.read({ sourceRef: edge.sourceRef, scopeKeys: snapshot.scopes, limit: 2, signal });
+        if (await this._fresh(source, snapshot, signal, checks, context)) edges.push(edge);
+      }
+      await this._assertCurrent(context, snapshot);
+      return { ...result, items: edges, edges: undefined, complete: false,
+        coverage: 'indexed-syntax-and-uncertain-textual-mentions', next: 'read-related-source-before-concluding' };
+    });
+  }
+
+  assess(context, input, { signal } = {}) {
+    if (this.evaluationPolicy?.gaps === false) throw toolFailure('证据评估在当前消融组禁用。', 'EVALUATION_FEATURE_DISABLED', 409);
+    signal = this.signalFor(signal);
+    return this._serialize(async () => {
+      const snapshot = await this._scopeSnapshot(context, signal), acquisition = this.getAcquisition(context);
+      if (!snapshot.settings.local.enabled || !acquisition) throw toolFailure('先检索并读取证据。', 'EVIDENCE_NOT_READ', 409);
+      const claims = [];
+      const checks = new Map(), sourceRefs = [];
+      for (const claim of input.claims ?? []) {
+        const support = [];
+        for (const citation of claim.support ?? []) {
+          const sourceRef = citation.sourceRef?.startsWith('ev1:')
+            ? (await this.getReferenceStore().resolve(context, citation.sourceRef, { scopeKeys: snapshot.scopes, signal })).canonicalSourceRef
+            : citation.sourceRef;
+          const source = await this.index.read({ sourceRef, scopeKeys: snapshot.scopes, limit: 2, signal });
+          if (!await this._fresh(source, snapshot, signal, checks, context)) {
+            acquisition.invalidateSource(source.sourceId, source.scopeKey);
+            throw toolFailure('证据来源变化，需要重新读取并修复受影响结论。', 'STALE_RETRIEVAL_SOURCE', 409);
+          }
+          support.push({ ...citation, sourceRef }); sourceRefs.push(sourceRef);
+        }
+        claims.push({ ...claim, support });
+      }
+      const result = acquisition.assess({ ...input, claims });
+      const taskVerification = this.getTaskVerification?.(context);
+      if (result.checks.length) {
+        result.checks = result.checks.map(check => {
+          const receipt = taskVerification?.receipts.find(item => item.toolCallId === check.toolCallId &&
+            item.mutationRevision === taskVerification.mutationRevision);
+          return { ...check, state: receipt?.passed ? 'passed' : receipt ? 'failed' : 'unverified' };
+        });
+        if (result.checks.every(check => check.state === 'passed') && !result.unresolved.length && !result.contradictions.length &&
+            result.claims.every(claim => claim.state === 'cited-source-read')) result.state = 'ready-to-answer';
+      }
+      if (taskVerification?.pendingValidation) {
+        // Earlier passed checks do not cover a later mutation or supersede a newer failed execution.
+        // 旧通过回执不能覆盖后续修改，也不能压过更新的失败执行。
+        result.state = 'needs-evidence-or-validation';
+        result.requiredValidation = { state: taskVerification.state, mutationRevision: taskVerification.mutationRevision,
+          pendingValidation: true };
+      }
+      await this._assertCurrent(context, snapshot);
+      // Experiences stay in this chat; neither global nor project scope receives private conversation material.
+      // 经验留在本聊天范围，不把私人对话内容自动提升到全局或项目范围。
+      const uniqueRefs = [...new Set(sourceRefs)];
+      result.experienceCoverage = { references: Math.min(64, uniqueRefs.length), totalReferences: uniqueRefs.length, complete: uniqueRefs.length <= 64 };
+      if (this.evaluationPolicy?.experience !== false) await this.experiences.save({ scopeKeys: [`chat:${snapshot.relationship.conversationId.toLowerCase()}`],
+        query: context.message?.trim() ? context.message.slice(0, 2000) : claims[0]?.statement ?? 'evidence', sourceRefs: uniqueRefs.slice(0, 64),
+        conclusionId: result.conclusionId, state: result.state, complete: result.experienceCoverage.complete });
+      return result;
+    });
+  }
+
+  experience(context, input, { signal } = {}) {
+    if (this.evaluationPolicy?.experience === false) throw toolFailure('任务经验在当前消融组禁用。', 'EVALUATION_FEATURE_DISABLED', 409);
+    signal = this.signalFor(signal);
+    return this._serialize(async () => {
+      const snapshot = await this._scopeSnapshot(context, signal);
+      if (!snapshot.settings.local.enabled) throw toolFailure('本地检索已关闭。', 'RETRIEVAL_DISABLED', 409);
+      const records = await this.experiences.find({ ...input, scopeKeys: [`chat:${snapshot.relationship.conversationId.toLowerCase()}`] });
+      const items = [], checks = new Map();
+      for (const record of records) {
+        let current = true;
+        for (const sourceRef of record.sourceRefs) {
+          try {
+            const source = await this.index.read({ sourceRef, scopeKeys: snapshot.scopes, limit: 2, signal });
+            if (!await this._fresh(source, snapshot, signal, checks, context)) current = false;
+          } catch (error) { if (signal.aborted) throw error; current = false; }
+        }
+        items.push({ ...record, current, usableAsAnswer: false,
+          next: !current ? 'repair-stale-source-dependencies' : record.recordState === 'partial' ?
+            'complete-missing-source-references-before-reuse' : 'repeat-source-read-and-validation-for-current-task' });
+      }
+      await this._assertCurrent(context, snapshot);
+      return { items, scope: 'current-chat', correctnessCertified: false };
+    });
+  }
+
 }

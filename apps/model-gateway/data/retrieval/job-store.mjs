@@ -12,9 +12,10 @@ const SEMANTIC_STATES = new Set(['disabled', 'complete', 'partial', 'unavailable
 const MAX_SEMANTIC_DIAGNOSTICS = 8;
 const JOB_TRANSITIONS = {
   queued: new Set(['queued', 'running', 'cancelled', 'failed']),
-  running: new Set(['running', 'paused', 'completed', 'cancelled', 'failed']),
+  running: new Set(['running', 'paused', 'completed', 'partial', 'cancelled', 'failed']),
   paused: new Set(['paused', 'running', 'cancelled', 'failed']),
   completed: new Set(['completed']),
+  partial: new Set(['partial']),
   cancelled: new Set(['cancelled']),
   failed: new Set(['failed'])
 };
@@ -72,6 +73,28 @@ function validateSemanticProgress(value) {
   return structuredClone(value);
 }
 
+function validateCoverageProgress(value) {
+  const fields = ['discovered', 'files', 'lexical', 'semantic', 'failed', 'skipped', 'partial', 'complete', 'sources', 'failures', 'reportTruncated'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key)) ||
+      typeof value.complete !== 'boolean') throw toolFailure('索引覆盖进度无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  for (const key of ['discovered', 'lexical', 'semantic', 'failed', 'skipped'])
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw toolFailure('索引覆盖数量无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  for (const key of ['files', 'partial']) if (value[key] !== undefined && (!Number.isSafeInteger(value[key]) || value[key] < 0))
+    throw toolFailure('索引覆盖数量无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  const states = new Set(['pending', 'ready', 'partial', 'failed', 'skipped', 'unverified', 'disabled']);
+  if (value.sources !== undefined && (!Array.isArray(value.sources) || value.sources.length > 1000 || value.sources.some(source =>
+    !source || typeof source.sourceId !== 'string' || source.sourceId.length > 256 || typeof source.relativePath !== 'string' || source.relativePath.length > 4096 ||
+    ['status', 'lexical', 'semantic', 'parser'].some(key => !states.has(source[key])) ||
+    source.errorCode !== undefined && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(source.errorCode))))
+    throw toolFailure('索引来源覆盖记录无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  if (value.failures !== undefined && (!Array.isArray(value.failures) || value.failures.length > 1000 || value.failures.some(item =>
+    !item || typeof item.relativePath !== 'string' || item.relativePath.length > 4096 || !/^[A-Z][A-Z0-9_]{0,127}$/u.test(item.errorCode ?? ''))))
+    throw toolFailure('索引来源失败记录无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  if (value.reportTruncated !== undefined && typeof value.reportTruncated !== 'boolean')
+    throw toolFailure('索引覆盖截断标记无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  return structuredClone(value);
+}
+
 /** Durable indexing status, independent of chat existence and action execution receipts.
  * 持久索引状态独立于聊天是否存在，也不能替代副作用执行回执。 */
 export class RetrievalJobStore {
@@ -86,6 +109,7 @@ export class RetrievalJobStore {
     const document = JSON.parse(await readFile(this.file, 'utf8'));
     if (document.schemaVersion !== 1 || !Array.isArray(document.jobs))
       throw toolFailure('索引任务文件版本无效。', 'UNSUPPORTED_RETRIEVAL_SCHEMA', 409);
+    for (const job of document.jobs) if (job.coverage !== undefined) validateCoverageProgress(job.coverage);
     return document;
   }
   list() { return this._run(async () => structuredClone((await this._read()).jobs)); }
@@ -126,6 +150,7 @@ export class RetrievalJobStore {
           (!Number.isSafeInteger(patch[field]) || patch[field] < 0 || field === 'completedSources' && patch[field] < job.completedSources))
         throw toolFailure('索引任务进度无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
       if (patch.semantic !== undefined) patch = { ...patch, semantic: validateSemanticProgress(patch.semantic) };
+      if (patch.coverage !== undefined) patch = { ...patch, coverage: validateCoverageProgress(patch.coverage) };
       if (patch.checkpoint !== undefined) patch = { ...patch, checkpoint: validateCheckpoint(patch.checkpoint) };
       Object.assign(job, patch); await atomicJson(this.file, document); return structuredClone(job);
     });
@@ -143,6 +168,7 @@ export class RetrievalJobStore {
           (!Number.isSafeInteger(patch[field]) || patch[field] < 0 || field === 'completedSources' && patch[field] < job.completedSources))
         throw toolFailure('索引任务进度无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
       if (patch.semantic !== undefined) patch = { ...patch, semantic: validateSemanticProgress(patch.semantic) };
+      if (patch.coverage !== undefined) patch = { ...patch, coverage: validateCoverageProgress(patch.coverage) };
       const record = { jobId, checkpointId: checkpoint.checkpointId, sources };
       const payload = JSON.stringify(record);
       const line = JSON.stringify({ ...record, checksum: createHash('sha256').update(payload).digest('hex') }) + '\n';

@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { findNativeToolHost } from './tool-host-path.mjs';
 import { bindLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 
 const boundary = 'host-terminal';
 const maxTransportBytes = 2 * 1024 * 1024;
@@ -24,12 +25,13 @@ function verifiesVisibleConsole(value, keepOpenMs) {
  * 显式宿主执行保留回执，绝不作为沙箱终端失败后的隐式回退。
  */
 export class HostTerminalRunner {
-  constructor({ toolHostPath, invoke } = {}) {
+  constructor({ toolHostPath, invoke, resourceService } = {}) {
     this.toolHostPath = toolHostPath;
     this.invoke = invoke ?? invokeHostTerminal;
     this.shutdown = new AbortController();
     this.active = new Set();
     this.pendingCount = 0;
+    this.resources = resourceService;
   }
 
   async _invoke(request, signal, timeoutMs, onOutput, onStarted) {
@@ -40,7 +42,19 @@ export class HostTerminalRunner {
     try {
       const host = await findNativeToolHost(this.toolHostPath, 'HOST_TERMINAL_UNAVAILABLE');
       this.shutdown.signal.throwIfAborted(); signal?.throwIfAborted();
-      operation = this.invoke(host, request, signal, timeoutMs, onOutput, onStarted);
+      const invoke = async lease => {
+        const registrations = [];
+        try {
+          return await this.invoke(host, request, signal, timeoutMs, onOutput, receipt => {
+            onStarted?.(receipt);
+            if (lease && Number.isSafeInteger(receipt.processId)) registrations.push(
+              Promise.resolve(this.resources.registerExecutor?.(lease.leaseId, { processId: receipt.processId })).catch(() => {}));
+          });
+        } finally { await Promise.all(registrations); }
+      };
+      operation = request.operation === 'host_terminal_capabilities' ? invoke(null) :
+        runResourceTask(this.resources, { kind: request.operation === 'host_terminal_job' ? 'background' : 'foreground',
+          cpuThreads: 2, memoryBytes: 64 * 1024 * 1024 }, invoke, { signal });
       this.active.add(operation);
       return await operation;
     } finally { this.active.delete(operation); this.pendingCount--; }

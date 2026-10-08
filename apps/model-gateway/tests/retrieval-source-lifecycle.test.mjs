@@ -82,6 +82,7 @@ async function fixture(t, overrides = {}) {
   const publications = [];
   const index = { upsertSources: async (sources, { signal } = {}) => {
     signal?.throwIfAborted(); publications.push(...sources.map(source => source.sourceId));
+    return { sources: sources.map(source => ({ sourceId: source.sourceId })) };
   }, removeSource: async () => {}, listSources: async () => [] };
   const settings = { local: { enabled: true, semantic: 'off', embeddingProfileId: 'builtin-multilingual' },
     cache: { memoryLimitBytes: 16 * 1024 * 1024 }, projectIndexing: { mountedFolder: false, bindingRevision: 0 } };
@@ -347,7 +348,10 @@ test('mounted folder changes during inference are re-scanned without publishing 
   const path = join(workspace, 'guide.md');
   await writeFile(path, 'Older document bytes.', 'utf8');
   const contents = [];
-  f.index.upsertSources = async sources => { contents.push(...sources.map(source => source.text)); };
+  f.index.upsertSources = async sources => {
+    contents.push(...sources.map(source => source.text));
+    return { sources: sources.map(source => ({ sourceId: source.sourceId })) };
+  };
   const job = await f.service.rebuild({ projectId: 'synthetic-project' });
   await entered.promise;
   await writeFile(path, 'Newer document bytes.', 'utf8');
@@ -412,8 +416,10 @@ test('dirty passes retain bounded earlier diagnostics without presenting a recov
     const semantic = { requested: true, profileId: 'builtin-multilingual', state: firstPass ? 'unavailable' : 'complete',
       totalChunks: 1, vectorChunks: firstPass ? 0 : 1, cachedChunks: 0,
       diagnosticCodes: firstPass ? ['SYNTHETIC_EMBEDDING_FAILURE'] : [] };
-    await progress(sources.length, { semantic });
-    return { semantic };
+    const coverage = { discovered: sources.length, lexical: sources.length, semantic: firstPass ? 0 : sources.length,
+      failed: 0, skipped: 0, partial: firstPass ? sources.length : 0, complete: !firstPass, sources: [] };
+    await progress(sources.length, { semantic, coverage });
+    return { semantic, coverage };
   };
   const job = await f.service.rebuild();
   await entered.promise;
@@ -471,7 +477,10 @@ test('an unavailable selected profile retains lexical indexing and honest durabl
   const job = await f.service.rebuild();
   await f.service.lifecycle.active.get(job.jobId)?.promise;
   const completed = await f.jobs.get(job.jobId);
-  assert.equal(completed.status, 'completed');
+  assert.equal(completed.status, 'partial');
+  assert.equal(completed.coverage.lexical, 1);
+  assert.equal(completed.coverage.semantic, 0);
+  assert.equal(completed.coverage.complete, false);
   assert.equal(f.publications.length, 1);
   assert.equal(completed.semantic.state, 'unavailable');
   assert.equal(completed.semantic.profileId, f.settings.local.embeddingProfileId);
@@ -538,7 +547,10 @@ test('enabling mounted indexing through settings during an active job triggers a
   await writeFile(join(workspace, 'guide.md'), 'The newly enabled mounted source.', 'utf8');
   await f.library.add([{ path: join(f.root, 'one.md'), title: 'One', text: 'Already imported source.' }]);
   const contents = [];
-  f.index.upsertSources = async sources => { contents.push(...sources.map(source => source.text)); };
+  f.index.upsertSources = async sources => {
+    contents.push(...sources.map(source => source.text));
+    return { sources: sources.map(source => ({ sourceId: source.sourceId })) };
+  };
   const job = await f.service.rebuild({ projectId: 'synthetic-project' });
   await entered.promise;
   const request = Readable.from([Buffer.from(JSON.stringify({ expectedRevision: 0,

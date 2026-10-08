@@ -106,7 +106,7 @@ function truncateCharacters(text, maximumCharacters) {
 
 /** Build bounded embedding context from actual source metadata without changing cited text.
  * 仅从真实来源元信息构建有界嵌入上下文，引用正文、哈希与偏移保持原样。 */
-export function embeddingTextForChunk(source, chunk, { maxChars = 512 } = {}) {
+export function embeddingProjectionForChunk(source, chunk, { maxChars = 512 } = {}) {
   if (!Number.isSafeInteger(maxChars) || maxChars < 64 || maxChars > 8000) throw new RangeError('Invalid embedding text size.');
   const body = typeof chunk?.text === 'string' ? chunk.text : '';
   const offset = (Number.isSafeInteger(chunk?.startOffset) ? chunk.startOffset : 0) + Math.max(0, body.search(/\S/u));
@@ -155,7 +155,12 @@ export function embeddingTextForChunk(source, chunk, { maxChars = 512 } = {}) {
   // 优先给原始分块预留空间；字符上限只补充约束，不能替代模型 tokenizer 的 token 限制。
   const contextBudget = Math.min(MAX_EMBEDDING_CONTEXT_CHARACTERS, Math.max(0, maxChars - body.length - 2));
   const context = truncateCharacters(metadata.join('\n').replace(/[\r\x00-\x08\x0b\x0c\x0e-\x1f]/g, ' '), contextBudget);
-  return truncateCharacters(context ? `${context}\n\n${body}` : body, maxChars);
+  return { context: context ? `${context}\n\n` : '', text: body };
+}
+
+export function embeddingTextForChunk(source, chunk, { maxChars = 512 } = {}) {
+  const projection = embeddingProjectionForChunk(source, chunk, { maxChars });
+  return truncateCharacters(projection.context + projection.text, maxChars);
 }
 
 export function matchExpression(query, options = {}) {

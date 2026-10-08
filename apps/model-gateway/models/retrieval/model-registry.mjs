@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { BUILTIN_EMBEDDING_PROFILE } from './embedding-profile.mjs';
-import { BUILTIN_RERANKER_PROFILE } from './reranker-profile.mjs';
+import { BUILTIN_EMBEDDING_PROFILE, BUILTIN_GPU_EMBEDDING_PROFILE } from './embedding-profile.mjs';
+import { BUILTIN_RERANKER_PROFILE, BUILTIN_GPU_RERANKER_PROFILE } from './reranker-profile.mjs';
 
 const RUNTIME_ASSET_PATHS = new Set(['config.json', 'tokenizer_config.json', 'special_tokens_map.json',
   'tokenizer.json', 'onnx/model_quantized.onnx']);
@@ -32,7 +32,14 @@ const EMBEDDING = registerProfile('embedding', BUILTIN_EMBEDDING_PROFILE, 'trans
 const RERANKER = registerProfile('reranker', BUILTIN_RERANKER_PROFILE, 'transformers-onnx-cross-encoder-v1', {
   version: 'query-passage-pair-sigmoid-v1', pairing: 'text_pair', scoring: 'sigmoid',
 });
-const PROFILES = Object.freeze([EMBEDDING, RERANKER]);
+const GPU_EMBEDDING = registerProfile('embedding', BUILTIN_GPU_EMBEDDING_PROFILE, 'transformers-onnx-dml-hybrid-q8-v1', {
+  version: 'e5-prefixed-mean-l2-v1', queryPrefix: BUILTIN_GPU_EMBEDDING_PROFILE.queryPrefix,
+  documentPrefix: BUILTIN_GPU_EMBEDDING_PROFILE.documentPrefix, pooling: 'mean', normalize: true,
+});
+const GPU_RERANKER = registerProfile('reranker', BUILTIN_GPU_RERANKER_PROFILE, 'transformers-onnx-dml-hybrid-cross-encoder-q8-v1', {
+  version: 'query-passage-pair-sigmoid-v1', pairing: 'text_pair', scoring: 'sigmoid',
+});
+const PROFILES = Object.freeze([EMBEDDING, RERANKER, GPU_EMBEDDING, GPU_RERANKER]);
 
 export class RetrievalModelProfileError extends Error {
   constructor(kind, profileId) {

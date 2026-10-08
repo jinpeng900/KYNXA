@@ -154,6 +154,14 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
     assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
     assert.equal(saved.ToolActivities[0].status, 'completed');
+    assert.equal(saved.ToolActivities[0].executionEnvironment.executorLocation, 'gateway-host');
+    const upstreamHistory = f.seen[1].messages ?? f.seen[1].input;
+    const upstreamResult = protocol === 'anthropic-messages'
+      ? upstreamHistory.at(-1).content.find(item => item.type === 'tool_result').content
+      : protocol === 'openai-responses' ? upstreamHistory.findLast(item => item.type === 'function_call_output').output
+        : upstreamHistory.findLast(item => item.role === 'tool').content;
+    assert.equal(JSON.parse(upstreamResult).executionEnvironment.executorLocation, 'gateway-host');
+    assert.equal(JSON.parse(upstreamResult).status, 'completed');
     assert.equal(saved.ToolRun.phase, 'completed');
     assert.equal(saved.ToolRun.rounds, 2);
     assert.equal(saved.ToolRun.toolCalls, 1);

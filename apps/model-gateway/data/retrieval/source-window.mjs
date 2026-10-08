@@ -79,9 +79,9 @@ export function sourceWindow(text, options = {}, checkCancelled) {
   let endOffset = Math.min(upper, startOffset + limit);
   if (splitsPair(text, endOffset)) endOffset--;
   checkCancelled?.();
-  return { text: text.slice(startOffset, endOffset), offset: startOffset, nextOffset: endOffset,
+  return { text: text.slice(startOffset, endOffset), offset: startOffset, nextOffset: endOffset, offsetUnit: 'utf16-code-units',
     totalCharacters: text.length, hasMore: endOffset < upper,
-    window: { version: SOURCE_WINDOW_VERSION, mode: section ? 'section' : 'window', anchorOffset,
+    window: { version: SOURCE_WINDOW_VERSION, mode: section ? 'section' : 'window', anchorOffset, offsetUnit: 'utf16-code-units',
       startOffset, endOffset, clippedAtStart: startOffset > lower, clippedAtEnd: endOffset < upper,
       ...(section ? { section } : {}), ...(sections ? { sections, spansSections, navigationTruncated } : {}),
       ...(sectionDiagnostics ? { sectionUnavailable: true, navigationTruncated: true, diagnosticCodes: sectionDiagnostics } : {}),

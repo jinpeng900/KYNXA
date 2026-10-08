@@ -9,3 +9,23 @@
 参见 [五人职责](../../../docs/team/README.md)、[依赖与合同](../../../docs/architecture/team-boundaries.md)。根目录 `server.mjs`、`initialize-storage.mjs`、`migrate-storage.mjs` 为稳定启动入口；不要在本目录再创建另一份正式服务或数据源。
 
 跨域变更同步生产调用方、共享 DTO、测试和随包清单。新增/移动模块后运行 `node tools/development/check-architecture.mjs`；回归选择见 [开发规则](../../../.agents/skills/kynxa-development/SKILL.md)。
+
+`local-model-resources.mjs` 提供外部本机运行时只读观察。Ollama（包括其中运行的 Qwen）通过
+[官方 `/api/ps`](https://docs.ollama.com/api/ps) 和
+[只读 `/api/show`](https://docs.ollama.com/api-reference/show-model-details) 获取是否加载、实际加载上下文、服务报告的模型大小及显存量。
+只接本机 loopback，请求有超时/取消、禁止重定向、有界解码与短期缓存；不读取环境变量、启动命令、模板或个人模型路径，也不启停、卸载或杀用户模型。
+
+结构元信息可估算 KV cache，但 dtype/滑动窗口等未知参数保留不确定性；服务 `size/size_vram` 可能已含 KV，不能把估算再次加到观测驻留量扣预算。
+外部模型不是 KYNXA 拥有的资源租约，系统 free memory 已反映其占用，只用于协调后台工作。
+`beginGeneration` 只知道本应用调用是否进行；没有本应用请求不等于其他客户端已空闲。没有标准资源接口的本地 OpenAI/Qwen 服务明确返回未知，不能伪造精确 RAM/GPU 占用。
+
+`external-model-demand.mjs` 只计算尚未发生的分配：已加载上下文覆盖目标时增量为零；实际扩张只计算
+新增 KV；冷加载估算权重与 KV。冷加载优先采用有界 `/api/tags` 的序列化模型大小，再回退参数量与
+量化估计，保留运行余量。服务未给出上下文时仍协调已知权重，KV 保留未知，不能称为完整加载准入。
+连接的 1M 输入上限不是 Ollama `num_ctx`；当前 OpenAI 协议未请求该扩张，不据此预约 1M 的 KV。
+
+A 的 `orchestration/external-model-admission.mjs` 将未来增量接到共享 Rust 资源服务，先退役本应用
+自有且确认空闲的 GPU 嵌入/重排，再派发生成。活跃原生任务、未确认取消和用户拥有的 Ollama 不被
+停止。GPU 上传的主机暂存仍是观察建议，未知外部接口或设备映射保留未确认状态，不冒充完整准入。
+模型同身份的并发请求共享预约；读取完整响应才释放预测保护。取消后的未知分配保留，确认目标已
+加载后可解除未来分配预约，但这不等于取消的生成已成功，也不解除其他未知显存租约。

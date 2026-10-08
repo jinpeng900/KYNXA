@@ -5,7 +5,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RetrievalIndex, chunkSource } from '../data/retrieval/index.mjs';
-import { hashText, validateChunkStructure, validateStructureDescriptor } from '../data/retrieval/retrieval-contracts.mjs';
+import { hashText, validateChunkStructure, validateStructureDescriptor, RETRIEVAL_INDEX_SCHEMA_VERSION } from '../data/retrieval/retrieval-contracts.mjs';
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-retrieval-structure-'));
@@ -207,7 +207,7 @@ test('legacy schema 2 migrates additively; relative paths stay searchable and un
   const reopened = new RetrievalIndex({ root });
   try {
     const after = await reopened.status();
-    assert.equal(after.schemaVersion, 3);
+    assert.equal(after.schemaVersion, RETRIEVAL_INDEX_SCHEMA_VERSION);
     assert.equal(after.indexSnapshotId, status.indexSnapshotId);
     assert.equal(after.vectorChunks, 1);
     const path = await reopened.search({ query: 'unmatchedintent', scopeKeys: ['project:one'], retrievalIntent: { path: 'old.md' } });

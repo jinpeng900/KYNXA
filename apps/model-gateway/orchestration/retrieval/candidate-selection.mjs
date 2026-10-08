@@ -1,10 +1,11 @@
 import { lexicalTerms, retrievalQueryConcepts } from '../../data/retrieval/retrieval-text.mjs';
 import { normalizeRetrievalPath } from '../../data/retrieval/retrieval-contracts.mjs';
+import { projectRetrievalModelView } from '../../data/retrieval/evidence-references.mjs';
 import { estimateTokens } from '../../models/context-tokens.mjs';
 import { buildRetrievalIntent } from './query-plan.mjs';
 
 export const RETRIEVAL_CANDIDATE_LIMIT = 48;
-const MAX_SELECTION_TOKENS = 16384;
+const MAX_SELECTION_TOKENS = 32768;
 const COMMON_QUERY_WORDS = new Set(['the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are',
   'what', 'how', 'where', 'when', 'which', 'does', 'do', 'can', 'should', 'please', 'this', 'that', 'it',
   'according', 'document', 'file', 'project']);
@@ -115,8 +116,8 @@ export function deduplicateCandidates(items, { existingContext = [], retrievalIn
 }
 
 export function evidenceRecord(item, reference) {
-  return { reference, sourceRef: item.modelSourceRef ?? item.sourceRef, title: item.title, scope: item.scopeKey,
-    locator: item.locator, ...(item.structure ? { structure: item.structure } : {}), excerpt: item.excerpt };
+  return projectRetrievalModelView({ reference, sourceRef: item.modelSourceRef ?? item.sourceRef, title: item.title, scope: item.scopeKey,
+    locator: item.locator, ...(item.structure ? { structure: item.structure } : {}), excerpt: item.excerpt });
 }
 
 export function evidenceItemTokens(item, reference = 1) {
@@ -125,7 +126,7 @@ export function evidenceItemTokens(item, reference = 1) {
 
 /** RRF and reranker scores order candidates; they never become answer probabilities.
  * RRF 和重排分数只用于排序，证据状态根据可观察的查询覆盖与来源事实判定，不解释为回答概率。 */
-export function assessEvidence(items, query, { requiresSourceRead = false, alreadyPresentCount = 0 } = {}) {
+export function assessEvidence(items, query, { requiresSourceRead = false, alreadyPresentCount = 0, retrievalIntent } = {}) {
   if (!items.length) return { state: 'empty', reason: alreadyPresentCount ? 'already-in-context' : 'no-current-evidence',
     requiresSourceRead: false, matchedTerms: 0, queryTerms: informativeTerms(query).size };
   const queryTerms = informativeTerms(query), matched = new Set();
@@ -141,14 +142,23 @@ export function assessEvidence(items, query, { requiresSourceRead = false, alrea
   const coverage = queryTerms.size ? matched.size / queryTerms.size : 0;
   const usable = bodyMatch && coverage >= 0.4;
   const semanticOnly = !bodyMatch && items.some(item => Number.isSafeInteger(item.vectorRank) && item.vectorRank > 0);
+  const intent = retrievalIntent ?? buildRetrievalIntent(query);
+  const expectedRoles = requestedRoles(query), presentRoles = new Set(items.map(candidateRole));
+  const missingEvidence = [...expectedRoles].filter(role => !presentRoles.has(role)).map(role => ({ kind: 'requested-role', role }));
+  if (intent.symbol && !items.some(item => metadataTargetMatch(item, intent).symbolMatch || item.exactTargetMatch))
+    missingEvidence.push({ kind: 'symbol-definition', symbol: intent.symbol });
+  if (intent.path && !items.some(item => metadataTargetMatch(item, intent).pathMatch))
+    missingEvidence.push({ kind: 'requested-file', path: intent.path });
+  // Role/target presence is only a retrieval gap signal; it does not certify facts or executed tests.
+  // 角色和目标是否出现只用于指示检索缺口，不能证明事实正确或测试已执行。
   return { state: usable ? 'usable' : 'weak', reason: usable ? 'query-terms-supported' : semanticOnly ? 'semantic-only-unverified' : 'partial-query-support',
     requiresSourceRead: requiresSourceRead || !usable, matchedTerms: matched.size, queryTerms: queryTerms.size,
-    queryCoverage: coverage };
+    queryCoverage: coverage, missingEvidence, presentRoles: [...presentRoles], sufficiency: 'not-evaluated' };
 }
 
 /** Select a bounded diverse projection; original excerpts, references and scores stay intact.
  * 按预算选择具有多样性的请求投影，原文、回源引用和原始分数保持不变。 */
-export function selectCandidates(items, { query = '', limit = 6, maximumTokens = 2048,
+export function selectCandidates(items, { query = '', limit = 8, maximumTokens = 8192,
   existingContext = [], lambda = 0.7, requiresSourceRead = false, retrievalIntent, taskContext } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 60) throw new RangeError('Invalid retrieval result limit.');
   if (!Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > MAX_SELECTION_TOKENS)
@@ -199,7 +209,7 @@ export function selectCandidates(items, { query = '', limit = 6, maximumTokens =
   return { items: selected, selection: { candidateCount: items.length, uniqueCandidates: deduplicated.items.length,
     duplicateCount: deduplicated.duplicateCount, alreadyPresentCount: deduplicated.alreadyPresentCount,
     omittedForBudget, usedTokens, maximumTokens, method: 'metadata-query-mmr', sourceCount: sourceCounts.size },
-    evidenceAssessment: assessEvidence(selected, query, { requiresSourceRead, alreadyPresentCount: deduplicated.alreadyPresentCount }) };
+    evidenceAssessment: assessEvidence(selected, query, { requiresSourceRead, alreadyPresentCount: deduplicated.alreadyPresentCount, retrievalIntent: intent }) };
 }
 
 export const selectEvidenceCandidates = selectCandidates;

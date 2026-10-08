@@ -4,7 +4,8 @@ import { open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { validateId } from '../platform/conversation-id.mjs';
 import { boundedInteger, ensureLocalDirectory, inspectLocalPath, objectInput, toolFailure, within } from '../platform/tool-paths.mjs';
-import { MAX_EVIDENCE_REFERENCES, projectEvidenceSearchResult, validatedEvidenceReference } from './retrieval/evidence-references.mjs';
+import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
+import { MAX_EVIDENCE_REFERENCES, projectEvidenceSearchResult, projectRetrievalModelView, validatedEvidenceReference } from './retrieval/evidence-references.mjs';
 
 export const MAX_TOOL_RESULT_BYTES = 8 * 1024 * 1024;
 export const TOOL_RESULT_METADATA_BYTES = 8192;
@@ -40,7 +41,7 @@ function checkDepth(value) {
  * Public projections never expose MCP _meta. Binary data is returned only to the explicit local-view API.
  * 公开视图不暴露 MCP _meta，二进制数据仅返回给明确的本地查看接口。
  */
-export function publicToolResult(canonical, { resultRef, includeMediaData = false } = {}) {
+export function publicToolResult(canonical, { resultRef, includeMediaData = false, executionEnvironment } = {}) {
   checkDepth(canonical);
   const walk = (value, pointer, kind = 'value') => {
     if (Array.isArray(value)) return value.map((item, index) => walk(item, `${pointer}/${index}`, kind === 'content' ? 'block' : 'value'));
@@ -49,7 +50,7 @@ export function publicToolResult(canonical, { resultRef, includeMediaData = fals
     const media = kind === 'block' && ['image', 'audio'].includes(value.type) && typeof value.data === 'string';
     const blob = kind === 'resource' && typeof value.blob === 'string';
     for (const [key, item] of Object.entries(value)) {
-      if (key === '_meta') continue;
+      if (key === '_meta' || pointer === '' && key === 'executionEnvironment') continue;
       if (!includeMediaData && ((media && key === 'data') || (blob && key === 'blob'))) continue;
       const childKind = pointer === '' && key === 'content' && Array.isArray(item) ? 'content' :
         kind === 'block' && value.type === 'resource' && key === 'resource' ? 'resource' : 'value';
@@ -62,19 +63,25 @@ export function publicToolResult(canonical, { resultRef, includeMediaData = fals
     }
     return Object.fromEntries(entries);
   };
-  return walk(canonical, '');
+  const projected = walk(canonical, ''), environment = normalizeToolExecutionEnvironment(executionEnvironment);
+  if (!environment) return projected;
+  return projected && typeof projected === 'object' && !Array.isArray(projected)
+    ? { ...projected, executionEnvironment: environment } : { output: projected, executionEnvironment: environment };
 }
 
 /**
  * Preserve small JSON verbatim; size the preview inside a valid envelope, including its JSON escaping.
  * 小 JSON 保持原文，预览大小在合法外层封装中计算，并包含 JSON 转义开销。
  */
-export function previewToolResult(value, { resultRef, status = 'completed', maximumCharacters = 65536 } = {}) {
+export function previewToolResult(value, { resultRef, status = 'completed', maximumCharacters = 65536, executionEnvironment } = {}) {
   maximumCharacters = boundedInteger(maximumCharacters, 65536, 256, 65536);
+  const environment = normalizeToolExecutionEnvironment(executionEnvironment);
+  if (environment) value = value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...value, executionEnvironment: environment } : { output: value, executionEnvironment: environment };
   const text = jsonText(value);
   if (text.length <= maximumCharacters) return text;
   const envelope = preview => ({ status, preview, totalCharacters: text.length, truncated: true,
-    ...(resultRef ? { resultRef } : {}) });
+    ...(resultRef ? { resultRef } : {}), ...(environment ? { executionEnvironment: environment } : {}) });
   if (jsonText(envelope('')).length > maximumCharacters)
     throw toolFailure('工具结果引用超过预览预算。', 'INVALID_TOOL_RESULT_REFERENCE');
   let low = 0, high = text.length;
@@ -125,12 +132,18 @@ export class ToolResultStore {
     const safeCanonical = JSON.parse(source);
     checkDepth(safeCanonical);
     objectInput(options);
-    const id = options.id === undefined ? randomUUID() : resultId(options.id), hash = sha256(source);
+    const executionEnvironment = normalizeToolExecutionEnvironment(options.executionEnvironment);
+    // V2 binds application-owned metadata to the formal receipt without rewriting third-party canonical data.
+    // V2 将应用拥有的元数据绑定正式回执，不改写第三方 canonical 原文；旧 V1 摘要继续兼容。
+    const version = executionEnvironment ? 2 : 1;
+    const integritySource = version === 2 ? jsonText({ canonical: safeCanonical, executionEnvironment }) : source;
+    const id = options.id === undefined ? randomUUID() : resultId(options.id), hash = sha256(integritySource);
     return this._scope(context, async (relationship, directory) => {
       await ensureLocalDirectory(directory);
-      const document = { version: 1, id, conversationId: relationship.conversationId, requestId,
+      const document = { version, id, conversationId: relationship.conversationId, requestId,
         toolCallId: call.id, toolName: call.name, originalProjectId: Object.hasOwn(context, 'projectId') ? context.projectId : relationship.projectId,
-        savedProjectId: relationship.projectId, createdAt: new Date().toISOString(), bytes, sha256: hash, canonical: safeCanonical };
+        savedProjectId: relationship.projectId, createdAt: new Date().toISOString(), bytes, sha256: hash, canonical: safeCanonical,
+        ...(executionEnvironment ? { executionEnvironment } : {}) };
       const serialized = jsonText(document), target = join(directory, `${id}.json`), temporary = join(directory, `.${id}.${randomUUID()}.tmp`);
       if (Buffer.byteLength(serialized) > MAX_DOCUMENT_BYTES) throw toolFailure('工具结果元信息过大。', 'TOOL_RESULT_TOO_LARGE', 413);
       let handle;
@@ -168,17 +181,21 @@ export class ToolResultStore {
           throw toolFailure('工具结果读取期间已变化。', 'CORRUPT_TOOL_RESULT', 500);
         let document;
         try { document = JSON.parse(bytes.toString('utf8')); } catch { throw toolFailure('工具结果 JSON 已损坏。', 'CORRUPT_TOOL_RESULT', 500); }
-        if (document?.version !== 1 || document.id !== id || typeof document.conversationId !== 'string' ||
+        if (![1, 2].includes(document?.version) || document.id !== id || typeof document.conversationId !== 'string' ||
             !sameId(document.conversationId, relationship.conversationId) || typeof document.requestId !== 'string' ||
             typeof document.toolCallId !== 'string' || typeof document.toolName !== 'string' ||
             !Number.isSafeInteger(document.bytes) || document.bytes < 0 || document.bytes > MAX_TOOL_RESULT_BYTES ||
             !document.canonical || typeof document.canonical !== 'object' || Array.isArray(document.canonical))
           throw toolFailure('工具结果身份或结构无效。', 'CORRUPT_TOOL_RESULT', 500);
         const source = jsonText(document.canonical);
-        if (Buffer.byteLength(source) !== document.bytes || sha256(source) !== document.sha256)
+        const executionEnvironment = document.version === 2 ? normalizeToolExecutionEnvironment(document.executionEnvironment) : undefined;
+        if (document.version === 2 && (!executionEnvironment || jsonText(executionEnvironment) !== jsonText(document.executionEnvironment)))
+          throw toolFailure('工具执行环境元数据无效。', 'CORRUPT_TOOL_RESULT', 500);
+        const integritySource = document.version === 2 ? jsonText({ canonical: document.canonical, executionEnvironment }) : source;
+        if (Buffer.byteLength(source) !== document.bytes || sha256(integritySource) !== document.sha256)
           throw toolFailure('工具结果完整性校验失败。', 'CORRUPT_TOOL_RESULT', 500);
         checkDepth(document.canonical);
-        return operation(document, { id, bytes: document.bytes, sha256: document.sha256 });
+        return operation({ ...document, executionEnvironment }, { id, bytes: document.bytes, sha256: document.sha256 });
       } catch (error) {
         if (error.code === 'ENOENT') throw toolFailure('当前聊天不存在此工具结果。', 'TOOL_RESULT_NOT_FOUND', 404);
         throw error;
@@ -186,24 +203,37 @@ export class ToolResultStore {
     }, { allowArchived });
   }
 
-  async read(context, id, { offset = 0, limit = 16000, projection = 'public', allowArchived = false } = {}) {
+  read(context, id, options = {}) { return this._readPage(context, id, options, false); }
+
+  /** Project the complete knowledge receipt before paging; offsets address this model view, not raw archive bytes.
+   * 先投影完整知识回执再分页，偏移属于该模型视图，不指向原始归档字节；正式归档与本机读取不变。
+   */
+  readModel(context, id, options = {}) { return this._readPage(context, id, options, true); }
+
+  async _readPage(context, id, { offset = 0, limit = 16000, projection = 'public', allowArchived = false } = {}, modelView) {
     offset = boundedInteger(offset, 0, 0, MAX_DOCUMENT_BYTES);
     limit = boundedInteger(limit, 16000, 1, 16000);
     if (projection !== 'public') throw toolFailure('模型只能读取公开工具结果。', 'INVALID_TOOL_RESULT_PROJECTION', 403);
     return this._load(context, id, (document, resultRef) => {
-      const source = jsonText(publicToolResult(document.canonical, { resultRef }));
+      let projected = publicToolResult(document.canonical, { resultRef, executionEnvironment: document.executionEnvironment });
+      if (modelView && document.toolName === 'knowledge.search') projected = projectEvidenceSearchResult(projected, resultRef.id);
+      else if (modelView && document.toolName.startsWith('knowledge.')) projected = projectRetrievalModelView(projected);
+      const source = jsonText(projected);
       if (offset > source.length) throw toolFailure('工具结果分页位置超出范围。', 'INVALID_TOOL_RESULT_OFFSET');
       if (offset > 0 && /[\uDC00-\uDFFF]/.test(source[offset] ?? '') && /[\uD800-\uDBFF]/.test(source[offset - 1])) offset--;
       let end = Math.min(source.length, offset + limit);
       if (end < source.length && /[\uD800-\uDBFF]/.test(source[end - 1] ?? '')) end--;
       if (end === offset && end < source.length) end = Math.min(source.length, end + 2);
       return { id: resultRef.id, text: source.slice(offset, end), offset, nextOffset: end,
-        totalCharacters: source.length, truncated: end < source.length, resultRef };
+        totalCharacters: source.length, truncated: end < source.length, resultRef,
+        ...(document.executionEnvironment ? { executionEnvironment: document.executionEnvironment } : {}),
+        ...(modelView ? { projection: 'model', offsetUnit: 'utf16-code-units', resultRefBasis: 'canonical-archive' } : {}) };
     }, { allowArchived: allowArchived === true });
   }
 
   async get(context, id) {
-    return this._load(context, id, document => publicToolResult(document.canonical, { includeMediaData: true }), { allowArchived: true });
+    return this._load(context, id, document => publicToolResult(document.canonical,
+      { includeMediaData: true, executionEnvironment: document.executionEnvironment }), { allowArchived: true });
   }
 
   /**
@@ -217,8 +247,9 @@ export class ToolResultStore {
       if (document.sha256 !== reference.sha256 || document.bytes !== reference.bytes ||
           !sameId(document.requestId, owner.requestId) || document.toolCallId !== owner.toolCallId || document.toolName !== owner.toolName)
         throw toolFailure('工具历史回执与归档身份不匹配。', 'TOOL_RESULT_REFERENCE_MISMATCH', 409);
-      const projected = publicToolResult(document.canonical, { resultRef });
-      return document.toolName === 'knowledge.search' ? projectEvidenceSearchResult(projected, resultRef.id) : projected;
+      const projected = publicToolResult(document.canonical, { resultRef, executionEnvironment: document.executionEnvironment });
+      if (document.toolName === 'knowledge.search') return projectEvidenceSearchResult(projected, resultRef.id);
+      return document.toolName.startsWith('knowledge.') ? projectRetrievalModelView(projected) : projected;
     }, { maximumReadBytes: reference.bytes + TOOL_RESULT_METADATA_BYTES });
   }
 
