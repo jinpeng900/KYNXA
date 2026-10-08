@@ -25,4 +25,7 @@ jobs:
           package-manager-cache: false
       # This checks source boundaries, not native Windows functionality.
       # 此检查验证源码边界，不代替 Windows 原生功能回归。
+      # Resolve declared package resources without compiling native Windows tools.
+      # 安装锁定依赖以核对随包资源，不在此执行 Windows 原生工具构建。
+      - run: npm ci --prefix apps/model-gateway --ignore-scripts --no-audit --no-fund
       - run: node tools/development/check-architecture.mjs
