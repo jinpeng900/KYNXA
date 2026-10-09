@@ -23,9 +23,13 @@ const directory = join(root, 'Index');
 const filename = join(directory, 'retrieval.sqlite');
 const identityDirectory = join(root, 'Retrieval');
 const identityPath = join(identityDirectory, 'source-identities.json');
-const CHUNK_ROW_COLUMNS = 'c.*, s.scope_key, s.source_type, s.title, s.locator, s.content_hash, s.source_revision, s.binding_revision, s.active_generation, s.derivation_signature';
+const CHUNK_ROW_COLUMNS = `c.*, s.scope_key, s.source_type, s.title, s.locator, s.content_hash, s.source_revision, s.binding_revision, s.active_generation, s.derivation_signature, ${RETRIEVAL_DOMAIN_SQL} AS actual_domain`;
+const PREFERRED_DOMAIN_RRF_BONUS = 0.05 / 61;
 const resourceService = workerData.resourceBridge ? createResourceWorkerClient(parentPort) : null;
+const READ_ONLY_METHODS = new Set(['search', 'read', 'readWindow', 'relations', 'coverage', 'verifyReference',
+  'listSources', 'scopeVersion', 'vectorSpaceStatus', 'status']);
 let database, lexicalRanker, relationStore, coverageStore, vectorSpaces, vectorSearch, vectorAvailable = false, vectorVersion = null, vectorError = null;
+let activeOperationId;
 
 function checkPath(path, isDirectory = false) {
   if (!existsSync(path)) return;
@@ -240,6 +244,8 @@ function refreshMigratedDerivation(sourceId) {
 }
 
 function cancelled(flag) {
+  if (flag && Atomics.load(flag, 0) === 2)
+    throw retrievalFailure('Retrieval search deadline exceeded. / 检索搜索超过截止时间。', 'RETRIEVAL_SEARCH_TIMEOUT', 504);
   if (flag && Atomics.load(flag, 0)) throw Object.assign(new Error('Retrieval cancelled. / 检索已取消。'), { name: 'AbortError', code: 'ABORT_ERR' });
 }
 
@@ -507,19 +513,21 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
   const scopes = retrievalScopeKeys(scopeKeys), placeholders = scopes.map(() => '?').join(',');
   const intent = validateRetrievalIntent(retrievalIntent);
   const requestedDomain = intent?.domain !== 'mixed' ? intent?.domain : undefined;
+  const preferredDomain = !requestedDomain && intent?.preferredDomain !== 'mixed' ? intent?.preferredDomain : undefined;
   const domainExpression = RETRIEVAL_DOMAIN_SQL;
   // Unknown legacy sources remain eligible; exact known-domain candidates rank first.
   // 未知类别的旧来源仍可检索，明确匹配领域的候选优先；领域路由不能替代范围授权。
   const domainFilter = requestedDomain ? ` AND (${domainExpression}=? OR ${domainExpression}='')` : '';
-  const domainRank = requestedDomain ? `CASE WHEN ${domainExpression}='${requestedDomain}' THEN 0 ELSE 1 END` : 'CASE WHEN 1 THEN 0 END';
+  const domainRank = requestedDomain ? `CASE WHEN ${domainExpression}=? THEN 0 ELSE 1 END` : 'CASE WHEN 1 THEN 0 END';
+  const rankingParameters = requestedDomain ? [requestedDomain] : [];
   const authorizedParameters = [...scopes, ...(requestedDomain ? [requestedDomain] : [])];
   cancelled(flag);
   const expression = matchExpression(query, { domain: intent?.domain });
   let lexical = [];
-  if (expression) lexical = lexicalRanker.search({ expression, query, scopes, domain: requestedDomain,
+  if (expression) lexical = lexicalRanker.search({ expression, query, scopes, domain: requestedDomain, preferredDomain,
     columns: CHUNK_ROW_COLUMNS, checkCancelled: () => cancelled(flag), limit: candidateLimit });
   else if (query.trim()) lexical = database.prepare(`SELECT ${CHUNK_ROW_COLUMNS} FROM chunks c JOIN sources s ON s.source_id=c.source_id
-    WHERE s.scope_key IN (${placeholders})${domainFilter} AND instr(lower(c.text),lower(?)) > 0 ORDER BY ${domainRank},c.id LIMIT ${candidateLimit}`).all(...authorizedParameters, query.trim());
+    WHERE s.scope_key IN (${placeholders})${domainFilter} AND instr(lower(c.text),lower(?)) > 0 ORDER BY ${domainRank},c.id LIMIT ${candidateLimit}`).all(...authorizedParameters, query.trim(), ...rankingParameters);
   let symbols = [], paths = [];
   const escapedPath = intent?.path?.replace(/[\\%_]/gu, character => `\\${character}`);
   const pathPredicate = column => intent?.path?.endsWith('/') ? `${column} LIKE ? ESCAPE '\\'` : `(${column}=? OR ${column} LIKE ? ESCAPE '\\')`;
@@ -542,7 +550,7 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
       SELECT ${CHUNK_ROW_COLUMNS},candidates.target_rank FROM candidates
       JOIN chunks c ON c.id=candidates.id JOIN sources s ON s.source_id=c.source_id
       ORDER BY candidates.target_rank,${domainRank},c.chunk_id`)
-      .all(...authorizedParameters, ...symbolParameters, ...(intent.path ? pathParameters : []))
+      .all(...authorizedParameters, ...symbolParameters, ...(intent.path ? pathParameters : []), ...rankingParameters)
       .map(row => ({ ...row, ...(row.target_rank === 0 ? { exact_target_match: true } : {}) }));
   }
   if (intent?.path) {
@@ -551,12 +559,15 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
       FROM chunks c JOIN sources s ON s.source_id=c.source_id WHERE s.scope_key IN (${placeholders})${domainFilter} AND ${pathPredicate('s.relative_path')})
       SELECT ${CHUNK_ROW_COLUMNS} FROM ranked JOIN chunks c ON c.id=ranked.id JOIN sources s ON s.source_id=c.source_id
       WHERE ranked.source_rank=1 ORDER BY ${domainRank},s.relative_path,c.chunk_id LIMIT ${candidateLimit}`)
-      .all(...authorizedParameters, ...pathParameters);
+      .all(...authorizedParameters, ...pathParameters, ...rankingParameters);
   }
   let semantic = [], degradedReason = null, semanticBackend = null;
   if (queryVector && embeddingProfileId) {
     if (!vectorAvailable) degradedReason = vectorError;
     else {
+      // Native ANN work owns processes and persistent derived graphs; never terminate its parent as a plain read.
+      // 原生 ANN 拥有子进程及派生图，进入向量阶段前撤销纯读取退役许可，避免遗留执行器或未确认资源。
+      parentPort.postMessage({ type: 'search_retirement_guard', id: activeOperationId, canRetire: false });
       const vectorResult = await vectorSearch.search({ scopeKeys: scopes, queryVector, embeddingProfileId,
         embeddingModelVersion, embeddingSpaceId, requestedDomain, ann, channelCandidates: candidateLimit }, () => cancelled(flag));
       semantic = vectorResult.items;
@@ -571,7 +582,11 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
     const diagnostics = { [`${channel}_position`]: rank + 1 };
     combined.set(row.chunk_id, { row: { ...old?.row, ...row, ...diagnostics }, score: (old?.score ?? 0) + weight / (60 + rank + 1) });
   }
-  const items = [...combined.values()].sort((a, b) => Number(Boolean(b.row.exact_target_match)) - Number(Boolean(a.row.exact_target_match)) ||
+  // Weak domain clues contribute a bounded rank signal, smaller than a full retrieval-channel vote.
+  // 弱领域线索只提供有界排序信号，权重小于完整检索通道；不得替代精确目标、权限或领域硬限制。
+  const items = [...combined.values()].map(item => ({ ...item,
+    score: item.score + (preferredDomain && item.row.actual_domain === preferredDomain ? PREFERRED_DOMAIN_RRF_BONUS : 0) }))
+    .sort((a, b) => Number(Boolean(b.row.exact_target_match)) - Number(Boolean(a.row.exact_target_match)) ||
     b.score - a.score || a.row.chunk_id.localeCompare(b.row.chunk_id))
     .slice(0, limit).map(item => publicChunk(item.row, item.score));
   const snapshots = database.prepare(`SELECT scope_key AS scopeKey,generation FROM scope_snapshots WHERE scope_key IN (${placeholders}) ORDER BY scope_key`).all(...scopes)
@@ -830,6 +845,14 @@ parentPort.on('message', message => {
       const operations = { upsertSources, search, read, readWindow, relations, recordCoverage, coverage, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, vectorSpaceStatus: input => vectorSpaces.status(retrievalScopeKeys(input.scopeKeys)), status, close };
       const operation = operations[message.method];
       if (!operation || !database) throw retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
+      activeOperationId = message.id;
+      const native = vectorSearch.status();
+      // Vector search can start native helpers immediately; deny retirement before any owner acknowledgement race.
+      // 向量搜索可能立即启动原生子进程，必须在初始阶段就禁止退役，不能依赖后续消息及时送达。
+      const canStartVectorWork = message.method === 'search' && message.input?.queryVector !== undefined && message.input?.queryVector !== null;
+      parentPort.postMessage({ type: 'operation_started', id: message.id,
+        canRetire: READ_ONLY_METHODS.has(message.method) && !canStartVectorWork &&
+          !native.helperPid && !native.pendingBuilds && !native.activeBuilds });
       const result = await operation(message.input ?? {}, flag);
       parentPort.postMessage({ id: message.id, result });
     } catch (error) {

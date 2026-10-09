@@ -172,7 +172,9 @@ test('a catalog collected before a real configuration change cannot acquire the 
   assert.equal(snapshot.generation, capturedGeneration, 'captured authority does not acquire the newer revision');
   assert.equal(snapshot.config.mcpServers[0].enabled, true, 'the captured configuration remains immutable');
   assert.equal((await f.run(context, 'filesystem.list', { path: '.' })).status, 'completed');
-  assert.equal((await f.run(context, 'mcp.synthetic.echo', envelope('filtered-old-tool'))).code, 'TOOL_NOT_FOUND');
+  const revokedCatalogCall = await f.run(context, 'mcp.synthetic.echo', envelope('filtered-old-tool'));
+  assert.equal(revokedCatalogCall.code, 'AGENT_CONFIG_CHANGED');
+  assert.equal(revokedCatalogCall.executed, false); assert.equal(revokedCatalogCall.recoverable, true);
   // Reinserting an obsolete declaration must still fail the live authority check before RPC.
   // 即使重新插入过期声明，执行前的实时权限检查仍须阻止 RPC。
   snapshot.descriptors.set(capturedDescriptor.name, capturedDescriptor);

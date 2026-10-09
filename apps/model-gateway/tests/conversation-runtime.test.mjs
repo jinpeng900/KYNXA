@@ -40,7 +40,11 @@ test('one transcript survives model/provider switches and restart; other convers
   await f.runtime.reply(first);
   await f.restart();
   await f.runtime.replyStream({ ...first, provider: 'provider-b', model: 'model-b', message: 'continue', requestId: randomUUID() }, () => {});
-  assert.deepEqual(f.seen[1].messages.map(item => item.content), ['remember my project', 'answer-1', 'continue']);
+  // Derived task hints are separate system data; the provider-neutral dialogue remains exact.
+  // 派生任务线索放在独立系统数据中，跨供应商对话原文仍须逐条保持一致。
+  assert.deepEqual(f.seen[1].messages.filter(item => item.role !== 'system').map(item => item.content),
+    ['remember my project', 'answer-1', 'continue']);
+  assert.match(f.seen[1].messages.find(item => item.role === 'system').content, /"relation":"continue"/u);
   await f.runtime.reply({ ...first, message: 'back to first model', requestId: randomUUID() });
   assert.deepEqual(f.seen[2].messages.map(item => item.content), ['remember my project', 'answer-1', 'continue', 'answer-2', 'back to first model']);
   const log = await f.runtime.conversations.readMessages(conversationId);
@@ -73,7 +77,7 @@ test('desktop catalog and transport share user IDs and final messages; stale UI 
   assert.deepEqual(updated.Projects[0].Chats[0].Messages.map(message => message.Content), ['hello', 'answer-1']);
   assert.equal(updated.Projects[0].Chats[0].Messages[1].Status, 'completed');
   await f.runtime.reply({ conversationId, requestId: randomUUID(), provider: 'provider-b', model: 'model-b', message: 'again' });
-  assert.deepEqual(f.seen[1].messages.map(item => item.content), ['hello', 'answer-1', 'again']);
+  assert.deepEqual(f.seen[1].messages.filter(item => item.role !== 'system').map(item => item.content), ['hello', 'answer-1', 'again']);
   assert.equal((await save({ Revision: initial.Revision, Projects: [] })).status, 409);
 });
 

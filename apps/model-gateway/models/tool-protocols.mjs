@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { StreamFailure, finalParts, checkFinish } from './streaming.mjs';
 import { estimateMessageTokens, estimateTokens } from './context.mjs';
 import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
+import { ToolCallDecodeFailure, validateTurnCallCount, validateArgumentBuffer } from './tool-call-validation.mjs';
 
 function nativeValueTokens(value, field = '') {
   if (typeof value === 'string') return estimateTokens(value);
@@ -57,16 +58,16 @@ export function toolDeclarations(protocol, catalog) {
 
 function decodeCall(rawCall, catalog) {
   if (typeof rawCall.id !== 'string' || !rawCall.id || rawCall.id.length > 200 || typeof rawCall.name !== 'string' ||
-      !rawCall.name || rawCall.name.length > 256 || /[\0\r\n]/.test(rawCall.name))
-    throw new StreamFailure('模型返回了无效的工具调用身份。');
+      !rawCall.name || rawCall.name.length > 256 || /[\0\r\n]/.test(rawCall.name) || /[\0\r\n]/.test(rawCall.id))
+    throw new ToolCallDecodeFailure('模型返回了无效的工具调用身份。', 'MODEL_TOOL_IDENTITY_INVALID');
   const descriptor = catalog.find(tool => tool.wireName === rawCall.name);
   let args = rawCall.arguments;
   if (typeof args === 'string') {
-    if (args.length > 65536) throw new StreamFailure('工具参数超过大小限制。');
-    try { args = JSON.parse(args); } catch { throw new StreamFailure('模型返回了不完整的工具参数。'); }
+    validateArgumentBuffer(args);
+    try { args = JSON.parse(args); } catch { throw new ToolCallDecodeFailure('模型返回了不完整的工具参数。', 'MODEL_TOOL_ARGUMENT_INVALID'); }
   }
   if (!args || typeof args !== 'object' || Array.isArray(args) || JSON.stringify(args).length > 65536)
-    throw new StreamFailure('工具参数必须为大小受限的 JSON 对象。');
+    throw new ToolCallDecodeFailure('工具参数必须为大小受限的 JSON 对象。', 'MODEL_TOOL_ARGUMENT_INVALID');
   // Unknown names become non-executable observations, never permission or an implicit tool load.
   // 未知名称形成不可执行的失败观察，不能因此取得权限或隐式加载工具。
   return { id: rawCall.id, name: descriptor?.name ?? rawCall.name, arguments: args,
@@ -97,16 +98,35 @@ export function decodeToolTurn(protocol, result, catalog) {
   // Check the stop status before parsing or dispatching any business arguments.
   // A syntactically valid prefix is still unsafe when its generation was cut off.
   // 解析或派发业务参数前先检查停止状态；生成被截断时，即使前缀语法有效也不能执行。
-  if (!['tool_calls', 'tool_use'].includes(parts.finish)) checkFinish(parts.finish);
-  if (rawCalls.length > 8) throw new StreamFailure('模型单次请求的工具数量超过上限。');
-  const calls = rawCalls.map(call => decodeCall(call, catalog));
-  if (new Set(calls.map(call => call.id)).size !== calls.length) throw new StreamFailure('模型重复了工具调用 ID。');
-  if (parts.finish && ['tool_calls', 'tool_use'].includes(parts.finish)) {
-    if (!calls.length) throw new StreamFailure('模型结束了工具调用，但未返回完整参数。');
-  } else checkFinish(parts.finish);
-  if (protocol === 'openai-responses' && result.status && result.status !== 'completed')
-    throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
-  return { ...parts, calls, continuation };
+  try {
+    if (!['tool_calls', 'tool_use'].includes(parts.finish)) {
+      try { checkFinish(parts.finish); }
+      catch (error) {
+        if (rawCalls.length) throw new ToolCallDecodeFailure(error.message, 'MODEL_TOOL_OUTPUT_TRUNCATED', error.type);
+        throw error;
+      }
+    }
+    validateTurnCallCount(rawCalls.length);
+    let argumentCharacters = 0;
+    for (const call of rawCalls) {
+      const text = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments) ?? '';
+      argumentCharacters += text.length;
+      validateArgumentBuffer(text, argumentCharacters);
+    }
+    const calls = rawCalls.map(call => decodeCall(call, catalog));
+    if (new Set(calls.map(call => call.id)).size !== calls.length)
+      throw new ToolCallDecodeFailure('模型重复了工具调用 ID。', 'MODEL_TOOL_IDENTITY_INVALID');
+    if (parts.finish && ['tool_calls', 'tool_use'].includes(parts.finish)) {
+      if (!calls.length) throw new ToolCallDecodeFailure('模型结束了工具调用，但未返回完整参数。', 'MODEL_TOOL_ARGUMENT_INVALID');
+    } else checkFinish(parts.finish);
+    if (protocol === 'openai-responses' && result.status && result.status !== 'completed')
+      throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
+    return { ...parts, calls, continuation };
+  } catch (error) {
+    if (error instanceof ToolCallDecodeFailure) error.estimatedGeneratedTokens = estimateTokens(parts.content ?? '')
+      + estimateTokens(parts.reasoning ?? '') + estimateTokens(JSON.stringify(rawCalls));
+    throw error;
+  }
 }
 
 export function appendToolResults(protocol, messages, turn, results, { onResult } = {}) {

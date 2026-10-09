@@ -26,11 +26,13 @@ async function foundationFixture(t, embeddings) {
   return { ...f, retrieval, entry, context };
 }
 
-test('query plans separate domains and exhaustive navigation from bounded evidence search', () => {
+test('query plans keep natural-language domains soft and exhaustive navigation distinct from bounded search', () => {
   assert.equal(retrievalPlan('你好').shouldRetrieve, false);
-  assert.equal(retrievalPlan('Explain coordinator.mjs cancellation').domain, 'code');
+  assert.equal(retrievalPlan('Explain coordinator.mjs cancellation').domain, 'mixed');
+  assert.equal(retrievalPlan('Explain coordinator.mjs cancellation').preferredDomain, 'code');
   assert.equal(retrievalPlan('比较论文和项目代码实现').domain, 'mixed');
-  assert.equal(retrievalPlan('总结文档中的条件').domain, 'knowledge');
+  assert.equal(retrievalPlan('总结文档中的条件').domain, 'mixed');
+  assert.equal(retrievalPlan('总结文档中的条件').preferredDomain, 'knowledge');
   const references = retrievalPlan('列出该函数所有引用');
   assert.equal(references.operation, 'references');
   assert.equal(references.operationSupported, false);
@@ -94,7 +96,8 @@ test('reranking rejects contradictory model metadata and keeps the original cand
     const result = await RetrievalCoordinator.prototype._rerank.call({ reranker: {
       status: () => ({ state: 'ready', ...selected }), rerank: async () => ({ ...selected,
         [field]: 'another-model-value', items: candidates.toReversed().map(item => ({ ...item, rerankScore: 0.8 })) })
-    } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: selected.profileId } } }, 'complex');
+    } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: selected.profileId } } }, 'complex', undefined,
+    { shouldRerank: true });
     assert.equal(result.diagnostic, 'RERANK_PROFILE_MISMATCH', field);
     assert.deepEqual(result.items, candidates);
     assert.equal(result.rerank, undefined);
@@ -107,7 +110,8 @@ test('legacy reranker seams may omit optional model metadata while retaining ver
   const result = await RetrievalCoordinator.prototype._rerank.call({ reranker: {
     status: () => ({ state: 'ready', profileId }), rerank: async () => ({
       items: candidates.toReversed().map(item => ({ ...item, rerankScore: 0.8 })) })
-  } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: profileId } } }, 'complex');
+  } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: profileId } } }, 'complex', undefined,
+  { shouldRerank: true });
   assert.equal(result.diagnostic, undefined);
   assert.deepEqual(result.items.map(item => item.sourceRef), ['second', 'first']);
   assert.equal(result.items[0].excerpt, candidates[1].excerpt);
