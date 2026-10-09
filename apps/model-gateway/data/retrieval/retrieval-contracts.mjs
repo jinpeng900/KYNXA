@@ -182,13 +182,16 @@ export function normalizeRetrievalPath(value) {
 
 export function validateRetrievalIntent(value) {
   if (value === undefined) return undefined;
-  requireKeys(value, ['domain', 'symbol', 'path'], 'retrieval intent');
+  requireKeys(value, ['domain', 'symbol', 'path', 'preferredDomain'], 'retrieval intent');
   const domain = value.domain ?? 'mixed';
   if (!['knowledge', 'code', 'mixed'].includes(domain)) throw retrievalFailure('Invalid retrieval domain. / 检索领域无效。');
+  if (value.preferredDomain !== undefined && !['knowledge', 'code', 'mixed'].includes(value.preferredDomain))
+    throw retrievalFailure('Invalid preferred retrieval domain. / 检索偏好领域无效。');
   if (value.symbol !== undefined && !validStructureText(value.symbol, 1024) ||
       value.path !== undefined && !validStructureText(value.path, 4096)) throw retrievalFailure('Invalid exact retrieval target. / 精确检索目标无效。');
   return { domain, ...(value.symbol !== undefined ? { symbol: value.symbol } : {}),
-    ...(value.path !== undefined ? { path: normalizeRetrievalPath(value.path) } : {}) };
+    ...(value.path !== undefined ? { path: normalizeRetrievalPath(value.path) } : {}),
+    ...(value.preferredDomain !== undefined ? { preferredDomain: value.preferredDomain } : {}) };
 }
 
 export function sourceReference(source, chunk = null) {

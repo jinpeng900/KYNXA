@@ -69,6 +69,78 @@ test('a local-browser prohibition preserves a separate explicit remote-browser t
   assert.equal(ordinary.allowLocalBrowser, false); assert.equal(ordinary.explicitBrowserTask, false);
 });
 
+test('rejected operations and abandoned topics cannot authorize browser actions', () => {
+  const history = ['在本机浏览器打开项目页面'];
+  for (const message of ['不是打开浏览器，是研究 React 论文的方法。', '先不聊浏览器了，谈谈人际网络怎么建立。',
+    '不是让你使用本机 Chrome，是解释品牌名称。', 'Not opening Chrome; explain a social network instead.',
+    'Never mind the browser task. Discuss a recipe.', '不是在云端浏览器读取页面，是分析论文实验。',
+    '请注意：不是打开浏览器，是研究 React 论文的方法。', '我说的不是打开浏览器，是研究 React 论文的方法。',
+    'Correction: not open the browser; explain a paper instead.', 'Rather than opening Chrome, explain a paper']) {
+    const intent = inferBrowserTaskIntent(message, history);
+    assert.equal(intent.explicitBrowserTask, false, message);
+    assert.equal(intent.allowLocalBrowser, false, message);
+    assert.throws(() => assertBrowserLaunchAllowed({ message, browserTaskIntent: intent }, 'C:\\Fixture\\chrome.exe'),
+      { code: 'BROWSER_TASK_NOT_AUTHORIZED' }, message);
+    assert.equal(canUseBrowserServer({ message, browserTaskIntent: intent }, existing), false, message);
+  }
+  for (const message of ['不要打开新浏览器窗口，在当前本机浏览器打开学习通网站',
+    '不是用 Chrome，而是用本机 Edge 打开网页', 'Do not open Chrome, use Edge to read the page',
+    '不是搜索 Chrome 文档，而是打开 Chrome 浏览器', '不要关闭 Chrome，刷新当前 Chrome',
+    '不是开 Chrome 的新窗口，而是切换当前 Chrome 页面',
+    '不要打开 Chrome 的新窗口，刷新当前 Chrome', 'Do not open a new Chrome window, refresh current Chrome']) {
+    assert.equal(inferBrowserTaskIntent(message).allowLocalBrowser, true, message);
+  }
+  for (const message of ['不要关闭 Chrome，刷新当前 Chrome', '不是开 Chrome 的新窗口，而是切换当前 Chrome 页面',
+    '不要打开 Chrome 的新窗口，刷新当前 Chrome', 'Do not open a new Chrome window, refresh current Chrome',
+    '不要打开新窗口中的 Chrome，刷新当前 Chrome', 'Do not open a new window in Chrome, refresh current Chrome'])
+    assert.equal(canUseBrowserServer({ message, browserTaskIntent: inferBrowserTaskIntent(message) }, existing), true,
+      'an excluded action does not exclude the whole engine');
+  assert.equal(inferBrowserTaskIntent('打开Chrome，算了，改为解释人际网络').allowLocalBrowser, false);
+  assert.equal(inferBrowserTaskIntent('继续', [...history, '不是打开浏览器，是研究论文方法']).allowLocalBrowser, false);
+});
+
+test('a rejected browser operation stays denied by the broker even if an old executable schema is injected', async t => {
+  const f = await configuredFixture(t);
+  const message = '不是打开浏览器，是研究 React 论文的方法。';
+  const context = await f.browserContext(message);
+  await f.service.catalog(context, { connectMcp: true });
+  assert.equal(context.message, message);
+  assert.deepEqual(f.discoveries[0], [isolated.id, remote.id]);
+  f.service.catalogs.get(context).descriptors.set(listing(existing).name, listing(existing));
+  const result = await f.run(context, listing(existing).name,
+    { arguments: {}, policy: { reason: 'An old tool name is not current authorization.' } });
+  assert.equal(result.code, 'BROWSER_TASK_NOT_AUTHORIZED');
+  assert.deepEqual(f.dispatched, []);
+});
+
+test('quoted source operations cannot pass the broker while an independent affirmative operation can', async t => {
+  const f = await configuredFixture(t);
+  for (const message of ['翻译这句话：“现在打开 Chrome 浏览器”。',
+    '把「启动本机浏览器」改写得更礼貌。', '示例是 `open Chrome`，检查英文语法。']) {
+    const context = await f.browserContext(message);
+    await f.service.catalog(context, { connectMcp: true });
+    f.service.catalogs.get(context).descriptors.set(listing(existing).name, listing(existing));
+    const result = await f.run(context, listing(existing).name,
+      { arguments: {}, policy: { reason: 'Quoted source text does not grant current browser authorization.' } });
+    assert.equal(result.code, 'BROWSER_TASK_NOT_AUTHORIZED', message);
+    assert.equal(context.message, message, 'the original quoted text remains available to the main model');
+  }
+  assert.deepEqual(f.dispatched, []);
+  const message = '翻译“打开 Chrome”，然后真的打开本机 Chrome。';
+  const affirmative = await f.browserContext(message);
+  assert.ok((await f.service.catalog(affirmative)).some(tool => tool.name === listing(existing).name));
+  assert.equal((await f.run(affirmative, listing(existing).name,
+    { arguments: {}, policy: { reason: 'The independent affirmative task is current.' } })).isError, false);
+  assert.deepEqual(f.dispatched, [listing(existing).name]);
+});
+
+test('quoted brand literals stay usable as explicit targets without adopting quoted operation text', () => {
+  for (const message of ['Open "Chrome".', '请使用“Chrome”读取当前页面。',
+    '不要打开“Chrome”的新窗口，刷新当前 Chrome 页面。'])
+    assert.equal(canUseBrowserServer({ message, browserTaskIntent: inferBrowserTaskIntent(message) }, existing), true, message);
+  assert.equal(inferBrowserTaskIntent('retry', ['打开本机 Chrome', '日志是“refresh current page”；仅解释日志。']).allowLocalBrowser, false);
+});
+
 test('how-to questions remain informational while explicit execution and live demonstrations stay available', () => {
   for (const message of ['Chrome怎么截图', '如何使用Chrome浏览器', '请解释Chrome怎么截图', '告诉我如何打开浏览器',
     'How do I use Chrome?', 'How can I take a screenshot in Chrome?', 'Tell me how to open the browser']) {
@@ -106,6 +178,148 @@ test('an excluded browser brand does not prohibit another explicitly requested b
   assert.equal(canUseBrowserServer(context, existing), false);
   assert.equal(canUseBrowserServer(context, { ...existing, args: [...existing.args, '--executablePath=C:\\Fixture\\msedge.exe'] }), true);
   assert.equal(inferBrowserTaskIntent('打开学习通网站', ['操作云端浏览器', '打开学习通网站']).allowLocalBrowser, false);
+});
+
+test('coordinated application prohibitions retain every named browser and keep the allowed target callable', () => {
+  for (const message of ["Don't use Chrome or Microsoft Edge. Open Firefox.",
+    'Don’t use Chrome and Microsoft Edge; use Firefox.',
+    'Do not use Chrome or Edge or Brave; open Firefox.',
+    "Don't use Chrome and don't use Edge; open Firefox.",
+    '不要使用 Chrome 或 Edge，打开 Firefox。', '不要用 Chrome 和 Edge；用 Firefox。',
+    '不要使用 Chrome、Edge 以及 Brave，打开 Firefox。', '不要使用“Chrome”或“Edge”，用 Firefox。']) {
+    const intent = inferBrowserTaskIntent(message), context = { message, browserTaskIntent: intent };
+    assert.equal(intent.allowLocalBrowser, true, message);
+    assert.ok(intent.excludedBrowserExecutables.includes('chrome.exe'), message);
+    assert.ok(intent.excludedBrowserExecutables.includes('msedge.exe'), message);
+    for (const executable of ['chrome.exe', 'msedge.exe']) {
+      assert.throws(() => assertBrowserLaunchAllowed(context, `C:\\Fixture\\${executable}`),
+        { code: 'BROWSER_TASK_NOT_AUTHORIZED' }, message);
+      assert.equal(canUseBrowserServer(context, { ...existing,
+        args: [...existing.args, `--executablePath=C:\\Fixture\\${executable}`] }), false, message);
+    }
+    assert.doesNotThrow(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\firefox.exe'), message);
+    assert.equal(canUseBrowserServer(context, { ...existing,
+      args: [...existing.args, '--executablePath=C:\\Fixture\\firefox.exe'] }), true, message);
+    const followUp = inferBrowserTaskIntent('刷新当前页面', [message]);
+    assert.deepEqual(followUp.excludedBrowserExecutables, intent.excludedBrowserExecutables,
+      'a natural continuation retains the active task restrictions');
+  }
+  for (const message of ['不要使用 Chrome，用 Edge。', 'Do not use Chrome, but use Edge.',
+    'Do not use Edge; use Chrome.']) {
+    const context = { message, browserTaskIntent: inferBrowserTaskIntent(message) };
+    const banned = message.startsWith('Do not use Edge') ? 'msedge.exe' : 'chrome.exe';
+    const allowed = banned === 'chrome.exe' ? 'msedge.exe' : 'chrome.exe';
+    assert.deepEqual(context.browserTaskIntent.excludedBrowserExecutables, [banned], message);
+    assert.doesNotThrow(() => assertBrowserLaunchAllowed(context, `C:\\Fixture\\${allowed}`), message);
+  }
+});
+
+test('coordinated window restrictions remain scoped and reasons do not become forbidden applications', () => {
+  for (const message of ['不要打开 Chrome 或 Edge 的新窗口，刷新当前 Chrome。',
+    '不要打开新窗口中的 Chrome 或 Edge，刷新当前 Chrome。',
+    'Do not open Chrome or Edge windows; refresh current Chrome.',
+    'Do not open Chrome windows or Edge tabs; refresh current Chrome.']) {
+    const context = { message, browserTaskIntent: inferBrowserTaskIntent(message) };
+    assert.equal(context.browserTaskIntent.allowLocalBrowser, true, message);
+    assert.equal(context.browserTaskIntent.excludedBrowserExecutables, undefined, message);
+    assert.equal(canUseBrowserServer(context, existing), true, message);
+  }
+  for (const message of ['不要使用 Chrome 的新窗口或 Edge，刷新当前 Chrome。',
+    '不要为了 Chrome 网站启动 Edge，打开 Firefox。']) {
+    const context = { message, browserTaskIntent: inferBrowserTaskIntent(message) };
+    assert.deepEqual(context.browserTaskIntent.excludedBrowserExecutables, ['msedge.exe'], message);
+    assert.equal(canUseBrowserServer(context, existing), true, message);
+    assert.throws(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\msedge.exe'),
+      { code: 'BROWSER_TASK_NOT_AUTHORIZED' }, message);
+  }
+});
+
+test('unquoted hypothetical and reported browser instructions do not grant control', () => {
+  for (const message of ['如果要求打开 Chrome，你会怎么做？', '假设打开 Edge 会怎样？',
+    '文档说打开 Chrome，请解释步骤。', '他说需要打开 Edge；解释原因。',
+    'If I asked you to open Chrome, what would you do?', 'Suppose I asked to open Edge; explain the steps.',
+    'The guide says to open Chrome; explain its steps.', 'They asked to launch Edge; summarize their request.']) {
+    const intent = inferBrowserTaskIntent(message, ['打开本机 Firefox']);
+    assert.equal(intent.allowLocalBrowser, false, message);
+    assert.equal(intent.explicitBrowserTask, false, message);
+  }
+  for (const message of ['如果需要使用 Chrome，你会怎么办？现在打开 Firefox。',
+    '文档说打开 Chrome，然后实际打开 Firefox。',
+    'If I asked to open Chrome, explain the process. Open Firefox.',
+    'If Chrome is installed, open Chrome.'])
+    assert.equal(inferBrowserTaskIntent(message).allowLocalBrowser, true,
+      'independent affirmative and actual conditional execution requests remain available');
+});
+
+test('the broker excludes both coordinated app bans and rejects injected schemas while dispatching Firefox', async t => {
+  const f = await configuredFixture(t), config = await f.service.getConfig();
+  const edge = server('edge-browser', [...existing.args, '--executablePath=C:\\Fixture\\msedge.exe']);
+  const firefox = server('firefox-browser', [...existing.args, '--executablePath=C:\\Fixture\\firefox.exe']);
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [existing, edge, firefox] });
+  f.service.mcp.catalog = async input => input.mcpServers.map(listing);
+  const message = "Don't use Chrome or Microsoft Edge. Open Firefox.", context = await f.browserContext(message);
+  const catalog = await f.service.catalog(context, { connectMcp: true });
+  assert.ok(catalog.some(tool => tool.name === listing(firefox).name));
+  for (const banned of [existing, edge]) {
+    assert.ok(!catalog.some(tool => tool.name === listing(banned).name));
+    f.service.catalogs.get(context).descriptors.set(listing(banned).name, listing(banned));
+    const result = await f.run(context, listing(banned).name,
+      { arguments: {}, policy: { reason: 'A stale schema cannot erase an explicit app prohibition.' } });
+    assert.equal(result.code, 'BROWSER_TASK_NOT_AUTHORIZED');
+  }
+  assert.deepEqual(f.dispatched, []);
+  assert.equal((await f.run(context, listing(firefox).name,
+    { arguments: {}, policy: { reason: 'The user selected Firefox as the allowed target.' } })).isError, false);
+  assert.deepEqual(f.dispatched, [listing(firefox).name]);
+});
+
+test('app-wide restrictions survive explanatory window mentions while actual window objects stay scoped', () => {
+  for (const message of ['不要使用 Chrome（窗口和标签都不用），改用本机 Edge 查看资料。',
+    'Do not use Chrome (including its tabs); use local Edge to read the page.',
+    '不要为了新建窗口启动 Chrome；打开本机 Edge。',
+    '不要因为窗口标题写着 Chrome 就启动 Chrome；使用本机 Edge。',
+    '不要为阅读页面而打开 Chrome，打开本机 Edge。']) {
+    const context = { message, browserTaskIntent: inferBrowserTaskIntent(message) };
+    assert.equal(context.browserTaskIntent.allowLocalBrowser, true, 'the independent Edge task remains available');
+    assert.equal(canUseBrowserServer(context, existing), false, message);
+    assert.throws(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\chrome.exe'), { code: 'BROWSER_TASK_NOT_AUTHORIZED' });
+    assert.doesNotThrow(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\msedge.exe'));
+  }
+  for (const message of ['不要打开 Chrome 的新窗口；刷新当前 Chrome 页面。',
+    "Do not open Chrome's current tab; refresh its existing Chrome tab.",
+    'Do not open a new window in Chrome; refresh current Chrome.'])
+    assert.equal(canUseBrowserServer({ message, browserTaskIntent: inferBrowserTaskIntent(message) }, existing), true,
+      'a directly targeted window/tab is not an app-wide prohibition');
+});
+
+test('the broker rejects an app ban with a preceding window reason even when a Chrome schema is injected', async t => {
+  const f = await configuredFixture(t);
+  for (const message of ['不要为了新建窗口启动 Chrome；打开本机 Edge。',
+    '不要因为窗口标题写着 Chrome 就启动 Chrome；使用本机 Edge。',
+    '不要为阅读页面而打开 Chrome，打开本机 Edge。']) {
+    const context = await f.browserContext(message);
+    const catalog = await f.service.catalog(context, { connectMcp: true });
+    assert.equal(context.message, message, 'the current original restriction remains authoritative');
+    assert.ok(!catalog.some(tool => tool.name === listing(existing).name), 'discovery excludes the banned app');
+    f.service.catalogs.get(context).descriptors.set(listing(existing).name, listing(existing));
+    const result = await f.run(context, listing(existing).name,
+      { arguments: {}, policy: { reason: 'A window reason cannot cancel the current Chrome prohibition.' } });
+    assert.equal(result.code, 'BROWSER_TASK_NOT_AUTHORIZED', message);
+  }
+  assert.deepEqual(f.dispatched, [], 'the injected Chrome schema never causes dispatch');
+});
+
+test('explicit task boundaries clear old browser authorization before considering a new affirmative task', () => {
+  const prior = '打开本机 Chrome 浏览器';
+  for (const ending of ['不是刷新当前页面，而是讨论人际信任。',
+    '先不聊刷新页面了，介绍论文实验。', '浏览器操作全部取消；现在只比较论文。']) {
+    assert.equal(inferBrowserTaskIntent('retry', [prior, ending]).allowLocalBrowser, false, ending);
+    assert.equal(inferBrowserTaskIntent(ending, [prior]).allowLocalBrowser, false, ending);
+  }
+  for (const replacement of ['不是读取论文，而是刷新本机 Chrome 当前页面。',
+    '先不聊论文了，现在用本机 Chrome 打开网页。'])
+    assert.equal(inferBrowserTaskIntent('retry', [prior, replacement]).allowLocalBrowser, true,
+      'the new affirmative browser task establishes its own current boundary');
 });
 
 test('only trusted isolated headless or nonlocal remote configuration supports automatic background reading', () => {

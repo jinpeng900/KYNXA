@@ -38,6 +38,20 @@ test('reading an enabled official catalog starts no process, transport or networ
   assert.ok(clients.diagnostics().every(state => state.state === 'disconnected' && state.toolCount === 0));
 });
 
+test('passive discovery does not await an unrelated handshake already owned by another request', async t => {
+  const clients = new McpToolClients(), server = { id: 'slow-startup', name: 'Slow unrelated service', enabled: true };
+  const key = clients._key(server, {});
+  clients.connections.set(key, new Promise(() => {}));
+  clients.states.set(server.id, { serverId: server.id, state: 'connecting', toolCount: 0 });
+  t.after(async () => { clients.connections.delete(key); await clients.close(); });
+  clients._connect = () => assert.fail('Passive discovery cannot join the unrequested startup.');
+  assert.deepEqual(await clients.catalog({ mcpServers: [server] }, {}, { connect: false }), []);
+  const headers = clients.discovery({ mcpServers: [server] }, {});
+  assert.equal(headers[0].name, 'mcp.slow-startup');
+  assert.equal(headers[0].state, 'connecting');
+  assert.deepEqual(headers[0].tools, []);
+});
+
 test('independent startup is limited to four at a time and discovery retains configured ordering', async t => {
   const clients = new McpToolClients();
   t.after(() => clients.close());

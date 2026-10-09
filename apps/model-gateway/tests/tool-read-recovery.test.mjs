@@ -67,18 +67,20 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     assert.deepEqual(saved.filter(item => item.status !== 'running').map(item => item.status), ['error', 'error', 'error']);
   });
 
-test('unknown MCP effects are recorded and stop before another model turn or effect', async () => {
+test('unknown MCP effects are recorded and permit an honest answer without another effect', async () => {
   const saved = [], phases = []; let rounds = 0, executions = 0;
-  await assert.rejects(runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '', declarations: [],
+  const result = await runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '', declarations: [],
     inputBudgetTokens: 32000, emit: () => {}, saveActivity: async item => saved.push(item), saveRunState: async state => phases.push(state),
     service: { execute: async () => { executions++; return { content: 'Navigation outcome unknown.', isError: true,
       status: 'unknown', code: 'MCP_TIMEOUT', resultRef: { id: 'synthetic-receipt' } }; } },
-    requestTurn: async () => { rounds++; return turn('openai-completions', [{ id: 'navigation-1', name: 'mcp.browser.navigate_page',
-      arguments: { arguments: { url: 'https://example.invalid' }, policy: { reason: 'Open a synthetic page.' } } }]); } }),
-  { code: 'MCP_OUTCOME_UNKNOWN' });
-  assert.equal(rounds, 1); assert.equal(executions, 1);
+    requestTurn: async () => { rounds++;
+      if (rounds > 1) return { content: 'Navigation remains unconfirmed; the original effect was not replayed.', reasoning: '', calls: [], continuation: [] };
+      return turn('openai-completions', [{ id: 'navigation-1', name: 'mcp.browser.navigate_page',
+      arguments: { arguments: { url: 'https://example.invalid' }, policy: { reason: 'Open a synthetic page.' } } }]); } });
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(rounds, 2); assert.equal(executions, 1);
   assert.equal(saved.at(-1).status, 'unknown'); assert.ok(saved.at(-1).resultRef);
-  assert.equal(phases.at(-1).phase, 'interrupted'); assert.equal(phases.at(-1).code, 'MCP_OUTCOME_UNKNOWN');
+  assert.equal(phases.at(-1).recovery.unknownEffects, 1);
 });
 
 test('failure guard resets after a changed target or a successful observation and never reclassifies effects', () => {

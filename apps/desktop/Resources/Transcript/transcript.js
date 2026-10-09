@@ -122,9 +122,14 @@
     const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
     return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
   }
-  function updateMessageTime(entry) {
-    const message = entry.message;
+  function updateMessageTime(entry, message = entry.timeMetadata || entry.message) {
     if (!message) return;
+    // Keep only footer metadata current while selected body content retains its previous snapshot.
+    // 正文选区保留旧快照时，仅更新页脚元信息；切换语言仍使用最新结束状态。
+    entry.timeMetadata = {
+      role: message.role, streaming: message.streaming, status: message.status,
+      createdAtMs: message.createdAtMs, endRecordedAtMs: message.endRecordedAtMs
+    };
     const english = document.documentElement.lang === 'en', separator = english ? ': ' : '：';
     const user = message.role === 'user';
     const streaming = !user && (message.streaming === true || message.status === 'streaming');
@@ -387,7 +392,7 @@
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
-    updateMessageTime(entry);
+    updateMessageTime(entry, message);
     const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -627,12 +632,13 @@
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
-      // Timing is outside selected prose. Terminal metadata stops the clock even while body convergence is deferred.
-      // 计时位于选中正文之外；正文收束延迟时，结束元数据仍立即停止计时，保留选区与正文节点。
+      // Timing and the footer stay current outside selected prose while body convergence is deferred.
+      // 正文收束延迟时，仅更新选区外的计时和页脚，保留选区与正文节点。
       const timingIds = new Set(snapshot.messages.map(message => String(message.id)));
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
       for (const message of snapshot.messages) {
-        const entry = entries.get(String(message.id)); if (entry) updateElapsedState(entry, message);
+        const entry = entries.get(String(message.id));
+        if (entry) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
       }
       synchronizeElapsedTimer(); return;
     }

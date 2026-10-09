@@ -1,0 +1,346 @@
+{
+  "schemaVersion": 1,
+  "manifestPath": "apps/model-gateway/tests/fixtures/tool-ambiguity-holdout-20261009.json",
+  "expectedLabelsUnchanged": true,
+  "total": 58,
+  "snapshots": {
+    "baseline": {
+      "path": "artifacts/tool-ambiguity-holdout-results-20261009.json",
+      "sha256": "6da5b5506bd744edceb7ef510ec05ff58bbb01f3a6cbd453bf76833e4bef6cc1",
+      "manifestSha256": "96c6a03445dcefb41e1681600d8e748c69ae75f50271e82c95585b1728c50c1c",
+      "counts": {
+        "execution-boundary-false-positive": 20,
+        "matches-frozen-expectation": 34,
+        "execution-boundary-false-negative": 3,
+        "app-restriction-not-enforced": 1
+      },
+      "moduleDigests": {
+        "../platform/request-clause-signals.mjs": "323be5e7be592490713c51a33b7512c38348a32db677b4d1873782c27184d080",
+        "../tools/tool-discovery.mjs": "d3f14eb736feda59b9792410fea153779475e84b1e8e3b579687a5246e9eb5a2",
+        "../tools/tool-catalog.mjs": "5e02cc71568a2d1da0dff04bb8fc2e25dab69b9d63290cd7cb37086e687992e8",
+        "../tools/browser-intent-policy.mjs": "4fc3bc211be1fab8fd7455945ac9e2de2362fa29a0483a9b86fdf26768711e28"
+      }
+    },
+    "firstpost": {
+      "path": "artifacts/tool-ambiguity-holdout-post-20261009.json",
+      "sha256": "b70b0fdba76cd3840e7a62f24dc670ab4265099de57a6eea43c0b9f98191b295",
+      "manifestSha256": "96c6a03445dcefb41e1681600d8e748c69ae75f50271e82c95585b1728c50c1c",
+      "counts": {
+        "execution-boundary-false-positive": 12,
+        "matches-frozen-expectation": 43,
+        "execution-boundary-false-negative": 3
+      },
+      "moduleDigests": {
+        "../platform/request-clause-signals.mjs": "39fa8b150f37ea6e7fb17cb00e5c50877da37192d7fb894e2eeae31e0c0028fe",
+        "../tools/tool-discovery.mjs": "d3f14eb736feda59b9792410fea153779475e84b1e8e3b579687a5246e9eb5a2",
+        "../tools/tool-catalog.mjs": "5e02cc71568a2d1da0dff04bb8fc2e25dab69b9d63290cd7cb37086e687992e8",
+        "../tools/browser-intent-policy.mjs": "e4d069001c97cc58b9c36fef11fd3dc348668f48a915ce973682b86f9729b6cd"
+      }
+    },
+    "finalpost": {
+      "path": "artifacts/tool-ambiguity-holdout-finalpost-20261009.json",
+      "sha256": "7468a3ec37c2d345c248772d80f29f8a5979014ae66cfb736b7237faec95b26a",
+      "manifestSha256": "96c6a03445dcefb41e1681600d8e748c69ae75f50271e82c95585b1728c50c1c",
+      "counts": {
+        "execution-boundary-false-positive": 13,
+        "matches-frozen-expectation": 42,
+        "execution-boundary-false-negative": 3
+      },
+      "moduleDigests": {
+        "../platform/request-clause-signals.mjs": "0fc7c49988ce4095598dabd69e43729951509482f71846f13de04d7add3ee947",
+        "../tools/tool-discovery.mjs": "d3f14eb736feda59b9792410fea153779475e84b1e8e3b579687a5246e9eb5a2",
+        "../tools/tool-catalog.mjs": "5e02cc71568a2d1da0dff04bb8fc2e25dab69b9d63290cd7cb37086e687992e8",
+        "../tools/browser-intent-policy.mjs": "e4d069001c97cc58b9c36fef11fd3dc348668f48a915ce973682b86f9729b6cd"
+      }
+    }
+  },
+  "byCategory": {
+    "negation": {
+      "baseline": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "neg-01",
+          "neg-02",
+          "neg-05"
+        ]
+      },
+      "firstpost": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "neg-01",
+          "neg-02",
+          "neg-05"
+        ]
+      },
+      "finalpost": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "neg-01",
+          "neg-02",
+          "neg-05"
+        ]
+      }
+    },
+    "quoted-speech": {
+      "baseline": {
+        "total": 8,
+        "matches": 1,
+        "mismatches": [
+          "quote-01",
+          "quote-02",
+          "quote-03",
+          "quote-04",
+          "quote-05",
+          "quote-06",
+          "quote-07"
+        ]
+      },
+      "firstpost": {
+        "total": 8,
+        "matches": 7,
+        "mismatches": [
+          "quote-06"
+        ]
+      },
+      "finalpost": {
+        "total": 8,
+        "matches": 7,
+        "mismatches": [
+          "quote-06"
+        ]
+      }
+    },
+    "conditional-hypothetical": {
+      "baseline": {
+        "total": 8,
+        "matches": 2,
+        "mismatches": [
+          "cond-01",
+          "cond-02",
+          "cond-03",
+          "cond-04",
+          "cond-05",
+          "cond-06"
+        ]
+      },
+      "firstpost": {
+        "total": 8,
+        "matches": 2,
+        "mismatches": [
+          "cond-01",
+          "cond-02",
+          "cond-03",
+          "cond-04",
+          "cond-05",
+          "cond-06"
+        ]
+      },
+      "finalpost": {
+        "total": 8,
+        "matches": 2,
+        "mismatches": [
+          "cond-01",
+          "cond-02",
+          "cond-03",
+          "cond-04",
+          "cond-05",
+          "cond-06"
+        ]
+      }
+    },
+    "affirmative-contrast": {
+      "baseline": {
+        "total": 6,
+        "matches": 6,
+        "mismatches": []
+      },
+      "firstpost": {
+        "total": 6,
+        "matches": 6,
+        "mismatches": []
+      },
+      "finalpost": {
+        "total": 6,
+        "matches": 6,
+        "mismatches": []
+      }
+    },
+    "double-negation": {
+      "baseline": {
+        "total": 6,
+        "matches": 5,
+        "mismatches": [
+          "double-04"
+        ]
+      },
+      "firstpost": {
+        "total": 6,
+        "matches": 5,
+        "mismatches": [
+          "double-04"
+        ]
+      },
+      "finalpost": {
+        "total": 6,
+        "matches": 4,
+        "mismatches": [
+          "double-04",
+          "double-05"
+        ]
+      }
+    },
+    "mixed-language": {
+      "baseline": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "mixed-04",
+          "mixed-05",
+          "mixed-06"
+        ]
+      },
+      "firstpost": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "mixed-04",
+          "mixed-05",
+          "mixed-06"
+        ]
+      },
+      "finalpost": {
+        "total": 6,
+        "matches": 3,
+        "mismatches": [
+          "mixed-04",
+          "mixed-05",
+          "mixed-06"
+        ]
+      }
+    },
+    "history-switch": {
+      "baseline": {
+        "total": 6,
+        "matches": 4,
+        "mismatches": [
+          "history-01",
+          "history-06"
+        ]
+      },
+      "firstpost": {
+        "total": 6,
+        "matches": 6,
+        "mismatches": []
+      },
+      "finalpost": {
+        "total": 6,
+        "matches": 6,
+        "mismatches": []
+      }
+    },
+    "window-restrictions": {
+      "baseline": {
+        "total": 8,
+        "matches": 6,
+        "mismatches": [
+          "window-04",
+          "window-07"
+        ]
+      },
+      "firstpost": {
+        "total": 8,
+        "matches": 7,
+        "mismatches": [
+          "window-07"
+        ]
+      },
+      "finalpost": {
+        "total": 8,
+        "matches": 7,
+        "mismatches": [
+          "window-07"
+        ]
+      }
+    },
+    "lexical-ambiguity": {
+      "baseline": {
+        "total": 4,
+        "matches": 4,
+        "mismatches": []
+      },
+      "firstpost": {
+        "total": 4,
+        "matches": 4,
+        "mismatches": []
+      },
+      "finalpost": {
+        "total": 4,
+        "matches": 4,
+        "mismatches": []
+      }
+    }
+  },
+  "caseOutcomes": [
+    {"id":"neg-01","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"neg-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"neg-03","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"neg-04","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"neg-05","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"neg-06","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-01","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-03","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-04","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-05","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-06","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"quote-07","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"quote-08","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"cond-01","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-03","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-04","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-05","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-06","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"cond-07","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"cond-08","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"contrast-01","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"contrast-02","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"contrast-03","expected":{"allowLocalBrowser":true,"existingChromeAllowed":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"contrast-04","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["firefox.exe"],"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["firefox.exe"],"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["firefox.exe"],"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"contrast-05","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"contrast-06","expected":{"allowLocalBrowser":false,"explicitBrowserTask":true},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"double-01","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"double-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"double-03","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"double-04","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"double-05","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"double-06","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"mixed-01","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"mixed-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"mixed-03","expected":{"allowLocalBrowser":true,"existingChromeAllowed":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"mixed-04","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]}},
+    {"id":"mixed-05","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]}},
+    {"id":"mixed-06","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[{"field":"allowLocalBrowser","expected":true,"actual":false}]}},
+    {"id":"history-01","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"history-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"history-03","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"history-04","expected":{"allowLocalBrowser":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"history-05","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"history-06","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":true},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"window-01","expected":{"allowLocalBrowser":true,"existingChromeAllowed":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"window-02","expected":{"allowLocalBrowser":true,"existingChromeAllowed":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"window-03","expected":{"allowLocalBrowser":true,"existingChromeAllowed":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"window-04","expected":{"allowLocalBrowser":true,"existingChromeAllowed":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"existingChromeAllowed","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"window-05","expected":{"allowLocalBrowser":true,"existingChromeAllowed":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"excludedBrowserExecutables":["chrome.exe"],"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"window-06","expected":{"allowLocalBrowser":true,"existingChromeAllowed":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"window-07","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[{"field":"allowLocalBrowser","expected":false,"actual":true}]}},
+    {"id":"window-08","expected":{"allowLocalBrowser":true,"existingChromeAllowed":true},"baseline":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":true,"explicitBrowserTask":true,"inherited":false},"existingChromeAllowed":true,"mismatches":[]}},
+    {"id":"candidate-01","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"candidate-02","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"candidate-03","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}},
+    {"id":"candidate-04","expected":{"allowLocalBrowser":false},"baseline":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"firstpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]},"finalpost":{"actualIntent":{"allowLocalBrowser":false,"explicitBrowserTask":false,"inherited":false},"existingChromeAllowed":false,"mismatches":[]}}
+  ]
+}

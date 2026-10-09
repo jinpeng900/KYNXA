@@ -113,6 +113,17 @@ var secondSegment = new AssistantSegment("fixture-round-2", 2, 2, "commentary", 
 var finalSegment = secondSegment with { Phase = "final_answer", Status = "completed", Content = "这是核验后的最终答案。" };
 ChatStreamEvent SegmentEvent(AssistantSegment segment) => Event("assistant_segment") with { Segment = segment, ToolStreamProtocol = 3 };
 var finalSegmentEvent = Event("completed", content: finalSegment.Content) with { AssistantSegments = [firstCompleted, finalSegment], ToolStreamProtocol = 3 };
+// A repaired model step keeps its interrupted trace while the final answer must be complete.
+// 已修复模型步骤保留中断轨迹，最终回答自身仍必须完整结束。
+var repairedSegment = firstCompleted with { Status = "interrupted" };
+var repairedTerminal = finalSegmentEvent with { AssistantSegments = [repairedSegment, finalSegment] };
+Check((await Read(prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(repairedSegment)) +
+    Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment)) + Frame(repairedTerminal)))[^1].Type == "completed",
+    "A safely recovered earlier step prevented the completed final answer");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted)) +
+    Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment with { Status = "interrupted" })) +
+    Frame(finalSegmentEvent with { AssistantSegments = [firstCompleted, finalSegment with { Status = "interrupted" }] })),
+    "An interrupted final answer was accepted as completed");
 string publicTimelineWire = "";
 using (var timelineArguments = JsonDocument.Parse("{\"url\":\"https://example.invalid\"}"))
 {

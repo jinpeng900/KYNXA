@@ -38,14 +38,21 @@ function assertPairs(protocol, messages) {
 for (const protocol of protocols) {
   test(`${protocol} compacts old archived results, keeps native pairing/reasoning and continues without replay`, async t => {
     const f = await toolFixture(t), context = await f.context('ask');
-    await writeFile(join(f.workspace, 'long.txt'), 'bounded result words with quotes " and emoji 😀\n'.repeat(260));
-    const original = new Map(), snapshots = [], metrics = [], saved = [];
+    // Leave room for one complete broker projection plus older paired receipts; three full results still exceed the budget.
+    // 为一个完整代理投影及旧调用配对回执留出空间；三个完整结果仍超过既定预算。
+    await writeFile(join(f.workspace, 'long.txt'), 'bounded result words with quotes " and emoji 😀\n'.repeat(160));
+    const original = new Map(), originalWire = new Map(), snapshots = [], metrics = [], saved = [];
     let executions = 0, requests = 0;
     const initial = [{ role: 'user', content: 'Read this mounted file three times with distinct tool calls.' }];
+    let uncompactedMessages = initial;
     const outcome = await runToolLoop({ protocol, messages: initial, system: 'Keep the fixed permission policy.', declarations: [],
       inputBudgetTokens: 9500, context, signal: new AbortController().signal, emit: () => {}, saveActivity: async activity => saved.push(activity),
       onContextCompacted: item => metrics.push(item), service: { execute: async (...args) => {
-        executions++; const result = await f.service.execute(...args); original.set(args[1].id, result); return result;
+        executions++; const result = await f.service.execute(...args); original.set(args[1].id, result);
+        uncompactedMessages = appendToolResults(protocol, uncompactedMessages, nativeTurn(protocol, [args[1]], executions),
+          [{ call: args[1], result }]);
+        originalWire.set(args[1].id, outputs(protocol, uncompactedMessages).at(-1).text);
+        return result;
       } }, requestTurn: async messages => {
         requests++; assert.ok(estimateToolMessageTokens(messages, 'Keep the fixed permission policy.') <= 9500);
         assertPairs(protocol, messages); snapshots.push(structuredClone(messages));
@@ -55,10 +62,17 @@ for (const protocol of protocols) {
     assert.equal(outcome.content, 'Continued after compaction.'); assert.equal(executions, 3); assert.equal(requests, 4);
     assert.deepEqual(saved.map(item => item.status), ['running', 'completed', 'running', 'completed', 'running', 'completed']);
     assert.ok(metrics.some(item => item.compactedToolResultCount > 0));
-    const last = snapshots.at(-1), compacted = outputs(protocol, last).filter(item => item.text !== original.get(item.id).content);
+    assert.ok(estimateToolMessageTokens(uncompactedMessages, 'Keep the fixed permission policy.') > 9500,
+      'the fixture produces real pressure after accounting for native broker projection');
+    const last = snapshots.at(-1), compacted = outputs(protocol, last).filter(item => item.text !== originalWire.get(item.id));
     assert.ok(compacted.length > 0);
     const newest = outputs(protocol, last).at(-1);
-    assert.equal(newest.text, original.get(newest.id).content, 'most recent result stays verbatim when it fits');
+    assert.equal(newest.text, originalWire.get(newest.id), 'most recent native result stays verbatim when it fits');
+    const newestEnvelope = JSON.parse(newest.text);
+    assert.equal(newestEnvelope.status, 'completed');
+    assert.deepEqual(newestEnvelope.executionEnvironment, original.get(newest.id).executionEnvironment);
+    assert.equal(newestEnvelope.output, original.get(newest.id).content, 'the complete newest business output is preserved');
+    assert.ok(compacted.every(item => item.id !== newest.id), 'older results are compacted before the newest complete observation');
     for (const item of compacted) {
       const envelope = JSON.parse(item.text);
       assert.equal(envelope.contextCompacted, true);

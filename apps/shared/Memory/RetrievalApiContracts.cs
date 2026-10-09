@@ -14,7 +14,8 @@ public sealed record RetrievalLocalSettings(bool Enabled, string Semantic, strin
     string VectorBackend = "sqlite", string? RerankProfileId = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingDevicePolicy = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalIndexingLimits? Indexing = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalAnnSettings? Ann = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalAnnSettings? Ann = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null);
 
 // Missing optional settings stay omitted, so an older settings screen cannot reset backend-owned policy.
 // 可选设置未指定时保持省略，防止旧设置界面把后端设备策略与容量配置重置为默认值。

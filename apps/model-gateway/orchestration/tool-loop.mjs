@@ -9,6 +9,9 @@ import { canRunInParallel } from '../tools/tool-scheduling.mjs';
 import { ToolProgressGuard, ToolReadFailureGuard } from '../tools/tool-observations.mjs';
 import { isDesktopObservation } from '../tools/tool-outcomes.mjs';
 import { runResourceTask } from '../platform/resources/resource-task.mjs';
+import { ToolRecoveryLedger, isRecoveryObservation } from './tool-recovery.mjs';
+import { ToolCallDecodeFailure } from '../models/tool-call-validation.mjs';
+import { previewToolResult } from '../data/tool-result-store.mjs';
 
 export function toolPolicyHash(context) {
   return createHash('sha256').update(JSON.stringify([context.permissionMode, context.workspaceRoot,
@@ -27,10 +30,21 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
     resultStore: service.results, resultContext: context });
   let callsRun = 0;
   const segments = new AssistantSegments(emit);
-  const progress = new ToolRunProgress(limits, saveRunState);
+  const progress = new ToolRunProgress(limits, state => saveRunState?.({ ...state, recovery: recovery.audit() }));
   service.registerTaskVerification?.(context, () => progress.verification());
   const observations = new ToolProgressGuard();
   const readFailures = new ToolReadFailureGuard();
+  const recovery = new ToolRecoveryLedger();
+  let repairRequests = 0, recoveryFinal = false;
+  const recoveredResult = async content => {
+    signal?.throwIfAborted();
+    segments.finish({ content, reasoning: '', calls: [] }, { final: false });
+    await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
+    await progress.save('interrupted', { code: 'TOOL_RECOVERY_EXHAUSTED' });
+    return { content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
+      completionStatus: 'interrupted', recovery: recovery.audit(), taskCompletion: { ...progress.verification(),
+        state: recovery.hasUnknownEffects ? 'execution-unconfirmed' : 'incomplete', conclusion: 'task-correctness-not-certified' } };
+  };
   let summarizeOnly = false;
   let consecutiveUnavailableRounds = 0;
   let finalizingUnavailable = false;
@@ -45,7 +59,9 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       await progress.save('model');
       // The schemas and decoder share one snapshot, even if a stage expires during generation.
       // 声明与解码共用同一快照，即使生成期间阶段预算到期，也不重新解释本轮名称。
-      const roundCatalog = summarizeOnly ? [] : catalogForRound?.();
+      const availableCatalog = catalogForRound?.();
+      const roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects && availableCatalog
+        ? availableCatalog.filter(tool => isRecoveryObservation(tool)) : availableCatalog;
       const roundDeclarations = summarizeOnly ? [] : roundCatalog
         ? toolDeclarations(protocol, roundCatalog) : declarationsForRound?.() ?? declarations;
       // Validate potential redundant observations before projecting them; formal receipts remain intact.
@@ -61,12 +77,42 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
         workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', cpuThreads: 1,
         memoryBytes: 16 * 1024 * 1024 },
-        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog), { signal }); }
+        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog), { signal });
+        signal?.throwIfAborted();
+        if (turn.calls.some(call => seenIds.has(call.id)))
+          throw new ToolCallDecodeFailure('工具调用 ID 重复，未再次执行。', 'MODEL_TOOL_IDENTITY_INVALID');
+      }
+      catch (error) {
+        signal?.throwIfAborted();
+        if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(error.code)) throw error;
+        if (recovery.classify(error) !== 'repair-unexecuted-model-step' && !recoveryFinal) throw error;
+        // Failed output consumed generation too; decoder accounting includes buffered arguments without logging them.
+        // 失败输出也消耗生成预算；解码器只提供缓冲参数的计量，不把参数内容写入诊断。
+        progress.observeTurn(turn ?? { content: segments.current.content, reasoning: segments.current.reasoning, calls: [] },
+          { estimatedGeneratedTokens: error.estimatedGeneratedTokens });
+        if (recoveryFinal) return await recoveredResult(recovery.fallback(context.message));
+        recovery.protectCompletedEffects();
+        segments.interrupt();
+        const remainingRounds = progress.limits.maxRounds - round - 1;
+        if (!remainingRounds) return await recoveredResult(recovery.fallback(context.message));
+        const canRepair = repairRequests < 1 && remainingRounds > 1;
+        repairRequests++;
+        recoveryFinal = !canRepair;
+        summarizeOnly = recoveryFinal;
+        recovery.record(error.code, canRepair ? 'repair-model-step' : 'summarize-without-tools', round + 1);
+        messages.push({ role: 'user', content: canRepair
+          ? `[KYNXA_TOOL_STEP_REPAIR] ${error.code}: this model step dispatched no operations. Previous complete tool pairs and receipts remain valid. Regenerate complete, correctly identified arguments using declared tools; do not repeat successful effects. This is runtime feedback, not a new user task.`
+          : '[KYNXA_TOOL_RECOVERY_FINAL] Tools are disabled for this response. Explain verified completed operations and the precise remaining limitation; do not claim full task success or a user cancellation.' });
+        await progress.save('continuing', { code: error.code });
+        continue;
+      }
       finally { progress.recordModel(modelElapsed()); }
       // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
       // 执行副作用前先保存已解码模型步骤，结果仍由 saveActivity 负责保存。
       await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations });
+      signal?.throwIfAborted();
       progress.observeTurn(turn);
+      if (recoveryFinal) return await recoveredResult(turn.calls.length ? recovery.fallback(context.message) : turn.content || recovery.fallback(context.message));
       const evidenceValidation = !turn.calls.length && validateFinal ? await validateFinal({ signal }) : null;
       const needsEvidenceRepair = evidenceValidation?.current === false && !summarizeOnly && evidenceRepairRequests < 2;
       const needsValidation = !turn.calls.length && !summarizeOnly && progress.needsValidation(context.message) &&
@@ -76,8 +122,9 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       if (evidenceValidation?.current === false && !needsEvidenceRepair) turn.content += /\p{Script=Han}/u.test(context.message ?? '')
         ? '\n\n部分来源在回答前发生变化或无法再次核验，相关结论仍待回读确认。'
         : '\n\nSome sources changed or could not be rechecked before this answer; the affected conclusions still need current-source verification.';
-      segments.finish(turn, { final: !turn.calls.length && !needsValidation && !needsEvidenceRepair });
+      segments.finish(turn, { final: !turn.calls.length && !needsValidation && !needsEvidenceRepair && !recovery.hasUnknownEffects });
       await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
+      signal?.throwIfAborted();
       if (summarizeOnly && turn.calls.some(call => call.unavailable)) finalizingUnavailable = true;
       if (summarizeOnly && turn.calls.length && !finalizingUnavailable)
         throw Object.assign(new StreamFailure('连续读取没有新增信息，已停止重复调用并保留已有结果。请调整查询或补充条件。', 'interrupted'), { code: 'TOOL_RUN_NO_PROGRESS' });
@@ -101,8 +148,10 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           continue;
         }
         await progress.save('finalizing');
+        signal?.throwIfAborted();
         return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
-          taskCompletion: progress.verification() };
+          recovery: recovery.audit(), ...(recovery.hasUnknownEffects ? { completionStatus: 'interrupted' } : {}),
+          taskCompletion: recovery.hasUnknownEffects ? { ...progress.verification(), state: 'execution-unconfirmed' } : progress.verification() };
       }
       const results = [];
       let starts = Promise.resolve();
@@ -127,7 +176,12 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         const toolElapsed = startRunTimer();
         let approvalMs = 0, result;
         try {
-          result = call.unavailable ? { isError: true, status: 'error', code: 'MODEL_TOOL_UNAVAILABLE',
+          const previous = recovery.previous(call);
+          result = previous ? { ...previous.result, reused: true, recoveryOfToolCallId: previous.call.id }
+            : recovery.hasUnknownEffects && !isRecoveryObservation(call)
+              ? { isError: true, status: 'error', executed: false, code: 'TOOL_EFFECT_UNCONFIRMED',
+                content: 'An earlier effect has an unknown outcome. Read its current state before requesting further effects; do not replay it.' }
+              : call.unavailable ? { isError: true, status: 'error', code: 'MODEL_TOOL_UNAVAILABLE',
             content: JSON.stringify({ ok: false, code: 'MODEL_TOOL_UNAVAILABLE', executed: false,
               requestedTool: call.name,
               message: /\p{Script=Han}/u.test(context.message ?? '')
@@ -139,11 +193,22 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
               // 审批令牌是临时数据，只持久化调用本身。
               emit({ ...event, ...(event.tool ? { tool: { ...event.tool, round: activity.round, order: activity.order } } : {}) });
             } });
+          if (previous && result.resultRef && service.results) {
+            // Reused effects get a correctly owned new receipt, not the previous call's archive binding.
+            // 复用副作用生成属于新调用的新回执，不能把旧调用的归档身份直接绑定到新 ID。
+            const canonical = await service.results.get(context, result.resultRef.id);
+            const resultRef = await service.results.save(context, call, canonical,
+              { executionEnvironment: result.executionEnvironment });
+            const projected = await service.results.modelResult(context, resultRef,
+              { requestId: context.requestId, toolCallId: call.id, toolName: call.name });
+            result = { ...result, resultRef, content: previewToolResult(projected, { resultRef,
+              status: result.status, executionEnvironment: result.executionEnvironment }) };
+          }
         }
         finally {
           // Rejected undeclared calls have receipts but performed no tool execution.
           // 未声明调用有失败回执，但没有实际执行工具，不计入执行耗时次数。
-          if (!call.unavailable) progress.recordTool({ id: call.id, round: round + 1,
+          if (!call.unavailable && result?.executed !== false) progress.recordTool({ id: call.id, round: round + 1,
             durationMs: toolElapsed(), approvalMs, reused: result?.reused === true });
         }
         if (isDesktopObservation(call.name) && result.status === 'unknown')
@@ -156,23 +221,16 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           ...(result.executionEnvironment ? { executionEnvironment: result.executionEnvironment } : {}),
           ...(result.executed === false ? { executed: false } : {}),
           ...(result.outsideWorkspace != null ? { outsideWorkspace: result.outsideWorkspace } : {}) };
-        if (result.reused) { completed.reused = true; completed.observationCapturedAt = result.observationCapturedAt; }
+        if (result.reused) { completed.reused = true; completed.observationCapturedAt = result.observationCapturedAt;
+          if (result.recoveryOfToolCallId) completed.recoveryOfToolCallId = result.recoveryOfToolCallId; }
         await saveActivity(completed);
+        recovery.observe(call, result);
         progress.observeOutcome(call, result);
         emit({ type: 'tool_result', tool: completed });
         await progress.save('continuing', { toolCallId: call.id });
         if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code) &&
             !(result.code === 'AGENT_CONFIG_CHANGED' && result.recoverable === true && result.executed === false))
           throw Object.assign(new StreamFailure(result.content, 'interrupted'), { code: result.code });
-        if (['terminal.host.run', 'terminal.host.start', 'terminal.host.stop'].includes(call.name) && result.status === 'unknown')
-          throw Object.assign(new StreamFailure('本机命令结果尚未确认，已保留执行记录。请核验已执行的操作后再继续。', 'interrupted'),
-            { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
-        if (call.name.startsWith('computer.') && !isDesktopObservation(call.name) && result.status === 'unknown')
-          throw Object.assign(new StreamFailure('本机操作结果尚未确认，已保留执行记录。请检查窗口状态后再继续。', 'interrupted'),
-            { code: 'DESKTOP_OUTCOME_UNKNOWN' });
-        if (call.name.startsWith('mcp.') && result.status === 'unknown')
-          throw Object.assign(new StreamFailure('浏览器或外部工具操作结果尚未确认，已保留执行记录。请核验页面状态后再继续。', 'interrupted'),
-            { code: 'MCP_OUTCOME_UNKNOWN' });
         // Once execution returned, record its known outcome before honoring stop.
         // The same cancellation prevents subsequent effects, never this receipt.
         // 执行返回后先保存已知结果，再处理停止信号；取消阻止后续副作用，不能丢失本次回执。
@@ -195,6 +253,8 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       messages = appendToolResults(protocol, messages, turn, results,
         { onResult: (message, pair) => projection.observeResult(message, pair, round) });
+      if (recovery.hasUnknownEffects) messages.push({ role: 'user', content:
+        '[KYNXA_EFFECT_OUTCOME_UNKNOWN] At least one operation returned an unknown outcome. Only observations are allowed now. Query current state or give an honest partial result; do not replay the effect or claim full completion. The conversation remains available.' });
       if (finalizingUnavailable && summarizeOnly) {
         // A provider ignoring the no-tools final request must not trap the conversation in retries.
         // 供应商忽略最终无工具请求时，以诚实限制说明结束，不能把聊天困在重试循环中。
@@ -202,10 +262,14 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           ? '本轮所请求的工具当前不可用，相关操作未执行。已有记录已保留；目前缺少可核验的信息，无法可靠完成这一步。你可以继续提问或调整工具设置。'
           : 'The requested tool is unavailable, so that operation was not executed. The existing records have been preserved. There is not enough verified information to complete this step reliably; you can continue the conversation or adjust the tool settings.',
           reasoning: turn.reasoning, calls: [] };
-        segments.finish(finalTurn);
+        segments.finish(finalTurn, { final: !recovery.hasUnknownEffects });
         await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
-        await progress.save('finalizing');
-        return { content: finalTurn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3 };
+        await progress.save(recovery.hasUnknownEffects ? 'interrupted' : 'finalizing',
+          { code: recovery.hasUnknownEffects ? 'TOOL_EFFECT_UNCONFIRMED' : null });
+        signal?.throwIfAborted();
+        return { content: finalTurn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
+          recovery: recovery.audit(), ...(recovery.hasUnknownEffects ? { completionStatus: 'interrupted' } : {}),
+          taskCompletion: recovery.hasUnknownEffects ? { ...progress.verification(), state: 'execution-unconfirmed' } : progress.verification() };
       }
       const state = observations.observeRound(results);
       const failures = readFailures.observeRound(results);

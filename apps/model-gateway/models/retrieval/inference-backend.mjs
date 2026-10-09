@@ -174,6 +174,10 @@ export async function loadVerifiedInferenceBackend({ device = 'cpu', deviceId = 
 export async function executeInferenceBatches(items, { batchSize = 1, batchTokenBudget = 512, tokenLengths,
   activationMemoryBytes, hiddenSize, attentionHeads,
   infer, checkCancelled = () => {}, yieldToMessages = () => Promise.resolve(), onPressure = () => {}, onMeasurement = () => {} }) {
+  if (!Array.isArray(items) || !Array.isArray(tokenLengths) || tokenLengths.length !== items.length ||
+      tokenLengths.some(length => !Number.isSafeInteger(length) || length < 1) ||
+      !Number.isSafeInteger(batchTokenBudget) || batchTokenBudget < 1)
+    throw Object.assign(new Error('Invalid token lengths or approved batch token budget.'), { code: 'INFERENCE_INVALID_BATCH' });
   const order = items.map((_, index) => index).sort((left, right) => (tokenLengths[left] - tokenLengths[right]) || left - right);
   const results = new Array(items.length);
   let offset = 0, activeBatchSize = Math.max(1, Math.min(128, batchSize)), retries = 0;
@@ -186,8 +190,13 @@ export async function executeInferenceBatches(items, { batchSize = 1, batchToken
     };
     // Padded attention tensors grow quadratically with sequence length; tokens alone are not a memory bound.
     // padding 后 attention 张量随序列长度平方增长，只有总 token 限制不能代表已批准显存边界。
-    while (count > 1 && (tokenLengths[order[offset + count - 1]] * count > batchTokenBudget ||
+    // Keep each bucket within twice its shortest sequence, then enforce the approved padded/token budgets.
+    // 每个桶最长序列不超过最短序列两倍，再按已批准的 padding/token 预算减批，避免短长输入混装。
+    while (count > 1 && (tokenLengths[order[offset + count - 1]] > tokenLengths[order[offset]] * 2 ||
+        tokenLengths[order[offset + count - 1]] * count > batchTokenBudget ||
         activationMemoryBytes && hiddenSize && attentionHeads && activationCost() > activationMemoryBytes)) count--;
+    if (tokenLengths[order[offset]] > batchTokenBudget)
+      throw Object.assign(new Error('A single inference input exceeds the approved batch token budget.'), { code: 'INFERENCE_RESOURCE_BUSY' });
     if (activationMemoryBytes && hiddenSize && attentionHeads && activationCost() > activationMemoryBytes)
       throw Object.assign(new Error('A single inference input exceeds the approved activation memory budget.'), { code: 'INFERENCE_RESOURCE_BUSY' });
     const indexes = order.slice(offset, offset + count);
@@ -203,6 +212,8 @@ export async function executeInferenceBatches(items, { batchSize = 1, batchToken
       const inputTokens = indexes.reduce((sum, index) => sum + tokenLengths[index], 0);
       onMeasurement({ latencyMs, throughputPerSecond: inputTokens * 1000 / latencyMs,
         phase: 'hot-inference', unit: 'tokens', sequenceTokens, inputTokens, paddedTokens: sequenceTokens * count, batchSize: count,
+        bucketMinimumTokens: tokenLengths[indexes[0]], paddingTokens: sequenceTokens * count - inputTokens,
+        paddingRatio: (sequenceTokens * count - inputTokens) / (sequenceTokens * count), retries,
         queueDepth: Math.max(0, order.length - offset), progress: offset / Math.max(1, order.length) });
     } catch (error) {
       checkCancelled();

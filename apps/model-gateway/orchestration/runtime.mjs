@@ -5,15 +5,18 @@ import { ConversationStore } from '../data/conversations.mjs';
 import { validateId } from '../platform/conversation-id.mjs';
 import { authorization, chatRequest } from '../models/protocols.mjs';
 import { readModelStream, StreamFailure, finalParts, checkFinish } from '../models/streaming.mjs';
+import { contextAllocation, contextAllocationAudit } from './retrieval/context-allocation.mjs';
 import { OutputBudgetError } from '../models/output-budget.mjs';
 import { MemoryService } from '../data/memory-service.mjs';
 import { buildContext, ContextError, estimateTokens, estimateMessageTokens } from '../models/context.mjs';
 
 import { ToolService } from '../tools/tool-service.mjs';
+import { isBrowserTaskFollowUp } from '../tools/browser-intent-policy.mjs';
+import { analyzeRequestClauses } from '../platform/request-clause-signals.mjs';
 import { SandboxRunner } from '../tools/sandbox-runner.mjs';
 import { DesktopRunner } from '../tools/desktop-runner.mjs';
 import { HostTerminalRunner } from '../tools/host-terminal-runner.mjs';
-import { toolDeclarations, decodeToolTurn, estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { toolDeclarations, decodeToolTurn, estimateToolMessageTokens, wireCatalog } from '../models/tool-protocols.mjs';
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { runToolLoop, toolPolicyHash } from './tool-loop.mjs';
 import { DEFAULT_TOOL_RUN_LIMITS, toolRunLimits } from './tool-run.mjs';
@@ -29,6 +32,7 @@ import { WebSearchTool } from '../tools/retrieval/web-search.mjs';
 import { isSimpleGreeting, retrievalPlan } from './retrieval/source-projection.mjs';
 import { LocalModelResourceObserver } from '../models/local-model-resources.mjs';
 import { ExternalModelAdmission } from './external-model-admission.mjs';
+import { requestInterpretation, requestInterpretationPrompt, retrievalOutcome } from './request-interpretation.mjs';
 
 // Keep presentation instructions independent of source language and the current tool catalog.
 // 回复语言遵循当前用户请求，资料语言和工具目录不能改变这一约定；无需相关的额外推导保持按需提供。
@@ -124,11 +128,22 @@ export class ModelRuntime {
     const hash = createHash('sha256').update(JSON.stringify([input.message, input.provider, input.model])).digest('hex');
     const greeting = isSimpleGreeting(input.message);
     const smallTalk = retrievalPlan(input.message).reason === 'small-talk';
+    const currentUserId = input.userMessageId ?? history.find(item => item.Id === requestId && item.Role === 'assistant')?.ReplyTo;
+    const previousUserHistory = history.filter(item => item.Role === 'user' && item.Id !== currentUserId);
+    const taskPlan = retrievalPlan(input.message, { history: previousUserHistory,
+      taskContext: previousUserHistory.at(-1)?.Content });
+    // Browser retries use the browser policy's own follow-up contract within the current task only.
+    // 浏览器重试沿用浏览器策略自己的续问合同；只传递最近任务边界后的正式原话，不能复活旧授权。
+    const previousTaskBoundary = previousUserHistory.findLastIndex(item =>
+      analyzeRequestClauses(item.Content ?? '').boundary !== 'none');
+    const currentTaskHistory = previousUserHistory.slice(Math.max(0, previousTaskBoundary));
+    const browserFollowup = !['topic-switch', 'correction'].includes(taskPlan.taskRelation.type) && isBrowserTaskFollowUp(input.message);
     const toolContext = input.permissionMode == null || greeting || smallTalk ? null : await this.tools.createContext(id,
       { requestId, permissionMode: input.permissionMode, message: input.message,
         // Reuse formal user history already loaded here; caller/model metadata cannot supply authorization.
         // 复用此处已经读取的正式用户历史，调用方或模型元数据不能提供授权。
-        previousUserMessages: history.filter(item => item.Role === 'user').map(item => item.Content ?? '') });
+        previousUserMessages: taskPlan.taskRelation?.allowsInheritance || browserFollowup
+          ? currentTaskHistory.map(item => item.Content ?? '') : [] });
     const policyHash = toolContext ? toolPolicyHash(toolContext) : null;
     const previous = history.find(item => item.Id === requestId && item.Role === 'assistant');
     if (previous && (previous.RequestHash !== hash || (previous.ToolPolicyHash && previous.ToolPolicyHash !== policyHash)))
@@ -189,11 +204,20 @@ export class ModelRuntime {
       let retrievalEvidence = { prompt: '', references: [] };
       // Reserve most of the real input window for dialogue, code and tool pairs; route evidence by task.
       // 按任务分配证据预算，使用 token 而非字符计算；为对话、代码与完整工具配对保留大部分真实输入窗口。
-      const evidenceBudgetTokens = Math.max(0, Math.min(16384, Math.floor(context.metrics.inputBudgetTokens * .12)));
       const retrievalHistory = history.filter(item => item.Id !== userId);
       const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
+      const requestedEvidencePlan = retrievalPlan(input.message, { history: retrievalHistory, taskContext: previousUser?.Content });
+      const allocation = contextAllocation(context.metrics.inputBudgetTokens, requestedEvidencePlan.taskType);
+      const evidenceBudgetTokens = allocation.requestedEvidenceTokens;
       const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
         taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
+      allocation.evidenceRequested = evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0;
+      if (toolContext?.browserTaskIntent?.inherited && !evidencePlan.taskRelation.allowsInheritance)
+        evidencePlan.taskRelation = { type: 'continue', allowsInheritance: true, reason: 'browser-task-follow-up' };
+      assistant.RequestInterpretation = requestInterpretation(evidencePlan);
+      const interpretationPrompt = greeting || smallTalk ? '' : requestInterpretationPrompt(
+        assistant.RequestInterpretation, Math.min(192, Math.floor(context.metrics.inputBudgetTokens * .03)));
+      const interpretationTokens = estimateTokens(interpretationPrompt);
       if (evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0) {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,
@@ -203,25 +227,39 @@ export class ModelRuntime {
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
+          assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
         }
       }
+      if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
       let toolSystem = '';
       if (toolContext) {
         const localOnly = retrievalEvidence.references.length > 0 && /根据资料|本地|记忆|之前|上次|工作文件|项目文件/iu.test(input.message) &&
           !/最新|联网|网上|网页|搜索|浏览器|https?:|latest|online|web|browser/iu.test(input.message);
-        await this.tools.catalog(toolContext, { connectMcp: !localOnly });
-        const schemaReserve = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40));
+        const availableTools = await this.tools.catalog(toolContext, { connectMcp: localOnly ? false : 'relevant' });
+        if (toolContext.toolIntent?.deviceState) {
+          // Discovery and the concrete host diagnostic must fit together; a percentage is not a schema contract.
+          // 发现入口与具体宿主诊断必须同时装入；比例上限不能替代实际工具 schema 的兼容要求。
+          const essentialNames = new Set(['tool.search', 'tool.load', 'tool.result.read', 'terminal.host.run']);
+          const essentialTools = wireCatalog(availableTools.filter(tool => essentialNames.has(tool.name)));
+          const essentialTokens = estimateTokens(JSON.stringify(toolDeclarations(connection.protocol, essentialTools)));
+          allocation.configuredSchemaCeilingTokens = allocation.schemaCeilingTokens;
+          allocation.schemaCeilingTokens = Math.max(allocation.schemaCeilingTokens, Math.min(essentialTokens + 64,
+            Math.floor(context.metrics.inputBudgetTokens * .65)));
+          allocation.schemaReason = 'required-current-capabilities';
+        }
+        const schemaReserve = allocation.schemaCeilingTokens;
         const evidenceReserveTokens = estimateMessageTokens([], retrievalEvidence.prompt);
         const referenceReserveTokens = Math.min(4096, context.metrics.memoryBudgetTokens ?? 0, estimateMessageTokens([], context.system));
         const maximumPromptTokens = Math.max(0, context.metrics.inputBudgetTokens - schemaReserve
           - estimateMessageTokens([{ role: 'user', content: input.message }]) - estimateMessageTokens([], MODEL_HISTORY_NOTICE)
-          - evidenceReserveTokens - referenceReserveTokens - 512);
+          - evidenceReserveTokens - referenceReserveTokens - interpretationTokens - 512);
         toolSystem = await this.tools.systemPrompt(toolContext, { maximumTokens: maximumPromptTokens });
-        const tokenBudget = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40),
+        const tokenBudget = Math.min(allocation.schemaCeilingTokens,
           context.metrics.inputBudgetTokens - estimateMessageTokens([{ role: 'user', content: input.message }])
-            - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - evidenceReserveTokens - referenceReserveTokens - 512);
+            - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - evidenceReserveTokens - referenceReserveTokens - interpretationTokens - 512);
         const recentHistory = history.slice(-12);
         catalog = this.tools.configureModelCatalog(toolContext, { protocol: connection.protocol, tokenBudget, message: input.message,
+          taskRelation: evidencePlan.taskRelation,
           historySignals: recentHistory.filter(item => item.Role === 'user' && item.Id !== userId).slice(-3)
             .map(item => String(item.Content ?? '').slice(0, 1000)),
           previousToolNames: recentHistory.filter(item => item.Role === 'assistant').flatMap(item =>
@@ -235,12 +273,14 @@ export class ModelRuntime {
       const hasToolHistory = [...projection.records.values()].some(record => record.rounds.some(round => round.calls.length));
       const webSettings = toolContext ? (await this.retrieval.effective(toolContext.projectId)).web : null;
       const composeAdditionalSystem = evidencePrompt => [catalog.length ? toolSystem : '', hasToolHistory ? MODEL_HISTORY_NOTICE : '',
-        toolContext || evidencePrompt ? REPLY_SCOPE_NOTICE : '', evidencePrompt,
+        toolContext || evidencePrompt ? REPLY_SCOPE_NOTICE : '', interpretationPrompt,
+        assistant.RetrievalOutcome ? `Automatic evidence outcome: ${JSON.stringify(assistant.RetrievalOutcome)}.` : '', evidencePrompt,
         webSettings?.language && webSettings.language !== 'auto' ? `Prefer ${webSettings.language} web sources when relevant; never rewrite evidence or fabricate translated URLs.` : '',
         greeting ? 'This is a greeting. Reply with a short, natural greeting in the user\'s language; no unsolicited capability list, retrieval, or explanation.' : '',
         smallTalk ? 'Reply with a brief, natural acknowledgement in the user\'s language; no unsolicited capability list, retrieval, or explanation.' : ''].filter(Boolean).join('\n');
       let additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
-      const schemaTokens = estimateTokens(JSON.stringify(declarations));
+      let schemaTokens = estimateTokens(JSON.stringify(declarations));
+      let finalEvidenceBudgetTokens = allocation.requestedEvidenceTokens;
       const historyBudget = context.metrics.inputBudgetTokens - estimateToolMessageTokens([{ role: 'user', content: input.message }], additionalSystem)
         - schemaTokens - estimateMessageTokens([], context.system);
       const historyCompaction = projection.compact({ inputBudgetTokens: historyBudget });
@@ -251,7 +291,7 @@ export class ModelRuntime {
         if (!catalog.length || (!(error instanceof ContextError) && !(error instanceof OutputBudgetError))) throw error;
         // Disabled/unavailable tools retain a portable low-trust chronology, never old executable schemas.
         // 工具禁用或不可用时，只保留可移植、低信任的时间线，不注入旧执行 schema。
-        catalog = []; declarations = []; projection.availableTools.clear();
+        catalog = []; declarations = []; schemaTokens = 0; projection.availableTools.clear();
         additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
         context = buildContext({ ...projectedInput, additionalSystem });
       }
@@ -259,22 +299,36 @@ export class ModelRuntime {
         // Deduplicate against the final budgeted request; keep chosen history/tool pairs unchanged afterwards.
         // 只对最终预算下真实保留的请求内容去重；之后保持已选择的历史和工具配对不变，避免证据两边都被移除。
         const baseSystem = additionalSystem ? context.system.slice(0, -additionalSystem.length).replace(/\n$/u, '') : context.system;
+        finalEvidenceBudgetTokens = Math.max(0, context.metrics.inputBudgetTokens -
+          estimateToolMessageTokens(context.messages, baseSystem) - schemaTokens - 512);
         try {
           retrievalEvidence = await this.retrieval.finalizeEvidence(toolContext ?? { conversationId: id, requestId,
             currentMessageId: userId, projectId: contextInput.projectId }, retrievalEvidence,
           { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages],
-            maximumTokens: Math.max(0, context.metrics.inputBudgetTokens - estimateToolMessageTokens(context.messages, baseSystem) - schemaTokens - 512) });
+            maximumTokens: finalEvidenceBudgetTokens });
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
+          assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
           retrievalEvidence = { prompt: '', references: [] };
         }
+        if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
         additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
         context.system = [baseSystem, additionalSystem].filter(Boolean).join('\n');
         context.metrics.estimatedInputTokens = estimateToolMessageTokens(context.messages, context.system);
       }
       assistant.EvidenceReferences = retrievalEvidence.references;
+      if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
       if (retrievalEvidence.resultRef) assistant.RetrievalResultRef = retrievalEvidence.resultRef;
+      // Record exposure separately from later model calls and execution receipts; absence is not a selection error.
+      // 记录本轮初始可见能力，与后续模型调用及执行回执分开；未展示不能算作模型错选。
+      assistant.ContextAssembly = { schemaVersion: 1, initialToolNames: catalog.map(tool => tool.name),
+        schemaTokens: catalog.length ? schemaTokens : 0, interpretationTokens,
+        evidenceTokens: estimateTokens(retrievalEvidence.prompt),
+        estimatedInputTokens: context.metrics.estimatedInputTokens,
+        budgetAudit: contextAllocationAudit(allocation, { actualEvidenceTokens: estimateTokens(retrievalEvidence.prompt),
+          actualSchemaTokens: catalog.length ? schemaTokens : 0, finalEvidenceBudgetTokens,
+          configuredEvidenceTokens: requestedEvidencePlan.evidenceTokens, retrievalBudgetAudit: retrievalEvidence.budgetAudit }) };
       if (context.summaryUpdate) await this.memory.repository.writeSummary(id, context.summaryUpdate);
       // Successful replies start timing only after the complete request is prepared; preparation failures retain their own elapsed time.
       // 成功回复只在完整请求准备完成后开始计时；准备失败仍保存该准备阶段的实际耗时。
@@ -392,8 +446,11 @@ export class ModelRuntime {
             } });
           if (!result.content.trim()) throw new StreamFailure('模型没有返回文本内容。');
           turn.assistant.DurationMs = replyDurationMs(turn.startedAtMonotonicMs);
-          await this.conversations.upsertMessage(id, { ...turn.assistant, ...runMetadata(turn, 'completed'), Content: result.content, Reasoning: result.reasoning, Status: 'completed' });
-          return includeTiming ? { content: result.content, durationMs: turn.assistant.DurationMs } : result.content;
+          const completionStatus = result.completionStatus ?? 'completed';
+          await this.conversations.upsertMessage(id, { ...turn.assistant, ...runMetadata(turn, completionStatus), Content: result.content,
+            Reasoning: result.reasoning, Status: completionStatus });
+          return includeTiming ? { content: result.content, durationMs: turn.assistant.DurationMs,
+            ...(completionStatus === 'interrupted' ? { completionStatus, taskCompletion: result.taskCompletion } : {}) } : result.content;
         }
         const request = chatRequest(connection, input.model, turn.messages, turn.requestOptions);
         // Admission covers dispatch and body consumption; denied resources must not start an upstream generation.
@@ -558,7 +615,8 @@ export class ModelRuntime {
         throwIfCancelled(); clearTimeout(timeout); await checkpoint;
         if (checkpointError) throw new StreamFailure('当前回复未能保存，请检查存储位置。');
         if (!result.content.trim()) throw new StreamFailure('模型没有返回文本内容。');
-        const completed = { ...snapshot(), ...runMetadata(turn, 'completed'), Content: result.content, Reasoning: result.reasoning, Status: 'completed' };
+        const completionStatus = result.completionStatus ?? 'completed';
+        const completed = { ...snapshot(), ...runMetadata(turn, completionStatus), Content: result.content, Reasoning: result.reasoning, Status: completionStatus };
         await this.conversations.upsertMessage(id, completed);
         return { ...result, durationMs: completed.DurationMs, contextUsage: turn.contextMetrics };
       }
