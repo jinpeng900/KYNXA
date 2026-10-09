@@ -17,7 +17,7 @@ const researchSuffix = /^\s*(?:(?:浏览器|browser)\s*)?(?:的\s*)?(?:最新(?:
 const researchPrefix = /^\s*(?:请\s*)?(?:搜索|查询|查找|检索|查|了解|研究|查看|读取|\b(?:search|find|read|inspect|research)\b|look\s+up)/iu;
 const informationalQuestion = /怎么|如何|怎样|\bhow\b/iu;
 const explicitExecutionRequest = /(?:帮我|替我|请你)\s*(?:实际|直接)?\s*(?:用|使用|操作|执行|演示|打开|启动|截图|截屏)|(?:请\s*)?(?:实际|直接)\s*(?:演示|操作|执行|用|使用)|\b(?:please\s+)?(?:actually\s+demonstrate|demonstrate|help\s+me\s+use|do\s+this\s+for\s+me)\b/iu;
-const localBrowserForbidden = new RegExp(`(?:不要|别|不必|禁止|不能|不许|不允许|不希望|避免|无需|do not|don't|never|without)[^，。；,.!?;\\n]{0,24}(?:打开|开启|启动|操作|使用|用|开|open|launch|start|use|operate|control)[^，。；,.!?;\\n]{0,16}${browserName}|(?:不用|不使用)[^，。；,.!?;\\n]{0,16}${browserName}`, 'iu');
+const localBrowserForbidden = new RegExp(`(?:不要|别|不必|禁止|不能|不许|不允许|不希望|避免|无需|do not|don't|never|without)[^，。；,.!?;\\n]{0,24}(?:打开|开启|启动|操作|使用|用|开|open|launch|start|use|operate|control)(?<objectPrefix>[^，。；,.!?;\\n]{0,16})${browserName}|(?:不用|不使用)(?<useObjectPrefix>[^，。；,.!?;\\n]{0,16})${browserName}`, 'iu');
 const browserExecutables = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe', 'chromium.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe']);
 const browserExecutableNames = new Map([['chrome', 'chrome.exe'], ['edge', 'msedge.exe'], ['firefox', 'firefox.exe'],
   ['chromium', 'chromium.exe'], ['brave', 'brave.exe'], ['opera', 'opera.exe'], ['vivaldi', 'vivaldi.exe']]);
@@ -36,9 +36,10 @@ function forbiddenBrowserExecutables(clause) {
   const restriction = localBrowserForbidden.exec(instruction);
   if (!restriction) return [];
   const objectSuffix = instruction.slice(restriction.index + restriction[0].length);
-  // Scope follows the prohibited object, not explanatory words elsewhere in the clause.
-  // 限制范围跟随被禁止的对象，不能由子句其他位置的解释性词语扩大或缩小。
-  const objectBeforeBrowser = /窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b/iu.test(restriction[0]);
+  // Only text after the matched operation can name its object; preceding reasons cannot relax an app ban.
+  // 只有命中操作之后的文本可说明其对象；操作前的理由不能放宽应用禁令。
+  const objectPrefix = restriction.groups?.objectPrefix ?? restriction.groups?.useObjectPrefix ?? '';
+  const objectBeforeBrowser = /窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b/iu.test(objectPrefix);
   const objectAfterBrowser = /^\s*(?:(?:浏览器|browser)\s*)?(?:(?:的|['’]s)\s*)?(?:(?:新|当前|已有|已打开|这个|该|无痕|隐私|new|current|existing|private)\s*)*(?:窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b)/iu.test(objectSuffix);
   if (objectBeforeBrowser || objectAfterBrowser) return [];
   return [...browserExecutableNames].filter(([name]) => new RegExp(`\\b${name}\\b`, 'iu').test(restriction[0]))

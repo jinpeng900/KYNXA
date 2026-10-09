@@ -305,3 +305,42 @@ test('bounded diversity keeps supplementary roles available behind many distinct
     retrievalIntent: { domain: 'code', path: 'src/tasks.mjs' } });
   assert.equal(precise.items[0], fragments[0]);
 });
+
+test('Windows source paths retain their drive and filename discussions do not schedule source reads', () => {
+  const message = '请看 C:\\Projects\\KYNXA\\src\\worker.ts 的取消逻辑。';
+  const windows = retrievalPlan(message);
+  assert.equal(windows.path, 'c:/projects/kynxa/src/worker.ts');
+  assert.equal(windows.originalQuery, message);
+  assert.equal(windows.shouldRetrieve, true);
+  assert.equal(windows.domain, 'mixed');
+  const example = '讨论一个示例文件名“src/ghost.ts”的命名风格，不要读取它。';
+  const nameOnly = retrievalPlan(example);
+  assert.equal(nameOnly.shouldRetrieve, false);
+  assert.equal(nameOnly.originalQuery, example);
+  assert.deepEqual(nameOnly.queryDerivation.additions, []);
+  assert.equal(retrievalPlan('解释文件名“src/worker.ts”的命名风格，并检查源码实现').shouldRetrieve, true);
+  assert.equal(retrievalPlan('根据项目文档讨论示例文件名“src/ghost.ts”的命名风格').shouldRetrieve, true);
+  assert.equal(retrievalPlan('解释“src/worker.ts”的取消逻辑').shouldRetrieve, true);
+});
+
+test('successive explicit continuations retain a source anchor until an unrelated turn or boundary', () => {
+  const source = { Id: 'source-user', Role: 'user', Status: 'completed', Content: '解释 docs/design.md 的恢复步骤' };
+  const followup = { Role: 'user', Status: 'completed', Content: '继续分析它的失败原因' };
+  const message = '继续比较它们的恢复方案';
+  const plan = retrievalPlan(message, { history: [source, followup], taskContext: followup.Content });
+  assert.equal(plan.shouldRetrieve, true);
+  assert.equal(plan.originalQuery, message);
+  assert.match(plan.query, /docs\/design\.md/u);
+  assert.equal(plan.queryDerivation.additions[0].historyId, source.Id);
+  assert.equal(plan.preferredDomain, 'knowledge');
+  for (const boundary of ['换个话题，蛋糕为什么干？', '不是文档，是品牌发音', '取消全部操作', '蛋糕为什么干？']) {
+    const unrelated = retrievalPlan(message, { history: [source, { Role: 'user', Content: boundary }, followup] });
+    assert.equal(unrelated.shouldRetrieve, false, boundary);
+    assert.deepEqual(unrelated.queryDerivation.additions, [], boundary);
+  }
+  const replacement = retrievalPlan(message, { history: [source,
+    { Role: 'user', Content: '换个话题，解释 docs/new.md 的恢复方案' }, followup] });
+  assert.equal(replacement.shouldRetrieve, true);
+  assert.match(replacement.query, /docs\/new\.md/u);
+  assert.doesNotMatch(replacement.query, /docs\/design\.md/u);
+});

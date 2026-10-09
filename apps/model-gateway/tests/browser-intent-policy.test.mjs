@@ -182,7 +182,10 @@ test('an excluded browser brand does not prohibit another explicitly requested b
 
 test('app-wide restrictions survive explanatory window mentions while actual window objects stay scoped', () => {
   for (const message of ['不要使用 Chrome（窗口和标签都不用），改用本机 Edge 查看资料。',
-    'Do not use Chrome (including its tabs); use local Edge to read the page.']) {
+    'Do not use Chrome (including its tabs); use local Edge to read the page.',
+    '不要为了新建窗口启动 Chrome；打开本机 Edge。',
+    '不要因为窗口标题写着 Chrome 就启动 Chrome；使用本机 Edge。',
+    '不要为阅读页面而打开 Chrome，打开本机 Edge。']) {
     const context = { message, browserTaskIntent: inferBrowserTaskIntent(message) };
     assert.equal(context.browserTaskIntent.allowLocalBrowser, true, 'the independent Edge task remains available');
     assert.equal(canUseBrowserServer(context, existing), false, message);
@@ -194,6 +197,23 @@ test('app-wide restrictions survive explanatory window mentions while actual win
     'Do not open a new window in Chrome; refresh current Chrome.'])
     assert.equal(canUseBrowserServer({ message, browserTaskIntent: inferBrowserTaskIntent(message) }, existing), true,
       'a directly targeted window/tab is not an app-wide prohibition');
+});
+
+test('the broker rejects an app ban with a preceding window reason even when a Chrome schema is injected', async t => {
+  const f = await configuredFixture(t);
+  for (const message of ['不要为了新建窗口启动 Chrome；打开本机 Edge。',
+    '不要因为窗口标题写着 Chrome 就启动 Chrome；使用本机 Edge。',
+    '不要为阅读页面而打开 Chrome，打开本机 Edge。']) {
+    const context = await f.browserContext(message);
+    const catalog = await f.service.catalog(context, { connectMcp: true });
+    assert.equal(context.message, message, 'the current original restriction remains authoritative');
+    assert.ok(!catalog.some(tool => tool.name === listing(existing).name), 'discovery excludes the banned app');
+    f.service.catalogs.get(context).descriptors.set(listing(existing).name, listing(existing));
+    const result = await f.run(context, listing(existing).name,
+      { arguments: {}, policy: { reason: 'A window reason cannot cancel the current Chrome prohibition.' } });
+    assert.equal(result.code, 'BROWSER_TASK_NOT_AUTHORIZED', message);
+  }
+  assert.deepEqual(f.dispatched, [], 'the injected Chrome schema never causes dispatch');
 });
 
 test('explicit task boundaries clear old browser authorization before considering a new affirmative task', () => {
