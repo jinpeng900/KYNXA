@@ -33,7 +33,7 @@ public sealed partial class ShellPage
         if (_closeApproved) return;
         e.Cancel = true;
         if (_savingOnClose || StoragePaths.IsMigrating) return;
-        if (_projectActionPending || _sendingPrompt)
+        if (_projectActionPending || _sendingPrompt || _retryingReplies.Count > 0)
         {
             ProjectNotice.Message = UiText.Get("正在保存聊天，请稍后再关闭。");
             ProjectNotice.IsOpen = true;
@@ -47,6 +47,7 @@ public sealed partial class ShellPage
             CaptureStandaloneDraft();
             await _projectStore.SaveAsync(_projects);
             await _projectStore.SaveChatsAsync(_standaloneChats);
+            await MessageTimePresentation.FlushAsync();
             _closeApproved = true;
             App.Window.Close();
         }

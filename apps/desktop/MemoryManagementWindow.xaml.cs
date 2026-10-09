@@ -37,6 +37,7 @@ public sealed partial class MemoryManagementWindow : Window
         MemoryManagementViewModel? viewModel = null)
     {
         InitializeComponent();
+        AppearanceService.TrackWindow(this);
         _targets = targets.Where(target => target.Scope != MemoryScopes.User).DistinctBy(target => (target.Scope, target.Id)).ToArray();
         _initialTarget = initialTarget;
         _viewModel = viewModel ?? new MemoryManagementViewModel();
@@ -121,7 +122,7 @@ public sealed partial class MemoryManagementWindow : Window
         {
             Title = UiText.Get("KYNXA · 记忆管理");
             foreach (var button in new[] { MemoryScopeChatButton, MemoryScopeProjectButton, MemoryScopeUserButton })
-                button.Background = (Brush)Application.Current.Resources[(string)button.Tag == _scope ? "KynxaSegmentIdleBrush" : "KynxaMainBrush"];
+                button.Background = (Brush)Application.Current.Resources[(string)button.Tag == _scope ? "KynxaSelectionBrush" : "KynxaMainBrush"];
             MemoryContextPicker.Visibility = _scope == MemoryScopes.User ? Visibility.Collapsed : Visibility.Visible;
             MemoryEditorHeading.Text = UiText.Get(_viewModel.IsNew ? "新增记忆" : "编辑记忆");
             MemoryScopeLabel.Text = _viewModel.Target?.DisplayName ?? UiText.Get(_scope == MemoryScopes.Chat ? "暂无已保存的聊天" : "暂无工作");
@@ -355,7 +356,7 @@ internal sealed class MemoryDisplayRow(MemoryEntry entry, string detail) : INoti
     private bool _selected;
     public MemoryEntry Entry { get; } = entry;
     public string Detail { get; } = detail;
-    public Brush Background => (Brush)Application.Current.Resources[_selected ? "KynxaSegmentIdleBrush" : "KynxaMainBrush"];
+    public Brush Background => (Brush)Application.Current.Resources[_selected ? "KynxaSelectionBrush" : "KynxaMainBrush"];
     public event PropertyChangedEventHandler? PropertyChanged;
     public void SetSelected(bool selected)
     {

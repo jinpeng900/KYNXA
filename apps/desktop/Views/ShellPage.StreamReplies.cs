@@ -180,7 +180,9 @@ public sealed partial class ShellPage
                         pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
                         pending.Message.Error = update.Error ?? string.Empty;
                         pending.Message.DurationMs = update.DurationMs;
-                        MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
+                        MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
+                        FlushReply(pending, final: true);
+                        await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
                         break;
                 }
                 pending.Dirty = true;
@@ -211,9 +213,10 @@ public sealed partial class ShellPage
             }
             if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
             {
-                MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
+                MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                 FlushReply(pending, final: true);
                 _pendingReplies.Remove(pending.ConversationId);
+                await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
             }
             pending.Cancellation.Dispose();
             if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
@@ -255,29 +258,39 @@ public sealed partial class ShellPage
     private async void Transcript_RetryRequested(object? sender, Guid messageId)
     {
         var failed = ActiveMessages.FirstOrDefault(row => row.Message.Id == messageId);
-        if (failed is null || failed.ToolActivities.Count > 0 || IsReplyInProgress(failed.ConversationId)) return;
+        if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || failed is null ||
+            failed.ToolActivities.Count > 0 || IsReplyInProgress(failed.ConversationId)) return;
         var (chat, _) = FindChat(failed.ConversationId);
         if (chat is null || chat.Messages.LastOrDefault() != failed.Message) return;
         string? question = chat.Messages.Take(chat.Messages.Count - 1).LastOrDefault(message => message.Role == "user")?.Content;
-        if (question is null) return;
-        // Replace only the failed attempt; never add a second copy of the user's question.
-        // 只替换失败的尝试，不重复添加用户问题。
-        chat.Messages.Remove(failed.Message);
-        var pending = BeginPendingReply(chat.Id, question,
-            string.IsNullOrEmpty(failed.Message.Provider) ? _selectedModel?.ProviderId : failed.Message.Provider,
-            string.IsNullOrEmpty(failed.Message.Model) ? _selectedModel?.ModelId : failed.Message.Model, requestId: failed.Message.Id);
-        if (ActiveChatId == chat.Id)
+        if (question is null || !_retryingReplies.Add(chat.Id)) return;
+        PendingChatReply pending;
+        try
         {
-            int index = ActiveMessages.IndexOf(failed);
-            if (index >= 0)
+            // Reserve this retry across cache I/O, then recheck ownership before replacing its source row.
+            // 缓存读写期间保留重试占位，替换原消息前再次核对会话和请求归属。
+            if (!await MessageTimePresentation.ForgetAsync(chat.Id, failed.Message))
+                ShowActionFeedback(UiText.Get("回复时间未能保存到本机缓存，聊天内容不受影响。"));
+            if (_chatClosing || _savingOnClose || StoragePaths.IsMigrating || IsReplyInProgress(chat.Id) ||
+                FindChat(chat.Id).Chat != chat || chat.Messages.LastOrDefault() != failed.Message) return;
+            chat.Messages.Remove(failed.Message);
+            pending = BeginPendingReply(chat.Id, question,
+                string.IsNullOrEmpty(failed.Message.Provider) ? _selectedModel?.ProviderId : failed.Message.Provider,
+                string.IsNullOrEmpty(failed.Message.Model) ? _selectedModel?.ModelId : failed.Message.Model, requestId: failed.Message.Id);
+            if (ActiveChatId == chat.Id)
             {
-                ActiveMessages[index] = pending.Presentation;
-                ConversationMessages.ShowConversation(chat.Id, ActiveMessages.ToArray(), openAtBottom: false);
-                ScreenshotPanel.ShowConversation(chat.Id, ActiveMessages.ToArray());
+                int index = ActiveMessages.IndexOf(failed);
+                if (index >= 0)
+                {
+                    ActiveMessages[index] = pending.Presentation;
+                    ConversationMessages.ShowConversation(chat.Id, ActiveMessages.ToArray(), openAtBottom: false);
+                    ScreenshotPanel.ShowConversation(chat.Id, ActiveMessages.ToArray());
+                }
+                else UpdateConversationPresentation();
             }
-            else UpdateConversationPresentation();
+            UpdateSendButtonState();
         }
-        UpdateSendButtonState();
+        finally { _retryingReplies.Remove(chat.Id); }
         await ReceiveReplyAsync(pending);
     }
 
@@ -289,7 +302,7 @@ public sealed partial class ShellPage
         pending.Message.Reasoning = pending.Reasoning.ToString();
         pending.Message.ReasoningDurationMs = pending.ThinkingTime.ElapsedMilliseconds;
         pending.Message.Status = "interrupted";
-        MessageTimePresentation.RecordEnd(pending.Message, DateTimeOffset.UtcNow);
+        MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
         pending.Presentation.Refresh();
         pending.Cancellation.Cancel();
         RenderProjects();

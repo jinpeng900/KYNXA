@@ -23,6 +23,10 @@
     <Color x:Key="KynxaControlPressedColor">#0D000000</Color>
 
     <SolidColorBrush x:Key="KynxaTitleBarBrush" Color="{StaticResource KynxaTitleBarColor}" />
+    <SolidColorBrush x:Key="KynxaAccentBrush" Color="#4568B2" />
+    <SolidColorBrush x:Key="KynxaFocusBrush" Color="#4568B2" />
+    <SolidColorBrush x:Key="KynxaSelectionBrush" Color="#EDF2FC" />
+    <SolidColorBrush x:Key="KynxaSettingsCardBrush" Color="#F5F7FB" />
     <SolidColorBrush x:Key="KynxaSidebarBrush" Color="{StaticResource KynxaSidebarColor}" />
     <SolidColorBrush x:Key="KynxaMainBrush" Color="{StaticResource KynxaMainColor}" />
     <SolidColorBrush x:Key="KynxaSurfaceBrush" Color="{StaticResource KynxaSurfaceColor}" />

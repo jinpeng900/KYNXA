@@ -12,6 +12,8 @@
     <EnableMsixTooling>false</EnableMsixTooling>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <Compile Include="../../apps/desktop/Views/RetrievalSettingsWindow*.cs" Link="Views/%(Filename)%(Extension)" />

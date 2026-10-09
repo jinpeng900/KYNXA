@@ -2,7 +2,7 @@
 <Page x:Class="KYNXA_Desktop.Views.ShellPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:services="using:KYNXA_Desktop.Services" xmlns:controls="using:KYNXA_Desktop.Controls" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:viewModels="using:KYNXA_Desktop.ViewModels" x:Name="PageRoot" Language="zh-CN" FontFamily="{StaticResource KynxaUIFont}" FontSize="14" Foreground="{StaticResource KynxaTextBrush}" Background="{StaticResource KynxaMainBrush}" Loaded="PageRoot_Loaded" mc:Ignorable="d">
 
-    <Grid x:Name="ShellGrid" SizeChanged="ShellGrid_SizeChanged">
+    <Grid x:Name="ShellGrid" Background="{StaticResource KynxaSidebarBrush}" SizeChanged="ShellGrid_SizeChanged">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="SidebarColumn" Width="240" />
             <ColumnDefinition Width="8" />
@@ -25,6 +25,10 @@
             </Grid.RowDefinitions>
 
             <Grid x:Name="GlobalSidebarHeader" Margin="8,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <Button x:Name="CompactSidebarButton" Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Center"
                         Style="{StaticResource KynxaIconButtonStyle}" Click="SidebarToggle_Click"
                         services:UiLocalization.AutomationName="展开侧栏" services:UiLocalization.ToolTip="展开侧栏">
@@ -43,21 +47,21 @@
                         <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
                         <Border x:Name="PrimaryModeSelectionPill" Grid.ColumnSpan="2"
                                 HorizontalAlignment="Left" VerticalAlignment="Stretch"
-                                Background="{StaticResource KynxaSurfaceBrush}" CornerRadius="8"
+                                Background="{StaticResource KynxaSelectionBrush}" CornerRadius="8"
                                 IsHitTestVisible="False">
                             <Border.TranslationTransition>
                                 <Vector3Transition Duration="0:0:0.18" />
                             </Border.TranslationTransition>
                         </Border>
                         <Button x:Name="WorkModeButton" Click="WorkModeButton_Click"
-                                services:UiLocalization.AutomationName="工作模式" Style="{StaticResource KynxaSegmentButtonStyle}">
+                                Padding="6,0" services:UiLocalization.AutomationName="工作模式" Style="{StaticResource KynxaSegmentButtonStyle}">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE7F8;" FontSize="14" />
                                 <TextBlock services:UiLocalization.Text="工作" VerticalAlignment="Center" />
                             </StackPanel>
                         </Button>
                         <Button x:Name="ChatModeButton" Grid.Column="1" Click="ChatModeButton_Click"
-                                services:UiLocalization.AutomationName="聊天模式" Style="{StaticResource KynxaSegmentButtonStyle}">
+                                Padding="6,0" services:UiLocalization.AutomationName="聊天模式" Style="{StaticResource KynxaSegmentButtonStyle}">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE8BD;" FontSize="14" />
                                 <TextBlock services:UiLocalization.Text="聊天" VerticalAlignment="Center" />
@@ -65,6 +69,11 @@
                         </Button>
                     </Grid>
                 </Border>
+                <Button x:Name="CollapseSidebarButton" Grid.Column="1" Margin="4,0,0,0"
+                        Style="{StaticResource KynxaIconButtonStyle}" Click="SidebarToggle_Click"
+                        services:UiLocalization.AutomationName="收起侧栏" services:UiLocalization.ToolTip="收起侧栏">
+                    <FontIcon Glyph="&#xE76B;" FontSize="16" />
+                </Button>
             </Grid>
 
             <StackPanel x:Name="GlobalNavigationArea" Grid.Row="1" HorizontalAlignment="Stretch">
@@ -102,18 +111,18 @@
                     <!-- One opaque surface spans the chevron and content; active and hover never compound.
                          一层不透明背景同时覆盖展开箭头与内容，选中和悬停反馈不叠加。
                     -->
-                    <SolidColorBrush x:Key="WorkProjectRowBackgroundBrush" Color="#F3F2F1" />
                     <Style x:Key="WorkProjectTreeItemStyle" TargetType="TreeViewItem">
                         <Setter Property="Height" Value="40" />
                         <Setter Property="MinHeight" Value="40" />
                         <Setter Property="Padding" Value="0" />
+                        <Setter Property="Margin" Value="{StaticResource KynxaSidebarItemMargin}" />
                         <Setter Property="Background" Value="Transparent" />
                         <Setter Property="BorderThickness" Value="0" />
                         <Setter Property="FontSize" Value="14" />
                         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                         <Setter Property="FontWeight" Value="Normal" />
                         <Setter Property="GlyphBrush" Value="{StaticResource KynxaSecondaryTextBrush}" />
-                        <Setter Property="CornerRadius" Value="8" />
+                        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                         <Setter Property="VerticalContentAlignment" Value="Center" />
                         <Setter Property="Template">
@@ -141,9 +150,11 @@
                                                 <VisualState x:Name="SelectedDisabled" />
                                             </VisualStateGroup>
                                         </VisualStateManager.VisualStateGroups>
-                                        <Border x:Name="PointerRowBackground" Background="{StaticResource WorkProjectRowBackgroundBrush}"
+                                        <Border x:Name="PointerRowBackground" Background="{StaticResource KynxaSelectionBrush}"
+                                                Margin="{StaticResource KynxaSidebarSurfaceInset}"
                                                 CornerRadius="{TemplateBinding CornerRadius}" Visibility="Collapsed" IsHitTestVisible="False" />
-                                        <Border Background="{StaticResource WorkProjectRowBackgroundBrush}"
+                                        <Border x:Name="ActiveRowBackground" Background="{StaticResource KynxaSelectionBrush}"
+                                                Margin="{StaticResource KynxaSidebarSurfaceInset}"
                                                 CornerRadius="{TemplateBinding CornerRadius}" Visibility="{Binding ActiveVisibility}"
                                                 IsHitTestVisible="False" />
                                         <!-- Native names/settings keep expansion, keyboard navigation and indentation intact.
@@ -180,31 +191,35 @@
                     </Style>
                     <Style x:Key="WorkChatListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource KynxaSidebarListItemStyle}">
                         <Setter Property="AutomationProperties.Name" Value="{Binding Title}" />
+                        <Setter Property="Padding" Value="0" />
                     </Style>
                     <DataTemplate x:Key="WorkChatRowTemplate" x:DataType="viewModels:ProjectTreeEntry">
-                        <Grid Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
+                        <Grid x:Name="WorkChatRowRoot" Height="40" Tag="{x:Bind}" Background="Transparent" Unloaded="ProjectRow_Unloaded"
                               PointerEntered="ProjectRow_PointerEntered" PointerExited="ProjectRow_PointerExited"
                               GotFocus="ProjectRow_GotFocus" LostFocus="ProjectRow_LostFocus">
-                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <Border Grid.ColumnSpan="2" CornerRadius="8" Margin="-8,0,-8,0"
-                                    Background="{StaticResource KynxaControlHoverBrush}" IsHitTestVisible="False"
+                            <Border x:Name="WorkChatActiveBackground" CornerRadius="{StaticResource KynxaControlRadius}"
+                                    Margin="{StaticResource KynxaSidebarSurfaceInset}"
+                                    Background="{StaticResource KynxaSelectionBrush}" IsHitTestVisible="False"
                                     Visibility="{x:Bind ActiveVisibility, Mode=OneWay}" />
-                            <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title, Mode=OneWay}"
-                                       FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal"
-                                       LineHeight="20" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"
-                                       TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ContextTitle, Mode=OneWay}" />
-                            <Ellipse Grid.Column="1" Width="5" Height="5" Margin="8,0,0,0" VerticalAlignment="Center"
-                                     Fill="{StaticResource KynxaSecondaryTextBrush}" Visibility="{x:Bind ReplyingVisibility, Mode=OneWay}"
-                                     services:UiLocalization.ToolTip="正在回复" services:UiLocalization.AutomationName="正在回复" />
-                            <StackPanel x:Name="ProjectRowActions" Orientation="Horizontal" HorizontalAlignment="Right"
-                                        VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" Background="Transparent">
-                                <StackPanel.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></StackPanel.OpacityTransition>
-                                <Button Style="{StaticResource KynxaProjectActionButtonStyle}" Tag="{x:Bind}" Click="ProjectMore_Click"
-                                        services:UiLocalization.AutomationName="聊天操作" AutomationProperties.AutomationId="{x:Bind MoreId}"
-                                        services:UiLocalization.ToolTip="聊天操作">
-                                    <FontIcon Glyph="&#xE712;" FontSize="14" />
-                                </Button>
-                            </StackPanel>
+                            <Grid Margin="8,0,16,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <TextBlock x:Name="ProjectRowTitle" Text="{x:Bind Title, Mode=OneWay}"
+                                           FontFamily="{StaticResource KynxaUIFont}" FontSize="14" FontWeight="Normal"
+                                           LineHeight="20" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ContextTitle, Mode=OneWay}" />
+                                <Ellipse Grid.Column="1" Width="5" Height="5" Margin="8,0,0,0" VerticalAlignment="Center"
+                                         Fill="{StaticResource KynxaSecondaryTextBrush}" Visibility="{x:Bind ReplyingVisibility, Mode=OneWay}"
+                                         services:UiLocalization.ToolTip="正在回复" services:UiLocalization.AutomationName="正在回复" />
+                                <StackPanel x:Name="ProjectRowActions" Orientation="Horizontal" HorizontalAlignment="Right"
+                                            VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" Background="Transparent">
+                                    <StackPanel.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></StackPanel.OpacityTransition>
+                                    <Button Style="{StaticResource KynxaProjectActionButtonStyle}" Tag="{x:Bind}" Click="ProjectMore_Click"
+                                            services:UiLocalization.AutomationName="聊天操作" AutomationProperties.AutomationId="{x:Bind MoreId}"
+                                            services:UiLocalization.ToolTip="聊天操作">
+                                        <FontIcon Glyph="&#xE712;" FontSize="14" />
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
                         </Grid>
                     </DataTemplate>
                 </Grid.Resources>
@@ -431,7 +446,7 @@
             </Grid>
         </Grid>
 
-        <controls:ResizeGrip x:Name="SidebarGrip" Grid.Column="1" Axis="Horizontal" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
+        <controls:ResizeGrip x:Name="SidebarGrip" Grid.Column="1" Axis="Horizontal" IndicatorBrush="Transparent" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
 
         <!-- Stable main slots: top workspace, primary content and optional preview.
              主体固定为顶部工作区、主要内容以及可选预览区域。
@@ -574,7 +589,7 @@
 
                                     <controls:ResizeGrip x:Name="ComposerLeftGrip" Grid.RowSpan="2" HorizontalAlignment="Left" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerLeftGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
                                     <controls:ResizeGrip x:Name="ComposerRightGrip" Grid.RowSpan="2" HorizontalAlignment="Right" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerRightGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
-                                    <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="2" VerticalAlignment="Top" Axis="Vertical" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="2" VerticalAlignment="Top" Axis="Vertical" IndicatorBrush="Transparent" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
                                 </Grid>
                             </controls:ComposerSurface.Body>
                             <controls:ComposerSurface.Footer>

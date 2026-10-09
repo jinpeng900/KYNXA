@@ -36,5 +36,6 @@ public sealed partial class MainWindow : Window
         }
 
         RootFrame.Navigate(typeof(ShellPage));
+        Services.AppearanceService.TrackWindow(this);
     }
 }

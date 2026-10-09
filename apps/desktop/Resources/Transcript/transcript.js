@@ -9,6 +9,7 @@
   const uiStrings = {
     conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
     copied: '已复制', copyFailed: '复制失败，请重试。', jumpToLatest: '跳转到最新消息',
+    copyBlock: '复制此内容块', copyCurrentContent: '复制当前内容', blockPlainText: '文本',
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
@@ -29,8 +30,14 @@
     toolAdjustWindow: '调整窗口', toolWindowResize: '调整大小', toolWindowMaximize: '最大化', toolWindowMinimize: '最小化',
     toolWindowRestore: '恢复窗口', toolBackgroundLaunch: '后台启动', toolWindowUnresponsive: '窗口未响应',
     toolViewScreenshot: '查看截图',
-    messageSentAt: '发送时间', replyCreatedAt: '回复创建时间', replyEndedAt: '回复结束时间',
-    localEndTime: '本机记录', timeNotRecorded: '未记录',
+    messageSentAt: '发送时间', replyCompletedAt: '回复完成时间', replyEndedAt: '回复结束时间', timeNotRecorded: '未记录',
+    diagramWaiting: '等待图表代码完整…', diagramRendering: '正在绘制图表…',
+    diagramFailed: '图表未能绘制，请查看源码。', diagramUnsafe: '图表含不支持的交互或配置，已保留源码。',
+    diagramTooLarge: '图表过于复杂，已保留源码。', diagramUnsupported: '暂不支持此图表类型，已保留源码。',
+    diagramSource: '查看源码', diagramHideSource: '收起源码', diagramCopySource: '复制源码',
+    diagramZoomIn: '放大图表', diagramZoomOut: '缩小图表', diagramFit: '适应窗口',
+    diagramFullscreen: '全屏查看图表', diagramClose: '关闭图表', diagramViewport: 'Mermaid 图表，可缩放和平移',
+    diagramViewerHint: '拖动平移 · Ctrl＋滚轮缩放 · ＋／－缩放 · 0 适应窗口 · Esc 关闭',
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
@@ -115,32 +122,34 @@
     const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
     return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
   }
-  function updateMessageMetadata(entry) {
-    const message = entry.message;
+  function updateMessageTime(entry, message = entry.timeMetadata || entry.message) {
     if (!message) return;
+    // Keep only footer metadata current while selected body content retains its previous snapshot.
+    // 正文选区保留旧快照时，仅更新页脚元信息；切换语言仍使用最新结束状态。
+    entry.timeMetadata = {
+      role: message.role, streaming: message.streaming, status: message.status,
+      createdAtMs: message.createdAtMs, endRecordedAtMs: message.endRecordedAtMs
+    };
     const english = document.documentElement.lang === 'en', separator = english ? ': ' : '：';
     const user = message.role === 'user';
-    const lines = [(user ? uiStrings.messageSentAt : uiStrings.replyCreatedAt) + separator + formatMessageTime(message.createdAtMs)];
-    if (!user) {
-      const streaming = message.streaming === true || message.status === 'streaming';
-      const ended = streaming ? uiStrings.generating : formatMessageTime(message.endRecordedAtMs);
-      const recorded = !streaming && ended !== uiStrings.timeNotRecorded;
-      const qualifier = recorded ? (english ? ` (${uiStrings.localEndTime})` : `（${uiStrings.localEndTime}）`) : '';
-      lines.push(uiStrings.replyEndedAt + qualifier + separator + ended);
-      const elapsed = !streaming ? window.KynxaMessagePresentation.elapsedText(message.durationMs, uiStrings) : '';
-      if (elapsed) lines.push(elapsed);
-    }
-    // Times describe the message without becoming body text, selection content, or a guessed end time.
-    // 时间只描述消息，不进入正文与选区，也不根据耗时猜测结束时刻。
-    const description = lines.join('\n');
-    if (entry.article.title !== description) entry.article.title = description;
-    if (entry.article.getAttribute('aria-description') !== description) entry.article.setAttribute('aria-description', description);
+    const streaming = !user && (message.streaming === true || message.status === 'streaming');
+    const value = user ? message.createdAtMs : message.endRecordedAtMs;
+    const formatted = streaming ? uiStrings.timeNotRecorded : formatMessageTime(value);
+    const label = user ? uiStrings.messageSentAt : message.status === 'completed' ? uiStrings.replyCompletedAt : uiStrings.replyEndedAt;
+    const text = streaming ? uiStrings.generating : label + separator + formatted;
+    // The persistent footer is outside copied content; unknown end times must never be inferred from duration.
+    // 时间常显在操作行，不进入复制正文；未知结束时刻不能根据用时推算。
+    if (entry.time.textContent !== text) entry.time.textContent = text;
+    if (formatted !== uiStrings.timeNotRecorded) {
+      const dateTime = new Date(value).toISOString();
+      if (entry.time.getAttribute('datetime') !== dateTime) entry.time.setAttribute('datetime', dateTime);
+    } else if (entry.time.hasAttribute('datetime')) entry.time.removeAttribute('datetime');
   }
   function localizeEntry(entry) {
     localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
-      updateMessageMetadata(entry);
+      updateMessageTime(entry);
       setStatusText(entry, statusText(entry.message));
       refreshElapsedText(entry);
     }
@@ -152,8 +161,12 @@
   }
   function localizeCopyButton(entry) {
     const state = entry.copy.dataset.copyState;
-    entry.copy.title = state === 'success' ? uiStrings.copied : state === 'error' ? uiStrings.copyFailed : uiStrings.copy;
+    if (state) entry.copy.removeAttribute('title');
+    else entry.copy.title = uiStrings.copy;
     entry.copy.setAttribute('aria-label', state === 'success' ? uiStrings.copied : state === 'error' ? uiStrings.copyFailed : uiStrings.copyMessage);
+    const feedback = state === 'success' ? uiStrings.copied : state === 'error' ? uiStrings.copyFailed : '';
+    if (entry.copyStatus.textContent !== feedback) entry.copyStatus.textContent = feedback;
+    entry.copyStatus.dataset.copyState = state || '';
   }
   function clearCopyFeedback() {
     clearTimeout(copyFeedbackTimer);
@@ -185,6 +198,19 @@
     localizeCopyButton(copyFeedbackEntry);
     copyFeedbackTimer = setTimeout(clearCopyFeedback, 2200);
   }
+  function setAppearance(command) {
+    const variables = {
+      main: '--appearance-main', soft: '--appearance-soft', accent: '--appearance-accent', selection: '--appearance-selection',
+      text: '--appearance-text', secondary: '--appearance-secondary', border: '--appearance-border', sidebar: '--appearance-sidebar'
+    };
+    const palette = command.palette;
+    if (!palette || Object.keys(variables).some(key => typeof palette[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(palette[key]))) return;
+    // Color-only updates preserve active ranges, cached message nodes, copy feedback and scroll positions.
+    // 只更新颜色，保留活动选区、缓存消息节点、复制反馈和滚动位置。
+    const style = document.documentElement.style;
+    for (const [key, variable] of Object.entries(variables)) style.setProperty(variable, palette[key]);
+    window.kynxaDiagrams?.setAppearance(palette);
+  }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
     // Startup has no content to preserve; let its first render follow the bottom.
@@ -204,6 +230,8 @@
     // 只本地化应用控件；消息 DOM 与浏览器选择保持不变。
     for (const entry of entries.values()) localizeEntry(entry);
     for (const saved of conversations.values()) for (const entry of saved.entries.values()) localizeEntry(entry);
+    window.kynxaDiagrams?.setLanguage(uiStrings);
+    window.kynxaContentBlocks?.setLanguage(uiStrings);
     if (!localizingUi) return;
     // Labels may wrap differently. Keep the user's scroll position and suppress only
     // the automatic bottom-follow triggered by this layout, without touching ranges.
@@ -212,6 +240,10 @@
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => {
         localizingUi = false;
+        if (!activeSelection() && !pointerSelecting) {
+          window.kynxaDiagrams?.hydrate(messages);
+          window.kynxaContentBlocks?.hydrate(messages);
+        }
         if (bottomNavigationPending) followBottom();
       });
     });
@@ -221,7 +253,12 @@
   const activeSelection = () => {
     const selection = getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
-    try { return selection.getRangeAt(0).intersectsNode(messages); } catch { return false; }
+    try {
+      const range = selection.getRangeAt(0), viewer = document.querySelector('.mermaid-viewer[open]');
+      // Fullscreen SVG text needs the same protection against redraw as transcript text.
+      // 全屏图表选中的文字与聊天正文一样，需要避免重绘打断选区。
+      return range.intersectsNode(messages) || !!viewer && range.intersectsNode(viewer);
+    } catch { return false; }
   };
   function followBottom() {
     if (localizingUi || !following || activeSelection() || pointerSelecting) return;
@@ -265,6 +302,10 @@
     cancelAnimationFrame(flushFrame);
     flushFrame = requestAnimationFrame(() => {
       if (pending && !activeSelection()) { const snapshot = pending; pending = null; applyTranscript(snapshot); }
+      if (!activeSelection() && !pointerSelecting) {
+        window.kynxaDiagrams?.hydrate(messages);
+        window.kynxaContentBlocks?.hydrate(messages);
+      }
     });
   }
   function renderMath(root) {
@@ -330,15 +371,18 @@
     const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-message';
     copy.title = uiStrings.copy; copy.setAttribute('aria-label', uiStrings.copyMessage);
     copy.innerHTML = COPY_ICON;
+    const time = document.createElement('time'); time.className = 'message-time'; time.dataset.copyIgnore = '';
+    const copyStatus = document.createElement('span'); copyStatus.className = 'message-copy-status'; copyStatus.dataset.copyIgnore = '';
+    copyStatus.setAttribute('role', 'status'); copyStatus.setAttribute('aria-live', 'polite');
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
     const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
     const timeline = document.createElement('div'); timeline.className = 'assistant-timeline'; timeline.hidden = true;
-    const entry = { article, content, elapsed, body, status, actions, copy, retry,
+    const entry = { article, content, elapsed, body, status, actions, copy, copyStatus, time, retry,
       tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null };
     copy.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
     copy.addEventListener('click', () => requestCopy(entry));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
-    actions.append(copy, retry); content.append(elapsed, timeline, body, status); article.append(content, actions);
+    actions.append(copy, time, retry, copyStatus); content.append(elapsed, timeline, body, status); article.append(content, actions);
     return entry;
   }
   function updateMessage(entry, message) {
@@ -348,7 +392,7 @@
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
-    updateMessageMetadata(entry);
+    updateMessageTime(entry, message);
     const presentation = presentationFor(message); entry.presentation = presentation;
     const role = message.role === 'user' ? 'user' : 'assistant';
     entry.article.className = 'message ' + role;
@@ -539,6 +583,8 @@
   }
   function openConversation(id) {
     if (conversationId === id) return;
+    window.kynxaDiagrams?.closeViewer();
+    window.kynxaContentBlocks?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
     pending = null; clearSelection(); beginBottomNavigation();
     // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
@@ -566,6 +612,10 @@
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
+    window.kynxaContentBlocks?.disposeDetached();
+    window.kynxaContentBlocks?.hydrate(messages);
+    window.kynxaDiagrams?.disposeDetached();
+    window.kynxaDiagrams?.hydrate(messages);
     updateJumpButton();
     liveElapsedEntries.clear();
     for (const entry of entries.values()) if (entry.elapsedMode === 'live') {
@@ -582,12 +632,13 @@
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
-      // Timing is outside selected prose. Terminal metadata stops the clock even while body convergence is deferred.
-      // 计时位于选中正文之外；正文收束延迟时，结束元数据仍立即停止计时，保留选区与正文节点。
+      // Timing and the footer stay current outside selected prose while body convergence is deferred.
+      // 正文收束延迟时，仅更新选区外的计时和页脚，保留选区与正文节点。
       const timingIds = new Set(snapshot.messages.map(message => String(message.id)));
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
       for (const message of snapshot.messages) {
-        const entry = entries.get(String(message.id)); if (entry) updateElapsedState(entry, message);
+        const entry = entries.get(String(message.id));
+        if (entry) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
       }
       synchronizeElapsedTimer(); return;
     }
@@ -605,8 +656,14 @@
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
       previous = entry.article;
     }
+    // Account for block headers before restoring the reader's visible anchor.
+    // 内容框工具栏先参与布局，再恢复阅读位置，避免追加内容时把正文挤离视口。
+    window.kynxaContentBlocks?.disposeDetached();
+    window.kynxaContentBlocks?.hydrate(messages);
     restoreScrollAnchor(anchors);
     applying = false;
+    window.kynxaDiagrams?.disposeDetached();
+    window.kynxaDiagrams?.hydrate(messages);
     updateJumpButton();
     synchronizeElapsedTimer();
     followBottom();
@@ -667,7 +724,7 @@
     }
     if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return '';
     if (node.nodeType === Node.ELEMENT_NODE) {
-      if (node.matches('[data-copy-ignore],.katex-mathml,annotation,[hidden]')) return '';
+      if (node.matches('[data-copy-ignore],.katex-mathml,annotation,[hidden],style,defs,title,desc')) return '';
       if (node.matches('[data-copy-tex]')) return node.textContent;
       if (node.tagName === 'BR') return '\n';
       if (node.tagName === 'DETAILS' && !node.open) return '';
@@ -688,6 +745,30 @@
     if (!selection || !selection.rangeCount || selection.isCollapsed || !activeSelection()) return null;
     const range = selection.getRangeAt(0);
     const fragment = range.cloneContents();
+    // Project selected diagrams back to literal source, omitting duplicate SVG labels and controls.
+    // 图表选区还原为原始源码，避免复制重复 SVG 标签和操作控件。
+    for (const block of messages.querySelectorAll('.mermaid-block[data-diagram-id]')) {
+      if (!range.intersectsNode(block)) continue;
+      const code = block.querySelector('.mermaid-source code');
+      if (!code) continue;
+      const visual = block.querySelector('.mermaid-viewport svg') || code;
+      const walker = document.createTreeWalker(visual, NodeFilter.SHOW_TEXT);
+      let first = null, last = null, textNode;
+      while ((textNode = walker.nextNode())) {
+        if (!textNode.textContent.length || textNode.parentElement?.closest('style,defs,title,desc')) continue;
+        first ||= textNode; last = textNode;
+      }
+      const target = document.createRange();
+      if (first && last) { target.setStart(first, 0); target.setEnd(last, last.textContent.length); }
+      else target.selectNodeContents(visual);
+      if (range.compareBoundaryPoints(Range.START_TO_START, target) > 0
+        || range.compareBoundaryPoints(Range.END_TO_END, target) < 0) continue;
+      const source = document.createElement('pre'); source.dataset.copyPlain = '';
+      source.textContent = code.textContent;
+      const copy = fragment.querySelector(`.mermaid-block[data-diagram-id="${block.dataset.diagramId}"]`);
+      if (copy) copy.replaceWith(source);
+      else if (block.contains(range.commonAncestorContainer) && !code.contains(range.commonAncestorContainer)) fragment.replaceChildren(source);
+    }
     for (const math of messages.querySelectorAll('.math[data-math-id]')) {
       if (!math.getClientRects().length || !range.intersectsNode(math)) continue;
       const target = visibleMathRange(math);
@@ -698,7 +779,9 @@
       if (copy) copy.replaceWith(copiedTex(math));
       else if (math.contains(range.commonAncestorContainer)) fragment.replaceChildren(copiedTex(math));
     }
-    fragment.querySelectorAll('[data-copy-ignore],.katex-mathml,annotation,[hidden]').forEach(node => node.remove());
+    // A range inside SVG may clone its children without the SVG ancestor; definitions remain invisible.
+    // SVG 内部选区可能只克隆子节点而丢失 SVG 祖先；不可见定义仍须从复制内容中排除。
+    fragment.querySelectorAll('[data-copy-ignore],.katex-mathml,annotation,[hidden],style,defs,title,desc').forEach(node => node.remove());
     fragment.querySelectorAll('details:not([open])').forEach(node => node.remove());
     const ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
@@ -765,10 +848,17 @@
   window.chrome?.webview?.addEventListener('message', event => {
     const command = event.data;
     if (command?.type === 'initializeUi') initializeUi(command);
+    else if (command?.type === 'setAppearance') setAppearance(command);
     else if (command?.type === 'render') applyTranscript(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
-    else if (command?.type === 'copyResult') acknowledgeCopy(command);
+    else if (command?.type === 'copyResult') {
+      acknowledgeCopy(command);
+      if (command.conversationId === conversationId) {
+        window.kynxaDiagrams?.acknowledgeCopy(command);
+        window.kynxaContentBlocks?.acknowledgeCopy(command);
+      }
+    }
     else if (command?.type === 'jumpToLatest') jumpToLatest();
     else if (command?.type === 'beforeSend') {
       if (atBottom() && !activeSelection()) { following = true; followBottom(); }
@@ -780,5 +870,29 @@
   window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size,
     cachedConversations: conversations.size, cachedCharacters, cachedNodes,
     liveElapsedCount: liveElapsedEntries.size, elapsedTimerActive: elapsedTimer !== null });
+  const diagramAnchors = new WeakMap();
+  window.kynxaContentBlocks?.configure({
+    requestCopy(source, block, requestId) {
+      const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
+      if (!block.isConnected || entries.get(messageId)?.article !== article) return;
+      send({ type: 'copy', conversationId, requestId, messageId, text: source });
+    }
+  });
+  window.kynxaDiagrams?.configure({
+    requestCopy(source, block, requestId) {
+      const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
+      if (!block.isConnected || entries.get(messageId)?.article !== article) return;
+      send({ type: 'copy', conversationId, requestId, messageId, text: source });
+    },
+    beforeLayoutChange(block) {
+      if (activeSelection() || pointerSelecting || localizingUi) return false;
+      diagramAnchors.set(block, following ? [] : scrollAnchors());
+      return true;
+    },
+    afterLayoutChange(block) {
+      restoreScrollAnchor(diagramAnchors.get(block) || []); diagramAnchors.delete(block);
+      updateJumpButton(); followBottom();
+    }
+  });
   send({ type: 'ready' });
 })();

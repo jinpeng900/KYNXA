@@ -34,7 +34,8 @@ public sealed partial class ShellPage
         _storageSettingsWindow = window;
         var font = (FontFamily)Application.Current.Resources["KynxaUIFont"];
         var content = new StackPanel { Spacing = 12, Margin = new Thickness(24, 24, 24, 24), MaxWidth = 760 };
-        TextBlock Label(string text, double size = 14) => new() { Text = text, FontSize = size, FontFamily = font, TextWrapping = TextWrapping.Wrap };
+        TextBlock Label(string text, double size = 14) => new() { Text = text, FontSize = size, FontFamily = font,
+            Foreground = AppearanceService.GetBrush("KynxaTextBrush"), TextWrapping = TextWrapping.Wrap };
         TextBlock LocalizedLabel(string key, double size = 14)
         {
             var text = Label(string.Empty, size);
@@ -45,15 +46,15 @@ public sealed partial class ShellPage
         general.Opacity = 0.6;
         content.Children.Add(general);
         var languageRow = new Grid { ColumnSpacing = 20, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         languageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         languageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var languageLabel = LocalizedLabel("界面语言");
         languageLabel.VerticalAlignment = VerticalAlignment.Center;
         var languagePicker = new ComboBox { FontFamily = font, FontSize = 13,
             MinWidth = 140, VerticalAlignment = VerticalAlignment.Center };
-        var focusBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 112, 112, 112));
-        var selectedBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 200, 200, 200));
+        var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
+        var selectedBrush = AppearanceService.GetBrush("KynxaSelectionBrush");
         languagePicker.Resources["ComboBoxBackgroundBorderBrushFocused"] = focusBrush;
         languagePicker.Resources["SystemControlFocusVisualPrimaryBrush"] = focusBrush;
         languagePicker.Resources["ComboBoxItemPillFillBrush"] = focusBrush;
@@ -67,8 +68,17 @@ public sealed partial class ShellPage
         Grid.SetColumn(languagePicker, 1);
         languageRow.Children.Add(languageLabel); languageRow.Children.Add(languagePicker);
         content.Children.Add(languageRow);
+        var appearanceSection = new AppearanceSettingsSection(font, paletteId =>
+        {
+            TrySetAppearancePalette(paletteId, out string? errorKey);
+            return errorKey;
+        });
+        content.Children.Add(appearanceSection.Root);
+        var moreOptions = LocalizedLabel("更多功能", 13);
+        moreOptions.Opacity = 0.6;
+        content.Children.Add(moreOptions);
         var memoryRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         memoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         memoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var memoryLabel = LocalizedLabel("记忆管理");
@@ -82,7 +92,7 @@ public sealed partial class ShellPage
         memoryRow.Children.Add(memoryButton);
         content.Children.Add(memoryRow);
         var toolsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var toolsLabel = LocalizedLabel("工具与技能");
@@ -96,7 +106,7 @@ public sealed partial class ShellPage
         content.Children.Add(toolsRow);
         toolsButton.Click += (_, _) => { if (!StoragePaths.IsMigrating) OpenAgentTools(); };
         var retrievalRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         retrievalRow.Children.Add(LocalizedLabel("检索与网页搜索"));
@@ -123,10 +133,11 @@ public sealed partial class ShellPage
         AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         content.Children.Add(progress); content.Children.Add(status);
         var storageControls = new StorageSettingsControls(window, row, extensionRow, memoryButton, toolsButton, languagePicker, progress, status);
-        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
+        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = AppearanceService.GetBrush("KynxaMainBrush") };
+        AutomationProperties.SetAutomationId(root, "AppearanceSettingsRoot");
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var titleBar = new Grid { Height = 48, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 250, 249, 248)) };
+        var titleBar = new Grid { Height = 48, Background = AppearanceService.GetBrush("KynxaTitleBarBrush") };
         var title = LocalizedLabel("KYNXA  /  设置");
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
@@ -162,12 +173,24 @@ public sealed partial class ShellPage
             int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
             window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
         };
-        if (Microsoft.UI.Windowing.AppWindowTitleBar.IsCustomizationSupported())
+        void UpdateSettingsAppearance(object? sender, EventArgs e)
         {
+            if (_storageSettingsWindow != window) return;
+            if (!root.DispatcherQueue.HasThreadAccess)
+            {
+                root.DispatcherQueue.TryEnqueue(() => UpdateSettingsAppearance(sender, e));
+                return;
+            }
+            if (!Microsoft.UI.Windowing.AppWindowTitleBar.IsCustomizationSupported()) return;
             window.AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
             window.AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            window.AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
+            window.AppWindow.TitleBar.ButtonForegroundColor = AppearanceService.ParseColor(AppearanceService.Current.Text);
+            window.AppWindow.TitleBar.ButtonInactiveForegroundColor = AppearanceService.ParseColor(AppearanceService.Current.Secondary);
+            window.AppWindow.TitleBar.ButtonHoverBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Soft);
+            window.AppWindow.TitleBar.ButtonPressedBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Selection);
         }
+        AppearanceService.Changed += UpdateSettingsAppearance;
+        UpdateSettingsAppearance(null, EventArgs.Empty);
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
         { storageControls.Message(text, severity); }
         if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);
@@ -210,6 +233,8 @@ public sealed partial class ShellPage
             App.Window.AppWindow.Closing -= PreventClose;
             App.Window.Closed -= CloseSettings;
             UiText.LanguageChanged -= UpdateSettingsTitle;
+            AppearanceService.Changed -= UpdateSettingsAppearance;
+            appearanceSection.Dispose();
             storageControls.Close();
             _storageSettingsWindow = null;
         };
@@ -234,7 +259,7 @@ public sealed partial class ShellPage
                 if (_retrievalSettingsWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成检索配置，再更改数据存储位置。"));
                 _retrievalSettingsWindow?.CloseForOwner();
-                if (_sendingPrompt || _pendingReplies.Values.Any(reply => reply.Error is null)) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
+                if (_sendingPrompt || _pendingReplies.Count > 0 || _retryingReplies.Count > 0) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
                 using (var self = System.Diagnostics.Process.GetCurrentProcess())
                 {
                     var instances = System.Diagnostics.Process.GetProcessesByName(self.ProcessName);
@@ -250,7 +275,7 @@ public sealed partial class ShellPage
                 var folder = await picker.PickSingleFolderAsync();
                 if (folder is null) return;
                 if (_storageSettingsWindow != window) return;
-                if (_sendingPrompt || _pendingReplies.Values.Any(reply => reply.Error is null)) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
+                if (_sendingPrompt || _pendingReplies.Count > 0 || _retryingReplies.Count > 0) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
                 string destination = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder.Path));
                 if (StoragePaths.DataRoot is string currentRoot && string.Equals(destination, Path.TrimEndingDirectorySeparator(currentRoot), StringComparison.OrdinalIgnoreCase))
                 { Message(UiText.Get("已经在使用这个目录。"), InfoBarSeverity.Success); return; }
@@ -258,6 +283,7 @@ public sealed partial class ShellPage
                 await _projectStore.SaveAsync(_projects);
                 await _projectStore.SaveChatsAsync(_standaloneChats);
                 _layoutStateService.Save(_layout);
+                await MessageTimePresentation.FlushAsync();
                 StoragePaths.IsMigrating = true;
                 migrationStarted = true;
                 languagePicker.IsEnabled = false;
@@ -289,6 +315,7 @@ public sealed partial class ShellPage
                 var result = await Task.Run(() => StorageMigrationService.MoveAsync(sourceDesktop, sourceModels, destination, StoragePaths.PointerPath,
                     updates, initializeTarget: ModelGatewayService.InitializeStorageAsync, migrateExtensions: ExtensionPaths.UsesLegacyRoot));
                 StoragePaths.Reload();
+                MessageTimePresentation.ConfigureCache(StoragePaths.DesktopDirectory);
                 ExtensionPaths.LegacyRoot = result.DataRoot;
                 ExtensionPaths.Reload();
                 extensionRow.SetPath(ExtensionPaths.Root);
