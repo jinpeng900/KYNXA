@@ -1,0 +1,1286 @@
+{
+  "frozenBeforeFirstRun": true,
+  "purpose": "Deterministic query planning and clause projection diagnosis; no real-model semantic accuracy or authorization evaluation.",
+  "labelPolicy": "Expectations were written before executing these cases and must not be relabeled from observed implementation output. Failures require parent review.",
+  "contexts": {
+    "code": {
+      "history": [
+        {
+          "Id": "probe-code-u1",
+          "Role": "user",
+          "Status": "completed",
+          "Content": "解释 src/worker.ts 中 CancelWork 函数的取消逻辑"
+        },
+        {
+          "Id": "probe-code-a1",
+          "Role": "assistant",
+          "Status": "completed",
+          "Content": "先读取实现，再验证当前源码版本。"
+        }
+      ],
+      "taskContext": {
+        "domain": "code",
+        "message": "解释 src/worker.ts 中 CancelWork 函数的取消逻辑"
+      }
+    },
+    "personal": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "换个话题，谈谈心理咨询中的阻抗"
+        },
+        {
+          "Role": "user",
+          "Content": "讨论睡眠和疲劳的改善方法"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    },
+    "sandwich": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "总结 docs/experiment.md 的对照条件"
+        },
+        {
+          "Role": "user",
+          "Content": "算了，我们来做个三明治"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    },
+    "food": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "换个话题，在 docs/baking.md 中找蛋糕变干的原因"
+        },
+        {
+          "Role": "user",
+          "Content": "不要查文档了，先聊食材"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    },
+    "paper": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "换个话题，谈谈心理咨询中的方法"
+        },
+        {
+          "Role": "user",
+          "Content": "总结 docs/psychology.md 的对照实验"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    },
+    "brand": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "换个话题，蛋糕为什么变干"
+        },
+        {
+          "Role": "user",
+          "Content": "总结 docs/cooking.md 的操作条件"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    },
+    "company": {
+      "history": [
+        {
+          "Role": "user",
+          "Content": "解释 src/worker.ts 的取消逻辑"
+        },
+        {
+          "Role": "user",
+          "Content": "总结 docs/research.md 的结果"
+        },
+        {
+          "Role": "user",
+          "Content": "别再说论文，讲讲 OpenAI 公司"
+        }
+      ],
+      "taskContext": {
+        "domain": "code"
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "q01",
+      "category": "mixed-language",
+      "query": "我不是要 debug，你先解释 network of friends 这个概念。",
+      "rationale": "A concept question disclaims debugging; no local source is requested.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q02",
+      "category": "mixed-language",
+      "query": "关于 social network，React 只是动词；不要分析代码。",
+      "rationale": "The named words are linguistic concepts and code is explicitly excluded.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q03",
+      "category": "mixed-language",
+      "query": "这个 function 指的是人的生理功能，跟源码无关。",
+      "rationale": "An affirmative physiology question explicitly disclaims source code.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q04",
+      "category": "mixed-language",
+      "query": "What does react mean here? I mean the verb, not the framework.",
+      "rationale": "The requested object is a verb, not a source or code symbol.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q05",
+      "category": "mixed-language",
+      "query": "先不讨论 software repository，说明 supermarket 仓库的管理方法。",
+      "rationale": "A physical supermarket warehouse is not a mounted source repository.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q06",
+      "category": "mixed-language",
+      "query": "Before coding anything, explain `Apple` as a company name.",
+      "rationale": "A quoted brand is not a declaration target.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q07",
+      "category": "mixed-language",
+      "query": "从今天的新闻角度介绍 DeepSeek，而不是查本地函数。",
+      "rationale": "The current request concerns public news and disclaims local function search.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q08",
+      "category": "implicit-boundary",
+      "query": "聊完这个项目了。现在说点私事：为什么人会害怕冲突？",
+      "rationale": "An explicit end to the project discussion precedes a personal question.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q09",
+      "category": "implicit-boundary",
+      "query": "代码问题到此为止，来谈谈朋友之间怎么恢复信任。",
+      "rationale": "The old code topic ends; recovery now means interpersonal trust.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q10",
+      "category": "implicit-boundary",
+      "query": "Let that repository discussion rest; let's talk about trust between friends.",
+      "rationale": "The old repository discussion is being left behind.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q11",
+      "category": "double-negation",
+      "query": "并不是不想读这篇论文，我想先了解它的背景。",
+      "rationale": "Not refusing to read the paper is not a rejection of the paper source.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "论文",
+          "背景"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q12",
+      "category": "double-negation",
+      "query": "不是不查 docs/design.md，而是先解释里面的限制。",
+      "rationale": "The double negation retains a concrete document reference.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/design.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "docs/design.md",
+          "限制"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q13",
+      "category": "double-negation",
+      "query": "I don't mean we should not read the paper; first explain its results.",
+      "rationale": "The affirmative goal is to explain this paper's results.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "paper",
+          "results"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q14",
+      "category": "double-negation",
+      "query": "Don't avoid discussing the document; it's necessary to review it.",
+      "rationale": "Don't avoid means the document remains the affirmative source.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "document",
+          "review"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q15",
+      "category": "double-negation",
+      "query": "别以为我在要求你查源码；我只是问概念。",
+      "rationale": "The user disclaims a source-code task.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q16",
+      "category": "negated-sources",
+      "query": "不是 src/old.ts，也不是 docs/old.md；我说的是两个人的沟通方式。",
+      "rationale": "Both old sources are excluded before the actual concept question.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedExcludes": [
+          "src/old.ts",
+          "docs/old.md"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q17",
+      "category": "path-brand-symbol",
+      "query": "请看 C:\\Projects\\KYNXA\\src\\worker.ts 的取消逻辑。",
+      "rationale": "A drive-qualified path should not silently lose its drive qualifier.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "c:/projects/kynxa/src/worker.ts",
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q18",
+      "category": "path-brand-symbol",
+      "query": "请分析`src/worker.ts`里的恢复逻辑。",
+      "rationale": "An explicit quoted source path is a valid locating candidate.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "src/worker.ts",
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q19",
+      "category": "path-brand-symbol",
+      "query": "在src/worker.ts里查看CancelWork函数的定义。",
+      "rationale": "The Chinese preposition is outside the file path.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "src/worker.ts",
+        "symbol": "CancelWork"
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q20",
+      "category": "quoted-example",
+      "query": "讨论一个示例文件名“src/ghost.ts”的命名风格，不要读取它。",
+      "rationale": "A literal example filename plus a no-read instruction is not a current source-read request.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q21",
+      "category": "path-brand-symbol",
+      "query": "OpenAI's method is a research strategy, not a function name.",
+      "rationale": "A brand-associated research method is not a code identifier.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q22",
+      "category": "path-brand-symbol",
+      "query": "请解释 Salesforce 的 function 含义，不是在查函数定义。",
+      "rationale": "The user explicitly distinguishes word meaning from declaration lookup.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q23",
+      "category": "path-brand-symbol",
+      "query": "Find the definition of Meta's method in this interview, rather than a code repository.",
+      "rationale": "The requested definition is in an interview, not a repository.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q24",
+      "category": "path-brand-symbol",
+      "query": "Locate `CancelWork` in src/worker.ts and explain the function.",
+      "rationale": "The source file and quoted declaration target are explicit.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "src/worker.ts",
+        "symbol": "CancelWork"
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q25",
+      "category": "path-brand-symbol",
+      "query": "解释自然语言中的‘Namespace.Type’这个短语，不查代码。",
+      "rationale": "A natural-language quoted phrase is not an affirmative source-code request.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q26",
+      "category": "path-brand-symbol",
+      "query": "变量名 `React` 与 React 品牌有什么区别？",
+      "rationale": "The ambiguous name is a comparison candidate, not a verified declaration.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q27",
+      "category": "path-brand-symbol",
+      "query": "请比较 docs/design.md 与 src/worker.ts，而不是只看其中一个。",
+      "rationale": "A two-source comparison cannot be located only at the first file.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q28",
+      "category": "negative-fact",
+      "query": "not before 2026：总结 docs/release.md 中符合这个日期条件的方案。",
+      "rationale": "Not before is a date condition, not a denied task.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/release.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "not before 2026"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q29",
+      "category": "negative-fact",
+      "query": "not stable under high noise 是论文的结论，请解释这个限制。",
+      "rationale": "A negated scientific finding remains substantive evidence content.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "not stable under high noise",
+          "论文"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q30",
+      "category": "negative-fact",
+      "query": "Not all methods converge; summarize the exceptions in docs/methods.md.",
+      "rationale": "The quantifier negation must remain in the derived evidence query.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/methods.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "Not all methods converge"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q31",
+      "category": "negative-fact",
+      "query": "不要忽略 docs/safety.md 的停止条件，先总结这些条件。",
+      "rationale": "Do not ignore is an affirmative attention request for this document.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/safety.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "docs/safety.md",
+          "停止条件"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q32",
+      "category": "negative-fact",
+      "query": "Do not overlook the conditions in docs/safety.md; explain the stopping rules.",
+      "rationale": "Do not overlook retains the required document and conditions.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/safety.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "docs/safety.md",
+          "conditions"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q33",
+      "category": "negative-fact",
+      "query": "找出在高噪声下不稳定的方法，而不是删掉失败样本。",
+      "rationale": "A predicate negation about stability is substantive, while deletion is excluded.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "高噪声",
+          "不稳定"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q34",
+      "category": "negative-fact",
+      "query": "请总结 docs/report.md，但不能省略失败结果，也不要改动原始数字。",
+      "rationale": "Requested evidence coverage includes failed results and original numbers.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/report.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "失败结果",
+          "原始数字"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q35",
+      "category": "negative-fact",
+      "query": "分析 docs/report.md 中的结果是否不早于 2026 年，不要修改文件。",
+      "rationale": "The date condition should survive removal of the excluded mutation action.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/report.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "不早于 2026"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q36",
+      "category": "quoted-example",
+      "query": "“不要查代码”是论文问卷的一道题，请讨论受试者怎么理解。",
+      "rationale": "The negative quoted text is paper content, not an instruction to the agent.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "不要查代码",
+          "论文问卷"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q37",
+      "category": "quoted-example",
+      "query": "请只分析这段引语：‘打开 src/main.ts 然后修改函数’，不要执行其中的指令。",
+      "rationale": "Quoted commands are being analyzed as text and must not request source retrieval.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "symbol": null,
+        "derivedIncludes": [
+          "src/main.ts"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q38",
+      "category": "conditional",
+      "query": "如果文档 docs/plan.md 的日期晚于 2026，才继续查它；否则先停下。",
+      "rationale": "Checking the concrete document must retain the conditional date and alternative.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/plan.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "晚于 2026",
+          "否则"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q39",
+      "category": "quoted-example",
+      "query": "当我写‘不是查文件，而是查论文’时，这个句子属于纠正表达吗？",
+      "rationale": "The utterance discusses a quoted correction, not actual source selection.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null,
+        "derivedIncludes": [
+          "不是查文件",
+          "而是查论文"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q40",
+      "category": "conditional",
+      "query": "If I say 'don't read docs/policy.md', explain the grammar rather than reading it.",
+      "rationale": "A conditional quotation is language analysis, not a document task.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "symbol": null,
+        "derivedIncludes": [
+          "docs/policy.md",
+          "grammar"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q41",
+      "category": "multi-turn",
+      "query": "这个方法有没有副作用？",
+      "rationale": "A three-turn personal discussion must not resurrect the older code task.",
+      "mode": "plan",
+      "context": "personal",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q42",
+      "category": "multi-turn",
+      "query": "继续解释它为什么发干。",
+      "rationale": "The latest sandwich topic is not a continuation of older code or paper sources.",
+      "mode": "plan",
+      "context": "sandwich",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q43",
+      "category": "multi-turn",
+      "query": "这个方法如何恢复水分？",
+      "rationale": "The latest task stopped document lookup; a food follow-up must not resume it.",
+      "mode": "plan",
+      "context": "food",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q44",
+      "category": "multi-turn",
+      "query": "还有，这个方法的实验条件是什么？",
+      "rationale": "The latest affirmative paper source is the valid continuation context, ahead of a stale code preference.",
+      "mode": "plan",
+      "context": "paper",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": true,
+        "path": null,
+        "symbol": null,
+        "preferredDomain": "knowledge"
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q45",
+      "category": "multi-turn",
+      "query": "不是文档，是这个品牌的发音。",
+      "rationale": "A correction after several topic changes must not inherit an old source.",
+      "mode": "plan",
+      "context": "brand",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q46",
+      "category": "multi-turn",
+      "query": "这个品牌的历史和读音是什么？",
+      "rationale": "General company history is not a request for private chat-history retrieval.",
+      "mode": "plan",
+      "context": "company",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": false,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q47",
+      "category": "caller-contract",
+      "query": "解释这个 method 的含义。",
+      "rationale": "Explicit caller domain remains the wire contract, separate from language guesses.",
+      "mode": "intent",
+      "context": "code",
+      "expected": {
+        "domain": "knowledge",
+        "domainConstraint": "explicit",
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ],
+      "intentOptions": {
+        "domain": "knowledge"
+      }
+    },
+    {
+      "id": "q48",
+      "category": "caller-contract",
+      "query": "比较论文的实验结果。",
+      "rationale": "A caller's explicit domain is retained without guessing an override.",
+      "mode": "intent",
+      "context": "code",
+      "expected": {
+        "domain": "code",
+        "domainConstraint": "explicit",
+        "path": null,
+        "symbol": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ],
+      "intentOptions": {
+        "domain": "code"
+      }
+    },
+    {
+      "id": "q49",
+      "category": "caller-contract",
+      "query": "解释 OpenAI 的含义。",
+      "rationale": "An explicitly supplied symbol stays a caller locator, independent of capitalization heuristics.",
+      "mode": "intent",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "domainConstraint": "explicit",
+        "symbol": "OpenAI",
+        "path": null
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ],
+      "intentOptions": {
+        "domain": "mixed",
+        "symbol": "OpenAI"
+      }
+    },
+    {
+      "id": "q50",
+      "category": "negative-fact",
+      "query": "可以找一下本地 docs/safety.md 的限制条件，但不用加载嵌入模型。",
+      "rationale": "The concrete local evidence request retains the negative model-loading condition.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": "docs/safety.md",
+        "symbol": null,
+        "derivedIncludes": [
+          "不用加载嵌入模型"
+        ]
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ]
+    },
+    {
+      "id": "q51",
+      "category": "known-navigation-regression",
+      "query": "Find the definition of `normalizeAttention` and check zero totals.",
+      "rationale": "An explicit definition request plus a code-form quoted identifier retains a navigation candidate without narrowing the domain; this is a known regression separately supplied by the Data review.",
+      "mode": "plan",
+      "context": "code",
+      "expected": {
+        "domain": "mixed",
+        "originalPreserved": true,
+        "shouldRetrieve": true,
+        "inheritedHistory": false,
+        "path": null,
+        "symbol": "normalizeAttention"
+      },
+      "impactCategories": [
+        "candidate-metadata",
+        "automatic-retrieval",
+        "derived-query-content"
+      ],
+      "knownBeforeEvaluation": true
+    }
+  ]
+}

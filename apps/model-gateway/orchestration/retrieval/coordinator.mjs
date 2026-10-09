@@ -3,7 +3,7 @@ import { RetrievalSettingsStore } from '../../data/retrieval/settings.mjs';
 import { RetrievalIndex } from '../../data/retrieval/index.mjs';
 import { RetrievalStructureService } from '../../data/retrieval/structure-service.mjs';
 import { EMBEDDING_TEXT_VERSION } from '../../data/retrieval/retrieval-text.mjs';
-import { MAX_QUERY_CHARACTERS, retrievalFailure } from '../../data/retrieval/retrieval-contracts.mjs';
+import { MAX_QUERY_CHARACTERS, retrievalFailure, validateRetrievalIntent } from '../../data/retrieval/retrieval-contracts.mjs';
 import { SourceLibrary } from '../../data/retrieval/source-library.mjs';
 import { RetrievalJobStore } from '../../data/retrieval/job-store.mjs';
 import { EmbeddingRouter } from '../../models/retrieval/embedding-router.mjs';
@@ -25,6 +25,7 @@ import { runResourceTask } from '../../platform/resources/resource-task.mjs';
 import { retrievalBudget } from './retrieval-budget.mjs';
 import { TaskExperienceStore } from '../../data/retrieval/task-experience-store.mjs';
 import { EmbeddingSpacePolicy } from './embedding-space-policy.mjs';
+import { retrievalOutcome } from '../request-interpretation.mjs';
 
 const embeddingVersion = modelVersion => modelVersion ? `${modelVersion}|${EMBEDDING_TEXT_VERSION}` : undefined;
 
@@ -276,9 +277,9 @@ export class RetrievalCoordinator {
     }
   }
 
-  search(context, { query, gap, domain, symbol, path, limit, taskType = 'lookup', maximumTokens, existingContext = [], requiresSourceRead = false },
+  search(context, { query, gap, domain, preferredDomain, symbol, path, limit, taskType = 'lookup', maximumTokens, existingContext = [], requiresSourceRead = false },
     { signal, modelReferences = false, archiveId = modelReferences ? allocateEvidenceArchiveId() : undefined,
-      allowColdInference = true } = {}) {
+      allowColdInference = true, retrievalIntent: preparedIntent } = {}) {
     signal = this._signal(signal);
     return this._serialize(() => runResourceTask(this.resources, { taskId: `retrieval:${context.requestId ?? context.conversationId}`,
       workspaceId: context.projectId ?? context.conversationId, memoryBytes: 8 * 1024 * 1024 }, async lease => {
@@ -293,16 +294,22 @@ export class RetrievalCoordinator {
         throw retrievalFailure('Invalid query or evidence budget. / 检索查询、数量或证据预算无效。');
       validateEvidenceGap(gap);
       if (maximumTokens === 0) return { items: [], strategy: 'context-budget-exhausted', vectorAvailable: false,
+        outcome: retrievalOutcome({ strategy: 'context-budget-exhausted' }),
         budget, evidenceAssessment: { ...assessEvidence([], query), reason: 'no-remaining-model-context' },
         acquisition: { shouldContinue: false, next: 'answer-with-current-evidence-or-state-the-context-limit' } };
       const withModelReferences = items => modelReferences
         ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(archiveId, index + 1) })) : items;
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
-      const retrievalIntent = buildRetrievalIntent(query, { domain, symbol, path, taskContext: snapshot.taskContext });
+      // Automatic evidence uses intent derived from the current utterance, not historical query additions.
+      // 自动证据使用从本轮原话提取的约束，历史补充文本不能重新变成硬路径或领域限制。
+      const retrievalIntent = preparedIntent === undefined
+        ? buildRetrievalIntent(query, { domain, preferredDomain, symbol, path, taskContext: snapshot.taskContext })
+        : validateRetrievalIntent(preparedIntent);
       if (retrievalIntent.path && this.evaluationPolicy?.gaps !== false) this.sourceService.lifecycle.prioritize?.(
         snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, retrievalIntent.path);
       if (!snapshot.settings.local.enabled) return { items: [], strategy: 'disabled', vectorAvailable: false,
+        outcome: retrievalOutcome({ strategy: 'disabled' }),
         evidenceAssessment: assessEvidence([], query) };
       let acquisition = this.acquisitions.get(context);
       if (!acquisition) {
@@ -465,6 +472,7 @@ export class RetrievalCoordinator {
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
       result.evidenceState = { authorization: 'checked', freshness: 'current', conclusion: 'not-verified' };
+      result.outcome = retrievalOutcome(result);
       result.acquisition = this.evaluationPolicy?.gaps === false ? { state: 'disabled', remainingSearches: 0,
         remainingGapSearches: 0 } : acquisition.observe(ticket, result);
       const nextDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,

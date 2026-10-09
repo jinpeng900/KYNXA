@@ -62,7 +62,7 @@ export class ScopedLexicalRanker {
     return this.database.prepare('SELECT term FROM temp.retrieval_query_vocabulary ORDER BY term').all().map(row => row.term);
   }
 
-  search({ expression, query, scopes, domain, columns, checkCancelled, limit = 40 }) {
+  search({ expression, query, scopes, domain, preferredDomain, columns, checkCancelled, limit = 40 }) {
     this.checkCancelled = checkCancelled;
     this.scoredRows = 0;
     const placeholders = scopes.map(() => '?').join(',');
@@ -94,7 +94,15 @@ export class ScopedLexicalRanker {
       inverseFrequency.set(term, Math.max(1e-6, Math.log((corpus.documents - frequency + 0.5) / (frequency + 0.5))));
     }
     this.activeStatistics = { ...corpus, inverseFrequency };
-    const domainRank = domain ? `CASE WHEN ${RETRIEVAL_DOMAIN_SQL}='${domain}' THEN 0 ELSE 1 END` : '0';
+    // A soft preference only breaks relevance ties; it never changes eligibility or corpus statistics.
+    // 软偏好只打破相关性并列，不改变候选资格或语料统计；明确领域筛选仍由 domain 决定。
+    const rankingDomain = domain || preferredDomain;
+    const domainRank = rankingDomain ? `CASE WHEN ${RETRIEVAL_DOMAIN_SQL}=? THEN 0 ELSE 1 END` : '0';
+    const rankingParameters = rankingDomain ? [rankingDomain] : [];
+    const candidateOrder = domain ? 'domain_rank,exact_rank,score.lexical_rank,c.chunk_id'
+      : 'exact_rank,score.lexical_rank,domain_rank,c.chunk_id';
+    const resultOrder = domain ? 'candidates.domain_rank,candidates.exact_rank,candidates.lexical_rank,candidates.chunk_id'
+      : 'candidates.exact_rank,candidates.lexical_rank,candidates.domain_rank,candidates.chunk_id';
     try {
       // Rank every authorized match before applying the candidate limit; global top-k can lose valid rows.
       // 所有已授权命中先按范围统计排序，再限制候选数；全局 top-k 后筛范围会漏掉有效结果。
@@ -108,11 +116,11 @@ export class ScopedLexicalRanker {
           CASE WHEN instr(lower(c.text),lower(?)) > 0 THEN 0 ELSE 1 END AS exact_rank,${domainRank} AS domain_rank
           FROM chunk_fts JOIN scores score ON score.doc=chunk_fts.rowid JOIN chunks c ON c.id=score.doc
           JOIN sources s ON s.source_id=c.source_id WHERE chunk_fts MATCH ? AND ${predicate}
-          ORDER BY domain_rank,exact_rank,score.lexical_rank,c.chunk_id LIMIT ${limit})
+          ORDER BY ${candidateOrder} LIMIT ${limit})
         SELECT ${columns},candidates.lexical_rank FROM candidates
         JOIN chunks c ON c.id=candidates.id JOIN sources s ON s.source_id=c.source_id
-        ORDER BY candidates.domain_rank,candidates.exact_rank,candidates.lexical_rank,candidates.chunk_id`)
-        .all(...terms, ...parameters, query, expression, ...parameters);
+        ORDER BY ${resultOrder}`)
+        .all(...terms, ...parameters, query, ...rankingParameters, expression, ...parameters);
     } finally { this.activeStatistics = null; this.checkCancelled = null; }
   }
 }

@@ -29,6 +29,7 @@ import { WebSearchTool } from '../tools/retrieval/web-search.mjs';
 import { isSimpleGreeting, retrievalPlan } from './retrieval/source-projection.mjs';
 import { LocalModelResourceObserver } from '../models/local-model-resources.mjs';
 import { ExternalModelAdmission } from './external-model-admission.mjs';
+import { requestInterpretation, requestInterpretationPrompt, retrievalOutcome } from './request-interpretation.mjs';
 
 // Keep presentation instructions independent of source language and the current tool catalog.
 // 回复语言遵循当前用户请求，资料语言和工具目录不能改变这一约定；无需相关的额外推导保持按需提供。
@@ -124,11 +125,16 @@ export class ModelRuntime {
     const hash = createHash('sha256').update(JSON.stringify([input.message, input.provider, input.model])).digest('hex');
     const greeting = isSimpleGreeting(input.message);
     const smallTalk = retrievalPlan(input.message).reason === 'small-talk';
+    const currentUserId = input.userMessageId ?? history.find(item => item.Id === requestId && item.Role === 'assistant')?.ReplyTo;
+    const previousUserHistory = history.filter(item => item.Role === 'user' && item.Id !== currentUserId);
+    const taskPlan = retrievalPlan(input.message, { history: previousUserHistory,
+      taskContext: previousUserHistory.at(-1)?.Content });
     const toolContext = input.permissionMode == null || greeting || smallTalk ? null : await this.tools.createContext(id,
       { requestId, permissionMode: input.permissionMode, message: input.message,
         // Reuse formal user history already loaded here; caller/model metadata cannot supply authorization.
         // 复用此处已经读取的正式用户历史，调用方或模型元数据不能提供授权。
-        previousUserMessages: history.filter(item => item.Role === 'user').map(item => item.Content ?? '') });
+        previousUserMessages: taskPlan.taskRelation?.allowsInheritance
+          ? previousUserHistory.map(item => item.Content ?? '') : [] });
     const policyHash = toolContext ? toolPolicyHash(toolContext) : null;
     const previous = history.find(item => item.Id === requestId && item.Role === 'assistant');
     if (previous && (previous.RequestHash !== hash || (previous.ToolPolicyHash && previous.ToolPolicyHash !== policyHash)))
@@ -194,6 +200,10 @@ export class ModelRuntime {
       const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
       const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
         taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
+      assistant.RequestInterpretation = requestInterpretation(evidencePlan);
+      const interpretationPrompt = greeting || smallTalk ? '' : requestInterpretationPrompt(
+        assistant.RequestInterpretation, Math.min(192, Math.floor(context.metrics.inputBudgetTokens * .03)));
+      const interpretationTokens = estimateTokens(interpretationPrompt);
       if (evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0) {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,
@@ -203,8 +213,10 @@ export class ModelRuntime {
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
+          assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
         }
       }
+      if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
       let toolSystem = '';
       if (toolContext) {
         const localOnly = retrievalEvidence.references.length > 0 && /根据资料|本地|记忆|之前|上次|工作文件|项目文件/iu.test(input.message) &&
@@ -215,13 +227,14 @@ export class ModelRuntime {
         const referenceReserveTokens = Math.min(4096, context.metrics.memoryBudgetTokens ?? 0, estimateMessageTokens([], context.system));
         const maximumPromptTokens = Math.max(0, context.metrics.inputBudgetTokens - schemaReserve
           - estimateMessageTokens([{ role: 'user', content: input.message }]) - estimateMessageTokens([], MODEL_HISTORY_NOTICE)
-          - evidenceReserveTokens - referenceReserveTokens - 512);
+          - evidenceReserveTokens - referenceReserveTokens - interpretationTokens - 512);
         toolSystem = await this.tools.systemPrompt(toolContext, { maximumTokens: maximumPromptTokens });
         const tokenBudget = Math.min(24000, Math.floor(context.metrics.inputBudgetTokens * .40),
           context.metrics.inputBudgetTokens - estimateMessageTokens([{ role: 'user', content: input.message }])
-            - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - evidenceReserveTokens - referenceReserveTokens - 512);
+            - estimateMessageTokens([], toolSystem + MODEL_HISTORY_NOTICE) - evidenceReserveTokens - referenceReserveTokens - interpretationTokens - 512);
         const recentHistory = history.slice(-12);
         catalog = this.tools.configureModelCatalog(toolContext, { protocol: connection.protocol, tokenBudget, message: input.message,
+          taskRelation: evidencePlan.taskRelation,
           historySignals: recentHistory.filter(item => item.Role === 'user' && item.Id !== userId).slice(-3)
             .map(item => String(item.Content ?? '').slice(0, 1000)),
           previousToolNames: recentHistory.filter(item => item.Role === 'assistant').flatMap(item =>
@@ -235,12 +248,13 @@ export class ModelRuntime {
       const hasToolHistory = [...projection.records.values()].some(record => record.rounds.some(round => round.calls.length));
       const webSettings = toolContext ? (await this.retrieval.effective(toolContext.projectId)).web : null;
       const composeAdditionalSystem = evidencePrompt => [catalog.length ? toolSystem : '', hasToolHistory ? MODEL_HISTORY_NOTICE : '',
-        toolContext || evidencePrompt ? REPLY_SCOPE_NOTICE : '', evidencePrompt,
+        toolContext || evidencePrompt ? REPLY_SCOPE_NOTICE : '', interpretationPrompt,
+        assistant.RetrievalOutcome ? `Automatic evidence outcome: ${JSON.stringify(assistant.RetrievalOutcome)}.` : '', evidencePrompt,
         webSettings?.language && webSettings.language !== 'auto' ? `Prefer ${webSettings.language} web sources when relevant; never rewrite evidence or fabricate translated URLs.` : '',
         greeting ? 'This is a greeting. Reply with a short, natural greeting in the user\'s language; no unsolicited capability list, retrieval, or explanation.' : '',
         smallTalk ? 'Reply with a brief, natural acknowledgement in the user\'s language; no unsolicited capability list, retrieval, or explanation.' : ''].filter(Boolean).join('\n');
       let additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
-      const schemaTokens = estimateTokens(JSON.stringify(declarations));
+      let schemaTokens = estimateTokens(JSON.stringify(declarations));
       const historyBudget = context.metrics.inputBudgetTokens - estimateToolMessageTokens([{ role: 'user', content: input.message }], additionalSystem)
         - schemaTokens - estimateMessageTokens([], context.system);
       const historyCompaction = projection.compact({ inputBudgetTokens: historyBudget });
@@ -251,7 +265,7 @@ export class ModelRuntime {
         if (!catalog.length || (!(error instanceof ContextError) && !(error instanceof OutputBudgetError))) throw error;
         // Disabled/unavailable tools retain a portable low-trust chronology, never old executable schemas.
         // 工具禁用或不可用时，只保留可移植、低信任的时间线，不注入旧执行 schema。
-        catalog = []; declarations = []; projection.availableTools.clear();
+        catalog = []; declarations = []; schemaTokens = 0; projection.availableTools.clear();
         additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
         context = buildContext({ ...projectedInput, additionalSystem });
       }
@@ -267,14 +281,23 @@ export class ModelRuntime {
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
+          assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
           retrievalEvidence = { prompt: '', references: [] };
         }
+        if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
         additionalSystem = composeAdditionalSystem(retrievalEvidence.prompt);
         context.system = [baseSystem, additionalSystem].filter(Boolean).join('\n');
         context.metrics.estimatedInputTokens = estimateToolMessageTokens(context.messages, context.system);
       }
       assistant.EvidenceReferences = retrievalEvidence.references;
+      if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
       if (retrievalEvidence.resultRef) assistant.RetrievalResultRef = retrievalEvidence.resultRef;
+      // Record exposure separately from later model calls and execution receipts; absence is not a selection error.
+      // 记录本轮初始可见能力，与后续模型调用及执行回执分开；未展示不能算作模型错选。
+      assistant.ContextAssembly = { schemaVersion: 1, initialToolNames: catalog.map(tool => tool.name),
+        schemaTokens: catalog.length ? schemaTokens : 0, interpretationTokens,
+        evidenceTokens: estimateTokens(retrievalEvidence.prompt),
+        estimatedInputTokens: context.metrics.estimatedInputTokens };
       if (context.summaryUpdate) await this.memory.repository.writeSummary(id, context.summaryUpdate);
       // Successful replies start timing only after the complete request is prepared; preparation failures retain their own elapsed time.
       // 成功回复只在完整请求准备完成后开始计时；准备失败仍保存该准备阶段的实际耗时。

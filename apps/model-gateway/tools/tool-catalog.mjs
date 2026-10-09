@@ -27,18 +27,18 @@ function relevanceScore(tool, signals) {
 }
 
 /**
- * Discovery can be large; only a bounded, explicitly selected projection enters a model request.
- * 工具发现目录可以很大，但只有明确选定且受预算限制的视图进入模型请求。
+ * Discovery can be large; hints rank a bounded candidate projection, with deferred tools still discoverable.
+ * 工具发现目录可以很大；线索排序受预算限制的候选视图，延后工具仍可按需发现。
  */
 export class ModelToolCatalog {
-  constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [] } = {}) {
+  constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [], taskRelation } = {}) {
     this.descriptors = descriptors.filter(tool => tool.enabled !== false);
     this.canonicalNames = new Map(this.descriptors.flatMap(tool => [[tool.name, tool.name],
       [wireCatalog([tool])[0].wireName, tool.name]]));
     this.protocol = protocol;
     this.tokenBudget = Math.max(0, Math.floor(tokenBudget));
     this.selected = [];
-    const signals = toolSelectionSignals(message, { historySignals, previousToolNames });
+    const signals = toolSelectionSignals(message, { historySignals, previousToolNames, taskRelation });
     const scores = new Map(this.descriptors.map(tool => [tool, relevanceScore(tool, signals)]));
     const ordered = this.descriptors.filter(tool => (!tool.name.startsWith('computer.') || signals.desktop) &&
       (!tool.name.startsWith('terminal.host.') || signals.hostTerminal)).sort((left, right) =>

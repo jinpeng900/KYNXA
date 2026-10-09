@@ -23,6 +23,10 @@
 
 每次搜索、读取和删除都要求非空已授权 `scopeKeys`。词法查询按绑定参数预过滤；向量通道先按范围、领域与嵌入空间选择精确扫描或独立 USearch 图，不做全库 Top-K 后过滤。默认 50,000 块以上使用 ANN，大型冷图由 `ann-build-queue.mjs` 逐批准备；未就绪返回 `RETRIEVAL_ANN_BUILD_PENDING`，保留词法证据，不把等待替换为同规模前台精确扫描。稳定代次在后台索引作业结束后预热，避免每个嵌入批次都重建图。
 
+`retrievalIntent.domain` 保留调用方明确指定的领域限制，`mixed` 不排除任何领域；明确 `code` 或 `knowledge` 时兼容保留旧数据的未知领域。可选 `preferredDomain` 接受 `code`、`knowledge`、`mixed`，只用于软排序：词法通道在精确短语与 BM25 并列时打破并列，RRF 合并后最多增加 `0.05 / 61` 分。明确 `domain` 优先并忽略相反偏好；偏好不改变语料统计、向量分片选择、范围授权或引用版本检查，另一领域仍可返回。`mixed` 偏好等同于没有偏好。
+
+`domain` remains the caller's hard domain filter; `preferredDomain` is an optional bounded ranking signal. A weak preference never changes candidate eligibility, scope authorization, corpus statistics, vector space selection, or source freshness checks.
+
 普通缓存替换会保存受管图并退出实际原生进程，再按需加载；不依赖 GC 回收来保证旧内存释放。操作后检查实际 RSS，允许预算为 128 MiB 运行时余量加配置的总图预算；这是操作边界观测限制，不是操作系统硬内存隔离。图版本和保存回执核验防止后台构建或存盘时混入新代次，原文和向量仍由 SQLite 保留。
 
 两通道各最多 40 候选，RRF 合并；最终最多 60 块。原生扩展缺失时词法仍可运行，诊断明确标识。向量支持按 chunkIndex 对齐的 null 空项；嵌入模型过长、失败或不可用的块不能用伪造向量补齐。调用方同时传入 `embeddingProfileId` 与 `embeddingModelVersion`，防止稳定 ID 换权重后复用旧向量。
