@@ -40,9 +40,12 @@ async function pdfText(bytes, limits) {
     useWasm: false, useWorkerFetch: false, disableRange: true, disableStream: true, disableAutoFetch: true,
     stopAtErrors: true, enableXfa: false, isEvalSupported: false, isOffscreenCanvasSupported: false, isImageDecoderSupported: false,
     maxImageSize: 0, verbosity: 0 });
+  let pageCount, processedPages = 0;
   try {
     const document = await task.promise;
-    if (document.numPages > limits.maximumPages) throw documentExtractionFailure('DOCUMENT_PAGE_LIMIT');
+    pageCount = document.numPages;
+    if (document.numPages > limits.maximumPages) throw documentExtractionFailure('DOCUMENT_PAGE_LIMIT',
+      { limit: { dimension: 'maximumPages', limit: limits.maximumPages, observed: document.numPages } });
     const pages = [], missingTextPages = [];
     let text = '';
     for (let page = 1; page <= document.numPages; page++) {
@@ -54,7 +57,8 @@ async function pdfText(bytes, limits) {
         if (typeof item.str !== 'string') continue;
         const piece = item.str + (item.hasEOL ? '\n' : ' ');
         pageBytes += Buffer.byteLength(piece);
-        if (pageBytes > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT');
+        if (pageBytes > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT',
+          { limit: { dimension: 'maximumOutputBytes', limit: limits.maximumOutputBytes, observed: pageBytes } });
         pieces.push(piece);
       }
       const pageText = pieces.join('').replace(/[ \t]+\n/gu, '\n').trimEnd();
@@ -63,8 +67,10 @@ async function pdfText(bytes, limits) {
       const startOffset = text.length;
       text += pageText;
       pages.push({ page, startOffset, endOffset: text.length });
-      if (Buffer.byteLength(text) > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT');
+      if (Buffer.byteLength(text) > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT',
+        { limit: { dimension: 'maximumOutputBytes', limit: limits.maximumOutputBytes, observed: Buffer.byteLength(text) } });
       current.cleanup();
+      processedPages = page;
       observeMemory(limits);
     }
     // Missing page text is not silently treated as complete extraction; OCR is a separate capability.
@@ -73,6 +79,7 @@ async function pdfText(bytes, limits) {
     return { text, pageCount: document.numPages, pages };
   } catch (error) {
     if (error.name === 'PasswordException') throw documentExtractionFailure('DOCUMENT_ENCRYPTED');
+    error.details = { ...error.details, ...(pageCount === undefined ? {} : { pageCount }), processedPages };
     throw error;
   } finally { await task.destroy(); }
 }
@@ -85,10 +92,13 @@ async function inspectDocxArchive(bytes, limits) {
   const names = new Set();
   try {
     for await (const entry of archive.eachEntry()) {
-      if (++entries > limits.maximumArchiveEntries || entry.uncompressedSize > limits.maximumExpandedBytes)
-        throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT');
+      if (++entries > limits.maximumArchiveEntries) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT',
+        { limit: { dimension: 'maximumArchiveEntries', limit: limits.maximumArchiveEntries, observed: entries } });
+      if (entry.uncompressedSize > limits.maximumExpandedBytes) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT',
+        { limit: { dimension: 'maximumExpandedBytes', limit: limits.maximumExpandedBytes, observed: entry.uncompressedSize } });
       declaredBytes += entry.uncompressedSize;
-      if (declaredBytes > limits.maximumExpandedBytes) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT');
+      if (declaredBytes > limits.maximumExpandedBytes) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT',
+        { limit: { dimension: 'maximumExpandedBytes', limit: limits.maximumExpandedBytes, observed: declaredBytes } });
       if (names.has(entry.fileName)) throw documentExtractionFailure('DOCUMENT_PARSE_FAILED');
       names.add(entry.fileName);
       if (entry.generalPurposeBitFlag & 1) throw documentExtractionFailure('DOCUMENT_ENCRYPTED');
@@ -98,7 +108,8 @@ async function inspectDocxArchive(bytes, limits) {
       try {
         for await (const chunk of stream) {
           expandedBytes += chunk.length;
-          if (expandedBytes > limits.maximumExpandedBytes) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT');
+          if (expandedBytes > limits.maximumExpandedBytes) throw documentExtractionFailure('DOCUMENT_ARCHIVE_LIMIT',
+            { limit: { dimension: 'maximumExpandedBytes', limit: limits.maximumExpandedBytes, observed: expandedBytes } });
           if (xml) chunks.push(chunk);
         }
       } finally { stream.destroy(); }
@@ -122,7 +133,8 @@ async function docxText(bytes, limits) {
   await inspectDocxArchive(bytes, limits);
   const result = await require('mammoth').extractRawText({ buffer: bytes });
   if (result.messages?.length) throw documentExtractionFailure('DOCUMENT_PARSE_FAILED');
-  if (Buffer.byteLength(result.value) > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT');
+  if (Buffer.byteLength(result.value) > limits.maximumOutputBytes) throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT',
+    { limit: { dimension: 'maximumOutputBytes', limit: limits.maximumOutputBytes, observed: Buffer.byteLength(result.value) } });
   if (!result.value.trim()) throw documentExtractionFailure('DOCUMENT_TEXT_UNAVAILABLE');
   observeMemory(limits);
   return { text: result.value };
@@ -151,6 +163,6 @@ process.on('message', async message => {
     process.send?.({ type: 'result', ...result });
   } catch (error) {
     const code = /^(?:DOCUMENT_[A-Z_]+|OCR_UNAVAILABLE)$/u.test(error?.code ?? '') ? error.code : 'DOCUMENT_PARSE_FAILED';
-    process.send?.({ type: 'error', code, ...(error.pages ? { pages: error.pages } : {}) });
+    process.send?.({ type: 'error', code, ...(error.pages ? { pages: error.pages } : {}), ...(error.details ? { details: error.details } : {}) });
   } finally { clearInterval(memoryTimer); }
 });

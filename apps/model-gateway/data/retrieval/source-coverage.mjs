@@ -1,4 +1,5 @@
 import { retrievalFailure, retrievalSourceId } from './retrieval-contracts.mjs';
+import { validateDocumentCoverage } from './document-coverage.mjs';
 
 const STATES = new Set(['pending', 'ready', 'partial', 'failed', 'skipped', 'unverified', 'disabled']);
 
@@ -12,14 +13,18 @@ export class SourceCoverageStore {
       scope_key TEXT NOT NULL,source_id TEXT NOT NULL,relative_path TEXT NOT NULL,status TEXT NOT NULL,
       lexical TEXT NOT NULL,semantic TEXT NOT NULL,parser TEXT NOT NULL,error_code TEXT,
       source_revision TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(scope_key,source_id));`);
+    if (!database.prepare('PRAGMA table_info(source_coverage)').all().some(column => column.name === 'document_coverage'))
+      database.exec('ALTER TABLE source_coverage ADD COLUMN document_coverage TEXT');
   }
 
   record(entries, scopes, checkCancelled) {
     if (!Array.isArray(entries) || entries.length > 100) throw retrievalFailure('Coverage batch is too large. / 来源覆盖批次过大。');
-    const insert = this.database.prepare(`INSERT INTO source_coverage VALUES (?,?,?,?,?,?,?,?,?,?)
+    const insert = this.database.prepare(`INSERT INTO source_coverage
+      (scope_key,source_id,relative_path,status,lexical,semantic,parser,error_code,source_revision,updated_at,document_coverage)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_key,source_id) DO UPDATE SET relative_path=excluded.relative_path,status=excluded.status,
       lexical=excluded.lexical,semantic=excluded.semantic,parser=excluded.parser,error_code=excluded.error_code,
-      source_revision=excluded.source_revision,updated_at=excluded.updated_at`);
+      source_revision=excluded.source_revision,updated_at=excluded.updated_at,document_coverage=excluded.document_coverage`);
     for (const entry of entries) {
       checkCancelled?.(); retrievalSourceId(entry.sourceId);
       if (!scopes.includes(entry.scopeKey) || typeof entry.relativePath !== 'string' || entry.relativePath.length > 4096 ||
@@ -27,7 +32,8 @@ export class SourceCoverageStore {
           entry.errorCode !== undefined && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(entry.errorCode))
         throw retrievalFailure('Invalid scoped source coverage. / 来源覆盖范围或状态无效。');
       insert.run(entry.scopeKey, entry.sourceId, entry.relativePath, entry.status, entry.lexical, entry.semantic, entry.parser,
-        entry.errorCode ?? null, JSON.stringify(entry.sourceRevision ?? null), new Date().toISOString());
+        entry.errorCode ?? null, JSON.stringify(entry.sourceRevision ?? null), new Date().toISOString(),
+        entry.documentCoverage ? JSON.stringify(validateDocumentCoverage(entry.documentCoverage)) : null);
     }
     return { recorded: entries.length };
   }
@@ -61,6 +67,7 @@ export class SourceCoverageStore {
         return { sourceId: row.source_id, scopeKey: row.scope_key, relativePath: row.relative_path,
           status: row.status === 'ready' && (lexical === 'unverified' || semantic === 'unverified') ? 'unverified' : row.status,
           lexical, semantic, parser: row.parser, ...(row.error_code ? { errorCode: row.error_code } : {}),
+          ...(row.document_coverage ? { documentCoverage: validateDocumentCoverage(JSON.parse(row.document_coverage)) } : {}),
           sourceRevision: JSON.parse(row.source_revision), updatedAt: row.updated_at };
       }) };
   }

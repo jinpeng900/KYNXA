@@ -18,11 +18,17 @@
 
 目前仓库为个人账号下的 `jinpeng900/KYNXA`。个人仓库的协作者可以读写整个仓库，不能授予“只可提交一个文件夹”的权限。[GitHub 个人仓库权限](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/repository-access-and-collaboration/permission-levels-for-a-personal-account-repository)。
 
-CODEOWNERS 指定审查人；启用主分支保护后要求负责人审查。生成规则让领域负责人或队长任一人可以批准，避免作者无法批准自己的 PR 时卡住。它不强制两人同时批准，也不限制读取目录。队长合并是本团队约定；当前个人仓库配置不保证其他有写入权的协作者绝对不能合并已满足规则的 PR。[CODEOWNERS 规则](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)。
+CODEOWNERS 指定审查人，不授予或限制分支写入权限。生成规则让领域负责人或队长任一人可以批准，避免作者无法批准自己的 PR 时卡住；它不强制两人同时批准，也不限制读取目录。本次独立 Rulesets 将 `main` 更新权限保留给队长，因此成员即使获得 PR 批准也不能自行合并。[CODEOWNERS 规则](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)。
+
+## 当前直接协作约定
+
+`hui33844` 直接修改和推送本仓库的 `kynxa_team/b-ui`，不采用 Fork。原生 Rulesets 将其他分支的更新权限保留给 `jinpeng900`，包含 `main`；界面分支仅放行队长与界面负责人，并单独禁止成员删除/强推。具体配置和验收命令见 [分支写入规则](rulesets/README.md)。这与文件夹主责不同：成员仍可在 UI 分支编辑其他文件，队长审核是否符合界面任务。
+
+以下通用邀请与审查命令不能替代规则集。先落实分支限制，再邀请成员；当前只为界面成员开放写入，C/D/E 的账号和对应分支规则须另行分配。
 
 ## 1. 队长邀请四位成员
 
-先安装并登录 GitHub CLI，从仓库根运行。当前开发机没有可直接调用的 `gh`；未安装时先运行 `winget install --id GitHub.cli --exact`，安装后重新打开 PowerShell，再执行以下命令。把数组中的四项替换为真实 GitHub 用户名，不带 `@`。邀请由队长发送，需要对方接受；未自动执行。
+先安装并登录 GitHub CLI，从仓库根运行。未安装时先运行 `winget install --id GitHub.cli --exact`，安装后重新打开 PowerShell，再执行以下命令。把数组中的四项替换为真实 GitHub 用户名，不带 `@`。邀请由队长发送，需要对方接受；不能批量邀请尚未设置分支权限的成员。
 
 ```powershell
 gh auth login
@@ -82,7 +88,19 @@ Set-Location KYNXA
 git switch --track origin/kynxa_team/b-ui
 ```
 
-后续每个任务从最新 `main` 建任务分支，避免长期交接分支积累已合并差异；不要直接向 `main` 推送。旧分支需同步重组后的目录。以下示例由 C 执行，B/D/E 分别使用 `kynxa_team/ui/`、`kynxa_team/tools/`、`kynxa_team/data/`，A 使用 `kynxa_team/integration/`。
+当前界面负责人只使用已有 `kynxa_team/b-ui`；接受邀请后首次克隆、切换分支，并在实际改动后提交：
+
+```powershell
+git clone https://github.com/jinpeng900/KYNXA.git
+Set-Location KYNXA
+git switch --track origin/kynxa_team/b-ui
+git add apps/desktop/Views/实际文件.cs
+git commit -m "feat(ui): 具体界面改动"
+git push origin kynxa_team/b-ui
+gh pr create --repo jinpeng900/KYNXA --base main --head kynxa_team/b-ui --fill
+```
+
+推送更新界面分支，不自动更新 `main`。队长用独立副本拉取该分支测试，并使用独立数据、扩展路径及网关端口；验收后再合并 PR。以下是未来成员完成分支授权后可采用的独立任务分支示例；当前受规则集限制的成员不能据此创建新分支。
 
 ```powershell
 git fetch origin
@@ -98,7 +116,7 @@ gh pr create --base main --fill
 
 新任务按用户约定统一使用 `kynxa_team/` 前缀和领域名，既有 `feature/` 或 `integration/` 分支不需要批量改名。跨模块 PR 写明接口和双方调用端，负责人跑本模块验证，队长完成集成与合并。每个人的测试仍放现有 tests，不为人员分工复制测试框架。
 
-本次交接文档和开发分支按用户授权提交/推送；不因此发送邀请或修改远端保护。四位成员账号尚未填写，CODEOWNERS 继续使用已知仓库所有者；保护配置只是初始化模板，未核验远端生效状态，不能声称已限制其他人合并。
+目录重组、交接文档与开发分支已提交。当前分支规则按用户明确约定单独应用，并通过远端 active 配置核对；邀请与成员账号实际推送分别验收，不能以本地 JSON 代替远端生效。旧 `main-branch-protection.json` 是通用审核模板，不替代本次仅允许队长更新 `main` 的规则集。CODEOWNERS 继续使用已知仓库所有者，待成员接受邀请后按真实账号更新领域审查人。
 
 ## 验证入口
 

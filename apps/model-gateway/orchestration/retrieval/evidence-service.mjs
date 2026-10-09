@@ -1,10 +1,9 @@
 import { toolFailure } from '../../platform/tool-paths.mjs';
 import { retrievalFailure, parseSourceReference } from '../../data/retrieval/retrieval-contracts.mjs';
 import { evidenceSourceRef } from '../../data/retrieval/evidence-references.mjs';
-import { estimateTokens } from '../../models/context-tokens.mjs';
 import { deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
 import { retrievalPlan } from './query-plan.mjs';
-import { EVIDENCE_NOTICE, projectEvidence } from './source-projection.mjs';
+import { projectEvidence } from './source-projection.mjs';
 import { retrievalOutcome } from '../request-interpretation.mjs';
 
 function projectionBudgetAudit(result, projection, phase, requested) {
@@ -72,10 +71,11 @@ export class RetrievalEvidenceService {
     if (!route.shouldRetrieve || route.evidenceTokens <= 0 || maximumCharacters <= 0)
       return { prompt: '', references: [], evidenceAssessment: assessEvidence([], query), plan: route };
     const promptTokens = Math.max(0, Math.min(route.evidenceTokens, maximumTokens ?? route.evidenceTokens));
-    const reservedTokens = estimateTokens(EVIDENCE_NOTICE) + 120;
+    // Search selects records; projection alone charges the actual notice and serialized records together.
+    // 搜索选择来源记录；只有投影统一扣除真实提示与序列化记录，不提前重复预扣固定包装费。
     const result = await this.search(context, { query: route.query, domain: route.domain,
       preferredDomain: route.preferredDomain, taskType: route.taskType,
-      maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
+      maximumTokens: promptTokens, existingContext, requiresSourceRead: route.requiresSourceRead },
     { signal, modelReferences: Boolean(this.resultStore), allowColdInference: false,
       retrievalIntent: route.retrievalIntent });
     const candidateAssessment = result.evidenceAssessment;
@@ -98,7 +98,6 @@ export class RetrievalEvidenceService {
     const prepared = Object.freeze({});
     signal?.throwIfAborted();
     this.#preparedEvidence.set(prepared, { result, query, route, maximumTokens: promptTokens, maximumCharacters,
-      projectedTokens: projection.usedTokens, projectedCharacters: projection.prompt.length,
       contextKey: this._evidenceContextKey(context), finalizing: false });
     const draft = { prompt: projection.prompt, prepared, evidenceAssessment: result.evidenceAssessment,
       outcome: retrievalOutcome(result), plan: route, budgetAudit: result.budget.audit,
@@ -141,7 +140,8 @@ export class RetrievalEvidenceService {
         const currentItems = state.result.items.filter((_, index) => checked[index].value);
         await this._assertCurrent(context, snapshot);
         signal?.throwIfAborted();
-        const unique = deduplicateCandidates(currentItems, { existingContext, retrievalIntent: state.route.retrievalIntent });
+        const unique = deduplicateCandidates(currentItems, { existingContext, retrievalIntent: state.route.retrievalIntent,
+          navigateCoveredMessages: true });
         const alreadyPresentCount = (state.result.selection?.alreadyPresentCount ?? 0) + unique.alreadyPresentCount;
         const withFinalReferences = items => state.result.evidenceArchiveId
           ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(state.result.evidenceArchiveId, index + 1) })) : items;
@@ -151,8 +151,8 @@ export class RetrievalEvidenceService {
         // A smaller final budget can change support; only shrink the projection until its notice agrees.
         // 最终预算缩小时可能改变证据支持状态；只缩减片段，直到提示与实际呈现片段一致。
         for (;;) {
-          projection = projectEvidence(items, Math.min(characterBudget, state.maximumCharacters, state.projectedCharacters),
-            { maximumTokens: Math.min(tokenBudget, state.maximumTokens, state.projectedTokens), assessment });
+          projection = projectEvidence(items, Math.min(characterBudget, state.maximumCharacters),
+            { maximumTokens: Math.min(tokenBudget, state.maximumTokens), assessment });
           for (const cut of projection.audit.earlyCutReasons)
             projectionCutCounts.set(cut.reason, (projectionCutCounts.get(cut.reason) ?? 0) + cut.count);
           const projectedAssessment = assessEvidence(projection.items, state.query,
@@ -179,6 +179,8 @@ export class RetrievalEvidenceService {
         result.budget = { ...state.result.budget, audit: projectionBudgetAudit(state.result, projection, 'finalize',
           { remainingContextTokens: maximumTokens ?? null, maximumCharacters: maximumCharacters ?? null }) };
         if (unique.alreadyPresentCount) result.budget.audit.earlyCutReasons.push({ phase: 'finalize', reason: 'already-in-model-context', count: unique.alreadyPresentCount });
+        if (unique.coveredMessageCount) result.budget.audit.earlyCutReasons.push({ phase: 'finalize',
+          reason: 'covered-chat-excerpt-replaced-by-navigation', count: unique.coveredMessageCount });
         if (result.selection.finalStaleSourceCount) result.budget.audit.earlyCutReasons.push({ phase: 'finalize', reason: 'stale-or-revoked-source',
           count: result.selection.finalStaleSourceCount, unit: 'sources' });
         result.outcome = retrievalOutcome(result);

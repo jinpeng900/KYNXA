@@ -2,6 +2,8 @@
 
 更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/b-ui`。
 
+当前负责人账号为 `hui33844`。直接推送原仓库的界面分支，由队长验收并决定是否合并进 `main`；具体写入权限和历史保护见 [规则集](rulesets/README.md)。跨领域修改仍需协调，分支权限不等于文件夹权限。
+
 ## 代码范围
 
 apps/desktop 的 Views、Controls、ViewModels、UI 模型/布局/资源与 Services/Presentation。B 是全部 ShellPage partial 的唯一主负责人。Presentation 包含本地化、侧栏、Markdown/公式、审批与结果、终端和截图展示。

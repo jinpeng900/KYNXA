@@ -124,12 +124,16 @@ async function rank(message, canRecoverGpuMemory = true) {
   if (tokenLengths.reduce((sum, count) => sum + count, 0) > admission.limits.maxBatchInputTokens)
     throw Object.assign(new Error('Reranker batch exceeds its configured token budget.'), { code: 'RERANK_INPUT_TOO_LONG' });
   let scores;
+  let hasReportedFirstBatch = false;
   try { scores = await executeInferenceBatches(message.texts, { ...activeBudget, tokenLengths,
     checkCancelled: () => checkCancelled(message.id), yieldToMessages: () => new Promise(resolve => setImmediate(resolve)),
     onPressure: diagnostic => parentPort.postMessage({ type: 'resource-pressure', diagnostic: { ...diagnostic,
       backend: activeBudget.device, boundary: 'completed-native-batch', requiresSessionRebuild: false } }),
     onMeasurement: feedback => {
-      if (feedback.progress === 1 || performance.now() - lastMeasurementAt >= 250) {
+      // Keep a queued hot sample even when the whole warm request takes less than the report interval.
+      // 整个热请求短于采样间隔时，也保留仍有排队工作的热采样。
+      if (!hasReportedFirstBatch || feedback.progress === 1 || performance.now() - lastMeasurementAt >= 250) {
+        hasReportedFirstBatch = true;
         lastMeasurementAt = performance.now(); parentPort.postMessage({ type: 'measurement',
           feedback: { ...feedback, ...memoryMeasurement(activeBudget.device) } });
       }

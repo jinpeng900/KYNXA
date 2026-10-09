@@ -24,7 +24,7 @@ export function toolPolicyHash(context) {
  */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
   context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, catalogForRound, signal, interactive = false,
-  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal }) {
+  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal, systemForRound }) {
   const seenIds = new Set();
   const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId,
     resultStore: service.results, resultContext: context });
@@ -55,6 +55,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
     for (let round = 0; round < progress.limits.maxRounds; round++) {
       signal?.throwIfAborted();
       progress.rounds = round + 1;
+      if (systemForRound) system = await systemForRound(system, signal);
       segments.start(round + 1);
       await progress.save('model');
       // The schemas and decoder share one snapshot, even if a stage expires during generation.
@@ -77,7 +78,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
         workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', cpuThreads: 1,
         memoryBytes: 16 * 1024 * 1024 },
-        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog), { signal });
+        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog, system), { signal });
         signal?.throwIfAborted();
         if (turn.calls.some(call => seenIds.has(call.id)))
           throw new ToolCallDecodeFailure('工具调用 ID 重复，未再次执行。', 'MODEL_TOOL_IDENTITY_INVALID');

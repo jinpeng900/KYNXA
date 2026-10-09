@@ -216,6 +216,22 @@ test('token estimates handle random long ASCII strings, newlines/tabs and astral
   assert.ok(result.metrics.estimatedInputTokens + result.maxOutputTokens + result.metrics.safetyMarginTokens <= 2048);
 });
 
+test('relevant confirmed decisions outrank unrelated short facts under pressure without changing authority', () => {
+  const relevant = entry('release-decision', 'project', projectId,
+    'Release validation requires smoke checks and rollback receipts. ' + 'Detailed release requirements. '.repeat(100), { kind: 'decision' });
+  const unrelated = Array.from({ length: 70 }, (_, index) => entry(`unrelated-${index}`, 'user', 'user', `Unrelated lunch note ${index}.`));
+  const result = build({ projectId, contextWindowTokens: 8192, currentMessage: 'Explain our release validation requirements',
+    memoryEntries: [...unrelated, relevant, entry('inactive', 'chat', conversationId, 'Release secret revoked', { active: false })] });
+  assert.equal(result.metrics.memoryIncludedIds[0], relevant.id);
+  assert.ok(result.metrics.memoryTruncatedIds.includes(relevant.id));
+  assert.doesNotMatch(result.system, /Release secret revoked/);
+  assert.ok(result.metrics.memoryTokens > 0 && result.metrics.memoryTokens <= result.metrics.memoryBudgetTokens);
+  assert.equal(result.metrics.memorySelectionAudit.scopeCounts.project, 1);
+  assert.ok(result.metrics.estimatedInputTokens <= result.metrics.inputBudgetTokens);
+  assert.ok(result.memoryProjection.every(item => result.metrics.memoryIncludedIds.includes(item.memoryId)));
+  assert.equal(relevant.status, 'confirmed');
+});
+
 test('covered source status changes and bad summary metadata force regeneration without trusting cached text', () => {
   const history = longHistory();
   const first = build({ history });

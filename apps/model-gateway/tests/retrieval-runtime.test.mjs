@@ -88,6 +88,43 @@ test('a model turn resolves a local follow-up without replacing current query en
   assert.equal((await f.conversations.readMessages(f.conversationId)).filter(item => item.Role === 'user').at(-1).Content, message);
 });
 
+test('8K default-output requests retain real local evidence through coordinator and HTTP projection', async t => {
+  const f = await toolFixture(t), { runtime, requests } = await runtimeWithMockModel(t, f, '恢复配置为 R7。',
+    { contextWindowTokens: 8192 });
+  const fact = '恢复配置为 R7，执行恢复前先校验备份。';
+  const file = join(f.workspace, '恢复配置.md'); await writeFile(file, fact, 'utf8');
+  const imported = await runtime.retrieval.importSource({ path: file, scope: 'user' });
+  await waitJob(runtime.retrieval, imported.jobId);
+  // Reproduce the former 12% share minus notice/packaging against the real coordinator, not a mocked search.
+  // 使用真实协调器复现原12%份额扣除提示和包装后归零，不能以模拟搜索冒充回归证据。
+  const baseline = buildContext({ conversationId: f.conversationId, currentMessage: '根据资料，恢复配置是什么？',
+    contextWindowTokens: 8192 });
+  assert.equal(baseline.metrics.inputBudgetTokens, 3686);
+  const exhausted = await runtime.retrieval.search({ conversationId: f.conversationId, projectId: f.projectId },
+    { query: '恢复配置', maximumTokens: Math.max(0, Math.floor(3686 * .12) - 390 - 120) });
+  assert.equal(exhausted.strategy, 'context-budget-exhausted');
+  const originalPrepare = runtime.prepare.bind(runtime); let turn;
+  runtime.prepare = async (...args) => { turn = await originalPrepare(...args); return turn; };
+  const requestId = randomUUID();
+  await runtime.reply({ conversationId: f.conversationId, requestId, message: '根据资料，恢复配置是什么？',
+    provider: 'fixture', model: 'mock-model' });
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0].max_tokens >= 1024 && requests[0].max_tokens <= 4096,
+    'The request retains a real output allowance within the small-window provider projection.');
+  const text = JSON.stringify(requests[0].messages);
+  assert.ok(text.includes(fact), 'The actual upstream HTTP request contains the complete short source.');
+  assert.ok(estimateToolMessageTokens(requests[0].messages) + estimateTokens(JSON.stringify(requests[0].tools ?? [])) <= turn.inputBudgetTokens);
+  const saved = (await f.conversations.readMessages(f.conversationId)).find(item => item.Id === requestId);
+  assert.ok(saved.EvidenceReferences.length);
+  assert.ok(saved.RetrievalResultRef);
+  assert.ok(saved.ContextAssembly.budgetAudit.approvedEvidenceTokens > 0);
+  assert.ok(saved.ContextAssembly.budgetAudit.actualEvidenceTokens <= saved.ContextAssembly.budgetAudit.approvedEvidenceTokens);
+  const reference = saved.EvidenceReferences[0];
+  const reread = await runtime.retrieval.read({ conversationId: f.conversationId, projectId: f.projectId },
+    { sourceRef: reference.modelSourceRef });
+  assert.ok(JSON.stringify(reread).includes(fact), 'The exposed compact reference resolves back to the current authorized source.');
+});
+
 test('a model request keeps current evidence once and does not inject a second copy from the index', async t => {
   const f = await toolFixture(t), answer = '账户设置中重置密码，修改后重新登录。';
   const { runtime, requests } = await runtimeWithMockModel(t, f, '账户设置里可以重置密码。');
@@ -104,6 +141,19 @@ test('a model request keeps current evidence once and does not inject a second c
   const saved = (await f.conversations.readMessages(f.conversationId)).find(item => item.Id === requestId);
   assert.deepEqual(saved.EvidenceReferences, []);
   assert.equal(saved.Status, 'completed');
+});
+
+test('confirmed multiline memory is not injected twice through the same retrieval foundation', async t => {
+  const f = await toolFixture(t), { runtime, requests } = await runtimeWithMockModel(t, f, '部署前校验备份。');
+  const content = 'UniqueDeployDecision = R7; 部署约定。\n部署前必须校验备份并保存恢复回执。';
+  await runtime.memory.create(f.conversationId, { scope: 'project', kind: 'decision', content });
+  const requestId = randomUUID();
+  await runtime.reply({ conversationId: f.conversationId, requestId, message: '根据记忆，部署约定是什么？', provider: 'fixture', model: 'mock-model' });
+  assert.equal(JSON.stringify(requests[0].messages).split('UniqueDeployDecision').length - 1, 1);
+  const saved = (await f.conversations.readMessages(f.conversationId)).find(item => item.Id === requestId);
+  assert.equal(saved.Status, 'completed');
+  assert.deepEqual(saved.EvidenceReferences, []);
+  assert.equal((await runtime.memory.contextFor(f.conversationId)).entries[0].content, content);
 });
 
 test('final-context dedup retains evidence when large tool schemas remove the initially complete history', async t => {

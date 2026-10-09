@@ -16,18 +16,23 @@ const RECONCILIATION_INTERVAL_MS = 30000;
 function sourceLimits(settings) {
   const indexing = validateIndexingLimits(settings.local.indexing ?? {});
   return { maximumFiles: indexing.maximumFiles, maximumSourceBytes: indexing.maximumSourceBytes,
-    maximumBytes: indexing.maximumTotalBytes, maximumEntries: indexing.maximumEntries };
+    maximumBytes: indexing.maximumTotalBytes, maximumEntries: indexing.maximumEntries,
+    maximumDocumentInputBytes: Math.min(indexing.maximumSourceBytes, indexing.maximumDocumentInputBytes),
+    maximumDocumentOutputBytes: Math.min(indexing.maximumSourceBytes, indexing.maximumDocumentOutputBytes),
+    maximumPdfPages: indexing.maximumPdfPages };
 }
 
 function mountedDescriptors(files, projectId, root, bindingRevision, failures = []) {
-  const failed = new Map(failures.map(item => [item.relativePath, item.errorCode]));
+  const failed = new Map(failures.map(item => [item.relativePath, item]));
   const failedDirectories = failures.filter(item => item.directory);
   return files.flatMap(file => {
     const relativePath = file.relativePath ?? relative(root, file.path);
-    const errorCode = failed.get(relativePath) ?? failedDirectories.find(item =>
-      item.relativePath === '' || relativePath.startsWith(`${item.relativePath}/`) || relativePath.startsWith(`${item.relativePath}\\`))?.errorCode;
+    const failure = failed.get(relativePath) ?? failedDirectories.find(item =>
+      item.relativePath === '' || relativePath.startsWith(`${item.relativePath}/`) || relativePath.startsWith(`${item.relativePath}\\`));
+    const errorCode = failure?.errorCode;
     const common = { scopeKey: `project:${projectId}`, sourceType: 'work-file', title: file.title ?? relativePath,
-      bindingRevision, ...(errorCode ? { unavailable: true, errorCode } : {}) };
+      bindingRevision, ...(errorCode ? { unavailable: true, errorCode,
+        ...(failure.documentCoverage ? { documentCoverage: failure.documentCoverage } : {}) } : {}) };
     const locator = { path: resolve(root, relativePath), relativePath, root,
       ...(file.extraction === undefined ? {} : { extraction: file.extraction }) };
     if (file.windows) return file.windows.map(window => ({ ...common,
@@ -261,7 +266,7 @@ export class SourceSyncService {
         memoryBytes: (stored?.files ?? []).reduce((total, file) => total + JSON.stringify(file).length * 2 + 256, 0) };
       this.mountedStates.set(projectId, state);
     }
-    if (state.limitsKey !== limitsKey) state.fullScan = true;
+    if (state.limitsKey !== limitsKey) { state.fullScan = true; state.failureCache.clear(); }
     const generation = state.generation, dirtyPaths = new Set(state.dirtyPaths), stats = {};
     const options = { ...limits, root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources,
       previousFiles: state.files, changedPaths: dirtyPaths, stats, failureCache: state.failureCache, allowPartial: true };
@@ -303,9 +308,12 @@ export class SourceSyncService {
       files = [...next.values()].map(file => ({ ...file, path: resolve(root, file.relativePath), title: file.relativePath }));
     }
     signal?.throwIfAborted();
+    if (stats.failures) stats.failures = stats.failures.map(failure => ({ ...failure,
+      scopeKey: `project:${projectId}`, sourceId: sourceIdentity('work-file', projectId, root, failure.relativePath) }));
     const sources = mountedDescriptors(files, projectId, root, bindingRevision, stats.failures);
     stats.coverage = { discovered: stats.discoveredFiles ?? stats.scannedFiles ?? files.length,
       readable: stats.scannedFiles ?? files.length, failed: stats.failedFiles ?? 0, complete: !stats.failedFiles && !stats.incomplete,
+      effectiveLimits: limits,
       ...(stats.limit ? { limit: stats.limit } : {}) };
     const memoryBytes = sources.reduce((total, source) => total + (source.text?.length ?? 0) * 2 +
       JSON.stringify(source.locator).length * 2 + 512, 0);

@@ -23,6 +23,25 @@ function options(requestTurn, service, extra = {}) {
     declarations: [], emit: () => {}, saveActivity: async () => {}, requestTurn, service, ...extra };
 }
 
+test('each round budgets, dispatches and saves the refreshed system without replaying a completed action', async () => {
+  const savedSystems = [], dispatchedSystems = [];
+  let rounds = 0, effects = 0;
+  const result = await runToolLoop(options(async (_messages, _tools, _signal, _receive, _catalog, system) => {
+    dispatchedSystems.push(system);
+    rounds++;
+    if (rounds === 2) return finalTurn('The current source has been checked.');
+    return decodeToolTurn('openai-completions', rawTurn('openai-completions', 'once', { path: 'fixture', content: 'once' }), catalog);
+  }, { execute: async () => { effects++; return { status: 'completed', isError: false, content: 'saved once' }; } }, {
+    system: 'old confirmed memory', declarations: toolDeclarations('openai-completions', catalog), catalogForRound: () => catalog,
+    systemForRound: async () => rounds ? 'current confirmed memory' : 'old confirmed memory',
+    saveModelRound: async step => savedSystems.push(step.system)
+  }));
+  assert.equal(effects, 1);
+  assert.equal(result.content, 'The current source has been checked.');
+  assert.deepEqual(dispatchedSystems, ['old confirmed memory', 'current confirmed memory']);
+  assert.deepEqual(savedSystems, dispatchedSystems);
+});
+
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
   test(`${protocol}: failed model step repairs without replaying a completed write or losing tool pairs`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'kynxa-step-recovery-'));

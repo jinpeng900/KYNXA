@@ -9,7 +9,8 @@ const queues = new Map();
 const MAX_SETTINGS_BYTES = 8 * 1024 * 1024;
 
 export const DEFAULT_INDEXING_LIMITS = Object.freeze({ maximumFiles: 20000, maximumSourceBytes: 32 * 1024 * 1024,
-  maximumTotalBytes: 512 * 1024 * 1024, maximumEntries: 200000, batchSize: 32 });
+  maximumTotalBytes: 512 * 1024 * 1024, maximumEntries: 200000, batchSize: 32,
+  maximumDocumentInputBytes: 32 * 1024 * 1024, maximumDocumentOutputBytes: 2 * 1024 * 1024, maximumPdfPages: 100 });
 export const DEFAULT_ANN_SETTINGS = DEFAULT_ANN_OPTIONS;
 
 export const DEFAULT_RETRIEVAL_SETTINGS = Object.freeze({
@@ -47,7 +48,8 @@ function integer(value, minimum, maximum, name) {
 export function validateIndexingLimits(value = {}, { partial = false } = {}) {
   requireKeys(value, Object.keys(DEFAULT_INDEXING_LIMITS), 'indexing limits');
   const ranges = { maximumFiles: [1, 100000], maximumSourceBytes: [1, 256 * 1024 * 1024],
-    maximumTotalBytes: [1, 8 * 1024 * 1024 * 1024], maximumEntries: [1, 2000000], batchSize: [1, 128] };
+    maximumTotalBytes: [1, 8 * 1024 * 1024 * 1024], maximumEntries: [1, 2000000], batchSize: [1, 128],
+    maximumDocumentInputBytes: [1, 32 * 1024 * 1024], maximumDocumentOutputBytes: [1, 2 * 1024 * 1024], maximumPdfPages: [1, 100] };
   const clean = Object.fromEntries(Object.entries(value).map(([name, item]) => [name, integer(item, ...ranges[name], name)]));
   return partial ? clean : { ...DEFAULT_INDEXING_LIMITS, ...clean };
 }

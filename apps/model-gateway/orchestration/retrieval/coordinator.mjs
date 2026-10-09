@@ -311,12 +311,19 @@ export class RetrievalCoordinator {
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
       const configuredRerankCandidates = snapshot.settings.local.rerankCandidates;
-      budget.rerankCandidates = configuredRerankCandidates ?? budget.rerankCandidates;
+      const requestedRerankCandidates = configuredRerankCandidates ?? budget.rerankCandidates;
+      const resourceRerankLimit = [20, 40, 60].includes(lease?.suggestions?.rerankCandidateLimit)
+        ? lease.suggestions.rerankCandidateLimit : 60;
+      budget.rerankCandidates = Math.min(requestedRerankCandidates, resourceRerankLimit);
       budget.audit = { ...budget.audit,
         configured: { ...budget.audit.configured, localRerankCandidates: configuredRerankCandidates ?? null },
         approved: { ...budget.audit.approved, rerankCandidates: budget.rerankCandidates },
+        rerankRequestedCandidates: requestedRerankCandidates, resourceRerankLimit,
         rerankBudgetSource: configuredRerankCandidates != null ? 'local-setting' :
           lease?.suggestions?.rerankCandidates !== undefined ? 'resource-suggestion' : 'task-policy' };
+      if (budget.rerankCandidates < requestedRerankCandidates)
+        budget.audit.earlyCutReasons.push({ reason: 'resource-grant', field: 'rerankCandidates',
+          proposed: requestedRerankCandidates, approved: budget.rerankCandidates, unit: 'candidates' });
       // Automatic evidence uses intent derived from the current utterance, not historical query additions.
       // 自动证据使用从本轮原话提取的约束，历史补充文本不能重新变成硬路径或领域限制。
       const retrievalIntent = preparedIntent === undefined

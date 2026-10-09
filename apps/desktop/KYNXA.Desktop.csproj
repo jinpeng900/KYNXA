@@ -113,7 +113,12 @@
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- Reflection-based JSON contracts need their members retained until trim-safe serializers are introduced.
+         反射 JSON 合同在改为可裁剪序列化之前必须保留成员，避免 Release 首次使用时丢失协议字段。 -->
+    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">False</PublishTrimmed>
+    <!-- Carry the Windows App SDK with Release packages; .NET self-containment alone does not include WinUI.
+         Release 随包提供 Windows App SDK；仅启用 .NET 自包含并不会包含 WinUI 运行库。 -->
+    <WindowsAppSDKSelfContained Condition="'$(Configuration)' == 'Release'">True</WindowsAppSDKSelfContained>
   </PropertyGroup>
   <Import Project="Build\RuntimePackaging.targets" />
 </Project>

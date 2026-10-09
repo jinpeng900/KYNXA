@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
@@ -10,6 +10,10 @@ import JSZip from 'jszip';
 import { extractDocumentBytes } from '../tools/retrieval/document-extraction.mjs';
 import { DOCUMENT_EXTRACTION_LIMITS, validateDocumentExtractionLimits } from '../tools/retrieval/document-extraction-contracts.mjs';
 import { readSourceFile, scanSourcePaths, scanSourceTree, sourceExtractionVersion } from '../tools/retrieval/source-reader.mjs';
+import { RetrievalIndex } from '../data/retrieval/index.mjs';
+import { RetrievalJobStore } from '../data/retrieval/job-store.mjs';
+import { DEFAULT_RETRIEVAL_SETTINGS } from '../data/retrieval/settings.mjs';
+import { SourceIndexService } from '../orchestration/retrieval/source-manager.mjs';
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const xmlEscape = value => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -118,12 +122,78 @@ test('configured PDF byte budgets admit larger containers and register the actua
 });
 
 test('PDF page/output limits and any missing-text page are explicit failures including mixed documents', async () => {
+  await assert.rejects(extractDocumentBytes(pdfFixture(Array.from({ length: 101 }, () => 'Known page')), 'pdf'), error => {
+    assert.equal(error.code, 'DOCUMENT_PAGE_LIMIT');
+    const coverage = error.details.documentCoverage;
+    assert.equal(coverage.pageCount, 101); assert.equal(coverage.processedPages, 0); assert.equal(coverage.publishedPages, 0);
+    assert.deepEqual(coverage.uncoveredRanges, [{ startPage: 1, endPage: 101 }]);
+    assert.deepEqual(coverage.limit, { dimension: 'maximumPages', limit: 100, observed: 101 });
+    assert.deepEqual(coverage.readback, { kind: 'original-document', startPage: 1, endPage: 101 });
+    return true;
+  });
   await assert.rejects(extractDocumentBytes(pdfFixture(['Hello', 'Again']), 'pdf', { maximumPages: 1 }), { code: 'DOCUMENT_PAGE_LIMIT' });
-  await assert.rejects(extractDocumentBytes(pdfFixture(['Known visible text']), 'pdf', { maximumOutputBytes: 4 }), { code: 'DOCUMENT_OUTPUT_LIMIT' });
+  await assert.rejects(extractDocumentBytes(pdfFixture(['Known visible text']), 'pdf', { maximumOutputBytes: 4 }), error => {
+    assert.equal(error.code, 'DOCUMENT_OUTPUT_LIMIT');
+    assert.equal(error.details.documentCoverage.pageCount, 1); assert.equal(error.details.documentCoverage.processedPages, 0);
+    assert.equal(error.details.documentCoverage.limit.dimension, 'maximumOutputBytes');
+    return true;
+  });
   await assert.rejects(extractDocumentBytes(pdfFixture(['']), 'pdf'), error => error.code === 'OCR_UNAVAILABLE' &&
     assert.deepEqual(error.details.pages, [1]) === undefined);
   await assert.rejects(extractDocumentBytes(pdfFixture(['Visible', '']), 'pdf'), error => error.code === 'OCR_UNAVAILABLE' &&
-    assert.deepEqual(error.details.pages, [2]) === undefined);
+    assert.deepEqual(error.details.pages, [2]) === undefined &&
+    assert.equal(error.details.documentCoverage.processedPages, 2) === undefined &&
+    assert.equal(error.details.documentCoverage.publishedPages, 0) === undefined);
+});
+
+test('configured document limits invalidate old receipts and keep original navigation in scans and failure-cache reuse', async t => {
+  const root = await sourceFixture(t), path = join(root, 'limited.pdf'), bytes = pdfFixture(['First', 'Second']);
+  await writeFile(path, bytes);
+  const previous = await readSourceFile(path), failureCache = new Map(), stats = {};
+  for await (const file of scanSourceTree(root, { stats, failureCache, maximumPdfPages: 1,
+    previousFiles: new Map([['limited.pdf', previous]]) })) assert.fail(file);
+  assert.equal(stats.failures[0].documentCoverage.pageCount, 2);
+  assert.equal(stats.failures[0].documentCoverage.effectiveLimits.maximumPages, 1);
+  assert.equal(stats.failures[0].documentCoverage.rawContentHash, sha256(bytes));
+  await assert.rejects(readSourceFile(path, { maximumDocumentInputBytes: 4 }), error => {
+    assert.equal(error.code, 'DOCUMENT_BYTES_LIMIT');
+    assert.deepEqual(error.details.documentCoverage.limit, { dimension: 'maximumInputBytes', limit: 4, observed: bytes.length });
+    return true;
+  });
+  await writeFile(path, pdfFixture(['Visible', '']));
+  const ocrStats = {};
+  for await (const file of scanSourceTree(root, { stats: ocrStats, failureCache })) assert.fail(file);
+  const reuseStats = {};
+  for await (const file of scanSourceTree(root, { stats: reuseStats, failureCache })) assert.fail(file);
+  assert.equal(reuseStats.reusedFailures, 1);
+  assert.deepEqual(reuseStats.failures[0].documentCoverage, ocrStats.failures[0].documentCoverage);
+});
+
+test('a new over-page PDF flows through real mounted discovery into a durable partial job and scoped SQLite coverage', async t => {
+  const root = await sourceFixture(t), workspace = join(root, 'workspace'), data = join(root, 'data');
+  await mkdir(workspace);
+  await writeFile(join(workspace, 'over-page.pdf'), pdfFixture(['First', 'Second']));
+  const settings = { ...structuredClone(DEFAULT_RETRIEVAL_SETTINGS), projectId: 'coverage-fixture',
+    projectIndexing: { mountedFolder: true, bindingRevision: 1, knowledgeIds: [] } };
+  settings.local.semantic = 'off'; settings.local.indexing.maximumPdfPages = 1;
+  const index = new RetrievalIndex({ root: data, vectorEnabled: false }), jobs = new RetrievalJobStore(data);
+  const service = new SourceIndexService({ index, jobs,
+    library: { describeSources: async () => ({ sources: [], coverage: { discovered: 0, complete: true } }) },
+    embeddings: { status: () => ({ state: 'unavailable' }) }, effectiveSettings: async () => settings,
+    getProject: async () => ({ FolderPath: workspace }), serialize: operation => operation() });
+  try {
+    const admitted = await service.rebuild({ projectId: 'coverage-fixture' });
+    await service.lifecycle.active.get(admitted.jobId)?.promise;
+    const job = await new RetrievalJobStore(data).get(admitted.jobId);
+    assert.equal(job.status, 'partial'); assert.equal(job.completedSources, 1); assert.equal(job.totalSources, 1);
+    assert.equal(job.coverage.complete, false); assert.equal(job.coverage.failed, 1);
+    assert.equal(job.coverage.failures[0].documentCoverage.pageCount, 2);
+    const item = (await index.coverage({ scopeKeys: ['project:coverage-fixture'] })).items[0];
+    assert.equal(item.relativePath, 'over-page.pdf'); assert.equal(item.parser, 'failed');
+    assert.equal(item.sourceRevision, null); assert.equal(item.documentCoverage.publishedPages, 0);
+    assert.deepEqual(item.documentCoverage.uncoveredRanges, [{ startPage: 1, endPage: 2 }]);
+    assert.equal((await index.coverage({ scopeKeys: ['user'] })).items.length, 0);
+  } finally { await service.close(); await index.close(); }
 });
 
 test('malformed containers, DOCX expansion/entry/output budgets and XML declarations are rejected', async () => {

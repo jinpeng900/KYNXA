@@ -55,7 +55,7 @@ function clipTextToTokenBudget(text, budgetTokens) {
 function validMemories(entries, conversationId, projectId) {
   const seen = new Set();
   return (entries ?? []).filter(entry => {
-    if (!entry || entry.status !== 'confirmed' || typeof entry.id !== 'string' || seen.has(entry.id) ||
+    if (!entry || entry.status !== 'confirmed' || entry.active === false || typeof entry.id !== 'string' || seen.has(entry.id) ||
       typeof entry.content !== 'string' || !entry.content.trim() || !['fact', 'preference', 'decision'].includes(entry.kind)) return false;
     const allowed = entry.scope === 'chat' ? equalId(entry.scopeId, conversationId) :
       entry.scope === 'project' ? projectId && equalId(entry.scopeId, projectId) :
@@ -92,6 +92,25 @@ function systemText(memoryLines, summaryContent = '') {
   return [referenceNotice, ...memoryLines, ...(summaryContent ? [summaryContent] : [])].join('\n');
 }
 
+// Relevance changes ordering only; it never expands scope or promotes unconfirmed facts.
+// 相关性只影响排序，不扩大作用域，也不把未确认内容提升为事实。
+function rankedMemories(entries, query, budgetTokens) {
+  if (estimateMessageTokens([], systemText(entries.map(entry => memoryLine(entry)))) <= budgetTokens) return entries;
+  const genericTerms = new Set(['继续', '工作', '这个', '那个', '问题', '请问', '一下', '怎么', '如何', '什么']);
+  const terms = new Set((query.toLowerCase().match(/[a-z0-9_]{3,}|[\p{Script=Han}]{2,}/gu) ?? [])
+    .flatMap(term => /\p{Script=Han}/u.test(term) ? Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2)) : [term])
+    .filter(term => !genericTerms.has(term)));
+  const ranked = entries.map((entry, index) => {
+    const text = entry.content.toLowerCase();
+    const matches = [...terms].filter(term => text.includes(term)).length;
+    const priority = (matches ? 100 + Math.min(50, matches) : 0) +
+      (entry.kind === 'preference' ? 20 : entry.kind === 'decision' ? 15 : 0);
+    return { entry, index, priority, compact: estimateTokens(memoryLine(entry)) <= budgetTokens * .5 };
+  });
+  return ranked.sort((left, right) => right.priority - left.priority || Number(right.compact) - Number(left.compact) || left.index - right.index)
+    .map(item => item.entry);
+}
+
 /**
  * Builds one bounded request projection. Never mutates history or promotes excerpts into memory.
  * 仅构建大小受限的请求视图，不修改历史，也不把摘录提升为长期记忆。
@@ -124,24 +143,18 @@ export function buildContext({ conversationId, projectId = null, history = [], c
 
   const turns = historyTurns ?? completedTurns(history, beforeUserId);
   const memories = validMemories(memoryEntries, conversationId, projectId);
-  const memoryLines = [], includedMemoryIds = [], truncatedMemoryIds = [];
+  const memoryLines = [], includedMemoryIds = [], truncatedMemoryIds = [], memoryProjection = [];
   const memoryBudgetTokens = Math.min(4096, Math.max(256, Math.floor(inputBudgetTokens * .20)), inputBudgetTokens - currentMessageTokens);
-  const isCompactMemory = entry => estimateTokens(memoryLine(entry)) <= memoryBudgetTokens * .5;
-  for (const entry of [...memories.filter(isCompactMemory), ...memories.filter(entry => !isCompactMemory(entry))]) {
+  const orderedMemories = rankedMemories(memories, currentMessage, memoryBudgetTokens);
+  for (const entry of orderedMemories) {
     const candidate = [...memoryLines, memoryLine(entry)];
-    if (estimateMessageTokens([], systemText(candidate)) > memoryBudgetTokens) continue;
-    memoryLines.push(candidate.at(-1));
+    const fullFits = estimateMessageTokens([], systemText(candidate)) <= memoryBudgetTokens;
+    const line = fullFits ? candidate.at(-1) : memoryExcerpt(entry, memoryLines, memoryBudgetTokens);
+    if (!line) continue;
+    memoryLines.push(line);
     includedMemoryIds.push(entry.id);
-  }
-  // Keep short facts complete first. A long confirmed note must not disappear forever
-  // merely because its full text exceeds the request's memory allocation.
-  // 优先完整保留短事实；较长的已确认记忆不能仅因全文超过分配额度就永久消失。
-  for (const entry of memories.filter(item => !includedMemoryIds.includes(item.id))) {
-    const excerpt = memoryExcerpt(entry, memoryLines, memoryBudgetTokens);
-    if (!excerpt) continue;
-    memoryLines.push(excerpt);
-    includedMemoryIds.push(entry.id);
-    truncatedMemoryIds.push(entry.id);
+    memoryProjection.push({ memoryId: entry.id, line, ...(fullFits ? { content: entry.content } : {}) });
+    if (!fullFits) truncatedMemoryIds.push(entry.id);
   }
   const omittedMemoryIds = memories.filter(item => !includedMemoryIds.includes(item.id)).map(item => item.id);
   const warnings = [
@@ -192,7 +205,7 @@ export function buildContext({ conversationId, projectId = null, history = [], c
   const estimatedInputTokens = estimateContextMessages(messages, system);
   if (estimatedInputTokens + reservedInputTokens > fullInputBudgetTokens)
     throw new ContextError('当前消息与参考资料超过模型输入预算，请缩短消息后重试。');
-  return { messages, system, maxOutputTokens, historySources, metrics: {
+  return { messages, system, maxOutputTokens, historySources, memoryProjection, metrics: {
     estimatedInputTokens, inputBudgetTokens: fullInputBudgetTokens, reservedToolTokens: reservedInputTokens, contextWindowTokens, outputReserveTokens: maxOutputTokens,
     safetyMarginTokens, requestedOutputTokens: outputBudget.requestedOutputTokens, outputBudgetReduced: outputBudget.outputBudgetReduced,
     outputBudgetReductionReason: outputBudget.outputBudgetReductionReason,
@@ -200,7 +213,12 @@ export function buildContext({ conversationId, projectId = null, history = [], c
     ...(providerMaxInputTokens === undefined ? {} : { providerMaxInputTokens }),
     includedTurnCount: turns.length - firstIncludedTurnIndex, omittedTurnCount: firstIncludedTurnIndex,
     memoryIncludedIds: includedMemoryIds, memoryOmittedCount: memoryEntries.length - includedMemoryIds.length,
-    memoryBudgetTokens: memoryBudgetTokens, memoryTruncatedIds: truncatedMemoryIds, memoryOmittedIds: omittedMemoryIds, warnings,
+    memoryBudgetTokens, memoryTokens: estimateMessageTokens([], baseSystem),
+    memorySelectionAudit: { strategy: 'confirmed-relevance-then-kind', requestedCount: memories.length,
+      includedCount: includedMemoryIds.length, scopeCounts: Object.fromEntries(['user', 'project', 'chat'].map(scope =>
+        [scope, memories.filter(entry => entry.scope === scope && includedMemoryIds.includes(entry.id)).length])),
+      earlyCutReason: omittedMemoryIds.length || truncatedMemoryIds.length ? 'shared-context-memory-budget' : null },
+    memoryTruncatedIds: truncatedMemoryIds, memoryOmittedIds: omittedMemoryIds, warnings,
     summaryUsed: Boolean(extracted.value), summaryReused: Boolean(extracted.reused),
     summaryExcerptBudgetTokens: extracted.value?.excerptBudgetTokens ?? 0,
     summarySelectedMessageIds: extracted.value?.selectedSources.flatMap(source => [source.userMessageId, source.assistantMessageId]) ?? []

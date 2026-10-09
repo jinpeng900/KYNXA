@@ -229,12 +229,17 @@ impl ResourceBudget {
             return json!({ "status": "denied", "reason": "RESOURCE_PRESSURE", "mode": "rust" });
         }
         self.sequence += 1;
+        let policy_fraction = self.policy.fraction(&request.task_id, request.gpu_memory_bytes > 0);
+        let execution_fraction = if hardware.cpu.usage_percent.is_some_and(|usage| usage > 85.0)
+            || hardware.memory.available_bytes < 1024 * 1024 * 1024 {
+            policy_fraction.min(0.5)
+        } else { policy_fraction };
         let lease = Lease {
             lease_id: format!("rust-{}-{}", std::process::id(), self.sequence),
             expires_at: now_ms + request.ttl_ms,
             cpu_threads: request.cpu_threads.min(available_cpu).min(
                 if request.kind == "background" {
-                    (cpu_capacity(hardware) as f64 * self.policy.fraction(&request.task_id,request.gpu_memory_bytes > 0))
+                    (cpu_capacity(hardware) as f64 * execution_fraction)
                         .floor()
                         .max(1.0) as usize
                 } else {
@@ -271,7 +276,9 @@ impl ResourceBudget {
         });
         output["suggestions"] =
             self.policy
-                .suggestions(hardware, lease.cpu_threads, lease.memory_bytes,&lease.task_id,lease.gpu_memory_bytes > 0);
+                .suggestions(hardware, lease.cpu_threads, lease.memory_bytes,&lease.task_id,lease.gpu_memory_bytes > 0,
+                    available_cpu.saturating_sub(lease.cpu_threads), available_memory.saturating_sub(lease.memory_bytes),
+                    available_gpu.saturating_sub(lease.gpu_memory_bytes));
         output
     }
 
@@ -372,6 +379,19 @@ mod tests {
             ttl_ms: 1000,
             wait_ms: 0,
         }
+    }
+
+    #[test]
+    fn search_planning_uses_remaining_headroom_without_approving_reranker_execution() {
+        let mut budget = ResourceBudget::new();
+        let search = budget.acquire(request(1, 8 << 20), &hardware(), 0);
+        assert_eq!(search["suggestions"]["rerankCandidates"], 60);
+        assert_eq!(search["suggestions"]["rerankSuggestionRequiresApproval"], true);
+        assert_eq!(budget.snapshot(&hardware(), 0)["budget"]["reservedCpuThreads"], 1);
+        let other = budget.acquire(request(4, 8 << 20), &hardware(), 0);
+        assert_eq!(other["status"], "granted");
+        let pressured = budget.acquire(request(1, 8 << 20), &hardware(), 0);
+        assert_eq!(pressured["suggestions"]["rerankCandidateLimit"], 20);
     }
     #[test]
     fn allocation_is_atomic_and_expiry_does_not_free_unconfirmed_work() {

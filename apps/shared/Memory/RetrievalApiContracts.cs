@@ -24,7 +24,10 @@ public sealed record RetrievalIndexingLimits(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumSourceBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumTotalBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumEntries = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentInputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentOutputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumPdfPages = null);
 public sealed record RetrievalAnnSettings(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Mode = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Adaptive = null,

@@ -5,8 +5,9 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { inspectLocalPath, toolFailure, within } from '../../platform/tool-paths.mjs';
 import { isSensitiveFilePath } from '../sensitive-files.mjs';
-import { extractDocumentBytes } from './document-extraction.mjs';
-import { DOCUMENT_EXTRACTION_LIMITS, DOCUMENT_EXTRACTION_VERSIONS, documentExtractionFailure } from './document-extraction-contracts.mjs';
+import { extractDocumentBytes, documentExtractionCoverage } from './document-extraction.mjs';
+import { DOCUMENT_EXTRACTION_LIMITS, DOCUMENT_EXTRACTION_VERSIONS, documentExtractionFailure,
+  validateDocumentExtractionLimits } from './document-extraction-contracts.mjs';
 import ignore from 'ignore';
 import { describeTextFileWindows, readTextFileWindow } from './text-file-windows.mjs';
 import { validateSourceFileWindow } from '../../data/retrieval/retrieval-contracts.mjs';
@@ -17,6 +18,10 @@ const DOCUMENT_FORMATS = new Map([['.pdf', 'pdf'], ['.docx', 'docx']]);
 const IGNORED_DIRECTORIES = new Set(['.git', '.vs', '.idea', 'node_modules', 'bin', 'obj', 'target', '__pycache__', '.venv', 'venv', '.kynxa', '.sandbox-runtime', '.sandbox-temp']);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const supportedSource = path => TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || DOCUMENT_FORMATS.has(extname(path).toLowerCase());
+const extractionLimitsKey = options => JSON.stringify([options.maximumSourceBytes ?? 32 * 1024 * 1024,
+  options.maximumDocumentInputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes,
+  options.maximumDocumentOutputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes,
+  options.maximumPdfPages ?? DOCUMENT_EXTRACTION_LIMITS.maximumPages]);
 
 /** Retry only transient observations; unsupported or malformed documents need a changed source or configuration.
  * 只重试暂时性观测错误；不支持或损坏的文档须等待来源或配置变化，不能无限重复解码。 */
@@ -50,7 +55,9 @@ function recordSourceFailure(stats, root, path, error, directory = false) {
   stats.failedFiles = (stats.failedFiles ?? 0) + 1;
   stats.failures ??= [];
   if (stats.failures.length < 10000) stats.failures.push({ relativePath: relative(root, path),
-    ...classifySourceFailure(error), attempts: error.sourceReadAttempts ?? 1, ...(directory ? { directory: true } : {}) });
+    ...classifySourceFailure(error), attempts: error.sourceReadAttempts ?? 1,
+    ...(error.details?.documentCoverage ? { documentCoverage: error.details.documentCoverage } : {}),
+    ...(directory ? { directory: true } : {}) });
   else stats.failureReportTruncated = true;
 }
 
@@ -63,13 +70,15 @@ async function readOrdinaryFile(path, maximumBytes, signal) {
   signal?.throwIfAborted();
   const before = await inspectLocalPath(path);
   signal?.throwIfAborted();
-  if (!before.isFile() || before.size > maximumBytes) throw toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400);
+  if (!before.isFile() || before.size > maximumBytes) throw Object.assign(toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400),
+    { observedBytes: before.size });
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.nlink !== 1 || opened.ino !== before.ino || opened.dev !== before.dev)
       throw toolFailure('资料路径已变化。', 'UNSAFE_TOOL_PATH', 403);
-    if (opened.size > maximumBytes) throw toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400);
+    if (opened.size > maximumBytes) throw Object.assign(toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400),
+      { observedBytes: opened.size });
     // Bound allocation even if another process grows the file while this read is in progress.
     // 即使其他进程在读取期间扩展文件，分配和读取也不能突破单文件预算。
     const buffer = Buffer.allocUnsafe(Math.min(opened.size + 1, maximumBytes + 1));
@@ -99,27 +108,35 @@ export function sameSourceMetadata(previous, current) {
 
 /** Reads authorized, bounded text or offline document bytes; extraction never bypasses path policy.
  * 只读取已授权的有界文本或离线文档字节，提取过程不能绕过现有路径策略。 */
-async function readSourceFileOnce(path, { root = null, excludedRoots = [], maximumSourceBytes = 32 * 1024 * 1024, signal, resourceService } = {}) {
+async function readSourceFileOnce(path, { root = null, excludedRoots = [], maximumSourceBytes = 32 * 1024 * 1024,
+  maximumDocumentInputBytes = DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes,
+  maximumDocumentOutputBytes = DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes,
+  maximumPdfPages = DOCUMENT_EXTRACTION_LIMITS.maximumPages, signal, resourceService } = {}) {
   signal?.throwIfAborted(); path = resolve(path);
   if (root && !within(resolve(root), path) || isSensitiveFilePath(path) || excludedRoots.some(folder => within(folder, path)))
     throw toolFailure('此路径不允许加入检索资料。', 'PROTECTED_RETRIEVAL_SOURCE', 403);
   if (!supportedSource(path))
     throw toolFailure('目前支持文本、代码和基础 PDF/DOCX 文本提取。', 'UNSUPPORTED_RETRIEVAL_SOURCE', 400);
   const format = DOCUMENT_FORMATS.get(extname(path).toLowerCase());
+  const documentLimits = format ? validateDocumentExtractionLimits({
+    maximumInputBytes: Math.min(maximumSourceBytes, maximumDocumentInputBytes),
+    maximumOutputBytes: Math.min(maximumSourceBytes, maximumDocumentOutputBytes), maximumPages: maximumPdfPages }) : null;
   if (!format && (await inspectLocalPath(path)).size > 2 * 1024 * 1024)
     return { path, title: root ? relative(root, path) : basename(path), ...await describeTextFileWindows(path, { maximumSourceBytes, signal }) };
   let bytes, metadata;
   try {
     ({ bytes, metadata } = await readOrdinaryFile(path,
-      format ? Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) : maximumSourceBytes, signal));
+      format ? documentLimits.maximumInputBytes : maximumSourceBytes, signal));
   } catch (error) {
-    if (format && error.code === 'INVALID_RETRIEVAL_SOURCE') throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT');
+    if (format && error.code === 'INVALID_RETRIEVAL_SOURCE') throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT', {
+      documentCoverage: documentExtractionCoverage(format, documentLimits, 'DOCUMENT_BYTES_LIMIT', undefined,
+        { limit: { dimension: 'maximumInputBytes', limit: documentLimits.maximumInputBytes, observed: error.observedBytes ?? 0 } }) });
     throw error;
   }
   if (format) {
     const { text, extraction } = await extractDocumentBytes(bytes, format, { signal, resourceService,
-      maximumInputBytes: Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes),
-      maximumOutputBytes: Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes) });
+      maximumInputBytes: documentLimits.maximumInputBytes, maximumOutputBytes: documentLimits.maximumOutputBytes,
+      maximumPages: documentLimits.maximumPages });
     signal?.throwIfAborted();
     return { path, title: root ? relative(root, path) : basename(path), text, contentHash: hash(text),
       textBytes: Buffer.byteLength(text), metadata, extraction };
@@ -233,7 +250,7 @@ export async function* scanSourceTree(path, options = {}) {
           if (failedSource && !options.changedPaths?.has(relativePath)) {
             const current = await inspectLocalPath(candidate);
             if (sameSourceMetadata(failedSource.metadata, fileMetadata(current)) &&
-                failedSource.extractionVersion === sourceExtractionVersion(candidate)) {
+                failedSource.extractionVersion === sourceExtractionVersion(candidate) && failedSource.limitsKey === extractionLimitsKey(options)) {
               recordSourceFailure(stats, root, candidate, failedSource.error);
               stats.reusedFailures = (stats.reusedFailures ?? 0) + 1;
               continue;
@@ -247,12 +264,15 @@ export async function* scanSourceTree(path, options = {}) {
             const maximumFileBytes = version ? Math.min(options.maximumSourceBytes ?? 32 * 1024 * 1024,
               DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) : options.maximumSourceBytes ?? 32 * 1024 * 1024;
             if (current.size > maximumFileBytes) {
-              if (sourceExtractionVersion(candidate)) throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT');
+              if (version) await readSourceFile(candidate, { ...options, root });
               throw toolFailure('资料文件超过配置预算。', 'INVALID_RETRIEVAL_SOURCE', 413);
             }
             const metadata = fileMetadata(current);
             reused = sameSourceMetadata(previous.metadata, metadata) && (previous.extraction?.version ?? null) === version &&
-              Number.isSafeInteger(previous.textBytes) && previous.textBytes <= maximumFileBytes;
+              Number.isSafeInteger(previous.textBytes) && previous.textBytes <= maximumFileBytes && (!version ||
+              current.size <= (options.maximumDocumentInputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) &&
+              previous.textBytes <= (options.maximumDocumentOutputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes) &&
+              (previous.extraction?.pageCount ?? 0) <= (options.maximumPdfPages ?? DOCUMENT_EXTRACTION_LIMITS.maximumPages));
             if (reused) file = { path: candidate, title: relativePath, contentHash: previous.contentHash,
               textBytes: previous.textBytes, metadata, ...(previous.extraction ? { extraction: previous.extraction } : {}),
               ...(previous.windows ? { windows: previous.windows } : {}), reused: true };
@@ -271,12 +291,14 @@ export async function* scanSourceTree(path, options = {}) {
           recordSourceFailure(stats, root, candidate, error);
           const classification = classifySourceFailure(error);
           if (options.failureCache && !classification.retryable &&
-              ['unsupported', 'invalid-source', 'ocr-unavailable'].includes(classification.category)) {
+              ['unsupported', 'invalid-source', 'ocr-unavailable', 'limit'].includes(classification.category)) {
             const current = await inspectLocalPath(candidate).catch(() => null);
             if (current?.isFile()) {
               const relativePath = relative(root, candidate);
               options.failureCache.set(relativePath, { metadata: fileMetadata(current),
-                extractionVersion: sourceExtractionVersion(candidate), error: { ...classification, code: classification.errorCode } });
+                limitsKey: extractionLimitsKey(options),
+                extractionVersion: sourceExtractionVersion(candidate), error: { ...classification, code: classification.errorCode,
+                  ...(error.details?.documentCoverage ? { details: { documentCoverage: error.details.documentCoverage } } : {}) } });
               while (options.failureCache.size > 256) options.failureCache.delete(options.failureCache.keys().next().value);
             }
           }

@@ -35,10 +35,13 @@ export class RerankerService {
   }
   status(profileId = this.#profile.id) {
     if (profileId !== this.#profile.id) return unavailableProfileStatus('reranker', profileId);
+    const resourceReservation = this.#resources.status();
     return { ...this.#metadata(), state: this.#state, loaded: this.#loaded, supported: true,
       local: true, network: false, workerPhase: this.#phase, assetVerification: this.#assetVerification,
       maxInputTokens: this.#profile.maxInputTokens, pendingRequests: this.#pending.size,
-      cpuThreads: this.cpuThreads, resourceReservation: this.#resources.status(),
+      cpuThreads: this.cpuThreads, resourceReservation, batchSuggestions: resourceReservation.batchSuggestions,
+      ...(resourceReservation.lastGrant ? { batchSize: resourceReservation.lastGrant.batchSize,
+        batchTokenBudget: resourceReservation.lastGrant.batchTokenBudget } : {}),
       inputAdmission: this.#admission.status(), requestLimits: this.#admission.limits,
       ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
       ...(this.#resourceDiagnostic ? { resourceDiagnostic: this.#resourceDiagnostic } : {}),

@@ -721,6 +721,15 @@ export class ToolService {
           const argumentsForBudget = remainingTokens === undefined ? call.arguments : { ...call.arguments,
             maximumTokens: Math.min(call.arguments.maximumTokens ?? 32768, remainingTokens) };
           result = await this.retrieval.search(context, argumentsForBudget, { signal, modelReferences: true });
+          if (result.budget?.audit) {
+            result.budget.audit.modelRequested = { limit: call.arguments.limit ?? null,
+              maximumTokens: call.arguments.maximumTokens ?? null };
+            result.budget.audit.availableContextTokens = remainingTokens ?? null;
+            if (remainingTokens !== undefined && (call.arguments.maximumTokens ?? result.budget.audit.configured.maximumTokens) > remainingTokens)
+              result.budget.audit.earlyCutReasons.push({ reason: 'remaining-context', field: 'maximumTokens',
+                proposed: call.arguments.maximumTokens ?? result.budget.audit.configured.maximumTokens,
+                approved: result.budget.maximumTokens, unit: 'tokens' });
+          }
           return await this._finishResult(context, call, { value: result, isError: false },
             { archiveId: result.evidenceArchiveId, modelProjection: id =>
               projectEvidenceSearchResult(publicToolResult({ content: [], structuredContent: result, isError: false }), id).structuredContent });

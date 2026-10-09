@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { InferenceResourceReservation, inferenceBatchBudget, inferenceResourceRequest } from '../models/retrieval/inference-resources.mjs';
-import { executeInferenceBatches, inferenceSessionOptions, loadVerifiedInferenceBackend } from '../models/retrieval/inference-backend.mjs';
+import { auditEmbeddingBatchCompatibility, executeInferenceBatches, inferenceSessionOptions, loadVerifiedInferenceBackend } from '../models/retrieval/inference-backend.mjs';
 import { EmbeddingService } from '../models/retrieval/embedding-service.mjs';
 import { BUILTIN_EMBEDDING_PROFILE } from '../models/retrieval/embedding-profile.mjs';
 import { InferenceAdmission } from '../models/retrieval/inference-admission.mjs';
 import { auditGpuPartition, qualifiedGpuOutputCompatibility } from '../models/retrieval/inference-backend.mjs';
+import { ResourceBudgetService } from '../platform/resources/resource-client.mjs';
 
 function resourceFixture({ gpu = false, deny = false } = {}) {
   const leases = new Map(), requests = [], releases = [];
@@ -418,4 +419,178 @@ test('a native GPU crash disables that backend and a new caller can restart once
   assert.equal(budgets[1].diagnostic.code, 'GPU_WORKER_FAILED');
   assert.equal(resourceService.requests.filter(request => request.gpuMemoryBytes > 0).length, 1);
   await service.close(); assert.equal(resourceService.leases.size, 0);
+});
+
+test('resource-approved batch probes reach 32/64/128 and immediately retreat on task pressure', async () => {
+  const resourceService = resourceFixture();
+  const acquire = resourceService.acquire;
+  resourceService.acquire = async request => {
+    const lease = await acquire(request);
+    if (lease.status === 'granted') { lease.cpuThreads = request.cpuThreads; lease.suggestions = { batchMultiplier: 1, batchProbeMultiplier: 2 }; }
+    return lease;
+  };
+  let fraction = 1;
+  resourceService.report = async () => ({ status: 'reported', feedback: { backgroundFraction: fraction } });
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService, cpuThreads: 12,
+    devicePreference: 'cpu' });
+  try {
+    assert.equal(reservation.status().batchSuggestions.batchSize, 32);
+    const first = await reservation.acquire(); assert.equal(first.batchSize, 32);
+    await reservation.idle();
+    const second = await reservation.acquire(); assert.equal(second.batchSize, 64);
+    fraction = 4; await reservation.report({ throughputPerSecond: 1000 }); await reservation.idle();
+    const third = await reservation.acquire(); assert.equal(third.batchSize, 128);
+    assert.ok(third.memoryBytes >= first.memoryBytes);
+    fraction = 0.5; await reservation.report({ allocationFailure: true });
+    assert.equal(reservation.status().batchSuggestions.batchSize, 16);
+    await reservation.idle();
+    const reduced = await reservation.acquire(); assert.ok(reduced.batchSize < first.batchSize);
+    assert.ok(reduced.batchTokenBudget <= first.batchTokenBudget);
+  } finally { await reservation.close(); }
+  assert.equal(resourceService.leases.size, 0);
+});
+
+test('automatic CPU demand explores only available cores while explicit thread settings remain fixed', async () => {
+  for (const explicit of [undefined, 3]) {
+    const resourceService = resourceFixture(), acquire = resourceService.acquire;
+    resourceService.acquire = async request => {
+      const lease = await acquire(request);
+      if (lease.status === 'granted') lease.suggestions = { batchMultiplier: 1, batchProbeMultiplier: 2 };
+      return lease;
+    };
+    const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService,
+      devicePreference: 'cpu', cpuThreads: explicit });
+    try {
+      await reservation.acquire(); await reservation.idle(); await reservation.acquire();
+      const requests = resourceService.requests.filter(request => request.cpuThreads > 0);
+      if (explicit) assert.equal(requests[1].cpuThreads, explicit);
+      else {
+        assert.ok(requests[1].cpuThreads <= Math.min(32, availableParallelism()));
+        if (availableParallelism() > 1) assert.ok(requests[1].cpuThreads > requests[0].cpuThreads);
+      }
+    } finally { await reservation.close(); }
+  }
+});
+
+test('a denied resident expansion retains a smaller approved execution and every held lease remains accounted', async () => {
+  const resourceService = resourceFixture(), acquire = resourceService.acquire;
+  let shouldDenyExpansion = false;
+  resourceService.acquire = async request => {
+    if (shouldDenyExpansion && request.memoryBytes > 0) return { status: 'denied', reason: 'RESOURCE_PRESSURE' };
+    const lease = await acquire(request);
+    if (lease.status === 'granted') { lease.cpuThreads = request.cpuThreads; lease.suggestions = { batchMultiplier: 1, batchProbeMultiplier: 4 }; }
+    return lease;
+  };
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService,
+    cpuThreads: 12, devicePreference: 'cpu' });
+  try {
+    const first = await reservation.acquire(); await reservation.idle(); shouldDenyExpansion = true;
+    const held = await reservation.acquire();
+    assert.equal(held.memoryBytes, first.memoryBytes); assert.equal(held.batchSize, first.batchSize);
+    assert.equal(reservation.status().adjustments.at(-1).reason, 'resident-expansion-denied');
+    assert.equal(resourceService.leases.size, 2);
+  } finally { await reservation.close(); }
+  assert.equal(resourceService.leases.size, 0);
+});
+
+test('CPU padded attention cost stays inside its approved resident scratch even when a plan asks for 128 items', async () => {
+  const resourceService = resourceFixture();
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService,
+    cpuThreads: 12, devicePreference: 'cpu' });
+  try {
+    const budget = await reservation.acquire();
+    const batches = [];
+    await executeInferenceBatches(Array(32).fill('long'), { ...budget, batchSize: 128, batchTokenBudget: 65_536,
+      tokenLengths: Array(32).fill(512), infer: async values => { batches.push(values.length); return values; } });
+    const bytesPerItem = 512 * budget.hiddenSize * 4 * 8 + 512 ** 2 * budget.attentionHeads * 4;
+    assert.ok(batches.every(count => count * bytesPerItem <= budget.activationMemoryBytes));
+    assert.ok(Math.max(...batches) < 32);
+  } finally { await reservation.close(); }
+});
+
+test('batch compatibility reports existing normalized-space drift and rejects failed qualification without changing identities', async () => {
+  const reference = [[1, 0], [0, 1]], budget = { batchSize: 32, batchTokenBudget: 512 };
+  const rotation = angle => values => Promise.resolve(values.map(text => text === 'first'
+    ? [Math.cos(angle), Math.sin(angle)] : [-Math.sin(angle), Math.cos(angle)]));
+  const accepted = await auditEmbeddingBatchCompatibility({ texts: ['first', 'second'], tokenLengths: [8, 8], dimensions: 2,
+    budget, reference, infer: rotation(0.02) });
+  assert.equal(accepted.status.qualified, true); assert.equal(accepted.status.strictlyEquivalent, false);
+  assert.ok(accepted.status.maxDifference > 1e-4); assert.equal(accepted.status.measuredMaximumBatchSize, 32);
+  assert.equal(accepted.status.retrievalQualityValidated, false);
+  const rejected = await auditEmbeddingBatchCompatibility({ texts: ['first', 'second'], tokenLengths: [8, 8], dimensions: 2,
+    budget, reference, infer: rotation(0.5) });
+  assert.equal(rejected.status.qualified, false); assert.ok(rejected.status.maxDifference > 0.03);
+  assert.deepEqual(rejected.reference, reference);
+});
+
+test('terminal single-item allocation failures report pressure before returning the error', async () => {
+  const pressure = [];
+  await assert.rejects(executeInferenceBatches(['single'], { tokenLengths: [512],
+    infer: async () => { throw new Error('out of memory'); }, onPressure: sample => pressure.push(sample) }), /out of memory/u);
+  assert.equal(pressure.length, 1); assert.equal(pressure[0].terminal, true);
+});
+
+test('a fresh authority sample cuts background CPU and batch grants despite earlier idle probe advice', async () => {
+  let usagePercent = 10;
+  const service = new ResourceBudgetService({ executablePath: null, sampler: () => ({ cpu: { logicalCores: 32, usagePercent },
+    memory: { totalBytes: 16 * 1024 ** 3, availableBytes: 8 * 1024 ** 3 }, gpu: { state: 'unknown' } }) });
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService: service,
+    devicePreference: 'cpu', cpuThreads: 12 });
+  try {
+    await reservation.acquire(); await reservation.idle();
+    const idle = await reservation.acquire(); assert.equal(idle.batchSize, 64); await reservation.idle();
+    usagePercent = 86;
+    const pressure = await reservation.acquire();
+    assert.ok(pressure.cpuThreads < idle.cpuThreads); assert.ok(pressure.batchSize < idle.batchSize);
+    assert.equal(reservation.status().batchSuggestions.batchSize, 16);
+    await reservation.report({ phase: 'hot-inference', backend: 'cpu', unit: 'tokens', throughputPerSecond: 1000 });
+    assert.equal(reservation.status().batchSuggestions.batchSize, 16, 'older hot policy state cannot override a fresh pressure sample');
+  } finally { await reservation.close(); await service.close(); }
+});
+
+test('mapped GPU batch expansion is approved separately and all GPU debt survives idle until backend retirement', async () => {
+  const resourceService = resourceFixture({ gpu: true }), acquire = resourceService.acquire;
+  resourceService.acquire = async request => {
+    const lease = await acquire(request);
+    if (lease.status === 'granted') lease.suggestions = { batchMultiplier: 1, batchProbeMultiplier: 4 };
+    return lease;
+  };
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService, cpuThreads: 12 });
+  try {
+    const first = await reservation.acquire(); await reservation.idle();
+    const grown = await reservation.acquire(); assert.ok(grown.gpuMemoryBytes > first.gpuMemoryBytes);
+    const gpuLeases = resourceService.requests.filter(request => request.gpuMemoryBytes > 0);
+    assert.equal(gpuLeases.length, 2);
+    assert.equal(gpuLeases.reduce((sum, request) => sum + request.gpuMemoryBytes, 0), grown.gpuMemoryBytes);
+    await reservation.idle(); assert.equal(reservation.status().gpuMemoryBytes, grown.gpuMemoryBytes);
+    await reservation.backend({ device: 'cpu', cpuThreads: grown.cpuThreads, diagnostic: { code: 'GPU_MEMORY_INSUFFICIENT' } });
+    assert.equal(reservation.status().gpuMemoryBytes, 0);
+    assert.equal(resourceService.leases.size, 2, 'both host resident reservations remain accounted');
+  } finally { await reservation.close(); }
+  assert.equal(resourceService.leases.size, 0);
+});
+
+test('failed native inference keeps execution and input billing until the worker reports settlement', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-inference-error-billing-'));
+  for (const asset of BUILTIN_EMBEDDING_PROFILE.files) {
+    await mkdir(dirname(join(root, asset.path)), { recursive: true }); await writeFile(join(root, asset.path), 'Synthetic transport fixture.');
+  }
+  const resources = resourceFixture(), worker = new EventEmitter(), messages = [];
+  worker.ref = worker.unref = () => {};
+  worker.postMessage = message => {
+    messages.push(message);
+    if (message.type === 'close') setImmediate(() => { worker.emit('message', { type: 'closed', disposed: true }); worker.emit('exit', 0); });
+  };
+  const service = new EmbeddingService({ modelRoot: root, resourceService: resources, workerFactory: () => worker, devicePreference: 'cpu' });
+  t.after(async () => { await service.close(); await rm(root, { recursive: true, force: true }); });
+  const result = service.embedDocuments(['Synthetic failure.']);
+  while (!messages.length) await new Promise(resolve => setImmediate(resolve));
+  worker.emit('message', { type: 'error', id: messages[0].id, code: 'EMBEDDING_FAILED', message: 'Synthetic native allocation failure.' });
+  await assert.rejects(result, { code: 'EMBEDDING_FAILED' });
+  assert.equal(resources.leases.size, 2); assert.equal(service.status().inputAdmission.activeRequests, 1);
+  worker.emit('message', { type: 'settled', id: messages[0].id });
+  worker.emit('message', { type: 'idle', throughId: messages[0].id });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resources.leases.size, 1); assert.equal(service.status().inputAdmission.activeRequests, 0);
+  await service.close(); assert.equal(resources.leases.size, 0);
 });

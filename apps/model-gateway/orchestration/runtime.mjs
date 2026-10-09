@@ -63,7 +63,7 @@ export function completedContext(messages, beforeUserId) {
  * 传输适配器使用与桌面展示相同的正式会话日志。
  */
 export class ModelRuntime {
-  constructor({ modelStore, dataHome, extensionRoot, conversationStore, memoryService, toolService, resourceService, evaluationPolicy, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = DEFAULT_TOOL_RUN_LIMITS.maxDurationMs }) {
+  constructor({ modelStore, dataHome, extensionRoot, conversationStore, memoryService, toolService, resourceService, evaluationPolicy, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs }) {
     this.store = modelStore;
     this.conversations = conversationStore ?? new ConversationStore({ dataHome });
     this.extensionRoot = resolve(extensionRoot ?? toolService?.extensionRoot ?? this.conversations.root);
@@ -77,7 +77,8 @@ export class ModelRuntime {
         ...extensionControlPaths(extensionPointerPath()).map(path => dirname(path))].filter(Boolean) }) });
     this.timeoutMs = timeoutMs;
     this.idleTimeoutMs = idleTimeoutMs;
-    this.streamTimeoutMs = streamTimeoutMs;
+    this.streamTimeoutMs = streamTimeoutMs ?? DEFAULT_TOOL_RUN_LIMITS.maxDurationMs;
+    this.hasStreamTimeoutOverride = streamTimeoutMs !== undefined;
     this.queues = new Map();
     this.shutdown = new AbortController();
     this.retrieval = new RetrievalCoordinator({ conversations: this.conversations, memory: this.memory, tools: this.tools,
@@ -207,11 +208,13 @@ export class ModelRuntime {
       const retrievalHistory = history.filter(item => item.Id !== userId);
       const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
       const requestedEvidencePlan = retrievalPlan(input.message, { history: retrievalHistory, taskContext: previousUser?.Content });
-      const allocation = contextAllocation(context.metrics.inputBudgetTokens, requestedEvidencePlan.taskType);
-      const evidenceBudgetTokens = allocation.requestedEvidenceTokens;
+      const allocation = contextAllocation(context.metrics.inputBudgetTokens, requestedEvidencePlan.taskType, {
+        mandatoryInputTokens: estimateMessageTokens([{ role: 'user', content: input.message }]) +
+          (context.metrics.memoryTokens ?? 0) + 192 });
+      const evidenceBudgetTokens = allocation.approvedEvidenceTokens;
       const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
         taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
-      allocation.evidenceRequested = evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0;
+      allocation.evidenceRequested = evidencePlan.shouldRetrieve;
       if (toolContext?.browserTaskIntent?.inherited && !evidencePlan.taskRelation.allowsInheritance)
         evidencePlan.taskRelation = { type: 'continue', allowsInheritance: true, reason: 'browser-task-follow-up' };
       assistant.RequestInterpretation = requestInterpretation(evidencePlan);
@@ -222,7 +225,7 @@ export class ModelRuntime {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,
             { signal: this.shutdown.signal, maximumTokens: evidencePlan.evidenceTokens,
-              maximumCharacters: Math.min(65536, evidencePlan.evidenceTokens * 4), plan: evidencePlan,
+              maximumCharacters: evidencePlan.evidenceTokens * 4, plan: evidencePlan,
               history: history.filter(item => item.Id !== userId), deferArchive: true });
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
@@ -249,7 +252,7 @@ export class ModelRuntime {
         }
         const schemaReserve = allocation.schemaCeilingTokens;
         const evidenceReserveTokens = estimateMessageTokens([], retrievalEvidence.prompt);
-        const referenceReserveTokens = Math.min(4096, context.metrics.memoryBudgetTokens ?? 0, estimateMessageTokens([], context.system));
+        const referenceReserveTokens = context.metrics.memoryTokens ?? Math.min(4096, estimateMessageTokens([], context.system));
         const maximumPromptTokens = Math.max(0, context.metrics.inputBudgetTokens - schemaReserve
           - estimateMessageTokens([{ role: 'user', content: input.message }]) - estimateMessageTokens([], MODEL_HISTORY_NOTICE)
           - evidenceReserveTokens - referenceReserveTokens - interpretationTokens - 512);
@@ -299,12 +302,14 @@ export class ModelRuntime {
         // Deduplicate against the final budgeted request; keep chosen history/tool pairs unchanged afterwards.
         // 只对最终预算下真实保留的请求内容去重；之后保持已选择的历史和工具配对不变，避免证据两边都被移除。
         const baseSystem = additionalSystem ? context.system.slice(0, -additionalSystem.length).replace(/\n$/u, '') : context.system;
-        finalEvidenceBudgetTokens = Math.max(0, context.metrics.inputBudgetTokens -
-          estimateToolMessageTokens(context.messages, baseSystem) - schemaTokens - 512);
+        const finalBaseSystem = [baseSystem, composeAdditionalSystem('')].filter(Boolean).join('\n');
+        finalEvidenceBudgetTokens = Math.max(0, Math.min(allocation.approvedEvidenceTokens, context.metrics.inputBudgetTokens -
+          estimateToolMessageTokens(context.messages, finalBaseSystem) - schemaTokens - 512));
         try {
           retrievalEvidence = await this.retrieval.finalizeEvidence(toolContext ?? { conversationId: id, requestId,
             currentMessageId: userId, projectId: contextInput.projectId }, retrievalEvidence,
-          { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages],
+          { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages,
+            ...context.memoryProjection.filter(item => item.content !== undefined).map(item => ({ content: item.content }))],
             maximumTokens: finalEvidenceBudgetTokens });
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
@@ -334,6 +339,7 @@ export class ModelRuntime {
       // 成功回复只在完整请求准备完成后开始计时；准备失败仍保存该准备阶段的实际耗时。
       return { assistant, conversationId: id, projectId: contextInput.projectId, messages: context.messages, connection, toolContext, catalog, declarations, runLimits: limits,
         modelOrigin: modelOrigin(connection, { providerId: input.provider, model: input.model }),
+        memorySnapshot: this.memory.snapshotFor?.(memory, context.metrics.memoryIncludedIds, context.memoryProjection),
         historySources: projection.historySources(context.messages, context.historySources),
         contextMetrics: { ...context.metrics, historyCompaction, toolCompactions: [] },
         inputBudgetTokens: context.metrics.inputBudgetTokens,
@@ -357,18 +363,63 @@ export class ModelRuntime {
 
   async replyResult(input) { return this.reply(input, { includeTiming: true }); }
 
+  runTimingAudit(turn) {
+    const requestedDurationMs = turn.runLimits?.maxDurationMs ?? DEFAULT_TOOL_RUN_LIMITS.maxDurationMs;
+    const effectiveDurationMs = this.hasStreamTimeoutOverride ? Math.min(requestedDurationMs, this.streamTimeoutMs) : requestedDurationMs;
+    const audit = { requestedDurationMs, effectiveDurationMs, configuredRuntimeDurationMs: this.streamTimeoutMs,
+      runtimeOverride: this.hasStreamTimeoutOverride, earlyCutReason: effectiveDurationMs < requestedDurationMs ? 'explicit-runtime-duration-cap' : null,
+      modelResponseTimeoutMs: this.timeoutMs, modelIdleTimeoutMs: this.idleTimeoutMs, includesPreparation: false };
+    turn.contextMetrics.runTimingAudit = audit;
+    return audit;
+  }
+
+  async refreshMemorySystem(turn, system, signal) {
+    signal?.throwIfAborted();
+    const validation = await this.memory.validateSnapshot?.(turn.conversationId, turn.memorySnapshot);
+    signal?.throwIfAborted();
+    if (!validation || validation.current) return turn.memorySystemRefreshed ? turn.requestOptions.system : system;
+    const invalidIds = new Set(validation.invalidSources.map(source => source.memoryId));
+    const removed = turn.memorySnapshot.projection.filter(item => invalidIds.has(item.memoryId));
+    const oldLines = new Set(removed.map(item => item.line));
+    const refreshed = system.split('\n').filter(line => !oldLines.has(line)).join('\n');
+    const notice = '[MEMORY_CHANGED] Ignore superseded memory; read current confirmed sources. / 旧记忆已失效，先核实当前来源。';
+    const shortNotice = '[MEMORY_CHANGED] 旧记忆已失效。';
+    const appliedNotice = estimateTokens(refreshed + '\n' + notice) <= estimateTokens(system) ? notice : shortNotice;
+    const nextSystem = refreshed + '\n' + appliedNotice;
+    if (estimateTokens(nextSystem) > estimateTokens(system))
+      throw Object.assign(new ContextError('记忆已变化，当前请求需要重新准备上下文。', 'CONTEXT_MEMORY_CHANGED'), { statusCode: 409 });
+    // Revocation removes only the request projection; completed actions and raw history are never replayed or erased.
+    // 撤销只移除本次请求投影，不重放已完成操作，也不删除原始历史。
+    turn.memorySnapshot.entries = turn.memorySnapshot.entries.filter(entry => !invalidIds.has(entry.memoryId));
+    turn.memorySnapshot.projection = turn.memorySnapshot.projection.filter(item => !invalidIds.has(item.memoryId));
+    turn.assistant.MemoryDiagnostic = { code: 'CONTEXT_MEMORY_REFRESHED', invalidSources: validation.invalidSources };
+    turn.contextMetrics.memoryRefresh = { removedMemoryIds: [...new Set([
+      ...(turn.contextMetrics.memoryRefresh?.removedMemoryIds ?? []), ...invalidIds])], freshnessOnly: true };
+    turn.memorySystemRefreshed = true;
+    turn.memoryInvalidation = { awaitingNoticeDelivery: true, invalidSources: validation.invalidSources };
+    turn.requestOptions.system = nextSystem;
+    return nextSystem;
+  }
+
   async consumeModelResponse(turn, modelId, request, signal, readResponse, { streaming = false } = {}) {
     const admission = await this.externalAdmissions.acquire(turn.connection, { modelId, signal });
     let stopLocal;
     try {
       signal?.throwIfAborted();
+      // Admission can wait for local model loading; recheck revoked records after that wait, before dispatch.
+      // 准入可能等待本地模型加载；等待结束后、正式派发前再次核对撤销记录。
+      const system = this.refreshMemorySystem
+        ? await this.refreshMemorySystem(turn, turn.requestOptions?.system ?? '', signal) : turn.requestOptions?.system ?? '';
+      const liveRequest = typeof request === 'function' ? request(system) : request;
+      turn.lastDispatchedSystem = system;
       admission.dispatched();
       stopLocal = this.beginLocalGeneration(turn, modelId);
-      const response = await requestModelResponse(turn.connection, request, signal, { streaming });
+      const response = await requestModelResponse(turn.connection, liveRequest, signal, { streaming });
       if (!response.ok) admission.settled();
       await checkResponse(response);
       const result = await readResponse(response);
       admission.settled();
+      if (turn.memoryInvalidation) turn.memoryInvalidation.awaitingNoticeDelivery = false;
       return result;
     } catch (error) {
       // A complete invalid JSON body is settled; cancellation or a broken stream is not execution proof.
@@ -392,6 +443,22 @@ export class ModelRuntime {
     const context = turn.toolContext ?? { conversationId: turn.conversationId, requestId: turn.assistant.Id, projectId: turn.projectId };
     try {
       const result = await this.retrieval.validateFinal(context, { signal, references: turn.assistant.EvidenceReferences ?? [] });
+      const memory = await this.memory.validateSnapshot?.(turn.conversationId, turn.memorySnapshot);
+      signal?.throwIfAborted();
+      if (memory) {
+        result.checked = (result.checked ?? 0) + memory.checked;
+        result.memoryChecked = memory.checked;
+        result.freshnessOnly = true;
+        result.correctnessCertified = false;
+      }
+      if (memory && !memory.current) {
+        result.current = false;
+        result.invalidSources = [...result.invalidSources, ...memory.invalidSources];
+      }
+      if (turn.memoryInvalidation?.awaitingNoticeDelivery) {
+        result.current = false;
+        result.invalidSources = [...result.invalidSources, ...turn.memoryInvalidation.invalidSources];
+      }
       if (result.references) turn.assistant.EvidenceReferences = result.references;
       if (!result.current) turn.assistant.RetrievalDiagnostic = { code: 'FINAL_EVIDENCE_CHANGED', invalidSources: result.invalidSources };
       return result;
@@ -407,8 +474,9 @@ export class ModelRuntime {
       if (turn.receipt) return includeTiming ? { content: turn.receipt.content, durationMs: turn.receipt.durationMs } : turn.receipt.content;
       try {
         const connection = turn.connection;
+        const timing = this.runTimingAudit(turn);
         if (turn.catalog.length) {
-          const signal = AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(this.streamTimeoutMs)]);
+          const signal = AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(timing.effectiveDurationMs)]);
           let content = '', reasoning = '', generationStarted = false;
           const receive = event => {
             if (!generationStarted && event.type === 'assistant_segment' && event.segment.status === 'streaming') {
@@ -435,8 +503,10 @@ export class ModelRuntime {
             saveActivity: activity => this.saveToolActivity(id, turn, activity),
             saveModelRound: step => this.saveModelRound(id, turn, step),
             validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
-            requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog) => {
-              const request = chatRequest(connection, input.model, messages, { ...turn.requestOptions, tools: roundDeclarations });
+            systemForRound: (system, signal) => this.refreshMemorySystem(turn, system, signal),
+            requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system) => {
+              const request = currentSystem => chatRequest(connection, input.model, messages,
+                { ...turn.requestOptions, system: currentSystem, tools: roundDeclarations });
               const raw = await this.consumeModelResponse(turn, input.model, request,
                 AbortSignal.any([roundSignal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson);
               const parts = finalParts(connection.protocol, raw);
@@ -452,14 +522,15 @@ export class ModelRuntime {
           return includeTiming ? { content: result.content, durationMs: turn.assistant.DurationMs,
             ...(completionStatus === 'interrupted' ? { completionStatus, taskCompletion: result.taskCompletion } : {}) } : result.content;
         }
-        const request = chatRequest(connection, input.model, turn.messages, turn.requestOptions);
+        await this.refreshMemorySystem(turn, turn.requestOptions.system, this.shutdown.signal);
+        const request = system => chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, system });
         // Admission covers dispatch and body consumption; denied resources must not start an upstream generation.
         // 准入覆盖派发及响应读取，资源未获准时不能先启动上游生成，更不能把准入错误归为 JSON 错误。
         const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
           memoryBytes: 16 * 1024 * 1024 }, async () => {
           try {
             return await this.consumeModelResponse(turn, input.model, request,
-              AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson);
+              AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(Math.min(this.timeoutMs, timing.effectiveDurationMs))]), parseModelJson);
           } catch (error) {
             if (error.name === 'TimeoutError') throw Object.assign(new StreamFailure('模型响应超时，请稍后重试。'), { code: 'MODEL_RESPONSE_TIMEOUT' });
             if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止。', 'interrupted');
@@ -525,7 +596,7 @@ export class ModelRuntime {
 
   async sendStream(input, id, emit, clientSignal) {
     const idle = new AbortController(), lifetime = new AbortController();
-    const timeout = setTimeout(() => lifetime.abort(), this.streamTimeoutMs);
+    let timeout;
     let idleTimer, turn, checkpoint, checkpointError, plainSegments;
     let content = '', reasoning = '', thinkingStarted, thinkingDuration = 0, lastSave = Date.now(), generationStarted = false;
     const activity = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => idle.abort(), this.idleTimeoutMs); };
@@ -574,6 +645,8 @@ export class ModelRuntime {
       throwIfCancelled();
       turn = await this.prepare(input, id);
       if (turn.receipt) return turn.receipt;
+      throwIfCancelled();
+      timeout = setTimeout(() => lifetime.abort(), this.runTimingAudit(turn).effectiveDurationMs);
       const connection = turn.connection;
       if (turn.catalog.length) {
         const result = await runToolLoop({ protocol: connection.protocol, messages: turn.messages,
@@ -588,6 +661,7 @@ export class ModelRuntime {
           system: turn.requestOptions.system, declarations: turn.declarations, inputBudgetTokens: turn.inputBudgetTokens,
           context: turn.toolContext, service: this.tools, signal, interactive: true, emit: receive,
           validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
+          systemForRound: (system, signal) => this.refreshMemorySystem(turn, system, signal),
           onRoundComplete: result => receive({ type: 'content_snapshot', ...result }),
           catalogForRound: () => this.tools.modelCatalog(turn.toolContext),
           saveActivity: async tool => {
@@ -602,8 +676,9 @@ export class ModelRuntime {
             turn.assistant = snapshot();
             await this.saveModelRound(id, turn, step);
           },
-          requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog) => {
-            const request = chatRequest(connection, input.model, messages, { ...turn.requestOptions, stream: true, tools: roundDeclarations });
+          requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system) => {
+            const request = currentSystem => chatRequest(connection, input.model, messages,
+              { ...turn.requestOptions, system: currentSystem, stream: true, tools: roundDeclarations });
             throwIfCancelled(); activity();
             try {
               return await this.consumeModelResponse(turn, input.model, request, roundSignal, response => {
@@ -624,7 +699,8 @@ export class ModelRuntime {
       // 轻量问候仍使用有序公开流合同，无需为保持界面生命周期而启动工具循环。
       plainSegments = new AssistantSegments(receive);
       plainSegments.start(1);
-      const request = chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, stream: true });
+      await this.refreshMemorySystem(turn, turn.requestOptions.system, signal);
+      const request = system => chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, system, stream: true });
       throwIfCancelled();
       activity();
       const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
@@ -674,7 +750,8 @@ export class ModelRuntime {
     await this.conversations.upsertMessage(id, turn.assistant);
   }
 
-  async saveModelRound(id, turn, { round, turn: modelTurn, messages, system, declarations }) {
+  async saveModelRound(id, turn, { round, turn: modelTurn, messages, system: projectedSystem, declarations }) {
+    const system = turn.lastDispatchedSystem ?? projectedSystem;
     const continuation = nativeContinuation(turn.connection.protocol, modelTurn);
     const prefixFingerprint = modelPrefixFingerprint(messages, system, declarations);
     const nativeContinuationRef = continuation ? await this.tools.results.saveModelContinuation(

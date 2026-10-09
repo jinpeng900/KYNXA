@@ -225,6 +225,8 @@ export class SourceIndexService {
       const limits = settings.local.indexing;
       const scanStats = {}, options = { excludedRoots: this.excludedRoots, stats: scanStats, resourceService: this.resources,
         maximumFiles: limits?.maximumFiles ?? 512, maximumSourceBytes: limits?.maximumSourceBytes,
+        maximumDocumentInputBytes: limits?.maximumDocumentInputBytes, maximumDocumentOutputBytes: limits?.maximumDocumentOutputBytes,
+        maximumPdfPages: limits?.maximumPdfPages,
         maximumBytes: limits?.maximumTotalBytes, maximumEntries: limits?.maximumEntries, signal: ownedSignal };
       const files = this.readTree === readSourceTree ? readSourceImportTree(input.path, options) : await this.readTree(input.path, options);
       ownedSignal.throwIfAborted();

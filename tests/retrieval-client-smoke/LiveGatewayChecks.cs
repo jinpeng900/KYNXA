@@ -53,6 +53,9 @@ internal static class LiveGatewayChecks
             Check(importedGlobal.Scope == "user" && importedGlobal.ProjectId is null && importedGlobal.Revision == 1 &&
                 importedGlobal.ImportedCount == 1 && importedGlobal.JobId is not null, "Real source import exposes its source revision and owned job.");
             await WaitForJobAsync(api, importedGlobal.JobId!);
+            var globalJob = await api.GetIndexJobAsync(importedGlobal.JobId!);
+            Check(globalJob.Status == "partial" && globalJob.Coverage is { Lexical: > 0, Complete: false },
+                "Unavailable embeddings keep lexical publication usable while the real terminal job reports partial coverage.");
             var importedProject = await api.ImportSourceAsync(new("project", info.ProjectSource, info.ProjectId));
             Check(importedProject.ProjectId == info.ProjectId && importedProject.Scope == "project", "Real project source retains its stable owner.");
             await WaitForJobAsync(api, importedProject.JobId!);
@@ -113,7 +116,7 @@ internal static class LiveGatewayChecks
         while (true)
         {
             var job = await api.GetIndexJobAsync(jobId);
-            if (job.Status == "completed" || allowCancelled && job.Status == "cancelled") return;
+            if (job.Status is "completed" or "partial" || allowCancelled && job.Status == "cancelled") return;
             if (job.Status is "failed" or "cancelled") throw new InvalidOperationException($"Index job {jobId} ended with {job.Status}: {job.Error}");
             if (timer.ElapsedMilliseconds > 15000) throw new TimeoutException("The isolated index job did not finish.");
             await Task.Delay(50);

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateSourceExtraction } from '../../data/retrieval/retrieval-contracts.mjs';
+import { validateDocumentCoverage } from '../../data/retrieval/document-coverage.mjs';
 import { DOCUMENT_EXTRACTION_LIMITS, DOCUMENT_EXTRACTION_VERSIONS, documentExtractionFailure,
   validateDocumentExtractionLimits } from './document-extraction-contracts.mjs';
 
@@ -13,6 +14,22 @@ let activeProcesses = 0;
 const abortFailure = () => Object.assign(new Error('Document extraction cancelled. / 文档提取已取消。'),
   { name: 'AbortError', code: 'ABORT_ERR' });
 
+export function documentExtractionCoverage(format, limits, code, rawContentHash, details = {}) {
+  const pageCount = Number.isSafeInteger(details.pageCount) && details.pageCount > 0 ? details.pageCount : undefined;
+  const processedPages = pageCount !== undefined && Number.isSafeInteger(details.processedPages) && details.processedPages >= 0
+    ? Math.min(details.processedPages, pageCount) : 0;
+  const limit = details.limit;
+  return validateDocumentCoverage({ format, reasonCode: code, complete: false, processedPages, publishedPages: 0,
+    ...(rawContentHash ? { rawContentHash } : {}), ...(pageCount === undefined ? {} : { pageCount }),
+    uncoveredRanges: pageCount === undefined ? [] : [{ startPage: 1, endPage: pageCount }],
+    unprocessedRanges: pageCount === undefined || processedPages === pageCount ? [] : [{ startPage: processedPages + 1, endPage: pageCount }],
+    ...(Array.isArray(details.pages) ? { missingTextPages: details.pages.filter(page => Number.isSafeInteger(page) &&
+      page >= 1 && page <= pageCount).slice(0, 100) } : {}),
+    effectiveLimits: { maximumInputBytes: limits.maximumInputBytes, maximumOutputBytes: limits.maximumOutputBytes, maximumPages: limits.maximumPages },
+    ...(limit ? { limit } : {}), readback: { kind: 'original-document',
+      ...(pageCount === undefined ? {} : { startPage: 1, endPage: pageCount }) } });
+}
+
 /** Decode only bytes supplied after path authorization; every invocation owns and retires its process.
  * 仅解码路径授权后提供的字节；每次调用独占并回收子进程，原生退出或解压 OOM 不能终止网关。 */
 export async function extractDocumentBytes(bytes, format, { signal, forkFactory = fork, resourceService, ...options } = {}) {
@@ -20,8 +37,12 @@ export async function extractDocumentBytes(bytes, format, { signal, forkFactory 
   const limits = validateDocumentExtractionLimits(options);
   if (!(bytes instanceof Uint8Array) || !DOCUMENT_EXTRACTION_VERSIONS[format])
     throw documentExtractionFailure('DOCUMENT_INVALID_INPUT');
-  if (!bytes.length || bytes.length > limits.maximumInputBytes) throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT');
-  if (activeProcesses >= DOCUMENT_EXTRACTION_LIMITS.maximumProcesses) throw documentExtractionFailure('DOCUMENT_DECODER_BUSY');
+  const rawContentHash = bytes.length <= limits.maximumInputBytes ? createHash('sha256').update(bytes).digest('hex') : undefined;
+  if (!bytes.length || bytes.length > limits.maximumInputBytes) throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT', {
+    documentCoverage: documentExtractionCoverage(format, limits, 'DOCUMENT_BYTES_LIMIT', rawContentHash,
+      { limit: { dimension: 'maximumInputBytes', limit: limits.maximumInputBytes, observed: bytes.length } }) });
+  if (activeProcesses >= DOCUMENT_EXTRACTION_LIMITS.maximumProcesses) throw documentExtractionFailure('DOCUMENT_DECODER_BUSY', {
+    documentCoverage: documentExtractionCoverage(format, limits, 'DOCUMENT_DECODER_BUSY', rawContentHash) });
   activeProcesses++;
   let child, timeout, renewal, result, rejection, lease, resourceFailure;
   let terminated = false, closed = false, slotReleased = false, resourcesReleased = false;
@@ -43,7 +64,10 @@ export async function extractDocumentBytes(bytes, format, { signal, forkFactory 
       renewal.unref?.();
     }
   } catch (error) {
-    releaseSlot(); await releaseResources(); throw error;
+    releaseSlot(); await releaseResources();
+    if (error.name !== 'AbortError' && /^(?:DOCUMENT_[A-Z_]+|OCR_UNAVAILABLE)$/u.test(error.code ?? ''))
+      error.details = { ...error.details, documentCoverage: documentExtractionCoverage(format, limits, error.code, rawContentHash) };
+    throw error;
   }
   let resolveClose;
   const exit = new Promise(resolveExit => { resolveClose = resolveExit; });
@@ -81,7 +105,10 @@ export async function extractDocumentBytes(bytes, format, { signal, forkFactory 
           ? message.code : 'DOCUMENT_PARSE_FAILED';
         const pages = Array.isArray(message.pages) ? message.pages.filter(page => Number.isInteger(page) && page >= 1 &&
           page <= limits.maximumPages).slice(0, limits.maximumPages) : null;
-        fail(documentExtractionFailure(code, pages ? { pages } : undefined));
+        try {
+          fail(documentExtractionFailure(code, { ...(pages ? { pages } : {}),
+            documentCoverage: documentExtractionCoverage(format, limits, code, rawContentHash, { ...message.details, ...(pages ? { pages } : {}) }) }));
+        } catch { fail(documentExtractionFailure('DOCUMENT_DECODER_FAILED')); }
         return;
       }
       if (message.type !== 'result') { fail(documentExtractionFailure('DOCUMENT_DECODER_FAILED')); return; }
@@ -90,7 +117,7 @@ export async function extractDocumentBytes(bytes, format, { signal, forkFactory 
             Buffer.byteLength(message.text) > limits.maximumOutputBytes)
           throw documentExtractionFailure('DOCUMENT_OUTPUT_LIMIT');
         const extraction = validateSourceExtraction({ format, version: DOCUMENT_EXTRACTION_VERSIONS[format],
-          rawContentHash: createHash('sha256').update(bytes).digest('hex'),
+          rawContentHash,
           ...(format === 'pdf' ? { pageCount: message.pageCount, pages: message.pages } : {}) }, message.text.length);
         result = { text: message.text, extraction };
         stop();
@@ -129,7 +156,11 @@ export async function extractDocumentBytes(bytes, format, { signal, forkFactory 
     signal?.removeEventListener('abort', abort);
     if (!closed) failure ??= documentExtractionFailure('DOCUMENT_DECODER_FAILED');
   }
-  if (failure) throw failure;
+  if (failure) {
+    if (failure.name !== 'AbortError' && /^(?:DOCUMENT_[A-Z_]+|OCR_UNAVAILABLE)$/u.test(failure.code ?? '') && !failure.details?.documentCoverage)
+      failure.details = { ...failure.details, documentCoverage: documentExtractionCoverage(format, limits, failure.code, rawContentHash) };
+    throw failure;
+  }
   if (resourceFailure) throw resourceFailure;
   signal?.throwIfAborted();
   return decoded;

@@ -1,5 +1,10 @@
+import { createHash } from 'node:crypto';
 import { MemoryRepository } from './memory-repository.mjs';
 import { explicitMemoryInstruction, memoryFailure, memoryId, memoryScope, validateMemorySource } from './memory-contracts.mjs';
+
+const entryIdentity = entry => createHash('sha256').update(JSON.stringify([
+  entry.id, entry.scope, entry.scopeId, entry.revision, entry.kind, entry.content, entry.source
+])).digest('hex');
 
 /**
  * Long-term memory is user-confirmed data, separate from transcripts and derived context summaries.
@@ -85,6 +90,44 @@ export class MemoryService {
       if (entry.status === 'confirmed' && entry.active) entries.push(entry);
     return { conversationId: visible.conversationId, projectId: visible.projectId,
       isFolderlessWorkspace: visible.isFolderlessWorkspace, entries };
+  }
+
+  // Snapshot only projected records; an unrelated memory edit must not invalidate this answer.
+  // 只对已投影条目取快照，无关记忆编辑不应使本次回答失效；原文不进入诊断。
+  snapshotFor(context, includedIds = [], projection = []) {
+    const selected = new Set(includedIds);
+    return { conversationId: context.conversationId, projectId: context.projectId,
+      isFolderlessWorkspace: context.isFolderlessWorkspace,
+      entries: context.entries.filter(entry => selected.has(entry.id)).map(entry => ({ memoryId: entry.id,
+        scope: entry.scope, scopeId: entry.scopeId, identity: entryIdentity(entry) })),
+      projection: projection.filter(item => selected.has(item.memoryId)).map(item => ({ ...item })) };
+  }
+
+  async validateSnapshot(conversationId, snapshot) {
+    if (!snapshot?.entries.length) return { current: true, checked: 0, invalidSources: [] };
+    const current = await this.repository.readFor(conversationId);
+    const selected = new Set(snapshot.entries.map(record => record.memoryId)), sources = new Map();
+    current.entries = [];
+    // Recheck the projected subset, not every historical source conversation on each model round.
+    // 每轮只核对已投影条目的来源，不为未使用记忆重新读取全部历史聊天。
+    for (const scope of current.scopes) {
+      scope.entries = scope.entries.filter(entry => selected.has(entry.id));
+      await this._withSourceStatus(scope, sources);
+      current.entries.push(...scope.entries.filter(entry => entry.status === 'confirmed' && entry.active));
+    }
+    const wrongConversation = memoryId(conversationId) !== memoryId(snapshot.conversationId);
+    const scopeChanged = (current.projectId ?? null) !== (snapshot.projectId ?? null) ||
+      Boolean(current.isFolderlessWorkspace) !== Boolean(snapshot.isFolderlessWorkspace);
+    const entries = new Map(current.entries.map(entry => [entry.id, entry]));
+    const invalidSources = snapshot.entries.flatMap(record => {
+      const entry = entries.get(record.memoryId);
+      if (!wrongConversation && (record.scope !== 'project' || !scopeChanged) && entry && entryIdentity(entry) === record.identity) return [];
+      return [{ memoryId: record.memoryId, sourceType: 'memory', scope: record.scope,
+        code: wrongConversation || scopeChanged && record.scope === 'project' ? 'MEMORY_SCOPE_CHANGED' : entry ? 'MEMORY_SOURCE_CHANGED' : 'MEMORY_SOURCE_UNAVAILABLE',
+        next: 'read-current-confirmed-memory-before-relying-on-this-record' }];
+    });
+    return { current: invalidSources.length === 0, checked: snapshot.entries.length, invalidSources,
+      freshnessOnly: true, correctnessCertified: false };
   }
 
   async _sourceFor(conversationId, input) {

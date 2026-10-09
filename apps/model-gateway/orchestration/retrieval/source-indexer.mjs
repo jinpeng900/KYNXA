@@ -5,6 +5,7 @@ import { deriveSourceVersion, canonicalMetadata } from '../../data/retrieval/der
 import { CHUNKER_VERSION, TOKENIZER_VERSION, EMBEDDING_TEXT_VERSION, STRUCTURED_CHUNKER_VERSION, STRUCTURED_EMBEDDING_TEXT_VERSION,
   chunkStructuredSource, embeddingProjectionForChunk } from '../../data/retrieval/retrieval-text.mjs';
 import { applyTokenFit, embeddingInputForChunk } from '../../data/retrieval/token-chunks.mjs';
+import { validateDocumentCoverage } from '../../data/retrieval/document-coverage.mjs';
 import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
 import { sourceIdentity } from './source-projection.mjs';
@@ -14,11 +15,44 @@ const MAX_BATCH_SOURCES = 4;
 const MAX_PUBLICATION_SOURCES = 100;
 const MAX_PUBLICATION_CHARACTERS = 8 * 1024 * 1024;
 const MAX_UNMEASURED_SOURCE_CHARACTERS = 2 * 1024 * 1024;
-const MAX_EMBEDDING_BATCH_CHUNKS = 32;
+const DEFAULT_EMBEDDING_BATCH_CHUNKS = 32;
+const MAX_EMBEDDING_BATCH_CHUNKS = 128;
+const MAX_EMBEDDING_REQUEST_BYTES = 256 * 1024;
 const MAX_FINGERPRINTS = 64000;
 const MAX_DIAGNOSTIC_CODES = 8;
 const embeddingVersion = modelVersion => modelVersion ? `${modelVersion}|${EMBEDDING_TEXT_VERSION}` : undefined;
 const EMBEDDING_CONTRACT_FIELDS = ['profileId', 'modelVersion', 'inputProjectionVersion', 'embeddingSpaceId', 'dimensions'];
+
+/** Suggestions plan a bounded request; the inference owner still approves its actual token/memory grant.
+ * 建议只规划有界请求；真实 token/内存额度仍由推理所有者批准，不能把建议当成授权。
+ */
+export function embeddingChunkBatch(source, chunks, offset, status = {}, { fitting = false } = {}) {
+  const suggestion = status.batchSuggestions ?? status.resourceReservation?.batchSuggestions ?? {};
+  const suggestedSize = Number.isSafeInteger(suggestion.batchSize) && suggestion.batchSize > 0
+    ? suggestion.batchSize : DEFAULT_EMBEDDING_BATCH_CHUNKS;
+  const admissionSize = status.requestLimits?.maxBatchDocuments;
+  const maximumChunks = Math.max(1, Math.min(MAX_EMBEDDING_BATCH_CHUNKS, suggestedSize,
+    Number.isSafeInteger(admissionSize) && admissionSize > 0 ? admissionSize : MAX_EMBEDDING_BATCH_CHUNKS));
+  const maximumInputTokens = Number.isSafeInteger(status.maxInputTokens) && status.maxInputTokens > 0 ? status.maxInputTokens : 512;
+  const tokenBudget = Number.isSafeInteger(suggestion.batchTokenBudget) && suggestion.batchTokenBudget >= maximumInputTokens
+    ? suggestion.batchTokenBudget : DEFAULT_EMBEDDING_BATCH_CHUNKS * maximumInputTokens;
+  const byteBudget = Math.min(MAX_EMBEDDING_REQUEST_BYTES, status.requestLimits?.maxRequestBytes ?? MAX_EMBEDDING_REQUEST_BYTES);
+  const selected = [];
+  let inputBytes = 0, estimatedTokens = 0, lengthBound = maximumChunks;
+  // UTF-8 demand bounds IPC allocation; unmeasured fitting uses a conservative byte estimate without truncating text.
+  // UTF-8 实际需求约束 IPC 分配；尚未拟合的正文用保守字节估计组批，不截断正文或修改单输入 token 上限。
+  for (let index = offset; index < chunks.length && selected.length < lengthBound; index++) {
+    const chunk = chunks[index], projection = fitting ? embeddingProjectionForChunk(source, chunk) : null;
+    const input = fitting ? projection.context + projection.text : embeddingInputForChunk(source, chunk);
+    const bytes = Buffer.byteLength(input) + 64;
+    const tokens = fitting ? bytes : chunk.embeddingProjection?.tokenCount ?? Math.min(maximumInputTokens, bytes);
+    const tier = input.length > 4096 ? 32 : input.length > 2048 ? 64 : MAX_EMBEDDING_BATCH_CHUNKS;
+    const nextBound = Math.min(lengthBound, tier);
+    if (selected.length && (selected.length >= nextBound || inputBytes + bytes > byteBudget || estimatedTokens + tokens > tokenBudget)) break;
+    selected.push(chunk); inputBytes += bytes; estimatedTokens += tokens; lengthBound = nextBound;
+  }
+  return selected;
+}
 
 function sourceMetadata(input) {
   if (input.text !== undefined) return validateSource(input);
@@ -102,9 +136,9 @@ export class SourceIndexer {
   async fitSourceChunks(source, chunks, status, { profileId, signal }, recordDiagnostic) {
     if (!chunks.length || typeof this.embeddings.fitDocuments !== 'function' || !status.fittingVersion) return { source, chunks };
     const fitted = [];
-    for (let offset = 0; offset < chunks.length; offset += MAX_EMBEDDING_BATCH_CHUNKS) {
+    for (let offset = 0; offset < chunks.length;) {
       signal?.throwIfAborted();
-      const batch = chunks.slice(offset, offset + MAX_EMBEDDING_BATCH_CHUNKS);
+      const batch = embeddingChunkBatch(source, chunks, offset, this.embeddings.status(profileId), { fitting: true });
       const projections = batch.map(chunk => embeddingProjectionForChunk(source, chunk));
       let receipt;
       for (let attempt = 0; attempt <= projections.length; attempt++) {
@@ -130,6 +164,7 @@ export class SourceIndexer {
           chunkId: `${chunk.chunkId.slice(0, chunk.chunkId.lastIndexOf(':'))}:${chunkIndex}` });
       }
       if (fitted.length > 40000) throw toolFailure('token 分块超过来源预算。', 'RETRIEVAL_SOURCE_TOO_LARGE', 413);
+      offset += batch.length;
     }
     return { source: { ...source, chunkerVersion: fitted[0]?.chunkerVersion ?? source.chunkerVersion,
       embeddingInputVersion: `${source.embeddingInputVersion ?? EMBEDDING_TEXT_VERSION}|${status.fittingVersion}` }, chunks: fitted };
@@ -205,13 +240,15 @@ export class SourceIndexer {
     while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
   }
 
-  async upsert(sources, settings, signal, progress, { semantic = true, loadSource, isCurrent, priorities } = {}) {
+  async upsert(sources, settings, signal, progress, { semantic = true, loadSource, isCurrent, priorities, sourceFailures = [] } = {}) {
     const profileId = settings.local.embeddingProfileId;
     const semanticRequested = semantic && settings.local.semantic !== 'off' && profileId !== null;
     const diagnosticCodes = new Set();
-    const coverageEntries = new Map(), coverageCounts = { discovered: sources.length, lexical: 0, semantic: 0, failed: 0, skipped: 0, partial: 0 };
-    const recordCoverage = (source, status, { lexical = 'unverified', semanticState = semanticRequested ? 'pending' : 'disabled', parser = 'pending', errorCode } = {}) => {
-      const old = coverageEntries.get(source.sourceId);
+    const coverageEntries = new Map(), coverageStates = new Map();
+    const coverageCounts = { discovered: sources.length, lexical: 0, semantic: 0, failed: 0, skipped: 0, partial: 0 };
+    let coverageReportTruncated = false;
+    const recordCoverage = (source, status, { lexical = 'unverified', semanticState = semanticRequested ? 'pending' : 'disabled', parser = 'pending', errorCode, documentCoverage } = {}) => {
+      const old = coverageStates.get(source.sourceId);
       if (old) {
         if (old.lexical === 'ready') coverageCounts.lexical--;
         if (old.semantic === 'ready') coverageCounts.semantic--;
@@ -220,21 +257,40 @@ export class SourceIndexer {
       if (lexical === 'ready') coverageCounts.lexical++;
       if (semanticState === 'ready') coverageCounts.semantic++;
       if (['failed', 'skipped', 'partial'].includes(status)) coverageCounts[status]++;
+      coverageStates.set(source.sourceId, { status, lexical, semantic: semanticState });
       coverageEntries.set(source.sourceId, { scopeKey: source.scopeKey, sourceId: source.sourceId, sourceRevision: source.sourceRevision,
         relativePath: source.locator?.relativePath ?? source.title ?? source.sourceId, status, lexical, semantic: semanticState, parser,
+        ...(documentCoverage ? { documentCoverage: validateDocumentCoverage(documentCoverage) } : {}),
         ...(errorCode ? { errorCode: /^[A-Z][A-Z0-9_]{0,127}$/u.test(errorCode) ? errorCode : 'RETRIEVAL_SOURCE_FAILED' } : {}) });
-      while (coverageEntries.size > 1000) coverageEntries.delete(coverageEntries.keys().next().value);
+      while (coverageEntries.size > 1000) { coverageEntries.delete(coverageEntries.keys().next().value); coverageReportTruncated = true; }
     };
     let totalChunks = 0, vectorChunks = 0, cachedChunks = 0, skippedSources = 0, skippedChunks = 0;
     const recordDiagnostic = (code, fallback = 'EMBEDDING_FAILED') => {
       if (diagnosticCodes.size < MAX_DIAGNOSTIC_CODES)
         diagnosticCodes.add(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(code) ? code : fallback);
     };
+    const knownSources = new Set(sources.map(source => source.sourceId));
+    const failureEntries = [];
+    for (const failure of sourceFailures) {
+      signal?.throwIfAborted();
+      if (!failure.sourceId || !failure.scopeKey || failure.directory) continue;
+      if (!knownSources.has(failure.sourceId)) { knownSources.add(failure.sourceId); coverageCounts.discovered++; }
+      recordCoverage({ sourceId: failure.sourceId, scopeKey: failure.scopeKey, title: failure.relativePath }, 'failed',
+        { parser: 'failed', errorCode: failure.errorCode, documentCoverage: failure.documentCoverage });
+      failureEntries.push(coverageEntries.get(failure.sourceId));
+    }
+    if (this.index.recordCoverage) for (let offset = 0; offset < failureEntries.length; offset += MAX_PUBLICATION_SOURCES) {
+      signal?.throwIfAborted();
+      const entries = failureEntries.slice(offset, offset + MAX_PUBLICATION_SOURCES);
+      await this.index.recordCoverage({ entries, scopeKeys: [...new Set(entries.map(entry => entry.scopeKey))] });
+    }
     const report = () => ({ coverage: { ...coverageCounts, complete: !coverageCounts.failed && !coverageCounts.skipped && !coverageCounts.partial,
-      sources: [...coverageEntries.values()] }, semantic: { requested: semanticRequested, profileId: profileId ?? null,
+      sources: [...coverageEntries.values()], reportTruncated: coverageReportTruncated }, semantic: { requested: semanticRequested, profileId: profileId ?? null,
       state: !semanticRequested ? 'disabled' : coverageCounts.failed || coverageCounts.skipped ? vectorChunks ? 'partial' : 'unavailable'
         : vectorChunks === totalChunks ? 'complete' : vectorChunks ? 'partial' : 'unavailable',
       totalChunks, vectorChunks, cachedChunks, skippedSources, skippedChunks, diagnosticCodes: [...diagnosticCodes] } });
+    if (failureEntries.length && progress) await progress(0, { ...report(),
+      processedSourceIds: failureEntries.map(entry => entry.sourceId) });
     const currentFingerprint = (source, versions, status) => fingerprintFor(source, versions, status, settings, semantic);
     let reuseSettings = new Map();
     const reuse = async (source, count, key, entry) => {
@@ -301,7 +357,8 @@ export class SourceIndexer {
         }
         if (input.unavailable) {
           skippedSources++; recordDiagnostic(input.errorCode, 'RETRIEVAL_SOURCE_FAILED');
-          recordCoverage(source, 'failed', { parser: 'failed', errorCode: input.errorCode ?? 'RETRIEVAL_SOURCE_FAILED' }); continue;
+          recordCoverage(source, 'failed', { parser: 'failed', errorCode: input.errorCode ?? 'RETRIEVAL_SOURCE_FAILED',
+            documentCoverage: input.documentCoverage }); continue;
         }
         const fingerprintKey = `${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`;
         const service = this.structures, serviceVersion = this.preparationVersion(profileId);
@@ -331,7 +388,8 @@ export class SourceIndexer {
             if (signal?.aborted || error.name === 'AbortError') throw error;
             skippedSources++;
             recordDiagnostic(error.code, 'RETRIEVAL_SOURCE_FAILED');
-            recordCoverage(source, error.code === 'STALE_RETRIEVAL_SOURCE' ? 'skipped' : 'failed', { parser: 'failed', errorCode: error.code ?? 'RETRIEVAL_SOURCE_FAILED' });
+            recordCoverage(source, error.code === 'STALE_RETRIEVAL_SOURCE' ? 'skipped' : 'failed', { parser: 'failed',
+              errorCode: error.code ?? 'RETRIEVAL_SOURCE_FAILED', documentCoverage: error.details?.documentCoverage });
             continue;
           }
           signal?.throwIfAborted();
@@ -420,9 +478,9 @@ export class SourceIndexer {
         let firstEmbeddingReceipt;
         let vectorDimensions;
         if (semanticRequested && ['ready', 'loading'].includes(status.state)) {
-          for (let chunkOffset = 0; chunkOffset < chunks.length; chunkOffset += MAX_EMBEDDING_BATCH_CHUNKS) {
+          for (let chunkOffset = 0; chunkOffset < chunks.length;) {
             signal?.throwIfAborted();
-            const slice = chunks.slice(chunkOffset, chunkOffset + MAX_EMBEDDING_BATCH_CHUNKS);
+            const slice = embeddingChunkBatch(source, chunks, chunkOffset, this.embeddings.status(profileId));
             try {
               const embedded = await this.embedBoundedDocuments(slice.map(item => embeddingInputForChunk(source, item)),
                 { signal, profileId }, recordDiagnostic);
@@ -461,6 +519,7 @@ export class SourceIndexer {
                 break;
               }
             }
+            chunkOffset += slice.length;
           }
         } else if (semanticRequested) {
           this.lastEmbeddingError = status.errorCode ?? 'EMBEDDING_PROFILE_UNAVAILABLE';
@@ -585,7 +644,10 @@ export class SourceIndexer {
       const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
         { root: source.locator.root, excludedRoots: this.excludedRoots, maximumSourceBytes: effective.local.indexing?.maximumSourceBytes, signal })
         : await this.readFile(source.locator.path, { root: source.locator.root, excludedRoots: this.excludedRoots,
-          maximumSourceBytes: effective.local.indexing?.maximumSourceBytes, signal, resourceService: this.resources });
+          maximumSourceBytes: effective.local.indexing?.maximumSourceBytes,
+          maximumDocumentInputBytes: effective.local.indexing?.maximumDocumentInputBytes,
+          maximumDocumentOutputBytes: effective.local.indexing?.maximumDocumentOutputBytes,
+          maximumPdfPages: effective.local.indexing?.maximumPdfPages, signal, resourceService: this.resources });
       return file.contentHash === source.contentHash &&
         (source.locator.extraction === undefined && file.extraction === undefined || sourceFileRevision(file) === source.sourceRevision);
     } catch (error) {

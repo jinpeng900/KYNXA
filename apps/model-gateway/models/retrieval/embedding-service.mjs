@@ -115,12 +115,16 @@ export class EmbeddingService {
 
   status(profileId = this.#profile.id) {
     if (profileId !== this.#profile.id) return unavailableProfileStatus('embedding', profileId);
+    const resourceReservation = this.#resources.status();
     return { ...retrievalModelMetadata(this.#profile), state: this.#state, loaded: this.#loaded, supported: true,
       local: true, network: false, assetVerification: this.#assetVerification,
       fittingVersion: EMBEDDING_DOCUMENT_FITTING_VERSION,
       maxInputTokens: this.#profile.maxInputTokens, cpuThreads: this.#cpuThreads,
       pendingRequests: this.#pending.size, workerPhase: this.#workerPhase,
-      resourceReservation: this.#resources.status(), ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
+      resourceReservation, batchSuggestions: resourceReservation.batchSuggestions,
+      ...(resourceReservation.lastGrant ? { batchSize: resourceReservation.lastGrant.batchSize,
+        batchTokenBudget: resourceReservation.lastGrant.batchTokenBudget } : {}),
+      ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
       inputAdmission: this.#admission.status(), requestLimits: this.#admission.limits,
       ...(this.#resourceDiagnostic ? { resourceDiagnostic: this.#resourceDiagnostic } : {}),
       ...(this.#errorCode ? { errorCode: this.#errorCode } : {}) };

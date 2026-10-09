@@ -207,35 +207,47 @@ export class ResourceBudgetService {
     if (!this.#leases.has(leaseId)) return { status: 'denied', reason: 'RESOURCE_LEASE_UNKNOWN' };
     const dimensions = { phase: ['cold-load', 'queue', 'hot-inference', 'other'],
       unit: ['tokens', 'documents', 'pairs', 'vectors', 'operations'], backend: ['cpu', 'gpu', 'dml', 'cuda', 'host'] };
-    const allowed = ['throughputPerSecond', 'latencyMs', 'queueDepth', 'allocationFailure', 'foregroundLatencyMs', 'progress', ...Object.keys(dimensions)];
+    const allowed = ['throughputPerSecond', 'latencyMs', 'queueDepth', 'allocationFailure', 'foregroundLatencyMs', 'progress',
+      'inputTokens', 'sequenceTokens', 'batchSize', 'cpuThreads', ...Object.keys(dimensions)];
     if (!feedback || typeof feedback !== 'object' || Object.entries(feedback).some(([key, value]) => !allowed.includes(key) ||
         (dimensions[key] ? !dimensions[key].includes(value) : key === 'allocationFailure' ? typeof value !== 'boolean' : !Number.isFinite(value) || value < 0 || value > 1e9)) ||
-        feedback.progress > 1 || feedback.queueDepth !== undefined && (!Number.isSafeInteger(feedback.queueDepth) || feedback.queueDepth > 1e6))
+        feedback.progress > 1 || feedback.queueDepth !== undefined && (!Number.isSafeInteger(feedback.queueDepth) || feedback.queueDepth > 1e6) ||
+        Object.entries({ inputTokens: 65_536, sequenceTokens: 512, batchSize: 128, cpuThreads: 32 }).some(([key, maximum]) =>
+          feedback[key] !== undefined && (!Number.isSafeInteger(feedback[key]) || feedback[key] < 1 || feedback[key] > maximum)))
       throw new ResourceBudgetError('RESOURCE_INVALID_FEEDBACK', 'Invalid task feedback.');
     if (this.#mode === 'rust') return this.#request('report', { leaseId, feedback });
     const now = this.#clock(), previous = this.#feedback, taskId = this.#leases.get(leaseId).taskId;
     const backend = feedback.backend ?? 'legacy', phase = feedback.phase ?? 'legacy';
-    const historyKey = `${taskId}|${backend}|${phase}|${feedback.unit ?? 'legacy'}`;
+    const sequenceBucket = feedback.sequenceTokens ? 2 ** Math.ceil(Math.log2(feedback.sequenceTokens)) : 'legacy';
+    const historyKey = `${taskId}|${backend}|${phase}|${feedback.unit ?? 'legacy'}|${sequenceBucket}`;
     const controlKey = backend === 'legacy' ? 'legacy' : `${taskId}|${['gpu', 'dml', 'cuda'].includes(backend) ? 'gpu' : backend}`;
     const control = this.#feedbackControls.get(controlKey) ?? { fraction: 1, lastAdjustmentMs: 0 };
-    const history = this.#feedbackHistories.get(historyKey) ?? { throughputPerSecond: null, latencyMs: null };
+    const history = this.#feedbackHistories.get(historyKey) ?? { throughputPerSecond: null, latencyMsPerToken: null, latencyMs: null };
+    // Compare token-normalized latency so a larger useful batch is not rejected for doing more work.
+    // 以每 token 延迟比较，不能因较大批次完成更多工作而拒绝实际吞吐收益。
+    const comparableLatencyMs = feedback.latencyMs === undefined ? undefined : feedback.latencyMs / Math.max(1, feedback.inputTokens ?? 1);
     if (feedback.allocationFailure || feedback.foregroundLatencyMs > 250) {
-      control.fraction = Math.max(0.125, control.fraction / 2); control.lastAdjustmentMs = now;
+      control.fraction = Math.max(0.125, Math.min(0.5, control.fraction / 2)); control.lastAdjustmentMs = now;
       previous.lastAdjustmentMs = now; previous.adjustmentReason = feedback.allocationFailure ? 'allocation-pressure' : 'foreground-latency';
     } else if (feedback.throughputPerSecond !== undefined && history.throughputPerSecond !== null &&
         feedback.throughputPerSecond > history.throughputPerSecond * 1.05 && feedback.queueDepth > 0 &&
-        (feedback.latencyMs === undefined || history.latencyMs === null || feedback.latencyMs <= history.latencyMs * 1.1) &&
+        (comparableLatencyMs === undefined || history.latencyMsPerToken === null || comparableLatencyMs <= history.latencyMsPerToken * 1.1) &&
         ['legacy', 'hot-inference'].includes(phase) && now - control.lastAdjustmentMs >= 5000) {
-      control.fraction = Math.min(1, control.fraction + 0.125); control.lastAdjustmentMs = now;
+      control.fraction = Math.min(4, control.fraction < 1 ? control.fraction + 0.125 : control.fraction * 2); control.lastAdjustmentMs = now;
       previous.lastAdjustmentMs = now; previous.adjustmentReason = 'measured-hot-throughput-gain';
+    } else if (phase === 'hot-inference' && feedback.queueDepth > 0 && history.throughputPerSecond !== null &&
+        feedback.throughputPerSecond < history.throughputPerSecond * 0.9 && now - control.lastAdjustmentMs >= 5000) {
+      control.fraction = Math.max(0.125, control.fraction / 2); control.lastAdjustmentMs = now;
+      previous.lastAdjustmentMs = now; previous.adjustmentReason = 'measured-hot-throughput-regression';
     } else previous.adjustmentReason = ['legacy', 'hot-inference'].includes(phase) ? 'no-comparable-throughput-gain' : 'non-hot-sample-held';
     if (backend === 'legacy') this.#backgroundFraction = control.fraction;
     previous.taskBackendFraction = control.fraction;
     previous.measurementContext = historyKey;
     this.#feedbackControls.delete(controlKey); this.#feedbackControls.set(controlKey, control);
     while (this.#feedbackControls.size > 128) this.#feedbackControls.delete(this.#feedbackControls.keys().next().value);
-    for (const key of ['throughputPerSecond', 'latencyMs']) if (feedback[key] !== undefined)
-      history[key] = history[key] === null ? feedback[key] : history[key] * 0.75 + feedback[key] * 0.25;
+    for (const [key, value] of [['throughputPerSecond', feedback.throughputPerSecond], ['latencyMsPerToken', comparableLatencyMs],
+      ['latencyMs', feedback.latencyMs]]) if (value !== undefined)
+      history[key] = history[key] === null ? value : history[key] * 0.75 + value * 0.25;
     previous.throughputPerSecond = history.throughputPerSecond; previous.latencyMs = history.latencyMs;
     this.#feedbackHistories.delete(historyKey); this.#feedbackHistories.set(historyKey, history);
     while (this.#feedbackHistories.size > 128) this.#feedbackHistories.delete(this.#feedbackHistories.keys().next().value);
@@ -427,7 +439,9 @@ export class ResourceBudgetService {
     if (request.memoryBytes > memoryBytes || request.cpuThreads > 0 && cpuThreads === 0 ||
         request.kind === 'background' && request.cpuThreads > 0 && hardware.cpu.usagePercent > 90)
       return { status: 'denied', reason: 'RESOURCE_PRESSURE', mode: 'fallback' };
-    const fraction = this.#feedbackControls.get(`${request.taskId}|cpu`)?.fraction ?? this.#backgroundFraction;
+    const policyFraction = this.#feedbackControls.get(`${request.taskId}|cpu`)?.fraction ?? this.#backgroundFraction;
+    const fraction = hardware.cpu.usagePercent > 85 || hardware.memory.availableBytes < 1024 ** 3
+      ? Math.min(0.5, policyFraction) : policyFraction;
     const grantedCpu = Math.min(cpuThreads, request.cpuThreads, request.kind === 'background' ?
       Math.max(1, Math.floor(this.#cpuCapacity(hardware) * fraction)) : cpuThreads);
     return { status: 'granted', mode: 'fallback', device: 'cpu', leaseId: `fallback-${randomUUID()}`,
@@ -440,10 +454,22 @@ export class ResourceBudgetService {
     const candidates = Math.max(16, Math.min(136, Math.round((hardware.cpu.usagePercent > 85 ? 40 :
       40 + Math.min(hardware.cpu.logicalCores, 32) * 3) * fraction)));
     const memory = Math.min(memoryBytes, Math.floor(hardware.memory.availableBytes / 3));
+    const isIdle = Number.isFinite(hardware.cpu.usagePercent) && hardware.cpu.usagePercent < 35 &&
+      hardware.memory.availableBytes >= 2 * 1024 ** 3;
+    const reserved = this.#reserved();
+    const cpuHeadroom = Math.max(0, this.#cpuCapacity(hardware) - reserved.cpuThreads - cpuThreads);
+    const memoryHeadroomBytes = Math.max(0, this.#memoryCapacity(hardware) - reserved.memoryBytes - memoryBytes);
+    // Search's one thread is planning overhead; the reranker obtains its own execution lease later.
+    // 检索的一条线程仅为规划开销；重排随后必须另行申请自己的执行租约。
+    const rerankCandidates = fraction < 1 || hardware.cpu.usagePercent > 85 || memoryHeadroomBytes < 512 * 1024 ** 2 || cpuHeadroom < 1 ? 20
+      : cpuHeadroom >= 3 && memoryHeadroomBytes >= 1024 ** 3 ? 60 : 40;
     return { annShardBytes: Math.min(Math.floor(memory / 2), 1024 ** 3), annCacheBytes: memory,
       annBuildConcurrency: Math.max(1, Math.min(4, cpuThreads)), candidateLimit: candidates,
       fusedCandidateLimit: Math.min(160, Math.floor(candidates * 1.2)), evidenceBudgetTokens: Math.max(2048, Math.min(16384, candidates * 128)),
-      batchMultiplier: fraction, adjustmentReason: fraction < 1 ? 'held-task-backend-pressure' : 'capacity-approved',
+      rerankCandidates, rerankCandidateLimit: rerankCandidates, batchMultiplier: fraction,
+      rerankSuggestionRequiresApproval: true,
+      batchProbeMultiplier: fraction === 1 && isIdle ? 2 : fraction,
+      adjustmentReason: fraction < 1 ? 'held-task-backend-pressure' : 'capacity-approved',
       lastFeedbackReason: this.#feedback.adjustmentReason ?? 'not-adjusted',
       measurementContext: this.#feedback.measurementContext ?? null, source: 'resource-authority' };
   }
