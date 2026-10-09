@@ -1,17 +1,43 @@
 const reason = { type: 'string', minLength: 1, maxLength: 2000 };
 export const retrievalDescriptors = [
-  { name: 'knowledge.search', source: 'builtin', description: 'Search authorized local knowledge. Answer directly when current excerpts support the requested facts. For additional searches specify the concrete missing fact in gap; prefer knowledge.read for a missing section of an existing source. Relevance scores do not prove sufficiency. Other chats are not shared.',
+  { name: 'knowledge.search', source: 'builtin', description: 'Search authorized local documents and code. Optional domain, symbol and relative path prioritize indexed declarations or a file. These are bounded candidates, not exhaustive references or a call graph. Answer when evidence supports the facts; specify a concrete gap for additional searches. Prefer knowledge.read section or unit for omitted context. Other chats are not shared.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['query'], properties: {
-      query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 12 },
+      query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 48 },
+      taskType: { type: 'string', enum: ['lookup', 'file', 'recall', 'complex', 'research'] },
+      maximumTokens: { type: 'integer', minimum: 0, maximum: 32768, description: 'Evidence tokens only, bounded separately from the candidate pool and model context.' },
+      domain: { type: 'string', enum: ['knowledge', 'code', 'mixed'] },
+      symbol: { type: 'string', minLength: 1, maxLength: 256, description: 'Exact declaration name or qualified name, for example SourceIndexer.upsert.' },
+      path: { type: 'string', minLength: 1, maxLength: 1000, description: 'Relative file or directory path; this is an indexed locator, not filesystem permission.' },
       gap: { type: 'string', minLength: 1, maxLength: 1000, description: 'Specific unanswered fact or omitted condition, not a restatement of the entire task.' } } } },
-  { name: 'knowledge.read', source: 'builtin', description: 'Read current authorized evidence. Use mode section for the matching chapter or window for nearby text, with gap naming the missing fact. These modes default to the referenced chunk, not the document start. Page mode preserves offset pagination. Short sourceRefs survive restart; changed/revoked sources require a new search.',
+  { name: 'knowledge.read', source: 'builtin', description: 'Read current authorized evidence. Use section for its chapter, unit for the indexed function/method or document block, or window for nearby text. Bounded unit reads report omitted parts and fall back honestly when structure is unavailable. Name the missing fact in gap. Page mode preserves pagination; changed/revoked sources require a new search.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['sourceRef'], properties: {
       sourceRef: { type: 'string', minLength: 1, maxLength: 4096 }, offset: { type: 'integer', minimum: 0, maximum: 2097152 },
-      limit: { type: 'integer', minimum: 1, maximum: 16000 },
-      mode: { type: 'string', enum: ['page', 'window', 'section'] },
+      limit: { type: 'integer', minimum: 1, maximum: 16000, description: 'Maximum characters. Page mode accepts 1 or more; window, section and unit require at least 2 to preserve complete UTF-16 characters.' },
+      mode: { type: 'string', enum: ['page', 'window', 'section', 'unit'] },
       anchorOffset: { type: 'integer', minimum: 0, maximum: 2097152 },
       beforeCharacters: { type: 'integer', minimum: 0, maximum: 4000 },
       gap: { type: 'string', minLength: 1, maxLength: 1000 } } } },
+  { name: 'knowledge.relations', source: 'builtin', description: 'Navigate current authorized definitions, syntax ownership, document sections or textual symbol mentions. Lexical references are uncertain and non-exhaustive, not a language-service call graph. Read each related source before drawing conclusions.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      sourceRef: { type: 'string', minLength: 1, maxLength: 4096 }, symbol: { type: 'string', minLength: 1, maxLength: 256 },
+      kind: { type: 'string', enum: ['definition', 'contains', 'section', 'lexical-reference'] },
+      limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
+  { name: 'knowledge.assess', source: 'builtin', description: 'Record explicit claims, exact supporting quotations from evidence already read, unresolved gaps and conflicting sources. Revalidates all source versions and invalidates stale dependencies. Optional test checks require real current tool receipts; a model claim cannot certify tests. Stop searching when cited support is sufficient. Keeps a version-bound navigation experience only in this chat.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['claims'], properties: {
+      conclusionId: { type: 'string', minLength: 1, maxLength: 128 },
+      claims: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', additionalProperties: false,
+        required: ['statement', 'support'], properties: { statement: { type: 'string', minLength: 1, maxLength: 2000 },
+          support: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false,
+            required: ['sourceRef', 'quote'], properties: { sourceRef: { type: 'string', minLength: 1, maxLength: 4096 },
+              quote: { type: 'string', minLength: 1, maxLength: 8000 } } } } } } },
+      unresolved: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 1000 } },
+      contradictions: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 1000 } },
+      verification: { type: 'array', maxItems: 32, items: { type: 'object', additionalProperties: false,
+        required: ['name', 'toolCallId'], properties: { name: { type: 'string', minLength: 1, maxLength: 200 },
+          toolCallId: { type: 'string', minLength: 1, maxLength: 200 } } } } } } },
+  { name: 'knowledge.experience', source: 'builtin', description: 'Recall current-chat navigation experience with live citation version checks. Historical answers are not current facts. Re-read and validate sources before reusing an experience; stale dependencies require repair.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      query: { type: 'string', maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 20 } } } },
   { name: 'web.search', source: 'builtin', description: 'Search public websites using an already enabled Exa or Brave MCP provider. Returns concise sources, URLs and archived original-result reference. Honors per-project search mode and stage budget. Stop when evidence answers the question; use web.fetch for public page text before browser automation.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['query', 'reason'], properties: {
       query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 12 }, reason,

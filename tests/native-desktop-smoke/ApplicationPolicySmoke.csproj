@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Compile Include="ApplicationPolicyChecks.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopApplications.cs" Link="DesktopApplications.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopForegroundPlacement.cs" Link="DesktopForegroundPlacement.cs" />
+    <Compile Include="../../apps/tool-host/Desktop/DesktopRequest.cs" Link="DesktopRequest.cs" />
+    <Compile Include="../../apps/tool-host/Native/DesktopNativeMethods.cs" Link="DesktopNativeMethods.cs" />
+    <Compile Include="../../apps/tool-host/Native/NativeMethods.cs" Link="NativeMethods.cs" />
+  </ItemGroup>
+</Project>

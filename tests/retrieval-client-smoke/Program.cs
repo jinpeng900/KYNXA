@@ -74,6 +74,76 @@ Check(transport.LastPath == "/api/retrieval/index/rebuild", "Rebuild uses an asy
 await api.GetIndexJobAsync(job.JobId);
 await api.CancelIndexJobAsync(job.JobId);
 Check(transport.LastMethod == HttpMethod.Post && transport.LastPath?.EndsWith("/job_test/cancel") == true, "Cancellation targets the owned job.");
+
+// Validate additive contracts through the existing client, using synthetic observations and no running gateway.
+// 用现有客户端验证新增合同，仅使用合成观察，不访问正在运行的网关或真实用户数据。
+var statusJson = """
+    {
+      "backend":"sqlite","sourceCount":20,"chunkCount":200,
+      "embedding":{"state":"ready","profileId":"builtin-multilingual-dml-q8","dimensions":384,"available":true,
+        "loaded":true,"inferenceBackend":{"device":"dml","deviceId":0,"cpuThreads":2,"dtype":"q8",
+          "gpuValidated":true,"executionMode":"hybrid","cpuOperatorFallback":true},
+        "resourceReservation":{"residentMemoryBytes":536870912}},
+      "jobs":[{"jobId":"job_partial","status":"partial","completedSources":19,"totalSources":20,
+        "coverage":{"discovered":20,"lexical":19,"semantic":15,"failed":1,"skipped":0,"partial":4,
+          "complete":false,"reportTruncated":false},"semantic":{"state":"partial","priorDiagnosticCodes":[]}}],
+      "resources":{"mode":"rust","gpu":{"state":"available","executionProvider":"dml"}},
+      "vectorSpacePolicy":{"retainedSpaces":2,"migration":[{"state":"preparing"}]},
+      "deployment":{"platform":"windows","otherPlatformsSupported":false},
+      "externalModels":[{"backend":"ollama","loaded":true,"observationOnly":true}],
+      "reranking":{"state":"disabled","loaded":false},"parsing":{"state":"ready"},
+      "embeddingProfiles":[{"profileId":"builtin-multilingual","loaded":false}],
+      "modelProfiles":[{"id":"builtin-multilingual-dml-q8"}],
+      "configuredEmbeddingProfileId":"builtin-multilingual"
+    }
+    """;
+transport.Respond = _ => new(HttpStatusCode.OK) { Content = new StringContent(statusJson, System.Text.Encoding.UTF8, "application/json") };
+var observedStatus = await api.GetStatusAsync();
+Check(observedStatus.Embedding.Loaded == true && observedStatus.Embedding.InferenceBackend?.Device == "dml",
+    "Loaded backend survives typed transport; GPU availability alone is not substituted for execution.");
+Check(observedStatus.Embedding.InferenceBackend?.ExecutionMode == "hybrid" && observedStatus.Embedding.InferenceBackend.CpuOperatorFallback == true,
+    "Hybrid GPU execution retains its CPU operator disclosure.");
+Check(observedStatus.Resources?.GetProperty("mode").GetString() == "rust" && observedStatus.VectorSpacePolicy?.GetProperty("retainedSpaces").GetInt32() == 2,
+    "Resource and migration observations reach the client instead of being discarded.");
+Check(observedStatus.Deployment?.GetProperty("platform").GetString() == "windows" && observedStatus.ExternalModels?.GetArrayLength() == 1,
+    "Windows deployment scope and read-only external runtime observations are retained.");
+Check(observedStatus.Jobs[0].Status == "partial" && observedStatus.Jobs[0].Coverage?.Failed == 1 && observedStatus.Jobs[0].Coverage?.Complete == false,
+    "A partially indexed corpus keeps its gap counts and cannot be presented as completed coverage.");
+Check(observedStatus.Jobs[0].Semantic?.GetProperty("state").GetString() == "partial" && observedStatus.Reranking?.Loaded == false,
+    "Partial semantic indexing and an unloaded reranker remain distinct.");
+Check(observedStatus.EmbeddingProfiles?.GetArrayLength() == 1 && observedStatus.ModelProfiles?.GetArrayLength() == 1 && observedStatus.Parsing?.GetProperty("state").GetString() == "ready",
+    "Per-profile observations, supported profiles and parser state survive the contract.");
+Check(observedStatus.ConfiguredEmbeddingProfileId == "builtin-multilingual" && observedStatus.Embedding.InferenceBackend?.Device == "dml",
+    "Configured profile stays separate from the observed execution backend. / 配置项与实际执行后端保持分离。");
+
+var extendedLocal = JsonSerializer.Deserialize<RetrievalLocalSettings>("""
+    {"enabled":true,"semantic":"auto","embeddingProfileId":"builtin-multilingual","embeddingDevicePolicy":"gpu",
+     "indexing":{"maximumFiles":50000,"maximumSourceBytes":33554432,"maximumTotalBytes":8589934592,"maximumEntries":300000,"batchSize":64},
+     "ann":{"adaptive":true,"mode":"auto","threshold":10000,"maxCachedShards":8,"maxShardBytes":1073741824,
+       "connectivity":32,"expansionAdd":256,"expansionSearch":128,"exactScanLimit":1000000}}
+    """, jsonOptions)!;
+Check(extendedLocal.EmbeddingDevicePolicy == "gpu" && extendedLocal.Indexing?.MaximumTotalBytes == 8589934592,
+    "Device policy and indexing capacity preserve values beyond 32-bit byte counts.");
+Check(extendedLocal.Ann?.Adaptive == true && extendedLocal.Ann?.ExpansionAdd == 256,
+    "ANN policy retains independent adaptive and graph settings.");
+transport.Respond = _ => Reply(global);
+await api.SaveSettingsAsync(new(7, new(Local: global.Local with { Semantic = "off" })));
+using (var patch = JsonDocument.Parse(transport.LastBody!))
+{
+    var local = patch.RootElement.GetProperty("patch").GetProperty("local");
+    Check(!local.TryGetProperty("embeddingDevicePolicy", out _) && !local.TryGetProperty("indexing", out _) && !local.TryGetProperty("ann", out _),
+        "Legacy UI updates omit unset new fields, preserving backend-owned settings.");
+}
+var indexingPatch = JsonSerializer.Serialize(new RetrievalIndexingLimits(BatchSize: 16), jsonOptions);
+Check(indexingPatch == "{\"batchSize\":16}", "Partial indexing patches do not inject unrelated default limits.");
+var annPatch = JsonSerializer.Serialize(new RetrievalAnnSettings(Adaptive: false), jsonOptions);
+Check(annPatch == "{\"adaptive\":false}", "Explicit false survives an ANN patch while unspecified knobs remain absent.");
+var legacyStatus = JsonSerializer.Deserialize<RetrievalStatus>("""
+    {"backend":"sqlite","sourceCount":0,"chunkCount":0,
+     "embedding":{"state":"ready","profileId":"builtin-multilingual","dimensions":384,"available":true},"jobs":[]}
+    """, jsonOptions)!;
+Check(legacyStatus.Resources is null && legacyStatus.Embedding.Loaded is null && legacyStatus.VectorSpacePolicy is null,
+    "Old status JSON stays compatible and unknown observations remain null.");
 int beforeInvalidPath = transport.Requests;
 try { await api.GetIndexJobAsync("../../private"); throw new Exception("Unsafe job ID was accepted."); }
 catch (ArgumentException) { checks++; }

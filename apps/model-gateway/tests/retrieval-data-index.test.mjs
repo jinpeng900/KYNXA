@@ -99,6 +99,99 @@ test('source references survive index rebuild and Data relocation; close checkpo
   finally { await moved.close(); }
 });
 
+test('cheap scoped versions track publication and rebuild without including unrelated scope metadata', async t => {
+  const { root, index } = await fixture(t, { vectorEnabled: false });
+  const initial = await index.scopeVersion({ scopeKeys: ['user', 'project:one'] });
+  assert.ok(initial.indexEpoch);
+  assert.deepEqual(initial.scopes, [{ scopeKey: 'user', generation: 0, corpusGeneration: 0 },
+    { scopeKey: 'project:one', generation: 0, corpusGeneration: 0 }]);
+  await index.upsertSources([source('scoped-version', 'project:one', 'project corpus')]);
+  const published = await index.scopeVersion({ scopeKeys: ['user', 'project:one'] });
+  assert.equal(published.indexEpoch, initial.indexEpoch);
+  assert.ok(published.scopes[1].generation > 0);
+  await index.upsertSources([source('other-version', 'project:other', 'separate corpus')]);
+  assert.deepEqual(await index.scopeVersion({ scopeKeys: ['user', 'project:one'] }), published);
+  await index.removeSource('scoped-version', { scopeKeys: ['project:one'] });
+  assert.ok((await index.scopeVersion({ scopeKeys: ['project:one'] })).scopes[0].generation > published.scopes[1].generation);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => index.scopeVersion({ scopeKeys: ['user'], signal: controller.signal }), { name: 'AbortError' });
+  assert.throws(() => index.scopeVersion({ scopeKeys: [] }), { code: 'RETRIEVAL_SCOPE_REQUIRED' });
+  await index.close();
+  await rm(join(root, 'Index', 'retrieval.sqlite'));
+  const rebuilt = new RetrievalIndex({ root, vectorEnabled: false });
+  try {
+    const fresh = await rebuilt.scopeVersion({ scopeKeys: ['user', 'project:one'] });
+    assert.notEqual(fresh.indexEpoch, initial.indexEpoch);
+    assert.deepEqual(fresh.scopes, initial.scopes);
+  } finally { await rebuilt.close(); }
+});
+
+test('corpus generations preserve body caches across vector and conversation publication but track real derivations', async t => {
+  const { root, index } = await fixture(t);
+  const knowledge = source('corpus-body', 'project:one', 'stable evidence', { sourceType: 'knowledge' });
+  const mounted = source('mounted-body', 'project:one', 'mounted evidence', { sourceType: 'work-file' });
+  await index.upsertSources([knowledge, mounted]);
+  const version = async () => (await index.scopeVersion({ scopeKeys: ['project:one'] })).scopes[0];
+  const initial = await version();
+  assert.ok(initial.corpusGeneration > 0);
+  // Genuine vector attachment changes the retrieval graph while preserving the source-body projection.
+  // 真实追加向量改变检索图版本，但不改变原文投影或其缓存代次。
+  await index.upsertSources([{ ...knowledge, embeddingProfileId: 'fixture', vectors: [[1, 0]] }]);
+  const vectorAttached = await version();
+  assert.ok(vectorAttached.generation > initial.generation);
+  assert.equal(vectorAttached.corpusGeneration, initial.corpusGeneration);
+  assert.equal((await index.listSources({ scopeKeys: ['project:one'] })).find(row => row.sourceId === knowledge.sourceId).vectorChunks, 1);
+  await index.upsertSources([source('conversation-memory', 'project:one', 'new memory', { sourceType: 'memory' }),
+    source('conversation-message', 'project:one', 'new message', { sourceType: 'message' })]);
+  const conversationPublished = await version();
+  assert.ok(conversationPublished.generation > vectorAttached.generation);
+  assert.equal(conversationPublished.corpusGeneration, initial.corpusGeneration);
+  await index.removeSource('conversation-memory', { scopeKeys: ['project:one'] });
+  assert.equal((await version()).corpusGeneration, initial.corpusGeneration);
+  const projection = { ...knowledge, parserVersion: 'plain-text-v2' };
+  await index.upsertSources([projection]);
+  const rederived = await version();
+  assert.ok(rederived.corpusGeneration > conversationPublished.corpusGeneration);
+  await index.upsertSources([{ ...projection, title: 'updated source title' }]);
+  const retitled = await version();
+  assert.ok(retitled.corpusGeneration > rederived.corpusGeneration);
+  await index.upsertSources([{ ...projection, title: 'updated source title', text: 'changed evidence', sourceRevision: 2 }]);
+  const changed = await version();
+  assert.ok(changed.corpusGeneration > retitled.corpusGeneration);
+  await index.removeSource(mounted.sourceId, { scopeKeys: ['project:one'] });
+  const removed = await version();
+  assert.ok(removed.corpusGeneration > changed.corpusGeneration);
+  await index.close();
+  const reopened = new RetrievalIndex({ root });
+  try {
+    assert.deepEqual((await reopened.scopeVersion({ scopeKeys: ['project:one'] })).scopes[0], removed);
+    await reopened.invalidateScope('project:one');
+    assert.ok((await reopened.scopeVersion({ scopeKeys: ['project:one'] })).scopes[0].corpusGeneration > removed.corpusGeneration);
+  } finally { await reopened.close(); }
+});
+
+test('existing corpus generation metadata migrates conservatively and lexical rebuild advances only corpus scopes', async t => {
+  const { root, index } = await fixture(t, { vectorEnabled: false });
+  await index.upsertSources([source('legacy-corpus', 'project:corpus', 'repeated repeated', { sourceType: 'knowledge' }),
+    source('legacy-memory', 'project:memory', 'repeated memory', { sourceType: 'memory' })]);
+  const before = await index.scopeVersion({ scopeKeys: ['project:corpus', 'project:memory'] });
+  await index.close();
+  const database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'));
+  database.prepare("DELETE FROM retrieval_metadata WHERE key=?").run('corpus_generation:project:corpus');
+  database.prepare('UPDATE chunks SET tokenizer_version=?').run('han-bigram-code-v1');
+  database.close();
+  const migrated = new RetrievalIndex({ root, vectorEnabled: false });
+  try {
+    const after = await migrated.scopeVersion({ scopeKeys: ['project:corpus', 'project:memory'] });
+    assert.equal(after.indexEpoch, before.indexEpoch);
+    assert.ok(after.scopes[0].generation > before.scopes[0].generation);
+    assert.ok(after.scopes[0].corpusGeneration > before.scopes[0].generation);
+    assert.ok(after.scopes[1].generation > before.scopes[1].generation);
+    assert.equal(after.scopes[1].corpusGeneration, 0);
+  } finally { await migrated.close(); }
+});
+
 test('missing vector extension provides lexical fallback and does not mix dimensions or invalid chunks', async t => {
   const { index } = await fixture(t, { vectorEnabled: false });
   await index.upsertSources([source('lexical', 'user', '中文检索仍然可用', { embeddingProfileId: 'fixture', vectors: [[1, 0]] })]);
@@ -194,6 +287,27 @@ test('model versions isolate same-profile vectors and partially embedded chunks 
   assert.ok((await index.search({ query: '部分嵌入', scopeKeys: ['user'] })).items.some(item => item.sourceId === partial.sourceId));
 });
 
+test('non-finite native cosine distances keep lexical evidence and cannot displace normal semantic candidates', async t => {
+  const { index } = await fixture(t);
+  const tiny = source('tiny-distance', 'user', 'lexical source with extremely small vector', { embeddingProfileId: 'fixture', vectors: [[1e-40, 0]] });
+  await index.upsertSources([tiny]);
+  const invalid = await index.search({ query: 'lexical', scopeKeys: ['user'], queryVector: [1e-40, 0], embeddingProfileId: 'fixture' });
+  assert.equal(invalid.strategy, 'lexical');
+  assert.equal(invalid.degradedReason, 'RETRIEVAL_VECTOR_DISTANCE_INVALID');
+  assert.equal(invalid.items[0].sourceId, tiny.sourceId);
+  assert.ok(invalid.items.every(item => item.vectorRank === undefined && item.distance === undefined));
+  const invalidRows = Array.from({ length: 45 }, (_, index) => source(`invalid-distance-${index}`, 'user', 'unrelated stored text',
+    { embeddingProfileId: 'fixture', vectors: [[1e-40, 0]] }));
+  const normal = source('normal-distance', 'user', 'normal semantic source', { embeddingProfileId: 'fixture', vectors: [[1, 0]] });
+  await index.upsertSources([...invalidRows, normal]);
+  const valid = await index.search({ query: 'unmatchedterm', scopeKeys: ['user'], queryVector: [1, 0], embeddingProfileId: 'fixture' });
+  assert.equal(valid.strategy, 'hybrid');
+  assert.equal(valid.degradedReason, 'RETRIEVAL_VECTOR_DISTANCE_INVALID');
+  assert.deepEqual(valid.items.map(item => item.sourceId), [normal.sourceId]);
+  assert.equal(valid.items[0].vectorRank, 1);
+  assert.equal(valid.items[0].distance, 0);
+});
+
 test('document lexical text preserves occurrences while bounded query terms remain unique', () => {
   assert.deepEqual(lexicalText('alpha alpha camelCase camelCase').split(' '),
     ['alpha', 'alpha', 'camelcase', 'camel', 'case', 'camelcase', 'camel', 'case']);
@@ -264,15 +378,21 @@ test('narrow lexical candidates preserve reference ordering and filter scopes be
   await index.upsertSources(documents);
   const database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'), { readOnly: true });
   try {
-    const reference = database.prepare(`SELECT c.chunk_id,bm25(chunk_fts) AS lexical_rank FROM chunk_fts
-      JOIN chunks c ON c.id=chunk_fts.rowid JOIN sources s ON s.source_id=c.source_id
-      WHERE chunk_fts MATCH ? AND s.scope_key IN (?)
+    // An independent FTS corpus is the oracle for scoped BM25, not the polluted shared corpus.
+    // 以独立 FTS 语料作为范围 BM25 的参考，不能继续以受无关资料污染的共享统计作为标准。
+    database.exec(`CREATE VIRTUAL TABLE temp.authorized_fts USING fts5(lexical_text,tokenize='unicode61');
+      INSERT INTO temp.authorized_fts(rowid,lexical_text) SELECT c.id,c.lexical_text FROM chunks c
+      JOIN sources s ON s.source_id=c.source_id WHERE s.scope_key='project:a'`);
+    const reference = database.prepare(`SELECT c.chunk_id,bm25(authorized_fts) AS lexical_rank FROM authorized_fts
+      JOIN chunks c ON c.id=authorized_fts.rowid
+      WHERE authorized_fts MATCH ?
       ORDER BY CASE WHEN instr(lower(c.text),lower(?)) > 0 THEN 0 ELSE 1 END,lexical_rank,c.chunk_id LIMIT 40`);
     for (const query of ['alpha beta', 'alpha', '" OR alpha:*']) {
-      const expected = reference.all(matchExpression(query), 'project:a', query);
+      const expected = reference.all(matchExpression(query), query);
       const actual = await index.search({ query, scopeKeys: ['project:a'], limit: 60 });
       assert.deepEqual(actual.items.map(item => item.chunkId), expected.map(row => row.chunk_id));
-      assert.deepEqual(actual.items.map(item => item.lexicalScore), expected.map(row => row.lexical_rank));
+      for (const [position, item] of actual.items.entries())
+        assert.ok(Math.abs(item.lexicalScore - expected[position].lexical_rank) < 1e-18);
       assert.ok(actual.items.every(item => item.scopeKey === 'project:a'));
       assert.deepEqual(actual.items.map(item => item.lexicalRank), expected.map((_, position) => position + 1));
     }
@@ -281,5 +401,43 @@ test('narrow lexical candidates preserve reference ordering and filter scopes be
     controller.abort();
     await assert.rejects(cancelledSearch, { name: 'AbortError' });
     assert.equal((await index.search({ query: 'alpha', scopeKeys: ['project:a'], limit: 60 })).items.length, 30);
+  } finally { database.close(); }
+});
+
+test('unrelated scope publications cannot change authorized BM25 scores or candidate ordering', async t => {
+  const { index } = await fixture(t, { vectorEnabled: false });
+  await index.upsertSources([
+    source('scoped-alpha', 'project:isolated', 'alpha '.repeat(18) + 'beta'),
+    source('scoped-beta', 'project:isolated', 'beta '.repeat(18) + 'alpha'),
+    source('scoped-filler', 'project:isolated', 'unrelated filler '.repeat(25))
+  ]);
+  const search = () => index.search({ query: 'alpha OR beta', scopeKeys: ['project:isolated'] });
+  const ranked = result => result.items.map(item => [item.chunkId, item.lexicalRank, item.lexicalScore]);
+  const original = ranked(await search());
+  await index.upsertSources(Array.from({ length: 45 }, (_, position) =>
+    source(`unrelated-${position}`, 'project:unrelated', 'alpha '.repeat(40) + 'irrelevant')));
+  assert.deepEqual(ranked(await search()), original);
+  await index.invalidateScope('project:unrelated');
+  assert.deepEqual(ranked(await search()), original);
+  // Authorized edits invalidate statistics even when an earlier request populated the cache.
+  // 已授权语料编辑仍须使统计缓存失效，不能因之前查询过而保留旧平均长度和词频。
+  await index.upsertSources([source('scoped-filler', 'project:isolated', 'beta '.repeat(80), { sourceRevision: 2 })]);
+  assert.notDeepEqual(ranked(await search()), original);
+});
+
+test('vector publication retains scoped lexical statistics while real conversation text invalidates them', async t => {
+  const { root, index } = await fixture(t);
+  const document = source('lexical-stats-corpus', 'project:stats', 'Stable evidence original', { sourceType: 'knowledge' });
+  await index.upsertSources([document]);
+  const database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'), { readOnly: true });
+  try {
+    const lexicalGeneration = () => database.prepare('SELECT value FROM retrieval_metadata WHERE key=?').get('lexical_generation:project:stats').value;
+    const original = lexicalGeneration();
+    await index.search({ query: 'evidence', scopeKeys: ['project:stats'] });
+    await index.upsertSources([{ ...document, embeddingProfileId: 'fixture', vectors: [[1, 0]] }]);
+    assert.equal(lexicalGeneration(), original);
+    await index.upsertSources([source('lexical-stats-message', 'project:stats', 'New evidence from conversation', { sourceType: 'message' })]);
+    assert.notEqual(lexicalGeneration(), original);
+    assert.ok((await index.search({ query: 'evidence', scopeKeys: ['project:stats'] })).items.some(item => item.sourceId === 'lexical-stats-message'));
   } finally { database.close(); }
 });

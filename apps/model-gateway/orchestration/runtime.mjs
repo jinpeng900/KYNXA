@@ -23,8 +23,12 @@ import { appendModelRound, modelOrigin, modelPrefixFingerprint, nativeContinuati
 import { resolveModelCapabilities } from '../models/model-capabilities.mjs';
 import { replyDurationMs } from '../platform/reply-timing.mjs';
 import { RetrievalCoordinator } from './retrieval/coordinator.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
+import { ResourceBudgetService } from '../platform/resources/resource-client.mjs';
 import { WebSearchTool } from '../tools/retrieval/web-search.mjs';
 import { isSimpleGreeting, retrievalPlan } from './retrieval/source-projection.mjs';
+import { LocalModelResourceObserver } from '../models/local-model-resources.mjs';
+import { ExternalModelAdmission } from './external-model-admission.mjs';
 
 // Keep presentation instructions independent of source language and the current tool catalog.
 // 回复语言遵循当前用户请求，资料语言和工具目录不能改变这一约定；无需相关的额外推导保持按需提供。
@@ -55,11 +59,15 @@ export function completedContext(messages, beforeUserId) {
  * 传输适配器使用与桌面展示相同的正式会话日志。
  */
 export class ModelRuntime {
-  constructor({ modelStore, dataHome, extensionRoot, conversationStore, memoryService, toolService, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = DEFAULT_TOOL_RUN_LIMITS.maxDurationMs }) {
+  constructor({ modelStore, dataHome, extensionRoot, conversationStore, memoryService, toolService, resourceService, evaluationPolicy, timeoutMs = 180000, idleTimeoutMs = timeoutMs, streamTimeoutMs = DEFAULT_TOOL_RUN_LIMITS.maxDurationMs }) {
     this.store = modelStore;
     this.conversations = conversationStore ?? new ConversationStore({ dataHome });
     this.extensionRoot = resolve(extensionRoot ?? toolService?.extensionRoot ?? this.conversations.root);
     this.memory = memoryService ?? new MemoryService({ conversationStore: this.conversations });
+    this.resources = resourceService ?? new ResourceBudgetService();
+    this.localModels = new LocalModelResourceObserver();
+    this.localModelSnapshots = new Map();
+    this.ownsResources = !resourceService;
     this.tools = toolService ?? new ToolService({ conversationStore: this.conversations, dataHome, extensionRoot: this.extensionRoot,
       desktopRunner: new DesktopRunner(), hostTerminalRunner: new HostTerminalRunner(), sandboxRunner: new SandboxRunner({ conversationWorkspaceHome: dataHome, excludedRoots: [dataHome, this.conversations.root, this.extensionRoot,
         ...extensionControlPaths(extensionPointerPath()).map(path => dirname(path))].filter(Boolean) }) });
@@ -69,9 +77,27 @@ export class ModelRuntime {
     this.queues = new Map();
     this.shutdown = new AbortController();
     this.retrieval = new RetrievalCoordinator({ conversations: this.conversations, memory: this.memory, tools: this.tools,
-      excludedRoots: [dataHome, this.extensionRoot] });
+      resources: this.resources, evaluationPolicy, excludedRoots: [dataHome, this.extensionRoot] });
+    this.externalAdmissions = new ExternalModelAdmission({ resources: this.resources, observer: this.localModels,
+      yieldIdleGpu: async options => Promise.all([
+        this.retrieval.embeddings.releaseIdleGpu?.(options), this.retrieval.reranker.releaseIdleGpu?.(options) ]),
+      onState: (connection, modelId, { snapshot, ...allocation }) => {
+        const key = `${connection.providerId}:${modelId}`;
+        this.localModelSnapshots.delete(key);
+        this.localModelSnapshots.set(key, { ...snapshot, providerId: connection.providerId, modelId, allocation });
+        while (this.localModelSnapshots.size > 32) this.localModelSnapshots.delete(this.localModelSnapshots.keys().next().value);
+      } });
     this.tools.retrieval = this.retrieval;
+    this.retrieval.externalModelStatus = () => [...this.localModelSnapshots.values()].map(snapshot => ({ ...snapshot,
+      observationAgeMs: snapshot.observedAt ? Math.max(0, Date.now() - snapshot.observedAt) : null,
+      observationsStale: !snapshot.observedAt || Date.now() - snapshot.observedAt > 5000 }));
     this.tools.webSearch = new WebSearchTool(this.tools);
+    // One authority is shared by models, parsing, indexing and terminal execution.
+    // 模型、解析、索引与终端执行共享唯一资源权威，不在各消费端另建预算器。
+    this.tools.resources = this.resources;
+    this.tools.hostTerminalRunner && (this.tools.hostTerminalRunner.resources = this.resources);
+    this.tools.sandboxRunner && (this.tools.sandboxRunner.resources = this.resources);
+    this.tools.desktopRunner && (this.tools.desktopRunner.resources = this.resources);
   }
 
   initializeExtensionStorage(options) {
@@ -99,7 +125,10 @@ export class ModelRuntime {
     const greeting = isSimpleGreeting(input.message);
     const smallTalk = retrievalPlan(input.message).reason === 'small-talk';
     const toolContext = input.permissionMode == null || greeting || smallTalk ? null : await this.tools.createContext(id,
-      { requestId, permissionMode: input.permissionMode, message: input.message });
+      { requestId, permissionMode: input.permissionMode, message: input.message,
+        // Reuse formal user history already loaded here; caller/model metadata cannot supply authorization.
+        // 复用此处已经读取的正式用户历史，调用方或模型元数据不能提供授权。
+        previousUserMessages: history.filter(item => item.Role === 'user').map(item => item.Content ?? '') });
     const policyHash = toolContext ? toolPolicyHash(toolContext) : null;
     const previous = history.find(item => item.Id === requestId && item.Role === 'assistant');
     if (previous && (previous.RequestHash !== hash || (previous.ToolPolicyHash && previous.ToolPolicyHash !== policyHash)))
@@ -136,24 +165,40 @@ export class ModelRuntime {
       // 为本轮冻结同一已验证连接；MCP 发现期间编辑设置，不能混用一个供应商的 schema 和另一协议。
       const connection = Object.freeze(structuredClone(await this.connection(input)));
       const capabilities = resolveModelCapabilities(connection, input.model);
+      const localModelKey = `${connection.providerId}:${input.model}`;
+      // A greeting reuses known limits without waiting on optional process observation APIs.
+      // 问候复用已知上限，不等待可选模型进程观察接口；实际任务才刷新外部运行时信息。
+      const localModel = greeting ? this.localModelSnapshots.get(localModelKey) ?? {
+        diagnostic: { code: 'LOCAL_MODEL_OBSERVATION_DEFERRED' } } : await this.localModels.observe(connection, { signal: this.shutdown.signal,
+        contextTokens: connection.contextWindowTokens, modelId: input.model });
+      if (!['LOCAL_MODEL_OBSERVATION_NOT_LOCAL', 'LOCAL_MODEL_OBSERVATION_DEFERRED'].includes(localModel.diagnostic?.code)) {
+        const key = localModelKey;
+        this.localModelSnapshots.delete(key); this.localModelSnapshots.set(key, { ...localModel,
+          providerId: connection.providerId, modelId: input.model });
+        while (this.localModelSnapshots.size > 32) this.localModelSnapshots.delete(this.localModelSnapshots.keys().next().value);
+      }
       const contextInput = { conversationId: id,
         projectId: memory.isFolderlessWorkspace ? null : memory.projectId,
         history, currentMessage: input.message, beforeUserId: userId,
         memoryEntries: memory.entries, summary,
         contextWindowTokens: Math.min(connection.contextWindowTokens ?? capabilities.contextWindowTokens ?? 8192,
-          capabilities.contextWindowTokens ?? Infinity), maxOutputTokens: connection.maxOutputTokens,
+          capabilities.contextWindowTokens ?? Infinity, localModel.runtimeContextTokens || Infinity,
+          localModel.modelMaximumContextTokens || Infinity), maxOutputTokens: connection.maxOutputTokens,
         providerMaxOutputTokens: capabilities.maxOutputTokens, providerMaxInputTokens: capabilities.maxInputTokens };
       let context = buildContext(contextInput), catalog = [], declarations = [];
       let retrievalEvidence = { prompt: '', references: [] };
       // Reserve most of the real input window for dialogue, code and tool pairs; route evidence by task.
       // 按任务分配证据预算，使用 token 而非字符计算；为对话、代码与完整工具配对保留大部分真实输入窗口。
-      const evidenceBudgetTokens = Math.max(0, Math.min(8192, Math.floor(context.metrics.inputBudgetTokens * .12)));
-      const evidencePlan = retrievalPlan(input.message, { history: history.filter(item => item.Id !== userId), maximumTokens: evidenceBudgetTokens });
+      const evidenceBudgetTokens = Math.max(0, Math.min(16384, Math.floor(context.metrics.inputBudgetTokens * .12)));
+      const retrievalHistory = history.filter(item => item.Id !== userId);
+      const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
+      const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
+        taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
       if (evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0) {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,
             { signal: this.shutdown.signal, maximumTokens: evidencePlan.evidenceTokens,
-              maximumCharacters: Math.min(32768, evidencePlan.evidenceTokens * 4), plan: evidencePlan,
+              maximumCharacters: Math.min(65536, evidencePlan.evidenceTokens * 4), plan: evidencePlan,
               history: history.filter(item => item.Id !== userId), deferArchive: true });
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
@@ -217,7 +262,8 @@ export class ModelRuntime {
         try {
           retrievalEvidence = await this.retrieval.finalizeEvidence(toolContext ?? { conversationId: id, requestId,
             currentMessageId: userId, projectId: contextInput.projectId }, retrievalEvidence,
-          { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages] });
+          { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages],
+            maximumTokens: Math.max(0, context.metrics.inputBudgetTokens - estimateToolMessageTokens(context.messages, baseSystem) - schemaTokens - 512) });
         } catch (error) {
           if (this.shutdown.signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
@@ -232,7 +278,7 @@ export class ModelRuntime {
       if (context.summaryUpdate) await this.memory.repository.writeSummary(id, context.summaryUpdate);
       // Successful replies start timing only after the complete request is prepared; preparation failures retain their own elapsed time.
       // 成功回复只在完整请求准备完成后开始计时；准备失败仍保存该准备阶段的实际耗时。
-      return { assistant, messages: context.messages, connection, toolContext, catalog, declarations, runLimits: limits,
+      return { assistant, conversationId: id, projectId: contextInput.projectId, messages: context.messages, connection, toolContext, catalog, declarations, runLimits: limits,
         modelOrigin: modelOrigin(connection, { providerId: input.provider, model: input.model }),
         historySources: projection.historySources(context.messages, context.historySources),
         contextMetrics: { ...context.metrics, historyCompaction, toolCompactions: [] },
@@ -256,6 +302,50 @@ export class ModelRuntime {
   }
 
   async replyResult(input) { return this.reply(input, { includeTiming: true }); }
+
+  async consumeModelResponse(turn, modelId, request, signal, readResponse, { streaming = false } = {}) {
+    const admission = await this.externalAdmissions.acquire(turn.connection, { modelId, signal });
+    let stopLocal;
+    try {
+      signal?.throwIfAborted();
+      admission.dispatched();
+      stopLocal = this.beginLocalGeneration(turn, modelId);
+      const response = await requestModelResponse(turn.connection, request, signal, { streaming });
+      if (!response.ok) admission.settled();
+      await checkResponse(response);
+      const result = await readResponse(response);
+      admission.settled();
+      return result;
+    } catch (error) {
+      // A complete invalid JSON body is settled; cancellation or a broken stream is not execution proof.
+      // 完整但无效的 JSON 响应已经结束；取消或断流不能当成外部执行完成的证据。
+      if (error.code === 'MODEL_INVALID_JSON') admission.settled();
+      throw error;
+    } finally { stopLocal?.(); await admission.release(); }
+  }
+
+  beginLocalGeneration(turn, modelId) {
+    const stop = this.localModels.beginGeneration(turn.connection, { modelId });
+    const key = `${turn.connection.providerId}:${modelId}`, snapshot = this.localModelSnapshots.get(key);
+    if (snapshot) this.localModelSnapshots.set(key, { ...snapshot, generationState: 'generating', applicationGenerationState: 'generating' });
+    return () => {
+      stop(); const current = this.localModelSnapshots.get(key);
+      if (current) this.localModelSnapshots.set(key, { ...current, generationState: 'unknown', applicationGenerationState: 'idle' });
+    };
+  }
+
+  async validateFinalEvidence(turn, signal) {
+    const context = turn.toolContext ?? { conversationId: turn.conversationId, requestId: turn.assistant.Id, projectId: turn.projectId };
+    try {
+      const result = await this.retrieval.validateFinal(context, { signal, references: turn.assistant.EvidenceReferences ?? [] });
+      if (result.references) turn.assistant.EvidenceReferences = result.references;
+      if (!result.current) turn.assistant.RetrievalDiagnostic = { code: 'FINAL_EVIDENCE_CHANGED', invalidSources: result.invalidSources };
+      return result;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { current: false, invalidSources: [{ code: error.code ?? 'FINAL_EVIDENCE_CHECK_UNAVAILABLE' }], correctnessCertified: false };
+    }
+  }
 
   async reply(input, { includeTiming = false } = {}) {
     return this.enqueue(input, async id => {
@@ -290,13 +380,11 @@ export class ModelRuntime {
             catalogForRound: () => this.tools.modelCatalog(turn.toolContext),
             saveActivity: activity => this.saveToolActivity(id, turn, activity),
             saveModelRound: step => this.saveModelRound(id, turn, step),
+            validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
             requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog) => {
               const request = chatRequest(connection, input.model, messages, { ...turn.requestOptions, tools: roundDeclarations });
-              const response = await fetch(connection.baseUrl + request.path, { method: 'POST', redirect: 'error',
-                headers: { 'Content-Type': 'application/json', ...authorization(connection) },
-                body: JSON.stringify(request.body), signal: AbortSignal.any([roundSignal, AbortSignal.timeout(this.timeoutMs)]) });
-              await checkResponse(response);
-              const raw = await response.json();
+              const raw = await this.consumeModelResponse(turn, input.model, request,
+                AbortSignal.any([roundSignal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson);
               const parts = finalParts(connection.protocol, raw);
               receiveTurn({ type: 'reasoning_delta', delta: parts.reasoning });
               receiveTurn({ type: 'text_delta', delta: parts.content });
@@ -308,25 +396,22 @@ export class ModelRuntime {
           return includeTiming ? { content: result.content, durationMs: turn.assistant.DurationMs } : result.content;
         }
         const request = chatRequest(connection, input.model, turn.messages, turn.requestOptions);
-        let response;
-        try {
-          response = await fetch(connection.baseUrl + request.path, {
-            method: 'POST', redirect: 'error',
-            headers: { 'Content-Type': 'application/json', ...authorization(connection) },
-            body: JSON.stringify(request.body),
-            signal: AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(this.timeoutMs)])
-          });
-        } catch (error) {
-          if (error.name === 'TimeoutError') throw new StreamFailure('模型响应超时，请稍后重试。');
-          if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止。', 'interrupted');
-          throw new StreamFailure('无法连接模型服务，请检查网络和服务地址。');
-        }
-        await checkResponse(response);
-        let result;
-        try { result = await response.json(); }
-        catch { throw new StreamFailure('模型接口返回了无效的 JSON 响应。'); }
+        // Admission covers dispatch and body consumption; denied resources must not start an upstream generation.
+        // 准入覆盖派发及响应读取，资源未获准时不能先启动上游生成，更不能把准入错误归为 JSON 错误。
+        const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
+          memoryBytes: 16 * 1024 * 1024 }, async () => {
+          try {
+            return await this.consumeModelResponse(turn, input.model, request,
+              AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson);
+          } catch (error) {
+            if (error.name === 'TimeoutError') throw Object.assign(new StreamFailure('模型响应超时，请稍后重试。'), { code: 'MODEL_RESPONSE_TIMEOUT' });
+            if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止。', 'interrupted');
+            throw error;
+          }
+        }, { signal: this.shutdown.signal });
         const parts = finalParts(connection.protocol, result);
-        const content = parts.content;
+        const evidenceValidation = await this.validateFinalEvidence(turn, this.shutdown.signal);
+        const content = parts.content + (evidenceValidation.current ? '' : evidenceWarning(input.message));
         // Persist returned text even when the provider reports truncation.
         // 供应商报告输出截断时，仍保存已返回的文本。
         turn.assistant.Content = content;
@@ -391,10 +476,10 @@ export class ModelRuntime {
     if (clientSignal) signals.push(clientSignal);
     const signal = AbortSignal.any(signals);
     const throwIfCancelled = () => {
-      if (clientSignal?.aborted) throw new StreamFailure('已停止生成。', 'interrupted');
-      if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止，已保留生成的内容。', 'interrupted');
-      if (idle.signal.aborted) throw new StreamFailure('模型长时间没有返回内容，已保留生成的内容。', 'interrupted');
-      if (lifetime.signal.aborted) throw new StreamFailure('生成时间超过上限，已保留生成的内容。', 'interrupted');
+      if (clientSignal?.aborted) throw Object.assign(new StreamFailure('已停止生成。', 'interrupted'), { code: 'MODEL_CANCELLED' });
+      if (this.shutdown.signal.aborted) throw Object.assign(new StreamFailure('模型服务已停止，已保留生成的内容。', 'interrupted'), { code: 'MODEL_SERVICE_STOPPED' });
+      if (idle.signal.aborted) throw Object.assign(new StreamFailure('模型长时间没有返回内容，已保留生成的内容。', 'interrupted'), { code: 'MODEL_IDLE_TIMEOUT' });
+      if (lifetime.signal.aborted) throw Object.assign(new StreamFailure('生成时间超过上限，已保留生成的内容。', 'interrupted'), { code: 'MODEL_RUN_TIMEOUT' });
     };
     const snapshot = () => ({ ...turn.assistant, Content: content, Reasoning: reasoning,
       DurationMs: replyDurationMs(turn.startedAtMonotonicMs),
@@ -445,6 +530,7 @@ export class ModelRuntime {
           onContextCompacted: metrics => turn.contextMetrics.toolCompactions.push(metrics),
           system: turn.requestOptions.system, declarations: turn.declarations, inputBudgetTokens: turn.inputBudgetTokens,
           context: turn.toolContext, service: this.tools, signal, interactive: true, emit: receive,
+          validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
           onRoundComplete: result => receive({ type: 'content_snapshot', ...result }),
           catalogForRound: () => this.tools.modelCatalog(turn.toolContext),
           saveActivity: async tool => {
@@ -463,11 +549,10 @@ export class ModelRuntime {
             const request = chatRequest(connection, input.model, messages, { ...turn.requestOptions, stream: true, tools: roundDeclarations });
             throwIfCancelled(); activity();
             try {
-              const response = await fetch(connection.baseUrl + request.path, { method: 'POST', redirect: 'error',
-                headers: { 'Content-Type': 'application/json', Accept: request.body.stream ? 'text/event-stream' : 'application/json', ...authorization(connection) },
-                body: JSON.stringify(request.body), signal: roundSignal });
-              activity(); await checkResponse(response);
-              return await readToolStream(response, connection.protocol, catalog, receiveTurn, activity);
+              return await this.consumeModelResponse(turn, input.model, request, roundSignal, response => {
+                activity();
+                return readToolStream(response, connection.protocol, catalog, receiveTurn, activity);
+              }, { streaming: true });
             } finally { clearTimeout(idleTimer); }
           } });
         throwIfCancelled(); clearTimeout(timeout); await checkpoint;
@@ -484,22 +569,21 @@ export class ModelRuntime {
       const request = chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, stream: true });
       throwIfCancelled();
       activity();
-      let response;
-      try {
-        response = await fetch(connection.baseUrl + request.path, {
-          method: 'POST', redirect: 'error',
-          headers: { 'Content-Type': 'application/json',
-            Accept: request.body.stream ? 'text/event-stream' : 'application/json', ...authorization(connection) },
-          body: JSON.stringify(request.body), signal
-        });
-      } catch {
-        throwIfCancelled();
-        throw new StreamFailure('无法连接模型服务，请检查网络和服务地址。');
-      }
-      activity();
-      await checkResponse(response);
-      const result = await readModelStream(response, connection.protocol, event => plainSegments.receive(event), activity);
+      const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
+        memoryBytes: 16 * 1024 * 1024 }, async () => {
+        try {
+          return await this.consumeModelResponse(turn, input.model, request, signal, response => {
+            activity();
+            return readModelStream(response, connection.protocol, event => plainSegments.receive(event), activity);
+          }, { streaming: true });
+        } catch (error) {
+          throwIfCancelled();
+          throw error;
+        }
+      }, { signal });
       throwIfCancelled();
+      const evidenceValidation = await this.validateFinalEvidence(turn, signal);
+      if (!evidenceValidation.current) result.content += evidenceWarning(input.message);
       if (!result.content.trim()) throw new StreamFailure('模型没有返回文本内容。');
       clearTimeout(idleTimer); clearTimeout(timeout);
       await checkpoint;
@@ -558,7 +642,9 @@ export class ModelRuntime {
       // Even failed process teardown must wait for final receipts and context releases.
       // 进程清理失败也必须等待最终回执和上下文释放完成。
       await Promise.allSettled([...this.queues.values()]);
+      await this.externalAdmissions.close();
       await this.retrieval.close();
+      if (this.ownsResources) await this.resources.close();
     }
   }
 }
@@ -570,15 +656,49 @@ function runMetadata(turn, phase, code = null) {
 
 function safeFailure(error) {
   if (error instanceof StreamFailure) return error;
-  if (['AbortError', 'TimeoutError'].includes(error?.name))
-    return new StreamFailure('连续执行已停止，已保留生成内容和完成的工具记录。', 'interrupted');
+  if (error?.name === 'TimeoutError') return Object.assign(new StreamFailure('模型响应超时，已保留生成内容和完成的工具记录。', 'interrupted'),
+    { code: 'MODEL_RESPONSE_TIMEOUT' });
+  if (error?.name === 'AbortError') return Object.assign(new StreamFailure('连续执行已停止，已保留生成内容和完成的工具记录。', 'interrupted'),
+    { code: 'MODEL_CANCELLED' });
+  if (/^(?:RESOURCE_|INFERENCE_RESOURCE_|STRUCTURE_RESOURCE_)/u.test(error?.code ?? ''))
+    return Object.assign(new StreamFailure(error.code === 'RESOURCE_WAIT_TIMEOUT' ? '等待执行资源超时，已有结果已保留。' :
+      '当前执行资源不足或暂时不可用，已有结果已保留。'), { code: error.code, statusCode: error.statusCode ?? 503 });
   return new StreamFailure('模型调用失败，请检查服务与数据存储位置。');
+}
+
+function evidenceWarning(message) {
+  return /\p{Script=Han}/u.test(message ?? '') ? '\n\n部分来源在回答前发生变化或无法再次核验，相关结论仍待回读确认。' :
+    '\n\nSome sources changed or could not be rechecked before this answer; affected conclusions still need current-source verification.';
+}
+
+async function parseModelJson(response) {
+  try { return await response.json(); }
+  catch (error) {
+    if (['AbortError', 'TimeoutError'].includes(error?.name)) throw error;
+    throw Object.assign(new StreamFailure(error instanceof SyntaxError ? '模型接口返回了无效的 JSON 响应。' :
+      '读取模型响应失败，请检查连接状态。'), { code: error instanceof SyntaxError ? 'MODEL_INVALID_JSON' : 'MODEL_RESPONSE_READ_FAILED' });
+  }
+}
+
+/** Transport errors retain their category; neither credentials nor raw upstream diagnostics become public errors.
+ * 传输错误保留分类，凭据和上游原始诊断不进入公开错误信息，取消与超时交由请求生命周期分别处理。 */
+async function requestModelResponse(connection, request, signal, { streaming = false } = {}) {
+  try {
+    return await fetch(connection.baseUrl + request.path, { method: 'POST', redirect: 'error',
+      headers: { 'Content-Type': 'application/json', ...authorization(connection),
+        ...(streaming ? { Accept: request.body.stream ? 'text/event-stream' : 'application/json' } : {}) },
+      body: JSON.stringify(request.body), signal });
+  } catch (error) {
+    if (signal?.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) throw error;
+    throw Object.assign(new StreamFailure('无法连接模型服务，请检查网络和服务地址。'), { code: 'MODEL_NETWORK_FAILED' });
+  }
 }
 
 async function checkResponse(response) {
   if (response.ok) return;
-  await response.body?.cancel();
+  await response.body?.cancel().catch(() => {});
   const hint = ({ 401: '请检查 API Key', 403: '当前密钥没有访问权限',
     402: '请检查账号余额', 404: '请检查服务地址与模型 ID', 429: '请求频繁或额度不足，请稍后重试' })[response.status];
-  throw new StreamFailure('模型服务返回 HTTP ' + response.status + (hint ? '，' + hint : '') + '。');
+  throw Object.assign(new StreamFailure('模型服务返回 HTTP ' + response.status + (hint ? '，' + hint : '') + '。'),
+    { code: 'MODEL_HTTP_ERROR', upstreamStatus: response.status });
 }

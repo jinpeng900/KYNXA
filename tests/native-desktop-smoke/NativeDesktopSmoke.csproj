@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="InputSequenceChecks.cs" />
+    <Compile Remove="ApplicationPolicyChecks.cs" />
   </ItemGroup>
 </Project>

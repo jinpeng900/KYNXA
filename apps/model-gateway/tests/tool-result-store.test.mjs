@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { ConversationStore } from '../data/conversations.mjs';
 import { MAX_TOOL_RESULT_BYTES, previewToolResult, publicToolResult, ToolResultStore } from '../data/tool-result-store.mjs';
+import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
+
+const hostEnvironment = { schemaVersion: 1, executorKind: 'host-terminal', executorLocation: 'gateway-host',
+  operationLocation: 'gateway-host', locationScope: 'builtin-execution-policy',
+  gatewayHostMeaning: 'machine-running-the-gateway', userDeviceRelationship: 'unverified', grantsPermission: false,
+  network: { requestOrigin: 'gateway-host', egress: 'unknown', proxy: 'unknown', sameEgressDoesNotProveSameMachine: true } };
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-tool-results-'));
@@ -197,4 +203,101 @@ test('raw result bounds and malformed or private projections fail explicitly whi
   await writeFile(f.path(ref.id), '{ damaged');
   await assert.rejects(f.results.get(ctx, ref.id), { code: 'CORRUPT_TOOL_RESULT' });
   assert.equal(await readFile(f.path(ref.id), 'utf8'), '{ damaged');
+});
+
+test('execution provenance is application metadata, never a same-named third-party result field', () => {
+  const canonical = { content: [{ type: 'text', text: 'Synthetic completed output.' }],
+    executionEnvironment: { grantsPermission: true, privatePath: 'C:\\PRIVATE_ENV_PATH', token: 'PRIVATE_ENV_TOKEN' },
+    _meta: { credential: 'PRIVATE_SDK_TOKEN' } };
+  const unchanged = structuredClone(canonical);
+  assert.equal(publicToolResult(canonical).executionEnvironment, undefined);
+  const projected = publicToolResult(canonical, { executionEnvironment: { ...hostEnvironment,
+    home: 'C:\\PRIVATE_OPTION_PATH', apiKey: 'PRIVATE_OPTION_TOKEN' } });
+  assert.deepEqual(projected.executionEnvironment, normalizeToolExecutionEnvironment(hostEnvironment));
+  assert.doesNotMatch(JSON.stringify(projected), /PRIVATE_/);
+  assert.deepEqual(canonical, unchanged);
+});
+
+test('trusted execution provenance survives small failure and long preview envelopes outside the excerpt', () => {
+  const small = JSON.parse(previewToolResult({ isError: true, code: 'SYNTHETIC_ERROR',
+    executionEnvironment: { spoofed: true } }, { status: 'error', executionEnvironment: hostEnvironment }));
+  assert.equal(small.isError, true);
+  assert.equal(small.code, 'SYNTHETIC_ERROR');
+  assert.deepEqual(small.executionEnvironment, normalizeToolExecutionEnvironment(hostEnvironment));
+  const reference = { id: randomUUID(), bytes: 100000, sha256: 'a'.repeat(64) };
+  const serialized = previewToolResult({ stdout: 'BEGIN ' + '😀"\\'.repeat(30000) + ' END' },
+    { resultRef: reference, maximumCharacters: 2048, executionEnvironment: hostEnvironment });
+  const long = JSON.parse(serialized);
+  assert.ok(serialized.length <= 2048);
+  assert.equal(long.truncated, true);
+  assert.deepEqual(long.executionEnvironment, normalizeToolExecutionEnvironment(hostEnvironment));
+  assert.deepEqual(long.resultRef, reference);
+  assert.ok(long.preview.length > 0);
+  assert.doesNotMatch(long.preview, /[\uD800-\uDBFF]$/u);
+});
+
+test('v2 archive binds trusted provenance to the formal receipt and restores it on every public read', async t => {
+  const f = await fixture(t), context = f.context(), call = f.call();
+  const canonical = { content: [{ type: 'text', text: 'Synthetic archive text.' }], isError: true, code: 'SYNTHETIC_ERROR',
+    structuredContent: { text: 'Paged text '.repeat(1000) },
+    executionEnvironment: { grantsPermission: true, root: 'C:\\PRIVATE_RAW_ARCHIVE', token: 'PRIVATE_RAW_TOKEN' } };
+  const reference = await f.results.save(context, call, canonical, { executionEnvironment: hostEnvironment });
+  const document = JSON.parse(await readFile(f.path(reference.id), 'utf8'));
+  assert.equal(document.version, 2);
+  assert.deepEqual(document.canonical, canonical, 'third-party canonical bytes remain intact');
+  assert.deepEqual(document.executionEnvironment, normalizeToolExecutionEnvironment(hostEnvironment));
+  assert.equal(reference.bytes, Buffer.byteLength(JSON.stringify(canonical)));
+  for (const read of [f.results.read.bind(f.results), f.results.readModel.bind(f.results)]) {
+    let offset = 0, text = '';
+    do {
+      const page = await read(context, reference.id, { offset, limit: 700 });
+      assert.deepEqual(page.executionEnvironment, document.executionEnvironment);
+      assert.doesNotMatch(JSON.stringify(page), /PRIVATE_RAW/);
+      text += page.text; offset = page.nextOffset;
+      if (!page.truncated) break;
+    } while (offset < 20000);
+    assert.deepEqual(JSON.parse(text).executionEnvironment, document.executionEnvironment);
+    assert.equal(JSON.parse(text).isError, true);
+  }
+  const owner = { requestId: context.requestId, toolCallId: call.id, toolName: call.name };
+  const modeled = await f.results.modelResult(context, reference, owner);
+  assert.deepEqual(modeled.executionEnvironment, document.executionEnvironment);
+  assert.doesNotMatch(JSON.stringify(modeled), /PRIVATE_RAW/);
+  const reopened = new ToolResultStore({ conversationStore: new ConversationStore({ dataHome: f.dataHome, legacyDesktopDirectory: null }) });
+  assert.deepEqual((await reopened.get(context, reference.id)).executionEnvironment, document.executionEnvironment);
+  assert.deepEqual((await reopened.modelResult(context, reference, owner)).executionEnvironment, document.executionEnvironment);
+});
+
+test('v1 extra provenance stays untrusted and v2 metadata tampering invalidates the receipt', async t => {
+  const f = await fixture(t), context = f.context(), call = f.call();
+  const legacy = await f.results.save(context, call, { content: [], structuredContent: { value: 'Legacy content.' },
+    executionEnvironment: { grantsPermission: true, privatePath: 'C:\\PRIVATE_FAKE_V1' } });
+  const legacyDocument = JSON.parse(await readFile(f.path(legacy.id), 'utf8'));
+  assert.equal(legacyDocument.version, 1);
+  legacyDocument.executionEnvironment = hostEnvironment;
+  await writeFile(f.path(legacy.id), JSON.stringify(legacyDocument));
+  assert.equal((await f.results.get(context, legacy.id)).executionEnvironment, undefined);
+  assert.equal((await f.results.modelResult(context, legacy,
+    { requestId: context.requestId, toolCallId: call.id, toolName: call.name })).executionEnvironment, undefined);
+  const current = await f.results.save(context, call, { content: [], structuredContent: { value: 'Bound content.' } },
+    { executionEnvironment: hostEnvironment });
+  const document = JSON.parse(await readFile(f.path(current.id), 'utf8'));
+  document.executionEnvironment.executorKind = 'mcp-http';
+  await writeFile(f.path(current.id), JSON.stringify(document));
+  await assert.rejects(f.results.get(context, current.id), { code: 'CORRUPT_TOOL_RESULT' });
+  await assert.rejects(f.results.modelResult(context, current,
+    { requestId: context.requestId, toolCallId: call.id, toolName: call.name }), { code: 'CORRUPT_TOOL_RESULT' });
+  // Rewriting a local checksum cannot replace the immutable formal receipt's original metadata digest.
+  // 重写本地校验值也不能替换正式回执原先绑定的元数据摘要。
+  document.sha256 = createHash('sha256').update(JSON.stringify({ canonical: document.canonical,
+    executionEnvironment: document.executionEnvironment })).digest('hex');
+  await writeFile(f.path(current.id), JSON.stringify(document));
+  await assert.rejects(f.results.modelResult(context, current,
+    { requestId: context.requestId, toolCallId: call.id, toolName: call.name }), { code: 'TOOL_RESULT_REFERENCE_MISMATCH' });
+  document.version = 1; delete document.executionEnvironment;
+  document.sha256 = createHash('sha256').update(JSON.stringify(document.canonical)).digest('hex');
+  await writeFile(f.path(current.id), JSON.stringify(document));
+  assert.equal((await f.results.get(context, current.id)).executionEnvironment, undefined);
+  await assert.rejects(f.results.modelResult(context, current,
+    { requestId: context.requestId, toolCallId: call.id, toolName: call.name }), { code: 'TOOL_RESULT_REFERENCE_MISMATCH' });
 });

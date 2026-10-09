@@ -43,3 +43,11 @@ node_modules/
 # Isolated development verification outputs; never ship them with the application.
 # 隔离的开发验收产物，不随应用发布。
 /artifacts/
+
+# Rust resource-service build outputs; ship only the prepared runtime artifact.
+# Rust 资源服务构建产物，仅由打包步骤收录准备好的运行文件。
+/apps/resource-service/target/
+
+# Machine-specific benchmark inputs, indexes and results remain local; portable runners live in tools/development.
+# 本机评测输入、索引与结果保留本地；可移植的评测入口位于 tools/development。
+/test/

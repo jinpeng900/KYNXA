@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rmdir, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, parse, relative } from 'node:path';
-import { boundedInteger, inspectLocalPath, toolFailure, within } from '../platform/tool-paths.mjs';
+import { boundedInteger, inspectLocalPath, revalidateLocalPathBinding, toolFailure, within } from '../platform/tool-paths.mjs';
 
 export const MAX_TOOL_FILE_BYTES = 1024 * 1024;
 const fileQueues = new Map();
@@ -54,7 +54,7 @@ function encode(content) {
 }
 
 async function readBounded(path, maxBytes = MAX_TOOL_FILE_BYTES) {
-  const info = await inspectLocalPath(path);
+  const info = await inspectLocalPath(path, { allowHardLinks: true });
   if (!info.isFile()) throw toolFailure('路径不是普通文件。');
   if (info.size > maxBytes) throw toolFailure('文件超过本次读取的大小上限。', 'TOOL_FILE_TOO_LARGE');
   const bytes = await readFile(path);
@@ -90,7 +90,7 @@ async function checkHash(path, expectedHash) {
   return value;
 }
 
-async function atomicText(path, bytes, expectedHash, signal) {
+async function atomicText(path, bytes, expectedHash, signal, pathBinding) {
   const original = await checkHash(path, expectedHash), parent = dirname(path);
   const parentInfo = await inspectLocalPath(parent);
   if (!parentInfo.isDirectory()) throw toolFailure('文件父目录不存在。');
@@ -105,6 +105,7 @@ async function atomicText(path, bytes, expectedHash, signal) {
     // 原子替换前立即重新检查链接及外部修改。
     await inspectLocalPath(parent);
     await checkHash(path, expectedHash);
+    if (pathBinding) await revalidateLocalPathBinding(pathBinding);
     signal?.throwIfAborted();
     await rename(temporary, path);
   } finally {
@@ -114,8 +115,10 @@ async function atomicText(path, bytes, expectedHash, signal) {
   return { path, bytes: bytes.length, sha256: sha256(bytes) };
 }
 
-export async function executeFilesystem(name, context, input, path, signal, { protectedRoots = [], denyRead = () => false } = {}) {
+export async function executeFilesystem(name, context, input, path, signal, { protectedRoots = [], denyRead = () => false,
+  pathBinding } = {}) {
   signal?.throwIfAborted();
+  if (pathBinding) await revalidateLocalPathBinding(pathBinding);
   if (name === 'filesystem.list') {
     const info = await inspectLocalPath(path);
     if (!info.isDirectory()) throw toolFailure('路径不是目录。');
@@ -131,7 +134,7 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
     return { path, sha256: value.hash, bytes: value.bytes.length, ...textPage(full, offset, maxChars) };
   }
   if (name === 'filesystem.stat') {
-    const info = await inspectLocalPath(path);
+    const info = await inspectLocalPath(path, { allowHardLinks: true });
     const hash = info.isFile() && info.size <= MAX_TOOL_FILE_BYTES ? (await readBounded(path)).hash : null;
     return { path, type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', bytes: info.size,
       modifiedAt: info.mtime.toISOString(), sha256: hash };
@@ -139,17 +142,23 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
   if (name === 'filesystem.search') return searchFiles(path, input, signal, protectedRoots, denyRead);
   return queued(path, async () => {
     signal?.throwIfAborted();
-    if (name === 'filesystem.write') return atomicText(path, encode(input.content), input.expectedHash, signal);
+    if (pathBinding) await revalidateLocalPathBinding(pathBinding);
+    if (name === 'filesystem.write') return atomicText(path, encode(input.content), input.expectedHash, signal, pathBinding);
     if (name === 'filesystem.edit') {
       const original = await checkHash(path, input.expectedHash), full = text(original.bytes);
       if (typeof input.oldText !== 'string' || !input.oldText || typeof input.newText !== 'string') throw toolFailure('请提供有效的替换文本。');
       const index = full.indexOf(input.oldText);
       if (index < 0 || full.indexOf(input.oldText, index + 1) >= 0)
         throw toolFailure('替换文本必须在文件中恰好出现一次。', 'TOOL_EDIT_NOT_UNIQUE', 409);
-      return atomicText(path, encode(full.slice(0, index) + input.newText + full.slice(index + input.oldText.length)), input.expectedHash, signal);
+      return atomicText(path, encode(full.slice(0, index) + input.newText + full.slice(index + input.oldText.length)), input.expectedHash, signal, pathBinding);
     }
     if (name === 'filesystem.delete') {
-      if (path === parse(path).root || (context.workspaceRoot && relative(context.workspaceRoot, path) === ''))
+      // Deleting an alias must never be translated into deleting the shared real target.
+      // 删除链接入口不能被转换为删除共享真实目标；链接入口管理留给明确的专用操作。
+      if (pathBinding && (await lstat(pathBinding.requestedPath)).isSymbolicLink())
+        throw toolFailure('此路径是链接入口，本次没有删除链接或其真实目标。', 'UNSAFE_TOOL_PATH', 403);
+      const workspaceRoot = pathBinding?.workspaceRoot ?? context.workspaceRoot;
+      if (path === parse(path).root || (workspaceRoot && relative(workspaceRoot, path) === ''))
         throw toolFailure('不能删除工作或文件系统根目录。', 'UNSAFE_TOOL_PATH', 403);
       const info = await inspectLocalPath(path);
       if (info.isDirectory()) {
@@ -184,7 +193,7 @@ async function searchFiles(path, input, signal, protectedRoots, denyRead) {
     if (matches.length >= maxMatches || visited >= 1000 || visitedEntries >= 2000 || depth > 8) { truncated = true; return; }
     visitedEntries++;
     let info;
-    try { info = await inspectLocalPath(current); }
+    try { info = await inspectLocalPath(current, { allowHardLinks: true }); }
     catch (error) {
       if (['UNSAFE_TOOL_PATH', 'ENOENT', 'EACCES', 'EPERM'].includes(error.code)) { skipped++; return; }
       throw error;

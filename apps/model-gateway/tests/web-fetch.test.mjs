@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
 import { WebFetchTool } from '../tools/web-fetch.mjs';
-import { toolFixture, pendingApproval, approve, parsed } from './tool-fixture.mjs';
+import { toolFixture, parsed } from './tool-fixture.mjs';
 import { searchTools } from '../tools/tool-discovery.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
 import { canRunInParallel } from '../tools/tool-scheduling.mjs';
@@ -62,7 +62,7 @@ test('declared encodings decode correctly and unsupported, malformed or binary t
   }
 });
 
-test('broker exposes public reading with no MCP connection, enforces reason/approval and preserves exact approved arguments', async t => {
+test('broker exposes public reading without MCP or repeated Ask approval and preserves the argument snapshot', async t => {
   const calls = [];
   const reader = new WebFetchTool({ fetchPage: async (url, options) => { calls.push({ url, options }); return response('<p>Synthetic evidence</p>'); } });
   const f = await toolFixture(t, { officialTools: true, webFetcher: reader });
@@ -75,12 +75,10 @@ test('broker exposes public reading with no MCP connection, enforces reason/appr
     assert.equal(denied.isError, true);
   }
   const call = f.call('web.fetch', { url: sourceUrl, reason: 'Synthetic public source verification.' });
-  const waiting = await pendingApproval(f.service, context, call);
-  assert.equal(waiting.event.tool.outsideWorkspace, true); assert.equal(calls.length, 0);
-  waiting.event.tool.arguments.url = 'https://www.example.com/mutated';
+  const running = f.service.execute(context, call, { interactive: false });
   call.arguments.url = 'https://www.example.com/also-mutated';
-  approve(f.service, context, waiting.event.tool);
-  const completed = await waiting.result;
+  const completed = await running;
+  assert.equal(f.service.approvals.pending.size, 0);
   assert.equal(calls.length, 1); assert.equal(calls[0].url, sourceUrl);
   assert.equal(completed.status, 'completed'); assert.equal(completed.outsideWorkspace, true);
   assert.ok(completed.resultRef);

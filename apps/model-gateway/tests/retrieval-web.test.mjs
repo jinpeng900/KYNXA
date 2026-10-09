@@ -21,6 +21,50 @@ async function fixture(t) {
   return { ...f, retrieval, log, events: async () => (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line)) };
 }
 
+test('web budget checks prepare approval state without consuming failed or undispatched queries', async () => {
+  const context = { projectId: null }, tools = { catalogs: new WeakMap() }, web = new WebSearchTool(tools);
+  tools.catalogs.set(context, { descriptors: new Map() });
+  for (let index = 0; index < 3; index++) {
+    const checked = await web.check(context, 'query');
+    assert.equal(checked.stage.queryCount, 0); assert.equal(checked.stage.pageCount, 0);
+  }
+  await assert.rejects(web.run(context, { query: 'No configured provider', reason: 'Synthetic lookup' }, {}),
+    { code: 'WEB_SEARCH_PROVIDER_UNAVAILABLE' });
+  assert.equal(web.stages.get(context).queryCount, 0);
+  await web.take(context, 'query'); await web.take(context, 'query');
+  await assert.rejects(web.check(context, 'query'), { code: 'WEB_STAGE_BUDGET_EXHAUSTED' });
+  assert.equal(web.stages.get(context).queryCount, 2);
+});
+
+test('concurrent public search dispatches cannot consume more than the stage query budget', async () => {
+  const context = { projectId: null }, web = new WebSearchTool({});
+  await web.check(context, 'query');
+  const results = await Promise.allSettled(Array.from({ length: 4 }, () => web.take(context, 'query')));
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 2);
+  const rejected = results.filter(item => item.status === 'rejected');
+  assert.equal(rejected.length, 2);
+  assert.ok(rejected.every(item => item.reason.code === 'WEB_STAGE_BUDGET_EXHAUSTED'));
+  assert.equal(web.stages.get(context).queryCount, 2);
+});
+
+test('unified web search consumes its dispatch budget once with or without retrieval settings', async () => {
+  for (const withRetrieval of [false, true]) {
+    const context = { projectId: null }, tools = { catalogs: new WeakMap() }, web = new WebSearchTool(tools);
+    if (withRetrieval) tools.retrieval = { effective: async () => ({ web: { mode: 'auto', depth: 'standard', providerId: 'auto' } }) };
+    const descriptor = { name: 'mcp.synthetic.web_search_exa', serverId: 'synthetic',
+      originalInputSchema: { properties: { query: {}, numResults: {} } } };
+    tools.catalogs.set(context, { descriptors: new Map([[descriptor.name, descriptor]]) });
+    let dispatched = 0;
+    tools.execute = async () => {
+      await web.take(context, 'query'); dispatched++;
+      return { content: JSON.stringify({ results: [{ url: 'https://example.com/source', title: 'Synthetic evidence', text: 'A verified fixture observation.' }] }), isError: false };
+    };
+    const result = await web.run(context, { query: 'Synthetic source query', reason: 'Synthetic lookup' }, {});
+    assert.equal(result.isError, undefined); assert.equal(dispatched, 1);
+    assert.equal(web.stages.get(context).queryCount, 1); assert.equal(result.value.remainingQueries, 1);
+  }
+});
+
 test('unified web search calls the real SDK once, retains original result, and bounds repeated search', async t => {
   const f = await fixture(t), context = await f.context('full');
   const cold = await f.service.webSearch.providers();
@@ -84,7 +128,33 @@ test('raw public-search stage timeout is a paired read error, while later local 
   const f = await fixture(t), context = await f.context('full');
   await f.service.catalog(context, { connectMcp: true });
   await f.service.webSearch.take(context, 'page');
-  f.service.webSearch.stages.get(context).durationMs = 30;
+  // Expire the synthetic deadline after SDK dispatch, rather than racing setup against a 30 ms wall clock.
+  // 等实际 SDK 派发后再触发自造期限，避免并行测试的准备耗时先耗尽 30 毫秒而根本没有派发。
+  const stageDeadline = new AbortController(), originalTimeout = AbortSignal.timeout;
+  let deadlineArmed = false;
+  t.mock.method(AbortSignal, 'timeout', durationMs => {
+    if (deadlineArmed) return originalTimeout(durationMs);
+    assert.ok(durationMs > 30000, 'the prepared public-search stage still has its normal budget');
+    deadlineArmed = true;
+    return stageDeadline.signal;
+  });
+  const execute = f.service.mcp.execute.bind(f.service.mcp);
+  f.service.mcp.execute = async (...args) => {
+    assert.equal(deadlineArmed, true);
+    const settled = execute(...args).then(value => ({ value }), error => ({ error }));
+    const dispatchLimit = performance.now() + 10000;
+    while (!(await f.events().catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    })).some(item => item.event === 'search' && item.query === 'slow-fixture')) {
+      assert.ok(performance.now() < dispatchLimit, 'the synthetic MCP search must reach the server');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    stageDeadline.abort(new DOMException('Synthetic public-search deadline expired.', 'TimeoutError'));
+    const outcome = await settled;
+    if (outcome.error) throw outcome.error;
+    return outcome.value;
+  };
   const result = await f.run(context, 'mcp.exa-test.web_search_exa', {
     arguments: { query: 'slow-fixture' }, policy: { reason: 'Synthetic stage timeout' }
   });

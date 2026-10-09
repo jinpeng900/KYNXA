@@ -16,6 +16,14 @@ dotnet run --project tests/native-desktop-smoke/InputSequenceSmoke.csproj -c Deb
 
 It covers partial mouse clicks, all prefixes of a key chord, Unicode release, successful drag cancellation, release retries, zero deliveries, middle/right buttons and explicit failure when cleanup remains incomplete. The current run passed 24 checks.
 
+The launch-classification check invokes production policy with synthetic PE files and never starts an application or touches the desktop:
+
+```powershell
+dotnet run --project tests/native-desktop-smoke/ApplicationPolicySmoke.csproj
+```
+
+It verifies GUI and console-subsystem application support, interpreter routing, and explicit file entries for `pythonw`/`javaw`; inline commands and implicit modules remain in the host-terminal channel.
+
 The WPF fixture provides real text/password/URL controls, button, drag region and scroller:
 
 ```powershell

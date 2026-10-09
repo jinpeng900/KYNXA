@@ -3,7 +3,7 @@ import { historyDescriptors } from '../../tools/tool-history.mjs';
 import { webFetchDescriptor } from '../../tools/web-fetch.mjs';
 import { retrievalDescriptors } from '../../tools/retrieval/descriptors.mjs';
 import { computerDescriptors } from './computer.mjs';
-import { hostTerminalDescriptor } from './terminal.mjs';
+import { hostTerminalDescriptor, hostTerminalJobDescriptors } from './terminal.mjs';
 
 const skillDescriptors = [
   { name: 'skill.list', description: 'Page application skill metadata from official-tools/Skills, user extension Skills, configured directories and this work\'s .kynxa/skills. Discovery is limited to 128 skills and 512 candidates per source directory. Does not execute scripts.',
@@ -29,13 +29,13 @@ const terminalDescriptor = { name: 'terminal.run', description: 'Run Node.js or 
     args: { type: 'array', items: { type: 'string' }, maxItems: 64 }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 } },
   required: ['command', 'args'], additionalProperties: false }, source: 'builtin' };
 const catalogDescriptors = [
-  { name: 'tool.search', description: 'Find enabled tools by name or description. Returns metadata and schemas for tools deferred by this turn budget; use tool.load before calling a deferred tool.',
+  { name: 'tool.search', description: 'Discover enabled tools and schemas by name or capability. Use returned names with tool.load before calling deferred tools.',
     inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, offset: { type: 'integer', minimum: 0, maximum: 100000 },
       limit: { type: 'integer', minimum: 1, maximum: 20 } }, additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.load', description: 'Load enabled tool names for the next call. Keeps discovery and requested tools; other tools can be deferred within the schema budget. Does not execute tools.',
+  { name: 'tool.load', description: 'Select enabled names or exact model aliases within the schema budget. Keeps discovery. Reports missing items; does not execute.',
     inputSchema: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, maxItems: 32 } }, required: ['names'], additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.result.read', description: 'Read a saved tool result in this conversation by its opaque reference, in bounded text pages. Media stays as typed references; private MCP metadata is excluded.',
+  { name: 'tool.result.read', description: 'Page a saved result by opaque id in this chat. Media remains typed references; private MCP metadata is excluded.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },
       limit: { type: 'integer', minimum: 1, maximum: 16000 } }, required: ['id'], additionalProperties: false }, source: 'builtin' }
 ];
-export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...retrievalDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];
+export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...retrievalDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...hostTerminalJobDescriptors, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];

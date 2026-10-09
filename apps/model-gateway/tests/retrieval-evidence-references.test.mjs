@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { ConversationStore } from '../data/conversations.mjs';
 import { ToolResultStore } from '../data/tool-result-store.mjs';
 import { EvidenceReferenceStore, allocateEvidenceArchiveId, evidenceSourceRef, parseEvidenceSourceRef,
-  projectEvidenceSearchResult } from '../data/retrieval/evidence-references.mjs';
+  projectEvidenceSearchResult, projectRetrievalModelView } from '../data/retrieval/evidence-references.mjs';
 import { hashText, sourceReference } from '../data/retrieval/retrieval-contracts.mjs';
 
 function item(scopeKey = 'user', sourceId = 'synthetic-document') {
@@ -98,6 +98,122 @@ test('formal receipts survive fresh store instances; model history is compact an
   assert.deepEqual(JSON.parse(before).canonical, full);
   await assert.rejects(results.save(f.context, f.call, canonical([]), { id }), { code: 'TOOL_RESULT_CONFLICT' });
   assert.equal(await readFile(path, 'utf8'), before);
+});
+
+test('nested retrieval paths and errors are model-only projections while useful evidence stays intact', async t => {
+  const f = await fixture(t), evidence = item();
+  evidence.title = 'Z:\\Synthetic user\\Notes\\document.md';
+  evidence.locator.path = 'Z:\\Synthetic user\\Notes\\document.md';
+  evidence.locator.root = 'Z:\\Synthetic user\\Notes';
+  const full = canonical([evidence]);
+  full.structuredContent.diagnostic = { details: [{ filename: '/synthetic/private/cache.sqlite',
+    message: "Failed to read '/synthetic/private/cache.sqlite'; retry relative document.md",
+    stack: 'Error\n at read (Z:\\Synthetic user\\Internal\\read.mjs:12:2)' }] };
+  full.content[0].text = JSON.stringify(full.structuredContent);
+  const ref = await f.results.save(f.context, f.call, full);
+  const model = await f.results.modelResult(f.context, ref, f.owner);
+  assert.equal(model.structuredContent.items[0].locator.path, undefined);
+  assert.equal(model.structuredContent.items[0].locator.root, undefined);
+  assert.equal(model.structuredContent.items[0].title, 'document.md');
+  assert.equal(model.structuredContent.items[0].locator.relativePath, 'document.md');
+  assert.equal(model.structuredContent.items[0].excerpt, evidence.excerpt);
+  assert.equal(model.structuredContent.items[0].locator.startOffset, evidence.locator.startOffset);
+  assert.equal(model.structuredContent.diagnostic.details[0].filename, undefined);
+  assert.match(model.structuredContent.diagnostic.details[0].message, /\[local-path\]/);
+  assert.doesNotMatch(JSON.stringify(model), /Synthetic user|synthetic\/private/);
+  assert.deepEqual((await f.results.get(f.context, ref.id)).structuredContent, full.structuredContent);
+  assert.equal(JSON.parse((await f.results.read(f.context, ref.id)).text).structuredContent.items[0].locator.path, evidence.locator.path);
+  const view = projectRetrievalModelView({ content: [{ type: 'text', text: "ENOENT: open 'Z:\\Synthetic user\\missing.md'" }],
+    structuredContent: { url: 'https://example.test/path', relativePath: 'docs/source.md', excerpt: 'Document mentions /usr/bin/node.' }, isError: true });
+  assert.doesNotMatch(view.content[0].text, /Synthetic user/);
+  assert.equal(view.structuredContent.url, 'https://example.test/path');
+  assert.equal(view.structuredContent.relativePath, 'docs/source.md');
+  assert.equal(view.structuredContent.excerpt, 'Document mentions /usr/bin/node.');
+});
+
+test('knowledge read history removes private locators without changing full source receipts', async t => {
+  const f = await fixture(t), call = { id: 'read-receipt', name: 'knowledge.read' };
+  const full = { content: [{ type: 'text', text: JSON.stringify({ text: 'Current original', offset: 2,
+    nextOffset: 18, offsetUnit: 'utf16-code-units', locator: { path: '/synthetic/private/file.md', relativePath: 'file.md' } }) }], isError: false };
+  const reference = await f.results.save(f.context, call, full);
+  const model = await f.results.modelResult(f.context, reference, { ...f.owner, toolCallId: call.id, toolName: call.name });
+  const parsed = JSON.parse(model.content[0].text);
+  assert.deepEqual(parsed.locator, { relativePath: 'file.md' });
+  assert.equal(parsed.offset, 2); assert.equal(parsed.offsetUnit, 'utf16-code-units');
+  assert.equal(parsed.text, 'Current original');
+  assert.deepEqual(await f.results.get(f.context, reference.id), full);
+});
+
+test('model archive paging projects a whole retrieval receipt before slicing with its own offsets', async t => {
+  const f = await fixture(t), evidence = item();
+  evidence.locator.path = 'Z:\\Synthetic user\\Private corpus\\document.md';
+  evidence.locator.root = 'Z:\\Synthetic user\\Private corpus';
+  evidence.excerpt = 'Public 😀 original evidence repeated. '.repeat(30);
+  const full = canonical([evidence]), reference = await f.results.save(f.context, f.call, full);
+  const expected = JSON.stringify(projectEvidenceSearchResult({ ...full, _meta: undefined }, reference.id));
+  let offset = 0, text = '', characters;
+  do {
+    const page = await f.results.readModel(f.context, reference.id, { offset, limit: 37 });
+    assert.equal(page.projection, 'model'); assert.equal(page.offsetUnit, 'utf16-code-units');
+    assert.equal(page.resultRefBasis, 'canonical-archive'); assert.equal(page.resultRef.sha256, reference.sha256);
+    assert.equal(page.offset, offset); assert.ok(page.nextOffset > offset);
+    assert.equal(page.text, expected.slice(page.offset, page.nextOffset));
+    assert.doesNotMatch(page.text, /^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u);
+    characters ??= page.totalCharacters;
+    assert.equal(page.totalCharacters, characters);
+    text += page.text; offset = page.nextOffset;
+    if (!page.truncated) break;
+  } while (offset < characters);
+  assert.equal(text, expected); assert.doesNotMatch(text, /Synthetic user|Private corpus|rag1:/u);
+  assert.equal(JSON.parse(text).structuredContent.items[0].excerpt, evidence.excerpt);
+  const raw = JSON.parse((await f.results.read(f.context, reference.id)).text);
+  assert.equal(raw.structuredContent.items[0].locator.path, evidence.locator.path);
+  await assert.rejects(f.results.readModel({ ...f.context, conversationId: 'chat-b' }, reference.id), { code: 'TOOL_RESULT_NOT_FOUND' });
+});
+
+test('a failed search archive remains readable to the model without inventing evidence references', async t => {
+  const f = await fixture(t);
+  const full = { content: [{ type: 'text', text: "Read failed for 'Z:\\Synthetic user\\missing.md'" }], isError: true,
+    code: 'STALE_RETRIEVAL_SOURCE', structuredContent: { error: { message: "Read failed for 'Z:\\Synthetic user\\missing.md'" } } };
+  const reference = await f.results.save(f.context, f.call, full);
+  const page = await f.results.readModel(f.context, reference.id);
+  const projected = JSON.parse(page.text);
+  assert.equal(projected.isError, true); assert.equal(projected.code, 'STALE_RETRIEVAL_SOURCE');
+  assert.equal(projected.structuredContent.items, undefined);
+  assert.doesNotMatch(page.text, /Synthetic user|ev1:/u);
+  const history = await f.results.modelResult(f.context, reference, f.owner);
+  assert.equal(history.code, 'STALE_RETRIEVAL_SOURCE');
+  assert.deepEqual(await f.results.get(f.context, reference.id), full);
+});
+
+test('unquoted Windows retrieval error paths are projected in nested and historical receipts while originals stay complete', async t => {
+  const f = await fixture(t);
+  const privatePath = 'C:\\Synthetic Private Home\\Index\\source.sqlite';
+  const privateShare = '\\\\synthetic-server\\Synthetic Private Share\\source.md';
+  const full = { isError: true, code: 'RETRIEVAL_SOURCE_UNAVAILABLE',
+    content: [{ type: 'text', text: `Index unavailable at ${privatePath}; inspect docs/source.md` },
+      { type: 'text', text: JSON.stringify(`Cannot open ${privateShare}; metadata unavailable`) }],
+    structuredContent: { error: { message: `Could not open ${privatePath}; retry only this source`,
+      nested: [{ diagnostic: `Access denied ${privateShare}; do not replay mutations` }] },
+      url: 'https://example.test/A:/public-release', relativePath: 'docs/source.md',
+      excerpt: `The manual gives an example path ${privatePath}.` } };
+  const unchanged = structuredClone(full);
+  const reference = await f.results.save(f.context, f.call, full);
+  const history = await f.results.modelResult(f.context, reference, f.owner);
+  const immediate = projectEvidenceSearchResult(full, reference.id);
+  const page = JSON.parse((await f.results.readModel(f.context, reference.id)).text);
+  for (const projected of [history, immediate, page]) {
+    assert.match(projected.content[0].text, /\[local-path\].*docs\/source\.md/u);
+    assert.doesNotMatch(JSON.stringify(projected.content), /Synthetic Private Home|Synthetic Private Share/u);
+    assert.doesNotMatch(JSON.stringify(projected.structuredContent.error), /Synthetic Private Home|Synthetic Private Share/u);
+    assert.equal(projected.structuredContent.url, full.structuredContent.url);
+    assert.equal(projected.structuredContent.relativePath, full.structuredContent.relativePath);
+    assert.equal(projected.structuredContent.excerpt, full.structuredContent.excerpt, 'original evidence text is not indiscriminately redacted');
+    assert.equal(projected.code, full.code);
+  }
+  assert.deepEqual(full, unchanged);
+  assert.deepEqual(await f.results.get(f.context, reference.id), full);
+  assert.deepEqual(JSON.parse((await f.results.read(f.context, reference.id)).text), full);
 });
 
 test('short references reject cross-chat, forged index, scope expansion and unbound internal ownership', async t => {

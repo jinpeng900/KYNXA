@@ -3,12 +3,17 @@ import { toolFailure } from '../platform/tool-paths.mjs';
 
 const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read',
   'tool.search', 'tool.load', 'tool.result.read', 'skill.resource.read', 'skill.inspect', 'skill.check',
-  'conversation.history.search', 'conversation.history.read', 'knowledge.search', 'knowledge.read', 'web.search']);
+  'conversation.history.search', 'conversation.history.read', 'knowledge.search', 'knowledge.read', 'knowledge.relations',
+  'knowledge.assess', 'knowledge.experience', 'web.search', 'terminal.host.read']);
 const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
+const HOST_OBSERVATIONS = new Set(['computer.apps', 'computer.windows']);
 
 export function needsToolApproval(context, name, { outsideWorkspace = false, verifiedSandbox = false, sensitiveRead = false } = {}) {
   if (context.permissionMode === 'full') return false;
   if (sensitiveRead) return true;
+  // Typed observations and public text fetches cannot mutate a host or execute arbitrary shell commands.
+  // 明确的只读枚举及受公共地址校验的网页读取不修改主机，也不执行任意脚本；不泛化到外部 MCP。
+  if (name === 'web.fetch' || HOST_OBSERVATIONS.has(name)) return false;
   if (outsideWorkspace) return true;
   if (READ_TOOLS.has(name)) return false;
   if (context.permissionMode === 'smart' && (REVERSIBLE_TOOLS.has(name) || (['terminal.run', 'skill.run'].includes(name) && verifiedSandbox))) return false;

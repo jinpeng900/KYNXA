@@ -35,6 +35,8 @@
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
     <Content Include="..\model-gateway\**\*.mjs" Exclude="..\model-gateway\node_modules\**;..\model-gateway\tests\**;..\model-gateway\official-tools\**;..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\model-gateway\data\retrieval\parser-licenses.txt"
+             Link="model-gateway\data\retrieval\parser-licenses.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\manifest.json;..\model-gateway\official-tools\LICENSE.txt"
              Link="model-gateway\official-tools\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\model-gateway\official-tools\MCP\catalog.mjs"

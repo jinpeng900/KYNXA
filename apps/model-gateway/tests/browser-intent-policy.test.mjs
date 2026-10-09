@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { inferBrowserTaskIntent, canUseBrowserServer } from '../tools/browser-intent-policy.mjs';
+import { inferBrowserTaskIntent, canUseBrowserServer, assertBrowserLaunchAllowed } from '../tools/browser-intent-policy.mjs';
 import { isBackgroundBrowserConnection } from '../tools/browser-connections.mjs';
 import { WebFetchTool } from '../tools/web-fetch.mjs';
 import { fetchPublicWebPage } from '../tools/web-http-transport.mjs';
@@ -78,6 +80,34 @@ test('how-to questions remain informational while explicit execution and live de
     assert.equal(inferBrowserTaskIntent(message).allowLocalBrowser, true, message);
 });
 
+test('natural website follow-ups retain only the active browser task and do not authorize unrelated searches', () => {
+  const history = ['打开本机浏览器'];
+  for (const message of ['打开学习通网站', '登录学习通', '截图，我二维码登录', '刷新当前页面', '向下滚动页面',
+    '查看有哪些作业未完成', '关闭当前页面']) {
+    const intent = inferBrowserTaskIntent(message, history);
+    assert.equal(intent.allowLocalBrowser, true, message);
+    assert.equal(intent.inherited, true, message);
+    history.push(message);
+  }
+  assert.equal(inferBrowserTaskIntent('搜索最新新闻', history).allowLocalBrowser, false);
+  assert.equal(inferBrowserTaskIntent('继续', [...history, '搜索最新新闻']).allowLocalBrowser, false);
+  assert.equal(inferBrowserTaskIntent('打开学习通网站', ['操作云端浏览器']).allowLocalBrowser, false);
+  assert.equal(inferBrowserTaskIntent('刷新当前页面', ['打开本机浏览器', ...Array(220).fill('查看当前页面')]).allowLocalBrowser, true);
+  assert.equal(inferBrowserTaskIntent('截图二维码', ['操作云端浏览器', '登录网站']).allowLocalBrowser, false);
+  for (const message of ['刷新本机浏览器当前页面', '关闭本机浏览器', '向下滚动本机浏览器页面',
+    '不要打开新浏览器窗口，在当前本机浏览器打开学习通网站', '不要用 Chrome，用本机 Edge 打开学习通网站'])
+    assert.equal(inferBrowserTaskIntent(message).allowLocalBrowser, true, message);
+});
+
+test('an excluded browser brand does not prohibit another explicitly requested brand', () => {
+  const context = { message: '不要用 Chrome，用本机 Edge 打开学习通网站' };
+  assert.throws(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\chrome.exe'), { code: 'BROWSER_TASK_NOT_AUTHORIZED' });
+  assert.doesNotThrow(() => assertBrowserLaunchAllowed(context, 'C:\\Fixture\\msedge.exe'));
+  assert.equal(canUseBrowserServer(context, existing), false);
+  assert.equal(canUseBrowserServer(context, { ...existing, args: [...existing.args, '--executablePath=C:\\Fixture\\msedge.exe'] }), true);
+  assert.equal(inferBrowserTaskIntent('打开学习通网站', ['操作云端浏览器', '打开学习通网站']).allowLocalBrowser, false);
+});
+
 test('only trusted isolated headless or nonlocal remote configuration supports automatic background reading', () => {
   const context = { message: '查最新消息' };
   for (const value of [headed, existing, server('not-isolated', ['chrome-devtools-mcp@1.10.1', '--headless']),
@@ -127,11 +157,13 @@ test('ordinary research cannot open a known browser through computer.launch; unr
   const calls = [], desktopRunner = { capabilities: async () => ({ available: true, boundary: 'host-desktop', operations: ['launch'] }),
     run: async (action, input) => { calls.push({ action, input }); return { value: { launched: true }, isError: false }; } };
   const f = await configuredFixture(t, { desktopRunner }), research = await f.browserContext('搜索最新公告');
-  const denied = await f.run(research, 'computer.launch', { appPath: 'C:\\Synthetic\\chrome.exe', reason: 'Need to verify the page.' });
+  const browserPath = join(f.workspace, 'chrome.exe'), editorPath = join(f.workspace, 'notepad.exe');
+  await Promise.all([browserPath, editorPath].map(appPath => writeFile(appPath, 'Synthetic application metadata; mocked launch only.')));
+  const denied = await f.run(research, 'computer.launch', { appPath: browserPath, reason: 'Need to verify the page.' });
   assert.equal(denied.code, 'BROWSER_TASK_NOT_AUTHORIZED'); assert.equal(calls.length, 0);
   const explicit = await f.browserContext('打开本机 Chrome 浏览器');
-  assert.equal((await f.run(explicit, 'computer.launch', { appPath: 'C:\\Synthetic\\chrome.exe', reason: 'Explicit local browser task.' })).isError, false);
-  assert.equal((await f.run(research, 'computer.launch', { appPath: 'C:\\Synthetic\\notepad.exe', reason: 'Unrelated existing app launch behavior.' })).isError, false);
+  assert.equal((await f.run(explicit, 'computer.launch', { appPath: browserPath, reason: 'Explicit local browser task.' })).isError, false);
+  assert.equal((await f.run(research, 'computer.launch', { appPath: editorPath, reason: 'Unrelated existing app launch behavior.' })).isError, false);
   assert.equal(calls.length, 2);
 });
 
