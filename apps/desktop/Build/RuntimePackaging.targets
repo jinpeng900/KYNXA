@@ -128,8 +128,8 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-toolhost-notices.ps1&quot; -AssetsPath &quot;$(MSBuildProjectDirectory)\..\tool-host\obj\project.assets.json&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -OutputDirectory &quot;$(_KynxaToolHostNoticesDirectory)&quot;" />
     <ItemGroup>
-      <_KynxaToolHostFiles Include="..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*"
-          Exclude="..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*.pdb;..\tool-host\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\**\*.tmp" />
+      <_KynxaToolHostFiles Include="..\tool-host\bin\$(Configuration)\net10.0-windows10.0.19041.0\$(RuntimeIdentifier)\**\*"
+          Exclude="..\tool-host\bin\$(Configuration)\net10.0-windows10.0.19041.0\$(RuntimeIdentifier)\**\*.pdb;..\tool-host\bin\$(Configuration)\net10.0-windows10.0.19041.0\$(RuntimeIdentifier)\**\*.tmp" />
       <Content Include="@(_KynxaToolHostFiles)"
                Link="ToolHost\%(_KynxaToolHostFiles.RecursiveDir)%(_KynxaToolHostFiles.Filename)%(_KynxaToolHostFiles.Extension)"
                CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

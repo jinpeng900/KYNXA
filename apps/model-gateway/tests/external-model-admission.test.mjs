@@ -116,7 +116,7 @@ test('already loaded target context never reserves observed external weights or 
   assert.equal(handle.plan.requiresAdmission, false);
   assert.equal(handle.plan.gpuMemoryBytes, 0);
   assert.equal(fixture.requests.length, 0);
-  assert.equal(fixture.events.includes('yield'), false);
+  assert.equal(fixture.events.includes('yield'), true, 'resident GPU generation still yields only owned idle inference');
   handle.dispatched(); handle.settled(); await handle.release();
   assert.equal(fixture.released.length, 0);
 });
@@ -316,6 +316,20 @@ test('missing resource APIs stay explicitly observation-only without loading or 
   assert.equal(fixture.events.includes('hardware'), false);
   assert.equal(fixture.events.includes('yield'), false);
   handle.dispatched(); handle.settled(); await handle.release();
+});
+
+test('unknown parallel slots do not let a cancelled known-context fence settle after only a smaller load', async t => {
+  const fixture = admissionFixture(t, { snapshot: { ...coldSnapshot, kvCacheEstimate: {
+    dtype: 'unknown', reservationDtype: 'f16-upper-bound', parallelSlots: 'unknown' } } });
+  const handle = await fixture.acquire();
+  assert.deepEqual(handle.plan.unknownComponents, ['kv-parallel-slots']);
+  handle.dispatched(); await handle.release();
+  fixture.snapshot = { ...fixture.snapshot, loaded: true, runtimeContextTokens: 4096 };
+  await fixture.admission.reconcile();
+  assert.equal(fixture.leases.size, 1, 'a reported smaller context does not fulfill the admitted target');
+  fixture.snapshot.runtimeContextTokens = 8192;
+  await fixture.admission.reconcile();
+  assert.equal(fixture.leases.size, 0);
 });
 
 async function mockUpstream(t, fixture, { bodyGate } = {}) {

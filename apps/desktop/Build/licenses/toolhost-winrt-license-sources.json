@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-09T18:58:22.607Z",
+  "scope": "ToolHost Windows SDK projection and WinRT runtime licenses",
+  "note": "Official original license bytes are preserved. DLL provenance binds the WinRT source commit; this records sources and hashes without claiming a complete dependency-license audit.",
+  "noteZh": "保留官方许可原文。WinRT 源提交对应实际 DLL 产品版本；这里只记录来源与哈希，不宣称完整依赖许可证审计。",
+  "files": [
+    {
+      "file": "windows-sdk-license.md",
+      "component": "Microsoft.Windows.SDK.NET.Ref",
+      "componentVersion": "10.0.19041.57",
+      "declaredLicenseUrl": "https://aka.ms/WinSDKLicenseURL",
+      "canonicalUrl": "https://learn.microsoft.com/en-us/legal/windows-sdk/license",
+      "url": "https://learn.microsoft.com/en-us/legal/windows-sdk/license?accept=text/markdown",
+      "resolvedUrl": "https://learn.microsoft.com/en-us/legal/windows-sdk/license?accept=text/markdown",
+      "bytes": 29470,
+      "sha256": "0b0f3f06e59fbf03e9b18e9688a90366ea26d9f95c3d82b302f97b1680b1199b",
+      "contentType": "text/markdown; charset=utf-8",
+      "documentationMetadata": {
+        "ms.date": "2019-05-01T00:00:00.0000000Z",
+        "document_id": "18244a78-056a-0530-a6f9-70a097f56c0c",
+        "document_version_independent_id": "a4ef9040-8807-599a-2a12-8a1ea0afc815",
+        "updated_at": "2024-03-19T22:32:00.0000000Z",
+        "original_content_git_url": "https://github.com/MicrosoftDocs/DocsLegal-pr/blob/live/DocsLegal/windows-sdk/license.md",
+        "gitcommit": "https://github.com/MicrosoftDocs/DocsLegal-pr/blob/2a6eedbea47a744f385794ac3d3e8b2cf721b611/DocsLegal/windows-sdk/license.md"
+      },
+      "rawBytesPreserved": true
+    },
+    {
+      "file": "cswinrt-2.2.0-LICENSE.txt",
+      "component": "WinRT.Runtime",
+      "componentVersion": "2.2.0.48161",
+      "sourceCommit": "8649ee3eeb2445ca2a36d80d878ef60b96a6c65d",
+      "canonicalUrl": "https://github.com/microsoft/CsWinRT/blob/8649ee3eeb2445ca2a36d80d878ef60b96a6c65d/LICENSE",
+      "url": "https://raw.githubusercontent.com/microsoft/CsWinRT/8649ee3eeb2445ca2a36d80d878ef60b96a6c65d/LICENSE",
+      "resolvedUrl": "https://raw.githubusercontent.com/microsoft/CsWinRT/8649ee3eeb2445ca2a36d80d878ef60b96a6c65d/LICENSE",
+      "bytes": 1162,
+      "sha256": "9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b",
+      "contentType": "text/plain; charset=utf-8",
+      "rawBytesPreserved": true
+    }
+  ]
+}

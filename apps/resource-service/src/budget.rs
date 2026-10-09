@@ -1,5 +1,5 @@
 use crate::policy::{AdaptivePolicy, WorkFeedback};
-use crate::sampling::{HardwareSnapshot, LeaseMemoryObservation};
+use crate::sampling::{HardwareSnapshot, LeaseGpuObservation, LeaseMemoryObservation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -57,6 +57,8 @@ pub struct ResourceBudget {
     policy: AdaptivePolicy,
     memory_observations: Vec<LeaseMemoryObservation>,
     baseline_floors: HashMap<(u32, u64), u64>,
+    gpu_observations: Vec<LeaseGpuObservation>,
+    gpu_baseline_floors: HashMap<(u32, u64), u64>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +80,8 @@ impl ResourceBudget {
             policy: AdaptivePolicy::new(),
             memory_observations: Vec::new(),
             baseline_floors: HashMap::new(),
+            gpu_observations: Vec::new(),
+            gpu_baseline_floors: HashMap::new(),
         }
     }
 
@@ -89,6 +93,8 @@ impl ResourceBudget {
         let (cpu, memory, gpu_memory) = self.reserved();
         let materialized_memory = self.materialized_memory();
         let materialized_bytes = materialized_memory.values().sum::<u64>();
+        let materialized_gpu = self.materialized_gpu_memory();
+        let materialized_gpu_bytes = materialized_gpu.values().sum::<u64>();
         let active = self
             .leases
             .values()
@@ -101,10 +107,17 @@ impl ResourceBudget {
             "accounting": { "observedMaterializedMemoryBytes": materialized_bytes,
                 "unmaterializedMemoryBytes": memory.saturating_sub(materialized_bytes),
                 "capacityMemoryBytes":memory_capacity(hardware),"maximumResidentReservationBytes":hardware.memory.total_bytes/2,
-                "availableMemoryBytes": self.available_memory(hardware), "gpuMemoryState": "unverified-reservation",
-                "gpuUnverifiedReservationBytes": gpu_memory, "leases": self.leases.values().map(|lease| {
+                "availableMemoryBytes": self.available_memory(hardware),
+                "gpuMemoryState": if materialized_gpu_bytes > 0 { "observed-process-increments" } else { "unverified-reservation" },
+                "observedMaterializedGpuMemoryBytes":materialized_gpu_bytes,
+                "availableGpuMemoryBytes":self.available_gpu_memory(hardware),
+                "gpuUnverifiedReservationBytes": gpu_memory.saturating_sub(materialized_gpu_bytes),
+                "gpuAttributionExact":false, "leases": self.leases.values().map(|lease| {
                     let observed = materialized_memory.get(&lease.lease_id).copied().unwrap_or(0);
+                    let observed_gpu = materialized_gpu.get(&lease.lease_id).copied().unwrap_or(0);
                     json!({ "leaseId":lease.lease_id,"memoryBytes":lease.memory_bytes,"observedMaterializedMemoryBytes":observed,
+                        "gpuMemoryBytes":lease.gpu_memory_bytes,"observedMaterializedGpuMemoryBytes":observed_gpu,
+                        "gpuUnverifiedReservationBytes":lease.gpu_memory_bytes.saturating_sub(observed_gpu),
                         "unmaterializedMemoryBytes":lease.memory_bytes.saturating_sub(observed),
                         "state":if lease.expires_at <= now_ms {"quarantined"} else if observed > 0 {"observed-materialized"}
                             else if self.memory_observations.iter().any(|observation|observation.lease_id == lease.lease_id && observation.memory_bytes.is_none())
@@ -131,6 +144,43 @@ impl ResourceBudget {
         self.memory_observations = observations;
         self.baseline_floors.retain(|identity,_|self.memory_observations.iter().any(|observation|
             (observation.process_id,observation.start_time_ms) == *identity && self.leases.contains_key(&observation.lease_id)));
+    }
+
+    pub fn reconcile_gpu_memory(&mut self, observations: Vec<LeaseGpuObservation>) {
+        self.gpu_observations = observations;
+        self.gpu_baseline_floors.retain(|identity, _| self.gpu_observations.iter().any(|observation|
+            (observation.process_id, observation.start_time_ms) == *identity && self.leases.contains_key(&observation.lease_id)));
+    }
+
+    fn materialized_gpu_memory(&self) -> HashMap<String, u64> {
+        let mut groups: HashMap<(u32, u64), Vec<&LeaseGpuObservation>> = HashMap::new();
+        for observation in &self.gpu_observations {
+            if observation.state == "running" && observation.process_id > 0 && observation.start_time_ms > 0
+                && self.leases.get(&observation.lease_id).is_some_and(|lease|lease.gpu_memory_bytes > 0) {
+                groups.entry((observation.process_id, observation.start_time_ms)).or_default().push(observation);
+            }
+        }
+        let mut credits = HashMap::new();
+        for (identity, mut observations) in groups {
+            let Some(current) = observations.iter().filter_map(|observation| observation.memory_bytes).min() else { continue; };
+            let Some(baseline) = observations.iter().filter_map(|observation| observation.baseline_memory_bytes).max() else { continue; };
+            let mut available_credit = current.saturating_sub(baseline.max(self.gpu_baseline_floors.get(&identity).copied().unwrap_or(0)));
+            observations.sort_by_key(|observation| &observation.lease_id);
+            // Free VRAM already includes verified process increments; pay down each increment only once across leases.
+            // 空闲显存已反映经过身份复核的进程增量；同一增量跨租约只能抵扣一次，未知数值保留完整预约。
+            for observation in observations {
+                let credit = available_credit.min(self.leases[&observation.lease_id].gpu_memory_bytes);
+                available_credit -= credit;
+                credits.insert(observation.lease_id.clone(), credit);
+            }
+        }
+        credits
+    }
+
+    fn available_gpu_memory(&self, hardware: &HardwareSnapshot) -> Option<u64> {
+        let (_, _, reserved) = self.reserved();
+        let materialized = self.materialized_gpu_memory().values().sum::<u64>();
+        gpu_capacity(hardware).map(|capacity| capacity.saturating_sub(reserved.saturating_sub(materialized)))
     }
 
     fn materialized_memory(&self) -> HashMap<String, u64> {
@@ -210,12 +260,10 @@ impl ResourceBudget {
         if self.leases.len() >= MAX_LEASES {
             return json!({ "status": "denied", "reason": "RESOURCE_LEASE_LIMIT", "mode": "rust" });
         }
-        let (reserved_cpu, _, reserved_gpu) = self.reserved();
+        let (reserved_cpu, _, _) = self.reserved();
         let available_cpu = cpu_capacity(hardware).saturating_sub(reserved_cpu);
         let available_memory = self.available_memory(hardware);
-        let available_gpu = gpu_capacity(hardware)
-            .unwrap_or(0)
-            .saturating_sub(reserved_gpu);
+        let available_gpu = self.available_gpu_memory(hardware).unwrap_or(0);
         if request.memory_bytes > available_memory
             || request.gpu_memory_bytes > available_gpu
             || (request.cpu_threads > 0 && available_cpu == 0)
@@ -229,12 +277,17 @@ impl ResourceBudget {
             return json!({ "status": "denied", "reason": "RESOURCE_PRESSURE", "mode": "rust" });
         }
         self.sequence += 1;
+        let policy_fraction = self.policy.fraction(&request.task_id, request.gpu_memory_bytes > 0);
+        let execution_fraction = if hardware.cpu.usage_percent.is_some_and(|usage| usage > 85.0)
+            || hardware.memory.available_bytes < 1024 * 1024 * 1024 {
+            policy_fraction.min(0.5)
+        } else { policy_fraction };
         let lease = Lease {
             lease_id: format!("rust-{}-{}", std::process::id(), self.sequence),
             expires_at: now_ms + request.ttl_ms,
             cpu_threads: request.cpu_threads.min(available_cpu).min(
                 if request.kind == "background" {
-                    (cpu_capacity(hardware) as f64 * self.policy.fraction(&request.task_id,request.gpu_memory_bytes > 0))
+                    (cpu_capacity(hardware) as f64 * execution_fraction)
                         .floor()
                         .max(1.0) as usize
                 } else {
@@ -271,7 +324,9 @@ impl ResourceBudget {
         });
         output["suggestions"] =
             self.policy
-                .suggestions(hardware, lease.cpu_threads, lease.memory_bytes,&lease.task_id,lease.gpu_memory_bytes > 0);
+                .suggestions(hardware, lease.cpu_threads, lease.memory_bytes,&lease.task_id,lease.gpu_memory_bytes > 0,
+                    available_cpu.saturating_sub(lease.cpu_threads), available_memory.saturating_sub(lease.memory_bytes),
+                    available_gpu.saturating_sub(lease.gpu_memory_bytes));
         output
     }
 
@@ -289,6 +344,16 @@ impl ResourceBudget {
     }
 
     pub fn release(&mut self, lease_id: &str) -> Value {
+        let gpu_credit = self.materialized_gpu_memory().get(lease_id).copied().unwrap_or(0);
+        if gpu_credit > 0 {
+            if let Some(observation) = self.gpu_observations.iter().find(|observation|observation.lease_id == lease_id) {
+                let identity = (observation.process_id, observation.start_time_ms);
+                let baseline = self.gpu_baseline_floors.get(&identity).copied().unwrap_or(observation.baseline_memory_bytes.unwrap_or(0));
+                // Released buffers may stay cached by the runtime; do not reassign their old credit to another lease.
+                // 已释放缓冲可能留在运行时缓存；其旧信用不能转移给另一份预约。
+                self.gpu_baseline_floors.insert(identity, baseline.saturating_add(gpu_credit));
+            }
+        }
         let credit = self.materialized_memory().get(lease_id).copied().unwrap_or(0);
         if credit > 0 {
             if let Some(observation) = self.memory_observations.iter().find(|observation|observation.lease_id == lease_id) {
@@ -372,6 +437,19 @@ mod tests {
             ttl_ms: 1000,
             wait_ms: 0,
         }
+    }
+
+    #[test]
+    fn search_planning_uses_remaining_headroom_without_approving_reranker_execution() {
+        let mut budget = ResourceBudget::new();
+        let search = budget.acquire(request(1, 8 << 20), &hardware(), 0);
+        assert_eq!(search["suggestions"]["rerankCandidates"], 60);
+        assert_eq!(search["suggestions"]["rerankSuggestionRequiresApproval"], true);
+        assert_eq!(budget.snapshot(&hardware(), 0)["budget"]["reservedCpuThreads"], 1);
+        let other = budget.acquire(request(4, 8 << 20), &hardware(), 0);
+        assert_eq!(other["status"], "granted");
+        let pressured = budget.acquire(request(1, 8 << 20), &hardware(), 0);
+        assert_eq!(pressured["suggestions"]["rerankCandidateLimit"], 20);
     }
     #[test]
     fn allocation_is_atomic_and_expiry_does_not_free_unconfirmed_work() {
@@ -488,5 +566,63 @@ mod tests {
         assert_eq!(snapshot["accounting"]["gpuUnverifiedReservationBytes"],4096);
         assert_eq!(snapshot["quarantinedLeases"],1);
         assert_eq!(budget.restore(Vec::new())["reason"],"RESOURCE_RESTORE_INVALID");
+    }
+
+    fn gpu_hardware() -> HardwareSnapshot {
+        let mut machine = hardware();
+        machine.gpu = GpuSnapshot { state: "available", device_id: Some(0), total_memory_bytes: Some(8 << 30),
+            available_memory_bytes: Some(7 << 30), usage_percent: Some(1), reason: None,
+            execution_provider: Some("dml"), execution_device_id: Some(0), mapping_status: "verified" };
+        machine
+    }
+
+    #[test]
+    fn verified_gpu_increment_is_not_subtracted_twice_from_free_vram() {
+        let mut budget = ResourceBudget::new();
+        let mut machine = gpu_hardware();
+        let mut allocation = request(0, 0); allocation.gpu_memory_bytes = 3 << 30;
+        let lease = budget.acquire(allocation, &machine, 0);
+        let id = lease["leaseId"].as_str().unwrap().to_string();
+        machine.gpu.available_memory_bytes = Some(5 << 30);
+        let mut next = request(0, 0); next.gpu_memory_bytes = 2 << 30;
+        assert_eq!(budget.acquire(next.clone(), &machine, 1)["status"], "denied");
+        budget.reconcile_gpu_memory(vec![LeaseGpuObservation { lease_id: id, process_id: 12, start_time_ms: 100,
+            baseline_memory_bytes: Some(100), memory_bytes: Some((2 << 30) + 100), state: "running" }]);
+        let snapshot = budget.snapshot(&machine, 1);
+        assert_eq!(snapshot["accounting"]["observedMaterializedGpuMemoryBytes"], 2_u64 << 30);
+        assert_eq!(snapshot["accounting"]["gpuUnverifiedReservationBytes"], 1_u64 << 30);
+        assert_eq!(budget.acquire(next, &machine, 1)["status"], "granted");
+    }
+
+    #[test]
+    fn shared_pid_gpu_credit_is_bounded_once_and_release_does_not_transfer_cached_buffers() {
+        let mut budget = ResourceBudget::new();
+        let mut allocation = request(0, 0); allocation.gpu_memory_bytes = 2 << 30;
+        let first = budget.acquire(allocation.clone(), &gpu_hardware(), 0);
+        let second = budget.acquire(allocation, &gpu_hardware(), 0);
+        let ids = [first["leaseId"].as_str().unwrap().to_string(), second["leaseId"].as_str().unwrap().to_string()];
+        budget.reconcile_gpu_memory(ids.iter().map(|id| LeaseGpuObservation { lease_id: id.clone(), process_id: 12,
+            start_time_ms: 100, baseline_memory_bytes: Some(100), memory_bytes: Some((2 << 30) + 100), state: "running" }).collect());
+        assert_eq!(budget.snapshot(&gpu_hardware(), 1)["accounting"]["observedMaterializedGpuMemoryBytes"], 2_u64 << 30);
+        budget.release(&ids[0]);
+        assert_eq!(budget.snapshot(&gpu_hardware(), 1)["accounting"]["observedMaterializedGpuMemoryBytes"], 0);
+        budget.reconcile_gpu_memory(vec![LeaseGpuObservation { lease_id: ids[1].clone(), process_id: 12,
+            start_time_ms: 101, baseline_memory_bytes: Some(100), memory_bytes: Some(3 << 30), state: "replaced" }]);
+        assert_eq!(budget.snapshot(&gpu_hardware(), 1)["accounting"]["observedMaterializedGpuMemoryBytes"], 0);
+        assert_eq!(budget.snapshot(&gpu_hardware(), 2000)["accounting"]["gpuUnverifiedReservationBytes"], 2_u64 << 30);
+    }
+
+    #[test]
+    fn unknown_wddm_usage_and_unknown_baseline_never_authorize_gpu_credit() {
+        for (baseline, current) in [(Some(0), None), (None, Some(2 << 30)), (None, None)] {
+            let mut budget = ResourceBudget::new();
+            let mut allocation = request(0, 0); allocation.gpu_memory_bytes = 2 << 30;
+            let lease = budget.acquire(allocation, &gpu_hardware(), 0);
+            budget.reconcile_gpu_memory(vec![LeaseGpuObservation { lease_id: lease["leaseId"].as_str().unwrap().into(),
+                process_id: 12, start_time_ms: 100, baseline_memory_bytes: baseline, memory_bytes: current, state: "running" }]);
+            let snapshot = budget.snapshot(&gpu_hardware(), 2000);
+            assert_eq!(snapshot["accounting"]["observedMaterializedGpuMemoryBytes"], 0);
+            assert_eq!(snapshot["accounting"]["gpuUnverifiedReservationBytes"], 2_u64 << 30);
+        }
     }
 }

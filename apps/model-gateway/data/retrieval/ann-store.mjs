@@ -11,6 +11,7 @@ const ANN_PACKAGE_VERSION = '2.26.4';
 const ANN_CACHE_VERSION = 1;
 const MAX_MANIFEST_BYTES = 65536;
 const NATIVE_RETRY_WINDOW_MS = 60000;
+const ANN_RUNTIME_BYTES = 96 * 1024 * 1024;
 const DOMAIN_SQL = `CASE WHEN c.structure_domain<>'' THEN c.structure_domain
   WHEN s.structure_json<>'' THEN json_extract(s.structure_json,'$.domain')
   WHEN s.source_type='code' THEN 'code' WHEN s.source_type IN ('document','memory','conversation','web') THEN 'knowledge' ELSE '' END`;
@@ -34,6 +35,25 @@ export function validateAnnOptions(input = {}) {
       throw retrievalFailure('Invalid ANN resource budget. / 本地向量索引资源预算无效。', 'INVALID_RETRIEVAL_ANN');
   }
   return { ...DEFAULT_ANN_OPTIONS, ...input };
+}
+
+/** Split only the current authorized descriptor, including its existing key range.
+ * 仅拆分当前已授权目录及其已有键区间；缩额不能扩大范围、领域或向量空间。 */
+export function partitionAnnDescriptor(database, vectorTable, descriptor, options) {
+  if (!options.adaptive) return [descriptor];
+  const perVectorBytes = descriptor.dimensions * 4 + options.connectivity * 16 + 256;
+  const vectorsPerShard = Math.max(1, Math.floor(options.maxShardBytes / perVectorBytes));
+  if (descriptor.count <= vectorsPerShard) return [descriptor];
+  const segments = Math.ceil(descriptor.count / vectorsPerShard);
+  return database.prepare(`WITH authorized AS MATERIALIZED (
+    SELECT c.id,ntile(?) OVER (ORDER BY c.id) AS segment FROM ${vectorTable} c JOIN sources s ON s.source_id=c.source_id
+    WHERE s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=?
+    AND c.embedding_space_id=? AND ${DOMAIN_SQL}=? AND c.vector IS NOT NULL AND c.id>=? AND c.id<=?)
+    SELECT min(id) AS minimumId,max(id) AS maximumId,count(*) AS count FROM authorized GROUP BY segment ORDER BY segment`)
+    .all(segments, descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
+      descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain,
+      descriptor.minimumId ?? 0, descriptor.maximumId ?? Number.MAX_SAFE_INTEGER)
+    .map(part => ({ ...descriptor, ...part, partitioned: true }));
 }
 
 function checkStorage(path, directory = false) {
@@ -200,13 +220,27 @@ export class LocalAnnStore {
     return result;
   }
 
-  async resourceOptions(options, descriptor, kind, signal) {
+  async planningOptions(options, descriptors, kind, signal) {
+    if (!this.resources || !options.adaptive || !descriptors.length) return options;
+    const largest = descriptors.reduce((previous, current) =>
+      current.count * (current.dimensions * 4 + options.connectivity * 16 + 256) >
+      previous.count * (previous.dimensions * 4 + options.connectivity * 16 + 256) ? current : previous);
+    const perVectorBytes = largest.dimensions * 4 + options.connectivity * 16 + 256;
+    const descriptor = { ...largest, count: Math.min(largest.count, Math.max(1, Math.floor(options.maxShardBytes / perVectorBytes))) };
+    const planned = await this.resourceOptions(options, descriptor, kind, signal, { planning: true });
+    const maxShardBytes = this.buildShardLimit && this.now() < this.buildShardLimit.expiresAt
+      ? Math.min(planned.maxShardBytes, this.buildShardLimit.bytes) : planned.maxShardBytes;
+    this.adaptiveOptions = { ...planned, maxShardBytes };
+    return this.adaptiveOptions;
+  }
+
+  async resourceOptions(options, descriptor, kind, signal, { planning = false } = {}) {
     if (!this.resources) return options;
     await this._waitForRetirement();
     if (this.nativeError && this.now() < this.nativeRetry.retryAt) throw this.nativeError;
     this.resourceContext = { options, descriptor: { ...descriptor }, kind };
     const incomingBytes = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
-    if (this.resourceLease && incomingBytes + 96 * 1024 * 1024 > this.resourceLease.memoryBytes) {
+    if (!planning && this.resourceLease && incomingBytes + ANN_RUNTIME_BYTES > this.resourceLease.memoryBytes) {
       await this._withOwner(async () => {
         for (const entry of this.shards.values()) await this._persist(entry);
         this.shards.clear(); await this._releaseHelper(); await this._releaseReservation();
@@ -217,8 +251,15 @@ export class LocalAnnStore {
       const available = snapshot.hardware?.memory?.availableBytes ?? snapshot.memory?.availableBytes ??
         snapshot.budget?.memoryBytes ?? 512 * 1024 * 1024;
       const estimate = descriptor.count * (descriptor.dimensions * 4 + options.connectivity * 16 + 256);
-      const target = this.isolatedBuilder ? estimate + 96 * 1024 * 1024 : Math.max(estimate * 2, available / 8);
-      const memoryBytes = Math.floor(Math.min(2 * 1024 ** 3, available / 3, Math.max(128 * 1024 * 1024, target)));
+      const capacity = snapshot.accounting?.availableMemoryBytes ?? snapshot.budget?.memoryBytes ?? available;
+      const target = this.isolatedBuilder ? estimate + ANN_RUNTIME_BYTES : Math.max(estimate * 2, available / 8);
+      const memoryBytes = Math.floor(Math.min(2 * 1024 ** 3, available / 3, capacity / (this.isolatedBuilder ? 1 : 2),
+        Math.max(128 * 1024 * 1024, target)));
+      this.resourceAdmissionAudit = { requestedMemoryBytes: memoryBytes, availableCapacityBytes: capacity,
+        memoryAdmission: 'full-request-or-denial', configured: { maxShardBytes: options.maxShardBytes,
+          maxCachedShards: options.maxCachedShards }, reason: 'awaiting-resource-admission' };
+      if (memoryBytes < ANN_RUNTIME_BYTES + 1024 * 1024)
+        throw retrievalFailure('ANN runtime headroom is unavailable. / 向量运行时余量不足。', 'RETRIEVAL_ANN_RESOURCE_LIMIT');
       const lease = await this.resources.acquire({ taskId: `ann:${randomUUID()}`, workspaceId: descriptor.scope_key,
         kind, cpuThreads: 0, memoryBytes, ttlMs: 30000, waitMs: 10000 }, { signal });
       if (lease.status !== 'granted') throw retrievalFailure('ANN is waiting for resource capacity. / 向量图等待可用资源。',
@@ -228,7 +269,7 @@ export class LocalAnnStore {
       this.resourceRenewal.unref?.();
     }
     if (!options.adaptive) return options;
-    const cacheBytes = Math.max(1024 * 1024, this.resourceLease.memoryBytes - 96 * 1024 * 1024);
+    const cacheBytes = Math.max(1024 * 1024, this.resourceLease.memoryBytes - ANN_RUNTIME_BYTES);
     const shardBytes = Math.max(1024 * 1024, Math.min(1024 ** 3, cacheBytes / (this.isolatedBuilder ? 1 : 2)));
     const maxShardBytes = options.maxShardBytes === DEFAULT_ANN_OPTIONS.maxShardBytes ? Math.floor(shardBytes) :
       Math.min(options.maxShardBytes, Math.floor(cacheBytes));
@@ -238,6 +279,8 @@ export class LocalAnnStore {
       ? Math.max(1, Math.min(16, Math.floor(cacheBytes / estimatedShardBytes))) :
         Math.min(options.maxCachedShards, Math.max(1, Math.floor(cacheBytes / maxShardBytes)));
     this.adaptiveOptions = { ...options, maxShardBytes, maxCachedShards };
+    this.resourceAdmissionAudit = { ...this.resourceAdmissionAudit, approvedMemoryBytes: this.resourceLease.memoryBytes,
+      cacheBytes, approved: { maxShardBytes, maxCachedShards }, reason: 'approved-resident-capacity' };
     return this.adaptiveOptions;
   }
 
@@ -366,8 +409,8 @@ export class LocalAnnStore {
         Math.min(options.maxCachedShards, this.adaptiveOptions.maxCachedShards) };
     const entries = [...this.shards.values()];
     const fits = entry => entry.count * (entry.identity.dimensions * 4 + entry.identity.connectivity * 16 + 256) <= options.maxShardBytes;
-    const incompatibleBuild = [...this.builds.jobs.values()].some(job => job.descriptor.count *
-      (job.descriptor.dimensions * 4 + (job.descriptor.buildConnectivity ?? options.connectivity) * 16 + 256) > options.maxShardBytes ||
+    const incompatibleBuild = [...this.builds.jobs.values()].some(job => (job.descriptor.buildLargestShardBytes ?? job.descriptor.count *
+      (job.descriptor.dimensions * 4 + (job.descriptor.buildConnectivity ?? options.connectivity) * 16 + 256)) > options.maxShardBytes ||
       job.descriptor.buildMaxShardBytes > options.maxShardBytes || job.descriptor.buildMaxCachedShards > options.maxCachedShards);
     const unusedOwner = (options.mode === 'off' || options.mode === 'exact') && (entries.length || this.builds.jobs.size || this.child);
     if (!unusedOwner && !incompatibleBuild && entries.length <= options.maxCachedShards && entries.every(fits)) return;
@@ -492,7 +535,7 @@ export class LocalAnnStore {
             checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
             lastId = batch.at(-1).id;
             completedVectors += batch.length;
-            if (job) job.completedVectors = completedVectors;
+            if (job) job.completedVectors = (job.completedBeforeShard ?? 0) + completedVectors;
             return batch.length;
           });
           if (!added) break;
@@ -509,7 +552,12 @@ export class LocalAnnStore {
         await this._checkResidentBudget(entry.options);
         this.shards.set(key, entry);
         try { await this._persist(entry); }
-        catch (error) { this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED'; }
+        catch (error) {
+          this.lastError = error.code ?? 'RETRIEVAL_ANN_CACHE_WRITE_FAILED';
+          // An isolated owner is retired after the job; without its disk receipt there is no reusable graph.
+          // 独立建图所有者作业后退役；缺少磁盘发布回执就没有可复用图，不能记为准备成功。
+          if (this.isolatedBuilder) throw error;
+        }
         checkCancelled(); this._assertBuildCurrent(entry, job?.controller.signal);
         if (!loaded) this.counters.built++;
       });
@@ -560,9 +608,18 @@ export class LocalAnnStore {
 
   _enqueue(entry) {
     if (this.nativeError && this.now() < this.nativeRetry.retryAt) throw this.nativeError;
+    const coveringBuild = [...this.builds.jobs.values()].some(job => !job.controller.signal.aborted &&
+      job.descriptor.buildConnectivity === entry.options.connectivity &&
+      job.descriptor.buildExpansionAdd === entry.options.expansionAdd && job.descriptor.buildExpansionSearch === entry.options.expansionSearch &&
+      ['scope_key', 'embedding_profile_id', 'dimensions', 'embedding_model_version', 'embedding_space_id', 'domain', 'generation']
+        .every(field => job.descriptor[field] === entry.descriptor[field]) &&
+      (job.descriptor.minimumId ?? 0) <= (entry.descriptor.minimumId ?? 0) &&
+      (job.descriptor.maximumId ?? Number.MAX_SAFE_INTEGER) >= (entry.descriptor.maximumId ?? Number.MAX_SAFE_INTEGER));
+    if (coveringBuild) return;
     const descriptor = { ...entry.descriptor, buildBudgetKey: JSON.stringify([entry.options.maxShardBytes, entry.options.maxCachedShards]),
       buildMaxShardBytes: entry.options.maxShardBytes, buildMaxCachedShards: entry.options.maxCachedShards,
-      buildConnectivity: entry.options.connectivity };
+      buildConnectivity: entry.options.connectivity, buildExpansionAdd: entry.options.expansionAdd,
+      buildExpansionSearch: entry.options.expansionSearch };
     const accepted = this.builds.enqueue(entry.key, descriptor, async job => {
       if (!this.resources) return this._prepareEntry(entry, () => this._assertBuildCurrent(entry, job.controller.signal), job);
       // Independent native owners permit real bounded parallel builds; SQLite remains on its single thread.
@@ -571,13 +628,36 @@ export class LocalAnnStore {
         now: this.now, resourceService: this.resources, isolatedBuilder: true, vectorTable: this.vectorTable });
       builder.parentBuildQueue = this.builds;
       try {
-        const options = await builder.resourceOptions(entry.options, entry.descriptor, 'background', job.controller.signal);
-        const isolatedEntry = builder._entry(entry.descriptor, options);
-        await builder._prepareEntry(isolatedEntry, () => builder._assertBuildCurrent(isolatedEntry, job.controller.signal), job);
+        const pending = [entry.descriptor];
+        let completedVectors = 0;
+        while (pending.length) {
+          job.controller.signal.throwIfAborted();
+          const descriptor = pending.shift();
+          const options = await builder.resourceOptions(entry.options, descriptor, 'background', job.controller.signal);
+          const parts = partitionAnnDescriptor(this.database, this.vectorTable, descriptor, options);
+          if (parts.length > 1) {
+            // Feed the admitted child budget back to foreground planning, then build smaller authorized ranges.
+            // 将子作业批准额度反馈给前台规划，再按较小的已授权键区间建图，不能重试原超额目标。
+            this.buildShardLimit = { bytes: options.maxShardBytes, expiresAt: this.now() + 30000 };
+            this.adaptiveOptions = { ...options };
+            job.descriptor.buildMaxShardBytes = options.maxShardBytes;
+            job.descriptor.buildMaxCachedShards = options.maxCachedShards;
+            job.descriptor.buildLargestShardBytes = Math.max(...parts.map(part => part.count *
+              (part.dimensions * 4 + options.connectivity * 16 + 256)));
+            pending.unshift(...parts);
+            continue;
+          }
+          const isolatedEntry = builder._entry(descriptor, options);
+          job.completedBeforeShard = completedVectors;
+          await builder._prepareEntry(isolatedEntry, () => builder._assertBuildCurrent(isolatedEntry, job.controller.signal), job);
+          job.controller.signal.throwIfAborted();
+          builder._assertBuildCurrent(isolatedEntry, job.controller.signal);
+          completedVectors += descriptor.count;
+          this.preparedOnDisk.set(isolatedEntry.key, isolatedEntry.generation);
+          while (this.preparedOnDisk.size > 128) this.preparedOnDisk.delete(this.preparedOnDisk.keys().next().value);
+        }
         this.counters.built += builder.counters.built;
         this.backgroundObservedPeakRssBytes = Math.max(this.backgroundObservedPeakRssBytes ?? 0, builder.helperMemory.observedPeakRssBytes);
-        this.preparedOnDisk.set(entry.key, entry.generation);
-        while (this.preparedOnDisk.size > 128) this.preparedOnDisk.delete(this.preparedOnDisk.keys().next().value);
       } finally { await builder.close(); }
     });
     if (!accepted) {
@@ -684,6 +764,8 @@ export class LocalAnnStore {
     helperObservedPeakRssBytes: this.helperMemory.observedPeakRssBytes,
     backgroundObservedPeakRssBytes: this.backgroundObservedPeakRssBytes ?? 0,
     adaptiveOptions: this.adaptiveOptions ?? null,
+    planningAudit: this.planningAudit ?? null,
+    resourceAdmissionAudit: this.resourceAdmissionAudit ?? null,
     nativeRetryAt: this.nativeError ? this.nativeRetry.retryAt : null, errorCode: this.nativeError?.code ?? this.lastError }; }
 
   async close() {

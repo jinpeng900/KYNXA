@@ -721,6 +721,15 @@ export class ToolService {
           const argumentsForBudget = remainingTokens === undefined ? call.arguments : { ...call.arguments,
             maximumTokens: Math.min(call.arguments.maximumTokens ?? 32768, remainingTokens) };
           result = await this.retrieval.search(context, argumentsForBudget, { signal, modelReferences: true });
+          if (result.budget?.audit) {
+            result.budget.audit.modelRequested = { limit: call.arguments.limit ?? null,
+              maximumTokens: call.arguments.maximumTokens ?? null };
+            result.budget.audit.availableContextTokens = remainingTokens ?? null;
+            if (remainingTokens !== undefined && (call.arguments.maximumTokens ?? result.budget.audit.configured.maximumTokens) > remainingTokens)
+              result.budget.audit.earlyCutReasons.push({ reason: 'remaining-context', field: 'maximumTokens',
+                proposed: call.arguments.maximumTokens ?? result.budget.audit.configured.maximumTokens,
+                approved: result.budget.maximumTokens, unit: 'tokens' });
+          }
           return await this._finishResult(context, call, { value: result, isError: false },
             { archiveId: result.evidenceArchiveId, modelProjection: id =>
               projectEvidenceSearchResult(publicToolResult({ content: [], structuredContent: result, isError: false }), id).structuredContent });
@@ -933,14 +942,43 @@ export class ToolService {
           ...(notDispatched ? { executed: false } : {}),
           outcome: unknown ? 'unknown' : cancelled ? 'cancelled' : 'failed' }, isError: true, code,
           ...(notDispatched ? { executed: false } : {}), ...(unknown ? { status: 'unknown' } : {}), outsideWorkspace });
-      const modelMessage = callName.startsWith('knowledge.') ? projectRetrievalModelView({ message }).message : message;
+      const job = unknown && callName === 'terminal.host.start' ? this.hostTerminalJobs?.jobs.get(error.jobId) : null;
+      const recoveryHandle = job && job.conversationId === context.conversationId
+        ? { kind: 'host-terminal-job', jobId: job.id } : null;
+      let modelMessage = callName.startsWith('knowledge.') ? projectRetrievalModelView({ message }).message : message;
+      if (recoveryHandle) modelMessage = `Host terminal job ${recoveryHandle.jobId}: query terminal.host.read with this jobId; do not replay the command. / 查询此后台任务状态，不能重新执行原命令。\n${modelMessage}`;
       return { content: boundedContent(modelMessage), isError: true, code, outsideWorkspace,
         executionEnvironment: this.executionEnvironmentFor(context, callName),
+        ...(recoveryHandle ? { recoveryHandle } : {}),
         ...(notDispatched ? { executed: false } : {}),
         ...(error.toolConfigurationRevoked === true && (!executionStarted || callName === 'tool.load')
           ? { executed: false, recoverable: true } : {}),
         ...(unknown ? { status: 'unknown' } : {}) };
     }
+  }
+
+  async verifyUnknownEffects(context, records, observation) {
+    if (observation.call.name !== 'terminal.host.read' || observation.result.isError) return [];
+    const proofs = [];
+    for (const { call, result } of records) {
+      const handle = result.recoveryHandle;
+      if (call.name !== 'terminal.host.start' || handle?.kind !== 'host-terminal-job' ||
+          observation.call.arguments.jobId !== handle.jobId) continue;
+      try {
+        // Read the owned registry again, not the model-visible output or arguments claiming success.
+        // 再读属于当前聊天的任务注册表，不能相信模型可见输出或参数自报的成功状态。
+        const job = this.hostTerminalJobs.read(context, { jobId: handle.jobId, offset: 0, limit: 1 });
+        const processId = job.processId ?? job.receipt?.processId;
+        if (!Number.isSafeInteger(processId) || processId <= 0 ||
+            !['running', 'completed', 'error', 'cancelled'].includes(job.status)) continue;
+        const receipt = await this._finishResult(context, call, { value: { ...job, processId,
+          dispatchConfirmed: true, verificationToolCallId: observation.call.id,
+          taskSuccessCertified: false }, isError: false });
+        proofs.push({ toolCallId: call.id, observationToolCallId: observation.call.id,
+          outcome: 'dispatch-confirmed', result: receipt });
+      } catch { /* Unavailable, foreign or uncertain jobs stay unconfirmed. 不可用、其他聊天或未知任务继续保持未确认。 */ }
+    }
+    return proofs;
   }
 
   async _finishResult(context, call, result, { archiveId, modelProjection } = {}) {

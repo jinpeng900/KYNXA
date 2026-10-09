@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { validateId } from '../platform/conversation-id.mjs';
 
 export const MEMORY_SCHEMA_VERSION = 1;
@@ -5,6 +6,10 @@ export const MEMORY_SCOPES = ['chat', 'project', 'user'];
 export const MEMORY_KINDS = ['fact', 'preference', 'decision'];
 export const MAX_MEMORY_CONTENT = 4000;
 export const MAX_MEMORY_ENTRIES = 1000;
+export const MEMORY_CANDIDATE_ALGORITHM = 'conservative-extractive-v1';
+export const MEMORY_CANDIDATE_TRIGGERS = ['remember', 'correction', 'decision', 'task-complete', 'ordinary-batch'];
+export const DEFAULT_MEMORY_CANDIDATE_SETTINGS = Object.freeze({ enabled: true, minTurns: 6, maxTurns: 12,
+  minTokens: 2048, maxTokens: 4096, maxCandidates: 8 });
 
 export function memoryFailure(message, code = 'INVALID_MEMORY', statusCode = 400) {
   return Object.assign(new Error(message), { code, statusCode });
@@ -33,6 +38,59 @@ export function expectedMemoryRevision(value, required = false) {
   if (value === undefined && !required) return undefined;
   if (!Number.isSafeInteger(value) || value < 0) throw memoryFailure('请提供有效的记忆版本 expectedRevision。');
   return value;
+}
+
+export function memoryStatus(value = 'confirmed') {
+  if (!['draft', 'confirmed'].includes(value)) throw memoryFailure('记忆状态无效。');
+  return value;
+}
+
+export function memoryCandidateSettings(input = {}, previous = DEFAULT_MEMORY_CANDIDATE_SETTINGS) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      Object.keys(input).some(key => !Object.hasOwn(DEFAULT_MEMORY_CANDIDATE_SETTINGS, key)))
+    throw memoryFailure('自动记忆候选设置无效。');
+  const settings = { ...previous, ...input };
+  if (typeof settings.enabled !== 'boolean' || !Number.isSafeInteger(settings.minTurns) || settings.minTurns < 6 ||
+      !Number.isSafeInteger(settings.maxTurns) || settings.maxTurns > 12 || settings.maxTurns < settings.minTurns ||
+      !Number.isSafeInteger(settings.minTokens) || settings.minTokens < 2048 ||
+      !Number.isSafeInteger(settings.maxTokens) || settings.maxTokens > 4096 || settings.maxTokens < settings.minTokens ||
+      !Number.isSafeInteger(settings.maxCandidates) || settings.maxCandidates < 1 || settings.maxCandidates > 8)
+    throw memoryFailure('自动候选须使用 6–12 完整轮次、2K–4K 估算 token 和最多 8 个候选。');
+  return settings;
+}
+
+export function memoryCandidateFingerprint(scope, content) {
+  return createHash('sha256').update(JSON.stringify([scope, content.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()])).digest('hex');
+}
+
+export function memorySourceId(scope, scopeId, id) {
+  const scopeKey = scope === 'user' ? 'user' : `${scope}:${scopeId}`;
+  return createHash('sha256').update(JSON.stringify(['memory', scopeKey, id])).digest('hex');
+}
+
+/** Candidate provenance retains exact user quotations; it cannot grant confirmation or a different scope.
+ * 候选来源保留用户原话，但不能自行授予确认状态或其他范围的权限。 */
+export function validateMemoryCandidate(value, source) {
+  object(value, '记忆候选');
+  if (Object.keys(value).some(key => !['algorithm', 'trigger', 'fingerprint', 'quotes', 'batchThroughMessageId'].includes(key)) ||
+      value.algorithm !== MEMORY_CANDIDATE_ALGORITHM || !MEMORY_CANDIDATE_TRIGGERS.includes(value.trigger) ||
+      !/^[a-f0-9]{64}$/u.test(value.fingerprint) || source.type !== 'user-message' ||
+      !Array.isArray(value.quotes) || !value.quotes.length || value.quotes.length > 12)
+    throw memoryFailure('记忆候选来源格式无效。');
+  const ids = new Set();
+  const quotes = value.quotes.map(quote => {
+    object(quote, '候选原话');
+    const messageId = memoryId(quote.messageId);
+    if (Object.keys(quote).some(key => !['messageId', 'text'].includes(key)) || ids.has(messageId) ||
+        typeof quote.text !== 'string' || !quote.text.trim() || quote.text.length > MAX_MEMORY_CONTENT || quote.text.includes('\0'))
+      throw memoryFailure('候选原话须引用完整、有界的用户消息。');
+    ids.add(messageId);
+    return { messageId, text: quote.text };
+  });
+  if (!ids.has(source.messageId)) throw memoryFailure('候选主来源不属于原话记录。');
+  if (value.batchThroughMessageId !== undefined && value.trigger !== 'ordinary-batch') throw memoryFailure('批次游标仅属于完整轮次候选。');
+  return { algorithm: value.algorithm, trigger: value.trigger, fingerprint: value.fingerprint, quotes,
+    ...(value.batchThroughMessageId === undefined ? {} : { batchThroughMessageId: memoryId(value.batchThroughMessageId) }) };
 }
 
 function object(value, label) {
@@ -73,21 +131,36 @@ export function validateMemoryDocument(value, { scope, scopeId }) {
   const entries = value.entries.map(entry => {
     object(entry, '记忆条目');
     const id = memoryId(entry.id);
-    if (ids.has(id) || entry.scope !== scope || entry.scopeId !== scopeId || entry.status !== 'confirmed' ||
+    if (ids.has(id) || entry.scope !== scope || entry.scopeId !== scopeId || !['draft', 'confirmed'].includes(entry.status) ||
         !Number.isSafeInteger(entry.revision) || entry.revision < 1)
       throw memoryFailure('记忆条目归属、状态或版本格式无效，原文件已保留。', 'CORRUPT_MEMORY', 500);
     ids.add(id);
+    const source = validateMemorySource(entry.source);
+    const candidate = entry.candidate === undefined ? undefined : validateMemoryCandidate(entry.candidate, source);
+    if (entry.status === 'draft' && !candidate) throw memoryFailure('草稿缺少候选来源。', 'CORRUPT_MEMORY', 500);
+    if (candidate && candidate.fingerprint !== memoryCandidateFingerprint(scope, candidate.quotes.map(quote => quote.text.trim()).join('\n\n')))
+      throw memoryFailure('候选原话身份不一致。', 'CORRUPT_MEMORY', 500);
     return { id, scope, scopeId, content: memoryContent(entry.content), kind: memoryKind(entry.kind, scope),
-      status: 'confirmed', source: validateMemorySource(entry.source), revision: entry.revision,
+      status: entry.status, source, ...(candidate ? { candidate } : {}), revision: entry.revision,
       createdAt: timestamp(entry.createdAt), updatedAt: timestamp(entry.updatedAt) };
   });
   if (value.dismissedSources !== undefined && !Array.isArray(value.dismissedSources))
     throw memoryFailure('记忆撤销来源格式无效，原文件已保留。', 'CORRUPT_MEMORY', 500);
   const dismissedSources = (value.dismissedSources ?? []).map(source => {
     object(source, '记忆撤销来源');
-    return { conversationId: memoryId(source.conversationId), messageId: memoryId(source.messageId), deletedAt: timestamp(source.deletedAt) };
+    if (source.candidateFingerprint !== undefined && !/^[a-f0-9]{64}$/u.test(source.candidateFingerprint))
+      throw memoryFailure('候选撤销身份格式无效。', 'CORRUPT_MEMORY', 500);
+    return { conversationId: memoryId(source.conversationId), messageId: memoryId(source.messageId), deletedAt: timestamp(source.deletedAt),
+      ...(source.candidateFingerprint === undefined ? {} : { candidateFingerprint: source.candidateFingerprint }),
+      ...(source.candidateBatchThroughMessageId === undefined ? {} : { candidateBatchThroughMessageId: memoryId(source.candidateBatchThroughMessageId) }) };
   });
-  return { schemaVersion: MEMORY_SCHEMA_VERSION, scope, scopeId, revision: value.revision, entries, dismissedSources };
+  let candidateConfiguration;
+  if (value.candidateSettings !== undefined || value.candidateSettingsRevision !== undefined) {
+    if (scope !== 'user' || value.candidateSettings === undefined || !Number.isSafeInteger(value.candidateSettingsRevision) || value.candidateSettingsRevision < 0)
+      throw memoryFailure('自动候选配置归属或版本无效。', 'CORRUPT_MEMORY', 500);
+    candidateConfiguration = { candidateSettings: memoryCandidateSettings(value.candidateSettings), candidateSettingsRevision: value.candidateSettingsRevision };
+  }
+  return { schemaVersion: MEMORY_SCHEMA_VERSION, scope, scopeId, revision: value.revision, entries, dismissedSources, ...candidateConfiguration };
 }
 
 /**

@@ -3,7 +3,7 @@ import { BUILTIN_EMBEDDING_PROFILE } from './embedding-profile.mjs';
 import { verifyEmbeddingBundle } from './embedding-assets.mjs';
 import { resolveRetrievalModelProfile } from './model-registry.mjs';
 import { fitEmbeddingDocuments } from './embedding-document-fit.mjs';
-import { executeInferenceBatches, isInferenceMemoryPressure, loadAuditedGpuInferenceBackend, loadVerifiedInferenceBackend } from './inference-backend.mjs';
+import { auditEmbeddingBatchCompatibility, executeInferenceBatches, isInferenceMemoryPressure, loadAuditedGpuInferenceBackend, loadVerifiedInferenceBackend } from './inference-backend.mjs';
 import { InferenceAdmission } from './inference-admission.mjs';
 
 const { parentPort, workerData } = await openNativeInferencePort();
@@ -25,6 +25,11 @@ let loadedBudget;
 let lastMeasurementAt = 0;
 const processBaselineBytes = process.memoryUsage().rss;
 let workloadPeakBytes = 0;
+let canonicalBatchReference;
+let batchAuditKey;
+let qualifiedBatchSize = 1;
+let backendStatus;
+let auditedBatchSize = 1;
 
 function memoryMeasurement(backend) {
   // This process owns one inference workload; the delta includes its native runtime and tokenizer.
@@ -136,6 +141,8 @@ async function loadExtractor(id) {
   }
   loadedBudget = { ...activeBudget, device: status.device };
   activeBudget = loadedBudget;
+  backendStatus = status;
+  batchAuditKey = undefined;
   if (status.device === 'cpu' && activeBudget.diagnostic) status.diagnostic ??= activeBudget.diagnostic;
   if (!closing) parentPort.postMessage({ type: 'ready', inferenceBackend: status });
   if (!closing) parentPort.postMessage({ type: 'measurement', feedback: {
@@ -143,9 +150,53 @@ async function loadExtractor(id) {
   return extractor;
 }
 
+async function auditBatchBudget(id, activeExtractor) {
+  const auditKey = `${activeBudget.device}:${activeBudget.cpuThreads}:${activeBudget.batchSize}`;
+  if (batchAuditKey === auditKey) { activeBudget = { ...activeBudget, batchSize: Math.min(activeBudget.batchSize, auditedBatchSize) }; return; }
+  const texts = [`${profile.documentPrefix}How do I reset an account password?`,
+    `${profile.documentPrefix}如何重置账户密码？`,
+    `${profile.documentPrefix}function resolveEvidence(sourceId) { return sources.get(sourceId); }`];
+  const tokenLengths = texts.map(text => activeExtractor.tokenizer(text,
+    { padding: false, truncation: false, return_tensor: false }).input_ids.length);
+  const infer = async batch => {
+    const output = await activeExtractor(batch, { pooling: 'mean', normalize: true });
+    try { return output.tolist(); } finally { output.dispose(); }
+  };
+  const audit = await auditEmbeddingBatchCompatibility({ texts, tokenLengths, dimensions: profile.dimensions,
+    budget: activeBudget, reference: canonicalBatchReference, infer, checkCancelled: () => checkCancelled(id), yieldToMessages });
+  canonicalBatchReference ??= audit.reference;
+  if (audit.status.qualified) qualifiedBatchSize = activeBudget.batchSize;
+  else {
+    // Keep the existing space identity and fall back to a qualified execution shape.
+    // 保留现有空间身份，回退到已通过的执行形状；不通过改 ID 或清缓存掩盖漂移。
+    activeBudget = { ...activeBudget, batchSize: qualifiedBatchSize <= activeBudget.batchSize ? qualifiedBatchSize : 1 };
+    let fallback = await auditEmbeddingBatchCompatibility({ texts, tokenLengths, dimensions: profile.dimensions,
+      budget: activeBudget, reference: canonicalBatchReference, infer, checkCancelled: () => checkCancelled(id), yieldToMessages });
+    if (!fallback.status.qualified && activeBudget.batchSize > 1) {
+      activeBudget = { ...activeBudget, batchSize: 1 };
+      fallback = await auditEmbeddingBatchCompatibility({ texts, tokenLengths, dimensions: profile.dimensions,
+        budget: activeBudget, reference: canonicalBatchReference, infer, checkCancelled: () => checkCancelled(id), yieldToMessages });
+    }
+    if (!fallback.status.qualified) throw Object.assign(new Error('No compatible execution shape is available for the existing embedding space.'),
+      { code: 'EMBEDDING_SPACE_INCOMPATIBLE' });
+    audit.status.fallbackQualified = true;
+    parentPort.postMessage({ type: 'adjustment', adjustment: { reason: 'embedding-batch-compatibility-held',
+      boundary: 'completed-request', requiresSessionRebuild: false,
+      to: { batchSize: activeBudget.batchSize } } });
+  }
+  batchAuditKey = auditKey;
+  auditedBatchSize = activeBudget.batchSize;
+  backendStatus = { ...backendStatus, batchCompatibility: { ...audit.status,
+    appliedBatchSize: activeBudget.batchSize, embeddingSpaceId: profile.embeddingSpaceId } };
+  parentPort.postMessage({ type: 'ready', inferenceBackend: backendStatus });
+}
+
 async function embed(message, canRecoverGpuMemory = true) {
   if (isCancelled(message.id)) return;
   const requestedBudget = message.resourceBudget ?? activeBudget;
+  if (workerData.devicePreference === 'cpu' && requestedBudget.device !== 'cpu')
+    throw Object.assign(new Error('CPU preference cannot dispatch GPU inference. / CPU 偏好不能派发 GPU 推理。'),
+      { code: 'EMBEDDING_DEVICE_PREFERENCE_CHANGED' });
   if (extractor && (requestedBudget.cpuThreads !== loadedBudget.cpuThreads || requestedBudget.device !== loadedBudget.device ||
       requestedBudget.deviceId !== loadedBudget.deviceId)) {
     // Thread counts are native session settings, so change them only between completed requests.
@@ -164,6 +215,7 @@ async function embed(message, canRecoverGpuMemory = true) {
     throw error;
   }));
   if (isCancelled(message.id)) return;
+  await auditBatchBudget(message.id, activeExtractor);
   const prefix = message.kind === 'query' ? profile.queryPrefix : profile.documentPrefix;
   const inputs = message.texts.map(text => `${prefix}${text}`);
   // Count the same prefixed input before the pipeline's default truncation can act.
@@ -188,12 +240,16 @@ async function embed(message, canRecoverGpuMemory = true) {
       code: 'EMBEDDING_INPUT_TOO_LONG', details: { totalInputTokens, maxBatchInputTokens: admission.limits.maxBatchInputTokens },
     });
   let vectors;
+  let hasReportedFirstBatch = false;
   try { vectors = await executeInferenceBatches(inputs, { ...activeBudget, tokenLengths, yieldToMessages,
     checkCancelled: () => checkCancelled(message.id),
     onPressure: diagnostic => parentPort.postMessage({ type: 'resource-pressure', diagnostic: { ...diagnostic,
       backend: activeBudget.device, boundary: 'completed-native-batch', requiresSessionRebuild: false } }),
     onMeasurement: feedback => {
-      if (feedback.progress === 1 || performance.now() - lastMeasurementAt >= 250) {
+      // Short warm requests still need a queued hot sample; final-only reports hide all expansion opportunities.
+      // 短热请求也需要仍有排队工作的采样；只报告最后一批会掩盖全部上探机会。
+      if (!hasReportedFirstBatch || feedback.progress === 1 || performance.now() - lastMeasurementAt >= 250) {
+        hasReportedFirstBatch = true;
         lastMeasurementAt = performance.now(); parentPort.postMessage({ type: 'measurement',
           feedback: { ...feedback, ...memoryMeasurement(activeBudget.device) } });
       }
@@ -259,6 +315,8 @@ function receiveMessage(message) {
   }
   activeRequestIds.add(message.id);
   queue = queue.then(() => message.type === 'fit-documents' ? fitDocuments(message) : embed(message)).catch(error => {
+    if (!isCancelled(message.id) && !error.inferencePressureReported && isInferenceMemoryPressure(error)) parentPort.postMessage({ type: 'resource-pressure',
+      diagnostic: { code: 'INFERENCE_ALLOCATION_FAILED', backend: activeBudget.device, terminal: true } });
     if (!isCancelled(message.id)) {
       parentPort.postMessage({ type: 'error', id: message.id, message: error.message,
         code: error.code ?? 'EMBEDDING_FAILED', ...(error.details ? { details: error.details } : {}) });

@@ -123,7 +123,9 @@ export function decodeToolTurn(protocol, result, catalog) {
       throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
     return { ...parts, calls, continuation };
   } catch (error) {
-    if (error instanceof ToolCallDecodeFailure) error.estimatedGeneratedTokens = estimateTokens(parts.content ?? '')
+    // Truncated and transport-shaped decoder failures consumed output too; the estimate never contains raw parameters.
+    // 截断等解码故障同样消耗输出；计量字段只保留估算量，不包含原始参数。
+    if (error && typeof error === 'object') error.estimatedGeneratedTokens = estimateTokens(parts.content ?? '')
       + estimateTokens(parts.reasoning ?? '') + estimateTokens(JSON.stringify(rawCalls));
     throw error;
   }

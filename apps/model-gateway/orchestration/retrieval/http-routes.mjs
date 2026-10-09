@@ -22,16 +22,25 @@ async function dispatchRetrievalRoute(request, response, url, retrieval, signal)
   const send = value => { sendJson(response, 200, value); return true; };
   if (path === '/api/retrieval/settings') {
     if (method === 'GET') return send(await retrieval.settings.getGlobal());
-    if (method === 'PATCH') return send(await retrieval.settings.patchGlobal(await readJsonBody(request)));
+    if (method === 'PATCH') {
+      const previous = await retrieval.effective();
+      const result = await retrieval.settings.patchGlobal(await readJsonBody(request));
+      await retrieval.configureInferenceSettings?.(null, { previous });
+      return send(result);
+    }
   }
   const projectSettings = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/retrieval\/settings$/u.exec(path);
   if (projectSettings) {
     if (method === 'GET') return send({ ...await retrieval.settings.getProject(projectSettings[1]),
       effective: await retrieval.effective(projectSettings[1]) });
     if (method === 'PATCH') {
+      const previous = await retrieval.effective(projectSettings[1]);
       const result = await retrieval.settings.patchProject(projectSettings[1], await readJsonBody(request));
       const effective = await retrieval.effective(projectSettings[1]);
-      if (effective.projectIndexing?.mountedFolder) await retrieval.rebuild({ projectId: projectSettings[1], dirty: true });
+      await retrieval.configureInferenceSettings?.(projectSettings[1], { previous });
+      const sourcesChanged = JSON.stringify(previous.projectIndexing) !== JSON.stringify(effective.projectIndexing);
+      if (effective.projectIndexing?.mountedFolder || previous.projectIndexing?.mountedFolder || sourcesChanged)
+        await retrieval.rebuild({ projectId: projectSettings[1], dirty: true });
       return send({ ...result, effective });
     }
   }

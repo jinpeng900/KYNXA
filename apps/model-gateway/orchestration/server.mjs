@@ -110,7 +110,7 @@ export function createModelServer(options = {}) {
       if (request.method === 'GET' && pathname === '/health')
         return sendJson(response, 200, { status: 'ok', service: 'kynxa-model-gateway', storageProtocol: 1,
           agentProtocol: 5, officialToolsProtocol: 2, hostTerminalProtocol: 3, browserAutomationProtocol: 2, extensionStorageProtocol: EXTENSION_STORAGE_PROTOCOL,
-          toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, contextProtocol: 3, retrievalProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
+          toolStreamProtocol: 3, replyTimingProtocol: 1, streamProtocol: 1, conversationProtocol: 1, memoryProtocol: 1, memoryManagementProtocol: 1, memoryCandidateProtocol: 1, contextProtocol: 3, retrievalProtocol: 1, dataLayoutVersion: DATA_LAYOUT_VERSION,
           activeRequests, migrating, migrationReady: migrating && runtimeRetired && !runtimeCleanupError && activeRequests === 0,
           modelDataHome: modelStore.dataHome, extensionRoot: currentExtensionRoot(),
           ...(storageConfigError ? { storageConfigError } : {}),
@@ -139,6 +139,15 @@ export function createModelServer(options = {}) {
             offset: url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0,
             limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 16000, allowArchived: true }));
         return sendJson(response, 200, { result: await modelRuntime.tools.results.get(resultContext, toolResultRoute[2]) });
+      }
+      if (pathname === '/api/memory/candidates' || pathname === '/api/memory/candidates/settings') {
+        if (request.method === 'GET') {
+          await modelRuntime.memory.initializeCandidates();
+          return sendJson(response, 200, modelRuntime.memory.candidateStatus());
+        }
+        if (request.method === 'PATCH' && pathname.endsWith('/settings'))
+          return sendJson(response, 200, await modelRuntime.memory.updateCandidateSettings(await readJsonBody(request)));
+        return sendJson(response, 405, { error: '此方法不支持。' });
       }
       const userMemoryRoute = /^\/api\/memory\/user(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);
       const projectMemoryRoute = /^\/api\/projects\/([a-zA-Z0-9_-]+)\/memory(?:\/([a-zA-Z0-9_-]+))?$/.exec(pathname);

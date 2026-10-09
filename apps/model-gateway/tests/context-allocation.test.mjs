@@ -4,9 +4,9 @@ import { contextAllocation, contextAllocationAudit } from '../orchestration/retr
 
 test('evidence-heavy tasks receive larger context shares while preserving output and history space', () => {
   const lookup = contextAllocation(8192, 'lookup'), file = contextAllocation(8192, 'file'), research = contextAllocation(8192, 'research');
-  assert.equal(lookup.requestedEvidenceTokens, 983);
-  assert.equal(file.requestedEvidenceTokens, 1474);
-  assert.equal(research.requestedEvidenceTokens, 1966);
+  assert.ok(lookup.requestedEvidenceTokens >= 1024);
+  assert.ok(file.requestedEvidenceTokens > lookup.requestedEvidenceTokens);
+  assert.ok(research.requestedEvidenceTokens > file.requestedEvidenceTokens);
   assert.ok(research.schemaCeilingTokens < file.schemaCeilingTokens);
   for (const allocation of [lookup, file, research]) assert.ok(allocation.schemaCeilingTokens + allocation.requestedEvidenceTokens < 8192);
 });
@@ -18,7 +18,17 @@ test('configured, approved, used and clipped evidence are distinct and unused sc
   assert.equal(audit.actualEvidenceTokens, 1200);
   assert.equal(audit.unusedSchemaTokens, 1038);
   assert.deepEqual(audit.earlyCutReasons, ['task-context-share', 'remaining-context', 'available-selected-evidence']);
-  assert.equal(contextAllocation(1_048_576, 'research').requestedEvidenceTokens, 16384);
+  assert.equal(contextAllocation(1_048_576, 'research').requestedEvidenceTokens, 32768);
+});
+
+test('a readable small-window allowance is approved only after mandatory input and safety fit', () => {
+  const small = contextAllocation(3686, 'lookup', { mandatoryInputTokens: 400 });
+  assert.ok(small.requestedEvidenceTokens >= 1024);
+  assert.equal(small.approvedEvidenceTokens, small.requestedEvidenceTokens);
+  const crowded = contextAllocation(3686, 'lookup', { mandatoryInputTokens: 3000 });
+  assert.equal(crowded.approvedEvidenceTokens, 174);
+  assert.ok(crowded.approvedEvidenceTokens + 3000 + crowded.safetyTokens <= 3686);
+  assert.equal(contextAllocation(3686, 'lookup', { mandatoryInputTokens: 3500 }).approvedEvidenceTokens, 0);
 });
 
 test('non-retrieval requests do not claim an approved evidence allowance or a context clipping error', () => {

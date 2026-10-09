@@ -79,7 +79,7 @@ test('cancelling a startup acknowledgement stops its owned runner without report
   const service = new HostTerminalJobs({ runner }), controller = new AbortController();
   const started = service.start(context, request, controller.signal);
   await Promise.resolve(); controller.abort();
-  await assert.rejects(started, { name: 'AbortError' });
+  await assert.rejects(started, error => error.name === 'AbortError' && service.jobs.has(error.jobId));
   await service.close();
   assert.equal([...service.jobs.values()][0].status, 'unknown');
   assert.equal([...service.jobs.values()][0].processId, undefined);

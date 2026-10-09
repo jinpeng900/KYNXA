@@ -93,6 +93,16 @@ export class ExternalModelAdmission {
     // OpenAI 请求没有 num_ctx，连接的 1M 输入预算不能被当成 Ollama 实际分配目标。
     const contextTokens = entry.snapshot.runtimeContextTokens || entry.snapshot.configuredContextTokens;
     entry.plan = planExternalModelDemand(entry.snapshot, { contextTokens, hardware });
+    // A resident foreground model still competes with owned GPU inference even when it needs no new allocation.
+    // 已驻留前台模型即便没有新增分配，也会与自有 GPU 推理争用；仅协调释放 KYNXA 的空闲执行器。
+    const shouldYieldOwnedIdleGpu = entry.snapshot.observedGpuMemoryBytes > 0 || entry.plan.gpuMemoryBytes > 0;
+    if (shouldYieldOwnedIdleGpu) {
+      const yielded = await this.yieldIdleGpu?.({ signal });
+      entry.coordination = { state: 'owned-idle-gpu-yield-requested', externalModelControlled: false,
+        receipt: yielded ?? null,
+        globalGenerationState: entry.snapshot.globalGenerationState ?? 'unknown',
+        applicationGenerationState: entry.snapshot.applicationGenerationState ?? 'idle' };
+    }
     if (!entry.plan.requiresAdmission) {
       this._state(entry, { state: entry.plan.state === 'ready' ? 'no-pending-increment' : 'unconfirmed', plan: entry.plan });
       return;
@@ -102,7 +112,6 @@ export class ExternalModelAdmission {
       this._state(entry, { state: 'unconfirmed', reason: 'GPU_DEVICE_MAPPING_UNVERIFIED', plan: entry.plan });
       return;
     }
-    if (gpuMemoryBytes > 0) await this.yieldIdleGpu?.({ signal });
     // GPU staging is an uncertain host-memory upper bound; VRAM admission is strict, host staging remains advisory.
     // GPU 上传的主机暂存量属于不确定上界；显存增量严格准入，主机暂存明确标为观察建议。
     const memoryBytes = gpuMemoryBytes > 0 && entry.plan.breakdown.memoryIncludesTransientStaging ? 0 : entry.plan.memoryBytes;
@@ -118,7 +127,8 @@ export class ExternalModelAdmission {
     entry.lease = lease;
     entry.timer = setInterval(() => this._renew(entry), TTL_MS / 3);
     entry.timer.unref?.();
-    this._state(entry, { state: entry.plan.partialCoverage ? 'admitted-known-weights-kv-unconfirmed' : 'admitted-predicted-increment',
+    this._state(entry, { state: entry.plan.unknownComponents?.includes('kv-cache') ? 'admitted-known-weights-kv-unconfirmed'
+      : entry.plan.partialCoverage ? 'admitted-predicted-increment-partial' : 'admitted-predicted-increment',
       plan: entry.plan, gpuMemoryBytes, memoryBytes,
       hostMemoryAdmission: memoryBytes === 0 && entry.plan.memoryBytes > 0 ? 'advisory-transient-staging' : 'predicted-increment',
       observedResidencyReservedAgain: false });
@@ -140,7 +150,8 @@ export class ExternalModelAdmission {
     entry.state = state;
     // Presentation failures cannot invalidate or leak an acquired fence.
     // 展示失败不能破坏或泄漏已经取得的资源预约。
-    try { this.onState(entry.connection, entry.modelId, { ...state, snapshot: entry.snapshot }); }
+    try { this.onState(entry.connection, entry.modelId, { ...state, snapshot: entry.snapshot,
+      ...(entry.coordination ? { coordination: entry.coordination } : {}) }); }
     catch { /* Reservation ownership remains authoritative. 资源所有者仍是权威。 */ }
   }
 
@@ -189,7 +200,7 @@ export class ExternalModelAdmission {
       const snapshot = await this.observer.observe(entry.connection, { modelId: entry.modelId, refresh: true });
       // A partial weight fence needs a reported loaded allocation, not its previously unknown target KV size.
       // 权重部分预约只需核实模型已分配并加载，不能等待原本未知的目标 KV；这不认证取消生成成功。
-      const hasMaterializedWeights = entry.plan?.partialCoverage && entry.plan.breakdown.weightIncrementBytes > 0 &&
+      const hasMaterializedWeights = entry.plan?.unknownComponents?.includes('kv-cache') && entry.plan.breakdown.weightIncrementBytes > 0 &&
         snapshot.runtimeContextTokens > 0;
       const hasMaterializedContext = snapshot.runtimeContextTokens >= (entry.plan?.breakdown.targetContextTokens ?? Infinity);
       if (snapshot.loaded === true && (hasMaterializedWeights || hasMaterializedContext))

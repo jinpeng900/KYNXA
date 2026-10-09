@@ -25,6 +25,9 @@ export class EvidenceAcquisition {
     this.seenEvidence = new Set();
     this.cachedSearches = new Map();
     this.sourceReads = new Map();
+    // Keep lightweight version dependencies independent of the bounded quotation cache.
+    // 轻量版本依赖独立于有界原文缓存；淘汰旧摘录不能取消最终回答前的来源核验。
+    this.finalSourceDependencies = new Map();
     this.sourceVersions = new Map();
     this.conclusions = new Map();
     this.progressByStrategy = new Map();
@@ -101,8 +104,23 @@ export class EvidenceAcquisition {
       sufficiency: 'not-evaluated' };
   }
 
+  observeProjection(items) {
+    // Search excerpts carry freshness dependencies, but do not count as original-source reads or verified support.
+    // 搜索摘录携带新鲜度依赖，不能冒充已回读原文或已验证支持结论。
+    const dependencies = new Map(items.map(item => [identity([item.scopeKey, item.sourceId]), {
+      sourceRef: item.sourceRef, sourceId: item.sourceId, scopeKey: item.scopeKey,
+      version: identity([item.sourceRevision, item.contentHash, item.derivationSignature, item.bindingRevision]) }]));
+    if (this.finalSourceDependencies.size + [...dependencies.keys()].filter(key => !this.finalSourceDependencies.has(key)).length > 1024)
+      throw retrievalFailure('Source verification capacity reached. / 本任务来源核验容量已满，不能静默遗漏后续来源。',
+        'RETRIEVAL_VERSION_LEDGER_LIMIT');
+    for (const [key, dependency] of dependencies) this.finalSourceDependencies.set(key, dependency);
+  }
+
   observeRead(item, { gap, mode = 'page', sourceRef } = {}) {
     const key = identity([item.scopeKey, item.sourceId]);
+    if (!this.finalSourceDependencies.has(key) && this.finalSourceDependencies.size >= 1024)
+      throw retrievalFailure('Source verification capacity reached; use the observed sources or summarize current findings before expanding. / 本任务来源核验容量已满，不能静默遗漏后续来源。',
+        'RETRIEVAL_VERSION_LEDGER_LIMIT');
     const version = identity([item.sourceRevision, item.contentHash, item.derivationSignature, item.bindingRevision]);
     const observed = this.sourceVersions.get(key);
     if (observed && observed.version !== version) this.invalidateSource(item.sourceId, item.scopeKey);
@@ -117,6 +135,8 @@ export class EvidenceAcquisition {
     if (fragments.length !== previousFragmentCount) this.progressByStrategy.clear();
     while (fragments.length > 16 || fragments.reduce((sum, fragment) => sum + fragment.text.length, 0) > 131072) fragments.shift();
     this.sourceReads.set(key, { sourceRef: item.sourceRef, mode, text, version, fragments });
+    this.finalSourceDependencies.set(key, { sourceRef: item.sourceRef, sourceId: item.sourceId,
+      scopeKey: item.scopeKey, version });
     while (this.sourceReads.size > 64) this.sourceReads.delete(this.sourceReads.keys().next().value);
     return { sufficiency: 'not-evaluated', missingInformation: gap ?? null, sourceVersionChecked: true,
       contentRead: true, next: 'evaluate-support-then-answer-or-name-the-remaining-gap' };

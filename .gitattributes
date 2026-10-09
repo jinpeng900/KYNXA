@@ -13,3 +13,8 @@ apps/desktop/Resources/Diagrams/Mermaid/** -text whitespace=cr-at-eol
 # Preserve whitespace embedded in the original third-party browser bundle.
 # 保留第三方浏览器包原文内的空白，不为提交检查改写发行文件。
 apps/desktop/Resources/Diagrams/Mermaid/mermaid.min.js whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve pinned upstream license bytes, including their original line endings and whitespace.
+# 保留固定第三方许可的原始字节、换行与空白，避免检出后破坏随包哈希。
+apps/desktop/Build/licenses/windows-sdk-license.md -text whitespace=-blank-at-eol,cr-at-eol
+apps/desktop/Build/licenses/*LICENSE.txt -text whitespace=-blank-at-eol,cr-at-eol

@@ -5,8 +5,9 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { inspectLocalPath, toolFailure, within } from '../../platform/tool-paths.mjs';
 import { isSensitiveFilePath } from '../sensitive-files.mjs';
-import { extractDocumentBytes } from './document-extraction.mjs';
-import { DOCUMENT_EXTRACTION_LIMITS, DOCUMENT_EXTRACTION_VERSIONS, documentExtractionFailure } from './document-extraction-contracts.mjs';
+import { extractDocumentBytes, documentExtractionCoverage } from './document-extraction.mjs';
+import { DOCUMENT_EXTRACTION_LIMITS, DOCUMENT_EXTRACTION_VERSIONS, documentExtractionFailure,
+  validateDocumentExtractionLimits } from './document-extraction-contracts.mjs';
 import ignore from 'ignore';
 import { describeTextFileWindows, readTextFileWindow } from './text-file-windows.mjs';
 import { validateSourceFileWindow } from '../../data/retrieval/retrieval-contracts.mjs';
@@ -17,6 +18,10 @@ const DOCUMENT_FORMATS = new Map([['.pdf', 'pdf'], ['.docx', 'docx']]);
 const IGNORED_DIRECTORIES = new Set(['.git', '.vs', '.idea', 'node_modules', 'bin', 'obj', 'target', '__pycache__', '.venv', 'venv', '.kynxa', '.sandbox-runtime', '.sandbox-temp']);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const supportedSource = path => TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || DOCUMENT_FORMATS.has(extname(path).toLowerCase());
+const extractionLimitsKey = options => JSON.stringify([options.maximumSourceBytes ?? 32 * 1024 * 1024,
+  options.maximumDocumentInputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes,
+  options.maximumDocumentOutputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes,
+  options.maximumPdfPages ?? DOCUMENT_EXTRACTION_LIMITS.maximumPages, options.ocrBackend === null ? 'disabled' : 'available']);
 
 /** Retry only transient observations; unsupported or malformed documents need a changed source or configuration.
  * 只重试暂时性观测错误；不支持或损坏的文档须等待来源或配置变化，不能无限重复解码。 */
@@ -25,11 +30,11 @@ export function classifySourceFailure(error) {
   if (error?.name === 'AbortError') return { errorCode: code, category: 'cancelled', retryable: false };
   if (['EACCES', 'EPERM', 'UNSAFE_TOOL_PATH', 'PROTECTED_RETRIEVAL_SOURCE'].includes(code))
     return { errorCode: code, category: 'permission', retryable: false };
-  if (code === 'OCR_UNAVAILABLE') return { errorCode: code, category: 'ocr-unavailable', retryable: false };
+  if (/^OCR_/u.test(code ?? '')) return { errorCode: code, category: 'ocr-unavailable', retryable: false };
   if (/STALE|SOURCE_CHANGED/u.test(code) || code === 'ENOENT')
     return { errorCode: code, category: 'source-changed', retryable: true };
   if (/RESOURCE|DECODER_BUSY/u.test(code)) return { errorCode: code, category: 'resource', retryable: true };
-  if (['EBUSY', 'EAGAIN', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code))
+  if (['EBUSY', 'EAGAIN', 'EMFILE', 'ENFILE', 'ETIMEDOUT', 'DOCUMENT_DECODER_TIMEOUT'].includes(code))
     return { errorCode: code, category: 'temporary', retryable: true };
   if (/LIMIT|BUDGET/u.test(code) || code === 'INVALID_RETRIEVAL_SOURCE')
     return { errorCode: code, category: 'limit', retryable: false };
@@ -50,7 +55,9 @@ function recordSourceFailure(stats, root, path, error, directory = false) {
   stats.failedFiles = (stats.failedFiles ?? 0) + 1;
   stats.failures ??= [];
   if (stats.failures.length < 10000) stats.failures.push({ relativePath: relative(root, path),
-    ...classifySourceFailure(error), attempts: error.sourceReadAttempts ?? 1, ...(directory ? { directory: true } : {}) });
+    ...classifySourceFailure(error), attempts: error.sourceReadAttempts ?? 1,
+    ...(error.details?.documentCoverage ? { documentCoverage: error.details.documentCoverage } : {}),
+    ...(directory ? { directory: true } : {}) });
   else stats.failureReportTruncated = true;
 }
 
@@ -63,13 +70,15 @@ async function readOrdinaryFile(path, maximumBytes, signal) {
   signal?.throwIfAborted();
   const before = await inspectLocalPath(path);
   signal?.throwIfAborted();
-  if (!before.isFile() || before.size > maximumBytes) throw toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400);
+  if (!before.isFile() || before.size > maximumBytes) throw Object.assign(toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400),
+    { observedBytes: before.size });
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.nlink !== 1 || opened.ino !== before.ino || opened.dev !== before.dev)
       throw toolFailure('资料路径已变化。', 'UNSAFE_TOOL_PATH', 403);
-    if (opened.size > maximumBytes) throw toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400);
+    if (opened.size > maximumBytes) throw Object.assign(toolFailure('资料文件超过允许大小。', 'INVALID_RETRIEVAL_SOURCE', 400),
+      { observedBytes: opened.size });
     // Bound allocation even if another process grows the file while this read is in progress.
     // 即使其他进程在读取期间扩展文件，分配和读取也不能突破单文件预算。
     const buffer = Buffer.allocUnsafe(Math.min(opened.size + 1, maximumBytes + 1));
@@ -99,28 +108,39 @@ export function sameSourceMetadata(previous, current) {
 
 /** Reads authorized, bounded text or offline document bytes; extraction never bypasses path policy.
  * 只读取已授权的有界文本或离线文档字节，提取过程不能绕过现有路径策略。 */
-async function readSourceFileOnce(path, { root = null, excludedRoots = [], maximumSourceBytes = 32 * 1024 * 1024, signal, resourceService } = {}) {
+async function readSourceFileOnce(path, { root = null, excludedRoots = [], maximumSourceBytes = 32 * 1024 * 1024,
+  maximumDocumentInputBytes = DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes,
+  maximumDocumentOutputBytes = DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes,
+  maximumPdfPages = DOCUMENT_EXTRACTION_LIMITS.maximumPages, signal, resourceService, pdfPageWindow, ocrBackend } = {}) {
   signal?.throwIfAborted(); path = resolve(path);
   if (root && !within(resolve(root), path) || isSensitiveFilePath(path) || excludedRoots.some(folder => within(folder, path)))
     throw toolFailure('此路径不允许加入检索资料。', 'PROTECTED_RETRIEVAL_SOURCE', 403);
   if (!supportedSource(path))
     throw toolFailure('目前支持文本、代码和基础 PDF/DOCX 文本提取。', 'UNSUPPORTED_RETRIEVAL_SOURCE', 400);
   const format = DOCUMENT_FORMATS.get(extname(path).toLowerCase());
+  const documentLimits = format ? validateDocumentExtractionLimits({
+    maximumInputBytes: Math.min(maximumSourceBytes, maximumDocumentInputBytes),
+    maximumOutputBytes: Math.min(maximumSourceBytes, maximumDocumentOutputBytes), maximumPages: maximumPdfPages }) : null;
   if (!format && (await inspectLocalPath(path)).size > 2 * 1024 * 1024)
     return { path, title: root ? relative(root, path) : basename(path), ...await describeTextFileWindows(path, { maximumSourceBytes, signal }) };
   let bytes, metadata;
   try {
     ({ bytes, metadata } = await readOrdinaryFile(path,
-      format ? Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) : maximumSourceBytes, signal));
+      format ? documentLimits.maximumInputBytes : maximumSourceBytes, signal));
   } catch (error) {
-    if (format && error.code === 'INVALID_RETRIEVAL_SOURCE') throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT');
+    if (format && error.code === 'INVALID_RETRIEVAL_SOURCE') throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT', {
+      documentCoverage: documentExtractionCoverage(format, documentLimits, 'DOCUMENT_BYTES_LIMIT', undefined,
+        { limit: { dimension: 'maximumInputBytes', limit: documentLimits.maximumInputBytes, observed: error.observedBytes ?? 0 } }) });
     throw error;
   }
   if (format) {
     const { text, extraction } = await extractDocumentBytes(bytes, format, { signal, resourceService,
-      maximumInputBytes: Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes),
-      maximumOutputBytes: Math.min(maximumSourceBytes, DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes) });
+      maximumInputBytes: documentLimits.maximumInputBytes, maximumOutputBytes: documentLimits.maximumOutputBytes,
+      maximumPages: documentLimits.maximumPages, pageWindow: pdfPageWindow,
+      ...(ocrBackend === undefined ? {} : { ocrBackend }) });
     signal?.throwIfAborted();
+    if (!sameSourceMetadata(metadata, fileMetadata(await inspectLocalPath(path))))
+      throw toolFailure('提取期间资料发生变化。', 'STALE_RETRIEVAL_SOURCE', 409);
     return { path, title: root ? relative(root, path) : basename(path), text, contentHash: hash(text),
       textBytes: Buffer.byteLength(text), metadata, extraction };
   }
@@ -152,6 +172,37 @@ export async function readSourceFile(path, options = {}) {
   }
 }
 
+/** Resume bounded PDF pages against one original revision; callers may publish each real window before requesting the next.
+ * 在同一原文件版本上继续有界 PDF 页面；调用方可先发布每个真实窗口，再请求后续页面。
+ */
+export async function* readSourceFileDocumentWindows(path, options = {}) {
+  if (extname(path).toLowerCase() !== '.pdf') { yield await readSourceFile(path, options); return; }
+  let cursor = options.pdfPageWindow, metadata, rawContentHash;
+  for (;;) {
+    options.signal?.throwIfAborted();
+    const file = await readSourceFile(path, { ...options, pdfPageWindow: cursor });
+    if (rawContentHash && (file.extraction.rawContentHash !== rawContentHash || !sameSourceMetadata(metadata, file.metadata)))
+      throw toolFailure('PDF 页面游标不再属于当前文件版本。', 'STALE_RETRIEVAL_SOURCE', 409);
+    rawContentHash ??= file.extraction.rawContentHash; metadata ??= file.metadata;
+    const window = file.extraction.pageWindow;
+    yield { ...file, documentWindowKey: hash(JSON.stringify([rawContentHash, window.startPage, window.endPage,
+      file.extraction.version, file.extraction.ocr ?? null])) };
+    if (window.nextPage === null) return;
+    cursor = { startPage: window.nextPage, rawContentHash };
+  }
+}
+
+async function* continueDocumentWindows(file, options) {
+  if (file.documentWindows) {
+    for (const window of file.documentWindows) yield { ...file, ...window, documentWindows: undefined, text: undefined, reused: true };
+    return;
+  }
+  yield file;
+  if (file.extraction?.format !== 'pdf' || file.extraction.pageWindow.nextPage === null) return;
+  yield* readSourceFileDocumentWindows(file.path, { ...options,
+    pdfPageWindow: { startPage: file.extraction.pageWindow.nextPage, rawContentHash: file.extraction.rawContentHash } });
+}
+
 export async function readSourceFileWindow(path, window, options = {}) {
   const { root = null, excludedRoots = [], maximumSourceBytes = 32 * 1024 * 1024, signal } = options;
   path = resolve(path); signal?.throwIfAborted();
@@ -169,7 +220,12 @@ export async function* readSourceImportTree(path, options = {}) {
   for await (const file of scanSourceTree(path, options)) {
     if (file.failed || file.skipped) continue;
     try {
-      if (!file.windows) { yield file.text === undefined ? await readSourceFile(file.path, options) : file; continue; }
+      if (!file.windows) {
+        yield file.text === undefined ? await readSourceFile(file.path, { ...options,
+          ...(file.extraction?.pageWindow ? { pdfPageWindow: { startPage: file.extraction.pageWindow.startPage,
+            endPage: file.extraction.pageWindow.endPage, rawContentHash: file.extraction.rawContentHash } } : {}) }) : file;
+        continue;
+      }
       for (const window of file.windows) yield { ...file, windows: undefined,
         ...await readSourceFileWindow(file.path, window, options), title: `${file.title} [${window.startOffset}-${window.endOffset}]` };
     } catch (error) {
@@ -187,7 +243,20 @@ export async function* scanSourceTree(path, options = {}) {
   options.signal?.throwIfAborted();
   const root = resolve(path), info = await inspectLocalPath(root);
   options.signal?.throwIfAborted();
-  if (info.isFile()) { yield await readSourceFile(root, options); return; }
+  if (info.isFile()) {
+    const stats = options.stats ?? {}, first = await readSourceFile(root, options);
+    stats.discoveredFiles = (stats.discoveredFiles ?? 0) + 1; stats.scannedFiles = (stats.scannedFiles ?? 0) + 1;
+    let windows = 0, bytes = 0;
+    for await (const file of continueDocumentWindows(first, options)) {
+      if (++windows > (options.maximumFiles ?? 2048) && !scanLimit(stats, options, 'files', options.maximumFiles ?? 2048, windows)) return;
+      bytes += file.textBytes;
+      if (bytes > (options.maximumBytes ?? 32 * 1024 * 1024) && !scanLimit(stats, options, 'bytes', options.maximumBytes ?? 32 * 1024 * 1024, bytes)) return;
+      stats.fileReads = (stats.fileReads ?? 0) + 1; stats.bytesRead = (stats.bytesRead ?? 0) + file.metadata.sizeBytes;
+      if (file.extraction?.format === 'pdf') stats.documentWindows = (stats.documentWindows ?? 0) + 1;
+      yield file;
+    }
+    return;
+  }
   if (!info.isDirectory()) throw toolFailure('资料路径无效。', 'INVALID_RETRIEVAL_SOURCE', 400);
   const pending = [{ path: root, rules: [] }]; let visited = 0, bytes = 0, files = 0, cursor = 0;
   const maximumFiles = options.maximumFiles ?? 2048, maximumBytes = options.maximumBytes ?? 32 * 1024 * 1024;
@@ -233,7 +302,8 @@ export async function* scanSourceTree(path, options = {}) {
           if (failedSource && !options.changedPaths?.has(relativePath)) {
             const current = await inspectLocalPath(candidate);
             if (sameSourceMetadata(failedSource.metadata, fileMetadata(current)) &&
-                failedSource.extractionVersion === sourceExtractionVersion(candidate)) {
+                (failedSource.error.category !== 'ocr-unavailable' || Date.now() - (failedSource.cachedAt ?? 0) < 5000) &&
+                failedSource.extractionVersion === sourceExtractionVersion(candidate) && failedSource.limitsKey === extractionLimitsKey(options)) {
               recordSourceFailure(stats, root, candidate, failedSource.error);
               stats.reusedFailures = (stats.reusedFailures ?? 0) + 1;
               continue;
@@ -247,36 +317,51 @@ export async function* scanSourceTree(path, options = {}) {
             const maximumFileBytes = version ? Math.min(options.maximumSourceBytes ?? 32 * 1024 * 1024,
               DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) : options.maximumSourceBytes ?? 32 * 1024 * 1024;
             if (current.size > maximumFileBytes) {
-              if (sourceExtractionVersion(candidate)) throw documentExtractionFailure('DOCUMENT_BYTES_LIMIT');
+              if (version) await readSourceFile(candidate, { ...options, root });
               throw toolFailure('资料文件超过配置预算。', 'INVALID_RETRIEVAL_SOURCE', 413);
             }
             const metadata = fileMetadata(current);
             reused = sameSourceMetadata(previous.metadata, metadata) && (previous.extraction?.version ?? null) === version &&
-              Number.isSafeInteger(previous.textBytes) && previous.textBytes <= maximumFileBytes;
+              (!version || previous.extraction?.format !== 'pdf' || previous.documentComplete === true || previous.extraction.complete === true) &&
+              Number.isSafeInteger(previous.textBytes) && (previous.documentWindows || previous.textBytes <= maximumFileBytes) && (!version ||
+              current.size <= (options.maximumDocumentInputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumInputBytes) &&
+              (previous.documentWindows || previous.textBytes <= (options.maximumDocumentOutputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes)) &&
+              (previous.extraction?.pages?.length ?? previous.extraction?.pageCount ?? 0) <= (options.maximumPdfPages ?? DOCUMENT_EXTRACTION_LIMITS.maximumPages));
+            if (reused && previous.documentWindows?.some(window => window.extraction.pages.length >
+                (options.maximumPdfPages ?? DOCUMENT_EXTRACTION_LIMITS.maximumPages) ||
+                window.textBytes > (options.maximumDocumentOutputBytes ?? DOCUMENT_EXTRACTION_LIMITS.maximumOutputBytes))) reused = false;
             if (reused) file = { path: candidate, title: relativePath, contentHash: previous.contentHash,
               textBytes: previous.textBytes, metadata, ...(previous.extraction ? { extraction: previous.extraction } : {}),
-              ...(previous.windows ? { windows: previous.windows } : {}), reused: true };
+              ...(previous.windows ? { windows: previous.windows } : {}),
+              ...(previous.documentWindows ? { documentWindows: previous.documentWindows } : {}), reused: true };
           }
           file ??= await readSourceFile(candidate, { ...options, root });
           options.failureCache?.delete(relativePath);
           if (reused) stats.reusedFiles++;
           else { stats.fileReads++; stats.bytesRead += file.metadata.sizeBytes; }
-          if (files >= maximumFiles && !scanLimit(stats, options, 'files', maximumFiles, files + 1)) return;
-          if (bytes + file.textBytes > maximumBytes && !scanLimit(stats, options, 'bytes', maximumBytes, bytes + file.textBytes)) return;
-          bytes += file.textBytes; files++; stats.scannedFiles++;
-          yield file;
+          stats.scannedFiles++;
+          for await (const window of continueDocumentWindows(file, { ...options, root })) {
+            if (files >= maximumFiles && !scanLimit(stats, options, 'files', maximumFiles, files + 1)) return;
+            if (bytes + window.textBytes > maximumBytes && !scanLimit(stats, options, 'bytes', maximumBytes, bytes + window.textBytes)) return;
+            bytes += window.textBytes; files++;
+            if (window !== file && !window.reused) { stats.fileReads++; stats.bytesRead += window.metadata.sizeBytes; }
+            if (window.extraction?.format === 'pdf') stats.documentWindows = (stats.documentWindows ?? 0) + 1;
+            yield window;
+          }
         }
         catch (error) {
           if (options.signal?.aborted || error.name === 'AbortError' || error.code === 'RETRIEVAL_SCAN_LIMIT') throw error;
           recordSourceFailure(stats, root, candidate, error);
           const classification = classifySourceFailure(error);
           if (options.failureCache && !classification.retryable &&
-              ['unsupported', 'invalid-source', 'ocr-unavailable'].includes(classification.category)) {
+              ['unsupported', 'invalid-source', 'ocr-unavailable', 'limit'].includes(classification.category)) {
             const current = await inspectLocalPath(candidate).catch(() => null);
             if (current?.isFile()) {
               const relativePath = relative(root, candidate);
               options.failureCache.set(relativePath, { metadata: fileMetadata(current),
-                extractionVersion: sourceExtractionVersion(candidate), error: { ...classification, code: classification.errorCode } });
+                limitsKey: extractionLimitsKey(options),
+                extractionVersion: sourceExtractionVersion(candidate), cachedAt: Date.now(), error: { ...classification, code: classification.errorCode,
+                  ...(error.details?.documentCoverage ? { details: { documentCoverage: error.details.documentCoverage } } : {}) } });
               while (options.failureCache.size > 256) options.failureCache.delete(options.failureCache.keys().next().value);
             }
           }
@@ -290,7 +375,9 @@ export async function* scanSourceTree(path, options = {}) {
 export async function readSourceTree(path, options = {}) {
   const result = [];
   for await (const file of scanSourceTree(path, options)) {
-    result.push(file.text === undefined && !file.windows ? await readSourceFile(file.path, { ...options, root: resolve(path) }) : file);
+    result.push(file.text === undefined && !file.windows ? await readSourceFile(file.path, { ...options, root: resolve(path),
+      ...(file.extraction?.pageWindow ? { pdfPageWindow: { startPage: file.extraction.pageWindow.startPage,
+        endPage: file.extraction.pageWindow.endPage, rawContentHash: file.extraction.rawContentHash } } : {}) }) : file);
   }
   return result;
 }
@@ -336,7 +423,7 @@ export async function* scanSourcePaths(path, dirtyPaths, options = {}) {
       }
       if (rulesCache.get(directory)?.ignores(relative(directory, candidate).replaceAll('\\', '/'))) protectedPath = true;
     }
-    if (protectedPath) { yield { path: candidate, title: relativePath, missing: true }; continue; }
+    if (protectedPath) { options.failureCache?.delete(relativePath); yield { path: candidate, title: relativePath, missing: true }; continue; }
     let current;
     try { current = await inspectLocalPath(candidate, { allowMissing: true }); }
     catch (error) {
@@ -345,7 +432,7 @@ export async function* scanSourcePaths(path, dirtyPaths, options = {}) {
       yield { path: candidate, title: relativePath, failed: true, errorCode: error.code ?? 'RETRIEVAL_SOURCE_FAILED' };
       continue;
     }
-    if (!current) { yield { path: candidate, title: relativePath, missing: true }; continue; }
+    if (!current) { options.failureCache?.delete(relativePath); yield { path: candidate, title: relativePath, missing: true }; continue; }
     if (current.isDirectory()) throw toolFailure('目录变化需要完整核对。', 'RETRIEVAL_FULL_SCAN_REQUIRED', 409);
     if (!supportedSource(candidate)) {
       yield { path: candidate, title: relativePath, missing: true }; continue;
@@ -354,7 +441,7 @@ export async function* scanSourcePaths(path, dirtyPaths, options = {}) {
     try {
       const file = await readSourceFile(candidate, { ...options, root });
       stats.fileReads++; stats.scannedFiles++; stats.bytesRead += file.metadata.sizeBytes;
-      yield file;
+      yield* continueDocumentWindows(file, { ...options, root });
     } catch (error) {
       if (['ENOENT', 'PROTECTED_RETRIEVAL_SOURCE'].includes(error.code))
         yield { path: candidate, title: relativePath, missing: true };

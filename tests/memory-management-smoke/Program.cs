@@ -18,6 +18,7 @@ internal static class Smoke
 
     public static async Task RunAsync()
     {
+        await CheckAsync("candidate provenance, confirmation-only PATCH and settings patch serialization", CandidateContractsAsync);
         await CheckAsync("HTTP scope paths and status-bearing GETs", HttpReadsAsync);
         await CheckAsync("HTTP manual CRUD uses scope revision and DELETE JSON", HttpWritesAsync);
         await CheckAsync("HTTP errors retain status and machine code", HttpErrorsAsync);
@@ -37,6 +38,24 @@ internal static class Smoke
         await CheckAsync("close cancels and ignores late results", CloseAsync);
         await CheckAsync("external cancellation rejects handlers that ignore the token", ExternalCancellationAsync);
         Console.WriteLine($"Memory management smoke passed: {_passed} checks.");
+    }
+
+    private static Task CandidateContractsAsync()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        using var confirmation = JsonDocument.Parse(JsonSerializer.Serialize(
+            new MemoryConfirmRequest(MemoryScopes.Chat, 4), options));
+        Assert(confirmation.RootElement.GetProperty("status").GetString() == MemoryStatuses.Confirmed, "confirmation status retained");
+        Assert(!confirmation.RootElement.TryGetProperty("content", out _) && !confirmation.RootElement.TryGetProperty("kind", out _), "omitted editor fields must not become null patches");
+        using var settings = JsonDocument.Parse(JsonSerializer.Serialize(
+            new MemoryCandidateSettingsRequest(2, new MemoryCandidateSettingsPatch(Enabled: false)), options));
+        Assert(settings.RootElement.GetProperty("patch").GetProperty("enabled").GetBoolean() == false, "disabled policy serialized");
+        Assert(!settings.RootElement.GetProperty("patch").TryGetProperty("minTurns", out _), "unchanged candidate limits omitted");
+        var original = new MemoryCandidate("conservative-extractive-v1", "decision", new string('a', 64), [new(EntryId, "Original user quote")]);
+        var restored = JsonSerializer.Deserialize<MemoryCandidate>(JsonSerializer.Serialize(original, options), options)!;
+        Assert(restored.Quotes[0].Text == "Original user quote" && restored.Quotes[0].MessageId == EntryId, "exact candidate quotation and source preserved");
+        Assert(MemoryStatuses.IsSupported(MemoryStatuses.Draft), "draft status contract supported");
+        return Task.CompletedTask;
     }
 
     private static async Task CheckAsync(string name, Func<Task> test)

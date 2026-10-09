@@ -11,6 +11,8 @@ const MAX_LEASES = 128;
 const DEFAULT_TTL_MS = 30_000;
 const MAX_TTL_MS = 300_000;
 const MAX_WAIT_MS = 60_000;
+const MIN_RECOVERY_BACKOFF_MS = 1000;
+const MAX_RECOVERY_BACKOFF_MS = 30000;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 export class ResourceBudgetError extends Error {
@@ -75,18 +77,31 @@ export class ResourceBudgetService {
   #feedbackHistories = new Map();
   #feedbackControls = new Map();
   #recovering;
+  #processFactory;
+  #recoveryAttempts = 0;
+  #recoveryFailures = 0;
+  #recoveryRetryAt = 0;
+  #recoveryReason;
 
   constructor({ executablePath = resourceExecutablePath(), executableArgs = [], timeoutMs = 2000,
-    sampler, clock = Date.now } = {}) {
+    sampler, clock = Date.now, processFactory = spawn } = {}) {
+    if (typeof processFactory !== 'function') throw new TypeError('Resource process factory is required.');
     this.#executablePath = executablePath;
     this.#executableArgs = executableArgs;
     this.#timeoutMs = Math.max(50, Math.min(10_000, timeoutMs));
     this.#sampler = sampler; this.#clock = clock;
+    this.#processFactory = processFactory;
   }
 
   status() {
     return { mode: this.#mode, closed: this.#closed, activeReservations: this.#leases.size,
-      recoveryState: this.#recovering ? 'reconciling' : this.#failureCode && this.#leases.size ? 'reservations-quarantined' : 'ready',
+      recoveryState: this.#closed ? 'closed' : this.#recovering ? 'reconciling' :
+        this.#mode === 'fallback' && this.#failureCode ? this.#executablePath && existsSync(this.#executablePath)
+          ? 'backoff' : 'native-monitor-not-bundled' : 'ready',
+      automaticRecovery: { attempts: this.#recoveryAttempts, consecutiveFailures: this.#recoveryFailures,
+        retryAt: !this.#closed && this.#mode === 'fallback' && this.#executablePath && existsSync(this.#executablePath)
+          ? this.#recoveryRetryAt : null, trigger: 'next-snapshot-or-acquire',
+        ...(this.#recoveryReason ? { reason: this.#recoveryReason } : {}) },
       ...(this.#child?.pid ? { processId: this.#child.pid } : {}),
       gpu: this.#mode === 'rust' && this.#nativeSnapshot?.gpu ? { ...this.#nativeSnapshot.gpu }
         : { state: 'unknown', availableMemoryBytes: null },
@@ -94,8 +109,7 @@ export class ResourceBudgetService {
   }
 
   async snapshot({ signal } = {}) {
-    if (this.#recovering) await this.#recovering;
-    this.#assertOpen(signal); await this.#start();
+    this.#assertOpen(signal); await this.#maybeRecover(signal); await this.#start();
     if (this.#mode === 'rust') {
       try { this.#nativeSnapshot = await this.#request('snapshot'); return this.#nativeSnapshot; }
       catch { /* Existing reservations remain quarantined in the gateway. 既有预约继续由网关隔离保留。 */ }
@@ -111,21 +125,22 @@ export class ResourceBudgetService {
         capacityMemoryBytes: this.#memoryCapacity(hardware), maximumResidentReservationBytes: Math.floor(hardware.memory.totalBytes * 0.4),
         availableMemoryBytes: Math.max(0, this.#memoryCapacity(hardware) - memoryBytes),
         gpuMemoryState: 'unverified-reservation', gpuUnverifiedReservationBytes: gpuMemoryBytes,
+        observedMaterializedGpuMemoryBytes: 0, availableGpuMemoryBytes: null, gpuAttributionExact: false,
         state: 'monitor-unavailable-reservations-quarantined' },
       activeLeases, quarantinedLeases: this.#leases.size - activeLeases, maxLeases: MAX_LEASES, sampledAt: now,
       queuedRequests: this.#fallbackWaiters.size, feedback: { ...this.#feedback, backgroundFraction: this.#backgroundFraction },
       executors: { measurementState: 'unknown', reason: 'RESOURCE_NATIVE_MONITOR_UNAVAILABLE', registeredLeases:
         [...this.#leases.values()].filter(lease => lease.executor).length, processes: [] },
+      recoveryState: this.status().recoveryState, automaticRecovery: this.status().automaticRecovery,
       ...(this.#failureCode ? { errorCode: this.#failureCode } : {}) };
   }
 
   async acquire(options, { signal } = {}) {
     this.#assertOpen(signal);
-    if (this.#recovering) await this.#recovering;
     const request = { workspaceId: '', kind: 'background', cpuThreads: 0, memoryBytes: 0,
       gpuMemoryBytes: 0, ttlMs: DEFAULT_TTL_MS, waitMs: 0, ...options };
     if (!validRequest(request)) throw new ResourceBudgetError('RESOURCE_INVALID_REQUEST', 'Invalid resource allocation request.');
-    await this.#start(); this.#assertOpen(signal);
+    await this.#maybeRecover(signal); await this.#start(); this.#assertOpen(signal);
     let result;
     if (this.#mode === 'rust') {
       try { result = await this.#request('acquire', request, { signal, timeoutMs: this.#timeoutMs + request.waitMs }); }
@@ -207,35 +222,47 @@ export class ResourceBudgetService {
     if (!this.#leases.has(leaseId)) return { status: 'denied', reason: 'RESOURCE_LEASE_UNKNOWN' };
     const dimensions = { phase: ['cold-load', 'queue', 'hot-inference', 'other'],
       unit: ['tokens', 'documents', 'pairs', 'vectors', 'operations'], backend: ['cpu', 'gpu', 'dml', 'cuda', 'host'] };
-    const allowed = ['throughputPerSecond', 'latencyMs', 'queueDepth', 'allocationFailure', 'foregroundLatencyMs', 'progress', ...Object.keys(dimensions)];
+    const allowed = ['throughputPerSecond', 'latencyMs', 'queueDepth', 'allocationFailure', 'foregroundLatencyMs', 'progress',
+      'inputTokens', 'sequenceTokens', 'batchSize', 'cpuThreads', ...Object.keys(dimensions)];
     if (!feedback || typeof feedback !== 'object' || Object.entries(feedback).some(([key, value]) => !allowed.includes(key) ||
         (dimensions[key] ? !dimensions[key].includes(value) : key === 'allocationFailure' ? typeof value !== 'boolean' : !Number.isFinite(value) || value < 0 || value > 1e9)) ||
-        feedback.progress > 1 || feedback.queueDepth !== undefined && (!Number.isSafeInteger(feedback.queueDepth) || feedback.queueDepth > 1e6))
+        feedback.progress > 1 || feedback.queueDepth !== undefined && (!Number.isSafeInteger(feedback.queueDepth) || feedback.queueDepth > 1e6) ||
+        Object.entries({ inputTokens: 65_536, sequenceTokens: 512, batchSize: 128, cpuThreads: 32 }).some(([key, maximum]) =>
+          feedback[key] !== undefined && (!Number.isSafeInteger(feedback[key]) || feedback[key] < 1 || feedback[key] > maximum)))
       throw new ResourceBudgetError('RESOURCE_INVALID_FEEDBACK', 'Invalid task feedback.');
     if (this.#mode === 'rust') return this.#request('report', { leaseId, feedback });
     const now = this.#clock(), previous = this.#feedback, taskId = this.#leases.get(leaseId).taskId;
     const backend = feedback.backend ?? 'legacy', phase = feedback.phase ?? 'legacy';
-    const historyKey = `${taskId}|${backend}|${phase}|${feedback.unit ?? 'legacy'}`;
+    const sequenceBucket = feedback.sequenceTokens ? 2 ** Math.ceil(Math.log2(feedback.sequenceTokens)) : 'legacy';
+    const historyKey = `${taskId}|${backend}|${phase}|${feedback.unit ?? 'legacy'}|${sequenceBucket}`;
     const controlKey = backend === 'legacy' ? 'legacy' : `${taskId}|${['gpu', 'dml', 'cuda'].includes(backend) ? 'gpu' : backend}`;
     const control = this.#feedbackControls.get(controlKey) ?? { fraction: 1, lastAdjustmentMs: 0 };
-    const history = this.#feedbackHistories.get(historyKey) ?? { throughputPerSecond: null, latencyMs: null };
+    const history = this.#feedbackHistories.get(historyKey) ?? { throughputPerSecond: null, latencyMsPerToken: null, latencyMs: null };
+    // Compare token-normalized latency so a larger useful batch is not rejected for doing more work.
+    // 以每 token 延迟比较，不能因较大批次完成更多工作而拒绝实际吞吐收益。
+    const comparableLatencyMs = feedback.latencyMs === undefined ? undefined : feedback.latencyMs / Math.max(1, feedback.inputTokens ?? 1);
     if (feedback.allocationFailure || feedback.foregroundLatencyMs > 250) {
-      control.fraction = Math.max(0.125, control.fraction / 2); control.lastAdjustmentMs = now;
+      control.fraction = Math.max(0.125, Math.min(0.5, control.fraction / 2)); control.lastAdjustmentMs = now;
       previous.lastAdjustmentMs = now; previous.adjustmentReason = feedback.allocationFailure ? 'allocation-pressure' : 'foreground-latency';
     } else if (feedback.throughputPerSecond !== undefined && history.throughputPerSecond !== null &&
         feedback.throughputPerSecond > history.throughputPerSecond * 1.05 && feedback.queueDepth > 0 &&
-        (feedback.latencyMs === undefined || history.latencyMs === null || feedback.latencyMs <= history.latencyMs * 1.1) &&
+        (comparableLatencyMs === undefined || history.latencyMsPerToken === null || comparableLatencyMs <= history.latencyMsPerToken * 1.1) &&
         ['legacy', 'hot-inference'].includes(phase) && now - control.lastAdjustmentMs >= 5000) {
-      control.fraction = Math.min(1, control.fraction + 0.125); control.lastAdjustmentMs = now;
+      control.fraction = Math.min(4, control.fraction < 1 ? control.fraction + 0.125 : control.fraction * 2); control.lastAdjustmentMs = now;
       previous.lastAdjustmentMs = now; previous.adjustmentReason = 'measured-hot-throughput-gain';
+    } else if (phase === 'hot-inference' && feedback.queueDepth > 0 && history.throughputPerSecond !== null &&
+        feedback.throughputPerSecond < history.throughputPerSecond * 0.9 && now - control.lastAdjustmentMs >= 5000) {
+      control.fraction = Math.max(0.125, control.fraction / 2); control.lastAdjustmentMs = now;
+      previous.lastAdjustmentMs = now; previous.adjustmentReason = 'measured-hot-throughput-regression';
     } else previous.adjustmentReason = ['legacy', 'hot-inference'].includes(phase) ? 'no-comparable-throughput-gain' : 'non-hot-sample-held';
     if (backend === 'legacy') this.#backgroundFraction = control.fraction;
     previous.taskBackendFraction = control.fraction;
     previous.measurementContext = historyKey;
     this.#feedbackControls.delete(controlKey); this.#feedbackControls.set(controlKey, control);
     while (this.#feedbackControls.size > 128) this.#feedbackControls.delete(this.#feedbackControls.keys().next().value);
-    for (const key of ['throughputPerSecond', 'latencyMs']) if (feedback[key] !== undefined)
-      history[key] = history[key] === null ? feedback[key] : history[key] * 0.75 + feedback[key] * 0.25;
+    for (const [key, value] of [['throughputPerSecond', feedback.throughputPerSecond], ['latencyMsPerToken', comparableLatencyMs],
+      ['latencyMs', feedback.latencyMs]]) if (value !== undefined)
+      history[key] = history[key] === null ? value : history[key] * 0.75 + value * 0.25;
     previous.throughputPerSecond = history.throughputPerSecond; previous.latencyMs = history.latencyMs;
     this.#feedbackHistories.delete(historyKey); this.#feedbackHistories.set(historyKey, history);
     while (this.#feedbackHistories.size > 128) this.#feedbackHistories.delete(this.#feedbackHistories.keys().next().value);
@@ -272,18 +299,25 @@ export class ResourceBudgetService {
             if (restored.status !== 'restored' || restored.restoredLeases !== leases.length)
               throw new ResourceBudgetError('RESOURCE_RESTORE_FAILED', 'Held resource reservations could not be restored.');
             for (const lease of this.#leases.values()) {
-              lease.mode = 'rust';
-              if (lease.executor?.startTimeMs !== null && lease.executor?.startTimeMs !== undefined)
-                await this.#request('recoverExecutor', { leaseId: lease.leaseId, ...lease.executor });
+              if (lease.executor?.startTimeMs !== null && lease.executor?.startTimeMs !== undefined) {
+                const recovered = await this.#request('recoverExecutor', { leaseId: lease.leaseId, ...lease.executor });
+                if (recovered.status !== 'registered') throw new ResourceBudgetError('RESOURCE_RESTORE_FAILED',
+                  'Held executor birth identity could not be restored.');
+              }
             }
+            for (const lease of this.#leases.values()) lease.mode = 'rust';
           } catch { this.#retire('RESOURCE_RESTORE_FAILED'); }
         }
       }
+      this.#assertOpen(signal);
       if (this.#mode === 'rust') {
         try {
           const result = await this.#request('reconcile'); this.#nativeSnapshot = result;
+          if (result?.status !== 'reconciled' || result.mode !== 'rust') throw new ResourceBudgetError('RESOURCE_RECONCILE_FAILED',
+            'Resource reconciliation did not confirm the restored monitor.');
+          this.#recoveryFailures = 0; this.#recoveryRetryAt = 0; this.#recoveryReason = undefined;
           return { ...result, recoveryState: 'reconciled' };
-        } catch { /* A failed reconcile retains all local debt. 核对失败仍保留本地全部账目。 */ }
+        } catch { this.#retire('RESOURCE_RECONCILE_FAILED'); }
       }
       return { status: 'quarantined', mode: 'fallback', retainedLeases: this.#leases.size,
         recoveryState: this.#executablePath ? 'monitor-unavailable' : 'native-monitor-not-bundled',
@@ -298,6 +332,24 @@ export class ResourceBudgetService {
     if (signal?.aborted) throw cancellationError();
   }
 
+  async #maybeRecover(signal) {
+    this.#assertOpen(signal);
+    if (this.#recovering) { await this.#recovering; this.#assertOpen(signal); return; }
+    if (this.#mode !== 'fallback' || !this.#failureCode || !this.#executablePath ||
+        !existsSync(this.#executablePath) || this.#clock() < this.#recoveryRetryAt) return;
+    // A fresh request can retry the monitor after backoff; it never replays a lost allocation or clears old debt.
+    // 新请求仅在退避结束后重试监控，不重放失联分配，也不清除旧债务；并发调用共享恢复屏障。
+    this.#recoveryAttempts++;
+    const result = await this.reconcile({ restartService: true });
+    if (result?.status !== 'reconciled' || result.mode !== 'rust') {
+      this.#recoveryFailures++;
+      this.#recoveryRetryAt = this.#clock() + Math.min(MAX_RECOVERY_BACKOFF_MS,
+        MIN_RECOVERY_BACKOFF_MS * 2 ** Math.min(5, this.#recoveryFailures - 1));
+      this.#recoveryReason = result?.reason ?? 'RESOURCE_RESTORE_FAILED';
+    }
+    this.#assertOpen(signal);
+  }
+
   async #start() {
     if (this.#mode !== 'uninitialized') return this.#starting;
     if (!this.#executablePath) { this.#mode = 'fallback'; this.#failureCode = 'RESOURCE_SERVICE_NOT_BUNDLED'; return; }
@@ -305,16 +357,16 @@ export class ResourceBudgetService {
     this.#starting = (async () => {
       let child;
       try {
-        child = spawn(this.#executablePath, [...this.#executableArgs, '--owner-pid', String(process.pid)], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], shell: false });
+        child = this.#processFactory(this.#executablePath, [...this.#executableArgs, '--owner-pid', String(process.pid)], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], shell: false });
       } catch { this.#retire('RESOURCE_SERVICE_START_FAILED'); return; }
       this.#child = child;
       this.#exit = new Promise(resolveExit => child.once('close', () => {
         if (this.#child === child) this.#retire('RESOURCE_SERVICE_EXITED');
         resolveExit();
       }));
-      child.once('error', () => this.#retire('RESOURCE_SERVICE_START_FAILED'));
-      child.stdin.on('error', () => this.#retire('RESOURCE_SERVICE_IO_FAILED'));
-      child.stdout.on('data', data => this.#onData(data));
+      child.once('error', () => { if (this.#child === child) this.#retire('RESOURCE_SERVICE_START_FAILED'); });
+      child.stdin.on('error', () => { if (this.#child === child) this.#retire('RESOURCE_SERVICE_IO_FAILED'); });
+      child.stdout.on('data', data => { if (this.#child === child) this.#onData(data); });
       try {
         const health = await this.#request('health');
         if (!health || health.mode !== 'rust' || !Number.isSafeInteger(health.cpu?.logicalCores) ||
@@ -379,7 +431,11 @@ export class ResourceBudgetService {
   }
 
   #retire(code) {
-    if (!this.#closed) { this.#mode = 'fallback'; this.#failureCode = code; }
+    if (!this.#closed) {
+      this.#mode = 'fallback'; this.#failureCode = code;
+      this.#recoveryReason = code;
+      this.#recoveryRetryAt = Math.max(this.#recoveryRetryAt, this.#clock() + MIN_RECOVERY_BACKOFF_MS);
+    }
     for (const pending of this.#pending.values()) {
       pending.cleanup();
       pending.reject(new ResourceBudgetError(code, 'The owned resource service is unavailable.'));
@@ -427,7 +483,9 @@ export class ResourceBudgetService {
     if (request.memoryBytes > memoryBytes || request.cpuThreads > 0 && cpuThreads === 0 ||
         request.kind === 'background' && request.cpuThreads > 0 && hardware.cpu.usagePercent > 90)
       return { status: 'denied', reason: 'RESOURCE_PRESSURE', mode: 'fallback' };
-    const fraction = this.#feedbackControls.get(`${request.taskId}|cpu`)?.fraction ?? this.#backgroundFraction;
+    const policyFraction = this.#feedbackControls.get(`${request.taskId}|cpu`)?.fraction ?? this.#backgroundFraction;
+    const fraction = hardware.cpu.usagePercent > 85 || hardware.memory.availableBytes < 1024 ** 3
+      ? Math.min(0.5, policyFraction) : policyFraction;
     const grantedCpu = Math.min(cpuThreads, request.cpuThreads, request.kind === 'background' ?
       Math.max(1, Math.floor(this.#cpuCapacity(hardware) * fraction)) : cpuThreads);
     return { status: 'granted', mode: 'fallback', device: 'cpu', leaseId: `fallback-${randomUUID()}`,
@@ -440,10 +498,22 @@ export class ResourceBudgetService {
     const candidates = Math.max(16, Math.min(136, Math.round((hardware.cpu.usagePercent > 85 ? 40 :
       40 + Math.min(hardware.cpu.logicalCores, 32) * 3) * fraction)));
     const memory = Math.min(memoryBytes, Math.floor(hardware.memory.availableBytes / 3));
+    const isIdle = Number.isFinite(hardware.cpu.usagePercent) && hardware.cpu.usagePercent < 35 &&
+      hardware.memory.availableBytes >= 2 * 1024 ** 3;
+    const reserved = this.#reserved();
+    const cpuHeadroom = Math.max(0, this.#cpuCapacity(hardware) - reserved.cpuThreads - cpuThreads);
+    const memoryHeadroomBytes = Math.max(0, this.#memoryCapacity(hardware) - reserved.memoryBytes - memoryBytes);
+    // Search's one thread is planning overhead; the reranker obtains its own execution lease later.
+    // 检索的一条线程仅为规划开销；重排随后必须另行申请自己的执行租约。
+    const rerankCandidates = fraction < 1 || hardware.cpu.usagePercent > 85 || memoryHeadroomBytes < 512 * 1024 ** 2 || cpuHeadroom < 1 ? 20
+      : cpuHeadroom >= 3 && memoryHeadroomBytes >= 1024 ** 3 ? 60 : 40;
     return { annShardBytes: Math.min(Math.floor(memory / 2), 1024 ** 3), annCacheBytes: memory,
       annBuildConcurrency: Math.max(1, Math.min(4, cpuThreads)), candidateLimit: candidates,
       fusedCandidateLimit: Math.min(160, Math.floor(candidates * 1.2)), evidenceBudgetTokens: Math.max(2048, Math.min(16384, candidates * 128)),
-      batchMultiplier: fraction, adjustmentReason: fraction < 1 ? 'held-task-backend-pressure' : 'capacity-approved',
+      rerankCandidates, rerankCandidateLimit: rerankCandidates, batchMultiplier: fraction,
+      rerankSuggestionRequiresApproval: true,
+      batchProbeMultiplier: fraction === 1 && isIdle ? 2 : fraction,
+      adjustmentReason: fraction < 1 ? 'held-task-backend-pressure' : 'capacity-approved',
       lastFeedbackReason: this.#feedback.adjustmentReason ?? 'not-adjusted',
       measurementContext: this.#feedback.measurementContext ?? null, source: 'resource-authority' };
   }
@@ -456,7 +526,7 @@ export class ResourceBudgetService {
       const timer = setTimeout(() => { this.#fallbackWaiters.delete(id); cleanup(); resolveResult({ status: 'denied', reason: 'RESOURCE_WAIT_TIMEOUT', mode: 'fallback' }); }, request.waitMs);
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel);
         if (!this.#fallbackWaiters.size) { clearInterval(this.#fallbackTimer); this.#fallbackTimer = undefined; } };
-      this.#fallbackWaiters.set(id, { request, queuedAt, resolve: resolveResult, reject: rejectResult, cleanup });
+      this.#fallbackWaiters.set(id, { request, queuedAt, signal, resolve: resolveResult, reject: rejectResult, cleanup });
       signal?.addEventListener('abort', cancel, { once: true });
       this.#fallbackTimer ??= setInterval(() => this.#drainFallback(), 200);
     });
@@ -467,6 +537,18 @@ export class ResourceBudgetService {
     const now = this.#clock();
     const priority = waiter => waiter.request.kind === 'background' && (now - waiter.queuedAt >= 2000 || this.#foregroundStreak >= 3) ? 0
       : waiter.request.kind === 'foreground' ? 1 : 2;
+    if (this.#mode === 'rust') {
+      // Recovered queues must re-enter native admission, or new fallback leases would bypass the restored ledger.
+      // 恢复后的等待队列必须重新进入原生准入，不能新增未写入恢复账本的降级预约。
+      const waiters = [...this.#fallbackWaiters.values()].sort((first, second) => priority(first) - priority(second) || first.queuedAt - second.queuedAt);
+      this.#fallbackWaiters.clear();
+      for (const waiter of waiters) {
+        waiter.cleanup();
+        this.acquire({ ...waiter.request, waitMs: Math.max(0, waiter.request.waitMs - (now - waiter.queuedAt)) },
+          { signal: waiter.signal }).then(waiter.resolve, waiter.reject);
+      }
+      return;
+    }
     const attempted = new Set();
     while (attempted.size < this.#fallbackWaiters.size) {
       const next = [...this.#fallbackWaiters.entries()].filter(([id]) => !attempted.has(id))

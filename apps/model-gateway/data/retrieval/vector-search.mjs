@@ -1,8 +1,11 @@
-import { LocalAnnStore, RETRIEVAL_DOMAIN_SQL, validateAnnOptions } from './ann-store.mjs';
+import { DEFAULT_ANN_OPTIONS, LocalAnnStore, RETRIEVAL_DOMAIN_SQL, partitionAnnDescriptor, validateAnnOptions } from './ann-store.mjs';
 
 const MAX_CHANNEL_CANDIDATES = 40;
 const MAX_DESCRIPTOR_CACHE_ENTRIES = 64;
 const MAX_DESCRIPTOR_CACHE_BYTES = 8 * 1024 * 1024;
+const EXACT_TARGET_LATENCY_MS = 25;
+const MIN_ADAPTIVE_THRESHOLD = 1024;
+const MAX_ADAPTIVE_THRESHOLD = 200000;
 
 /** Exact and approximate channels share the same authorized SQLite corpus and model identity.
  * 精确与近似通道共享同一已授权 SQLite 语料及模型身份，不混用向量空间或跨范围召回。 */
@@ -17,11 +20,15 @@ export class RetrievalVectorSearch {
     this.descriptorCacheBytes = 0;
     this.descriptorCacheCounters = { hits: 0, misses: 0, invalidated: 0 };
     this.partitionCache = new Map();
+    this.partitionCacheBytes = 0;
+    this.exactCosts = new Map();
     this.exactLatencyMs = null;
   }
 
   _invalidateDescriptors(scopeKeys) {
     this.partitionCache.clear();
+    this.partitionCacheBytes = 0;
+    for (const [key, cost] of this.exactCosts) if (scopeKeys.includes(cost.scopeKey)) this.exactCosts.delete(key);
     for (const [key, entry] of this.descriptorCache) if (entry.scopeKeys.some(scopeKey => scopeKeys.includes(scopeKey))) {
       this.descriptorCache.delete(key);
       this.descriptorCacheBytes -= entry.bytes;
@@ -36,26 +43,86 @@ export class RetrievalVectorSearch {
       const perVector = descriptor.dimensions * 4 + options.connectivity * 16 + 256;
       const vectorsPerShard = Math.max(1, Math.floor(options.maxShardBytes / perVector));
       if (descriptor.count <= vectorsPerShard) { result.push(descriptor); continue; }
-      const segments = Math.ceil(descriptor.count / vectorsPerShard);
       const key = JSON.stringify([descriptor, vectorsPerShard]);
-      let parts = this.partitionCache.get(key);
+      let parts = this.partitionCache.get(key)?.parts;
       if (!parts) {
-        // Partition only the authorized space. Key ranges are version-bound and never overlap.
-        // 只对已授权向量空间分片；键区间绑定当前版本、互不重叠，不混用不同模型空间。
-        parts = this.database.prepare(`WITH authorized AS MATERIALIZED (
-          SELECT c.id,ntile(?) OVER (ORDER BY c.id) AS segment FROM ${this.vectorTable} c JOIN sources s ON s.source_id=c.source_id
-          WHERE s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=?
-          AND c.embedding_space_id=? AND ${RETRIEVAL_DOMAIN_SQL}=? AND c.vector IS NOT NULL)
-          SELECT min(id) AS minimumId,max(id) AS maximumId,count(*) AS count FROM authorized GROUP BY segment ORDER BY segment`)
-          .all(segments, descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
-            descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain)
-          .map(part => ({ ...descriptor, ...part, partitioned: true }));
-        this.partitionCache.set(key, parts);
-        while (this.partitionCache.size > 64) this.partitionCache.delete(this.partitionCache.keys().next().value);
+        parts = partitionAnnDescriptor(this.database, this.vectorTable, descriptor, options);
+        const bytes = Buffer.byteLength(key) + Buffer.byteLength(JSON.stringify(parts));
+        if (bytes <= MAX_DESCRIPTOR_CACHE_BYTES) {
+          while (this.partitionCache.size >= MAX_DESCRIPTOR_CACHE_ENTRIES || this.partitionCacheBytes + bytes > MAX_DESCRIPTOR_CACHE_BYTES) {
+            const [oldestKey, oldest] = this.partitionCache.entries().next().value;
+            this.partitionCache.delete(oldestKey); this.partitionCacheBytes -= oldest.bytes;
+          }
+          this.partitionCache.set(key, { parts, bytes }); this.partitionCacheBytes += bytes;
+        }
       }
       result.push(...parts);
     }
     return result;
+  }
+
+  _costKey(descriptor) {
+    return JSON.stringify([this.ann.epoch, descriptor.scope_key, descriptor.embedding_profile_id, descriptor.dimensions,
+      descriptor.embedding_model_version, descriptor.embedding_space_id, descriptor.domain, descriptor.generation]);
+  }
+
+  _recordExactCost(descriptor, elapsedMs) {
+    if (!descriptor.count || !Number.isFinite(elapsedMs) || elapsedMs <= 0) return;
+    const key = this._costKey(descriptor), previous = this.exactCosts.get(key);
+    this.exactCosts.delete(key);
+    this.exactCosts.set(key, { scopeKey: descriptor.scope_key,
+      msPerVector: previous ? previous.msPerVector * 0.8 + elapsedMs / descriptor.count * 0.2 : elapsedMs / descriptor.count });
+    while (this.exactCosts.size > MAX_DESCRIPTOR_CACHE_ENTRIES) this.exactCosts.delete(this.exactCosts.keys().next().value);
+  }
+
+  _routingOptions(options, descriptors, { approvedCapacity = false } = {}) {
+    // Tune only the default automatic switch using measured exact cost and admitted capacity; ranking stays unchanged.
+    // 仅按实测精确扫描成本及批准容量调整默认自动切换阈值，明确配置和排序算法保持原合同。
+    let threshold = options.threshold, reason = 'configured-threshold';
+    const costs = descriptors.map(descriptor => this.exactCosts.get(this._costKey(descriptor))?.msPerVector).filter(value => value > 0);
+    if (options.mode === 'auto' && options.adaptive && threshold === DEFAULT_ANN_OPTIONS.threshold) {
+      if (costs.length) {
+        threshold = Math.max(MIN_ADAPTIVE_THRESHOLD, Math.min(MAX_ADAPTIVE_THRESHOLD,
+          Math.floor(EXACT_TARGET_LATENCY_MS / Math.max(...costs))));
+        reason = 'observed-exact-cost';
+      }
+      if (approvedCapacity && descriptors.length) {
+        const maximumVectorBytes = Math.max(...descriptors.map(descriptor => descriptor.dimensions * 4 + options.connectivity * 16 + 256));
+        const capacityThreshold = Math.max(MIN_ADAPTIVE_THRESHOLD, Math.floor(options.maxShardBytes / maximumVectorBytes / 2));
+        if (capacityThreshold < threshold) { threshold = capacityThreshold; reason = 'approved-shard-capacity'; }
+      }
+    }
+    this.routingAudit = { configuredThreshold: options.threshold, effectiveThreshold: threshold, reason,
+      exactTargetLatencyMs: EXACT_TARGET_LATENCY_MS, measuredCorpora: costs.length,
+      thresholdBounds: { minimum: MIN_ADAPTIVE_THRESHOLD, maximum: MAX_ADAPTIVE_THRESHOLD },
+      explicitThresholdPreserved: options.threshold !== DEFAULT_ANN_OPTIONS.threshold };
+    return { ...options, threshold };
+  }
+
+  async _plannedDescriptors(descriptors, options, kind) {
+    // Admission precedes partitioning; the shard plan cannot rely on a configured budget that was never reserved.
+    // 先准入后分片，分片计划不能依赖未预约的配置额度；CPU/内存执行仍由原生所有者逐次准入。
+    const routed = this._routingOptions(options, descriptors);
+    if (options.mode !== 'ann' && (options.mode !== 'auto' || !descriptors.some(descriptor => descriptor.count > routed.threshold))) {
+      this.ann.planningAudit = { configured: { maxShardBytes: options.maxShardBytes, threshold: options.threshold },
+        approved: null, reason: 'exact-route-no-ann-admission' };
+      return { options: routed, descriptors: this._partitionDescriptors(descriptors, routed) };
+    }
+    let admitted;
+    try { admitted = await this.ann.planningOptions(options, descriptors, kind); }
+    catch (error) {
+      this.ann.planningAudit = { ...this.ann.resourceAdmissionAudit, approved: null,
+        configured: { maxShardBytes: options.maxShardBytes, threshold: options.threshold }, reason: error.code ?? 'RETRIEVAL_ANN_RESOURCE_LIMIT' };
+      throw error;
+    }
+    const effective = this._routingOptions(admitted, descriptors, { approvedCapacity: Boolean(this.ann.resourceLease) });
+    const parts = this._partitionDescriptors(descriptors, effective);
+    this.ann.planningAudit = { ...this.ann.resourceAdmissionAudit, configured: { maxShardBytes: options.maxShardBytes,
+      maxCachedShards: options.maxCachedShards, threshold: options.threshold }, approved: { maxShardBytes: effective.maxShardBytes,
+      maxCachedShards: effective.maxCachedShards, threshold: effective.threshold }, originalDescriptors: descriptors.length,
+      plannedShards: parts.length, largestShardBytes: Math.max(0, ...parts.map(descriptor => descriptor.count *
+        (descriptor.dimensions * 4 + effective.connectivity * 16 + 256))) };
+    return { options: effective, descriptors: parts };
   }
 
   _descriptors({ scopeKeys, embeddingProfileId, dimensions, embeddingModelVersion, embeddingSpaceId, requestedDomain }) {
@@ -121,7 +188,7 @@ export class RetrievalVectorSearch {
   }
 
   async prepareScopes(scopeKeys, ann) {
-    const options = ann === undefined ? this.lastOptions ?? this.options : validateAnnOptions({ ...this.options, ...ann });
+    let options = ann === undefined ? this.lastOptions ?? this.options : validateAnnOptions({ ...this.options, ...ann });
     await this.ann.enforceBudget(options);
     if (options.mode === 'off' || options.mode === 'exact') return this.ann.status();
     const descriptors = this.database.prepare(`SELECT s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,
@@ -130,7 +197,12 @@ export class RetrievalVectorSearch {
       WHERE s.scope_key IN (${scopeKeys.map(() => '?').join(',')}) AND c.vector IS NOT NULL
       GROUP BY s.scope_key,c.embedding_profile_id,c.dimensions,c.embedding_model_version,c.embedding_space_id,domain`)
       .all(...scopeKeys);
-    for (const descriptor of this._partitionDescriptors(descriptors, options)) {
+    let planned;
+    try { planned = await this._plannedDescriptors(descriptors, options, 'background'); }
+    catch (error) { this.ann.lastError = error.code ?? 'RETRIEVAL_ANN_RESOURCE_LIMIT'; return this.ann.status(); }
+    options = planned.options;
+    await this.ann.enforceBudget(options);
+    for (const descriptor of planned.descriptors) {
       try { this.ann.warm(descriptor, options); }
       catch (error) { this.ann.lastError = error.code ?? 'RETRIEVAL_ANN_BUILD_FAILED'; }
     }
@@ -145,13 +217,24 @@ export class RetrievalVectorSearch {
   async search({ scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, requestedDomain, ann,
     channelCandidates = MAX_CHANNEL_CANDIDATES }, checkCancelled) {
     const candidateLimit = Math.max(1, Math.min(160, channelCandidates));
-    const options = validateAnnOptions({ ...this.options, ...ann });
+    let options = validateAnnOptions({ ...this.options, ...ann });
     this.lastOptions = options;
     await this.ann.enforceBudget(options);
     checkCancelled();
-    const descriptors = this._partitionDescriptors(this._descriptors({ scopeKeys, embeddingProfileId, dimensions: queryVector.length,
-      embeddingModelVersion, embeddingSpaceId, requestedDomain }), options);
-    let degradedReason = null;
+    const rawDescriptors = this._descriptors({ scopeKeys, embeddingProfileId, dimensions: queryVector.length,
+      embeddingModelVersion, embeddingSpaceId, requestedDomain });
+    let descriptors, planningError;
+    try {
+      const planned = await this._plannedDescriptors(rawDescriptors, options, 'foreground');
+      options = planned.options; descriptors = planned.descriptors;
+      checkCancelled(); await this.ann.enforceBudget(options); checkCancelled();
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+      planningError = error.code ?? 'RETRIEVAL_ANN_RESOURCE_LIMIT';
+      descriptors = this._partitionDescriptors(rawDescriptors, options);
+    }
+    this.effectiveOptions = options;
+    let degradedReason = planningError ?? null;
     let exactScannedChunks = 0;
     const matches = [], backends = new Set();
     const exactCandidates = (descriptor, fallback = false) => {
@@ -178,6 +261,7 @@ export class RetrievalVectorSearch {
           new Uint8Array(new Float32Array(queryVector).buffer));
       const elapsed = performance.now() - started;
       this.exactLatencyMs = this.exactLatencyMs === null ? elapsed : this.exactLatencyMs * 0.8 + elapsed * 0.2;
+      this._recordExactCost(descriptor, elapsed);
       if (rows.length ? rows[0].invalid_distance_count : descriptor.count) degradedReason ??= 'RETRIEVAL_VECTOR_DISTANCE_INVALID';
       matches.push(...rows.map(row => ({ id: row.id, distance: row.distance,
         identity: descriptor, domainRank: requestedDomain && descriptor.domain !== requestedDomain ? 1 : 0 })));
@@ -189,6 +273,7 @@ export class RetrievalVectorSearch {
       checkCancelled();
       const shouldApproximate = options.mode === 'ann' || options.mode === 'auto' && descriptor.count > options.threshold;
       if (!shouldApproximate) { exactCandidates(descriptor); continue; }
+      if (planningError) { exactCandidates(descriptor, true); continue; }
       try {
         const rows = await this.ann.search(descriptor, queryVector, candidateLimit, options, checkCancelled);
         matches.push(...rows.filter(row => Number.isFinite(row.distance)).map(row => ({ ...row,
@@ -226,11 +311,14 @@ export class RetrievalVectorSearch {
     return { items, degradedReason, semanticBackend: backends.size > 1 ? 'mixed' : [...backends][0] ?? null };
   }
 
-  status() { return { ...this.ann.status(), options: this.lastOptions ?? this.options, exactLatencyMs: this.exactLatencyMs,
+  status() { return { ...this.ann.status(), options: this.lastOptions ?? this.options,
+    effectiveOptions: this.effectiveOptions ?? null, routingAudit: this.routingAudit ?? null, exactLatencyMs: this.exactLatencyMs,
+    partitionCache: { entries: this.partitionCache.size, payloadBytes: this.partitionCacheBytes },
     descriptorCache: { entries: this.descriptorCache.size, payloadBytes: this.descriptorCacheBytes, ...this.descriptorCacheCounters } }; }
   close() {
     this.descriptorCache.clear(); this.descriptorCacheBytes = 0;
     this.partitionCache.clear();
+    this.partitionCacheBytes = 0; this.exactCosts.clear();
     return this.ann.close();
   }
 }

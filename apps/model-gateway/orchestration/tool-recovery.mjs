@@ -28,6 +28,7 @@ function effectKey(call) {
 export class ToolRecoveryLedger {
   constructor() {
     this.completed = new Map(); this.protectedEffects = null; this.unknown = new Map(); this.receipts = []; this.events = [];
+    this.verifiedEffects = [];
   }
 
   observe(call, result) {
@@ -47,18 +48,40 @@ export class ToolRecoveryLedger {
   previous(call) { return isRecoveryObservation(call) ? null : this.protectedEffects?.get(effectKey(call)); }
   get hasUnknownEffects() { return this.unknown.size > 0; }
 
+  resolveVerified(proofs = []) {
+    // Only broker-owned state checks supply proofs; model text never certifies an uncertain dispatch.
+    // 仅权限代理持有的真实状态核验提供证明；模型文字不能自行确认未知派发。
+    let resolved = 0;
+    for (const proof of proofs) {
+      const record = [...this.unknown.entries()].find(([, item]) => item.call.id === proof.toolCallId);
+      if (!record || proof.outcome !== 'dispatch-confirmed' || !proof.result || proof.result.isError ||
+          proof.result.status !== 'completed') continue;
+      const [key, original] = record;
+      const verified = { call: original.call, result: proof.result };
+      this.unknown.delete(key); this.completed.set(key, verified);
+      this.protectedEffects ??= new Map(this.completed);
+      this.protectedEffects.set(key, verified);
+      this.verifiedEffects.push({ toolCallId: proof.toolCallId, observationToolCallId: proof.observationToolCallId,
+        outcome: proof.outcome, ...(proof.result.resultRef ? { resultRef: proof.result.resultRef } : {}) });
+      resolved++;
+    }
+    return resolved;
+  }
+
   classify(error) {
     return error instanceof ToolCallDecodeFailure && error.executed === false ? 'repair-unexecuted-model-step' : 'stop';
   }
 
   record(code, action, round) { this.events.push({ code, action, round, dispatched: false }); this.events = this.events.slice(-8); }
-  audit() { return { version: 1, events: [...this.events], unknownEffects: this.unknown.size }; }
+  audit() { return { version: 1, events: [...this.events], unknownEffects: this.unknown.size,
+    verifiedEffects: [...this.verifiedEffects] }; }
 
   fallback(message = '') {
     const chinese = /\p{Script=Han}/u.test(message);
     const counts = { completed: 0, unknown: 0, error: 0 };
+    const verifiedIds = new Set(this.verifiedEffects.map(item => item.toolCallId));
     for (const receipt of this.receipts) {
-      if (receipt.status === 'completed') counts.completed++;
+      if (receipt.status === 'completed' || verifiedIds.has(receipt.id)) counts.completed++;
       else if (receipt.status === 'unknown') counts.unknown++;
       else counts.error++;
     }

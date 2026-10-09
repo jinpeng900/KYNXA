@@ -34,6 +34,29 @@ function validateWindows(file) {
   return windows;
 }
 
+/** Persist page metadata without retaining document bodies; incomplete discovery cannot become complete on restart.
+ * 只持久化页面元信息，不保留文档正文；未完成的发现不能在重启后冒充完整清单。
+ */
+function validateDocumentWindows(file) {
+  if (file.documentWindows === undefined) return undefined;
+  const fail = () => { throw toolFailure('PDF 页窗口清单损坏，原记录已保留。', 'INVALID_RETRIEVAL_MANIFEST', 409); };
+  if (!Array.isArray(file.documentWindows) || !file.documentWindows.length || file.documentWindows.length > MAX_MANIFEST_FILES) fail();
+  let nextPage = 1, totalBytes = 0, rawContentHash, pageCount;
+  const windows = file.documentWindows.map(window => {
+    const extraction = validateSourceExtraction(window.extraction);
+    if (!extraction.pageWindow || extraction.pageWindow.startPage !== nextPage ||
+        rawContentHash && extraction.rawContentHash !== rawContentHash || pageCount && extraction.pageCount !== pageCount ||
+        !/^[a-f0-9]{64}$/u.test(window.contentHash ?? '') || !Number.isSafeInteger(window.textBytes) ||
+        window.textBytes < 0 || window.textBytes > 2 * 1024 * 1024) fail();
+    rawContentHash ??= extraction.rawContentHash; pageCount ??= extraction.pageCount;
+    nextPage = extraction.pageWindow.endPage + 1; totalBytes += window.textBytes;
+    return { contentHash: window.contentHash, textBytes: window.textBytes, extraction };
+  });
+  if (file.textBytes !== totalBytes || file.contentHash !== windows[0].contentHash ||
+      JSON.stringify(file.extraction) !== JSON.stringify(windows[0].extraction) || file.documentComplete !== (nextPage === pageCount + 1)) fail();
+  return windows;
+}
+
 function validateBinding(binding) {
   if (!binding || typeof binding.projectId !== 'string' || !binding.projectId || binding.projectId.length > 256 ||
       typeof binding.root !== 'string' || !isAbsolute(binding.root) ||
@@ -57,9 +80,11 @@ function validateFiles(files) {
       throw toolFailure('索引文件清单损坏，原记录已保留。', 'INVALID_RETRIEVAL_MANIFEST', 409);
     names.add(file.relativePath);
     const windows = validateWindows(file);
+    const documentWindows = validateDocumentWindows(file);
     return { relativePath: file.relativePath, contentHash: file.contentHash, textBytes: file.textBytes,
       ...(file.extraction === undefined ? {} : { extraction: validateSourceExtraction(file.extraction) }),
       ...(windows === undefined ? {} : { windows }),
+      ...(documentWindows === undefined ? {} : { documentWindows, documentComplete: file.documentComplete }),
       metadata: Object.fromEntries(META_FIELDS.map(field => [field, file.metadata[field]])) };
   });
 }

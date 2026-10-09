@@ -96,6 +96,7 @@ fn main() {
         let now_ms = epoch_ms();
         let hardware = sampler.snapshot(budget.has_gpu_allocation());
         budget.reconcile_memory(sampler.memory_observations());
+        budget.reconcile_gpu_memory(sampler.gpu_memory_observations());
         for lease_id in sampler.retired_executors() {
             budget.release(&lease_id);
             sampler.remove_executor(&lease_id);
@@ -129,6 +130,7 @@ fn main() {
                         .is_some_and(|bytes| bytes > 0);
         let hardware = if request.method == "reconcile" { sampler.reconcile(needs_gpu) } else { sampler.snapshot(needs_gpu) };
         budget.reconcile_memory(sampler.memory_observations());
+        budget.reconcile_gpu_memory(sampler.gpu_memory_observations());
         let result = match request.method.as_str() {
             "snapshot" | "health" | "reconcile" => {
                 for lease_id in sampler.retired_executors() {

@@ -5,20 +5,55 @@ import { deriveSourceVersion, canonicalMetadata } from '../../data/retrieval/der
 import { CHUNKER_VERSION, TOKENIZER_VERSION, EMBEDDING_TEXT_VERSION, STRUCTURED_CHUNKER_VERSION, STRUCTURED_EMBEDDING_TEXT_VERSION,
   chunkStructuredSource, embeddingProjectionForChunk } from '../../data/retrieval/retrieval-text.mjs';
 import { applyTokenFit, embeddingInputForChunk } from '../../data/retrieval/token-chunks.mjs';
+import { validateDocumentCoverage } from '../../data/retrieval/document-coverage.mjs';
 import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
 import { sourceIdentity } from './source-projection.mjs';
 import { prioritizeEvidenceSources } from './query-plan.mjs';
+import { prepareSourcePipeline, IndexPublicationStage } from './index-pipeline.mjs';
 
 const MAX_BATCH_SOURCES = 4;
 const MAX_PUBLICATION_SOURCES = 100;
 const MAX_PUBLICATION_CHARACTERS = 8 * 1024 * 1024;
 const MAX_UNMEASURED_SOURCE_CHARACTERS = 2 * 1024 * 1024;
-const MAX_EMBEDDING_BATCH_CHUNKS = 32;
+const DEFAULT_EMBEDDING_BATCH_CHUNKS = 32;
+const MAX_EMBEDDING_BATCH_CHUNKS = 128;
+const MAX_EMBEDDING_REQUEST_BYTES = 256 * 1024;
 const MAX_FINGERPRINTS = 64000;
 const MAX_DIAGNOSTIC_CODES = 8;
 const embeddingVersion = modelVersion => modelVersion ? `${modelVersion}|${EMBEDDING_TEXT_VERSION}` : undefined;
 const EMBEDDING_CONTRACT_FIELDS = ['profileId', 'modelVersion', 'inputProjectionVersion', 'embeddingSpaceId', 'dimensions'];
+
+/** Suggestions plan a bounded request; the inference owner still approves its actual token/memory grant.
+ * 建议只规划有界请求；真实 token/内存额度仍由推理所有者批准，不能把建议当成授权。
+ */
+export function embeddingChunkBatch(source, chunks, offset, status = {}, { fitting = false } = {}) {
+  const suggestion = status.batchSuggestions ?? status.resourceReservation?.batchSuggestions ?? {};
+  const suggestedSize = Number.isSafeInteger(suggestion.batchSize) && suggestion.batchSize > 0
+    ? suggestion.batchSize : DEFAULT_EMBEDDING_BATCH_CHUNKS;
+  const admissionSize = status.requestLimits?.maxBatchDocuments;
+  const maximumChunks = Math.max(1, Math.min(MAX_EMBEDDING_BATCH_CHUNKS, suggestedSize,
+    Number.isSafeInteger(admissionSize) && admissionSize > 0 ? admissionSize : MAX_EMBEDDING_BATCH_CHUNKS));
+  const maximumInputTokens = Number.isSafeInteger(status.maxInputTokens) && status.maxInputTokens > 0 ? status.maxInputTokens : 512;
+  const tokenBudget = Number.isSafeInteger(suggestion.batchTokenBudget) && suggestion.batchTokenBudget >= maximumInputTokens
+    ? suggestion.batchTokenBudget : DEFAULT_EMBEDDING_BATCH_CHUNKS * maximumInputTokens;
+  const byteBudget = Math.min(MAX_EMBEDDING_REQUEST_BYTES, status.requestLimits?.maxRequestBytes ?? MAX_EMBEDDING_REQUEST_BYTES);
+  const selected = [];
+  let inputBytes = 0, estimatedTokens = 0, lengthBound = maximumChunks;
+  // UTF-8 demand bounds IPC allocation; unmeasured fitting uses a conservative byte estimate without truncating text.
+  // UTF-8 实际需求约束 IPC 分配；尚未拟合的正文用保守字节估计组批，不截断正文或修改单输入 token 上限。
+  for (let index = offset; index < chunks.length && selected.length < lengthBound; index++) {
+    const chunk = chunks[index], projection = fitting ? embeddingProjectionForChunk(source, chunk) : null;
+    const input = fitting ? projection.context + projection.text : embeddingInputForChunk(source, chunk);
+    const bytes = Buffer.byteLength(input) + 64;
+    const tokens = fitting ? bytes : chunk.embeddingProjection?.tokenCount ?? Math.min(maximumInputTokens, bytes);
+    const tier = input.length > 4096 ? 32 : input.length > 2048 ? 64 : MAX_EMBEDDING_BATCH_CHUNKS;
+    const nextBound = Math.min(lengthBound, tier);
+    if (selected.length && (selected.length >= nextBound || inputBytes + bytes > byteBudget || estimatedTokens + tokens > tokenBudget)) break;
+    selected.push(chunk); inputBytes += bytes; estimatedTokens += tokens; lengthBound = nextBound;
+  }
+  return selected;
+}
 
 function sourceMetadata(input) {
   if (input.text !== undefined) return validateSource(input);
@@ -78,10 +113,10 @@ export class SourceIndexer {
     this.fingerprints.delete(`${sourceId}:semantic`);
   }
 
-  preparationVersion(profileId) {
+  preparationVersion(profileId, devicePreference) {
     const parserVersion = preparationVersion(this.structures);
     if (!parserVersion) return null;
-    const status = typeof this.embeddings.fitDocuments === 'function' ? this.embeddings.status(profileId) : null;
+    const status = typeof this.embeddings.fitDocuments === 'function' ? this.embeddings.status(profileId, { devicePreference }) : null;
     return status?.fittingVersion ? `${parserVersion}|${status.fittingVersion}|${sourceIdentity(status.profileId,
       status.modelVersion, status.inputProjectionVersion, status.maxInputTokens, status.embeddingSpaceId)}` : parserVersion;
   }
@@ -99,16 +134,16 @@ export class SourceIndexer {
     return current ? published : null;
   }
 
-  async fitSourceChunks(source, chunks, status, { profileId, signal }, recordDiagnostic) {
+  async fitSourceChunks(source, chunks, status, { profileId, signal, devicePreference }, recordDiagnostic) {
     if (!chunks.length || typeof this.embeddings.fitDocuments !== 'function' || !status.fittingVersion) return { source, chunks };
     const fitted = [];
-    for (let offset = 0; offset < chunks.length; offset += MAX_EMBEDDING_BATCH_CHUNKS) {
+    for (let offset = 0; offset < chunks.length;) {
       signal?.throwIfAborted();
-      const batch = chunks.slice(offset, offset + MAX_EMBEDDING_BATCH_CHUNKS);
+      const batch = embeddingChunkBatch(source, chunks, offset, this.embeddings.status(profileId, { devicePreference }), { fitting: true });
       const projections = batch.map(chunk => embeddingProjectionForChunk(source, chunk));
       let receipt;
       for (let attempt = 0; attempt <= projections.length; attempt++) {
-        try { receipt = await this.embeddings.fitDocuments(projections, { signal, profileId }); break; }
+        try { receipt = await this.embeddings.fitDocuments(projections, { signal, profileId, devicePreference }); break; }
         catch (error) {
           if (signal?.aborted) throw error;
           const index = error.details?.index;
@@ -130,6 +165,7 @@ export class SourceIndexer {
           chunkId: `${chunk.chunkId.slice(0, chunk.chunkId.lastIndexOf(':'))}:${chunkIndex}` });
       }
       if (fitted.length > 40000) throw toolFailure('token 分块超过来源预算。', 'RETRIEVAL_SOURCE_TOO_LARGE', 413);
+      offset += batch.length;
     }
     return { source: { ...source, chunkerVersion: fitted[0]?.chunkerVersion ?? source.chunkerVersion,
       embeddingInputVersion: `${source.embeddingInputVersion ?? EMBEDDING_TEXT_VERSION}|${status.fittingVersion}` }, chunks: fitted };
@@ -163,13 +199,14 @@ export class SourceIndexer {
   }
 
   async restore(sources, settings, records, signal) {
+    const devicePreference = settings.local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto';
     const scopes = [...new Set(sources.map(source => source.scopeKey))];
     if (!scopes.length || !records.length) return;
     const published = new Map((await this.index.listSources({ scopeKeys: scopes, signal })).map(source => [source.sourceId, source]));
     const current = new Map(sources.map(source => [source.sourceId, sourceMetadata(source)]));
-    const serviceVersion = this.preparationVersion(settings.local.embeddingProfileId);
+    const serviceVersion = this.preparationVersion(settings.local.embeddingProfileId, devicePreference);
     const serviceIdentity = this.structures?.identity?.() ?? this.structures;
-    const status = this.embeddings.status(settings.local.embeddingProfileId);
+    const status = this.embeddings.status(settings.local.embeddingProfileId, { devicePreference });
     for (const record of records) {
       signal?.throwIfAborted();
       const source = current.get(record.sourceId), row = published.get(record.sourceId);
@@ -205,13 +242,58 @@ export class SourceIndexer {
     while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
   }
 
-  async upsert(sources, settings, signal, progress, { semantic = true, loadSource, isCurrent, priorities } = {}) {
+  async prepareSourceBody(input, settings, signal, { semantic, loadSource }) {
+    let source = sourceMetadata(input);
     const profileId = settings.local.embeddingProfileId;
+    const devicePreference = settings.local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto';
+    const previous = this.fingerprints.get(`${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`);
+    const service = this.structures, serviceIdentity = service?.identity?.() ?? service;
+    const serviceVersion = this.preparationVersion(profileId, devicePreference);
+    const inputSignature = preparationSignature(source);
+    const status = this.embeddings.status(profileId, { devicePreference });
+    if (input.unavailable || serviceVersion && previous?.preparation && previous.preparation.service === serviceIdentity &&
+        previous.preparation.serviceVersion === serviceVersion && previous.preparation.inputSignature === inputSignature &&
+        previous.fingerprint === fingerprintFor(source, previous.preparation, status, settings, semantic)) return null;
+    if (source.text === undefined) {
+      if (!loadSource) throw toolFailure('来源正文不可用。', 'RETRIEVAL_SOURCE_UNAVAILABLE', 409);
+      source = validateSource(await loadSource(source, signal));
+      signal?.throwIfAborted();
+      if (preparationSignature(source) !== inputSignature) throw toolFailure('来源准备期间发生变化。', 'STALE_RETRIEVAL_SOURCE', 409);
+    }
+    let chunks;
+    if (this.structures) {
+      try {
+        const parsed = await this.structures.parse(source, { signal });
+        signal?.throwIfAborted();
+        source = { ...source, structure: parsed.structure, parserVersion: parsed.parserVersion,
+          chunkerVersion: parsed.chunkerVersion, embeddingInputVersion: parsed.embeddingInputVersion };
+        chunks = parsed.chunks;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        // Parser failure preserves original lexical text, never fabricated symbols.
+        // 解析失败保留原始词法正文，不生成虚构符号。
+        const path = source.locator.relativePath ?? source.locator.path ?? source.title;
+        const code = !['memory', 'message'].includes(source.sourceType) && /\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|pyi?|rs|go)$/iu.test(path);
+        const structure = { domain: code ? 'code' : 'knowledge', language: null, parserVersion: 'plain-text-v1', parseStatus: 'unavailable',
+          diagnosticCodes: [/^[A-Z][A-Z0-9_]{0,127}$/.test(error.code ?? '') ? error.code : 'STRUCTURE_PARSE_FAILED'] };
+        source = { ...source, structure, parserVersion: structure.parserVersion,
+          chunkerVersion: STRUCTURED_CHUNKER_VERSION, embeddingInputVersion: STRUCTURED_EMBEDDING_TEXT_VERSION };
+        chunks = chunkStructuredSource(source, { ...structure, units: [] }, { checkCancelled: () => signal?.throwIfAborted() });
+      }
+    } else chunks = chunkSource(source);
+    return { source, chunks };
+  }
+
+  async upsert(sources, settings, signal, progress, { semantic = true, loadSource, isCurrent, priorities, sourceFailures = [] } = {}) {
+    const profileId = settings.local.embeddingProfileId;
+    const devicePreference = settings.local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto';
     const semanticRequested = semantic && settings.local.semantic !== 'off' && profileId !== null;
     const diagnosticCodes = new Set();
-    const coverageEntries = new Map(), coverageCounts = { discovered: sources.length, lexical: 0, semantic: 0, failed: 0, skipped: 0, partial: 0 };
-    const recordCoverage = (source, status, { lexical = 'unverified', semanticState = semanticRequested ? 'pending' : 'disabled', parser = 'pending', errorCode } = {}) => {
-      const old = coverageEntries.get(source.sourceId);
+    const coverageEntries = new Map(), coverageStates = new Map();
+    const coverageCounts = { discovered: sources.length, lexical: 0, semantic: 0, failed: 0, skipped: 0, partial: 0 };
+    let coverageReportTruncated = false;
+    const recordCoverage = (source, status, { lexical = 'unverified', semanticState = semanticRequested ? 'pending' : 'disabled', parser = 'pending', errorCode, documentCoverage } = {}) => {
+      const old = coverageStates.get(source.sourceId);
       if (old) {
         if (old.lexical === 'ready') coverageCounts.lexical--;
         if (old.semantic === 'ready') coverageCounts.semantic--;
@@ -220,21 +302,41 @@ export class SourceIndexer {
       if (lexical === 'ready') coverageCounts.lexical++;
       if (semanticState === 'ready') coverageCounts.semantic++;
       if (['failed', 'skipped', 'partial'].includes(status)) coverageCounts[status]++;
+      coverageStates.set(source.sourceId, { status, lexical, semantic: semanticState });
       coverageEntries.set(source.sourceId, { scopeKey: source.scopeKey, sourceId: source.sourceId, sourceRevision: source.sourceRevision,
+        ...(source.sourceType ? { sourceType: source.sourceType } : {}),
         relativePath: source.locator?.relativePath ?? source.title ?? source.sourceId, status, lexical, semantic: semanticState, parser,
+        ...(documentCoverage ? { documentCoverage: validateDocumentCoverage(documentCoverage) } : {}),
         ...(errorCode ? { errorCode: /^[A-Z][A-Z0-9_]{0,127}$/u.test(errorCode) ? errorCode : 'RETRIEVAL_SOURCE_FAILED' } : {}) });
-      while (coverageEntries.size > 1000) coverageEntries.delete(coverageEntries.keys().next().value);
+      while (coverageEntries.size > 1000) { coverageEntries.delete(coverageEntries.keys().next().value); coverageReportTruncated = true; }
     };
     let totalChunks = 0, vectorChunks = 0, cachedChunks = 0, skippedSources = 0, skippedChunks = 0;
     const recordDiagnostic = (code, fallback = 'EMBEDDING_FAILED') => {
       if (diagnosticCodes.size < MAX_DIAGNOSTIC_CODES)
         diagnosticCodes.add(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(code) ? code : fallback);
     };
+    const knownSources = new Set(sources.map(source => source.sourceId));
+    const failureEntries = [];
+    for (const failure of sourceFailures) {
+      signal?.throwIfAborted();
+      if (!failure.sourceId || !failure.scopeKey || failure.directory) continue;
+      if (!knownSources.has(failure.sourceId)) { knownSources.add(failure.sourceId); coverageCounts.discovered++; }
+      recordCoverage({ sourceId: failure.sourceId, scopeKey: failure.scopeKey, sourceType: 'work-file', title: failure.relativePath }, 'failed',
+        { parser: 'failed', errorCode: failure.errorCode, documentCoverage: failure.documentCoverage });
+      failureEntries.push(coverageEntries.get(failure.sourceId));
+    }
+    if (this.index.recordCoverage) for (let offset = 0; offset < failureEntries.length; offset += MAX_PUBLICATION_SOURCES) {
+      signal?.throwIfAborted();
+      const entries = failureEntries.slice(offset, offset + MAX_PUBLICATION_SOURCES);
+      await this.index.recordCoverage({ entries, scopeKeys: [...new Set(entries.map(entry => entry.scopeKey))] });
+    }
     const report = () => ({ coverage: { ...coverageCounts, complete: !coverageCounts.failed && !coverageCounts.skipped && !coverageCounts.partial,
-      sources: [...coverageEntries.values()] }, semantic: { requested: semanticRequested, profileId: profileId ?? null,
+      sources: [...coverageEntries.values()], reportTruncated: coverageReportTruncated }, semantic: { requested: semanticRequested, profileId: profileId ?? null,
       state: !semanticRequested ? 'disabled' : coverageCounts.failed || coverageCounts.skipped ? vectorChunks ? 'partial' : 'unavailable'
         : vectorChunks === totalChunks ? 'complete' : vectorChunks ? 'partial' : 'unavailable',
       totalChunks, vectorChunks, cachedChunks, skippedSources, skippedChunks, diagnosticCodes: [...diagnosticCodes] } });
+    if (failureEntries.length && progress) await progress(0, { ...report(),
+      processedSourceIds: failureEntries.map(entry => entry.sourceId) });
     const currentFingerprint = (source, versions, status) => fingerprintFor(source, versions, status, settings, semantic);
     let reuseSettings = new Map();
     const reuse = async (source, count, key, entry) => {
@@ -267,298 +369,286 @@ export class SourceIndexer {
     const batchSize = Math.min(requestedBatchSize, MAX_PUBLICATION_SOURCES);
     const orderedSources = priorities ? [...sources] : sources;
     let priorityRevision = -1;
-    for (let offset = 0; offset < sources.length;) {
-      signal?.throwIfAborted();
-      // New foreground targets reorder only remaining work at a safe publication boundary.
-      // 新前台目标只在安全发布边界重排剩余工作，不重做已完成批次，也不恢复取消的任务。
-      if (priorities && priorityRevision !== priorities.revision) {
-        const remaining = prioritizeEvidenceSources(orderedSources.slice(offset), priorities.paths);
-        for (let index = 0; index < remaining.length; index++) orderedSources[offset + index] = remaining[index];
-        priorityRevision = priorities.revision;
-      }
-      reuseSettings = new Map();
-      const batch = [];
-      let batchCharacters = 0;
-      for (const source of orderedSources.slice(offset, offset + batchSize)) {
-        const window = source.locator?.fileWindow;
-        const measured = typeof source.text === 'string' ? source.text.length : window ? window.endOffset - window.startOffset :
-          Number.isSafeInteger(source.storedBytes) && source.storedBytes >= 0 ? source.storedBytes : MAX_UNMEASURED_SOURCE_CHARACTERS;
-        const characters = Number.isSafeInteger(measured) && measured >= 0 ?
-          Math.min(measured, MAX_UNMEASURED_SOURCE_CHARACTERS) : MAX_UNMEASURED_SOURCE_CHARACTERS;
-        if (batch.length && batchCharacters + characters > MAX_PUBLICATION_CHARACTERS) break;
-        batch.push(source); batchCharacters += characters;
-      }
-      const prepared = [];
-      const fingerprintUpdates = new Map();
-      const checkpointSources = [];
-      for (const input of batch) {
+    const publicationStage = new IndexPublicationStage();
+    try {
+      for (let offset = 0; offset < sources.length;) {
+        // Publication is durable before admitting another batch or changing priority.
+        // 下一批接纳和优先级重排前先等正式发布，不能预取越过恢复检查点。
+        await publicationStage.drain();
         signal?.throwIfAborted();
-        let source, chunks;
-        try { source = sourceMetadata(input); }
-        catch (error) {
-          if (signal?.aborted || error.name === 'AbortError') throw error;
-          skippedSources++; coverageCounts.failed++; recordDiagnostic(error.code, 'RETRIEVAL_SOURCE_FAILED'); continue;
+        // New foreground targets reorder only remaining work at a safe publication boundary.
+        // 新前台目标只在安全发布边界重排剩余工作，不重做已完成批次，也不恢复取消的任务。
+        if (priorities && priorityRevision !== priorities.revision) {
+          const remaining = prioritizeEvidenceSources(orderedSources.slice(offset), priorities.paths);
+          for (let index = 0; index < remaining.length; index++) orderedSources[offset + index] = remaining[index];
+          priorityRevision = priorities.revision;
         }
-        if (input.unavailable) {
-          skippedSources++; recordDiagnostic(input.errorCode, 'RETRIEVAL_SOURCE_FAILED');
-          recordCoverage(source, 'failed', { parser: 'failed', errorCode: input.errorCode ?? 'RETRIEVAL_SOURCE_FAILED' }); continue;
+        reuseSettings = new Map();
+        const batch = [];
+        let batchCharacters = 0;
+        for (const source of orderedSources.slice(offset, offset + batchSize)) {
+          const window = source.locator?.fileWindow;
+          const measured = typeof source.text === 'string' ? source.text.length : window ? window.endOffset - window.startOffset :
+            Number.isSafeInteger(source.storedBytes) && source.storedBytes >= 0 ? source.storedBytes : MAX_UNMEASURED_SOURCE_CHARACTERS;
+          const characters = Number.isSafeInteger(measured) && measured >= 0 ?
+            Math.min(measured, MAX_UNMEASURED_SOURCE_CHARACTERS) : MAX_UNMEASURED_SOURCE_CHARACTERS;
+          if (batch.length && batchCharacters + characters > MAX_PUBLICATION_CHARACTERS) break;
+          batch.push(source); batchCharacters += characters;
         }
-        const fingerprintKey = `${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`;
-        const service = this.structures, serviceVersion = this.preparationVersion(profileId);
-        const serviceIdentity = service?.identity?.() ?? service;
-        const inputSignature = preparationSignature(source);
-        const previous = this.fingerprints.get(fingerprintKey);
-        let status = this.embeddings.status(profileId);
-        // Retain only publication metadata, so large scopes can skip parsing without retaining whole chunk arrays.
-        // 只保留已发布派生的轻量元信息，大范围未变来源可跳过解析，不驻留整份分块数组。
-        if (serviceVersion && previous?.preparation && previous.preparation.service === serviceIdentity &&
-            previous.preparation.serviceVersion === serviceVersion && previous.preparation.inputSignature === inputSignature &&
-            previous.fingerprint === currentFingerprint(source, previous.preparation, status)) {
-          const cached = await reuse(source, previous.preparation.chunkCount, fingerprintKey, previous);
-          if (cached) {
-            totalChunks += previous.preparation.chunkCount;
-            if (cached === 'reused' && previous.checkpoint) checkpointSources.push(previous.checkpoint);
-            continue;
-          }
-        }
-        if (source.text === undefined) {
-          if (!loadSource) {
-            skippedSources++; recordDiagnostic('RETRIEVAL_SOURCE_UNAVAILABLE');
-            recordCoverage(source, 'failed', { parser: 'failed', errorCode: 'RETRIEVAL_SOURCE_UNAVAILABLE' }); continue;
-          }
-          try { source = validateSource(await loadSource(source, signal)); }
-          catch (error) {
-            if (signal?.aborted || error.name === 'AbortError') throw error;
-            skippedSources++;
-            recordDiagnostic(error.code, 'RETRIEVAL_SOURCE_FAILED');
-            recordCoverage(source, error.code === 'STALE_RETRIEVAL_SOURCE' ? 'skipped' : 'failed', { parser: 'failed', errorCode: error.code ?? 'RETRIEVAL_SOURCE_FAILED' });
-            continue;
-          }
+        const prepared = [];
+        const fingerprintUpdates = new Map();
+        const checkpointSources = [];
+        for await (const stage of prepareSourcePipeline(batch,
+          input => this.prepareSourceBody(input, settings, signal, { semantic, loadSource }),
+          { concurrency: semantic ? 2 : 1, signal })) {
+          const input = stage.input;
           signal?.throwIfAborted();
-          if (preparationSignature(source) !== inputSignature) {
-            skippedSources++; recordDiagnostic('STALE_RETRIEVAL_SOURCE'); recordCoverage(source, 'skipped', { errorCode: 'STALE_RETRIEVAL_SOURCE' }); continue;
-          }
-        }
-        if (this.structures) {
-          try {
-            const parsed = await this.structures.parse(source, { signal });
-            signal?.throwIfAborted();
-            source = { ...source, structure: parsed.structure, parserVersion: parsed.parserVersion,
-              chunkerVersion: parsed.chunkerVersion, embeddingInputVersion: parsed.embeddingInputVersion };
-            chunks = parsed.chunks;
-          } catch (error) {
-            if (signal?.aborted) throw error;
-            // A parser fault preserves real lexical text and reports unavailable structure, never invented symbols.
-            // 解析故障保留真实词法正文并标记结构不可用，不生成虚构符号。
-            const path = source.locator.relativePath ?? source.locator.path ?? source.title;
-            const code = !['memory', 'message'].includes(source.sourceType) && /\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|pyi?|rs|go)$/iu.test(path);
-            const structure = { domain: code ? 'code' : 'knowledge',
-              language: null, parserVersion: 'plain-text-v1', parseStatus: 'unavailable',
-              diagnosticCodes: [/^[A-Z][A-Z0-9_]{0,127}$/.test(error.code ?? '') ? error.code : 'STRUCTURE_PARSE_FAILED'] };
-            source = { ...source, structure, parserVersion: structure.parserVersion,
-              chunkerVersion: STRUCTURED_CHUNKER_VERSION, embeddingInputVersion: STRUCTURED_EMBEDDING_TEXT_VERSION };
-            chunks = chunkStructuredSource(source, { ...structure, units: [] },
-              { checkCancelled: () => signal?.throwIfAborted() });
-          }
-        } else chunks = chunkSource(source);
-        if (source.structure?.parseStatus === 'unavailable' &&
-            !source.structure.diagnosticCodes?.some(code => ['UNSUPPORTED_CODE_LANGUAGE', 'CODE_LANGUAGE_UNSUPPORTED'].includes(code)))
-          this.preparationFailures++;
-        let fittingFailed = false;
-        const fittingRequired = settings.local.semantic !== 'off' && profileId !== null &&
-          typeof this.embeddings.fitDocuments === 'function' && Boolean(status.fittingVersion);
-        if (fittingRequired) {
-          try {
-            if (!['ready', 'loading'].includes(status.state))
-              throw toolFailure('当前嵌入模型不可用，token 分块待恢复。', status.errorCode ?? 'EMBEDDING_PROFILE_UNAVAILABLE', 409);
-            ({ source, chunks } = await this.fitSourceChunks(source, chunks, status, { profileId, signal }, recordDiagnostic));
-          }
-          catch (error) {
-            if (signal?.aborted) throw error;
-            fittingFailed = true;
-            this.preparationFailures++;
-            this.lastEmbeddingError = error.code ?? 'EMBEDDING_FIT_FAILED';
-            recordDiagnostic(this.lastEmbeddingError);
-          }
-        }
-        if (fittingFailed) {
-          // A transient fitting fault cannot replace a still-authorized unchanged publication with incompatible raw chunks.
-          // 临时拟合故障不能用不兼容原始分块替换仍获授权且未变化的正式派生；不缓存本次降级，恢复后重试。
-          const published = await this.unchangedPublication(sourceMetadata(input), settings, signal, isCurrent);
-          if (published) {
-            totalChunks += published.chunkCount;
-            if (semanticRequested && published.embeddingProfileId === profileId &&
-                published.embeddingModelVersion === embeddingVersion(status.modelVersion) &&
-                published.embeddingSpaceId === status.embeddingSpaceId && published.vectorDimensions === status.dimensions)
-              vectorChunks += published.vectorChunks;
-            recordCoverage(source, 'partial', { lexical: 'ready', semanticState: published.vectorChunks ? 'partial' : 'pending',
-              parser: 'ready', errorCode: this.lastEmbeddingError });
-            continue;
-          }
-        }
-        totalChunks += chunks.length;
-        const versions = deriveSourceVersion(source, chunks, { checkCancelled: () => signal?.throwIfAborted() });
-        status = this.embeddings.status(profileId);
-        const fingerprint = currentFingerprint(source, versions, status);
-        const preparation = !fittingFailed && serviceVersion && this.preparationVersion(profileId) === serviceVersion &&
-          this.structures === service && (this.structures?.identity?.() ?? this.structures) === serviceIdentity &&
-          source.structure?.parseStatus !== 'unavailable'
-          ? { service: serviceIdentity, serviceVersion, inputSignature, chunkCount: chunks.length,
-            derivationSignature: versions.derivationSignature, embeddingInputSignature: versions.embeddingInputSignature } : undefined;
-        const derivedPrevious = this.fingerprints.get(fingerprintKey);
-        const cached = derivedPrevious?.fingerprint === fingerprint && await reuse(source, chunks.length, fingerprintKey, derivedPrevious);
-        if (cached) {
-          this.fingerprints.set(fingerprintKey, { fingerprint, ...(preparation ? { preparation } : {}),
-            ...(derivedPrevious.checkpoint ? { checkpoint: derivedPrevious.checkpoint } : {}) });
-          if (cached === 'reused' && derivedPrevious.checkpoint) checkpointSources.push(derivedPrevious.checkpoint);
-          continue;
-        }
-        const vectors = chunks.map(() => null);
-        let embeddingModelVersion;
-        let embeddingSpaceId;
-        let embeddedProfileId;
-        let firstEmbeddingReceipt;
-        let vectorDimensions;
-        if (semanticRequested && ['ready', 'loading'].includes(status.state)) {
-          for (let chunkOffset = 0; chunkOffset < chunks.length; chunkOffset += MAX_EMBEDDING_BATCH_CHUNKS) {
-            signal?.throwIfAborted();
-            const slice = chunks.slice(chunkOffset, chunkOffset + MAX_EMBEDDING_BATCH_CHUNKS);
-            try {
-              const embedded = await this.embedBoundedDocuments(slice.map(item => embeddingInputForChunk(source, item)),
-                { signal, profileId }, recordDiagnostic);
-              signal?.throwIfAborted();
-              if (!compatibleEmbeddingContract({ ...status, profileId }, embedded) ||
-                  firstEmbeddingReceipt && !compatibleEmbeddingContract(firstEmbeddingReceipt, embedded) ||
-                  !Array.isArray(embedded.vectors) || embedded.vectors.length !== slice.length)
-                throw toolFailure('嵌入结果与所选模型或批次不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
-              for (const [index, vector] of embedded.vectors.entries()) {
-                if (vector === null && embedded.rejectedPositions.has(index)) continue;
-                const expectedDimensions = status.dimensions ?? embedded.dimensions ?? vectorDimensions;
-                if (!(Array.isArray(vector) || vector instanceof Float32Array) || !vector.length ||
-                    expectedDimensions !== undefined && vector.length !== expectedDimensions ||
-                    !vector.every(Number.isFinite) || !vector.some(value => value !== 0))
-                  throw toolFailure('嵌入向量与所选模型维数不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
-                vectorDimensions ??= vector.length;
-              }
-              firstEmbeddingReceipt ??= {};
-              for (const field of EMBEDDING_CONTRACT_FIELDS)
-                if (embedded[field] !== undefined) firstEmbeddingReceipt[field] ??= embedded[field];
-              embeddingModelVersion = embeddingVersion(firstEmbeddingReceipt.modelVersion);
-              embeddingSpaceId = firstEmbeddingReceipt.embeddingSpaceId;
-              embeddedProfileId = firstEmbeddingReceipt.profileId ?? profileId;
-              embedded.vectors.forEach((vector, index) => { vectors[chunkOffset + index] = vector; });
-            } catch (error) {
-              if (signal?.aborted) throw error;
-              this.lastEmbeddingError = error.code ?? 'EMBEDDING_FAILED';
-              recordDiagnostic(error.code);
-              if (error.code === 'EMBEDDING_PROFILE_MISMATCH') {
-                // One source cannot publish a mixture of model spaces, even if earlier batches completed.
-                // 同一来源不能发布多个模型空间的混合向量，即使之前的批次已经返回也必须全部丢弃。
-                vectors.fill(null);
-                embeddingModelVersion = undefined;
-                embeddingSpaceId = undefined;
-                embeddedProfileId = undefined;
-                break;
-              }
-            }
-          }
-        } else if (semanticRequested) {
-          this.lastEmbeddingError = status.errorCode ?? 'EMBEDDING_PROFILE_UNAVAILABLE';
-          recordDiagnostic(status.errorCode, 'EMBEDDING_PROFILE_UNAVAILABLE');
-        }
-        prepared.push({ ...source, chunks, ...versions,
-          ...(vectors.some(Boolean) ? { vectors, embeddingProfileId: embeddedProfileId, embeddingModelVersion, embeddingSpaceId } : {}) });
-        fingerprintUpdates.set(source.sourceId, {
-          cacheEligible: !semanticRequested || vectors.every(Boolean),
-          key: fingerprintKey, value: { fingerprint, ...(preparation ? { preparation } : {}) },
-          source, versions, chunks, vectors, embeddingModelVersion, embeddingSpaceId, embeddedProfileId, vectorDimensions });
-      }
-      const publish = async () => {
-        signal?.throwIfAborted();
-        const current = [];
-        for (const source of prepared) {
-          if (!semantic || await this.backgroundSourceActive(source, settings, signal)) current.push(source);
-          else {
-            skippedSources++;
-            skippedChunks += source.chunks.length;
-            recordDiagnostic('STALE_RETRIEVAL_SOURCE');
-            recordCoverage(source, 'skipped', { errorCode: 'STALE_RETRIEVAL_SOURCE' });
-          }
-        }
-        signal?.throwIfAborted();
-        if (current.length) {
-          let receipt;
-          try { receipt = await this.index.upsertSources(current, { signal }); }
+          let source, chunks;
+          try { source = sourceMetadata(input); }
           catch (error) {
             if (signal?.aborted || error.name === 'AbortError') throw error;
-            const receipts = [];
-            for (const source of current) {
-              try { receipts.push(await this.index.upsertSources([source], { signal })); }
-              catch (sourceError) {
-                if (signal?.aborted || sourceError.name === 'AbortError') throw sourceError;
-                recordDiagnostic(sourceError.code, 'RETRIEVAL_SOURCE_FAILED');
-                recordCoverage(source, 'failed', { parser: 'failed', errorCode: sourceError.code ?? 'RETRIEVAL_SOURCE_FAILED' });
-              }
-            }
-            receipt = { sources: receipts.flatMap(item => Array.isArray(item?.sources) ? item.sources : []) };
+            skippedSources++; coverageCounts.failed++; recordDiagnostic(error.code, 'RETRIEVAL_SOURCE_FAILED'); continue;
           }
-          const acknowledged = new Set((Array.isArray(receipt?.sources) ? receipt.sources : []).map(source => source.sourceId));
-          for (const source of current) {
-            if (!acknowledged.has(source.sourceId)) {
-              // A resolved call without its publication receipt cannot prove that derived text or vectors committed.
-              // 调用已返回但缺少发布回执，不能证明正文派生或向量已经提交，也不能缓存为成功。
-              if (coverageEntries.get(source.sourceId)?.status !== 'failed') {
-                recordDiagnostic('RETRIEVAL_PUBLICATION_UNVERIFIED');
-                recordCoverage(source, 'partial', { parser: 'ready', errorCode: 'RETRIEVAL_PUBLICATION_UNVERIFIED' });
-              }
+          if (input.unavailable) {
+            skippedSources++; recordDiagnostic(input.errorCode, 'RETRIEVAL_SOURCE_FAILED');
+            recordCoverage(source, 'failed', { parser: 'failed', errorCode: input.errorCode ?? 'RETRIEVAL_SOURCE_FAILED',
+              documentCoverage: input.documentCoverage }); continue;
+          }
+          const fingerprintKey = `${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`;
+          const service = this.structures, serviceVersion = this.preparationVersion(profileId, devicePreference);
+          const serviceIdentity = service?.identity?.() ?? service;
+          const inputSignature = preparationSignature(source);
+          const previous = this.fingerprints.get(fingerprintKey);
+          let status = this.embeddings.status(profileId, { devicePreference });
+          // Retain only publication metadata, so large scopes can skip parsing without retaining whole chunk arrays.
+          // 只保留已发布派生的轻量元信息，大范围未变来源可跳过解析，不驻留整份分块数组。
+          if (serviceVersion && previous?.preparation && previous.preparation.service === serviceIdentity &&
+              previous.preparation.serviceVersion === serviceVersion && previous.preparation.inputSignature === inputSignature &&
+              previous.fingerprint === currentFingerprint(source, previous.preparation, status)) {
+            const cached = await reuse(source, previous.preparation.chunkCount, fingerprintKey, previous);
+            if (cached) {
+              totalChunks += previous.preparation.chunkCount;
+              if (cached === 'reused' && previous.checkpoint) checkpointSources.push(previous.checkpoint);
               continue;
             }
-            const parser = source.structure?.parseStatus === 'unavailable' ? 'failed' : source.structure?.parseStatus === 'partial' ? 'partial' : 'ready';
-            const vectorCount = source.vectors?.filter(Boolean).length ?? 0;
-            const semanticState = !semanticRequested ? 'disabled' : vectorCount === source.chunks.length ? 'ready' : vectorCount ? 'partial' : 'pending';
-            recordCoverage(source, parser === 'ready' && ['ready', 'disabled'].includes(semanticState) ? 'ready' : 'partial',
-              { lexical: 'ready', semanticState, parser });
-            const update = fingerprintUpdates.get(source.sourceId);
-            if (!acknowledged.has(source.sourceId) || !update?.value.preparation) continue;
-            const checkpoint = { sourceId: source.sourceId, inputSignature: update.value.preparation.inputSignature,
-              fingerprint: update.value.fingerprint, semantic, preparationVersion: update.value.preparation.serviceVersion,
-              derivationSignature: update.versions.derivationSignature, embeddingInputSignature: update.versions.embeddingInputSignature,
-              chunkCount: update.chunks.length, vectorChunks: update.vectors.filter(Boolean).length,
-              embeddingProfileId: update.embeddedProfileId ?? null, embeddingModelVersion: update.embeddingModelVersion ?? null,
-              embeddingSpaceId: update.embeddingSpaceId ?? null, vectorDimensions: update.vectorDimensions ?? null };
-            update.value.checkpoint = checkpoint;
-            checkpointSources.push(checkpoint);
           }
-          if (!semantic) {
-            // Only a proven unchanged publication preserves a semantic cache; fallback derivations may drop vectors.
-            // 只有正式回执证实派生未变才保留语义缓存；词法降级可能已经清除原有向量。
-            const unchanged = new Set((Array.isArray(receipt?.sources) ? receipt.sources : [])
-              .filter(source => source?.unchanged === true).map(source => source.sourceId));
-            for (const source of current) if (!unchanged.has(source.sourceId))
-              this.fingerprints.delete(`${source.sourceId}:semantic`);
+          try {
+            if (stage.error) throw stage.error;
+            const body = stage.value ?? await this.prepareSourceBody(input, settings, signal, { semantic, loadSource });
+            if (!body) throw toolFailure('来源准备不可用。', 'RETRIEVAL_SOURCE_UNAVAILABLE', 409);
+            ({ source, chunks } = body);
+          } catch (error) {
+            if (signal?.aborted || error.name === 'AbortError') throw error;
+            skippedSources++; recordDiagnostic(error.code, 'RETRIEVAL_SOURCE_FAILED');
+            recordCoverage(source, error.code === 'STALE_RETRIEVAL_SOURCE' ? 'skipped' : 'failed', { parser: 'failed',
+              errorCode: error.code ?? 'RETRIEVAL_SOURCE_FAILED', documentCoverage: error.details?.documentCoverage });
+            continue;
           }
+          if (source.structure?.parseStatus === 'unavailable' &&
+              !source.structure.diagnosticCodes?.some(code => ['UNSUPPORTED_CODE_LANGUAGE', 'CODE_LANGUAGE_UNSUPPORTED'].includes(code)))
+            this.preparationFailures++;
+          let fittingFailed = false;
+          const fittingRequired = settings.local.semantic !== 'off' && profileId !== null &&
+            typeof this.embeddings.fitDocuments === 'function' && Boolean(status.fittingVersion);
+          if (fittingRequired) {
+            try {
+              if (!['ready', 'loading'].includes(status.state))
+                throw toolFailure('当前嵌入模型不可用，token 分块待恢复。', status.errorCode ?? 'EMBEDDING_PROFILE_UNAVAILABLE', 409);
+              ({ source, chunks } = await this.fitSourceChunks(source, chunks, status, { profileId, signal, devicePreference }, recordDiagnostic));
+            }
+            catch (error) {
+              if (signal?.aborted) throw error;
+              fittingFailed = true;
+              this.preparationFailures++;
+              this.lastEmbeddingError = error.code ?? 'EMBEDDING_FIT_FAILED';
+              recordDiagnostic(this.lastEmbeddingError);
+            }
+          }
+          if (fittingFailed) {
+            // A transient fitting fault cannot replace a still-authorized unchanged publication with incompatible raw chunks.
+            // 临时拟合故障不能用不兼容原始分块替换仍获授权且未变化的正式派生；不缓存本次降级，恢复后重试。
+            const published = await this.unchangedPublication(sourceMetadata(input), settings, signal, isCurrent);
+            if (published) {
+              totalChunks += published.chunkCount;
+              if (semanticRequested && published.embeddingProfileId === profileId &&
+                  published.embeddingModelVersion === embeddingVersion(status.modelVersion) &&
+                  published.embeddingSpaceId === status.embeddingSpaceId && published.vectorDimensions === status.dimensions)
+                vectorChunks += published.vectorChunks;
+              recordCoverage(source, 'partial', { lexical: 'ready', semanticState: published.vectorChunks ? 'partial' : 'pending',
+                parser: 'ready', errorCode: this.lastEmbeddingError });
+              continue;
+            }
+          }
+          totalChunks += chunks.length;
+          const versions = deriveSourceVersion(source, chunks, { checkCancelled: () => signal?.throwIfAborted() });
+          status = this.embeddings.status(profileId, { devicePreference });
+          const fingerprint = currentFingerprint(source, versions, status);
+          const preparation = !fittingFailed && serviceVersion && this.preparationVersion(profileId, devicePreference) === serviceVersion &&
+            this.structures === service && (this.structures?.identity?.() ?? this.structures) === serviceIdentity &&
+            source.structure?.parseStatus !== 'unavailable'
+            ? { service: serviceIdentity, serviceVersion, inputSignature, chunkCount: chunks.length,
+              derivationSignature: versions.derivationSignature, embeddingInputSignature: versions.embeddingInputSignature } : undefined;
+          const derivedPrevious = this.fingerprints.get(fingerprintKey);
+          const cached = derivedPrevious?.fingerprint === fingerprint && await reuse(source, chunks.length, fingerprintKey, derivedPrevious);
+          if (cached) {
+            this.fingerprints.set(fingerprintKey, { fingerprint, ...(preparation ? { preparation } : {}),
+              ...(derivedPrevious.checkpoint ? { checkpoint: derivedPrevious.checkpoint } : {}) });
+            if (cached === 'reused' && derivedPrevious.checkpoint) checkpointSources.push(derivedPrevious.checkpoint);
+            continue;
+          }
+          const vectors = chunks.map(() => null);
+          let embeddingModelVersion;
+          let embeddingSpaceId;
+          let embeddedProfileId;
+          let firstEmbeddingReceipt;
+          let vectorDimensions;
+          if (semanticRequested && ['ready', 'loading'].includes(status.state)) {
+            for (let chunkOffset = 0; chunkOffset < chunks.length;) {
+              signal?.throwIfAborted();
+              const slice = embeddingChunkBatch(source, chunks, chunkOffset, this.embeddings.status(profileId, { devicePreference }));
+              try {
+                const embedded = await this.embedBoundedDocuments(slice.map(item => embeddingInputForChunk(source, item)),
+                  { signal, profileId, devicePreference }, recordDiagnostic);
+                signal?.throwIfAborted();
+                if (!compatibleEmbeddingContract({ ...status, profileId }, embedded) ||
+                    firstEmbeddingReceipt && !compatibleEmbeddingContract(firstEmbeddingReceipt, embedded) ||
+                    !Array.isArray(embedded.vectors) || embedded.vectors.length !== slice.length)
+                  throw toolFailure('嵌入结果与所选模型或批次不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
+                for (const [index, vector] of embedded.vectors.entries()) {
+                  if (vector === null && embedded.rejectedPositions.has(index)) continue;
+                  const expectedDimensions = status.dimensions ?? embedded.dimensions ?? vectorDimensions;
+                  if (!(Array.isArray(vector) || vector instanceof Float32Array) || !vector.length ||
+                      expectedDimensions !== undefined && vector.length !== expectedDimensions ||
+                      !vector.every(Number.isFinite) || !vector.some(value => value !== 0))
+                    throw toolFailure('嵌入向量与所选模型维数不匹配。', 'EMBEDDING_PROFILE_MISMATCH', 409);
+                  vectorDimensions ??= vector.length;
+                }
+                firstEmbeddingReceipt ??= {};
+                for (const field of EMBEDDING_CONTRACT_FIELDS)
+                  if (embedded[field] !== undefined) firstEmbeddingReceipt[field] ??= embedded[field];
+                embeddingModelVersion = embeddingVersion(firstEmbeddingReceipt.modelVersion);
+                embeddingSpaceId = firstEmbeddingReceipt.embeddingSpaceId;
+                embeddedProfileId = firstEmbeddingReceipt.profileId ?? profileId;
+                embedded.vectors.forEach((vector, index) => { vectors[chunkOffset + index] = vector; });
+              } catch (error) {
+                if (signal?.aborted) throw error;
+                this.lastEmbeddingError = error.code ?? 'EMBEDDING_FAILED';
+                recordDiagnostic(error.code);
+                if (error.code === 'EMBEDDING_PROFILE_MISMATCH') {
+                  // One source cannot publish a mixture of model spaces, even if earlier batches completed.
+                  // 同一来源不能发布多个模型空间的混合向量，即使之前的批次已经返回也必须全部丢弃。
+                  vectors.fill(null);
+                  embeddingModelVersion = undefined;
+                  embeddingSpaceId = undefined;
+                  embeddedProfileId = undefined;
+                  break;
+                }
+              }
+              chunkOffset += slice.length;
+            }
+          } else if (semanticRequested) {
+            this.lastEmbeddingError = status.errorCode ?? 'EMBEDDING_PROFILE_UNAVAILABLE';
+            recordDiagnostic(status.errorCode, 'EMBEDDING_PROFILE_UNAVAILABLE');
+          }
+          prepared.push({ ...source, chunks, ...versions,
+            ...(vectors.some(Boolean) ? { vectors, embeddingProfileId: embeddedProfileId, embeddingModelVersion, embeddingSpaceId } : {}) });
+          fingerprintUpdates.set(source.sourceId, {
+            cacheEligible: !semanticRequested || vectors.every(Boolean),
+            key: fingerprintKey, value: { fingerprint, ...(preparation ? { preparation } : {}) },
+            source, versions, chunks, vectors, embeddingModelVersion, embeddingSpaceId, embeddedProfileId, vectorDimensions });
         }
-        return new Set(current.filter(source => coverageEntries.get(source.sourceId)?.lexical === 'ready').map(source => source.sourceId));
-      };
-      const published = prepared.length ? await (semantic ? this.serialize(publish) : publish()) : new Set();
-      if (semanticRequested) for (const source of prepared)
-        if (published.has(source.sourceId)) vectorChunks += source.vectors?.filter(Boolean).length ?? 0;
-      for (const [sourceId, fingerprint] of fingerprintUpdates)
-        if (published.has(sourceId) && fingerprint.cacheEligible) this.fingerprints.set(fingerprint.key, fingerprint.value);
-      while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
-      if (this.index.recordCoverage) {
-        const entries = batch.map(source => coverageEntries.get(source.sourceId)).filter(Boolean);
-        // Publication receipts must remain recorded even when cancellation arrives after the commit.
-        // 提交之后才到达的取消不能抹掉已经完成的发布与覆盖回执。
-        if (entries.length) await this.index.recordCoverage({ entries, scopeKeys: [...new Set(entries.map(entry => entry.scopeKey))] });
+        const publish = async () => {
+          signal?.throwIfAborted();
+          const current = [];
+          for (const source of prepared) {
+            if (isCurrent ? await isCurrent(source, signal) : !semantic || await this.backgroundSourceActive(source, settings, signal)) current.push(source);
+            else {
+              skippedSources++;
+              skippedChunks += source.chunks.length;
+              recordDiagnostic('STALE_RETRIEVAL_SOURCE');
+              recordCoverage(source, 'skipped', { errorCode: 'STALE_RETRIEVAL_SOURCE' });
+            }
+          }
+          signal?.throwIfAborted();
+          if (current.length) {
+            let receipt;
+            try { receipt = await this.index.upsertSources(current, { signal }); }
+            catch (error) {
+              if (signal?.aborted || error.name === 'AbortError') throw error;
+              const receipts = [];
+              for (const source of current) {
+                try { receipts.push(await this.index.upsertSources([source], { signal })); }
+                catch (sourceError) {
+                  if (signal?.aborted || sourceError.name === 'AbortError') throw sourceError;
+                  recordDiagnostic(sourceError.code, 'RETRIEVAL_SOURCE_FAILED');
+                  recordCoverage(source, 'failed', { parser: 'failed', errorCode: sourceError.code ?? 'RETRIEVAL_SOURCE_FAILED' });
+                }
+              }
+              receipt = { sources: receipts.flatMap(item => Array.isArray(item?.sources) ? item.sources : []) };
+            }
+            const acknowledged = new Set((Array.isArray(receipt?.sources) ? receipt.sources : []).map(source => source.sourceId));
+            for (const source of current) {
+              if (!acknowledged.has(source.sourceId)) {
+                // A resolved call without its publication receipt cannot prove that derived text or vectors committed.
+                // 调用已返回但缺少发布回执，不能证明正文派生或向量已经提交，也不能缓存为成功。
+                if (coverageEntries.get(source.sourceId)?.status !== 'failed') {
+                  recordDiagnostic('RETRIEVAL_PUBLICATION_UNVERIFIED');
+                  recordCoverage(source, 'partial', { parser: 'ready', errorCode: 'RETRIEVAL_PUBLICATION_UNVERIFIED' });
+                }
+                continue;
+              }
+              const parser = source.structure?.parseStatus === 'unavailable' ? 'failed' : source.structure?.parseStatus === 'partial' ? 'partial' : 'ready';
+              const vectorCount = source.vectors?.filter(Boolean).length ?? 0;
+              const semanticState = !semanticRequested ? 'disabled' : vectorCount === source.chunks.length ? 'ready' : vectorCount ? 'partial' : 'pending';
+              recordCoverage(source, parser === 'ready' && ['ready', 'disabled'].includes(semanticState) ? 'ready' : 'partial',
+                { lexical: 'ready', semanticState, parser });
+              const update = fingerprintUpdates.get(source.sourceId);
+              if (!acknowledged.has(source.sourceId) || !update?.value.preparation) continue;
+              const checkpoint = { sourceId: source.sourceId, inputSignature: update.value.preparation.inputSignature,
+                fingerprint: update.value.fingerprint, semantic, preparationVersion: update.value.preparation.serviceVersion,
+                derivationSignature: update.versions.derivationSignature, embeddingInputSignature: update.versions.embeddingInputSignature,
+                chunkCount: update.chunks.length, vectorChunks: update.vectors.filter(Boolean).length,
+                embeddingProfileId: update.embeddedProfileId ?? null, embeddingModelVersion: update.embeddingModelVersion ?? null,
+                embeddingSpaceId: update.embeddingSpaceId ?? null, vectorDimensions: update.vectorDimensions ?? null };
+              update.value.checkpoint = checkpoint;
+              checkpointSources.push(checkpoint);
+            }
+            if (!semantic) {
+              // Only a proven unchanged publication preserves a semantic cache; fallback derivations may drop vectors.
+              // 只有正式回执证实派生未变才保留语义缓存；词法降级可能已经清除原有向量。
+              const unchanged = new Set((Array.isArray(receipt?.sources) ? receipt.sources : [])
+                .filter(source => source?.unchanged === true).map(source => source.sourceId));
+              for (const source of current) if (!unchanged.has(source.sourceId))
+                this.fingerprints.delete(`${source.sourceId}:semantic`);
+            }
+          }
+          return new Set(current.filter(source => coverageEntries.get(source.sourceId)?.lexical === 'ready').map(source => source.sourceId));
+        };
+        const completedSourceCount = Math.min(sources.length, offset + batch.length);
+        const publishBatch = async () => {
+          const published = prepared.length ? await (semantic ? this.serialize(publish) : publish()) : new Set();
+          if (semanticRequested) for (const source of prepared)
+            if (published.has(source.sourceId)) vectorChunks += source.vectors?.filter(Boolean).length ?? 0;
+          for (const [sourceId, fingerprint] of fingerprintUpdates)
+            if (published.has(sourceId) && fingerprint.cacheEligible) this.fingerprints.set(fingerprint.key, fingerprint.value);
+          while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
+          if (this.index.recordCoverage) {
+            const entries = batch.map(source => coverageEntries.get(source.sourceId)).filter(Boolean);
+            // Publication receipts must remain recorded even when cancellation arrives after the commit.
+            // 提交之后才到达的取消不能抹掉已经完成的发布与覆盖回执。
+            if (entries.length) await this.index.recordCoverage({ entries, scopeKeys: [...new Set(entries.map(entry => entry.scopeKey))] });
+          }
+          // Persist completed publication before observing cancellation at the next batch boundary.
+          // 已完成发布先记录进度，再在下一个批次边界处理取消，避免丢掉真实完成记录。
+          if (progress) await progress(Math.min(sources.length, completedSourceCount), { ...report(),
+            ...(priorities ? { processedSourceIds: batch.map(source => source.sourceId) } : {}),
+            ...(checkpointSources.length ? { checkpointSources } : {}) });
+        };
+        if (semantic) await publicationStage.submit(publishBatch);
+        else await publishBatch();
+        offset += batch.length;
       }
-      // Persist completed publication before observing cancellation at the next batch boundary.
-      // 已完成发布先记录进度，再在下一个批次边界处理取消，避免丢掉真实完成记录。
-      if (progress) await progress(Math.min(sources.length, offset + batch.length), { ...report(),
-        ...(priorities ? { processedSourceIds: batch.map(source => source.sourceId) } : {}),
-        ...(checkpointSources.length ? { checkpointSources } : {}) });
-      offset += batch.length;
-    }
+    } finally { await publicationStage.drain(); }
     return report();
   }
 
@@ -571,7 +661,7 @@ export class SourceIndexer {
       return false;
     if (source.sourceType === 'knowledge') {
       const current = await this.library.readSource(source.sourceId,
-        { scopeKeys: [source.scopeKey], sourceRevision: source.sourceRevision, signal });
+        { scopeKeys: [source.scopeKey], sourceRevision: source.sourceRevision, limits: effective.local.indexing, signal });
       signal?.throwIfAborted();
       return current?.contentHash === source.contentHash;
     }
@@ -585,7 +675,13 @@ export class SourceIndexer {
       const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
         { root: source.locator.root, excludedRoots: this.excludedRoots, maximumSourceBytes: effective.local.indexing?.maximumSourceBytes, signal })
         : await this.readFile(source.locator.path, { root: source.locator.root, excludedRoots: this.excludedRoots,
-          maximumSourceBytes: effective.local.indexing?.maximumSourceBytes, signal, resourceService: this.resources });
+          maximumSourceBytes: effective.local.indexing?.maximumSourceBytes,
+          maximumDocumentInputBytes: effective.local.indexing?.maximumDocumentInputBytes,
+          maximumDocumentOutputBytes: effective.local.indexing?.maximumDocumentOutputBytes,
+          maximumPdfPages: effective.local.indexing?.maximumPdfPages, signal, resourceService: this.resources,
+          ...(source.locator.extraction?.pageWindow ? { pdfPageWindow: { startPage: source.locator.extraction.pageWindow.startPage,
+            endPage: source.locator.extraction.pageWindow.endPage,
+            rawContentHash: source.locator.extraction.rawContentHash } } : {}) });
       return file.contentHash === source.contentHash &&
         (source.locator.extraction === undefined && file.extraction === undefined || sourceFileRevision(file) === source.sourceRevision);
     } catch (error) {
@@ -604,5 +700,7 @@ export class SourceIndexer {
         this.invalidate(source.sourceId);
       }
     }
+    await this.index.reconcileCoverage?.({ scopeKeys: snapshot.scopes, sourceTypes,
+      sourceIds: [...snapshot.identities.keys()], signal });
   }
 }

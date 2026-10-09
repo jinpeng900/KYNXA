@@ -16,25 +16,43 @@ const RECONCILIATION_INTERVAL_MS = 30000;
 function sourceLimits(settings) {
   const indexing = validateIndexingLimits(settings.local.indexing ?? {});
   return { maximumFiles: indexing.maximumFiles, maximumSourceBytes: indexing.maximumSourceBytes,
-    maximumBytes: indexing.maximumTotalBytes, maximumEntries: indexing.maximumEntries };
+    maximumBytes: indexing.maximumTotalBytes, maximumEntries: indexing.maximumEntries,
+    maximumDocumentInputBytes: Math.min(indexing.maximumSourceBytes, indexing.maximumDocumentInputBytes),
+    maximumDocumentOutputBytes: Math.min(indexing.maximumSourceBytes, indexing.maximumDocumentOutputBytes),
+    maximumPdfPages: indexing.maximumPdfPages };
+}
+
+function pdfReadOptions(source) {
+  const extraction = source.locator.extraction;
+  return extraction?.pageWindow ? { pdfPageWindow: { startPage: extraction.pageWindow.startPage,
+    endPage: extraction.pageWindow.endPage, rawContentHash: extraction.rawContentHash } } : {};
 }
 
 function mountedDescriptors(files, projectId, root, bindingRevision, failures = []) {
-  const failed = new Map(failures.map(item => [item.relativePath, item.errorCode]));
+  const failed = new Map(failures.map(item => [item.relativePath, item]));
   const failedDirectories = failures.filter(item => item.directory);
-  return files.flatMap(file => {
+  const windows = files.flatMap(file => file.documentWindows
+    ? file.documentWindows.map(window => ({ ...file, ...window, documentWindows: undefined })) : [file]);
+  return windows.flatMap(file => {
     const relativePath = file.relativePath ?? relative(root, file.path);
-    const errorCode = failed.get(relativePath) ?? failedDirectories.find(item =>
-      item.relativePath === '' || relativePath.startsWith(`${item.relativePath}/`) || relativePath.startsWith(`${item.relativePath}\\`))?.errorCode;
+    const failure = failed.get(relativePath) ?? failedDirectories.find(item =>
+      item.relativePath === '' || relativePath.startsWith(`${item.relativePath}/`) || relativePath.startsWith(`${item.relativePath}\\`));
+    const page = file.extraction?.pageWindow;
+    const failedWindow = failure?.documentCoverage?.readback;
+    const affectsWindow = !page || !failedWindow?.startPage ||
+      page.startPage <= failedWindow.endPage && page.endPage >= failedWindow.startPage;
+    const errorCode = affectsWindow ? failure?.errorCode : undefined;
     const common = { scopeKey: `project:${projectId}`, sourceType: 'work-file', title: file.title ?? relativePath,
-      bindingRevision, ...(errorCode ? { unavailable: true, errorCode } : {}) };
+      bindingRevision, ...(errorCode ? { unavailable: true, errorCode,
+        ...(failure.documentCoverage ? { documentCoverage: failure.documentCoverage } : {}) } : {}) };
     const locator = { path: resolve(root, relativePath), relativePath, root,
       ...(file.extraction === undefined ? {} : { extraction: file.extraction }) };
     if (file.windows) return file.windows.map(window => ({ ...common,
       sourceId: sourceIdentity('work-file', projectId, root, relativePath, window.startOffset),
       locator: { ...locator, fileWindow: window }, storedBytes: window.textBytes, contentHash: window.contentHash,
       sourceRevision: sourceFileRevision({ contentHash: window.contentHash, fileWindow: window }) }));
-    return [{ ...common, sourceId: sourceIdentity('work-file', projectId, root, relativePath), locator,
+    return [{ ...common, sourceId: page ? sourceIdentity('work-file', projectId, root, relativePath, 'pdf-page', page.startPage)
+      : sourceIdentity('work-file', projectId, root, relativePath), locator,
       ...(file.text === undefined ? {} : { text: file.text }), storedBytes: file.textBytes,
       contentHash: file.contentHash, sourceRevision: sourceFileRevision(file) }];
   });
@@ -114,12 +132,12 @@ export class SourceSyncService {
     return { sources, scan, isCurrent: async (source, ownedSignal) => {
       ownedSignal?.throwIfAborted();
       return this.library.isActive ? this.library.isActive(source.sourceId, source.sourceRevision)
-        : (await this.library.readSource(source.sourceId, { scopeKeys: scopes, sourceRevision: source.sourceRevision,
+        : (await this.library.readSource(source.sourceId, { scopeKeys: scopes, sourceRevision: source.sourceRevision, limits: settings.local.indexing,
           signal: ownedSignal }))?.contentHash === source.contentHash;
     }, loadSource: async (source, ownedSignal) => {
       ownedSignal?.throwIfAborted();
       const current = await this.library.readSource(source.sourceId,
-        { scopeKeys: scopes, sourceRevision: source.sourceRevision, signal: ownedSignal });
+        { scopeKeys: scopes, sourceRevision: source.sourceRevision, limits: settings.local.indexing, signal: ownedSignal });
       scan.loadedFiles++;
       if (!current || current.contentHash !== source.contentHash)
         throw toolFailure('登记资料已变化，请重新建立索引。', 'STALE_RETRIEVAL_SOURCE', 409);
@@ -261,7 +279,7 @@ export class SourceSyncService {
         memoryBytes: (stored?.files ?? []).reduce((total, file) => total + JSON.stringify(file).length * 2 + 256, 0) };
       this.mountedStates.set(projectId, state);
     }
-    if (state.limitsKey !== limitsKey) state.fullScan = true;
+    if (state.limitsKey !== limitsKey) { state.fullScan = true; state.failureCache.clear(); }
     const generation = state.generation, dirtyPaths = new Set(state.dirtyPaths), stats = {};
     const options = { ...limits, root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources,
       previousFiles: state.files, changedPaths: dirtyPaths, stats, failureCache: state.failureCache, allowPartial: true };
@@ -279,7 +297,18 @@ export class SourceSyncService {
           const relativePath = relative(root, file.path);
           if (file.missing) next.delete(relativePath);
           else if (file.failed) continue;
-          else next.set(relativePath, { relativePath, contentHash: file.contentHash, textBytes: file.textBytes, metadata: file.metadata,
+          else if (file.extraction?.pageWindow) {
+            const previous = next.get(relativePath), startPage = file.extraction.pageWindow.startPage;
+            const compatible = previous?.extraction?.rawContentHash === file.extraction.rawContentHash && startPage > 1;
+            const documentWindows = [...(compatible ? previous.documentWindows ?? [] : [])
+              .filter(window => window.extraction.pageWindow.startPage < startPage),
+            { contentHash: file.contentHash, textBytes: file.textBytes, extraction: file.extraction }];
+            next.set(relativePath, { relativePath, metadata: file.metadata, contentHash: documentWindows[0].contentHash,
+              extraction: documentWindows[0].extraction, documentWindows,
+              documentComplete: documentWindows[0].extraction.pageWindow.startPage === 1 &&
+                documentWindows.at(-1).extraction.pageWindow.nextPage === null,
+              textBytes: documentWindows.reduce((sum, window) => sum + window.textBytes, 0) });
+          } else next.set(relativePath, { relativePath, contentHash: file.contentHash, textBytes: file.textBytes, metadata: file.metadata,
             ...(file.extraction === undefined ? {} : { extraction: file.extraction }), ...(file.windows ? { windows: file.windows } : {}) });
         }
       };
@@ -294,7 +323,7 @@ export class SourceSyncService {
       for (const [path, file] of state.files) if (!next.has(path) &&
         (stats.failures?.some(failure => path === failure.relativePath || path.startsWith(`${failure.relativePath}/`) || path.startsWith(`${failure.relativePath}\\`)))) next.set(path, file);
       const bytes = [...next.values()].reduce((total, file) => total + file.textBytes, 0);
-      if (next.size > limits.maximumFiles || bytes > limits.maximumBytes)
+      if ([...next.values()].reduce((count, file) => count + (file.documentWindows?.length ?? 1), 0) > limits.maximumFiles || bytes > limits.maximumBytes)
         throw toolFailure('挂载资料超过当前来源或字节预算。', 'RETRIEVAL_SCAN_LIMIT', 413);
       await this.manifest?.write(binding, [...next.values()], { signal });
       state.files = next;
@@ -303,9 +332,14 @@ export class SourceSyncService {
       files = [...next.values()].map(file => ({ ...file, path: resolve(root, file.relativePath), title: file.relativePath }));
     }
     signal?.throwIfAborted();
+    if (stats.failures) stats.failures = stats.failures.map(failure => ({ ...failure,
+      scopeKey: `project:${projectId}`, sourceId: failure.documentCoverage?.format === 'pdf'
+        ? sourceIdentity('work-file', projectId, root, failure.relativePath, 'pdf-page', failure.documentCoverage.readback?.startPage ?? 1)
+        : sourceIdentity('work-file', projectId, root, failure.relativePath) }));
     const sources = mountedDescriptors(files, projectId, root, bindingRevision, stats.failures);
     stats.coverage = { discovered: stats.discoveredFiles ?? stats.scannedFiles ?? files.length,
       readable: stats.scannedFiles ?? files.length, failed: stats.failedFiles ?? 0, complete: !stats.failedFiles && !stats.incomplete,
+      effectiveLimits: limits,
       ...(stats.limit ? { limit: stats.limit } : {}) };
     const memoryBytes = sources.reduce((total, source) => total + (source.text?.length ?? 0) * 2 +
       JSON.stringify(source.locator).length * 2 + 512, 0);
@@ -332,13 +366,18 @@ export class SourceSyncService {
         if (source.locator.fileWindow && expected?.windows?.some(window => window.contentHash === source.contentHash && window.startOffset === source.locator.fileWindow.startOffset))
           return current.isFile() && sameSourceMetadata(source.locator.fileWindow.metadata, { sizeBytes: current.size, mtimeMs: current.mtimeMs,
             ctimeMs: current.ctimeMs, device: current.dev, inode: current.ino });
+        const documentWindow = expected?.documentWindows?.find(window => window.contentHash === source.contentHash &&
+          sourceFileRevision(window) === source.sourceRevision);
+        if (documentWindow) return current.isFile() && sameSourceMetadata(expected.metadata, { sizeBytes: current.size,
+          mtimeMs: current.mtimeMs, ctimeMs: current.ctimeMs, device: current.dev, inode: current.ino });
         if (expected && expected.contentHash === source.contentHash && sourceFileRevision(expected) === source.sourceRevision &&
             (expected.extraction === undefined || expected.extraction.version === sourceExtractionVersion(source.locator.path)))
           return current.isFile() && sameSourceMetadata(expected.metadata, { sizeBytes: current.size, mtimeMs: current.mtimeMs,
             ctimeMs: current.ctimeMs, device: current.dev, inode: current.ino });
         const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
           { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal }) : await readSourceFile(source.locator.path,
-          { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources });
+          { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources,
+            ...pdfReadOptions(source) });
         return file.contentHash === source.contentHash && sourceFileRevision(file) === source.sourceRevision;
       } catch (error) { if (signal?.aborted) throw error; return false; }
     };
@@ -351,7 +390,8 @@ export class SourceSyncService {
         throw toolFailure('挂载文件夹已经变化。', 'STALE_RETRIEVAL_SOURCE', 409);
       const file = source.locator.fileWindow ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow,
         { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal }) : await readSourceFile(source.locator.path,
-        { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources });
+        { ...sourceLimits(settings), root, excludedRoots: this.excludedRoots, signal, resourceService: this.resources,
+          ...pdfReadOptions(source) });
       scan.loadedFiles = (scan.loadedFiles ?? 0) + 1;
       scan.loadedBytes = (scan.loadedBytes ?? 0) + file.metadata.sizeBytes;
       if (file.contentHash !== source.contentHash || sourceFileRevision(file) !== source.sourceRevision)

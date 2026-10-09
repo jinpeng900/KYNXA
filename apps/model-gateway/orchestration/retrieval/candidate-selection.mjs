@@ -4,7 +4,7 @@ import { projectRetrievalModelView } from '../../data/retrieval/evidence-referen
 import { estimateTokens } from '../../models/context-tokens.mjs';
 import { buildRetrievalIntent } from './query-plan.mjs';
 
-export const RETRIEVAL_CANDIDATE_LIMIT = 48;
+export const RETRIEVAL_CANDIDATE_LIMIT = 64;
 const MAX_SELECTION_TOKENS = 32768;
 const COMMON_QUERY_WORDS = new Set(['the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are',
   'what', 'how', 'where', 'when', 'which', 'does', 'do', 'can', 'should', 'please', 'this', 'that', 'it',
@@ -87,10 +87,10 @@ function contextTexts(value) {
 
 /** Remove exact/overlapping repeats while retaining distinct evidence from one source.
  * 删除同一分块、重叠区间及重复正文，单份来源仍可贡献多段不同证据。 */
-export function deduplicateCandidates(items, { existingContext = [], retrievalIntent } = {}) {
+export function deduplicateCandidates(items, { existingContext = [], retrievalIntent, navigateCoveredMessages = false } = {}) {
   const seenChunks = new Set(), seenText = new Set(), kept = [];
   const existing = contextTexts(existingContext);
-  let duplicateCount = 0, alreadyPresentCount = 0;
+  let duplicateCount = 0, alreadyPresentCount = 0, coveredMessageCount = 0;
   // Verified symbol/file intersections precede optional scores and identical copies in other files.
   // 已核实的符号与文件交集优先于可选重排分数和其他文件中的同文副本。
   const priority = item => {
@@ -99,25 +99,36 @@ export function deduplicateCandidates(items, { existingContext = [], retrievalIn
   };
   const prioritized = items.some(item => priority(item) > 0)
     ? [...items].sort((left, right) => priority(right) - priority(left)) : items;
-  for (const item of prioritized) {
+  for (const originalItem of prioritized) {
+    let item = originalItem;
+    const originalText = normalizedText(item.excerpt);
+    // A chat echo of an injected source keeps its read handle, so omitted surrounding conditions are not silently certified or lost.
+    // 聊天中重复引用已注入来源时保留回读入口，不能重复注入引用，也不静默认证或丢弃周边条件。
+    if (navigateCoveredMessages && item.sourceType === 'message' && items.some(source => source.sourceType !== 'message' &&
+        !source.navigationOnly && normalizedText(source.excerpt).length >= 8 && originalText.includes(normalizedText(source.excerpt)))) {
+      item = { ...item, excerpt: '', structure: undefined, navigationOnly: true };
+      coveredMessageCount++;
+    }
     const text = normalizedText(item.excerpt);
-    if (!text) continue;
+    if (!text && !item.navigationOnly) continue;
     const chunkKey = `${item.scopeKey}:${item.sourceId}:${item.chunkId ?? item.sourceRef ?? text}`;
-    if (seenChunks.has(chunkKey) || seenText.has(text) || kept.some(previous => rangeOverlap(previous, item) >= 0.75)) {
+    if (seenChunks.has(chunkKey) || text && seenText.has(text) || kept.some(previous => rangeOverlap(previous, item) >= 0.75)) {
       duplicateCount++; continue;
     }
-    seenChunks.add(chunkKey); seenText.add(text);
+    seenChunks.add(chunkKey);
+    if (text) seenText.add(text);
     if (text.length >= 8 && existing.some(content => content.includes(text))) {
       alreadyPresentCount++; continue;
     }
     kept.push(item);
   }
-  return { items: kept, duplicateCount, alreadyPresentCount };
+  return { items: kept, duplicateCount, alreadyPresentCount, coveredMessageCount };
 }
 
 export function evidenceRecord(item, reference) {
   return projectRetrievalModelView({ reference, sourceRef: item.modelSourceRef ?? item.sourceRef, title: item.title, scope: item.scopeKey,
-    locator: item.locator, ...(item.structure ? { structure: item.structure } : {}), excerpt: item.excerpt });
+    locator: item.locator, ...(item.structure ? { structure: item.structure } : {}), excerpt: item.excerpt,
+    ...(item.navigationOnly ? { navigationOnly: true, next: 'knowledge.read', evidenceSupport: 'not-read' } : {}) });
 }
 
 export function evidenceItemTokens(item, reference = 1) {
@@ -141,6 +152,7 @@ export function assessEvidence(items, query, { requiresSourceRead = false, alrea
   }
   const coverage = queryTerms.size ? matched.size / queryTerms.size : 0;
   const usable = bodyMatch && coverage >= 0.4;
+  const navigationOnly = items.every(item => item.navigationOnly === true);
   const semanticOnly = !bodyMatch && items.some(item => Number.isSafeInteger(item.vectorRank) && item.vectorRank > 0);
   const intent = retrievalIntent ?? buildRetrievalIntent(query);
   const expectedRoles = requestedRoles(query), presentRoles = new Set(items.map(candidateRole));
@@ -151,8 +163,8 @@ export function assessEvidence(items, query, { requiresSourceRead = false, alrea
     missingEvidence.push({ kind: 'requested-file', path: intent.path });
   // Role/target presence is only a retrieval gap signal; it does not certify facts or executed tests.
   // 角色和目标是否出现只用于指示检索缺口，不能证明事实正确或测试已执行。
-  return { state: usable ? 'usable' : 'weak', reason: usable ? 'query-terms-supported' : semanticOnly ? 'semantic-only-unverified' : 'partial-query-support',
-    requiresSourceRead: requiresSourceRead || !usable, matchedTerms: matched.size, queryTerms: queryTerms.size,
+  return { state: usable ? 'usable' : 'weak', reason: navigationOnly ? 'navigation-only' : usable ? 'query-terms-supported' : semanticOnly ? 'semantic-only-unverified' : 'partial-query-support',
+    requiresSourceRead: requiresSourceRead || !usable || navigationOnly, matchedTerms: matched.size, queryTerms: queryTerms.size,
     queryCoverage: coverage, missingEvidence, presentRoles: [...presentRoles], sufficiency: 'not-evaluated' };
 }
 
@@ -206,7 +218,18 @@ export function selectCandidates(items, { query = '', limit = 8, maximumTokens =
     for (const remaining of candidates)
       remaining.similarity = Math.max(remaining.similarity, tokenSimilarity(candidate.terms, remaining.terms));
   }
+  // If no complete excerpt fits, keep one honest read handle instead of equating a size limit with no search hits.
+  // 完整摘录均超预算时保留一个诚实的回读入口，不能把体积限制误报成没有命中。
+  let navigationCount = 0;
+  if (!selected.length && maximumTokens > 0) for (const item of deduplicated.items) {
+    const navigation = { ...item, excerpt: '', structure: undefined, navigationOnly: true };
+    const cost = evidenceItemTokens(navigation);
+    if (cost > maximumTokens) continue;
+    selected.push(navigation); usedTokens = cost; navigationCount = 1;
+    sourceCounts.set(`${item.scopeKey}:${item.sourceId}`, 1); break;
+  }
   const earlyCutReasons = [];
+  if (navigationCount) earlyCutReasons.push({ reason: 'excerpt-replaced-by-read-navigation', count: navigationCount });
   if (deduplicated.duplicateCount) earlyCutReasons.push({ reason: 'duplicate-or-overlapping-evidence', count: deduplicated.duplicateCount });
   if (deduplicated.alreadyPresentCount) earlyCutReasons.push({ reason: 'already-in-model-context', count: deduplicated.alreadyPresentCount });
   if (omittedForBudget) earlyCutReasons.push({ reason: 'evidence-token-budget', count: omittedForBudget });

@@ -23,30 +23,62 @@ export function retrievalRecord(value, label = 'Retrieval value') {
  * 提取身份绑定原始文件字节；页范围指向保存的实际抽取正文，不生成伪装成原文的页说明。 */
 export function validateSourceExtraction(value, textLength) {
   retrievalRecord(value, 'Source extraction');
-  requireKeys(value, ['format', 'version', 'rawContentHash', 'pageCount', 'pages'], 'Source extraction');
+  requireKeys(value, ['format', 'version', 'rawContentHash', 'pageCount', 'pages', 'pageWindow', 'complete', 'uncoveredRanges', 'ocr'], 'Source extraction');
   if (!['pdf', 'docx'].includes(value.format) || typeof value.version !== 'string' || !value.version ||
       value.version.length > 256 || /[\x00-\x1f]/u.test(value.version) ||
       typeof value.rawContentHash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.rawContentHash))
     throw retrievalFailure('Invalid document extraction identity. / 文档提取身份无效。', 'INVALID_RETRIEVAL_EXTRACTION');
   const result = { format: value.format, version: value.version, rawContentHash: value.rawContentHash };
   if (value.format === 'docx') {
-    if (value.pageCount !== undefined || value.pages !== undefined)
+    if (value.pageCount !== undefined || value.pages !== undefined || value.pageWindow !== undefined ||
+        value.complete !== undefined || value.uncoveredRanges !== undefined || value.ocr !== undefined)
       throw retrievalFailure('DOCX text extraction cannot claim rendered page positions. / DOCX 文本提取不能声称已得到渲染页码。', 'INVALID_RETRIEVAL_EXTRACTION');
     return result;
   }
-  if (!Number.isSafeInteger(value.pageCount) || value.pageCount < 1 || value.pageCount > 100 ||
-      !Array.isArray(value.pages) || value.pages.length !== value.pageCount)
+  const window = value.pageWindow;
+  if (window) {
+    requireKeys(window, ['version', 'startPage', 'endPage', 'nextPage'], 'PDF page window');
+    if (window.version !== 'pdf-page-window-v1' || !Number.isSafeInteger(window.startPage) || window.startPage < 1 ||
+        !Number.isSafeInteger(window.endPage) || window.endPage < window.startPage || window.endPage > value.pageCount ||
+        window.endPage - window.startPage + 1 > 100 ||
+        window.nextPage !== (window.endPage < value.pageCount ? window.endPage + 1 : null))
+      throw retrievalFailure('Invalid PDF page window. / PDF 页窗口无效。', 'INVALID_RETRIEVAL_EXTRACTION');
+  }
+  if (!Number.isSafeInteger(value.pageCount) || value.pageCount < 1 || value.pageCount > 1000000 ||
+      !Array.isArray(value.pages) || !value.pages.length || value.pages.length > 100 ||
+      value.pages.length !== (window ? window.endPage - window.startPage + 1 : value.pageCount))
     throw retrievalFailure('Invalid PDF page ranges. / PDF 页范围无效。', 'INVALID_RETRIEVAL_EXTRACTION');
   let previousEnd = 0;
   const pages = value.pages.map((page, index) => {
-    requireKeys(page, ['page', 'startOffset', 'endOffset'], 'PDF page range');
-    if (page.page !== index + 1 || !Number.isSafeInteger(page.startOffset) || !Number.isSafeInteger(page.endOffset) ||
+    requireKeys(page, ['page', 'startOffset', 'endOffset', 'method'], 'PDF page range');
+    if (page.page !== (window?.startPage ?? 1) + index ||
+        page.method !== undefined && !['text', 'ocr'].includes(page.method) ||
+        !Number.isSafeInteger(page.startOffset) || !Number.isSafeInteger(page.endOffset) ||
         page.startOffset < previousEnd || page.endOffset < page.startOffset || page.endOffset > MAX_SOURCE_CHARACTERS ||
         textLength !== undefined && page.endOffset > textLength)
       throw retrievalFailure('PDF page range differs from extracted text. / PDF 页范围与提取正文不匹配。', 'INVALID_RETRIEVAL_EXTRACTION');
     previousEnd = page.endOffset;
-    return { page: page.page, startOffset: page.startOffset, endOffset: page.endOffset };
+    return { page: page.page, startOffset: page.startOffset, endOffset: page.endOffset,
+      ...(page.method ? { method: page.method } : {}) };
   });
+  if (window) {
+    const complete = window.startPage === 1 && window.endPage === value.pageCount;
+    const uncoveredRanges = [...(window.startPage > 1 ? [{ startPage: 1, endPage: window.startPage - 1 }] : []),
+      ...(window.endPage < value.pageCount ? [{ startPage: window.endPage + 1, endPage: value.pageCount }] : [])];
+    if (value.complete !== complete || JSON.stringify(value.uncoveredRanges) !== JSON.stringify(uncoveredRanges))
+      throw retrievalFailure('PDF coverage differs from its page window. / PDF 覆盖说明与页窗口不一致。', 'INVALID_RETRIEVAL_EXTRACTION');
+    Object.assign(result, { pageWindow: { ...window }, complete, uncoveredRanges });
+  } else if (value.complete !== undefined || value.uncoveredRanges !== undefined)
+    throw retrievalFailure('PDF coverage requires its explicit window. / PDF 覆盖说明必须带显式窗口。', 'INVALID_RETRIEVAL_EXTRACTION');
+  if (value.ocr !== undefined) {
+    requireKeys(value.ocr, ['backend', 'version', 'language'], 'PDF OCR identity');
+    if (value.ocr.backend !== 'windows-media-ocr' || typeof value.ocr.version !== 'string' || !value.ocr.version ||
+        value.ocr.version.length > 128 || typeof value.ocr.language !== 'string' || !value.ocr.language || value.ocr.language.length > 128 ||
+        /[\x00-\x1f]/u.test(value.ocr.version + value.ocr.language) || !pages.some(page => page.method === 'ocr'))
+      throw retrievalFailure('Invalid OCR extraction identity. / OCR 提取身份无效。', 'INVALID_RETRIEVAL_EXTRACTION');
+    result.ocr = { ...value.ocr };
+  } else if (pages.some(page => page.method === 'ocr'))
+    throw retrievalFailure('OCR pages require their backend identity. / OCR 页面必须带识别后端身份。', 'INVALID_RETRIEVAL_EXTRACTION');
   return { ...result, pageCount: value.pageCount, pages };
 }
 
@@ -57,7 +89,9 @@ export function sourceFileRevision(file) {
   }
   if (file.extraction === undefined) return file.contentHash;
   const extraction = validateSourceExtraction(file.extraction);
-  return hashText(JSON.stringify([file.contentHash, extraction.version, extraction.rawContentHash, extraction.pages ?? null]));
+  const identity = [file.contentHash, extraction.version, extraction.rawContentHash, extraction.pages ?? null];
+  if (extraction.pageWindow || extraction.ocr) identity.push(extraction.pageWindow ?? null, extraction.ocr ?? null);
+  return hashText(JSON.stringify(identity));
 }
 
 export function validateSourceFileWindow(value, textLength) {
@@ -94,6 +128,8 @@ export function sourceEvidenceLocator(locator, { startOffset, endOffset } = {}) 
     if (pages.length) { result.startPage = pages[0].page; result.endPage = pages.at(-1).page; }
   }
   return { ...result, documentFormat: extraction.format,
+    ...(extraction.pageWindow ? { pageWindow: extraction.pageWindow, documentComplete: extraction.complete,
+      uncoveredRanges: extraction.uncoveredRanges, ...(extraction.ocr ? { ocr: extraction.ocr } : {}) } : {}),
     ...(extraction.pageCount === undefined ? {} : { pageCount: extraction.pageCount }) };
 }
 

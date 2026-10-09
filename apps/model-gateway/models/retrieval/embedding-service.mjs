@@ -94,11 +94,13 @@ export class EmbeddingService {
   #resourceDiagnostic;
   #workerRestarts = 0;
   #admission; #nativeTickets = new Map();
+  #devicePreference; #retiring = false; #retirement; #retirementCompletion;
 
   constructor({ modelRoot = defaultEmbeddingModelRoot(), cpuThreads, resourceService, devicePreference = 'auto', requestLimits, timeoutMs = 120_000,
     closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS, profileId = BUILTIN_EMBEDDING_PROFILE.id,
     workerFactory = createNativeInferenceProcess } = {}) {
     this.#profile = resolveRetrievalModelProfile('embedding', profileId);
+    this.#devicePreference = devicePreference;
     this.#admission = new InferenceAdmission(requestLimits);
     if (this.#profile.requiredDevice && devicePreference === 'cpu')
       throw new EmbeddingError('The selected GPU vector space cannot return CPU projections.', 'EMBEDDING_GPU_REQUIRED');
@@ -115,18 +117,24 @@ export class EmbeddingService {
 
   status(profileId = this.#profile.id) {
     if (profileId !== this.#profile.id) return unavailableProfileStatus('embedding', profileId);
+    const resourceReservation = this.#resources.status();
     return { ...retrievalModelMetadata(this.#profile), state: this.#state, loaded: this.#loaded, supported: true,
       local: true, network: false, assetVerification: this.#assetVerification,
+      devicePreference: this.#devicePreference, retiring: this.#retiring,
       fittingVersion: EMBEDDING_DOCUMENT_FITTING_VERSION,
       maxInputTokens: this.#profile.maxInputTokens, cpuThreads: this.#cpuThreads,
       pendingRequests: this.#pending.size, workerPhase: this.#workerPhase,
-      resourceReservation: this.#resources.status(), ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
+      resourceReservation, batchSuggestions: resourceReservation.batchSuggestions,
+      ...(resourceReservation.lastGrant ? { batchSize: resourceReservation.lastGrant.batchSize,
+        batchTokenBudget: resourceReservation.lastGrant.batchTokenBudget } : {}),
+      ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
       inputAdmission: this.#admission.status(), requestLimits: this.#admission.limits,
       ...(this.#resourceDiagnostic ? { resourceDiagnostic: this.#resourceDiagnostic } : {}),
       ...(this.#errorCode ? { errorCode: this.#errorCode } : {}) };
   }
 
-  async embedQuery(text, { signal, profileId = this.#profile.id } = {}) {
+  async embedQuery(text, { signal, profileId = this.#profile.id, devicePreference = this.#devicePreference } = {}) {
+    this.#assertDevicePreference(devicePreference);
     resolveRetrievalModelProfile('embedding', profileId);
     if (profileId !== this.#profile.id) throw new RetrievalModelProfileError('embedding', profileId);
     validateTexts([text], this.#admission.limits.maxBatchDocuments);
@@ -134,7 +142,8 @@ export class EmbeddingService {
     return { ...retrievalModelMetadata(this.#profile), vector: vectors[0] };
   }
 
-  async embedDocuments(texts, { signal, profileId = this.#profile.id } = {}) {
+  async embedDocuments(texts, { signal, profileId = this.#profile.id, devicePreference = this.#devicePreference } = {}) {
+    this.#assertDevicePreference(devicePreference);
     resolveRetrievalModelProfile('embedding', profileId);
     if (profileId !== this.#profile.id) throw new RetrievalModelProfileError('embedding', profileId);
     validateTexts(texts, this.#admission.limits.maxBatchDocuments);
@@ -146,7 +155,8 @@ export class EmbeddingService {
     return { ...retrievalModelMetadata(this.#profile), vectors: await this.#request('document', texts, signal) };
   }
 
-  async fitDocuments(inputs, { signal, profileId = this.#profile.id } = {}) {
+  async fitDocuments(inputs, { signal, profileId = this.#profile.id, devicePreference = this.#devicePreference } = {}) {
+    this.#assertDevicePreference(devicePreference);
     resolveRetrievalModelProfile('embedding', profileId);
     if (profileId !== this.#profile.id) throw new RetrievalModelProfileError('embedding', profileId);
     const documents = normalizeFittingDocuments(inputs, this.#admission.limits.maxBatchDocuments);
@@ -166,7 +176,7 @@ export class EmbeddingService {
     try {
       worker = this.#workerFactory(new URL('./embedding-worker.mjs', import.meta.url), {
         workerData: { modelRoot: this.#modelRoot, cpuThreads: resourceBudget.cpuThreads, profileId: this.#profile.id,
-          requestLimits: this.#admission.limits },
+          requestLimits: this.#admission.limits, devicePreference: this.#devicePreference },
         // Do not inherit debugger or test runner flags into the inference worker.
         // 推理 worker 不继承调试器或测试运行器参数，避免额外进程行为。
         execArgv: [],
@@ -194,7 +204,8 @@ export class EmbeddingService {
         return;
       }
       if (message.type === 'settled') {
-        this.#admission.release(this.#nativeTickets.get(message.id)); this.#nativeTickets.delete(message.id); return;
+        this.#admission.release(this.#nativeTickets.get(message.id)); this.#nativeTickets.delete(message.id);
+        this.#retireWhenIdle(); return;
       }
       if (message.type === 'idle') {
         for (const [requestId, ticket] of this.#nativeTickets)
@@ -204,6 +215,7 @@ export class EmbeddingService {
           if (!this.#loaded && this.#state === 'loading') this.#state = 'ready';
           worker.unref();
           this.#resources.idle().catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
+          this.#retireWhenIdle();
         }
         return;
       }
@@ -276,6 +288,7 @@ export class EmbeddingService {
       this.#resources.idle().catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
       if (!this.#closed && (this.#pending.size || (this.#state !== 'error' && this.#state !== 'unavailable')))
         this.#failWorker(new EmbeddingError(`Embedding process exited (${signal ?? exitCode}).`, 'EMBEDDING_WORKER_FAILED'));
+      this.#retireWhenIdle();
     });
   }
 
@@ -295,7 +308,7 @@ export class EmbeddingService {
   }
 
   async #request(kind, texts, signal) {
-    if (this.#closed) throw new EmbeddingError('Embedding service is closed.', 'EMBEDDING_CLOSED');
+    if (this.#closed || this.#retiring) throw new EmbeddingError('Embedding service is closed or retiring.', 'EMBEDDING_CLOSED');
     if (signal?.aborted) throw abortedError();
     if (this.#state === 'unavailable') throw new EmbeddingError('Bundled embedding assets are missing. Keyword search remains available.', this.#errorCode);
     if (this.#state === 'error' && !this.#worker && this.#errorCode === 'EMBEDDING_WORKER_FAILED' && this.#workerRestarts < 1) {
@@ -322,7 +335,12 @@ export class EmbeddingService {
       if (this.#closed) throw new EmbeddingError('Embedding service is closed.', 'EMBEDDING_CLOSED');
       if (signal?.aborted || error.name === 'AbortError') throw abortedError();
       throw new EmbeddingError('Local embedding resources are temporarily unavailable.', 'EMBEDDING_BUSY');
-    } finally { this.#preparingRequests--; }
+    } finally {
+      this.#preparingRequests--;
+      // Transfer accepted preparation into its native ticket before deciding that retirement is idle.
+      // 先把已接纳的准备请求转为原生票据，再判断退役是否已排空，不能在派发前提前关闭。
+      queueMicrotask(() => this.#retireWhenIdle());
+    }
     if (this.#closed) { this.#admission.release(ticket); throw new EmbeddingError('Embedding service is closed.', 'EMBEDDING_CLOSED'); }
     if (signal?.aborted) {
       if (!this.#pending.size && !this.#preparingRequests) this.#resources.idle().catch(() => {});
@@ -384,6 +402,33 @@ export class EmbeddingService {
     return { retiring: true, gpuMemoryBytes, completion: this.close() };
   }
 
+  #assertDevicePreference(devicePreference) {
+    if (this.#closed || this.#retiring)
+      throw new EmbeddingError('Embedding service is closed or retiring.', 'EMBEDDING_CLOSED');
+    if (devicePreference !== this.#devicePreference)
+      throw new EmbeddingError('Device preference requires a separately configured session. / 设备偏好变化需要重新配置会话。',
+        'EMBEDDING_DEVICE_PREFERENCE_CHANGED');
+  }
+
+  // Policy changes stop new admission while accepted and cancelled native work keeps its ownership until idle.
+  // 策略变化阻止新增接纳；已接纳及已取消的原生工作继续保留所有权，排空后才关闭和释放驻留。
+  retire() {
+    if (this.#retirement) return this.#retirement;
+    if (this.#closed) return this.close();
+    this.#retiring = true;
+    this.#retirement = new Promise((resolveRetirement, rejectRetirement) => {
+      this.#retirementCompletion = { resolve: resolveRetirement, reject: rejectRetirement };
+    });
+    this.#retireWhenIdle();
+    return this.#retirement;
+  }
+
+  #retireWhenIdle() {
+    if (!this.#retiring || this.#closed || this.#pending.size || this.#preparingRequests || this.#nativeTickets.size ||
+        this.#admission.status().activeRequests || this.#worker && !['idle', 'stopped'].includes(this.#workerPhase)) return;
+    this.close();
+  }
+
   close() {
     if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
@@ -396,6 +441,11 @@ export class EmbeddingService {
     this.#closePromise = this.#drainWorker(worker).finally(async () => {
       if (!this.#worker) await this.#resources.close();
     });
+    if (this.#retirementCompletion) {
+      const completion = this.#retirementCompletion;
+      this.#retirementCompletion = undefined;
+      this.#closePromise.then(completion.resolve, completion.reject);
+    }
     return this.#closePromise;
   }
 

@@ -39,38 +39,44 @@ function rememberCost(profile, feedback, executorProcessId) {
 
 // These are requested model costs, never a competing resource allocation policy.
 // 此处只描述模型需求；实际额度由唯一资源服务批准，不另设抢占资源的调度器。
-export function inferenceResourceRequest(profile, requestedCpuThreads, { backend = 'cpu', sequenceTokens = 128, batchSize = 16 } = {}) {
+export function inferenceResourceRequest(profile, requestedCpuThreads, { backend = 'cpu', sequenceTokens = 128, batchSize = 32 } = {}) {
   const weightBytes = profile.files.filter(asset => asset.path.endsWith('.onnx')).reduce((sum, asset) => sum + asset.bytes, 0);
   const logicalCores = availableParallelism();
   const cpuThreads = Number.isInteger(requestedCpuThreads) ? Math.max(1, Math.min(32, requestedCpuThreads))
-    : Math.max(1, Math.min(32, Math.floor(logicalCores / 2)));
+    : Math.max(1, Math.min(8, Math.floor(logicalCores / 2)));
   const tokenizerBytes = profile.files.filter(asset => asset.path.includes('tokenizer')).reduce((sum, asset) => sum + asset.bytes, 0);
   const tokenizerMemoryBytes = Math.ceil(tokenizerBytes * 4 + 64 * MIB);
   const quantized = /q[48]|int[48]/u.test(profile.dtype ?? '');
   const runtimeWeightBytes = weightBytes * (quantized ? 2 : 1.4);
   const scratchBytes = activationBytes(profile, Math.max(1, Math.min(profile.maxInputTokens ?? 512, sequenceTokens)),
     Math.max(1, Math.min(128, batchSize)));
-  const initialMemoryBytes = runtimeWeightBytes + tokenizerMemoryBytes + 96 * MIB + scratchBytes;
+  const residentBaselineBytes = runtimeWeightBytes + tokenizerMemoryBytes + 96 * MIB;
+  const initialMemoryBytes = residentBaselineBytes + scratchBytes;
   const records = measuredCosts.get(costIdentity(profile, backend)) ?? [];
   const observedPeakBytes = records.length ? Math.max(...records.map(record => record.bytes)) : 0;
   return { cpuThreads, memoryBytes: Math.ceil(Math.max(initialMemoryBytes, observedPeakBytes * 1.125 + 32 * MIB)),
     tokenizerMemoryBytes, gpuMemoryBytes: Math.ceil(runtimeWeightBytes + 128 * MIB +
-      activationBytes(profile, Math.min(profile.maxInputTokens ?? 512, 256), 32)),
+      activationBytes(profile, Math.min(profile.maxInputTokens ?? 512, sequenceTokens), batchSize)),
     memoryEstimate: { backend, dtype: profile.dtype ?? 'fp32', sequenceTokens, batchSize,
       runtimeWeightBytes: Math.ceil(runtimeWeightBytes),
+      residentBaselineBytes: Math.ceil(residentBaselineBytes), activationEstimateBytes: scratchBytes,
       observedPeakBytes: observedPeakBytes || null, sampleCount: records.length,
       source: records.length ? 'owned-workload-peak-with-margin' : 'model-shape-startup-estimate' } };
 }
 
 export function inferenceBatchBudget({ cpuThreads, memoryBytes, gpuMemoryBytes = 0, device = 'cpu',
-  batchMultiplier = 1 }, maxInputTokens = 512) {
-  const fraction = Math.max(0.125, Math.min(1, Number.isFinite(batchMultiplier) ? batchMultiplier : 1));
-  // GPU work is limited by GPU/host buffers and tokens, not by the CPU thread multiplier.
-  // GPU 推理受显存、主机供数缓冲与 token 上限约束，不机械套用 CPU 线程倍数。
+  batchMultiplier = 1, activationMemoryBytes, hiddenSize, attentionHeads, sequenceTokens = 128 }, maxInputTokens = 512) {
+  const fraction = Math.max(0.125, Math.min(4, Number.isFinite(batchMultiplier) ? batchMultiplier : 1));
+  // Both backends use admitted memory and token bounds; CPU threads control parallel execution, not row capacity.
+  // 两种后端都遵守获批内存与 token 边界；CPU 线程控制并行执行，不机械限制每批行数。
   const capacity = device !== 'cpu' && gpuMemoryBytes > 0
     ? Math.min(gpuMemoryBytes / (16 * MIB), memoryBytes / (8 * MIB))
-    : Math.min(Math.max(1, cpuThreads) * 4, memoryBytes / (32 * MIB));
-  const batchSize = Math.max(1, Math.min(128, Math.floor(capacity * fraction)));
+    : Number.isFinite(activationMemoryBytes) && activationMemoryBytes > 0 && hiddenSize > 0 && attentionHeads > 0
+      ? activationMemoryBytes / activationBytes({ hiddenSize, attentionHeads },
+        Math.max(1, Math.min(maxInputTokens, sequenceTokens)), 1) : memoryBytes / (8 * MIB);
+  const plannedRows = device === 'cpu' ? 32 * fraction : capacity * fraction;
+  const requestedBatchSize = Math.max(1, Math.min(128, Math.floor(Math.min(capacity, plannedRows))));
+  const batchSize = requestedBatchSize >= 32 ? 2 ** Math.floor(Math.log2(requestedBatchSize)) : requestedBatchSize;
   const tokensPerItem = device !== 'cpu' ? 128 : 384;
   return { batchSize, batchTokenBudget: Math.max(maxInputTokens, Math.min(65_536, batchSize * tokensPerItem)) };
 }
@@ -95,19 +101,22 @@ function awaitAdmission(promise, signal) {
  * 驻留内存不随空闲或调用方取消而提前释放；CPU 仅在原生工作排空后释放。 */
 export class InferenceResourceReservation {
   #service; #request; #taskId; #kind; #devicePreference; #profile;
-  #resident; #residentUpgrades = []; #gpuResident; #execution; #residentPromise; #gpuPromise; #executionPromise; #releasePromise; #timer; #closed = false; #renewError;
+  #resident; #residentUpgrades = []; #gpuResident; #gpuUpgrades = []; #execution; #residentPromise; #gpuPromise; #executionPromise; #releasePromise; #timer; #closed = false; #renewError;
   #diagnostic; #lastGrant; #lastGpuSnapshotAt = 0;
   #lifetime = new AbortController();
   #admissions = new Set();
   #executorProcessId; #feedback;
   #adjustments = [];
   #appliedBackend; #lastBatchMeasurement;
+  #baseCpuThreads; #explicitCpuThreads; #batchMultiplier = 1; #planningSuggestions;
 
   constructor({ profile, cpuThreads, resourceService, kind = 'background', devicePreference = 'auto' }) {
     if (!['auto', 'cpu'].includes(devicePreference)) throw new TypeError('Unsupported inference device preference.');
     this.#service = resourceService ?? sharedResourceBudget();
     this.#profile = profile;
     this.#request = inferenceResourceRequest(profile, cpuThreads, { backend: profile.requiredDevice ?? 'cpu' });
+    this.#baseCpuThreads = this.#request.cpuThreads;
+    this.#explicitCpuThreads = Number.isInteger(cpuThreads);
     this.#kind = kind;
     this.#devicePreference = devicePreference;
     this.#taskId = `inference-${randomUUID()}`;
@@ -127,11 +136,26 @@ export class InferenceResourceReservation {
   async #acquireOwned(kind, tokenizerOnly) {
     const signal = this.#lifetime.signal;
     await this.#releasePromise;
-    await (this.#residentPromise ??= this.#acquireResident(signal, tokenizerOnly).finally(() => { this.#residentPromise = undefined; }));
-    if (!tokenizerOnly && this.#residentBytes() < this.#request.memoryBytes)
-      await (this.#residentPromise ??= this.#acquireResident(signal, false).finally(() => { this.#residentPromise = undefined; }));
+    const previousRequest = this.#request;
+    this.#planRequest();
+    try {
+      await (this.#residentPromise ??= this.#acquireResident(signal, tokenizerOnly).finally(() => { this.#residentPromise = undefined; }));
+      if (!tokenizerOnly && this.#residentBytes() < this.#request.memoryBytes)
+        await (this.#residentPromise ??= this.#acquireResident(signal, false).finally(() => { this.#residentPromise = undefined; }));
+    } catch (error) {
+      // A denied exploration keeps the prior approved resident; admission still gates all new work.
+      // 扩张被拒时保留此前已批准驻留额度；新增工作仍必须经过执行准入。
+      const observedPeakBytes = this.#request.memoryEstimate.observedPeakBytes ?? 0;
+      if (this.#closed || signal.aborted || tokenizerOnly || !this.#lastGrant ||
+          observedPeakBytes > 0 && observedPeakBytes * 1.125 + 32 * MIB > this.#residentBytes()) throw error;
+      this.#request = { ...previousRequest, memoryBytes: this.#residentBytes() };
+      this.#batchMultiplier = Math.min(this.#batchMultiplier, this.#lastGrant.batchMultiplier ?? 1);
+      this.adjustment({ reason: 'resident-expansion-denied', boundary: 'next-request' });
+    }
     if (this.#closed) throw budgetError('reservation-closed');
     await (this.#executionPromise ??= this.#acquireExecution(kind, signal).finally(() => { this.#executionPromise = undefined; }));
+    if (this.#execution.suggestions?.batchMultiplier < 1)
+      this.#batchMultiplier = Math.min(this.#batchMultiplier, this.#execution.suggestions.batchMultiplier);
     if (!tokenizerOnly)
       await (this.#gpuPromise ??= this.#acquireGpu(signal).finally(() => { this.#gpuPromise = undefined; }));
     if (this.#closed) throw budgetError('reservation-closed');
@@ -145,10 +169,30 @@ export class InferenceResourceReservation {
       this.#adjustments = this.#adjustments.slice(-16);
     }
     this.#lastGrant = grant;
+    this.#planningSuggestions = this.#execution.suggestions;
     return this.#lastGrant;
   }
 
+  #planRequest() {
+    this.#batchMultiplier = this.#suggestedBatchMultiplier();
+    const cpuThreads = this.#explicitCpuThreads ? this.#baseCpuThreads
+      : Math.max(1, Math.min(32, availableParallelism(), Math.ceil(this.#baseCpuThreads * this.#batchMultiplier)));
+    const batchSize = Math.max(1, Math.min(128, Math.floor(32 * this.#batchMultiplier)));
+    this.#request = inferenceResourceRequest(this.#profile, cpuThreads, {
+      backend: this.#appliedBackend?.device ?? this.#profile.requiredDevice ?? 'cpu',
+      sequenceTokens: this.#lastBatchMeasurement?.sequenceTokens ?? 128, batchSize });
+  }
+
+  #suggestedBatchMultiplier() {
+    let fraction = this.#feedback?.backgroundFraction ?? this.#planningSuggestions?.batchMultiplier ?? 1;
+    if (this.#planningSuggestions?.batchMultiplier < 1)
+      fraction = Math.min(fraction, this.#planningSuggestions.batchMultiplier);
+    const multiplier = fraction < 1 ? fraction : Math.max(fraction, this.#planningSuggestions?.batchProbeMultiplier ?? 1);
+    return Math.max(0.125, Math.min(4, multiplier));
+  }
+
   #residentBytes() { return (this.#resident?.memoryBytes ?? 0) + this.#residentUpgrades.reduce((sum, lease) => sum + lease.memoryBytes, 0); }
+  #gpuBytes() { return (this.#gpuResident?.gpuMemoryBytes ?? 0) + this.#gpuUpgrades.reduce((sum, lease) => sum + lease.gpuMemoryBytes, 0); }
 
   async #acquireResident(signal, tokenizerOnly) {
     const desiredMemoryBytes = tokenizerOnly ? this.#request.tokenizerMemoryBytes
@@ -166,6 +210,18 @@ export class InferenceResourceReservation {
   }
 
   async #acquireGpu(signal) {
+    if (this.#gpuResident && this.#request.gpuMemoryBytes > this.#gpuBytes()) {
+      const lease = await this.#service.acquire({ taskId: `${this.#taskId}-gpu`, workspaceId: 'local', kind: this.#kind,
+        memoryBytes: 0, cpuThreads: 0, gpuMemoryBytes: this.#request.gpuMemoryBytes - this.#gpuBytes(), ttlMs: LEASE_TTL_MS }, { signal });
+      if (lease.status === 'granted') {
+        if (lease.executionProvider === this.#gpuResident.executionProvider &&
+            lease.executionDeviceId === this.#gpuResident.executionDeviceId && lease.deviceId === this.#gpuResident.deviceId) {
+          this.#gpuUpgrades.push(lease);
+          if (this.#executorProcessId && this.#service.registerExecutor)
+            await this.#service.registerExecutor(lease.leaseId, { processId: this.#executorProcessId });
+        } else await this.#service.release(lease.leaseId);
+      } else this.adjustment({ reason: 'gpu-expansion-denied', boundary: 'next-request' });
+    }
     if (this.#diagnostic?.code === 'GPU_RESOURCE_UNAVAILABLE' && Date.now() - this.#lastGpuSnapshotAt >= 1000 && this.#service.snapshot) {
       this.#lastGpuSnapshotAt = Date.now();
       const snapshot = await this.#service.snapshot({ signal });
@@ -211,26 +267,38 @@ export class InferenceResourceReservation {
   }
 
   #grantedBudget() {
+    const shape = modelShape(this.#profile);
+    const cpuScratch = { activationMemoryBytes: Math.max(1, this.#residentBytes() - this.#request.memoryEstimate.residentBaselineBytes),
+      hiddenSize: shape.hiddenSize, attentionHeads: shape.heads,
+      sequenceTokens: this.#request.memoryEstimate.sequenceTokens };
+    const cpuFallbackBatchBudget = { ...inferenceBatchBudget({ cpuThreads: this.#execution.cpuThreads,
+      memoryBytes: this.#residentBytes(), device: 'cpu', batchMultiplier: this.#batchMultiplier,
+      ...cpuScratch }, this.#profile.maxInputTokens ?? 512),
+      activationMemoryBytes: Math.max(1, this.#residentBytes() - this.#request.memoryEstimate.residentBaselineBytes),
+      hiddenSize: shape.hiddenSize, attentionHeads: shape.heads };
     return { cpuThreads: this.#execution.cpuThreads, memoryBytes: this.#residentBytes(),
-      gpuMemoryBytes: this.#gpuResident?.gpuMemoryBytes ?? 0,
+      gpuMemoryBytes: this.#gpuBytes(),
       device: this.#gpuResident ? process.platform === 'win32' ? 'dml' : 'cuda' : 'cpu',
       ...(this.#gpuResident ? { deviceId: this.#gpuResident.executionDeviceId ?? this.#gpuResident.deviceId } : {}),
       resourceMode: this.#execution.mode, memoryEstimate: this.#request.memoryEstimate,
-      cpuFallbackBatchBudget: inferenceBatchBudget({ cpuThreads: this.#execution.cpuThreads,
-        memoryBytes: this.#residentBytes(), device: 'cpu' }),
+      batchMultiplier: this.#batchMultiplier,
+      batchSuggestions: this.#execution.suggestions ?? {},
+      cpuFallbackBatchBudget,
       ...(this.#gpuResident ? { activationMemoryBytes: Math.max(1,
-        this.#gpuResident.gpuMemoryBytes - this.#request.memoryEstimate.runtimeWeightBytes - 128 * MIB),
-        hiddenSize: modelShape(this.#profile).hiddenSize, attentionHeads: modelShape(this.#profile).heads } : {}),
+        this.#gpuBytes() - this.#request.memoryEstimate.runtimeWeightBytes - 128 * MIB),
+        hiddenSize: shape.hiddenSize, attentionHeads: shape.heads }
+        : { activationMemoryBytes: cpuFallbackBatchBudget.activationMemoryBytes,
+          hiddenSize: shape.hiddenSize, attentionHeads: shape.heads }),
       ...inferenceBatchBudget({ cpuThreads: this.#execution.cpuThreads, memoryBytes: this.#residentBytes(),
-        gpuMemoryBytes: this.#gpuResident?.gpuMemoryBytes ?? 0, device: this.#gpuResident ? 'dml' : 'cpu',
-        batchMultiplier: this.#feedback?.backgroundFraction ?? this.#execution.suggestions?.batchMultiplier }),
+        gpuMemoryBytes: this.#gpuBytes(), device: this.#gpuResident ? 'dml' : 'cpu',
+        batchMultiplier: this.#batchMultiplier, ...cpuScratch }, this.#profile.maxInputTokens ?? 512),
       ...(this.#diagnostic ? { diagnostic: this.#diagnostic } : {}) };
   }
 
   #startRenewal() {
     if (this.#timer) return;
     this.#timer = setInterval(() => {
-      Promise.all([this.#resident, ...this.#residentUpgrades, this.#gpuResident, this.#execution].filter(Boolean).map(lease => this.#service.renew(lease.leaseId, { ttlMs: LEASE_TTL_MS })))
+      Promise.all([this.#resident, ...this.#residentUpgrades, this.#gpuResident, ...this.#gpuUpgrades, this.#execution].filter(Boolean).map(lease => this.#service.renew(lease.leaseId, { ttlMs: LEASE_TTL_MS })))
         .then(results => { if (results.some(result => result?.status === 'denied')) this.#renewError = true; })
         .catch(() => { this.#renewError = true; });
     }, 10_000);
@@ -256,10 +324,11 @@ export class InferenceResourceReservation {
     clearInterval(this.#timer);
     await this.#residentPromise?.catch(() => {});
     await this.idle();
-    const leases = [this.#resident, ...this.#residentUpgrades, this.#gpuResident].filter(Boolean);
+    const leases = [this.#resident, ...this.#residentUpgrades, this.#gpuResident, ...this.#gpuUpgrades].filter(Boolean);
     this.#resident = undefined;
     this.#residentUpgrades = [];
     this.#gpuResident = undefined;
+    this.#gpuUpgrades = [];
     await Promise.all(leases.map(lease => this.#service.release(lease.leaseId)));
   }
 
@@ -280,14 +349,15 @@ export class InferenceResourceReservation {
     if (status?.device !== 'cpu' || !this.#gpuResident) return;
     // The worker reports CPU only after disposing its attempted GPU session.
     // worker 仅在释放尝试过的 GPU 会话后报告 CPU，届时才可解除显存预留。
-    const lease = this.#gpuResident;
+    const leases = [this.#gpuResident, ...this.#gpuUpgrades];
     this.#gpuResident = undefined;
+    this.#gpuUpgrades = [];
     this.#diagnostic = status.diagnostic ?? { code: 'GPU_BACKEND_UNAVAILABLE' };
     if (this.#lastGrant) {
       const { deviceId, activationMemoryBytes, hiddenSize, attentionHeads, ...grant } = this.#lastGrant;
       this.#lastGrant = { ...grant, ...grant.cpuFallbackBatchBudget, device: 'cpu', gpuMemoryBytes: 0, diagnostic: this.#diagnostic };
     }
-    await this.#service.release(lease.leaseId);
+    await Promise.all(leases.map(lease => this.#service.release(lease.leaseId)));
   }
 
   retryRequiredGpuAfterExit() {
@@ -299,7 +369,7 @@ export class InferenceResourceReservation {
   async registerExecutor(processId) {
     if (!Number.isSafeInteger(processId) || processId <= 0 || !this.#service.registerExecutor) return;
     this.#executorProcessId = processId;
-    await Promise.all([this.#resident, ...this.#residentUpgrades, this.#gpuResident].filter(Boolean)
+    await Promise.all([this.#resident, ...this.#residentUpgrades, this.#gpuResident, ...this.#gpuUpgrades].filter(Boolean)
       .map(lease => this.#service.registerExecutor(lease.leaseId, { processId })));
   }
 
@@ -319,7 +389,8 @@ export class InferenceResourceReservation {
         source: 'owned-worker-hot-inference' };
     }
     this.#request = inferenceResourceRequest(this.#profile, this.#request.cpuThreads,
-      { backend: feedback.backend ?? 'cpu', sequenceTokens: feedback.sequenceTokens ?? 128, batchSize: feedback.batchSize ?? 16 });
+      { backend: feedback.backend ?? 'cpu', sequenceTokens: feedback.sequenceTokens ?? 128,
+        batchSize: this.#request.memoryEstimate.batchSize });
     // Cold load, queueing and tokenization do not train the hot inference throughput controller.
     // 冷加载、排队与分词采样不参与热推理吞吐比较，内存观察仍可单独修正下一请求预算。
     if (feedback.phase && feedback.phase !== 'hot-inference' && !feedback.allocationFailure) return;
@@ -328,7 +399,7 @@ export class InferenceResourceReservation {
     // Native protocol rejects unknown fields; model cost samples never enter the allocator contract.
     // 原生协议拒绝未知字段；模型成本采样留在模型层，不直接扩充资源调度器的公开合同。
     const resourceFeedback = Object.fromEntries(['throughputPerSecond', 'latencyMs', 'queueDepth', 'allocationFailure',
-      'foregroundLatencyMs', 'progress', 'phase', 'unit', 'backend'].filter(key => feedback[key] !== undefined)
+      'foregroundLatencyMs', 'progress', 'phase', 'unit', 'backend', 'inputTokens', 'sequenceTokens', 'batchSize', 'cpuThreads'].filter(key => feedback[key] !== undefined)
       .map(key => [key, feedback[key]]));
     const result = await this.#service.report(lease.leaseId, resourceFeedback);
     if (result?.status === 'reported') this.#feedback = result.feedback;
@@ -343,8 +414,12 @@ export class InferenceResourceReservation {
   }
 
   status() {
-    return { cpuThreads: this.#execution?.cpuThreads ?? 0, residentMemoryBytes: this.#residentBytes(),
-      gpuMemoryBytes: this.#gpuResident?.gpuMemoryBytes ?? 0, leaseRenewalFailed: Boolean(this.#renewError),
+    const suggestedBatchSize = Math.max(1, Math.min(128, Math.floor(32 * this.#suggestedBatchMultiplier())));
+    return { devicePreference: this.#devicePreference, cpuThreads: this.#execution?.cpuThreads ?? 0, residentMemoryBytes: this.#residentBytes(),
+      batchSuggestions: { batchSize: suggestedBatchSize, batchTokenBudget: Math.min(65_536,
+        Math.max(this.#profile.maxInputTokens ?? 512, suggestedBatchSize * 384)), maxInputTokens: this.#profile.maxInputTokens ?? 512,
+        estimatedMemoryBytes: this.#request.memoryBytes, source: 'resource-demand-estimate', requiresApproval: true },
+      gpuMemoryBytes: this.#gpuBytes(), leaseRenewalFailed: Boolean(this.#renewError),
       ...(this.#feedback ? { feedback: this.#feedback } : {}),
       memoryEstimate: this.#request.memoryEstimate, adjustments: this.#adjustments,
       cpuThreadAudit: { requested: this.#request.cpuThreads, granted: this.#execution?.cpuThreads ?? 0,

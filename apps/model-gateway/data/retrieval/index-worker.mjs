@@ -630,6 +630,11 @@ function recordCoverage(input, flag) {
   return transaction(() => coverageStore.record(input.entries, retrievalScopeKeys(input.scopeKeys), () => cancelled(flag)), flag);
 }
 
+function reconcileCoverage(input, flag) {
+  return transaction(() => coverageStore.reconcile(retrievalScopeKeys(input.scopeKeys), input.sourceTypes,
+    input.sourceIds, () => cancelled(flag)), flag);
+}
+
 function coverage(input, flag) {
   return coverageStore.query(retrievalScopeKeys(input.scopeKeys), input, () => cancelled(flag));
 }
@@ -730,7 +735,13 @@ async function removeSource({ sourceId, scopeKeys, permanent = true }) {
   const registry = identities(), key = hashText(sourceId);
   const existing = registry.sources[key];
   if (!current && existing && !scopes.includes(existing.scopeKey)) return { removed: false, generation: generation(), indexSnapshotId: snapshotId() };
-  if (!current && !permanent) return { removed: false, generation: generation(), indexSnapshotId: snapshotId() };
+  if (!current && !permanent) {
+    // Coverage-only failures are not source identities; remove diagnostics without creating a tombstone.
+    // 仅有失败覆盖的记录不是来源身份；清理诊断时不能为它伪造来源或永久撤销标记。
+    database.prepare(`DELETE FROM source_coverage WHERE source_id=? AND scope_key IN (${scopes.map(() => '?').join(',')})`)
+      .run(sourceId, ...scopes);
+    return { removed: false, generation: generation(), indexSnapshotId: snapshotId() };
+  }
   const scope = current?.scope_key ?? existing?.scopeKey ?? scopes[0];
   registry.sources[key] = { ...existing, sourceId, scopeKey: scope, active: false,
     ...(permanent || existing?.tombstone ? { tombstone: true } : {}) };
@@ -842,7 +853,7 @@ parentPort.on('message', message => {
     const flag = message.cancelBuffer ? new Int32Array(message.cancelBuffer) : null;
     try {
       cancelled(flag);
-      const operations = { upsertSources, search, read, readWindow, relations, recordCoverage, coverage, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, vectorSpaceStatus: input => vectorSpaces.status(retrievalScopeKeys(input.scopeKeys)), status, close };
+      const operations = { upsertSources, search, read, readWindow, relations, recordCoverage, reconcileCoverage, coverage, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, vectorSpaceStatus: input => vectorSpaces.status(retrievalScopeKeys(input.scopeKeys)), status, close };
       const operation = operations[message.method];
       if (!operation || !database) throw retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
       activeOperationId = message.id;

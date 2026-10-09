@@ -769,13 +769,14 @@ test('foreground corpus synchronization skips unchanged work while messages and 
         bodyLoads++;
         return registered.loadSource(source, signal);
       }, isCurrent: async (source, signal) => {
-        freshnessChecks++;
+        if (source.sourceType === 'knowledge') freshnessChecks++;
         return source.sourceType === 'knowledge' ? registered.isCurrent(source, signal) : true;
       } };
   };
   await indexing.service.syncFormalSources(await snapshot({ id: 'message-one', content: 'The first formal chat message.' }, 'The first confirmed memory.'));
   assert.equal(bodyLoads, 5);
   const firstParses = indexing.counts.parsed;
+  const firstFreshnessChecks = freshnessChecks;
   const initialVersion = await f.index.scopeVersion({ scopeKeys: ['user'] });
   const [vectorTarget] = await f.index.listSources({ scopeKeys: ['user'], sourceType: 'knowledge' });
   const original = await f.library.readSource(vectorTarget.sourceId, { scopeKeys: ['user'] });
@@ -791,7 +792,7 @@ test('foreground corpus synchronization skips unchanged work while messages and 
     'a real vector-only publication does not change the corpus derivation proof');
   await indexing.service.syncFormalSources(await snapshot({ id: 'message-two', content: 'The changed formal chat message.' }, 'The changed confirmed memory.'));
   assert.equal(bodyLoads, 5, 'vector augmentation and new chat or memory content never reload the unchanged corpus');
-  assert.equal(freshnessChecks, 0, 'an unchanged corpus does not stat every file during foreground synchronization');
+  assert.equal(freshnessChecks, firstFreshnessChecks, 'an unchanged corpus does not repeat source checks after its first verified publication');
   assert.equal(indexing.counts.parsed, firstParses + 2, 'the new chat message and changed memory still receive current derivations');
   assert.deepEqual((await f.index.listSources({ scopeKeys: ['chat:synthetic-chat'] })).map(source => source.sourceId), ['message-two']);
   const userSources = await f.index.listSources({ scopeKeys: ['user'] });

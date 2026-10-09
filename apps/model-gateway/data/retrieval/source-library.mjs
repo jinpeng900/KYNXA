@@ -11,6 +11,19 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const scopeKey = entry => entry.scope === 'user' ? 'user' : `project:${entry.projectId}`;
 const MAX_REGISTRY_BYTES = 32 * 1024 * 1024;
 
+/** Decoder input limits apply when importing bytes; stored snapshots retain output and page limits on every read.
+ * 解码输入额度在导入原始字节时执行；已存正文快照每次读取仍受正文和页数额度约束。
+ */
+function documentLimitViolation(entry, limits, textBytes = entry.storedBytes ?? 0) {
+  if (!entry.extraction) return null;
+  if (textBytes > limits.maximumDocumentOutputBytes)
+    return { dimension: 'maximumDocumentOutputBytes', limit: limits.maximumDocumentOutputBytes, observed: textBytes };
+  const selectedPages = entry.extraction.pages?.length ?? entry.extraction.pageCount ?? 0;
+  if (selectedPages > limits.maximumPdfPages)
+    return { dimension: 'maximumPdfPages', limit: limits.maximumPdfPages, observed: selectedPages };
+  return null;
+}
+
 /**
  * Explicitly imported text is authoritative; indexes never own or resurrect this registry.
  * 显式导入的文本与登记是权威资料；索引不能拥有或恢复已撤销的来源。
@@ -117,6 +130,8 @@ export class SourceLibrary {
           if (typeof file.text !== 'string' || Buffer.byteLength(file.text) > Math.min(resourceLimits.maximumSourceBytes, 2 * 1024 * 1024))
             throw toolFailure('资料文本过大。', 'INVALID_RETRIEVAL_SOURCE', 400);
           const extraction = file.extraction === undefined ? undefined : validateSourceExtraction(file.extraction, file.text.length);
+          if (documentLimitViolation({ extraction }, resourceLimits, Buffer.byteLength(file.text)))
+            throw toolFailure('资料提取正文或页数超过当前文档额度。', 'RETRIEVAL_LIBRARY_LIMIT', 413);
           const fileWindow = file.fileWindow === undefined ? undefined : validateSourceFileWindow(file.fileWindow, file.text.length);
           const existing = document.sources.find(entry => entry.status !== 'deleted' && entry.scope === target.scope &&
             entry.projectId === target.projectId && entry.originalPath === file.path && entry.contentHash === hash(file.text) &&
@@ -157,11 +172,13 @@ export class SourceLibrary {
     });
   }
 
-  async _readEntry(entry, signal) {
+  async _readEntry(entry, signal, limits) {
     signal?.throwIfAborted();
     const file = join(this.folder, validateId(entry.id), 'source', 'document.txt');
     const info = await inspectLocalPath(file);
     if (!info.isFile() || info.size > 2 * 1024 * 1024) throw toolFailure('导入资料异常。', 'INVALID_RETRIEVAL_SOURCE', 409);
+    if (limits && (info.size > limits.maximumSourceBytes || documentLimitViolation(entry, limits, info.size)))
+      throw toolFailure('已登记资料超过当前文档或来源额度，原文已保留。', 'RETRIEVAL_LIBRARY_LIMIT', 413);
     const text = await readFile(file, { encoding: 'utf8', signal });
     signal?.throwIfAborted();
     if (hash(text) !== entry.contentHash) throw toolFailure('导入资料已被意外更改。', 'STALE_RETRIEVAL_SOURCE', 409);
@@ -174,9 +191,10 @@ export class SourceLibrary {
 
   /** Read one authorized snapshot from the registry and disk, including its actual content hash.
    * 从正式登记和磁盘回读单份已授权快照，核实版本及实际正文哈希。 */
-  readSource(sourceId, { scopeKeys, sourceRevision, signal } = {}) {
+  readSource(sourceId, { scopeKeys, sourceRevision, signal, limits } = {}) {
     sourceId = validateId(sourceId).toLowerCase();
     const scopes = retrievalScopeKeys(scopeKeys);
+    const resourceLimits = limits === undefined ? undefined : validateIndexingLimits(limits);
     return this._enqueue(async () => {
       signal?.throwIfAborted();
       const entry = this._entry(await this._read(), sourceId);
@@ -186,7 +204,7 @@ export class SourceLibrary {
         try { await this._target(entry.scope, entry.projectId); } catch { return null; }
       }
       try {
-        const source = await this._readEntry(entry, signal);
+        const source = await this._readEntry(entry, signal, resourceLimits);
         this.errors.delete(entry.id);
         return source;
       } catch (error) {
@@ -244,14 +262,15 @@ export class SourceLibrary {
         }
         const scope = scopeKey(entry), current = usage.get(scope) ?? { files: 0, bytes: 0 };
         const proposed = { files: current.files + 1, bytes: current.bytes + (entry.storedBytes ?? 0) };
-        const dimension = (entry.storedBytes ?? 0) > resourceLimits.maximumSourceBytes ? 'maximumSourceBytes' :
-          proposed.files > resourceLimits.maximumFiles ? 'maximumFiles' : proposed.bytes > resourceLimits.maximumTotalBytes ? 'maximumTotalBytes' : null;
+        const documentLimit = documentLimitViolation(entry, resourceLimits);
+        const dimension = documentLimit?.dimension ?? ((entry.storedBytes ?? 0) > resourceLimits.maximumSourceBytes ? 'maximumSourceBytes' :
+          proposed.files > resourceLimits.maximumFiles ? 'maximumFiles' : proposed.bytes > resourceLimits.maximumTotalBytes ? 'maximumTotalBytes' : null);
         if (dimension) {
           if (!allowPartial) throw toolFailure('已登记资料超过当前索引预算，原文已保留。', 'RETRIEVAL_LIBRARY_LIMIT', 413);
           coverage.complete = false; coverage.skipped++;
           if (coverage.limits.length < 8 && !coverage.limits.some(item => item.dimension === dimension && item.scopeKey === scope))
-            coverage.limits.push({ dimension, limit: resourceLimits[dimension], observed: dimension === 'maximumSourceBytes' ?
-              entry.storedBytes : dimension === 'maximumFiles' ? proposed.files : proposed.bytes, scopeKey: scope });
+            coverage.limits.push({ dimension, limit: resourceLimits[dimension], observed: documentLimit?.observed ?? (dimension === 'maximumSourceBytes' ?
+              entry.storedBytes : dimension === 'maximumFiles' ? proposed.files : proposed.bytes), scopeKey: scope });
           continue;
         }
         usage.set(scope, proposed); coverage.admitted++;

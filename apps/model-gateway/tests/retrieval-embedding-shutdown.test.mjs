@@ -22,6 +22,7 @@ async function isolatedEmbeddingCheck(t, scenario) {
     import assert from 'node:assert/strict';
     import { mkdir, writeFile } from 'node:fs/promises';
     import { join } from 'node:path';
+    import { EventEmitter } from 'node:events';
     const [serviceModule, profileModule, processModule, scenario, home] = process.argv.slice(1);
     const { EmbeddingService } = await import(serviceModule);
     const { BUILTIN_EMBEDDING_PROFILE } = await import(profileModule);
@@ -84,8 +85,27 @@ async function isolatedEmbeddingCheck(t, scenario) {
       await service.close();
       report = { scenario, cancelledBeforeNativeLoad: true, laterRequestWorks: true };
     } else if (scenario === 'close-timeout') {
-      const service = createService({ closeTimeoutMs: 1 });
+      // Enter a known owned-worker boundary; immediate close can precede asynchronous resource admission.
+      // 先进入确定的自有 worker 边界；立即 close 可能早于异步资源准入，不能将未启动误当关闭超时。
+      const root = join(home, 'synthetic-timeout-model');
+      for (const asset of BUILTIN_EMBEDDING_PROFILE.files) {
+        await mkdir(join(root, asset.path, '..'), { recursive: true });
+        await writeFile(join(root, asset.path), 'synthetic timeout asset');
+      }
+      const worker = new EventEmitter();
+      worker.ref = () => {}; worker.unref = () => {};
+      worker.postMessage = message => {
+        if (message.type === 'embed') worker.emit('message', { type: 'phase', phase: 'inference' });
+      };
+      worker.terminate = async () => { forcedTerminations++; worker.emit('exit', 0); };
+      const resources = {
+        acquire: async request => ({ ...request, status: 'granted', leaseId: 'owned-timeout-fixture' }),
+        renew: async () => ({ status: 'renewed' }), release: async () => ({ status: 'released' }),
+      };
+      const service = new EmbeddingService({ modelRoot: root, closeTimeoutMs: 1, devicePreference: 'cpu',
+        resourceService: resources, workerFactory: () => worker });
       const pending = outcome(service.embedQuery('A request closed before its worker finishes starting.'));
+      await waitForPhase(service, 'inference');
       const close = service.close();
       assert.equal(service.close(), close);
       await assert.rejects(close, { code: 'EMBEDDING_CLOSE_TIMEOUT' });
