@@ -55,6 +55,10 @@ export class ToolRunProgress {
     this.generatedTokens = 0;
     this.rounds = 0;
     this.toolCalls = 0;
+    this.mutationRevision = 0;
+    this.checkedMutationRevision = 0;
+    this.validationReceipts = [];
+    this.validationRequests = 0;
     this.diagnostics = { version: 1, totalModelMs: 0, totalToolMs: 0, totalApprovalWaitMs: 0,
       maxModelMs: 0, maxToolMs: 0, maxApprovalWaitMs: 0, modelCalls: 0,
       executedToolCalls: 0, reusedToolCalls: 0, noProgressRounds: 0, modelRounds: [], toolCallsTiming: [] };
@@ -98,10 +102,55 @@ export class ToolRunProgress {
     this.diagnostics = { ...previous, noProgressRounds: metricSum(previous.noProgressRounds, metricInteger(count)) };
   }
 
+  /** Record only returned validation receipts, never model claims or retrieved test source.
+   * 只记录工具实际返回的验证回执，不接受模型宣称或检索到的测试源码作为执行证明。 */
+  observeOutcome(call, result) {
+    const completed = !result.isError && !['unknown', 'cancelled', 'error'].includes(result.status);
+    if (completed && ['filesystem.write', 'filesystem.edit', 'filesystem.mkdir', 'filesystem.move',
+      'filesystem.delete'].includes(call.name)) this.mutationRevision++;
+    if (!['terminal.run', 'terminal.host.run'].includes(call.name)) return;
+    let command = call.name === 'terminal.host.run' ? call.arguments?.script ?? call.arguments?.command :
+      [call.arguments?.command, ...(call.arguments?.args ?? [])].filter(value => typeof value === 'string').join(' ');
+    if (call.name === 'terminal.run' && /^cmd(?:\.exe)?$/iu.test(call.arguments?.command ?? '') &&
+        call.arguments?.args?.length === 3 && call.arguments.args[0].toLowerCase() === '/d' && call.arguments.args[1].toLowerCase() === '/c')
+      command = call.arguments.args[2];
+    if (typeof command !== 'string' || /[;&|`\r\n]/u.test(command)) return;
+    // Only simple test/build invocations are classified; wrappers and compound scripts stay unclassified.
+    // 仅识别直接测试或构建命令，包装器及复合脚本保留为未分类，不能把 echo 等成功当成验收。
+    const validationCommand = /^\s*(?:dotnet(?:\.exe)?\s+(?:test|build)|cargo(?:\.exe)?\s+(?:test|check|build)|npm(?:\.cmd)?\s+(?:test|run\s+(?:test|build))|node(?:\.exe)?\s+--test|pytest(?:\.exe)?)(?:\s|$)/iu;
+    if (!validationCommand.test(command.replace(/\s+/gu, ' '))) return;
+    let payload;
+    try { payload = JSON.parse(result.content); } catch { return; }
+    const output = payload.structuredContent ?? payload;
+    if (!Number.isInteger(output.exitCode) || output.cancelled || output.timedOut) return;
+    const passed = completed && output.exitCode === 0;
+    this.validationReceipts.push({ toolCallId: call.id, mutationRevision: this.mutationRevision,
+      exitCode: output.exitCode, passed });
+    this.validationReceipts = this.validationReceipts.slice(-64);
+    if (passed) this.checkedMutationRevision = this.mutationRevision;
+    else this.checkedMutationRevision = Math.min(this.checkedMutationRevision, Math.max(0, this.mutationRevision - 1));
+  }
+
+  needsValidation(task = '') {
+    return (this.mutationRevision > this.checkedMutationRevision || this.validationReceipts.at(-1)?.passed === false) &&
+      /代码|修复|实现|重构|\b(?:code|fix|implement|refactor)\b/iu.test(task);
+  }
+
+  verification() {
+    const failed = this.validationReceipts.at(-1)?.passed === false;
+    return { version: 1, mutationRevision: this.mutationRevision, checkedMutationRevision: this.checkedMutationRevision,
+      pendingValidation: this.mutationRevision > this.checkedMutationRevision || failed,
+      receipts: structuredClone(this.validationReceipts),
+      state: failed ? 'checks-failed' : this.mutationRevision > this.checkedMutationRevision ? 'needs-validation' :
+        this.validationReceipts.some(receipt => receipt.passed) ? 'checks-passed' : 'no-execution-checks',
+      conclusion: 'task-correctness-not-certified' };
+  }
+
   async save(phase, { toolCallId = null, code = null } = {}) {
     await this.persist({ version: 1, phase, rounds: this.rounds, toolCalls: this.toolCalls,
       estimatedGeneratedTokens: this.generatedTokens, limits: this.limits,
       startedAt: this.startedAt, updatedAt: new Date().toISOString(), toolCallId, code,
+      ...(this.mutationRevision || this.validationReceipts.length ? { verification: this.verification() } : {}),
       diagnostics: structuredClone(this.diagnostics) });
   }
 }

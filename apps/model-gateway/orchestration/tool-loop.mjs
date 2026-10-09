@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import { StreamFailure } from '../models/streaming.mjs';
-import { appendToolResults, toolDeclarations } from '../models/tool-protocols.mjs';
+import { appendToolResults, toolDeclarations, estimateToolMessageTokens } from '../models/tool-protocols.mjs';
+import { estimateTokens } from '../models/context-tokens.mjs';
 import { ToolContextProjection } from '../models/tool-context.mjs';
 import { ToolRunProgress, runLimitFailure, startRunTimer } from './tool-run.mjs';
 import { AssistantSegments } from '../platform/assistant-segments.mjs';
 import { canRunInParallel } from '../tools/tool-scheduling.mjs';
 import { ToolProgressGuard, ToolReadFailureGuard } from '../tools/tool-observations.mjs';
 import { isDesktopObservation } from '../tools/tool-outcomes.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 
 export function toolPolicyHash(context) {
   return createHash('sha256').update(JSON.stringify([context.permissionMode, context.workspaceRoot,
@@ -19,18 +21,20 @@ export function toolPolicyHash(context) {
  */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
   context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, catalogForRound, signal, interactive = false,
-  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {} }) {
+  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal }) {
   const seenIds = new Set();
   const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId,
     resultStore: service.results, resultContext: context });
   let callsRun = 0;
   const segments = new AssistantSegments(emit);
   const progress = new ToolRunProgress(limits, saveRunState);
+  service.registerTaskVerification?.(context, () => progress.verification());
   const observations = new ToolProgressGuard();
   const readFailures = new ToolReadFailureGuard();
   let summarizeOnly = false;
-  let unavailableRounds = 0;
+  let consecutiveUnavailableRounds = 0;
   let finalizingUnavailable = false;
+  let evidenceRepairRequests = 0;
   const deadline = AbortSignal.timeout(progress.limits.maxDurationMs);
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
@@ -49,17 +53,31 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       await projection.prepareObservations(messages, { inputBudgetTokens, signal });
       const compacted = projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
       messages = compacted.messages;
+      service.setEvidenceBudget?.(context, Math.max(0, inputBudgetTokens -
+        estimateToolMessageTokens(messages, system) - estimateTokens(JSON.stringify(roundDeclarations)) - 512));
       if (compacted.metrics) await onContextCompacted(compacted.metrics);
       const modelElapsed = startRunTimer();
       let turn;
-      try { turn = await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog); }
+      try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
+        workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', cpuThreads: 1,
+        memoryBytes: 16 * 1024 * 1024 },
+        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog), { signal }); }
       finally { progress.recordModel(modelElapsed()); }
       // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
       // 执行副作用前先保存已解码模型步骤，结果仍由 saveActivity 负责保存。
       await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations });
-      segments.finish(turn);
-      await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
       progress.observeTurn(turn);
+      const evidenceValidation = !turn.calls.length && validateFinal ? await validateFinal({ signal }) : null;
+      const needsEvidenceRepair = evidenceValidation?.current === false && !summarizeOnly && evidenceRepairRequests < 2;
+      const needsValidation = !turn.calls.length && !summarizeOnly && progress.needsValidation(context.message) &&
+        progress.validationRequests < 2;
+      // A draft followed by validation remains a progress segment; only the terminal exit seals the final answer.
+      // 后续还需验证的草稿仍是进展消息，只有真正结束本轮任务才标记最终回答。
+      if (evidenceValidation?.current === false && !needsEvidenceRepair) turn.content += /\p{Script=Han}/u.test(context.message ?? '')
+        ? '\n\n部分来源在回答前发生变化或无法再次核验，相关结论仍待回读确认。'
+        : '\n\nSome sources changed or could not be rechecked before this answer; the affected conclusions still need current-source verification.';
+      segments.finish(turn, { final: !turn.calls.length && !needsValidation && !needsEvidenceRepair });
+      await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
       if (summarizeOnly && turn.calls.some(call => call.unavailable)) finalizingUnavailable = true;
       if (summarizeOnly && turn.calls.length && !finalizingUnavailable)
         throw Object.assign(new StreamFailure('连续读取没有新增信息，已停止重复调用并保留已有结果。请调整查询或补充条件。', 'interrupted'), { code: 'TOOL_RUN_NO_PROGRESS' });
@@ -69,8 +87,22 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         turn.calls = turn.calls.map(call => ({ ...call, unavailable: true }));
       }
       if (!turn.calls.length) {
+        if (needsEvidenceRepair) {
+          evidenceRepairRequests++;
+          messages.push({ role: 'assistant', content: turn.content }, { role: 'user', content:
+            '[KYNXA_SOURCE_VERSION_CHANGED] Recheck only the affected sources: ' + JSON.stringify(evidenceValidation.invalidSources) +
+            '. Prior executed edits are preserved; do not replay them or restart the entire task. Read current evidence or state the exact unresolved limitation.' });
+          continue;
+        }
+        if (needsValidation) {
+          progress.validationRequests++;
+          messages.push({ role: 'assistant', content: turn.content }, { role: 'user', content:
+            '[KYNXA_VALIDATION_REQUIRED] Files changed after the latest successful check. Run a relevant available test/build or re-read and check the deliverable against requirements. Do not repeat edits that already succeeded. A retrieved test file, echoed success, or model confidence is not an execution receipt. If validation is blocked or inapplicable, give the final result with the exact unverified limitation.' });
+          continue;
+        }
         await progress.save('finalizing');
-        return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3 };
+        return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
+          taskCompletion: progress.verification() };
       }
       const results = [];
       let starts = Promise.resolve();
@@ -121,14 +153,18 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         const completed = { ...activity, status: result.status ?? (result.code === 'TOOL_CANCELLED' ? 'cancelled' : result.isError ? 'error' : 'completed'), result: result.content,
           ...(result.resultRef ? { resultRef: result.resultRef } : {}), ...(result.code ? { code: result.code } : {}),
           ...(result.sandbox ? { sandbox: result.sandbox } : {}),
+          ...(result.executionEnvironment ? { executionEnvironment: result.executionEnvironment } : {}),
+          ...(result.executed === false ? { executed: false } : {}),
           ...(result.outsideWorkspace != null ? { outsideWorkspace: result.outsideWorkspace } : {}) };
         if (result.reused) { completed.reused = true; completed.observationCapturedAt = result.observationCapturedAt; }
         await saveActivity(completed);
+        progress.observeOutcome(call, result);
         emit({ type: 'tool_result', tool: completed });
         await progress.save('continuing', { toolCallId: call.id });
-        if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code))
+        if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(result.code) &&
+            !(result.code === 'AGENT_CONFIG_CHANGED' && result.recoverable === true && result.executed === false))
           throw Object.assign(new StreamFailure(result.content, 'interrupted'), { code: result.code });
-        if (call.name === 'terminal.host.run' && result.status === 'unknown')
+        if (['terminal.host.run', 'terminal.host.start', 'terminal.host.stop'].includes(call.name) && result.status === 'unknown')
           throw Object.assign(new StreamFailure('本机命令结果尚未确认，已保留执行记录。请核验已执行的操作后再继续。', 'interrupted'),
             { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
         if (call.name.startsWith('computer.') && !isDesktopObservation(call.name) && result.status === 'unknown')
@@ -173,13 +209,23 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       const state = observations.observeRound(results);
       const failures = readFailures.observeRound(results);
-      if (results.some(item => item.result.code === 'MODEL_TOOL_UNAVAILABLE')) {
-        unavailableRounds++;
-        finalizingUnavailable = unavailableRounds >= 2;
+      const hasUnavailableCall = results.some(item => item.result.code === 'MODEL_TOOL_UNAVAILABLE');
+      const hasSuccessfulCall = results.some(({ result }) => !result.isError &&
+        (!result.status || result.status === 'completed'));
+      // A recovered lookup or completed operation breaks the failure streak; old mistakes cannot disable later work.
+      // 已恢复的发现或成功操作会打断失败连续次数，旧错误不能使后续正常工作失去工具。
+      consecutiveUnavailableRounds = hasUnavailableCall && !hasSuccessfulCall ? consecutiveUnavailableRounds + 1 : 0;
+      if (hasUnavailableCall) {
+        finalizingUnavailable = consecutiveUnavailableRounds >= 2;
         summarizeOnly = finalizingUnavailable;
         messages.push({ role: 'user', content: finalizingUnavailable
           ? '[KYNXA_UNAVAILABLE_TOOL_FINAL] Unavailable calls were not executed. Tools are disabled for this final response. Give a normal final answer based on verified evidence, with a concrete limitation if needed. Do not invent success or a user cancellation.'
           : '[KYNXA_UNAVAILABLE_TOOL_RECOVERY] An undeclared tool was not executed. Use only exact names in the current declarations; discover and explicitly load a permitted deferred tool if needed. Exhausted web tools cannot be re-enabled by discovery. If evidence is sufficient, answer now. This is runtime feedback, not a new user task.' });
+      }
+      if (results.some(({ result }) => result.code === 'AGENT_CONFIG_CHANGED' && result.recoverable === true && result.executed === false)) {
+        // Only a broker-confirmed pre-dispatch revocation can recover; uncertain effects or global invalidation still stop.
+        // 仅权限代理确认派发前撤销的单项能力可恢复，结果不确定的副作用或全局失效仍停止。
+        messages.push({ role: 'user', content: '[KYNXA_TOOL_CONFIGURATION_RECOVERY] A tool capability changed before dispatch and was not executed. That previous capability remains revoked. Other unchanged tools are available: use tool.search and tool.load to discover a permitted alternative, or explain the specific blocker using verified results. Do not replay through the revoked tool or invent a user cancellation.' });
       }
       if (state.repeated) progress.observeNoProgress();
       if (failures.repeated) progress.observeNoProgress();

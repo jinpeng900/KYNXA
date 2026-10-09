@@ -57,6 +57,17 @@ test('evidence budgets include source metadata and retain complete records inste
   assert.equal(selectCandidates([concise], { maximumTokens: 0 }).items.length, 0);
 });
 
+test('exact symbol and file targets survive reranking, duplicate copies and diversity selection', () => {
+  const target = { ...candidate('target', 'target.cs', 'bool CancelJob() { return true; }'), exactTargetMatch: true };
+  const duplicate = { ...candidate('copy', 'other.cs', target.excerpt), rerankScore: 100 };
+  const distractors = Array.from({ length: 12 }, (_, index) => ({ ...candidate(`note-${index}`, `note-${index}.md`,
+    `CancelJob cancellation note ${index} has no target implementation.`), rerankScore: 99 - index }));
+  const selected = selectCandidates([duplicate, ...distractors, target], { query: 'CancelJob target.cs', limit: 1, maximumTokens: 2000 });
+  assert.equal(selected.items[0].sourceRef, target.sourceRef);
+  assert.equal(selected.items[0].exactTargetMatch, true);
+  assert.equal(selected.selection.duplicateCount, 1);
+});
+
 test('recent context suppresses repeated evidence while weak lexical fragments remain labelled as weak', () => {
   const present = candidate('present', 'guide', '数据库恢复需要先核实当前备份以及目标版本，确认权限后执行。');
   const result = selectCandidates([present], { query: '数据库恢复', existingContext: [{ role: 'assistant', content: present.excerpt }] });
@@ -226,20 +237,21 @@ test('revision caches avoid whole-source rescans but re-read hits and reject cha
   retrieval.library.readSource = async (...args) => { exactReads++; return originalReadSource(...args); };
   const first = await retrieval.search(f.context, { query: '星际调度恢复' });
   assert.equal(first.items.length, 1);
+  const firstExactReads = exactReads;
   assert.equal((await retrieval.search(f.context, { query: '星际调度恢复' })).items.length, 1);
-  assert.equal(scans, 1);
-  assert.equal(exactReads, 2);
+  assert.equal(scans, 0, 'lazy corpus snapshots never reload the whole authorized library');
+  assert.equal(exactReads, firstExactReads + 1, 'a cached corpus still re-reads its selected evidence');
   assert.equal(first.selection.candidateCount, 1);
   const reference = first.items[0].sourceRef;
   await retrieval.read(f.context, { sourceRef: reference });
-  assert.equal(scans, 1);
+  assert.equal(scans, 0);
   await writeFile(join(retrieval.library.folder, imported.sources[0].id, 'source', 'document.txt'), '意外修改的快照。', 'utf8');
   assert.equal((await retrieval.search(f.context, { query: '星际调度恢复' })).items.length, 0);
   await assert.rejects(retrieval.read(f.context, { sourceRef: reference }), { code: 'STALE_RETRIEVAL_SOURCE' });
   await retrieval.library.add([{ path: join(f.workspace, 'new.md'), title: 'New recovery',
     text: '新版本星际调度恢复使用独立检查点。' }], { scope: 'user' });
   assert.ok((await retrieval.search(f.context, { query: '星际调度恢复' })).items.length);
-  assert.equal(scans, 2);
+  assert.equal(scans, 0);
 });
 
 test('conditional reranking preserves source identity and falls back without a configured profile', async t => {
@@ -289,6 +301,9 @@ test('cancellation during source freshness waits for all admitted reads before r
   const f = await auditCoordinator(t), retrieval = f.retrieval;
   await retrieval.library.add([{ path: join(f.workspace, 'a.md'), title: 'A', text: '取消时的审计恢复检查点。' },
     { path: join(f.workspace, 'b.md'), title: 'B', text: '取消时的审计恢复权限验证。' }], { scope: 'user' });
+  // Prepare lexical derivations before gating concurrent evidence reads, rather than blocking sequential lazy hydration.
+  // 先完成词法派生，再阻止并发证据回读，避免把顺序的按需正文加载误当成并发回读。
+  await retrieval.search(f.context, { query: '审计恢复' });
   const originalReadSource = retrieval.library.readSource.bind(retrieval.library);
   let enterReads, releaseReads;
   const entered = new Promise(resolve => { enterReads = resolve; });

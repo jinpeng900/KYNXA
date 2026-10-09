@@ -28,12 +28,14 @@ test('desktop additions retain broker approvals, result receipts and schema vali
       boundary: 'host-desktop', action, completed: true, ...target, mode: args.mode, backgroundRequested: args.background }, isError: false }; }
   } });
   const ask = await f.context('ask');
+  const application = join(f.workspace, 'fixture.exe');
+  await writeFile(application, 'Synthetic executable identity; the desktop runner remains a mock.');
   const denied = await f.run(ask, 'computer.window', { ...target, mode: 'resize', width: 800, height: 600 });
   assert.equal(denied.code, 'TOOL_APPROVAL_REQUIRED'); assert.equal(calls.length, 0);
   const full = await f.context('full');
   for (const [name, args] of [
     ['computer.window', { ...target, mode: 'resize', width: 800, height: 600 }],
-    ['computer.launch', { appPath: 'C:\\Synthetic\\fixture.exe', background: true, reason: target.reason }],
+    ['computer.launch', { appPath: application, background: true, reason: target.reason }],
     ['computer.read', { ...target, region: { x: 0, y: 0, width: 100, height: 100 }, elementId: '42,12345', timeoutMs: 1000 }],
     ...['CTRL+PLUS', 'CTRL+MINUS', 'CTRL+0'].map(key => ['computer.key', { ...target, key }])
   ]) {

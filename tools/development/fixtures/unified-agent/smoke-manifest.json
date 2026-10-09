@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "model": "deepseek-chat",
+  "datasetRevision": "kynxa-unified-smoke-v1",
+  "seed": 17,
+  "fixtureRoot": "tools/development/fixtures/unified-agent/workspace",
+  "validatorRoot": "tools/development/fixtures/unified-agent/validators",
+  "contextWindowTokens": 131072,
+  "maxOutputTokens": 8192,
+  "sampling": { "temperature": 0, "seedSupported": false },
+  "retrieval": { "semantic": "off", "embeddingProfileId": "builtin-multilingual", "rerankProfileId": null },
+  "sources": [ { "id": "addition-contract", "path": "requirements.md" } ],
+  "acceptanceCommands": [ { "id": "addition-test", "label": "Independent addition contract", "script": "addition.test.mjs", "timeoutMs": 10000 } ],
+  "tasks": [
+    {
+      "id": "addition-repair-development",
+      "split": "development",
+      "query": "根据项目资料修复 addition.mjs 中 add 函数的加法实现，并运行 addition-test 验证。",
+      "expectedSourceIds": [ "addition-contract" ],
+      "acceptanceCheckIds": [ "addition-test" ]
+    }
+  ]
+}

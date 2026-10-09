@@ -1,4 +1,5 @@
 import { MAX_SOURCE_CHARACTERS, retrievalFailure } from './retrieval-contracts.mjs';
+import { parseDocumentStructure } from './document-structure.mjs';
 
 export const MAX_SOURCE_WINDOW_CHARACTERS = 16000;
 export const SOURCE_WINDOW_VERSION = 'source-window-v1';
@@ -15,35 +16,12 @@ export function validateSourceWindowOptions({ mode = 'window', anchorOffset, bef
 
 /** Heading offsets point into the original UTF-16 text; fenced code cannot create a chapter.
  * 标题偏移直接指向原始 UTF-16 正文，围栏代码里的标题不形成章节。 */
-function markdownHeadings(text, checkCancelled) {
-  const headings = [];
-  let fence = null, previous = null, lineNumber = 0;
-  for (const match of text.matchAll(/[^\n]*(?:\n|$)/g)) {
-    if (!match[0]) continue;
-    if (++lineNumber % 256 === 0) checkCancelled?.();
-    const line = match[0].replace(/\r?\n$/, ''), offset = match.index;
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      if (marker && marker[1][0] === fence.character && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
-      previous = null;
-      continue;
-    }
-    if (marker && !(marker[1][0] === '`' && marker[2].includes('`'))) {
-      fence = { character: marker[1][0], length: marker[1].length }; previous = null; continue;
-    }
-    const atx = /^ {0,3}(#{1,6})(?:[\t ]+|$)(.*)$/.exec(line);
-    if (atx) {
-      headings.push({ title: atx[2].replace(/[\t ]+#+[\t ]*$/, '').trim(), level: atx[1].length, startOffset: offset });
-      previous = null; continue;
-    }
-    const setext = /^ {0,3}(=+|-+)[\t ]*$/.exec(line);
-    if (setext && previous?.title && !/^\s*(?:[-+*]\s|\d+[.)]\s|>)/.test(previous.title)) {
-      headings.push({ title: previous.title.trim(), level: setext[1][0] === '=' ? 1 : 2, startOffset: previous.offset });
-      previous = null; continue;
-    }
-    previous = line.trim() && !/^ {4}|^\t/.test(line) ? { title: line, offset } : null;
-  }
-  return headings;
+function markdownStructure(text, checkCancelled) {
+  const parsed = parseDocumentStructure({ text, locator: { relativePath: 'source.md' } }, { checkCancelled });
+  const headings = parsed.units
+    .filter(unit => unit.kind === 'heading')
+    .map(unit => ({ title: unit.sectionTitle, level: unit.headingLevel, startOffset: unit.startOffset }));
+  return { headings, incomplete: parsed.diagnosticCodes.includes('DOCUMENT_STRUCTURE_LIMIT'), diagnosticCodes: parsed.diagnosticCodes };
 }
 
 /** Return bounded original text around an anchor, optionally inside its real Markdown section.
@@ -61,9 +39,13 @@ export function sourceWindow(text, options = {}, checkCancelled) {
       !integer(referenceRange.endOffset, referenceRange.startOffset + 1, text.length) ||
       splitsPair(text, referenceRange.startOffset) || splitsPair(text, referenceRange.endOffset)))
     throw retrievalFailure('Invalid chunk range. / 分块范围无效。', 'INVALID_RETRIEVAL_WINDOW');
-  let section, sections, spansSections = false, navigationTruncated = false, lower = 0, upper = text.length;
+  let section, sections, sectionDiagnostics, spansSections = false, navigationTruncated = false, lower = 0, upper = text.length;
   if (mode === 'section') {
-    const headings = markdownHeadings(text, checkCancelled);
+    const parsed = markdownStructure(text, checkCancelled);
+    // Partial navigation cannot prove the final chapter boundary; retain a truthful raw window.
+    // 部分章节导航无法证明最终边界，此时回退为真实原文窗口，不把未解析的后续标题归入前章。
+    const headings = parsed.incomplete ? [] : parsed.headings;
+    if (parsed.incomplete) sectionDiagnostics = parsed.diagnosticCodes;
     let selected = -1;
     for (let index = 0; index < headings.length; index++) {
       if (headings[index].startOffset > anchorOffset) break;
@@ -97,11 +79,12 @@ export function sourceWindow(text, options = {}, checkCancelled) {
   let endOffset = Math.min(upper, startOffset + limit);
   if (splitsPair(text, endOffset)) endOffset--;
   checkCancelled?.();
-  return { text: text.slice(startOffset, endOffset), offset: startOffset, nextOffset: endOffset,
+  return { text: text.slice(startOffset, endOffset), offset: startOffset, nextOffset: endOffset, offsetUnit: 'utf16-code-units',
     totalCharacters: text.length, hasMore: endOffset < upper,
-    window: { version: SOURCE_WINDOW_VERSION, mode: section ? 'section' : 'window', anchorOffset,
+    window: { version: SOURCE_WINDOW_VERSION, mode: section ? 'section' : 'window', anchorOffset, offsetUnit: 'utf16-code-units',
       startOffset, endOffset, clippedAtStart: startOffset > lower, clippedAtEnd: endOffset < upper,
       ...(section ? { section } : {}), ...(sections ? { sections, spansSections, navigationTruncated } : {}),
+      ...(sectionDiagnostics ? { sectionUnavailable: true, navigationTruncated: true, diagnosticCodes: sectionDiagnostics } : {}),
       ...(referenceRange ? { referenceRange: { ...referenceRange },
         referenceRangeCovered: startOffset <= referenceRange.startOffset && endOffset >= referenceRange.endOffset } : {}) } };
 }

@@ -2,11 +2,12 @@ import { spawn } from 'node:child_process';
 import { basename, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { findNativeToolHost } from './tool-host-path.mjs';
-import { inspectLocalPath, toolFailure } from '../platform/tool-paths.mjs';
+import { bindLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
 import { computerKeyNames } from '../official-tools/Tools/computer.mjs';
+import { runResourceTask } from '../platform/resources/resource-task.mjs';
 
 const actions = new Set(['windows', 'apps', 'screenshot', 'read', 'launch', 'window', 'activate', 'move', 'click', 'scroll', 'drag', 'type', 'key']);
-const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:w|\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
+const shells = /^(?:cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|node|python(?:\d+(?:\.\d+)*)?|py|bash|sh|wsl|wt)\.exe$/i;
 const maxStdoutBytes = 8 * 1024 * 1024;
 const definiteLaunchFailures = new Set(['DESKTOP_LAUNCH_BLOCKED', 'DESKTOP_LAUNCH_FAILED', 'DESKTOP_INVALID_REQUEST',
   'DESKTOP_UNAVAILABLE', 'DESKTOP_BUSY', 'DESKTOP_CANCELLED', 'DESKTOP_ACCESS_DENIED']);
@@ -16,17 +17,23 @@ const definiteLaunchFailures = new Set(['DESKTOP_LAUNCH_BLOCKED', 'DESKTOP_LAUNC
  * 桌面操作有独立协议和宿主边界，不经过终端沙箱执行。
  */
 export class DesktopRunner {
-  constructor({ toolHostPath, invoke } = {}) {
+  constructor({ toolHostPath, invoke, resourceService } = {}) {
     this.toolHostPath = toolHostPath;
     this.invoke = invoke ?? invokeDesktopHost;
     this.shutdown = new AbortController();
     this.active = new Set();
+    this.resources = resourceService;
   }
 
   async _invoke(request, signal, timeoutMs) {
     const host = await findNativeToolHost(this.toolHostPath, 'DESKTOP_UNAVAILABLE');
     this.shutdown.signal.throwIfAborted(); signal?.throwIfAborted();
-    const operation = this.invoke(host, request, signal, timeoutMs);
+    const invoke = lease => this.invoke(host, request, signal, timeoutMs, undefined, processId => {
+      if (lease) this.resources.registerExecutor?.(lease.leaseId, { processId }).catch(() => {});
+    });
+    const operation = request.operation === 'desktop_capabilities' ? invoke(null) :
+      runResourceTask(this.resources, { cpuThreads: 1, memoryBytes: request.action === 'screenshot'
+        ? 192 * 1024 * 1024 : 32 * 1024 * 1024 }, invoke, { signal });
     this.active.add(operation);
     try { return await operation; }
     finally { this.active.delete(operation); }
@@ -65,11 +72,13 @@ export class DesktopRunner {
       throw toolFailure('不支持此按键组合。', 'DESKTOP_INVALID_KEY');
     if (action === 'launch' && arguments_.background !== undefined && typeof arguments_.background !== 'boolean')
       throw toolFailure('后台启动选项必须为布尔值。', 'DESKTOP_INVALID_REQUEST');
+    let launchBinding;
     if (action === 'launch') {
       const path = arguments_.appPath;
       if (typeof path !== 'string' || !isAbsolute(path) || /^\\\\/.test(path) || !/\.exe$/i.test(path) || shells.test(basename(path)))
         throw toolFailure('打开软件需要本地应用 .exe 路径；命令解释器请使用对应的终端工具。', 'DESKTOP_INVALID_APPLICATION');
-      const info = await inspectLocalPath(path);
+      launchBinding = await bindLocalPath(path, { allowHardLinks: true });
+      const info = await revalidateLocalPathBinding(launchBinding);
       if (!info.isFile()) throw toolFailure('应用路径不是本地程序文件。', 'DESKTOP_INVALID_APPLICATION');
     } else if (!['windows', 'apps'].includes(action)) {
       if (typeof arguments_.windowId !== 'string' || !/^[1-9]\d{0,19}$/.test(arguments_.windowId) ||
@@ -77,6 +86,7 @@ export class DesktopRunner {
         throw toolFailure('请使用 computer.windows 返回的窗口与进程身份。', 'DESKTOP_INVALID_TARGET');
     }
     const { reason, ...parameters } = arguments_;
+    if (launchBinding) parameters.appPath = launchBinding.path;
     const combined = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
     let value;
     try { value = await this._invoke({ operation: 'desktop', action, ...parameters }, combined,
@@ -127,10 +137,11 @@ export class DesktopRunner {
 
 // The optional process factory is an isolated transport-test seam, never a model/tool parameter.
 // 可选进程工厂只用于隔离传输测试，不属于模型或工具参数。
-export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess = spawn) {
+export function invokeDesktopHost(host, request, signal, timeoutMs, spawnProcess = spawn, onStarted) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawnProcess(host, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    if (child.pid) onStarted?.(child.pid);
     const stdoutDecoder = new StringDecoder('utf8');
     let stdoutBuffer = '', stdoutBytes = 0, stderrBytes = 0, stopError, settled = false, hardStop, drainTimer;
     let replyFrame, frameCount = 0, exited = false, spawned = false, submitted = false, invalidTransport;

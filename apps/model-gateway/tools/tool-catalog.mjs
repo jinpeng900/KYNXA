@@ -9,7 +9,10 @@ const coreTool = tool => tool.source === 'builtin' && !tool.name.startsWith('com
 function relevanceScore(tool, signals) {
   const name = tool.name.toLowerCase(), description = String(tool.description ?? '').toLowerCase();
   if (name.startsWith('computer.')) return signals.desktop ? 40 : 0;
-  if (name === 'terminal.host.run') return signals.hostTerminal ? 40 : 0;
+  if (name.startsWith('terminal.host.')) {
+    if (!signals.hostTerminal) return 0;
+    return name === 'terminal.host.run' ? (signals.deviceState ? 80 : 40) : 32;
+  }
   let score = signals.terms.reduce((sum, word) => sum + (name.includes(word) ? 3 : description.includes(word) ? 1 : 0), 0);
   const docs = /context7|query[-_]docs|resolve[-_]library[-_]id|(?:search|fetch|get)[-_](?:docs|documentation)/.test(name);
   const webSearch = /web[-_]?search|search[-_]?web|search[-_]?news|news[-_]?search/.test(name) || /public web search|search (?:the )?(?:web|internet)/.test(description);
@@ -30,14 +33,19 @@ function relevanceScore(tool, signals) {
 export class ModelToolCatalog {
   constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [] } = {}) {
     this.descriptors = descriptors.filter(tool => tool.enabled !== false);
+    this.canonicalNames = new Map(this.descriptors.flatMap(tool => [[tool.name, tool.name],
+      [wireCatalog([tool])[0].wireName, tool.name]]));
     this.protocol = protocol;
     this.tokenBudget = Math.max(0, Math.floor(tokenBudget));
     this.selected = [];
     const signals = toolSelectionSignals(message, { historySignals, previousToolNames });
     const scores = new Map(this.descriptors.map(tool => [tool, relevanceScore(tool, signals)]));
     const ordered = this.descriptors.filter(tool => (!tool.name.startsWith('computer.') || signals.desktop) &&
-      (tool.name !== 'terminal.host.run' || signals.hostTerminal)).sort((left, right) =>
+      (!tool.name.startsWith('terminal.host.') || signals.hostTerminal)).sort((left, right) =>
       Number(discoveryNames.has(right.name)) - Number(discoveryNames.has(left.name)) ||
+      // A device inspection needs the real host shell before less relevant builtin schemas fill the budget.
+      // 本机状态查询先保留真实宿主终端，避免其他内置 schema 先占满预算；执行审批保持原规则。
+      (signals.deviceState ? Number(right.name === 'terminal.host.run') - Number(left.name === 'terminal.host.run') : 0) ||
       (signals.remoteBrowser ? Number(toolDiscoveryCategory(right) === 'browser') - Number(toolDiscoveryCategory(left) === 'browser') : 0) ||
       (signals.desktop ? Number(right.name.startsWith('computer.')) - Number(left.name.startsWith('computer.')) : 0) ||
       Number(coreTool(right)) - Number(coreTool(left)) || scores.get(right) - scores.get(left) ||
@@ -52,9 +60,17 @@ export class ModelToolCatalog {
 
   wire() { return wireCatalog(this.selected); }
 
+  resolveNames(names) {
+    // Exact aliases refer only to enabled descriptors in this request; unknown providers are never guessed or loaded.
+    // 精确别名只对应本请求已启用的描述符，未知服务不能通过猜测名称被加载。
+    return names.map(name => this.canonicalNames.get(name) ?? name);
+  }
+
   load(names) {
-    const requested = names.map(name => this.descriptors.find(tool => tool.name === name));
-    if (requested.some(tool => !tool)) throw toolFailure('工具不存在或已禁用。', 'TOOL_NOT_FOUND', 404);
+    const resolved = [...new Set(this.resolveNames(names))];
+    const requested = resolved.map(name => this.descriptors.find(tool => tool.name === name)).filter(Boolean);
+    const unavailable = resolved.filter(name => !this.canonicalNames.has(name)).map(name => ({ name, code: 'TOOL_NOT_FOUND' }));
+    if (!requested.length) throw toolFailure('工具不存在或已禁用。', 'TOOL_NOT_FOUND', 404);
     // Explicit discovery may replace ordinary builtin schemas as well as remote ones.
     // Keeping every builtin prevents a small-window model from ever loading the requested capability.
     // 显式发现可以替换普通内置 schema 或远程 schema；小窗口模型若强制保留全部内置工具，将无法装入请求的能力。
@@ -65,6 +81,7 @@ export class ModelToolCatalog {
     for (const descriptor of this.selected) if (!next.some(tool => tool.name === descriptor.name) && this.fits([...next, descriptor])) next.push(descriptor);
     this.selected = next;
     return { loaded: requested.map(tool => tool.name), selectedCount: next.length,
-      availableCount: this.descriptors.length, deferredCount: this.descriptors.length - next.length };
+      availableCount: this.descriptors.length, deferredCount: this.descriptors.length - next.length,
+      ...(unavailable.length ? { unavailable } : {}) };
   }
 }

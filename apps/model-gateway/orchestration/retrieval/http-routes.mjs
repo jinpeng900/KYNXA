@@ -6,6 +6,19 @@ import { objectInput, toolFailure } from '../../platform/tool-paths.mjs';
 export async function handleRetrievalRoute(request, response, url, retrieval) {
   const path = url.pathname, method = request.method;
   if (!path.startsWith('/api/retrieval/') && !/^\/api\/projects\/[^/]+\/retrieval\//u.test(path)) return false;
+  const controller = new AbortController();
+  const aborted = () => controller.abort();
+  const disconnected = () => { if (!response.writableEnded) aborted(); };
+  request.on('aborted', aborted);
+  response.on('close', disconnected);
+  if (request.aborted) aborted();
+  try { return await dispatchRetrievalRoute(request, response, url, retrieval, controller.signal); }
+  finally { request.off('aborted', aborted); response.off('close', disconnected); }
+}
+
+async function dispatchRetrievalRoute(request, response, url, retrieval, signal) {
+  const path = url.pathname, method = request.method;
+  signal.throwIfAborted();
   const send = value => { sendJson(response, 200, value); return true; };
   if (path === '/api/retrieval/settings') {
     if (method === 'GET') return send(await retrieval.settings.getGlobal());
@@ -18,22 +31,23 @@ export async function handleRetrievalRoute(request, response, url, retrieval) {
     if (method === 'PATCH') {
       const result = await retrieval.settings.patchProject(projectSettings[1], await readJsonBody(request));
       const effective = await retrieval.effective(projectSettings[1]);
-      if (effective.projectIndexing?.mountedFolder) await retrieval.rebuild({ projectId: projectSettings[1] });
+      if (effective.projectIndexing?.mountedFolder) await retrieval.rebuild({ projectId: projectSettings[1], dirty: true });
       return send({ ...result, effective });
     }
   }
   if (path === '/api/retrieval/status' && method === 'GET') return send(await retrieval.status());
+  if (path === '/api/retrieval/models' && method === 'GET') return send({ profiles: retrieval.modelProfiles() });
   if (path === '/api/retrieval/providers' && method === 'GET') return send(await retrieval.tools.webSearch.providers());
   if (path === '/api/retrieval/index/rebuild' && method === 'POST')
-    return send(await retrieval.rebuild(objectInput(await readJsonBody(request))));
+    return send(await retrieval.rebuild({ ...objectInput(await readJsonBody(request)), signal }));
   const job = /^\/api\/retrieval\/index\/jobs\/([a-zA-Z0-9-]+)(\/cancel)?$/u.exec(path);
   if (job && method === (job[2] ? 'POST' : 'GET'))
     return send(job[2] ? await retrieval.cancelJob(job[1]) : await retrieval.jobs.get(job[1]));
   if (path === '/api/retrieval/sources') {
     if (method === 'GET') return send(await retrieval.library.list(url.searchParams.get('projectId')));
-    if (method === 'POST') return send(await retrieval.importSource(objectInput(await readJsonBody(request))));
+    if (method === 'POST') return send(await retrieval.importSource(objectInput(await readJsonBody(request)), { signal }));
   }
   const source = /^\/api\/retrieval\/sources\/([a-zA-Z0-9-]+)$/u.exec(path);
-  if (source && method === 'DELETE') return send(await retrieval.removeSource(source[1], await readJsonBody(request)));
+  if (source && method === 'DELETE') return send(await retrieval.removeSource(source[1], await readJsonBody(request), { signal }));
   throw toolFailure('检索接口或操作不存在。', 'RETRIEVAL_ROUTE_NOT_FOUND', 404);
 }

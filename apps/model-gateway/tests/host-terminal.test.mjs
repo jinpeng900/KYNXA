@@ -33,10 +33,10 @@ test('host commands require Ask/Smart approval, never use the sandbox, and retai
   }
   assert.equal(runner.calls.length, 1); assert.equal(runner.calls[0].script, 'echo fixture');
   assert.equal(runner.calls[0].reason, undefined);
-  assert.equal(runner.calls[0].cwd, f.workspace);
+  assert.equal(runner.calls[0].cwd, await realpath(f.workspace));
 });
 
-test('full host commands validate reasons and schemas; changed work/config cancels an approval', async t => {
+test('full host commands validate reasons and schemas; work changes cancel approval but unrelated skills do not', async t => {
   const runner = stub(), f = await toolFixture(t, { hostTerminalRunner: runner });
   const ctx = await f.context('full');
   assert.equal((await f.run(ctx, 'terminal.host.run', { ...input, reason: '   ' })).code, 'OUTSIDE_WORKSPACE_REASON_REQUIRED');
@@ -53,8 +53,8 @@ test('full host commands validate reasons and schemas; changed work/config cance
   const config = await f.service.getConfig();
   await f.service.updateConfig({ ...config, expectedRevision: config.revision, skillDirectories: [join(f.root, 'skills')] });
   approve(f.service, next, waiting.event.tool);
-  assert.equal((await waiting.result).code, 'AGENT_CONFIG_CHANGED');
-  assert.equal(runner.calls.length, 1);
+  assert.equal((await waiting.result).status, 'completed');
+  assert.equal(runner.calls.length, 2);
 });
 
 test('unavailable host terminal stays unavailable while a working sandbox never gets called', async t => {

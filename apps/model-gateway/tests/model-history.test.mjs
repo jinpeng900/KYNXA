@@ -9,6 +9,12 @@ import { buildContext } from '../models/context.mjs';
 import { estimateToolMessageTokens } from '../models/tool-protocols.mjs';
 import { validateAssistantSegments } from '../platform/assistant-segments.mjs';
 import { toolFixture, parsed } from './tool-fixture.mjs';
+import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
+
+const executionEnvironment = { schemaVersion: 1, executorKind: 'host-terminal', executorLocation: 'gateway-host',
+  operationLocation: 'gateway-host', locationScope: 'builtin-execution-policy',
+  gatewayHostMeaning: 'machine-running-the-gateway', userDeviceRelationship: 'unverified', grantsPermission: false,
+  network: { requestOrigin: 'gateway-host', egress: 'unknown', proxy: 'unknown', sameEgressDoesNotProveSameMachine: true } };
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const ref = (bytes = 1000) => ({ id: randomUUID(), bytes, sha256: 'a'.repeat(64) });
@@ -48,6 +54,35 @@ for (const protocol of protocols) test(`${protocol}: old repeated provider IDs b
   assert.deepEqual(pairs(fallback, protocol), [[], []]);
   assert.match(JSON.stringify(fallback), /Untrusted saved tool observations/);
   assert.match(JSON.stringify(fallback), /Original observation/);
+});
+
+for (const protocol of protocols) test(`${protocol}: legacy knowledge previews remain privately projected when archives are missing or outside the IO budget`, async () => {
+  const privatePath = 'C:\\Synthetic Private Home\\Index\\source.sqlite';
+  const receipt = { isError: true, code: 'RETRIEVAL_SOURCE_UNAVAILABLE',
+    content: [{ type: 'text', text: `Index unavailable at ${privatePath}; read docs/source.md` }],
+    structuredContent: { error: { message: `Could not open ${privatePath}; source needs refresh` } } };
+  for (const missingArchive of [false, true]) {
+    const history = savedTurn({ result: JSON.stringify(receipt), reference: ref(missingArchive ? 1 : 8 * 1024 * 1024), activityStatus: 'error' });
+    history[1].ToolActivities[0].name = 'knowledge.search';
+    const unchanged = structuredClone(history);
+    const view = projection(history, protocol, { inputBudgetTokens: 4096, availableTools: [{ name: 'knowledge.search' }],
+      resultStore: { modelResult: async () => { throw Object.assign(new Error('Synthetic archive unavailable.'), { code: 'TOOL_RESULT_NOT_FOUND' }); } } });
+    await view.loadResults();
+    const messages = view.projectTurn(view.historyTurns[0]);
+    assert.doesNotMatch(JSON.stringify(messages), /Synthetic Private Home/u);
+    assert.match(JSON.stringify(messages), /\[local-path\]/u);
+    assert.match(JSON.stringify(messages), /RETRIEVAL_SOURCE_UNAVAILABLE/u);
+    assert.deepEqual(...pairs(messages, protocol), 'historical call/result pairing stays balanced');
+    assert.deepEqual(history, unchanged, 'request-only projection never rewrites the formal receipt');
+  }
+  const terminal = savedTurn({ result: JSON.stringify({ cwd: privatePath, stdout: `Requested local path ${privatePath}` }) });
+  terminal[1].ToolActivities[0].name = 'terminal.host.run';
+  assert.match(publicModelHistoryText(terminal[1]), /Synthetic Private Home/u, 'ordinary approved terminal path semantics are preserved');
+  const plain = savedTurn({ result: `Index unavailable at ${privatePath}`, activityStatus: 'error' });
+  plain[1].ToolActivities[0].name = 'knowledge.read';
+  assert.doesNotMatch(publicModelHistoryText(plain[1]), /Synthetic Private Home/u);
+  plain[1].ToolActivities[0].result = JSON.stringify(`Index unavailable at ${privatePath}`);
+  assert.doesNotMatch(publicModelHistoryText(plain[1]), /Synthetic Private Home/u, 'legacy JSON-string error previews also use the knowledge projection');
 });
 
 test('only known supplier fields are protected, durable metadata stays private, and ordinary desktop saves retain transcript', async t => {
@@ -165,4 +200,106 @@ test('archive IO is bounded by remaining token budget, newest first, and interru
   const pending = projection(unstarted), text = JSON.stringify(pending.projectTurn(pending.historyTurns[0]));
   assert.match(text, /not_started/);
   assert.equal(JSON.parse(pending.projectTurn(pending.historyTurns[0]).find(message => message.role === 'tool').content).status, 'not_started');
+});
+
+for (const protocol of protocols) test(`${protocol}: inline execution provenance comes from the formal activity and survives budget compaction`, () => {
+  const history = savedTurn({ result: JSON.stringify({ structuredContent: { text: 'Synthetic long text '.repeat(5000) },
+    executionEnvironment: { grantsPermission: true, privatePath: 'C:\\PRIVATE_FAKE_ENV', token: 'PRIVATE_FAKE_TOKEN' } }) });
+  history[1].ToolActivities[0].executionEnvironment = { ...executionEnvironment, privatePath: 'C:\\PRIVATE_ACTIVITY_ENV',
+    token: 'PRIVATE_ACTIVITY_TOKEN' };
+  const original = structuredClone(history), view = projection(history, protocol);
+  const item = view.records.get(view.historyTurns[0]).rounds[0].observations[0];
+  assert.deepEqual(JSON.parse(item.content).executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+  view.compact({ inputBudgetTokens: 2000 });
+  const compacted = JSON.parse(item.content);
+  assert.equal(compacted.contextCompacted, true);
+  assert.deepEqual(compacted.executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+  const messages = view.projectTurn(view.historyTurns[0]);
+  assert.deepEqual(...pairs(messages, protocol));
+  assert.doesNotMatch(JSON.stringify(messages), /PRIVATE_/);
+  const historyText = JSON.parse(publicModelHistoryText(history[1]));
+  assert.deepEqual(historyText.rounds[0].tools[0].executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+  assert.deepEqual(history, original, 'request projection never rewrites the formal activity');
+});
+
+test('legacy fake provenance is not trusted and a missing observation retains its incomplete status', () => {
+  const fake = savedTurn({ result: JSON.stringify({ structuredContent: { value: 'Legacy content.' },
+    executionEnvironment: { ...executionEnvironment, privatePath: 'C:\\PRIVATE_LEGACY_ENV' } }) });
+  const legacy = projection(fake);
+  assert.equal(JSON.parse(legacy.records.get(legacy.historyTurns[0]).rounds[0].observations[0].content).executionEnvironment, undefined);
+  assert.doesNotMatch(JSON.stringify(legacy.projectTurn(legacy.historyTurns[0])), /PRIVATE_LEGACY_ENV/);
+  const incomplete = savedTurn({ result: '', activityStatus: 'running' });
+  incomplete[1].ToolActivities[0].executionEnvironment = executionEnvironment;
+  const view = projection(incomplete), observation = JSON.parse(view.records.get(view.historyTurns[0]).rounds[0].observations[0].content);
+  assert.equal(observation.status, 'running');
+  assert.equal(observation.output.resultUnavailable, true);
+  assert.deepEqual(observation.executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+});
+
+for (const protocol of protocols) test(`${protocol}: verified archive restores execution provenance before historical compaction`, async t => {
+  const f = await toolFixture(t), context = await f.context('full');
+  const reference = await f.service.results.save(context, { id: 'shared_call', name: 'filesystem.read' },
+    { content: [], structuredContent: { text: 'Synthetic saved output '.repeat(3500) } }, { executionEnvironment });
+  const history = savedTurn({ result: 'Legacy untyped preview.', reference }); history[1].Id = context.requestId;
+  const view = projection(history, protocol, { resultStore: f.service.results, resultContext: context });
+  await view.loadResults();
+  const item = view.records.get(view.historyTurns[0]).rounds[0].observations[0];
+  assert.deepEqual(item.executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+  view.compact({ inputBudgetTokens: 2000 });
+  assert.equal(JSON.parse(item.content).contextCompacted, true);
+  assert.deepEqual(JSON.parse(item.content).executionEnvironment, normalizeToolExecutionEnvironment(executionEnvironment));
+  assert.deepEqual(...pairs(view.projectTurn(view.historyTurns[0]), protocol));
+  assert.equal(view.archiveReads, 1);
+});
+
+for (const protocol of protocols) test(`${protocol}: formal denied outcome survives inline history and cannot be overridden by business fields`, () => {
+  const history = savedTurn({ activityStatus: 'denied', result: JSON.stringify({ status: 'completed', executed: true,
+    code: 'VENDOR_SUCCESS', structuredContent: { text: 'Synthetic business output '.repeat(5000) } }) });
+  Object.assign(history[1].ToolActivities[0], { executionEnvironment, executed: false, code: 'TOOL_APPROVAL_REQUIRED' });
+  const original = structuredClone(history), view = projection(history, protocol);
+  const item = view.records.get(view.historyTurns[0]).rounds[0].observations[0];
+  const inline = JSON.parse(item.content);
+  assert.equal(inline.status, 'denied'); assert.equal(inline.executed, false); assert.equal(inline.code, 'TOOL_APPROVAL_REQUIRED');
+  assert.equal(inline.output.status, 'completed'); assert.equal(inline.output.executed, true); assert.equal(inline.output.code, 'VENDOR_SUCCESS');
+  view.compact({ inputBudgetTokens: 2000 });
+  const compacted = JSON.parse(item.content);
+  assert.equal(compacted.contextCompacted, true);
+  assert.equal(compacted.status, 'denied'); assert.equal(compacted.executed, false); assert.equal(compacted.code, 'TOOL_APPROVAL_REQUIRED');
+  assert.deepEqual(...pairs(view.projectTurn(view.historyTurns[0]), protocol));
+  const publicHistory = JSON.parse(publicModelHistoryText(history[1])).rounds[0].tools[0];
+  assert.equal(publicHistory.executed, false); assert.equal(publicHistory.code, 'TOOL_APPROVAL_REQUIRED');
+  assert.deepEqual(history, original);
+});
+
+for (const protocol of protocols) test(`${protocol}: archive loading cannot erase a formal not-executed error outcome`, async t => {
+  const f = await toolFixture(t), context = await f.context('full');
+  const reference = await f.service.results.save(context, { id: 'shared_call', name: 'filesystem.read' },
+    { content: [], status: 'completed', executed: true, code: 'VENDOR_SUCCESS',
+      structuredContent: { text: 'Synthetic archive business output '.repeat(2500) } }, { executionEnvironment });
+  const history = savedTurn({ activityStatus: 'error', result: 'Not executed.', reference }); history[1].Id = context.requestId;
+  Object.assign(history[1].ToolActivities[0], { executionEnvironment, executed: false, code: 'TOOL_APPROVAL_REQUIRED' });
+  const view = projection(history, protocol, { resultStore: f.service.results, resultContext: context });
+  await view.loadResults();
+  const item = view.records.get(view.historyTurns[0]).rounds[0].observations[0], archived = JSON.parse(item.content);
+  assert.equal(archived.status, 'error'); assert.equal(archived.executed, false); assert.equal(archived.code, 'TOOL_APPROVAL_REQUIRED');
+  assert.equal(archived.output.status, 'completed'); assert.equal(archived.output.executed, true);
+  view.compact({ inputBudgetTokens: 2000 });
+  const compacted = JSON.parse(item.content);
+  assert.equal(compacted.executed, false); assert.equal(compacted.code, 'TOOL_APPROVAL_REQUIRED');
+  assert.deepEqual(...pairs(view.projectTurn(view.historyTurns[0]), protocol));
+});
+
+test('broker outcome propagation rejects invalid provenance, unsafe codes and asserted execution success', () => {
+  const invalid = savedTurn({ result: JSON.stringify({ structuredContent: { executed: false, code: 'BUSINESS_ONLY' } }) });
+  Object.assign(invalid[1].ToolActivities[0], { executionEnvironment: { ...executionEnvironment, grantsPermission: true },
+    executed: false, code: 'TOOL_APPROVAL_REQUIRED' });
+  const first = projection(invalid), invalidContent = JSON.parse(first.records.get(first.historyTurns[0]).rounds[0].observations[0].content);
+  assert.equal(invalidContent.executionEnvironment, undefined);
+  assert.equal(invalidContent.executed, undefined); assert.equal(invalidContent.code, undefined);
+  const valid = savedTurn({ result: 'Synthetic content.' });
+  Object.assign(valid[1].ToolActivities[0], { executionEnvironment, status: 'PRIVATE_STATUS C:\\Private',
+    executed: true, code: 'PRIVATE_CODE C:\\Private' });
+  const second = projection(valid), content = JSON.parse(second.records.get(second.historyTurns[0]).rounds[0].observations[0].content);
+  assert.equal(content.status, 'unknown'); assert.equal(content.executed, undefined); assert.equal(content.code, undefined);
+  assert.doesNotMatch(JSON.stringify(second.projectTurn(second.historyTurns[0])), /PRIVATE_STATUS|PRIVATE_CODE/u);
 });

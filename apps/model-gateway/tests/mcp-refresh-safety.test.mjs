@@ -58,20 +58,33 @@ for (const change of ['disable-server', 'disable-tool', 'transport-arguments']) 
   test(`real configuration change ${change} revokes already pending approval`, async t => {
     const f = await configured(t), context = await f.context('ask');
     await f.service.catalog(context, { connectMcp: true });
+    const connection = await [...f.service.mcp.connections.values()][0], pid = connection.transport.pid;
     const config = await f.service.getConfig();
     const pending = await pendingApproval(f.service, context, f.call('mcp.synthetic.echo', envelope('must-not-run')));
     const server = { ...config.mcpServers[0], ...(change === 'disable-server' ? { enabled: false }
       : change === 'disable-tool' ? { disabledTools: ['echo'] } : { args: [...config.mcpServers[0].args, 'many'] }) };
     await f.service.updateConfig(saveInput(config, [server]));
     approve(f.service, context, pending.event.tool);
-    assert.equal((await pending.result).code, 'AGENT_CONFIG_CHANGED');
+    const rejected = await pending.result;
+    assert.equal(rejected.code, 'AGENT_CONFIG_CHANGED');
+    assert.equal(rejected.executed, false);
     assert.equal((await events(f.log)).some(event => event.event === 'echo'), false);
-    assert.equal(f.service.mcp.connections.size, 0);
+    assert.equal(f.service.mcp.connections.size, change === 'disable-tool' ? 1 : 0);
+    if (change === 'disable-tool') {
+      assert.equal((await [...f.service.mcp.connections.values()][0]).transport.pid, pid);
+      const allowed = await pendingApproval(f.service, context, f.call('mcp.synthetic.numeric_reason', {
+        arguments: { reason: 7, value: 'allowed alternative' }, policy: { reason: 'Call the unchanged enabled fixture tool.' }
+      }));
+      approve(f.service, context, allowed.event.tool);
+      assert.equal((await allowed.result).status, 'completed');
+      assert.equal((await events(f.log)).filter(event => event.event === 'numeric_reason').length, 1);
+      assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1);
+    }
   });
 }
 
 for (const change of ['disabledSkills', 'skillDirectories']) {
-  test(`a ${change} change revokes old approval while preserving the MCP process for a new request`, async t => {
+  test(`a ${change} change preserves unrelated pending approval and the existing MCP process`, async t => {
     const f = await configured(t), context = await f.context('ask');
     await f.service.catalog(context, { connectMcp: true });
     const connection = await [...f.service.mcp.connections.values()][0], pid = connection.transport.pid;
@@ -83,8 +96,8 @@ for (const change of ['disabledSkills', 'skillDirectories']) {
     assert.equal(f.service.mcp.connections.size, 1);
     assert.equal((await [...f.service.mcp.connections.values()][0]).transport.pid, pid);
     approve(f.service, context, pending.event.tool);
-    assert.equal((await pending.result).code, 'AGENT_CONFIG_CHANGED');
-    assert.equal((await events(f.log)).some(event => event.event === 'echo'), false);
+    assert.equal((await pending.result).content, 'echo:old-approval');
+    assert.equal((await events(f.log)).filter(event => event.event === 'echo').length, 1);
     const fresh = await f.context('full');
     await f.service.catalog(fresh, { connectMcp: true });
     assert.equal((await f.run(fresh, 'mcp.synthetic.echo', envelope('new-authority'))).content, 'echo:new-authority');
@@ -92,7 +105,7 @@ for (const change of ['disabledSkills', 'skillDirectories']) {
   });
 }
 
-test('a concurrent return to the earlier configuration is not mistaken for a no-op', async t => {
+test('concurrent display-label updates retain both configuration revisions without revoking an unchanged tool', async t => {
   const f = await configured(t), context = await f.context('full');
   await f.service.catalog(context, { connectMcp: true });
   const current = await f.service.getConfig(), generation = f.service.configGeneration;
@@ -112,13 +125,35 @@ test('a concurrent return to the earlier configuration is not mistaken for a no-
     f.service.updateConfig({ ...saveInput(current), expectedRevision: current.revision + 1 })
   ]);
   assert.equal(f.service.configGeneration, generation + 2);
-  assert.equal((await f.run(context, 'mcp.synthetic.echo', envelope('stale'))).code, 'AGENT_CONFIG_CHANGED');
+  assert.equal((await f.run(context, 'mcp.synthetic.echo', envelope('same-authority'))).content, 'echo:same-authority');
+  assert.equal((await events(f.log)).filter(event => event.event === 'echo').length, 1);
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1);
+});
+
+test('a live schema change still revokes the pending call even when connection and configuration stay unchanged', async t => {
+  const f = await configured(t), context = await f.context('ask');
+  await f.service.catalog(context, { connectMcp: true });
+  const connection = await [...f.service.mcp.connections.values()][0], generation = f.service.configGeneration;
+  const pending = await pendingApproval(f.service, context, f.call('mcp.synthetic.echo', envelope('do-not-send-old-schema')));
+  const listTools = connection.client.listTools.bind(connection.client);
+  connection.client.listTools = async (...args) => {
+    const listing = structuredClone(await listTools(...args));
+    listing.tools.find(tool => tool.name === 'echo').inputSchema.properties.value.minLength = 1;
+    return listing;
+  };
+  await f.service.refreshMcp(await f.context('ask'));
+  assert.equal(f.service.configGeneration, generation);
+  approve(f.service, context, pending.event.tool);
+  assert.equal((await pending.result).code, 'MCP_CATALOG_CHANGED');
   assert.equal((await events(f.log)).some(event => event.event === 'echo'), false);
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1);
 });
 
 test('a catalog collected before a real configuration change cannot acquire the newer generation', async t => {
   const f = await configured(t), context = await f.context('full');
   await f.service.catalog(context, { connectMcp: true });
+  const capturedDescriptor = f.service.catalogs.get(context).descriptors.get('mcp.synthetic.echo');
+  const capturedGeneration = f.service.configGeneration;
   let discovered, release;
   const ready = new Promise(resolve => { discovered = resolve; });
   const proceed = new Promise(resolve => { release = resolve; });
@@ -130,7 +165,18 @@ test('a catalog collected before a real configuration change cannot acquire the 
   await ready;
   await f.service.updateConfig(saveInput(config, [{ ...config.mcpServers[0], enabled: false }]));
   release();
-  await assert.rejects(preparing, { code: 'AGENT_CONFIG_CHANGED' });
-  assert.equal((await f.run(context, 'mcp.synthetic.echo', envelope('stale-catalog'))).code, 'AGENT_CONFIG_CHANGED');
+  const tools = await preparing;
+  assert.ok(tools.some(tool => tool.name === 'filesystem.list'));
+  assert.equal(tools.some(tool => tool.name.startsWith('mcp.synthetic.')), false);
+  const snapshot = f.service.catalogs.get(context);
+  assert.equal(snapshot.generation, capturedGeneration, 'captured authority does not acquire the newer revision');
+  assert.equal(snapshot.config.mcpServers[0].enabled, true, 'the captured configuration remains immutable');
+  assert.equal((await f.run(context, 'filesystem.list', { path: '.' })).status, 'completed');
+  assert.equal((await f.run(context, 'mcp.synthetic.echo', envelope('filtered-old-tool'))).code, 'TOOL_NOT_FOUND');
+  // Reinserting an obsolete declaration must still fail the live authority check before RPC.
+  // 即使重新插入过期声明，执行前的实时权限检查仍须阻止 RPC。
+  snapshot.descriptors.set(capturedDescriptor.name, capturedDescriptor);
+  const rejected = await f.run(context, 'mcp.synthetic.echo', envelope('stale-catalog'));
+  assert.equal(rejected.code, 'AGENT_CONFIG_CHANGED'); assert.equal(rejected.executed, false);
   assert.equal((await events(f.log)).some(event => event.event === 'echo'), false);
 });

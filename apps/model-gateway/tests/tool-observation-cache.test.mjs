@@ -16,14 +16,24 @@ const observation = (text = 'https://example.invalid/source', error = false) => 
 
 async function fixture(t) {
   const f = await toolFixture(t);
+  await f.service.updateConfig({ version: 1, expectedRevision: 0, skillDirectories: [], mcpServers: [
+    { id: 'exa', name: 'Synthetic search', command: process.execPath, args: ['--version', 'exa'], enabled: true },
+    { id: 'synthetic', name: 'Synthetic action', command: process.execPath, args: ['--version', 'synthetic'], enabled: true }
+  ] });
+  // Cache behavior uses a deep request budget; the standard two-query boundary has separate broker tests.
+  // 缓存验证使用深度请求预算，标准两次查询边界由独立的权限代理测试覆盖。
+  f.service.retrieval = { effective: async () => ({ web: { mode: 'auto', depth: 'deep', browserRead: 'off' } }) };
   let calls = 0, validations = 0, validationCode = null;
   let connection = { closed: false };
   let produce = () => observation();
-  const descriptor = { name: searchName, source: 'mcp:exa', key: 'synthetic-search', toolName: 'web_search_exa',
+  const descriptor = { name: searchName, source: 'mcp:exa', serverId: 'exa', key: 'synthetic-search', toolName: 'web_search_exa',
     operation: 'tools/call', inputSchema: { type: 'object' }, originalInputSchema: { type: 'object' } };
-  const install = context => {
+  const install = async context => {
+    const config = await f.service.getConfig();
     f.service.catalogs.set(context, { generation: f.service.configGeneration,
-      descriptors: new Map([[searchName, descriptor], ['mcp.synthetic.custom', { ...descriptor, name: 'mcp.synthetic.custom', source: 'mcp:synthetic' }]]) });
+      config, servers: new Map(config.mcpServers.map(server => [server.id, server])),
+      descriptors: new Map([[searchName, descriptor], ['mcp.synthetic.custom', { ...descriptor,
+        name: 'mcp.synthetic.custom', source: 'mcp:synthetic', serverId: 'synthetic' }]]) });
     return context;
   };
   f.service.mcp.execute = async (...args) => { calls++; return produce(...args); };
@@ -45,7 +55,7 @@ test('request-scoped observation reuse still binds each complete result to its o
   const first = await f.service.execute(context, firstCall);
   const second = await f.service.execute(context, secondCall);
   assert.equal(first.isError, false, first.code + ': ' + first.content); assert.equal(second.isError, false);
-  assert.equal(f.calls(), 1); assert.equal(f.validations(), 2);
+  assert.equal(f.calls(), 1); assert.ok(f.validations() >= 2, 'each call still revalidates its existing connection');
   assert.equal(second.reused, true);
   assert.match(second.content, /^\[KYNXA_OBSERVATION_REUSED\]/);
   assert.equal(second.content.includes('synthetic-private-observation'), false);
@@ -68,7 +78,7 @@ test('Ask reapproval and denial cannot be bypassed by an existing cached MCP obs
   assert.equal((await first.result).isError, false);
   const denied = await pendingApproval(f.service, context, f.call(searchName, envelope()));
   assert.notEqual(denied.event.tool.approvalId, first.event.tool.approvalId);
-  assert.equal(f.calls(), 1); assert.equal(f.validations(), 1);
+  assert.equal(f.calls(), 1); assert.ok(f.validations() >= 2, 'preparation validates without issuing a cached or fresh RPC');
   assert.throws(() => approve(f.service, context, first.event.tool), { code: 'TOOL_APPROVAL_NOT_FOUND' });
   approve(f.service, context, denied.event.tool, false);
   const denial = await denied.result;
@@ -77,19 +87,29 @@ test('Ask reapproval and denial cannot be bypassed by an existing cached MCP obs
   const approved = await pendingApproval(f.service, context, f.call(searchName, envelope()));
   approve(f.service, context, approved.event.tool);
   assert.equal((await approved.result).reused, true);
-  assert.equal(f.calls(), 1); assert.equal(f.validations(), 2);
+  assert.equal(f.calls(), 1); assert.ok(f.validations() >= 3);
 });
 
-test('configuration changes invalidate request authority before any cached observation is reused', async t => {
+test('unrelated skill settings preserve MCP authority and its request-scoped cached observation', async t => {
   const f = await fixture(t), context = await f.context();
   assert.equal((await f.run(context, searchName, envelope())).isError, false);
   const { revision, ...config } = await f.service.getConfig();
   await f.service.updateConfig({ ...config, expectedRevision: revision, disabledSkills: ['a'.repeat(24)] });
-  const stale = await f.run(context, searchName, envelope());
-  assert.equal(stale.code, 'AGENT_CONFIG_CHANGED');
-  assert.equal(stale.reused, undefined); assert.equal(f.calls(), 1); assert.equal(f.validations(), 1);
+  const retained = await f.run(context, searchName, envelope());
+  assert.equal(retained.isError, false); assert.equal(retained.reused, true); assert.equal(f.calls(), 1);
   assert.equal((await f.run(await f.context(), searchName, envelope())).reused, undefined);
   assert.equal(f.calls(), 2);
+});
+
+test('an affected tool configuration revokes request authority before a cached observation can be reused', async t => {
+  const f = await fixture(t), context = await f.context();
+  assert.equal((await f.run(context, searchName, envelope())).isError, false);
+  const { revision, ...config } = await f.service.getConfig();
+  await f.service.updateConfig({ ...config, expectedRevision: revision,
+    mcpServers: config.mcpServers.map(server => server.id === 'exa' ? { ...server, disabledTools: ['web_search_exa'] } : server) });
+  const revoked = await f.run(context, searchName, envelope());
+  assert.equal(revoked.code, 'AGENT_CONFIG_CHANGED'); assert.equal(revoked.executed, false); assert.equal(revoked.recoverable, true);
+  assert.equal(revoked.reused, undefined); assert.equal(revoked.resultRef, undefined); assert.equal(f.calls(), 1);
 });
 
 test('a reconnected MCP instance does not reuse the disconnected instance observation', async t => {
@@ -108,7 +128,8 @@ test('configuration changed during asynchronous MCP revalidation is checked agai
   await f.run(context, searchName, envelope());
   f.service.mcp.validateExecution = async () => {
     const { revision, ...config } = await f.service.getConfig();
-    await f.service.updateConfig({ ...config, expectedRevision: revision, disabledSkills: ['b'.repeat(24)] });
+    await f.service.updateConfig({ ...config, expectedRevision: revision,
+      mcpServers: config.mcpServers.map(server => server.id === 'exa' ? { ...server, disabledTools: ['web_search_exa'] } : server) });
     return { connection: f.connection(), args: {} };
   };
   const rejected = await f.run(context, searchName, envelope());
@@ -124,7 +145,7 @@ for (const code of ['MCP_NOT_CONNECTED', 'MCP_CATALOG_CHANGED', 'MCP_PROCESS_CLE
     const rejected = await f.run(context, searchName, envelope());
     assert.equal(rejected.code, code); assert.equal(rejected.isError, true);
     assert.equal(rejected.reused, undefined); assert.equal(rejected.resultRef, undefined);
-    assert.equal(f.calls(), 1); assert.equal(f.validations(), 2);
+    assert.equal(f.calls(), 1); assert.ok(f.validations() >= 2);
   });
 }
 
@@ -134,7 +155,7 @@ test('cancellation before or during cache validation prevents a completed reused
   const before = new AbortController(); before.abort();
   const stopped = await f.run(context, searchName, envelope(), { signal: before.signal });
   assert.equal(stopped.code, 'TOOL_CANCELLED'); assert.equal(stopped.resultRef, undefined);
-  assert.equal(f.validations(), 1);
+  assert.equal(f.calls(), 1, 'cancelled preparation cannot issue a network call or reuse the completed receipt');
   const during = new AbortController();
   f.service.mcp.validateExecution = async () => { during.abort(); return { connection: f.connection(), args: {} }; };
   const cancelled = await f.run(context, searchName, envelope(), { signal: during.signal });
@@ -151,7 +172,7 @@ test('a changed actual work folder is detected before cache lookup and reuse', a
     Projects: catalog.Projects.map(project => project.Id === f.projectId ? { ...project, FolderPath: changed } : project) });
   const rejected = await f.run(context, searchName, envelope());
   assert.equal(rejected.code, 'WORKSPACE_CHANGED'); assert.equal(rejected.reused, undefined);
-  assert.equal(f.calls(), 1); assert.equal(f.validations(), 1);
+  assert.equal(f.calls(), 1, 'changed ownership cannot issue another RPC or reuse the old result');
 });
 
 test('successful effects and unknown MCP actions invalidate earlier request observations', async t => {

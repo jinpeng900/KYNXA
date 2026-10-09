@@ -13,12 +13,14 @@ export async function verifyEmbeddingAsset(modelRoot, asset) {
   return digest.digest('hex') === asset.sha256;
 }
 
-export async function verifyEmbeddingBundle(modelRoot) {
-  for (const asset of BUILTIN_EMBEDDING_PROFILE.files) {
+export async function verifyEmbeddingBundle(modelRoot, { profile = BUILTIN_EMBEDDING_PROFILE, checkCancelled = () => {} } = {}) {
+  for (const asset of profile.files) {
+    checkCancelled();
     if (!await verifyEmbeddingAsset(modelRoot, asset)) {
       const error = new Error('Bundled embedding assets failed integrity verification.');
       error.code = 'EMBEDDING_ASSET_INVALID';
       throw error;
     }
+    checkCancelled();
   }
 }

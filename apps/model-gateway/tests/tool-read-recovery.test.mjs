@@ -216,6 +216,8 @@ test('unclassified third-party MCP timeout or disconnect cannot turn an uncertai
   const name = 'mcp.synthetic.apply_change', descriptor = { name, source: 'mcp:synthetic',
     serverId: 'synthetic', key: 'synthetic-change', toolName: 'apply_change', operation: 'tools/call', originalInputSchema: { type: 'object' } };
   f.service.catalogs.set(context, { generation: f.service.configGeneration, descriptors: new Map([[name, descriptor]]) });
+  f.service.mcp.validateExecution = async (_descriptor, input) => ({ connection: { serverId: 'synthetic' },
+    args: structuredClone(input.arguments) });
   for (const code of ['MCP_TIMEOUT', 'MCP_CONNECTION_LOST']) {
     f.service.mcp.execute = async () => { throw Object.assign(new Error('Synthetic external outcome unavailable.'), { code }); };
     const uncertain = await f.run(context, name, { arguments: {}, policy: { reason: 'Only a fixture change.' } });

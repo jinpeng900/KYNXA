@@ -183,6 +183,26 @@ test('selected Node scripts can run beside unsupported alternatives, but unknown
   assert.ok(unavailable.diagnostics.some(item => item.code === 'SKILL_RUNTIME_VERSION_UNAVAILABLE'));
 });
 
+test('descriptive compatibility and documentation URLs do not reject a verified dependency-free Node script', async t => {
+  const f = await fixture(t);
+  const folder = await f.save(join(f.data, 'Skills'), 'descriptive-skill', { 'scripts/main.mjs': 'console.log("safe")' },
+    'compatibility: Designed for coding agents. Documentation at https://example.com/node. No Python is required.\n');
+  const skill = await f.available('descriptive-skill'), context = { sandboxCapabilities: capabilities };
+  const report = await f.service.checkEnvironment(skill.id, context, config);
+  assert.equal(report.compatible, null, 'unverified descriptive metadata is not falsely certified');
+  assert.equal(report.canRun, true, 'the selected script has a verified runtime and no missing manifest dependencies');
+  assert.ok(report.diagnostics.some(item => item.code === 'SKILL_COMPATIBILITY_REVIEW'));
+  assert.ok(!report.diagnostics.some(item => item.code === 'SKILL_NETWORK_UNAVAILABLE'));
+  assert.equal((await f.service.prepareScript(skill.id, 'scripts/main.mjs', context, config)).environment.canRun, true);
+  for (const declaration of ['Node.js', 'Requires Node.js; no network required', `Requires Node.js >=${process.versions.node.split('.')[0]}; without network`]) {
+    await writeFile(join(folder, 'SKILL.md'), content('descriptive-skill', `compatibility: ${declaration}\n`));
+    assert.equal((await f.service.prepareScript(skill.id, 'scripts/main.mjs', context, config)).environment.canRun, true, declaration);
+  }
+  await writeFile(join(folder, 'package.json'), JSON.stringify({ dependencies: { 'uninstalled-example': '1.0.0' } }));
+  assert.equal((await f.service.prepareScript(skill.id, 'scripts/main.mjs', context, config)).environment.canRun, false,
+    'informational compatibility cannot bypass an unverified actual package dependency');
+});
+
 test('an older terminal-only helper cannot pass skill environment checks without explicit read-only hash-checked package capability', async t => {
   const f = await fixture(t);
   await f.save(join(f.data, 'Skills'), 'legacy-helper-skill', { 'scripts/main.mjs': 'console.log("safe")' });

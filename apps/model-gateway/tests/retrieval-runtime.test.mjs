@@ -36,6 +36,7 @@ test('greetings skip tool-host, MCP, retrieval and model loading without deletin
   t.after(() => runtime.close());
   f.service.createContext = async () => { throw new Error('Greeting must not prepare tools'); };
   runtime.retrieval.evidence = async () => { throw new Error('Greeting must not retrieve'); };
+  runtime.localModels.observe = async () => { throw new Error('Greeting must not wait for optional process observation'); };
   const turn = await runtime.prepare({ conversationId: f.conversationId, message: '你好！', permissionMode: 'full', provider: 'fixture', model: 'mock-model' }, f.conversationId);
   assert.equal(turn.toolContext, null); assert.deepEqual(turn.catalog, []);
   assert.match(turn.requestOptions.system, /short, natural greeting/);
@@ -312,6 +313,9 @@ test('chat history never includes sibling transcripts or the current question, a
 
 test('mounted sources update by content version, honor gitignore and disappear immediately when indexing is disabled', async t => {
   const f = await toolFixture(t), retrieval = coordinator(f); t.after(() => retrieval.close());
+  // This case isolates mounted lexical freshness; deliberately absent embedding assets are covered separately.
+  // 本例独立验证挂载资料词法时效，刻意缺失嵌入资产的降级另行覆盖。
+  await retrieval.settings.patchGlobal({ expectedRevision: 0, patch: { local: { semantic: 'off' } } });
   await mkdir(join(f.workspace, 'ignored')); await writeFile(join(f.workspace, '.gitignore'), 'ignored/\n', 'utf8');
   await writeFile(join(f.workspace, 'ignored', 'secret.md'), '不应索引的特殊关键字', 'utf8');
   const file = join(f.workspace, 'guide.md'); await writeFile(file, '版本甲功能使用说明', 'utf8');

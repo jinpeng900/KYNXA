@@ -14,6 +14,13 @@ const browserTools = [remote('mcp.chrome-devtools.list_pages'), remote('mcp.chro
 const descriptors = [...builtinDescriptors, ...browserTools];
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const names = tools => tools.map(tool => tool.name);
+const nativeCapabilities = {
+  desktopRunner: { capabilities: async () => ({ available: true, boundary: 'host-desktop',
+    operations: builtinDescriptors.filter(tool => tool.name.startsWith('computer.')).map(tool => tool.name.slice('computer.'.length)) }),
+    run: async () => assert.fail('tool discovery must not perform desktop actions') },
+  hostTerminalRunner: { capabilities: async () => ({ available: true, boundary: 'host-terminal', shells: ['cmd', 'powershell'], backgroundJobs: true }),
+    run: async () => assert.fail('tool discovery must not execute a host command') }
+};
 
 test('actual failed Chinese and multiword searches find enabled host and browser tools', () => {
   assert.ok(names(searchTools(descriptors, '浏览器')).includes('computer.launch'));
@@ -23,6 +30,80 @@ test('actual failed Chinese and multiword searches find enabled host and browser
   assert.equal(searchTools(descriptors, '网页截图')[0].name, 'mcp.playwright.browser_take_screenshot');
   assert.ok(names(searchTools(descriptors, '打开本机浏览器')).includes('computer.launch'));
   assert.deepEqual(searchTools(descriptors, '绝无此项功能'), []);
+});
+
+test('device status requests select the host shell without turning inspection into browser control', () => {
+  for (const message of ['我的IP是什么', '查看我的公网IP', '当前网络', '检查当前网络配置', '查看代理设置',
+    '检查 DNS', '列出网卡', '查看本机进程', '列出所有进程', '哪个程序占端口5218', '端口5218被哪个进程占用',
+    'What is my IP?', 'Check my proxy settings', 'show current DNS servers', 'list local processes',
+    'which process is listening on port 5218', 'Which app is using port 3000?', 'list network adapters', 'run ipconfig']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器'], previousToolNames: ['computer.launch'] });
+    assert.equal(signals.deviceState, true, message);
+    assert.equal(signals.hostTerminal, true, message);
+    assert.equal(signals.desktop, false, message);
+    assert.equal(signals.browser, false, message);
+    assert.equal(signals.web, false, message);
+    assert.equal(signals.retainedNames.size, 0, 'a new device task does not carry earlier attempted browser names');
+  }
+});
+
+test('public IP ownership, networking explanations and script generation do not claim device access', () => {
+  for (const message of ['查询8.8.8.8的归属', '看看 IPv6 2001:4860:4860::8888 的归属', '我的IP是8.8.8.8，查归属',
+    'IP和DNS有什么区别', '解释DNS原理', '如何查看当前网络配置', 'ipconfig是什么', '给我一个列出本机进程的脚本',
+    'Who owns IP 8.8.8.8?', 'What is DNS?', 'Explain ipconfig', 'How to configure a proxy?',
+    'write a script to inspect my IP', 'current network industry trends']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器', '查看我的IP'],
+      previousToolNames: ['computer.launch', 'terminal.host.run'] });
+    assert.equal(signals.deviceState, false, message);
+    assert.equal(signals.hostTerminal, false, message);
+    assert.equal(signals.desktop, false, message);
+    assert.equal(signals.retainedNames.size, 0, message);
+  }
+  assert.equal(toolSelectionSignals('Who owns IP 8.8.8.8?').web, true);
+  assert.equal(toolSelectionSignals('打开我的iPad应用').deviceState, false, 'IP is an ASCII word, not part of iPad');
+});
+
+test('a short device retry follows the latest device subject while explicit browser boundaries still apply', () => {
+  for (const message of ['再来', '再查一次', '刷新', '现在呢', 'refresh', 'what about now?']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['打开本机浏览器', '查看我的IP'],
+      previousToolNames: ['computer.launch', 'mcp.chrome-devtools.list_pages', 'terminal.host.run'] });
+    assert.equal(signals.deviceState, true, message);
+    assert.equal(signals.hostTerminal, true, message);
+    assert.equal(signals.browser, false, message);
+    assert.equal(signals.desktop, false, message);
+    assert.deepEqual([...signals.retainedNames], ['terminal.host.run']);
+  }
+  const combined = toolSelectionSignals('检查我的IP，并给本机桌面截图');
+  assert.equal(combined.deviceState, true); assert.equal(combined.desktop, true);
+  const remote = toolSelectionSignals('在云端浏览器查看我的IP');
+  assert.equal(remote.deviceState, false); assert.equal(remote.hostTerminal, false);
+  assert.equal(remote.remoteBrowser, true); assert.equal(remote.desktop, false);
+  const browserRetry = toolSelectionSignals('再来', { historySignals: ['查看我的IP', '打开Chrome'],
+    previousToolNames: ['computer.launch'] });
+  assert.equal(browserRetry.desktop, true, 'a later browser topic keeps its existing local-browser followup behavior');
+  assert.equal(browserRetry.deviceState, false, 'an older device inspection is not the current browser task');
+});
+
+test('device state search aliases rank the enabled host execution schema and never revive a disabled tool', () => {
+  for (const query of ['我的IP是什么', '当前网络', 'DNS配置', '网卡', '本机进程', '哪个程序占端口',
+    'my ip address', 'current network', 'proxy settings', 'network adapters', 'list processes', 'ipconfig'])
+    assert.equal(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
+  const disabled = descriptors.map(tool => tool.name === 'terminal.host.run' ? { ...tool, enabled: false } : tool);
+  assert.ok(!names(searchTools(disabled, '我的IP')).includes('terminal.host.run'));
+  for (const query of ['查询8.8.8.8的归属', 'Who owns IP 8.8.8.8?', 'IP和DNS区别', 'Explain ipconfig'])
+    assert.notEqual(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
+});
+
+test('ordinary Chinese typing requests discover and select existing desktop input schemas', () => {
+  for (const query of ['将文字键入光标所在的位置', '把你好填进记事本', '在输入框填写内容', '粘贴到当前窗口']) {
+    assert.ok(names(searchTools(descriptors, query)).includes('computer.type'), query);
+    const catalog = new ModelToolCatalog(descriptors, { protocol: protocols[0], tokenBudget: 16000, message: query });
+    assert.ok(catalog.selected.some(tool => tool.name === 'computer.type'), query);
+  }
+  assert.ok(names(searchTools([...descriptors, remote('mcp.playwright.browser_fill_form')], '填写输入框'))
+    .includes('mcp.playwright.browser_fill_form'));
+  assert.equal(toolSelectionSignals('写一个处理输入文本的函数').desktop, false,
+    'code input is not automatically desktop input');
 });
 
 test('exact identities outrank partial metadata, disabled tools stay absent and paging order is stable', () => {
@@ -37,13 +118,46 @@ test('exact identities outrank partial metadata, disabled tools stay absent and 
   assert.deepEqual(source, before);
 });
 
+test('wire aliases load only exact enabled tools and one unavailable item cannot suppress valid screenshot loading', () => {
+  const disabled = { ...remote('mcp.synthetic.disabled_screenshot'), enabled: false };
+  const catalog = new ModelToolCatalog([...descriptors, disabled], { protocol: protocols[0], tokenBudget: 16000 });
+  const screenshot = builtinDescriptors.find(tool => tool.name === 'computer.screenshot');
+  const alias = wireCatalog([screenshot])[0].wireName;
+  assert.deepEqual(catalog.resolveNames([alias, 'missing.tool']), ['computer.screenshot', 'missing.tool']);
+  const result = catalog.load(['mcp.unconnected.browser_screenshot', alias, 'computer.screenshot']);
+  assert.deepEqual(result.loaded, ['computer.screenshot']);
+  assert.deepEqual(result.unavailable, [{ name: 'mcp.unconnected.browser_screenshot', code: 'TOOL_NOT_FOUND' }]);
+  assert.ok(catalog.wire().some(tool => tool.name === 'computer.screenshot'));
+  assert.deepEqual(names(searchTools([...descriptors, disabled], alias)), ['computer.screenshot']);
+  const disabledAlias = wireCatalog([disabled])[0].wireName;
+  assert.deepEqual(searchTools([...descriptors, disabled], disabledAlias), []);
+  const before = structuredClone(catalog.selected);
+  assert.throws(() => catalog.load([disabledAlias, alias.replace(/.$/, alias.endsWith('a') ? 'b' : 'a')]), { code: 'TOOL_NOT_FOUND' });
+  assert.deepEqual(catalog.selected, before, 'unknown or disabled aliases never mutate the usable selection');
+});
+
 test('tool classifications distinguish host control, host shell and browser automation without availability claims', () => {
   assert.equal(toolDiscoveryCategory({ name: 'computer.launch' }), 'computer');
   assert.equal(toolDiscoveryCategory({ name: 'terminal.host.run' }), 'host-terminal');
+  for (const action of ['start', 'read', 'stop'])
+    assert.equal(toolDiscoveryCategory({ name: `terminal.host.${action}` }), 'host-terminal');
   assert.equal(toolDiscoveryCategory({ name: 'terminal.run' }), 'sandbox-terminal');
   assert.equal(toolDiscoveryCategory({ name: 'mcp.playwright.browser_navigate' }), 'browser');
   assert.equal(toolDiscoveryCategory({ name: 'browser.local.read' }), 'browser');
   assert.equal(toolDiscoveryCategory({ name: 'mcp.exa.web_search_exa' }), 'web-search');
+});
+
+test('background host jobs are discoverable for terminal tasks and deferred during unrelated conversations', () => {
+  for (const protocol of protocols) {
+    const unrelated = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '你好' });
+    assert.ok(!unrelated.selected.some(tool => tool.name.startsWith('terminal.host.')));
+    const background = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '启动后台终端进程并监控输出' });
+    for (const action of ['start', 'read', 'stop']) {
+      const name = `terminal.host.${action}`;
+      assert.ok(background.selected.some(tool => tool.name === name));
+      assert.ok(names(searchTools(descriptors, '后台进程')).includes(name));
+    }
+  }
 });
 
 for (const protocol of protocols) test(`${protocol}: browser followups retain relevant schemas with explicit new tasks resetting the subject`, () => {
@@ -143,12 +257,28 @@ test('tiny budgets keep discovery and allow loading individual capabilities with
 });
 
 test('tool.search exposes ranked bilingual matches through the real service with ordinary pagination', async t => {
-  const f = await toolFixture(t), ctx = await f.context('full');
+  const f = await toolFixture(t, nativeCapabilities), ctx = await f.context('full');
   await f.service.catalog(ctx);
   const host = parsed(await f.run(ctx, 'tool.search', { query: '本机终端', limit: 1 }));
   assert.equal(host.tools[0].name, 'terminal.host.run'); assert.equal(host.offset, 0);
+  const device = parsed(await f.run(ctx, 'tool.search', { query: '我的IP是什么', limit: 1 }));
+  assert.equal(device.tools[0].name, 'terminal.host.run');
+  assert.equal(f.service.mcp.connections.size, 0, 'device tool discovery neither starts a browser provider nor executes a host command');
   const browser = parsed(await f.run(ctx, 'tool.search', { query: '浏览器', limit: 1 }));
   assert.ok(browser.total > 1); assert.equal(browser.hasMore, true);
   const second = parsed(await f.run(ctx, 'tool.search', { query: '浏览器', offset: browser.nextOffset, limit: 1 }));
   assert.notEqual(browser.tools[0].name, second.tools[0].name);
+});
+
+test('broker tool loading retains a valid screenshot schema beside an unavailable browser tool without executing either', async t => {
+  const f = await toolFixture(t, nativeCapabilities), context = await f.context('full');
+  await f.service.catalog(context);
+  f.service.configureModelCatalog(context, { protocol: protocols[0], tokenBudget: 16000, message: '截图' });
+  const screenshot = builtinDescriptors.find(tool => tool.name === 'computer.screenshot');
+  const alias = wireCatalog([screenshot])[0].wireName;
+  const result = parsed(await f.run(context, 'tool.load', { names: [alias, 'mcp.unconnected.browser_screenshot'] }));
+  assert.deepEqual(result.loaded, ['computer.screenshot']);
+  assert.deepEqual(result.unavailable, [{ name: 'mcp.unconnected.browser_screenshot', code: 'TOOL_NOT_FOUND' }]);
+  assert.ok(f.service.modelCatalog(context).some(tool => tool.name === 'computer.screenshot'));
+  assert.equal(f.service.mcp.connections.size, 0, 'loading cannot start an absent provider or perform desktop actions');
 });

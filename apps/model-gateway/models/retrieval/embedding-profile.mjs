@@ -13,6 +13,8 @@ export const BUILTIN_EMBEDDING_PROFILE = Object.freeze({
   modelVersion: `${MODEL_REVISION}:q8`,
   revision: MODEL_REVISION,
   dimensions: 384,
+  hiddenSize: 384,
+  attentionHeads: 12,
   maxInputTokens: 512,
   queryPrefix: 'query: ',
   documentPrefix: 'passage: ',
@@ -31,6 +33,16 @@ export const BUILTIN_EMBEDDING_PROFILE = Object.freeze({
     { path: 'licenses/onnxruntime-ThirdPartyNotices.txt', url: 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.21.0/ThirdPartyNotices.txt', bytes: 316114, sha256: '8c06e8cff286a4a117b3b246a4c7da68428a144af757823db50e3d6520941ec6' },
     { path: 'licenses/sqlite-vec-MIT.txt', url: 'https://raw.githubusercontent.com/asg017/sqlite-vec/v0.1.9/LICENSE-MIT', bytes: 1068, sha256: '6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea' },
   ].map(Object.freeze)),
+});
+
+// The same q8 asset can use different native math; its audited GPU outputs own a separate vector space.
+// 相同 q8 权重在不同原生算术路径下可能产生差异；经审计 GPU 输出使用独立向量空间，不能混入旧 CPU 索引。
+export const BUILTIN_GPU_EMBEDDING_PROFILE = Object.freeze({
+  ...BUILTIN_EMBEDDING_PROFILE,
+  id: 'builtin-multilingual-dml-q8',
+  modelVersion: `${MODEL_REVISION}:q8:dml-hybrid-v1`,
+  requiredDevice: 'dml',
+  backendContract: 'audited-dml-hybrid-q8-v1',
 });
 
 export function embeddingBuildCacheRoot() {

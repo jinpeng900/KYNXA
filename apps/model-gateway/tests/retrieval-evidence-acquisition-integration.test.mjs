@@ -63,12 +63,14 @@ test('simultaneous same-gap searches perform one index search and keep independe
   assert.equal(typeof initialHandle, 'string'); assert.equal(initialHandle.length, 29);
   assert.equal(typeof repeatedHandle, 'string'); assert.equal(repeatedHandle.length, 29);
   assert.notEqual(initialHandle, repeatedHandle);
-  assert.equal(initial.value.acquisition.executed, true);
-  assert.equal(initial.value.acquisition.reused, false);
-  assert.equal(repeated.value.acquisition.executed, false);
-  assert.equal(repeated.value.acquisition.reused, true);
-  assert.equal(repeated.value.acquisition.newEvidenceCount, 0);
-  assert.equal(repeated.value.acquisition.sufficiency, 'not-evaluated');
+  // Concurrent broker preparation does not guarantee which caller acquires the search slot first.
+  // 并发权限代理准备不保证哪个调用先取得检索槽，验证恰好一份真实检索和一份独立复用回执。
+  const executed = [initial, repeated].filter(result => result.value.acquisition.executed);
+  const reused = [initial, repeated].filter(result => result.value.acquisition.reused);
+  assert.equal(executed.length, 1); assert.equal(executed[0].value.acquisition.reused, false);
+  assert.equal(reused.length, 1); assert.equal(reused[0].value.acquisition.executed, false);
+  assert.equal(reused[0].value.acquisition.newEvidenceCount, 0);
+  assert.equal(reused[0].value.acquisition.sufficiency, 'not-evaluated');
   assert.notEqual(initial.receipt.resultRef.id, repeated.receipt.resultRef.id);
   for (const result of [initial, repeated]) {
     assert.match(result.receipt.resultRef.sha256, /^[a-f0-9]{64}$/);

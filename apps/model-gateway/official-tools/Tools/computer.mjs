@@ -28,7 +28,7 @@ export const computerDescriptors = [
     { ...window, maxCharacters: { type: 'integer', minimum: 1, maximum: 64000 }, maxElements: { type: 'integer', minimum: 1, maximum: 1000 },
       timeoutMs: { type: 'integer', minimum: 500, maximum: 5000 }, region,
       elementId: { type: 'string', minLength: 1, maxLength: 256 } }, target),
-  descriptor('launch', 'Open a local application executable discovered with computer.apps/windows or supplied by the user. Requires an absolute .exe path; shell/interpreter commands are unsupported. Background Chrome/Edge adds the declared anti-occlusion rendering flag before approval. Do not replace sandboxed terminal execution.',
+  descriptor('launch', 'Open a local application executable discovered with computer.apps/windows or supplied by the user. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots.',
     { appPath: { type: 'string', minLength: 1, maxLength: 4096 }, args: { type: 'array', items: { type: 'string' }, maxItems: 32 },
       background: { type: 'boolean', default: true, description: 'Default true: best-effort launch behind the current foreground window without minimizing the target, so window screenshots remain available. Applications can override it; the receipt reports observed foreground state.' } }, ['appPath']),
   descriptor('window', 'Resize, maximize, minimize or restore the identified window without requesting foreground activation. Resize uses client physical pixels; observe actual returned dimensions/state.',

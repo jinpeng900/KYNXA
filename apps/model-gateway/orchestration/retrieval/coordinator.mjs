@@ -1,49 +1,86 @@
-import { watch } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { RetrievalSettingsStore } from '../../data/retrieval/settings.mjs';
-import { RetrievalIndex, chunkSource } from '../../data/retrieval/index.mjs';
-import { EMBEDDING_TEXT_VERSION, embeddingTextForChunk } from '../../data/retrieval/retrieval-text.mjs';
+import { RetrievalIndex } from '../../data/retrieval/index.mjs';
+import { RetrievalStructureService } from '../../data/retrieval/structure-service.mjs';
+import { EMBEDDING_TEXT_VERSION } from '../../data/retrieval/retrieval-text.mjs';
 import { MAX_QUERY_CHARACTERS, retrievalFailure } from '../../data/retrieval/retrieval-contracts.mjs';
 import { SourceLibrary } from '../../data/retrieval/source-library.mjs';
 import { RetrievalJobStore } from '../../data/retrieval/job-store.mjs';
-import { EmbeddingService } from '../../models/retrieval/embedding-service.mjs';
+import { EmbeddingRouter } from '../../models/retrieval/embedding-router.mjs';
 import { RerankerService } from '../../models/retrieval/reranker-service.mjs';
-import { readSourceTree, readSourceFile } from '../../tools/retrieval/source-reader.mjs';
+import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
+import { sourceFileRevision } from '../../data/retrieval/retrieval-contracts.mjs';
 import { validateId } from '../../platform/conversation-id.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
-import { estimateTokens } from '../../models/context-tokens.mjs';
-import { sourceIdentity, visibleScopes, projectConversationSources, projectEvidence, retrievalPlan, EVIDENCE_NOTICE } from './source-projection.mjs';
-import { RETRIEVAL_CANDIDATE_LIMIT, selectCandidates, deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
+import { sourceIdentity, visibleScopes, projectConversationSources } from './source-projection.mjs';
+import { selectCandidates, deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
 import { EvidenceAcquisition, validateEvidenceGap } from './evidence-acquisition.mjs';
+import { SourceIndexService, sourceScanSummary } from './source-manager.mjs';
+import { RetrievalEvidenceService } from './evidence-service.mjs';
+import { retrievalPlan, buildRetrievalIntent, planEvidenceAcquisition, hasExactRetrievalTarget } from './query-plan.mjs';
+import { listRetrievalModelProfiles, resolveRetrievalModelProfile } from '../../models/retrieval/model-registry.mjs';
 import { allocateEvidenceArchiveId, evidenceSourceRef, EvidenceReferenceStore } from '../../data/retrieval/evidence-references.mjs';
+import { ResourceBudgetService } from '../../platform/resources/resource-client.mjs';
+import { runResourceTask } from '../../platform/resources/resource-task.mjs';
+import { retrievalBudget } from './retrieval-budget.mjs';
+import { TaskExperienceStore } from '../../data/retrieval/task-experience-store.mjs';
+import { EmbeddingSpacePolicy } from './embedding-space-policy.mjs';
 
-const SOURCE_CACHE_TTL_MS = 2000;
-const MAX_SOURCE_CACHE_ENTRIES = 32;
 const embeddingVersion = modelVersion => modelVersion ? `${modelVersion}|${EMBEDDING_TEXT_VERSION}` : undefined;
+
+function hasModelMetadataMismatch(expected, result) {
+  return ['modelVersion', 'inputProjectionVersion'].some(field => expected[field] !== undefined &&
+    result[field] !== undefined && expected[field] !== result[field]);
+}
 
 /** Application coordinator composes E-owned storage, C-owned inference and D-owned file reads.
  * 应用协调层组合数据存储、嵌入推理和工具文件读取，不改变正式会话或记忆归属。 */
 export class RetrievalCoordinator {
-  #preparedEvidence = new WeakMap();
-
-  constructor({ conversations, memory, tools, index, embeddings, reranker, excludedRoots = [] }) {
+  constructor({ conversations, memory, tools, index, embeddings, reranker, structures, resources, evaluationPolicy, excludedRoots = [] }) {
     this.conversations = conversations; this.memory = memory; this.tools = tools;
     this.settings = new RetrievalSettingsStore({ root: conversations.root, conversationStore: conversations });
-    this.index = index ?? new RetrievalIndex({ root: conversations.root });
-    this.embeddings = embeddings ?? new EmbeddingService();
-    this.reranker = reranker === undefined ? new RerankerService() : reranker;
+    this.resources = resources ?? new ResourceBudgetService();
+    this.ownsResources = !resources;
+    // Only the offline evaluator injects this policy; public settings and model arguments cannot change it.
+    // 仅离线评测构造器注入消融策略，公开设置及模型参数不能修改此策略。
+    this.evaluationPolicy = evaluationPolicy ? Object.freeze({ ...evaluationPolicy }) : null;
+    this.index = index ?? new RetrievalIndex({ root: conversations.root, resourceService: this.resources });
+    this.structures = structures ?? new RetrievalStructureService({ resourceService: this.resources });
+    this.embeddings = embeddings ?? new EmbeddingRouter({ resourceService: this.resources });
+    this.spacePolicy = new EmbeddingSpacePolicy({ resources: this.resources,
+      embeddings: { status: profileId => this.embeddings.status(profileId) }, index: this.index });
+    this.reranker = reranker === undefined ? new RerankerService({ resourceService: this.resources }) : reranker;
     this.library = new SourceLibrary({ root: conversations.root, conversationStore: conversations });
     this.evidenceReferences = tools.results ? new EvidenceReferenceStore({ conversationStore: conversations, resultStore: tools.results }) : null;
     this.jobs = new RetrievalJobStore(conversations.root);
+    this.experiences = new TaskExperienceStore(conversations.root);
     this.excludedRoots = [conversations.root, ...excludedRoots].filter(Boolean);
-    this.fingerprints = new Map(); this.activeJobs = new Map(); this.watchers = new Map(); this.mountedCache = new Map();
-    this.libraryCache = new Map(); this.conversationCache = new Map();
     this.acquisitions = new WeakMap();
     this.queue = Promise.resolve(); this.closed = false;
+    this.shutdown = new AbortController();
+    this.sourceService = new SourceIndexService({ library: this.library, index: this.index, jobs: this.jobs,
+      resourceService: this.resources,
+      structures: { parse: (...args) => this.structures.parse(...args), version: () => this.structures.derivationVersion,
+        status: () => this.structures.status?.(), identity: () => this.structures },
+      embeddings: { status: (...args) => this.embeddings.status(...args),
+        ...(typeof this.embeddings.fitDocuments === 'function' ? { fitDocuments: (...args) => this.embeddings.fitDocuments(...args) } : {}),
+        embedDocuments: (...args) => this.embeddings.embedDocuments(...args) }, getProject: id => this._project(id),
+      validateProject: id => this.conversations.describeProject(id), effectiveSettings: async id =>
+        this.spacePolicy.indexingSettings(await this.effective(id), this.shutdown.signal),
+      serialize: operation => this._serialize(operation), excludedRoots: this.excludedRoots });
+    // Compatibility views reference the sole owner; they never create a second job or cache state.
+    // 兼容视图引用唯一所有者，不建立第二份作业或缓存状态。
+    this.activeJobs = this.sourceService.lifecycle.active;
+    this.evidenceService = new RetrievalEvidenceService({ search: (...args) => this.search(...args),
+      scopeSnapshot: (...args) => this._scopeSnapshot(...args), isFresh: (...args) => this._fresh(...args),
+      assertCurrent: (...args) => this._assertCurrent(...args), serialize: operation => this._serialize(operation),
+      getResultStore: () => this.tools.results, signalFor: signal => this._signal(signal), isClosed: () => this.closed,
+      index: this.index, getAcquisition: context => this.acquisitions.get(context), getReferenceStore: () => this.evidenceReferences,
+      experiences: this.experiences, getTaskVerification: context => this.tools.taskVerificationFor?.(context), evaluationPolicy: this.evaluationPolicy });
   }
 
   async initialize() {
-    if (!this.initialization) this.initialization = this.jobs.recover();
+    if (!this.initialization) this.initialization = this.sourceService.initialize();
     await this.initialization;
   }
 
@@ -54,12 +91,29 @@ export class RetrievalCoordinator {
 
   async effective(projectId) { return this.settings.getEffective(projectId); }
 
+  _planEvidence(input) {
+    if (this.evaluationPolicy?.gaps !== false) return planEvidenceAcquisition(input);
+    return { channels: ['lexical', ...(input.semanticEnabled && input.embeddingStatus?.loaded ? ['vector'] : [])],
+      shouldEmbed: Boolean(input.semanticEnabled && input.embeddingStatus?.loaded),
+      shouldRerank: ['complex', 'research'].includes(input.taskType) && input.items?.length > 1 && input.rerankerStatus?.state === 'ready',
+      next: 'baseline-retrieval', sufficiency: 'not-evaluated', gapPlanningDisabled: true };
+  }
+
   async status() {
     await this.initialize();
-    const indexed = await this.index.status(), embedding = this.embeddings.status();
+    const settings = await this.effective();
+    const indexed = await this.index.status(), embedding = this.embeddings.status(settings.local.embeddingProfileId);
+    const jobs = await this.jobs.list();
     return { ...indexed, backend: 'sqlite', sourceCount: indexed.sources, chunkCount: indexed.chunks,
       embedding: { ...embedding, available: ['ready', 'loading'].includes(embedding.state) },
-      reranking: this.reranker?.status() ?? { state: 'disabled', loaded: false }, jobs: await this.jobs.list() };
+      configuredEmbeddingProfileId: settings.local.embeddingProfileId,
+      embeddingProfiles: this.modelProfiles().filter(profile => profile.kind === 'embedding').map(profile => this.embeddings.status(profile.id)),
+      reranking: settings.local.rerankProfileId ? this.reranker?.status(settings.local.rerankProfileId) ?? { state: 'unavailable', loaded: false }
+        : { state: 'disabled', loaded: false },
+      modelProfiles: this.modelProfiles(), parsing: this.structures.status?.(), jobs,
+      resources: await this.resources.snapshot(), vectorSpacePolicy: this.spacePolicy.status(jobs),
+      externalModels: this.externalModelStatus?.() ?? [],
+      deployment: { platform: 'windows', gpu: 'single-nvidia-dml-verified', otherPlatformsSupported: false } };
   }
 
   async _project(projectId) {
@@ -67,157 +121,6 @@ export class RetrievalCoordinator {
     const project = await this.conversations.describeProject(projectId);
     if (project.isArchived || project.isFolderlessWorkspace) return null;
     return { Id: project.projectId, FolderPath: project.folderPath };
-  }
-
-  _trimSourceCaches(memoryLimitBytes) {
-    const caches = [this.libraryCache, this.conversationCache, this.mountedCache];
-    let retainedBytes = caches.flatMap(current => [...current.values()])
-      .reduce((total, entry) => total + entry.memoryBytes, 0);
-    while (retainedBytes > memoryLimitBytes || caches.some(current => current.size > MAX_SOURCE_CACHE_ENTRIES)) {
-      const candidates = retainedBytes > memoryLimitBytes ? caches : caches.filter(current => current.size > MAX_SOURCE_CACHE_ENTRIES);
-      let oldest;
-      for (const current of candidates) for (const [key, entry] of current)
-        if (!oldest || entry.capturedAt < oldest.entry.capturedAt) oldest = { cache: current, key, entry };
-      if (!oldest) break;
-      retainedBytes -= oldest.entry.memoryBytes;
-      oldest.cache.delete(oldest.key);
-    }
-  }
-
-  async _librarySources(scopes, settings) {
-    this._trimSourceCaches(settings.cache.memoryLimitBytes);
-    const catalog = await this.library.list(settings.projectId);
-    const key = JSON.stringify(scopes.filter(scope => scope === 'user' || scope.startsWith('project:'))), cached = this.libraryCache.get(key);
-    if (cached?.revision === catalog.revision && performance.now() - cached.capturedAt < SOURCE_CACHE_TTL_MS)
-      return cached.sources;
-    const sources = await this.library.readAll(scopes);
-    const memoryBytes = sources.reduce((total, source) => total + source.text.length * 2, 0);
-    this.libraryCache.set(key, { revision: catalog.revision, capturedAt: performance.now(), sources, memoryBytes });
-    this._trimSourceCaches(settings.cache.memoryLimitBytes);
-    return sources;
-  }
-
-  _conversationSources(relationship, entries, messages, settings) {
-    this._trimSourceCaches(settings.cache.memoryLimitBytes);
-    const revision = sourceIdentity(visibleScopes(relationship), entries.map(entry => [entry.id, entry.revision, entry.active, entry.content]),
-      messages.map(message => [message.Id, message.Role, message.Status, message.Content]));
-    const key = relationship.conversationId, cached = this.conversationCache.get(key);
-    if (cached?.revision === revision && performance.now() - cached.capturedAt < SOURCE_CACHE_TTL_MS) return cached.sources;
-    const sources = projectConversationSources(relationship, entries, messages);
-    const memoryBytes = sources.reduce((total, source) => total + source.text.length * 2, 0);
-    this.conversationCache.set(key, { revision, capturedAt: performance.now(), sources, memoryBytes });
-    this._trimSourceCaches(settings.cache.memoryLimitBytes);
-    return sources;
-  }
-
-  async _mountedSources(projectId, settings, signal) {
-    projectId = projectId?.toLowerCase() ?? null;
-    const project = await this._project(projectId);
-    if (!project?.FolderPath || !settings.projectIndexing?.mountedFolder) {
-      this.watchers.get(projectId)?.close(); this.watchers.delete(projectId); this.mountedCache.delete(projectId); return [];
-    }
-    const root = resolve(project.FolderPath), bindingRevision = settings.projectIndexing.bindingRevision;
-    this._watch(projectId, root);
-    const cached = this.mountedCache.get(projectId);
-    if (cached?.root === root && cached.bindingRevision === bindingRevision && performance.now() - cached.capturedAt < 2000)
-      return cached.sources;
-    const files = await readSourceTree(root, { root, excludedRoots: this.excludedRoots, signal });
-    const sources = files.map(file => ({ sourceId: sourceIdentity('work-file', projectId, root, relative(root, file.path)),
-      scopeKey: `project:${projectId.toLowerCase()}`, sourceType: 'work-file', title: file.title,
-      locator: { path: file.path, relativePath: relative(root, file.path), root }, text: file.text,
-      contentHash: file.contentHash, sourceRevision: file.contentHash, bindingRevision }));
-    const memoryBytes = sources.reduce((total, source) => total + source.text.length * 2, 0);
-    const memoryLimit = settings.cache.memoryLimitBytes;
-    let cachedBytes = [...this.mountedCache.values()].reduce((total, entry) => total + entry.memoryBytes, 0);
-    for (const [id, entry] of this.mountedCache) {
-      if (cachedBytes + memoryBytes <= memoryLimit) break;
-      this.mountedCache.delete(id); cachedBytes -= entry.memoryBytes;
-    }
-    if (memoryBytes <= memoryLimit) this.mountedCache.set(projectId, { root, bindingRevision, capturedAt: performance.now(), sources, memoryBytes });
-    this._trimSourceCaches(memoryLimit);
-    return sources;
-  }
-
-  _watch(projectId, root) {
-    const current = this.watchers.get(projectId);
-    if (current?.root === root) return;
-    current?.close();
-    let timer;
-    try {
-      const watcher = watch(root, { recursive: true, persistent: false }, () => {
-        this.mountedCache.delete(projectId);
-        clearTimeout(timer);
-        timer = setTimeout(() => { if (!this.closed) this.rebuild({ projectId }).catch(() => {}); }, 800);
-        timer.unref();
-      });
-      watcher.on('error', () => { watcher.close(); this.watchers.delete(projectId); });
-      this.watchers.set(projectId, { root, close: () => { clearTimeout(timer); watcher.close(); } });
-    } catch { /* Freshness is still checked at every query. / 监听不可用时仍逐次校验来源。 */ }
-  }
-
-  async _upsert(sources, settings, signal, progress, { semantic = true } = {}) {
-    // Four maximal sources fit the data-layer's eight-MiB publication budget.
-    // 四份上限资料符合数据层每批八 MiB 的发布预算。
-    for (let offset = 0; offset < sources.length; offset += 4) {
-      signal?.throwIfAborted();
-      const batch = sources.slice(offset, offset + 4), prepared = [], fingerprintUpdates = new Map();
-      for (const source of batch) {
-        const fingerprint = sourceIdentity(source.contentHash, source.sourceRevision, source.bindingRevision,
-          source.locator, settings.local.semantic, settings.local.embeddingProfileId, EMBEDDING_TEXT_VERSION,
-          semantic ? embeddingVersion(this.embeddings.status().modelVersion) : null);
-        const fingerprintKey = `${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`;
-        if (this.fingerprints.get(fingerprintKey) === fingerprint) continue;
-        const chunks = chunkSource(source);
-        const vectors = chunks.map(() => null);
-        let embeddingModelVersion;
-        if (semantic && settings.local.semantic !== 'off' && settings.local.embeddingProfileId === 'builtin-multilingual' &&
-            ['ready', 'loading'].includes(this.embeddings.status().state)) {
-          // Split inference into bounded batches; a failed semantic item retains its lexical index.
-          // 分批推理限制资源；语义失败时保留词法索引，不伪造向量或静默截断原文。
-          for (let chunkOffset = 0; chunkOffset < chunks.length; chunkOffset += 32) {
-            signal?.throwIfAborted();
-            const slice = chunks.slice(chunkOffset, chunkOffset + 32);
-            try {
-              const embedded = await this.embeddings.embedDocuments(slice.map(item => embeddingTextForChunk(source, item)), { signal });
-              embeddingModelVersion = embeddingVersion(embedded.modelVersion);
-              embedded.vectors.forEach((vector, i) => { vectors[chunkOffset + i] = vector; });
-            } catch (error) { if (signal?.aborted) throw error; this.lastEmbeddingError = error.code ?? 'EMBEDDING_FAILED'; }
-          }
-        }
-        prepared.push({ ...source, chunks, ...(vectors.some(Boolean) ? { vectors, embeddingProfileId: 'builtin-multilingual', embeddingModelVersion } : {}) });
-        if (!semantic || settings.local.semantic === 'off' || vectors.every(Boolean))
-          fingerprintUpdates.set(source.sourceId, { key: fingerprintKey, value: fingerprint });
-      }
-      const publish = async () => {
-        signal?.throwIfAborted();
-        const current = [];
-        for (const source of prepared) {
-          if (!semantic || await this._backgroundSourceActive(source, settings, signal)) current.push(source);
-        }
-        if (current.length) await this.index.upsertSources(current, { signal });
-        return new Set(current.map(source => source.sourceId));
-      };
-      const published = prepared.length ? await (semantic ? this._serialize(publish) : publish()) : new Set();
-      for (const [sourceId, fingerprint] of fingerprintUpdates) if (published.has(sourceId))
-        this.fingerprints.set(fingerprint.key, fingerprint.value);
-      while (this.fingerprints.size > 8192) this.fingerprints.delete(this.fingerprints.keys().next().value);
-      if (progress) await progress(Math.min(sources.length, offset + batch.length));
-    }
-  }
-
-  async _backgroundSourceActive(source, settings, signal) {
-    if (source.sourceType === 'knowledge') {
-      const current = await this.library.readSource(source.sourceId,
-        { scopeKeys: [source.scopeKey], sourceRevision: source.sourceRevision });
-      return current?.contentHash === source.contentHash;
-    }
-    if (source.sourceType !== 'work-file') return false;
-    const projectId = source.scopeKey.slice('project:'.length), effective = await this.effective(projectId);
-    const project = await this._project(projectId);
-    if (!effective.projectIndexing?.mountedFolder || effective.projectIndexing.bindingRevision !== source.bindingRevision ||
-        !project?.FolderPath || resolve(project.FolderPath) !== source.locator.root || effective.local.semantic !== settings.local.semantic) return false;
-    try { return (await readSourceFile(source.locator.path, { root: source.locator.root, excludedRoots: this.excludedRoots, signal })).contentHash === source.contentHash; }
-    catch { return false; }
   }
 
   async _scopeSnapshot(context, signal) {
@@ -245,23 +148,26 @@ export class RetrievalCoordinator {
     if (!settings.local.enabled) return { relationship, settings, scopes, sources: [], identities: new Map() };
     const memory = await this.memory.contextFor(relationship.conversationId);
     const messages = this._beforeCurrentMessage(await this.conversations.readMessages(relationship.conversationId), context);
-    const sources = [...await this._librarySources(scopes, settings), ...this._conversationSources(relationship, memory.entries, messages, settings),
-      ...await this._mountedSources(relationship.isFolderlessWorkspace ? null : relationship.projectId, settings, signal)];
-    return { relationship, settings, scopes, sources, identities: new Map(sources.map(source => [source.sourceId, source])) };
-  }
-
-  async _prune(snapshot, signal) {
-    for (const sourceType of ['knowledge', 'work-file', 'memory', 'message']) {
-      const previous = await this.index.listSources({ scopeKeys: snapshot.scopes, sourceType, signal });
-      for (const source of previous) if (!snapshot.identities.has(source.sourceId)) {
-        await this.index.removeSource(source.sourceId, { scopeKeys: snapshot.scopes, permanent: false, signal });
-        this.fingerprints.delete(`${source.sourceId}:lexical`); this.fingerprints.delete(`${source.sourceId}:semantic`);
-      }
-    }
+    const [library, mounted] = await Promise.all([
+      this.sourceService.librarySnapshot(scopes, settings, signal),
+      this.sourceService.foregroundMountedSnapshot(relationship.isFolderlessWorkspace ? null : relationship.projectId, settings, signal)
+    ]);
+    const sources = [...library.sources, ...this.sourceService.conversationSources(relationship, memory.entries, messages, settings), ...mounted.sources];
+    // Keep source identities in the request; corpus bodies are hydrated only for changed derivations or current reads.
+    // 请求只保留来源身份；正文仅在派生变化或当前回读时按需加载，避免将整个语料驻留聊天请求。
+    const loadSource = (source, ownedSignal) => source.sourceType === 'knowledge' ? library.loadSource(source, ownedSignal)
+      : source.sourceType === 'work-file' ? mounted.loadSource(source, ownedSignal) : Promise.resolve(source);
+    const isCurrent = (source, ownedSignal) => source.sourceType === 'knowledge' ? library.isCurrent(source, ownedSignal)
+      : source.sourceType === 'work-file' ? mounted.isCurrent(source, ownedSignal) : Promise.resolve(true);
+    const priorUser = messages.filter(message => message.Role === 'user' && (!message.Status || message.Status === 'completed')).at(-1);
+    return { relationship, settings, scopes, sources, loadSource, isCurrent,
+      taskContext: context.message ?? priorUser?.Content,
+      identities: new Map(sources.map(source => [source.sourceId, source])),
+      ...(library.scan || mounted.scan ? { sourceScan: sourceScanSummary(library, mounted) } : {}) };
   }
 
   async _fresh(item, snapshot, signal, checks = new Map(), context = {}) {
-    const key = `${item.sourceId}:${item.sourceRevision}:${item.contentHash}`;
+    const key = `${item.sourceId}:${item.sourceRevision}:${item.contentHash}:${item.derivationSignature ?? ''}`;
     if (checks.has(key)) return checks.get(key);
     const operation = this._freshSource(item, snapshot, signal, checks, context);
     checks.set(key, operation);
@@ -271,9 +177,14 @@ export class RetrievalCoordinator {
   async _freshSource(item, snapshot, signal, checks, context) {
     signal?.throwIfAborted();
     if (!snapshot.scopes.includes(item.scopeKey)) return false;
+    if (item.derivationSignature && !(await this.index.verifyReference({
+      sourceRef: item.sourceRef, scopeKeys: snapshot.scopes, signal })).current) return false;
     let source = snapshot.identities.get(item.sourceId) ?? item;
+    if (snapshot.sourceScan?.coverage?.complete === false && !snapshot.identities.has(item.sourceId) &&
+      ['knowledge', 'work-file'].includes(item.sourceType)) return false;
+    if (source.unavailable) return false;
     if (source.sourceType === 'knowledge') {
-      source = await this.library.readSource(item.sourceId, { scopeKeys: snapshot.scopes, sourceRevision: item.sourceRevision });
+      source = await this.library.readSource(item.sourceId, { scopeKeys: snapshot.scopes, sourceRevision: item.sourceRevision, signal });
     } else if (source.sourceType === 'memory' || source.sourceType === 'message') {
       const type = source.sourceType;
       if (!checks.has(type)) checks.set(type, (async () => {
@@ -295,11 +206,17 @@ export class RetrievalCoordinator {
           snapshot.settings.projectIndexing.bindingRevision !== source.bindingRevision ||
           !project?.FolderPath || resolve(project.FolderPath) !== source.locator.root) return false;
       try {
-        const fresh = (await readSourceFile(source.locator.path, { root: source.locator.root, excludedRoots: this.excludedRoots, signal })).contentHash === source.contentHash;
-        if (!fresh) this.mountedCache.delete(source.scopeKey.slice('project:'.length));
+        const options = { root: source.locator.root, excludedRoots: this.excludedRoots,
+          maximumSourceBytes: snapshot.settings.local.indexing?.maximumSourceBytes, resourceService: this.resources, signal };
+        const file = source.locator.fileWindow
+          ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow, options)
+          : await readSourceFile(source.locator.path, options);
+        const fresh = file.contentHash === source.contentHash &&
+          (!source.locator.fileWindow && source.locator.extraction === undefined && file.extraction === undefined || sourceFileRevision(file) === source.sourceRevision);
+        if (!fresh) this.sourceService.invalidateMounted(source.scopeKey.slice('project:'.length));
         return fresh;
       }
-      catch (error) { if (signal?.aborted) throw error; this.mountedCache.delete(source.scopeKey.slice('project:'.length)); return false; }
+      catch (error) { if (signal?.aborted) throw error; this.sourceService.invalidateMounted(source.scopeKey.slice('project:'.length)); return false; }
     }
     return true;
   }
@@ -321,14 +238,25 @@ export class RetrievalCoordinator {
     }
   }
 
-  async _rerank(context, query, candidates, snapshot, taskType, signal) {
-    if (!['complex', 'research'].includes(taskType) || !snapshot.settings.local.rerankProfileId || !this.reranker || candidates.length < 2)
+  async _rerank(context, query, candidates, snapshot, taskType, signal, decision) {
+    decision ??= this._planEvidence({ query, items: candidates, taskType,
+      rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+    if (['complex', 'research'].includes(taskType) && snapshot.settings.local.rerankProfileId && this.reranker &&
+        decision?.rerankReason === 'optional-model-not-ready')
+      return { items: candidates, diagnostic: this.reranker.status(snapshot.settings.local.rerankProfileId).errorCode ?? 'RERANK_UNAVAILABLE' };
+    if (!decision?.shouldRerank || !snapshot.settings.local.rerankProfileId || !this.reranker || candidates.length < 2)
       return { items: candidates };
-    const status = this.reranker.status();
+    try { resolveRetrievalModelProfile('reranker', snapshot.settings.local.rerankProfileId); }
+    catch (error) { return { items: candidates, diagnostic: error.code }; }
+    const status = this.reranker.status(snapshot.settings.local.rerankProfileId);
     if (status.profileId !== snapshot.settings.local.rerankProfileId || !['ready', 'loading'].includes(status.state))
-      return { items: candidates, diagnostic: 'RERANK_UNAVAILABLE' };
+      return { items: candidates, diagnostic: status.errorCode ?? 'RERANK_UNAVAILABLE' };
     try {
-      const result = await this.reranker.rerank({ context, query, candidates, settings: snapshot.settings, signal, limit: 20 });
+      const result = await this.reranker.rerank({ profileId: snapshot.settings.local.rerankProfileId,
+        context, query, candidates, settings: snapshot.settings, signal, limit: 20 });
+      if (result.profileId !== undefined && result.profileId !== snapshot.settings.local.rerankProfileId ||
+          hasModelMetadataMismatch(status, result))
+        throw retrievalFailure('Reranking result belongs to another model. / 重排结果不属于所选模型配置。', 'RERANK_PROFILE_MISMATCH', 409);
       const originals = new Map(candidates.map(item => [item.sourceRef, item]));
       const ranked = [], seen = new Set();
       let scoredCount = 0;
@@ -348,19 +276,32 @@ export class RetrievalCoordinator {
     }
   }
 
-  search(context, { query, gap, limit = 6, taskType = 'lookup', maximumTokens = 8192, existingContext = [], requiresSourceRead = false },
-    { signal, modelReferences = false, archiveId = modelReferences ? allocateEvidenceArchiveId() : undefined } = {}) {
-    return this._serialize(async () => {
+  search(context, { query, gap, domain, symbol, path, limit, taskType = 'lookup', maximumTokens, existingContext = [], requiresSourceRead = false },
+    { signal, modelReferences = false, archiveId = modelReferences ? allocateEvidenceArchiveId() : undefined,
+      allowColdInference = true } = {}) {
+    signal = this._signal(signal);
+    return this._serialize(() => runResourceTask(this.resources, { taskId: `retrieval:${context.requestId ?? context.conversationId}`,
+      workspaceId: context.projectId ?? context.conversationId, memoryBytes: 8 * 1024 * 1024 }, async lease => {
+      const budget = { ...retrievalBudget({ taskType, suggestions: lease?.suggestions, limit, maximumTokens }),
+        ...this.evaluationPolicy?.fixedBudget };
+      budget.maximumTokens = Math.min(budget.maximumTokens, maximumTokens ?? 32768);
+      limit = budget.limit; maximumTokens = budget.maximumTokens;
       if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
       if (typeof query !== 'string' || !query.trim() || query.length > MAX_QUERY_CHARACTERS ||
           !Number.isSafeInteger(limit) || limit < 1 || limit > 60 ||
-          !Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > 16384)
+          !Number.isSafeInteger(maximumTokens) || maximumTokens < 0 || maximumTokens > 32768)
         throw retrievalFailure('Invalid query or evidence budget. / 检索查询、数量或证据预算无效。');
       validateEvidenceGap(gap);
+      if (maximumTokens === 0) return { items: [], strategy: 'context-budget-exhausted', vectorAvailable: false,
+        budget, evidenceAssessment: { ...assessEvidence([], query), reason: 'no-remaining-model-context' },
+        acquisition: { shouldContinue: false, next: 'answer-with-current-evidence-or-state-the-context-limit' } };
       const withModelReferences = items => modelReferences
         ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(archiveId, index + 1) })) : items;
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
+      const retrievalIntent = buildRetrievalIntent(query, { domain, symbol, path, taskContext: snapshot.taskContext });
+      if (retrievalIntent.path && this.evaluationPolicy?.gaps !== false) this.sourceService.lifecycle.prioritize?.(
+        snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, retrievalIntent.path);
       if (!snapshot.settings.local.enabled) return { items: [], strategy: 'disabled', vectorAvailable: false,
         evidenceAssessment: assessEvidence([], query) };
       let acquisition = this.acquisitions.get(context);
@@ -369,10 +310,11 @@ export class RetrievalCoordinator {
           retrievalPlan(context.message ?? query).taskType === 'research' });
         this.acquisitions.set(context, acquisition);
       }
-      const ticket = acquisition.prepare({ query, gap,
+      const ticket = this.evaluationPolicy?.gaps === false ? { gap: query, explicitGap: false, entry: { searches: 0 }, cached: undefined } : acquisition.prepare({ query, gap,
         snapshotKey: sourceIdentity(snapshot.scopes, snapshot.settings, snapshot.sources.map(source =>
           [source.sourceId, source.sourceRevision, source.contentHash, source.bindingRevision, source.locator])),
-        cacheKey: [query.normalize('NFKC').trim().toLowerCase(), limit, taskType, maximumTokens, requiresSourceRead, modelReferences, sourceIdentity(existingContext)] });
+        cacheKey: [query.normalize('NFKC').trim().toLowerCase(), limit, taskType, maximumTokens, requiresSourceRead, modelReferences,
+          retrievalIntent, allowColdInference, sourceIdentity(existingContext)] });
       // Optional inference health is checked live; a previous success must not hide a failed reranker.
       // 可选推理服务的健康状态需要实时检查，不能以历史成功掩盖重排服务失败。
       if (ticket.cached && snapshot.settings.local.rerankProfileId && ['complex', 'research'].includes(taskType))
@@ -402,25 +344,96 @@ export class RetrievalCoordinator {
       }
       // Foreground requests update lexical text only; imported/project embeddings are built in background jobs.
       // 前台请求只同步词法原文；导入资料和工作向量由后台任务生成，不等整段聊天嵌入完成。
-      await this._upsert(snapshot.sources, snapshot.settings, signal, undefined, { semantic: false });
-      await this._prune(snapshot, signal);
-      let embedded;
-      if (snapshot.sources.length && snapshot.settings.local.semantic !== 'off' && snapshot.settings.local.embeddingProfileId === 'builtin-multilingual') {
-        try { embedded = await this.embeddings.embedQuery(query, { signal }); }
-        catch (error) { if (signal?.aborted) throw error; this.lastEmbeddingError = error.code ?? 'EMBEDDING_FAILED'; }
+      await this.sourceService.syncFormalSources(snapshot, signal);
+      let embedded, embeddingDiagnostic;
+      const space = await this.spacePolicy.select(snapshot.settings, snapshot.scopes, signal);
+      let profileId = space.profileId;
+      if (space.canMigrate && this.evaluationPolicy?.resources !== false) this.spacePolicy.schedule(
+        snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, space.targetProfileId,
+        () => this.sourceService.rebuild({ projectId: snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId,
+          signal: this.shutdown.signal }));
+      const status = this.embeddings.status(profileId);
+      const semanticEnabled = snapshot.settings.local.semantic !== 'off' && profileId !== null;
+      // Exact paths/symbols start with current lexical/structural evidence, without waiting for model loading.
+      // 精确路径或符号先使用当前词法及结构证据，不等待模型加载；可选冷模型不阻塞自动上下文准备。
+      let lexical;
+      if (retrievalIntent.path || retrievalIntent.symbol || !allowColdInference && status.loaded === false)
+        lexical = await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
+          retrievalIntent, ann: snapshot.settings.local.ann, signal });
+      if (lexical && (retrievalIntent.path || retrievalIntent.symbol)) {
+        const targets = lexical.items.filter(item => hasExactRetrievalTarget(item, retrievalIntent));
+        const checks = new Map(), staleSources = new Set();
+        for (const item of targets) {
+          signal.throwIfAborted();
+          if (!await this._fresh(item, snapshot, signal, checks, context)) staleSources.add(item.sourceId);
+        }
+        lexical.items = lexical.items.filter(item => !staleSources.has(item.sourceId));
       }
-      const result = await this.index.search({ query, scopeKeys: snapshot.scopes, limit: RETRIEVAL_CANDIDATE_LIMIT,
-        queryVector: embedded?.vector, embeddingProfileId: embedded?.profileId, embeddingModelVersion: embeddingVersion(embedded?.modelVersion), signal });
+      const initialDecision = this._planEvidence({ query, gap, intent: retrievalIntent, items: lexical?.items,
+        taskType, semanticEnabled, embeddingStatus: { ...status,
+          ...(allowColdInference && status.state === 'ready' ? { loaded: true } : {}) } });
+      if (snapshot.sources.length && initialDecision.shouldEmbed) {
+        for (const candidateProfile of [...new Set([profileId, space.fallbackProfileId].filter(Boolean))]) {
+          profileId = candidateProfile;
+          try {
+            const profile = resolveRetrievalModelProfile('embedding', profileId);
+            embedded = await this.embeddings.embedQuery(query, { signal, profileId });
+            const status = this.embeddings.status(profileId);
+            // Registered model/space identity determines dimensions; legacy seams may omit optional metadata.
+            // 注册模型或空间身份确定维数；旧接口可省略可选元信息，但声明的维数必须与实际向量一致。
+            const registeredModel = status.embeddingSpaceId === profile.embeddingSpaceId || embedded.embeddingSpaceId === profile.embeddingSpaceId ||
+              status.modelVersion === profile.modelVersion || embedded.modelVersion === profile.modelVersion;
+            const expectedDimensions = registeredModel ? profile.dimensions : status.dimensions;
+            if (embedded.profileId !== profileId || status.embeddingSpaceId && embedded.embeddingSpaceId !== status.embeddingSpaceId ||
+                hasModelMetadataMismatch(status, embedded) ||
+                !(Array.isArray(embedded.vector) || embedded.vector instanceof Float32Array) ||
+                expectedDimensions !== undefined && status.dimensions !== undefined && status.dimensions !== expectedDimensions ||
+                expectedDimensions !== undefined && (embedded.vector.length !== expectedDimensions ||
+                  embedded.dimensions !== undefined && embedded.dimensions !== expectedDimensions) ||
+                embedded.dimensions !== undefined && embedded.vector.length !== embedded.dimensions)
+              throw retrievalFailure('Embedding result belongs to another model space. / 嵌入结果不属于所选模型空间。', 'RETRIEVAL_MODEL_SPACE_MISMATCH', 409);
+            break;
+          } catch (error) {
+            if (signal.aborted) throw error;
+            embedded = undefined;
+            embeddingDiagnostic = error.code ?? 'EMBEDDING_FAILED';
+          }
+        }
+      }
+      const result = lexical && !embedded ? lexical : await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
+        retrievalIntent, ann: snapshot.settings.local.ann,
+        queryVector: embedded?.vector, embeddingProfileId: embedded?.profileId,
+        embeddingModelVersion: embeddingVersion(embedded?.modelVersion), embeddingSpaceId: embedded?.embeddingSpaceId, signal });
+      if (snapshot.indexingPending) result.indexingPending = true;
+      if (snapshot.indexingPartial || snapshot.sourceScan?.coverage?.complete === false) {
+        result.indexingPartial = true; result.sourceCoverage = snapshot.sourceScan?.coverage;
+      }
+      result.vectorSpacePolicy = { profileId: embedded?.profileId ?? null, targetProfileId: space.targetProfileId,
+        state: space.state, compatibleFallback: embedded && embedded.profileId !== space.targetProfileId,
+        ...(embeddingDiagnostic ? { diagnostic: embeddingDiagnostic } : {}) };
+      if (semanticEnabled && !initialDecision.shouldEmbed && !lexical?.items.some(item => hasExactRetrievalTarget(item, retrievalIntent)))
+        result.embeddingDiagnostic = status.errorCode ?? 'EMBEDDING_PREPARATION_PENDING';
+      if (embeddingDiagnostic) result.embeddingDiagnostic = embeddingDiagnostic;
+      // Search is bounded evidence acquisition, never an exhaustive symbol-reference enumeration.
+      // 搜索只提供有界候选证据，不能冒充对符号引用的穷举。
+      result.coverage = { ...result.coverage, operation: 'search', complete: false, candidateLimit: budget.fusedCandidates };
+      result.budget = budget;
       result.items = withModelReferences(result.items);
       // Targeted current reads replace the second whole-library/history/tree snapshot.
       // 只回读命中来源并复核其版本，避免第二次全量资料、聊天和目录扫描。
       const candidateCount = result.items.length, freshChecks = new Map();
-      const unique = deduplicateCandidates(result.items, { existingContext });
-      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal);
+      const unique = deduplicateCandidates(result.items, { existingContext, retrievalIntent });
+      const candidateAssessment = assessEvidence(unique.items, query, { requiresSourceRead, retrievalIntent });
+      const rerankDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
+        items: unique.items, assessment: candidateAssessment,
+        rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal, rerankDecision);
+      result.rerankDecision = { executed: Boolean(reranked.rerank), reason: rerankDecision.rerankReason };
       let current = reranked.items, selected;
       const invalidSourceIds = new Set();
       do {
-        selected = selectCandidates(current, { query, limit, maximumTokens, requiresSourceRead });
+        selected = selectCandidates(current, { query, retrievalIntent, taskContext: snapshot.taskContext,
+          limit, maximumTokens, requiresSourceRead });
         const pending = selected.items.map(item => this._fresh(item, snapshot, signal, freshChecks, context));
         const checked = await Promise.allSettled(pending);
         signal?.throwIfAborted();
@@ -429,7 +442,7 @@ export class RetrievalCoordinator {
         const stale = selected.items.filter((_, index) => !checked[index].value);
         if (!stale.length) break;
         for (const item of stale) invalidSourceIds.add(item.sourceId);
-        const available = deduplicateCandidates(result.items.filter(item => !invalidSourceIds.has(item.sourceId)), { existingContext }).items;
+        const available = deduplicateCandidates(result.items.filter(item => !invalidSourceIds.has(item.sourceId)), { existingContext, retrievalIntent }).items;
         const rankedReferences = new Set(current.map(item => item.sourceRef));
         // A stale preferred copy must not hide an independently valid duplicate source.
         // 优先副本失效后，仍允许原候选池中其他有效来源的同文副本补位。
@@ -451,15 +464,25 @@ export class RetrievalCoordinator {
       // worker 与文件 IO 等待后复核工作关联和开关，旧请求不能复活已禁用资料。
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
-      result.acquisition = acquisition.observe(ticket, result);
+      result.evidenceState = { authorization: 'checked', freshness: 'current', conclusion: 'not-verified' };
+      result.acquisition = this.evaluationPolicy?.gaps === false ? { state: 'disabled', remainingSearches: 0,
+        remainingGapSearches: 0 } : acquisition.observe(ticket, result);
+      const nextDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
+        items: result.items, assessment: result.evidenceAssessment, indexingPending: result.indexingPending,
+        remainingSearches: Math.min(result.acquisition.remainingSearches, result.acquisition.remainingGapSearches),
+        newEvidenceCount: result.acquisition.newEvidenceCount });
+      result.acquisition.decision = this.evaluationPolicy?.gaps === false ? nextDecision :
+        acquisition.applyProgressDecision(nextDecision, result.acquisition);
+      result.acquisition.next = result.acquisition.decision.next;
       return result;
-    });
+    }, { signal }));
   }
 
   read(context, { sourceRef, offset = 0, limit = 8000, mode = 'page', anchorOffset, beforeCharacters = 384, gap }, { signal } = {}) {
+    signal = this._signal(signal);
     return this._serialize(async () => {
       validateEvidenceGap(gap);
-      if (!['page', 'window', 'section'].includes(mode)) throw retrievalFailure('Invalid source read mode. / 资料读取模式无效。');
+      if (!['page', 'window', 'section', 'unit'].includes(mode)) throw retrievalFailure('Invalid source read mode. / 资料读取模式无效。');
       const snapshot = await this._scopeSnapshot(context, signal);
       if (!snapshot.settings.local.enabled) throw toolFailure('本地检索已关闭。', 'RETRIEVAL_DISABLED', 409);
       let canonicalSourceRef = sourceRef;
@@ -475,161 +498,30 @@ export class RetrievalCoordinator {
         throw toolFailure('资料已更改或撤销，请重新检索。', 'STALE_RETRIEVAL_SOURCE', 409);
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
+      const acquisition = this.acquisitions.get(context);
       return { ...item, ...(canonicalSourceRef !== sourceRef ? { sourceRef } : {}),
-        evidenceDecision: { sufficiency: 'not-evaluated', missingInformation: gap ?? null,
+        evidenceDecision: acquisition?.observeRead(item, { gap, mode, sourceRef: canonicalSourceRef }) ?? { sufficiency: 'not-evaluated',
+          missingInformation: gap ?? null, sourceVersionChecked: true, contentRead: true,
           next: 'answer-if-this-context-supports-the-requested-facts-otherwise-name-the-remaining-gap' } };
     });
   }
 
-  async evidence(context, query, { signal, maximumCharacters = 10000, maximumTokens, existingContext = [], history = [], plan,
-    deferArchive = false } = {}) {
-    const route = plan ?? retrievalPlan(query, { history, maximumTokens });
-    if (!route.shouldRetrieve || route.evidenceTokens <= 0 || maximumCharacters <= 0)
-      return { prompt: '', references: [], evidenceAssessment: assessEvidence([], query), plan: route };
-    const promptTokens = Math.max(0, Math.min(route.evidenceTokens, maximumTokens ?? route.evidenceTokens));
-    const reservedTokens = estimateTokens(EVIDENCE_NOTICE) + 120;
-    const result = await this.search(context, { query: route.query, limit: 6, taskType: route.taskType,
-      maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
-    { signal, modelReferences: Boolean(this.tools.results) });
-    const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: result.evidenceAssessment });
-    result.items = projection.items;
-    result.evidenceAssessment = assessEvidence(result.items, query, { requiresSourceRead: route.requiresSourceRead,
-      alreadyPresentCount: result.selection?.alreadyPresentCount });
-    result.plan = route; result.selection = { ...result.selection, promptTokens: projection.usedTokens };
-    if (!result.items.length) return { prompt: '', references: [], evidenceAssessment: result.evidenceAssessment, plan: route };
-    // The opaque handle keeps validated excerpts internal until the final model projection exists.
-    // 以不透明句柄保存已验证片段，最终请求视图确定后才去重并归档，不把临时数据暴露给模型或事件。
-    const prepared = Object.freeze({});
-    this.#preparedEvidence.set(prepared, { result, query, route, maximumTokens: promptTokens, maximumCharacters,
-      projectedTokens: projection.usedTokens, projectedCharacters: projection.prompt.length,
-      contextKey: this._evidenceContextKey(context), finalizing: false });
-    const draft = { prompt: projection.prompt, prepared, evidenceAssessment: result.evidenceAssessment, plan: route,
-      references: result.items.map(({ sourceRef, modelSourceRef, sourceId,
-      scopeKey, sourceRevision, contentHash, title, locator }) => ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
-    return deferArchive ? draft : this.finalizeEvidence(context, draft, { signal });
+  _signal(signal) {
+    return signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
   }
 
-  _evidenceContextKey(context) {
-    return JSON.stringify([context.conversationId?.toLowerCase(), context.requestId?.toLowerCase() ?? null,
-      context.projectId?.toLowerCase() ?? null]);
-  }
+  relations(...args) { return this.evidenceService.relations(...args); }
+  assess(...args) { return this.evidenceService.assess(...args); }
+  experience(...args) { return this.evidenceService.experience(...args); }
 
-  /** Reproject already verified evidence against the final retained context, without another retrieval.
-   * 仅在已验证片段中，按最终保留上下文重新去重与投影，不进行第二次检索。 */
-  async finalizeEvidence(context, preparedEvidence, { existingContext = [], maximumTokens, maximumCharacters, signal } = {}) {
-    if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
-    signal?.throwIfAborted();
-    const state = this.#preparedEvidence.get(preparedEvidence?.prepared);
-    if (!state || state.finalizing || state.contextKey !== this._evidenceContextKey(context))
-      throw toolFailure('证据请求视图无效或不属于当前请求。', 'RETRIEVAL_PREPARATION_INVALID', 409);
-    const tokenBudget = maximumTokens ?? state.maximumTokens, characterBudget = maximumCharacters ?? state.maximumCharacters;
-    if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 0 || !Number.isSafeInteger(characterBudget) || characterBudget < 0)
-      throw retrievalFailure('Invalid final evidence budget. / 最终证据预算无效。');
-    // Admit only one finalizer before any await; source removal shares the same publication queue.
-    // 首次等待前只允许一个最终投影；来源撤销共用同一发布队列，不能在回读与归档之间插入旧来源。
-    state.finalizing = true;
-    return this._serialize(async () => {
-      try {
-        if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
-        const snapshot = await this._scopeSnapshot(context, signal);
-        if (!snapshot.settings.local.enabled) throw toolFailure('本地检索已关闭。', 'RETRIEVAL_DISABLED', 409);
-        snapshot.sources = state.result.items;
-        const freshness = new Map();
-        const checked = await Promise.allSettled(state.result.items.map(item => this._fresh(item, snapshot, signal, freshness, context)));
-        signal?.throwIfAborted();
-        const failed = checked.find(item => item.status === 'rejected');
-        if (failed) throw failed.reason;
-        const currentItems = state.result.items.filter((_, index) => checked[index].value);
-        await this._assertCurrent(context, snapshot);
-        signal?.throwIfAborted();
-        const unique = deduplicateCandidates(currentItems, { existingContext });
-        const alreadyPresentCount = (state.result.selection?.alreadyPresentCount ?? 0) + unique.alreadyPresentCount;
-        const withFinalReferences = items => state.result.evidenceArchiveId
-          ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(state.result.evidenceArchiveId, index + 1) })) : items;
-        let items = withFinalReferences(unique.items), assessment = assessEvidence(items, state.query,
-          { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount }), projection;
-        // A smaller final budget can change support; only shrink the projection until its notice agrees.
-        // 最终预算缩小时可能改变证据支持状态；只缩减片段，直到提示与实际呈现片段一致。
-        for (;;) {
-          projection = projectEvidence(items, Math.min(characterBudget, state.maximumCharacters, state.projectedCharacters),
-            { maximumTokens: Math.min(tokenBudget, state.maximumTokens, state.projectedTokens), assessment });
-          const projectedAssessment = assessEvidence(projection.items, state.query,
-            { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount });
-          if (assessment.state === projectedAssessment.state && assessment.requiresSourceRead === projectedAssessment.requiresSourceRead) {
-            assessment = projectedAssessment; break;
-          }
-          items = withFinalReferences(projection.items); assessment = projectedAssessment;
-        }
-        const result = { ...state.result, items: projection.items, evidenceAssessment: assessment,
-          selection: { ...state.result.selection, alreadyPresentCount, promptTokens: projection.usedTokens,
-            finalStaleSourceCount: new Set(state.result.items.filter((_, index) => !checked[index].value).map(item => item.sourceId)).size } };
-        let resultRef;
-        if (result.items.length && context.requestId && this.tools.results) resultRef = await this.tools.results.save(context,
-          { id: `retrieval:${context.requestId}`, name: 'knowledge.search' }, { content: [], structuredContent: result, isError: false },
-          { id: state.result.evidenceArchiveId });
-        signal?.throwIfAborted();
-        this.#preparedEvidence.delete(preparedEvidence.prepared);
-        return { prompt: projection.prompt, resultRef, evidenceAssessment: assessment, plan: state.route,
-          references: result.items.map(({ sourceRef, modelSourceRef, sourceId, scopeKey, sourceRevision, contentHash, title, locator }) =>
-            ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
-      } catch (error) { state.finalizing = false; throw error; }
-    });
-  }
-
-  async importSource(input) {
-    const files = await readSourceTree(input.path, { excludedRoots: this.excludedRoots, maximumFiles: 512 });
-    const result = await this.library.add(files, input);
-    this.libraryCache.clear();
-    const job = await this.rebuild({ projectId: input.scope === 'project' ? input.projectId : null });
-    const first = result.sources[0];
-    return { id: first.id, title: first.title, scope: first.scope, projectId: first.projectId, path: first.originalPath,
-      revision: first.revision, status: 'ready', importedCount: result.sources.length, jobId: job.jobId };
-  }
-
-  async removeSource(id, input) {
-    return this._serialize(async () => {
-      const removed = await this.library.remove(id, input);
-      this.libraryCache.clear();
-      this.fingerprints.delete(`${removed.id}:lexical`); this.fingerprints.delete(`${removed.id}:semantic`);
-      await this.index.removeSource(removed.id, { scopeKeys: [removed.scopeKey] });
-      return { deleted: true, id: removed.id };
-    });
-  }
-
-  async rebuild({ projectId = null } = {}) {
-    if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
-    await this.initialize();
-    if (projectId) { projectId = validateId(projectId).toLowerCase(); await this.conversations.describeProject(projectId); }
-    const running = [...this.activeJobs.values()].find(item => item.projectId === projectId && !item.controller.signal.aborted);
-    if (running) return this.jobs.get(running.jobId);
-    this.mountedCache.delete(projectId);
-    const job = await this.jobs.create(projectId), controller = new AbortController();
-    const active = { jobId: job.jobId, projectId, controller };
-    this.activeJobs.set(job.jobId, active);
-    active.promise = (async () => {
-      const signal = controller.signal;
-      try {
-        await this.jobs.update(job.jobId, { status: 'running', startedAt: new Date().toISOString() });
-        const settings = await this.effective(projectId), scopes = ['user', ...(projectId ? [`project:${projectId}`] : [])];
-        const sources = [...await this.library.readAll(scopes), ...await this._mountedSources(projectId, settings, signal)];
-        await this.jobs.update(job.jobId, { totalSources: sources.length });
-        await this._upsert(sources, settings, signal, completedSources => this.jobs.update(job.jobId, { completedSources }));
-        signal.throwIfAborted();
-        await this.jobs.update(job.jobId, { status: 'completed', finishedAt: new Date().toISOString() });
-      } catch (error) {
-        await this.jobs.update(job.jobId, { status: signal.aborted ? 'cancelled' : 'failed',
-          error: signal.aborted ? 'INDEX_CANCELLED' : typeof error.code === 'string' ? error.code : 'INDEX_FAILED', finishedAt: new Date().toISOString() });
-      } finally { this.activeJobs.delete(job.jobId); }
-    })();
-    active.promise.catch(() => {});
-    return job;
-  }
-
-  async cancelJob(id) {
-    const job = await this.jobs.get(validateId(id));
-    this.activeJobs.get(job.jobId)?.controller.abort();
-    return job;
-  }
+  modelProfiles() { return listRetrievalModelProfiles(); }
+  evidence(...args) { return this.evidenceService.prepare(...args); }
+  finalizeEvidence(...args) { return this.evidenceService.finalize(...args); }
+  validateFinal(...args) { return this.evidenceService.validateFinal(...args); }
+  importSource(input, options) { return this.sourceService.import(input, options); }
+  removeSource(id, input, options) { return this.sourceService.remove(id, input, options); }
+  rebuild(options) { return this.sourceService.rebuild(options); }
+  cancelJob(id) { return this.sourceService.cancelJob(id); }
 
   close() {
     if (!this.closure) this.closure = this._close();
@@ -638,16 +530,18 @@ export class RetrievalCoordinator {
 
   async _close() {
     this.closed = true;
-    for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear();
-    this.mountedCache.clear();
-    this.libraryCache.clear(); this.conversationCache.clear();
-    for (const job of this.activeJobs.values()) job.controller.abort();
-    const inferenceClosures = await Promise.allSettled([this.embeddings.close(), this.reranker?.close()]);
-    await Promise.allSettled([...this.activeJobs.values()].map(job => job.promise));
-    await this.queue.catch(() => {});
-    await this.index.close();
-    const inferenceFailure = inferenceClosures.find(item => item.status === 'rejected');
-    if (inferenceFailure) throw inferenceFailure.reason;
+    this.shutdown.abort();
+    await this.spacePolicy.close();
+    const closures = await Promise.allSettled([this.sourceService.close({
+      releaseInference: async () => {
+        const released = await Promise.allSettled([this.embeddings.close(), this.reranker?.close(), this.structures.close?.()]);
+        const failure = released.find(item => item.status === 'rejected');
+        if (failure) throw failure.reason;
+      }
+    }), this.queue.catch(() => {})]);
+    const indexClosure = await Promise.allSettled([this.index.close()]);
+    const resourceClosure = await Promise.allSettled([this.ownsResources ? this.resources.close() : Promise.resolve()]);
+    const failure = [...closures, ...indexClosure, ...resourceClosure].find(item => item.status === 'rejected' && item.reason?.name !== 'AbortError');
+    if (failure) throw failure.reason;
   }
 }

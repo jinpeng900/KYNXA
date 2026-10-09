@@ -45,14 +45,24 @@ export async function checkSkillEnvironment(skill, inventory, { sandboxCapabilit
     diagnostics.push(diagnostic('SKILL_RUNTIME_UNAVAILABLE', `Script ${script.path} requires ${script.runtime}; the verified sandbox does not advertise a supported runtime.`,
       scriptPath && script.path === scriptPath ? 'error' : 'warning'));
   const compatibility = typeof skill.metadata?.compatibility === 'string' ? skill.metadata.compatibility : null;
+  const requirementText = (compatibility ?? '').replace(/\b(?:no|without)\s+(?:extra\s+)?(?:runtime|python|internet|network)(?:\s+access)?\s+(?:is\s+)?required\b/ig, '');
   let compatibilityReviewed = !compatibility;
+  let hasUnverifiedCompatibilityRequirement = false;
   if (compatibility) {
-    const node = /^(?:Requires?\s+)?Node(?:\.js)?\s*:?\s*((?:>=|<=|>|<|=)?\d+(?:\.\d+){0,2}(?:\s+(?:>=|<=|>|<|=)?\d+(?:\.\d+){0,2})*)\s*$/i.exec(compatibility);
-    const satisfied = node ? checkNodeVersion(node[1]) : null;
+    const node = /^(?:Requires?\s+)?Node(?:\.js)?\s*:?\s*((?:>=|<=|>|<|=)?\d+(?:\.\d+){0,2}(?:\s+(?:>=|<=|>|<|=)?\d+(?:\.\d+){0,2})*)?(?:\s*[.;,]\s*(?:no|without)\s+(?:internet|network)(?:\s+access)?(?:\s+(?:is\s+)?required)?)?\s*\.?$/i.exec(compatibility);
+    const satisfied = node ? (node[1] ? checkNodeVersion(node[1]) : commands.includes('node') && capabilities.available === true) : null;
     if (satisfied != null) {
       compatibilityReviewed = true;
       if (!satisfied) diagnostics.push(diagnostic('SKILL_RUNTIME_VERSION_UNAVAILABLE', 'The verified Node runtime does not meet the declared version requirement.', 'error'));
-    } else diagnostics.push(diagnostic('SKILL_COMPATIBILITY_REVIEW', 'Compatibility requirements need review; descriptive text does not prove that the isolated runtime satisfies them.'));
+    } else {
+      // Descriptive compatibility is not a dependency manifest. Explicit unknown requirements still block execution.
+      // 描述性兼容说明不是依赖清单；明确声明但无法核验的需求仍阻止执行。
+      hasUnverifiedCompatibilityRequirement = /\b(?:requires?|required|needs?|must|depends?\s+on)\b|需要|必须|依赖|要求/u.test(requirementText.toLowerCase()) ||
+        /\b(?:python|ruby|java|php|perl|lua|node(?:\.js)?)\s*(?:>=|<=|>|<|=)?\s*\d/i.test(requirementText);
+      diagnostics.push(diagnostic('SKILL_COMPATIBILITY_REVIEW', hasUnverifiedCompatibilityRequirement
+        ? 'Explicit compatibility requirements need verification before execution.'
+        : 'Compatibility text is descriptive; execution is checked against the selected script runtime and dependency manifests.'));
+    }
   }
   const declared = skill.metadata?.metadata;
   if (declared && typeof declared === 'object') for (const key of ['dependencies', 'requires']) {
@@ -99,7 +109,8 @@ export async function checkSkillEnvironment(skill, inventory, { sandboxCapabilit
   }
   if (dependencies.some(item => item.status !== 'verified'))
     diagnostics.push(diagnostic('SKILL_DEPENDENCIES_UNVERIFIED', 'Declared dependencies have not been verified in the isolated runtime. No package installation or host command was executed.', 'error'));
-  if (/(?:internet|network|https?:\/\/)/i.test(compatibility ?? '') &&
+  if (/\b(?:requires?|required|needs?|must|depends?\s+on)\b|需要|必须|依赖|要求/i.test(requirementText) &&
+      /(?:internet|network|https?:\/\/)/i.test(requirementText) &&
       !/(?:no|without)\s+(?:internet|network)/i.test(compatibility) && capabilities.network !== true)
     diagnostics.push(diagnostic('SKILL_NETWORK_UNAVAILABLE', 'The skill mentions network requirements; the current verified sandbox has no network access.', 'error'));
   const hasErrors = diagnostics.some(item => item.severity === 'error');
@@ -108,7 +119,7 @@ export async function checkSkillEnvironment(skill, inventory, { sandboxCapabilit
     sandbox: { available: capabilities.available === true, commands, network: capabilities.network === true,
       skillExecution: skillSandbox, runtimeVersions: { node: process.versions.node } },
     compatible: hasErrors ? false : compatibilityReviewed ? true : null,
-    canRun: selected?.supported === true && !hasErrors && compatibilityReviewed, diagnostics };
+    canRun: selected?.supported === true && !hasErrors && !hasUnverifiedCompatibilityRequirement, diagnostics };
 }
 
 export function skillPackagePublicInventory(inventory) {

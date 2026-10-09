@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { StreamFailure, finalParts, checkFinish } from './streaming.mjs';
 import { estimateMessageTokens, estimateTokens } from './context.mjs';
+import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
 
 function nativeValueTokens(value, field = '') {
   if (typeof value === 'string') return estimateTokens(value);
@@ -43,7 +44,11 @@ export function wireCatalog(descriptors) {
 
 export function toolDeclarations(protocol, catalog) {
   return catalog.map(tool => {
-    const spec = { name: tool.wireName, description: `${tool.name}: ${tool.description}`, parameters: tool.inputSchema };
+    const environment = normalizeToolExecutionEnvironment(tool.executionEnvironment);
+    const describesExecution = /^(?:web\.|terminal\.|computer\.|mcp\.)/u.test(tool.name);
+    const location = environment && describesExecution
+      ? ` Execution process: ${environment.executorLocation}; network origin: ${environment.network.requestOrigin}.` : '';
+    const spec = { name: tool.wireName, description: `${tool.name}: ${tool.description}${location}`, parameters: tool.inputSchema };
     if (protocol === 'anthropic-messages') return { name: spec.name, description: spec.description, input_schema: spec.parameters };
     if (protocol === 'openai-responses') return { type: 'function', ...spec, strict: false };
     return { type: 'function', function: spec };
@@ -106,10 +111,22 @@ export function decodeToolTurn(protocol, result, catalog) {
 
 export function appendToolResults(protocol, messages, turn, results, { onResult } = {}) {
   const recordProviderResult = (entry, field, pair) => { onResult?.(entry, { ...pair, field }); return entry; };
+  // Broker metadata is outside untrusted output; it never changes the local display or grants permission.
+  // 权限代理元信息置于不可信输出之外，不改本机展示，也不授予执行权限。
+  const modelText = result => {
+    const executionEnvironment = normalizeToolExecutionEnvironment(result.executionEnvironment);
+    if (!executionEnvironment) return result.content;
+    const status = ['completed', 'error', 'cancelled', 'unknown'].includes(result.status)
+      ? result.status : result.isError ? 'error' : 'completed';
+    return JSON.stringify({ executionEnvironment, status,
+      ...(result.executed === false ? { executed: false } : {}),
+      ...(typeof result.code === 'string' && /^[A-Z][A-Z0-9_]{0,99}$/u.test(result.code) ? { code: result.code } : {}),
+      ...(result.recoverable === true ? { recoverable: true } : {}), output: result.content });
+  };
   if (protocol === 'anthropic-messages') return [...messages, ...turn.continuation, { role: 'user', content:
-    results.map(pair => recordProviderResult({ type: 'tool_result', tool_use_id: pair.call.id, content: pair.result.content, is_error: !!pair.result.isError }, 'content', pair)) }];
+    results.map(pair => recordProviderResult({ type: 'tool_result', tool_use_id: pair.call.id, content: modelText(pair.result), is_error: !!pair.result.isError }, 'content', pair)) }];
   if (protocol === 'openai-responses') return [...messages, ...turn.continuation,
-    ...results.map(pair => recordProviderResult({ type: 'function_call_output', call_id: pair.call.id, output: pair.result.content }, 'output', pair))];
+    ...results.map(pair => recordProviderResult({ type: 'function_call_output', call_id: pair.call.id, output: modelText(pair.result) }, 'output', pair))];
   return [...messages, ...turn.continuation,
-    ...results.map(pair => recordProviderResult({ role: 'tool', tool_call_id: pair.call.id, content: pair.result.content }, 'content', pair))];
+    ...results.map(pair => recordProviderResult({ role: 'tool', tool_call_id: pair.call.id, content: modelText(pair.result) }, 'content', pair))];
 }
