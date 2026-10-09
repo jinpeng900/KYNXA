@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -18,6 +19,110 @@ async function configured(t, protocolVersion, { many = false, disabledTools = []
     ...(protocolVersion ? { protocolVersion } : {}) }] });
   return { ...f, log };
 }
+
+test('generic English words do not warm unrelated MCP services while exact names and Chinese brands remain usable', async t => {
+  const f = await configured(t), config = await f.service.getConfig(), chineseLog = join(f.root, 'brand-events.jsonl');
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [...config.mcpServers,
+    { ...config.mcpServers[0], id: 'chinese-brand', name: '飞书', args: [fixturePath, chineseLog] }] });
+  const create = message => f.service.createContext(f.conversationId, { requestId: randomUUID(), permissionMode: 'full', message });
+  const generic = await create('Check the mounted file.');
+  await f.service.catalog(generic, { connectMcp: 'relevant' });
+  assert.equal(f.service.mcp.connections.size, 0);
+  await assert.rejects(stat(f.log), { code: 'ENOENT' });
+  await assert.rejects(stat(chineseLog), { code: 'ENOENT' });
+  f.service.configureModelCatalog(generic, { protocol: 'openai-completions', tokenBudget: 16000 });
+  const discovered = JSON.parse((await f.run(generic, 'tool.search', { query: 'synthetic' })).content);
+  assert.ok(discovered.servers.some(server => server.loadName === 'mcp.synthetic'));
+  assert.equal(f.service.mcp.connections.size, 0, 'not warming a service does not hide it or connect it during discovery');
+  const specific = await create('Inspect the synthetic service.');
+  await f.service.catalog(specific, { connectMcp: 'relevant' });
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1);
+  await assert.rejects(stat(chineseLog), { code: 'ENOENT' });
+  const chinese = await create('查看飞书');
+  await f.service.catalog(chinese, { connectMcp: 'relevant' });
+  assert.equal((await events(chineseLog)).filter(event => event.event === 'started').length, 1);
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1, 'the ready exact service is reused');
+});
+
+test('cold MCP headers remain discoverable without launching processes, and loading a header connects only that service', async t => {
+  const f = await configured(t), ctx = await f.context('full'), config = await f.service.getConfig();
+  const unrelatedLog = join(f.root, 'unrelated.jsonl');
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [...config.mcpServers,
+    { ...config.mcpServers[0], id: 'unrelated', name: 'Unrelated archive service', args: [fixturePath, unrelatedLog] }] });
+  await f.service.catalog(ctx, { connectMcp: 'relevant' });
+  f.service.configureModelCatalog(ctx, { protocol: 'openai-completions', tokenBudget: 16000 });
+  await assert.rejects(stat(f.log), { code: 'ENOENT' });
+  await assert.rejects(stat(unrelatedLog), { code: 'ENOENT' });
+  const discovery = JSON.parse((await f.run(ctx, 'tool.search', { query: 'synthetic' })).content);
+  assert.ok(discovery.servers.some(server => server.loadName === 'mcp.synthetic' && server.executable === false));
+  assert.equal(discovery.tools.some(tool => tool.name === 'mcp.synthetic.echo'), false, 'unknown tool names and schemas are not fabricated');
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'premature' }, 'Must not execute a header'))).code, 'TOOL_NOT_FOUND');
+  const loaded = await f.run(ctx, 'tool.load', { names: ['mcp.synthetic'] });
+  assert.equal(loaded.isError, false, loaded.content);
+  assert.ok(JSON.parse(loaded.content).loaded.includes('mcp.synthetic.echo'));
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'on-demand' }, 'Execute a verified schema'))).content, 'echo:on-demand');
+  await assert.rejects(stat(unrelatedLog), { code: 'ENOENT' });
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 1);
+});
+
+test('loading a retained tool after a real MCP disconnect reconnects only its service and never replays business calls', async t => {
+  const f = await configured(t), ctx = await f.context('full'), config = await f.service.getConfig();
+  const unrelatedLog = join(f.root, 'unrelated-recovery.jsonl');
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision, mcpServers: [...config.mcpServers,
+    { ...config.mcpServers[0], id: 'unrelated', name: 'Unrelated service', args: [fixturePath, unrelatedLog] }] });
+  await f.service.catalog(ctx, { connectMcp: true, mcpServerIds: ['synthetic'] });
+  f.service.configureModelCatalog(ctx, { protocol: 'openai-completions', tokenBudget: 16000 });
+  await f.service.mcp.disconnect('synthetic');
+  assert.equal(f.service.mcp.readyConnections.size, 0);
+  assert.ok(f.service.catalogs.get(ctx).descriptors.has('mcp.synthetic.echo'), 'the old request still retains its schema');
+  const loaded = await f.run(ctx, 'tool.load', { names: ['mcp.synthetic.echo'] });
+  assert.equal(loaded.isError, false, loaded.content);
+  assert.deepEqual(JSON.parse(loaded.content).loaded, ['mcp.synthetic.echo']);
+  assert.equal(f.service.mcp.readyConnections.size, 1);
+  const beforeCall = await events(f.log);
+  assert.equal(beforeCall.filter(event => event.event === 'started').length, 2);
+  assert.equal(beforeCall.filter(event => event.event === 'echo').length, 0, 'loading executes no business operation');
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'after-direct-load' }, 'Use the newly verified live tool'))).content, 'echo:after-direct-load');
+  assert.equal((await events(f.log)).filter(event => event.event === 'echo').length, 1);
+  await assert.rejects(stat(unrelatedLog), { code: 'ENOENT' });
+});
+
+test('disconnected validated MCP metadata is discoverable but must reconnect and honor current tool disablement', async t => {
+  const f = await configured(t), ctx = await f.context('full');
+  await f.service.catalog(ctx, { connectMcp: true });
+  await f.service.mcp.disconnect('synthetic');
+  await f.service.catalog(ctx);
+  f.service.configureModelCatalog(ctx, { protocol: 'openai-completions', tokenBudget: 16000 });
+  const discovery = JSON.parse((await f.run(ctx, 'tool.search', { query: 'mcp.synthetic.echo' })).content);
+  assert.equal(discovery.tools[0].schemaState, 'needs-connection');
+  assert.equal(discovery.tools[0].executable, false);
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'stale' }, 'Cached metadata is not executable'))).code, 'TOOL_NOT_FOUND');
+  const loaded = await f.run(ctx, 'tool.load', { names: ['mcp.synthetic.echo'] });
+  assert.equal(loaded.isError, false, loaded.content);
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'fresh' }, 'Execute a revalidated tool'))).content, 'echo:fresh');
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 2);
+  const previous = await f.service.getConfig();
+  await f.service.updateConfig({ ...previous, expectedRevision: previous.revision,
+    mcpServers: previous.mcpServers.map(server => ({ ...server, args: [...server.args, 'many'] })) });
+  assert.equal(f.service.mcp.connections.size, 0);
+  const reloaded = await f.run(ctx, 'tool.load', { names: ['mcp.synthetic.echo'] });
+  assert.equal(reloaded.isError, false, reloaded.content);
+  assert.equal((await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'new-config' }, 'Revalidate the changed transport'))).content, 'echo:new-config');
+  assert.equal((await events(f.log)).filter(event => event.event === 'started').length, 3);
+  const config = await f.service.getConfig();
+  await f.service.updateConfig({ ...config, expectedRevision: config.revision,
+    mcpServers: config.mcpServers.map(server => ({ ...server, disabledTools: ['echo'] })) });
+  const forbidden = await f.run(ctx, 'tool.load', { names: ['mcp.synthetic.echo'] });
+  assert.equal(forbidden.isError, true);
+  assert.equal(forbidden.code, 'AGENT_CONFIG_CHANGED');
+  assert.equal(forbidden.executed, false); assert.equal(forbidden.recoverable, true);
+  const current = JSON.parse((await f.run(ctx, 'tool.search', { query: 'mcp.synthetic.echo' })).content);
+  assert.equal(current.total, 0);
+  const revokedCall = await f.run(ctx, 'mcp.synthetic.echo', envelope({ value: 'revoked' }, 'Never execute a revoked tool'));
+  assert.equal(revokedCall.code, 'AGENT_CONFIG_CHANGED');
+  assert.equal(revokedCall.executed, false); assert.equal(revokedCall.recoverable, true);
+  assert.equal((await events(f.log)).filter(event => event.event === 'echo').length, 2, 'only fresh authorized calls execute');
+});
 
 test('config and default catalogs do not launch MCP; explicit refresh performs real 2025 discovery and call', async t => {
   const f = await configured(t), ctx = await f.context('full');

@@ -145,3 +145,20 @@ test('vector-only retrieval preserves both domains and respects scope with soft 
     assert.equal(result.items[0].sourceId, first);
   }
 });
+
+test('concurrent queued lexical queries retain independent scope statistics and deterministic scores', async t => {
+  const index = await fixture(t, { vectorEnabled: false });
+  await index.upsertSources(Array.from({ length: 100 }, (_, count) => source(`source-${count}`,
+    count % 2 === 0 ? 'code' : 'document', `alpha ${count % 4 === 0 ? 'beta beta' : 'delta'} unique${count}`,
+    { scopeKey: count % 3 === 0 ? 'project:private' : 'project:allowed' })));
+  const inputs = Array.from({ length: 12 }, (_, count) => ({ query: count % 2 === 0 ? 'alpha beta' : 'alpha delta',
+    scopeKeys: [count % 3 === 0 ? 'project:private' : 'project:allowed'],
+    channelCandidates: 128, limit: 128, retrievalIntent: { domain: count % 4 === 0 ? 'code' : 'mixed' } }));
+  const before = await Promise.all(inputs.map(input => index.search(input)));
+  for (const [count, input] of inputs.entries()) {
+    const repeated = await index.search(input);
+    assert.deepEqual(repeated.items, before[count].items);
+    assert.ok(repeated.items.every(item => input.scopeKeys.includes(item.scopeKey)));
+    assert.ok(repeated.items.every(item => Number.isFinite(item.lexicalScore)));
+  }
+});

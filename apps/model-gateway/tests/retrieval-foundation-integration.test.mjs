@@ -96,7 +96,8 @@ test('reranking rejects contradictory model metadata and keeps the original cand
     const result = await RetrievalCoordinator.prototype._rerank.call({ reranker: {
       status: () => ({ state: 'ready', ...selected }), rerank: async () => ({ ...selected,
         [field]: 'another-model-value', items: candidates.toReversed().map(item => ({ ...item, rerankScore: 0.8 })) })
-    } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: selected.profileId } } }, 'complex');
+    } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: selected.profileId } } }, 'complex', undefined,
+    { shouldRerank: true });
     assert.equal(result.diagnostic, 'RERANK_PROFILE_MISMATCH', field);
     assert.deepEqual(result.items, candidates);
     assert.equal(result.rerank, undefined);
@@ -109,7 +110,8 @@ test('legacy reranker seams may omit optional model metadata while retaining ver
   const result = await RetrievalCoordinator.prototype._rerank.call({ reranker: {
     status: () => ({ state: 'ready', profileId }), rerank: async () => ({
       items: candidates.toReversed().map(item => ({ ...item, rerankScore: 0.8 })) })
-  } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: profileId } } }, 'complex');
+  } }, {}, 'query', candidates, { settings: { local: { rerankProfileId: profileId } } }, 'complex', undefined,
+  { shouldRerank: true });
   assert.equal(result.diagnostic, undefined);
   assert.deepEqual(result.items.map(item => item.sourceRef), ['second', 'first']);
   assert.equal(result.items[0].excerpt, candidates[1].excerpt);

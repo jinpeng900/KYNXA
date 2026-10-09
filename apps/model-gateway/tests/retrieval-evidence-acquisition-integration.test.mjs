@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { RetrievalCoordinator } from '../orchestration/retrieval/coordinator.mjs';
+import { parseEvidenceSourceRef } from '../data/retrieval/evidence-references.mjs';
 import { toolFixture } from './tool-fixture.mjs';
 
 function memoryEntry(content, title = 'CALYX release notes') {
@@ -38,6 +39,79 @@ async function acquisitionFixture(t, { entries = [], message = '', reranker = nu
   };
   return { ...fixture, retrieval, context, entries, execute, searchCount: () => searchCount };
 }
+
+test('more than 60 internal candidates retain late evidence and receive compact references only after selection', async t => {
+  const candidateCount = 128;
+  const fixture = await acquisitionFixture(t, { entries: Array.from({ length: candidateCount }, (_, index) =>
+    memoryEntry(`CALYX release date evidence ${index} is current.`, `CALYX release note ${index}`)) });
+  fixture.retrieval.evaluationPolicy = { fixedBudget: { channelCandidates: candidateCount, fusedCandidates: candidateCount } };
+  const indexSearch = fixture.retrieval.index.search.bind(fixture.retrieval.index);
+  let lateSourceId;
+  fixture.retrieval.index.search = async input => {
+    assert.equal(input.limit, candidateCount);
+    const result = await indexSearch(input);
+    assert.equal(result.items.length, candidateCount);
+    // A late exact match must remain eligible; reducing the internal pool to the handle limit loses it.
+    // 末尾的精确命中必须仍可入选；若按短引用上限截断内部候选，就会丢失这一证据。
+    result.items.at(-1).exactTargetMatch = true;
+    lateSourceId = result.items.at(-1).sourceId;
+    return result;
+  };
+  const result = await fixture.execute('knowledge.search', { query: 'CALYX release date', limit: 5 });
+  assert.equal(result.value.selection.candidateCount, candidateCount);
+  assert.equal(result.value.budget.audit.approved.fusedCandidates, candidateCount);
+  assert.equal(result.value.budget.audit.downstreamLimits.finalReferences, 60);
+  assert.equal(result.value.budget.audit.actual.candidates, candidateCount);
+  assert.equal(result.value.budget.audit.actual.selectedCount, 5);
+  assert.equal(result.value.budget.audit.earlyCutReasons.find(item => item.reason === 'selected-fragment-limit').count, 123);
+  assert.equal(result.value.items.length, 5);
+  assert.equal(result.value.items[0].sourceId, lateSourceId);
+  const handles = result.value.items.map(item => parseEvidenceSourceRef(item.modelSourceRef));
+  assert.deepEqual(handles.map(handle => handle.referenceNumber), [1, 2, 3, 4, 5]);
+  assert.ok(handles.every(handle => handle.archiveId === result.receipt.resultRef.id));
+  assert.equal(new Set(result.value.items.map(item => item.modelSourceRef)).size, 5);
+  assert.ok(result.value.items.every(item => item.sourceRef.startsWith('rag1:') && item.modelSourceRef.length === 29));
+  const projected = JSON.parse(result.receipt.content);
+  assert.deepEqual(projected.items.map(item => item.sourceRef), result.value.items.map(item => item.modelSourceRef));
+  const largestProjection = await fixture.retrieval.search(fixture.context,
+    { query: 'CALYX release date', limit: 60, maximumTokens: 32768 }, { modelReferences: true });
+  assert.equal(largestProjection.items.length, 60);
+  assert.deepEqual(largestProjection.items.map(item => parseEvidenceSourceRef(item.modelSourceRef).referenceNumber),
+    Array.from({ length: 60 }, (_, index) => index + 1));
+});
+
+test('a 64-candidate pool keeps the same separate 60-reference contract', async t => {
+  const fixture = await acquisitionFixture(t, { entries: Array.from({ length: 64 }, (_, index) =>
+    memoryEntry(`CALYX observed release evidence ${index} is current.`, `CALYX source ${index}`)) });
+  fixture.retrieval.evaluationPolicy = { fixedBudget: { channelCandidates: 64, fusedCandidates: 64 } };
+  const result = await fixture.execute('knowledge.search', { query: 'CALYX observed release', limit: 8 });
+  assert.equal(result.value.budget.audit.actual.candidates, 64);
+  assert.equal(result.value.items.length, 8);
+  assert.equal(result.value.budget.audit.downstreamLimits.finalReferences, 60);
+});
+
+test('an empty automatic derived query retries original wording once in the same scope without loosening explicit targets', async t => {
+  for (const [intent, shouldFallback] of [[{ domain: 'mixed', preferredDomain: 'code' }, true],
+    [{ domain: 'knowledge' }, false], [{ domain: 'mixed', path: 'unavailable.md' }, false],
+    [{ domain: 'mixed', symbol: 'UnrelatedFunction' }, false]]) {
+    await t.test(JSON.stringify(intent), async child => {
+      const fixture = await acquisitionFixture(child, { message: 'CALYX release date',
+        entries: [memoryEntry('CALYX release date is 2031-02-07.')] });
+      const seen = [], originalSearch = fixture.retrieval.index.search.bind(fixture.retrieval.index);
+      fixture.retrieval.index.search = input => { seen.push(input); return originalSearch(input); };
+      const result = await fixture.retrieval.search(fixture.context, { query: 'zzunavailablezz' }, { retrievalIntent: intent });
+      assert.equal(seen.length, shouldFallback ? 2 : 1);
+      if (shouldFallback) {
+        assert.deepEqual(seen[1].scopeKeys, seen[0].scopeKeys);
+        assert.deepEqual(seen[1].retrievalIntent, seen[0].retrievalIntent);
+        assert.equal(seen[1].query, fixture.context.message);
+        assert.ok(result.items.length);
+        assert.equal(result.fallback.authorizationExpanded, false);
+        assert.equal(result.fallback.attempts, 1);
+      } else assert.equal(result.fallback, undefined);
+    });
+  }
+});
 
 test('simultaneous same-gap searches perform one index search and keep independent durable tool results', async t => {
   const fixture = await acquisitionFixture(t, { entries: [memoryEntry('CALYX release date is 2031-02-07.')] });

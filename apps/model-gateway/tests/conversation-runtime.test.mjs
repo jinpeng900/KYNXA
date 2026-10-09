@@ -77,7 +77,7 @@ test('desktop catalog and transport share user IDs and final messages; stale UI 
   assert.deepEqual(updated.Projects[0].Chats[0].Messages.map(message => message.Content), ['hello', 'answer-1']);
   assert.equal(updated.Projects[0].Chats[0].Messages[1].Status, 'completed');
   await f.runtime.reply({ conversationId, requestId: randomUUID(), provider: 'provider-b', model: 'model-b', message: 'again' });
-  assert.deepEqual(f.seen[1].messages.map(item => item.content), ['hello', 'answer-1', 'again']);
+  assert.deepEqual(f.seen[1].messages.filter(item => item.role !== 'system').map(item => item.content), ['hello', 'answer-1', 'again']);
   assert.equal((await save({ Revision: initial.Revision, Projects: [] })).status, 409);
 });
 

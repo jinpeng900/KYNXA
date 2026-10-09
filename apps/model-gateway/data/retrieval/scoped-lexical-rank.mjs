@@ -106,7 +106,11 @@ export class ScopedLexicalRanker {
     try {
       // Rank every authorized match before applying the candidate limit; global top-k can lose valid rows.
       // 所有已授权命中先按范围统计排序，再限制候选数；全局 top-k 后筛范围会漏掉有效结果。
-      return this.database.prepare(`WITH frequencies AS MATERIALIZED (
+      // Evaluate MATCH once before joining per-document scores; otherwise SQLite can rescan FTS for every score.
+      // 先物化一次全文命中，再关联逐文档分数，避免查询计划对每条分数重复执行 MATCH。
+      return this.database.prepare(`WITH fts_matches AS MATERIALIZED (
+        SELECT rowid AS id FROM chunk_fts WHERE chunk_fts MATCH ?),
+        frequencies AS MATERIALIZED (
         SELECT v.doc,v.term,COUNT(*) AS frequency FROM temp.retrieval_term_instances v
         JOIN chunks c ON c.id=v.doc JOIN sources s ON s.source_id=c.source_id
         WHERE v.term IN (${terms.map(() => '?').join(',')}) AND ${predicate} GROUP BY v.doc,v.term),
@@ -114,13 +118,13 @@ export class ScopedLexicalRanker {
           FROM frequencies f JOIN chunk_fts_docsize d ON d.id=f.doc GROUP BY f.doc),
         candidates AS MATERIALIZED (SELECT c.id,c.chunk_id,score.lexical_rank,
           CASE WHEN instr(lower(c.text),lower(?)) > 0 THEN 0 ELSE 1 END AS exact_rank,${domainRank} AS domain_rank
-          FROM chunk_fts JOIN scores score ON score.doc=chunk_fts.rowid JOIN chunks c ON c.id=score.doc
-          JOIN sources s ON s.source_id=c.source_id WHERE chunk_fts MATCH ? AND ${predicate}
+          FROM fts_matches matched JOIN scores score ON score.doc=matched.id JOIN chunks c ON c.id=score.doc
+          JOIN sources s ON s.source_id=c.source_id WHERE ${predicate}
           ORDER BY ${candidateOrder} LIMIT ${limit})
         SELECT ${columns},candidates.lexical_rank FROM candidates
         JOIN chunks c ON c.id=candidates.id JOIN sources s ON s.source_id=c.source_id
         ORDER BY ${resultOrder}`)
-        .all(...terms, ...parameters, query, ...rankingParameters, expression, ...parameters);
+        .all(expression, ...terms, ...parameters, query, ...rankingParameters, ...parameters);
     } finally { this.activeStatistics = null; this.checkCancelled = null; }
   }
 }

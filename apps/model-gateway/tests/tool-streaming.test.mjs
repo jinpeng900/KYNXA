@@ -58,3 +58,23 @@ test('Responses incomplete final snapshot is retained without accepting valid-lo
   assert.equal(events.at(-1).type, 'content_snapshot');
   assert.equal(events.at(-1).content, 'full partial response');
 });
+
+test('tool argument buffers remain charged when stream identity fails before a complete call', async () => {
+  const catalog = wireCatalog([{ name: 'filesystem.write', description: 'Write', inputSchema: { type: 'object' } }]);
+  const body = frame({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'first',
+    function: { name: catalog[0].wireName, arguments: JSON.stringify({ content: 'generated argument '.repeat(1000) }) } }] } }] })
+    + frame({ choices: [{ index: 0, delta: { tool_calls: [{ index: -1, id: 'invalid', function: { arguments: '{}' } }] } }] });
+  await assert.rejects(readToolStream(response(body), 'openai-completions', catalog), error =>
+    error.code === 'MODEL_TOOL_INDEX_INVALID' && error.executed === false && error.estimatedGeneratedTokens > 1024);
+});
+
+test('unbound Anthropic tool arguments and duplicate tool blocks request repair without guessing identity', async () => {
+  const unbound = frame({ type: 'content_block_delta', index: 99,
+    delta: { type: 'input_json_delta', partial_json: '{"path":"never.txt"}' } });
+  await assert.rejects(readToolStream(response(unbound), 'anthropic-messages', []),
+    { code: 'MODEL_TOOL_IDENTITY_INVALID', executed: false });
+  const tool = frame({ type: 'content_block_start', index: 99,
+    content_block: { type: 'tool_use', id: 'first', name: 'synthetic', input: {} } });
+  await assert.rejects(readToolStream(response(tool + tool), 'anthropic-messages', []),
+    { code: 'MODEL_TOOL_INDEX_INVALID', executed: false });
+});

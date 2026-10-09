@@ -7,6 +7,14 @@ import { retrievalPlan } from './query-plan.mjs';
 import { EVIDENCE_NOTICE, projectEvidence } from './source-projection.mjs';
 import { retrievalOutcome } from '../request-interpretation.mjs';
 
+function projectionBudgetAudit(result, projection, phase, requested) {
+  const previous = result.budget?.audit ?? {};
+  return { ...previous, projections: [...(previous.projections ?? []), { phase, requested, ...projection.audit }],
+    actual: { ...previous.actual, projectedCount: projection.items.length, promptTokens: projection.usedTokens,
+      promptCharacters: projection.prompt.length },
+    earlyCutReasons: [...(previous.earlyCutReasons ?? []), ...projection.audit.earlyCutReasons.map(reason => ({ ...reason, phase }))] };
+}
+
 /** Evidence preparation owns opaque handles, bounded projection and one durable final publication.
  * 证据装配负责不透明句柄、有界视图和一次正式归档，来源与查询执行仍由注入服务拥有。 */
 export class RetrievalEvidenceService {
@@ -70,14 +78,21 @@ export class RetrievalEvidenceService {
       maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
     { signal, modelReferences: Boolean(this.resultStore), allowColdInference: false,
       retrievalIntent: route.retrievalIntent });
-    const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: result.evidenceAssessment });
+    const candidateAssessment = result.evidenceAssessment;
+    const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: candidateAssessment });
     const projectionOmittedCount = result.items.length - projection.items.length;
     result.items = projection.items;
     result.evidenceAssessment = assessEvidence(result.items, query, { requiresSourceRead: route.requiresSourceRead,
-      alreadyPresentCount: result.selection?.alreadyPresentCount });
+      alreadyPresentCount: result.selection?.alreadyPresentCount, retrievalIntent: route.retrievalIntent });
     result.plan = route; result.selection = { ...result.selection, promptTokens: projection.usedTokens, projectionOmittedCount };
+    result.budget = { ...result.budget, audit: projectionBudgetAudit(result, projection, 'prepare',
+      { taskEvidenceTokens: route.evidenceTokens, remainingContextTokens: maximumTokens ?? null, maximumCharacters }) };
+    result.selection.projectionSupport = { before: { matchedTerms: candidateAssessment?.matchedTerms,
+      missingEvidence: candidateAssessment?.missingEvidence ?? [] },
+    after: { matchedTerms: result.evidenceAssessment.matchedTerms, missingEvidence: result.evidenceAssessment.missingEvidence ?? [] },
+    semanticSupportVerified: false };
     if (!result.items.length) return { prompt: '', references: [], evidenceAssessment: result.evidenceAssessment,
-      outcome: retrievalOutcome(result), plan: route };
+      outcome: retrievalOutcome(result), plan: route, budgetAudit: result.budget.audit };
     // The opaque handle keeps validated excerpts internal until the final model projection exists.
     // 以不透明句柄保存已验证片段，最终请求视图确定后才去重并归档，不把临时数据暴露给模型或事件。
     const prepared = Object.freeze({});
@@ -86,7 +101,7 @@ export class RetrievalEvidenceService {
       projectedTokens: projection.usedTokens, projectedCharacters: projection.prompt.length,
       contextKey: this._evidenceContextKey(context), finalizing: false });
     const draft = { prompt: projection.prompt, prepared, evidenceAssessment: result.evidenceAssessment,
-      outcome: retrievalOutcome(result), plan: route,
+      outcome: retrievalOutcome(result), plan: route, budgetAudit: result.budget.audit,
       references: result.items.map(({ sourceRef, modelSourceRef, sourceId,
       scopeKey, sourceRevision, contentHash, title, locator }) => ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
     return deferArchive ? draft : this.finalize(context, draft, { signal });
@@ -126,30 +141,46 @@ export class RetrievalEvidenceService {
         const currentItems = state.result.items.filter((_, index) => checked[index].value);
         await this._assertCurrent(context, snapshot);
         signal?.throwIfAborted();
-        const unique = deduplicateCandidates(currentItems, { existingContext });
+        const unique = deduplicateCandidates(currentItems, { existingContext, retrievalIntent: state.route.retrievalIntent });
         const alreadyPresentCount = (state.result.selection?.alreadyPresentCount ?? 0) + unique.alreadyPresentCount;
         const withFinalReferences = items => state.result.evidenceArchiveId
           ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(state.result.evidenceArchiveId, index + 1) })) : items;
+        const projectionCutCounts = new Map();
         let items = withFinalReferences(unique.items), assessment = assessEvidence(items, state.query,
-          { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount }), projection;
+          { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount, retrievalIntent: state.route.retrievalIntent }), projection;
         // A smaller final budget can change support; only shrink the projection until its notice agrees.
         // 最终预算缩小时可能改变证据支持状态；只缩减片段，直到提示与实际呈现片段一致。
         for (;;) {
           projection = projectEvidence(items, Math.min(characterBudget, state.maximumCharacters, state.projectedCharacters),
             { maximumTokens: Math.min(tokenBudget, state.maximumTokens, state.projectedTokens), assessment });
+          for (const cut of projection.audit.earlyCutReasons)
+            projectionCutCounts.set(cut.reason, (projectionCutCounts.get(cut.reason) ?? 0) + cut.count);
           const projectedAssessment = assessEvidence(projection.items, state.query,
-            { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount });
+            { requiresSourceRead: state.route.requiresSourceRead, alreadyPresentCount, retrievalIntent: state.route.retrievalIntent });
+          const finalItems = withFinalReferences(projection.items);
           if (assessment.state === projectedAssessment.state && assessment.requiresSourceRead === projectedAssessment.requiresSourceRead &&
-              JSON.stringify(assessment.missingEvidence) === JSON.stringify(projectedAssessment.missingEvidence)) {
+              JSON.stringify(assessment.missingEvidence) === JSON.stringify(projectedAssessment.missingEvidence) &&
+              finalItems.every((item, index) => item.modelSourceRef === projection.items[index].modelSourceRef)) {
             assessment = projectedAssessment; break;
           }
-          items = withFinalReferences(projection.items); assessment = projectedAssessment;
+          items = finalItems; assessment = projectedAssessment;
         }
+        projection.audit = { ...projection.audit, inputCount: unique.items.length,
+          earlyCutReasons: [...projectionCutCounts].map(([reason, count]) => ({ reason, count })) };
         const result = { ...state.result, items: projection.items, evidenceAssessment: assessment,
           evidenceState: { authorization: 'checked', freshness: projection.items.length ? 'current' : 'no-evidence', conclusion: 'not-verified' },
           selection: { ...state.result.selection, alreadyPresentCount, promptTokens: projection.usedTokens,
+            projectionSupport: { before: { matchedTerms: state.result.evidenceAssessment.matchedTerms,
+              missingEvidence: state.result.evidenceAssessment.missingEvidence ?? [] },
+            after: { matchedTerms: assessment.matchedTerms, missingEvidence: assessment.missingEvidence ?? [] },
+            semanticSupportVerified: false },
             projectionOmittedCount: (state.result.selection?.projectionOmittedCount ?? 0) + unique.items.length - projection.items.length,
             finalStaleSourceCount: new Set(state.result.items.filter((_, index) => !checked[index].value).map(item => item.sourceId)).size } };
+        result.budget = { ...state.result.budget, audit: projectionBudgetAudit(state.result, projection, 'finalize',
+          { remainingContextTokens: maximumTokens ?? null, maximumCharacters: maximumCharacters ?? null }) };
+        if (unique.alreadyPresentCount) result.budget.audit.earlyCutReasons.push({ phase: 'finalize', reason: 'already-in-model-context', count: unique.alreadyPresentCount });
+        if (result.selection.finalStaleSourceCount) result.budget.audit.earlyCutReasons.push({ phase: 'finalize', reason: 'stale-or-revoked-source',
+          count: result.selection.finalStaleSourceCount, unit: 'sources' });
         result.outcome = retrievalOutcome(result);
         let resultRef;
         if (result.items.length && context.requestId && this.resultStore) resultRef = await this.resultStore.save(context,
@@ -160,7 +191,7 @@ export class RetrievalEvidenceService {
         // 归档回执已返回即表示发布完成，随后取消不能把该句柄变成可重试状态。
         if (!resultRef) signal?.throwIfAborted();
         return { prompt: projection.prompt, resultRef, evidenceAssessment: assessment,
-          outcome: result.outcome, plan: state.route,
+          outcome: result.outcome, plan: state.route, budgetAudit: result.budget.audit,
           references: result.items.map(({ sourceRef, modelSourceRef, sourceId, scopeKey, sourceRevision, contentHash, title, locator }) =>
             ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
       } catch (error) {

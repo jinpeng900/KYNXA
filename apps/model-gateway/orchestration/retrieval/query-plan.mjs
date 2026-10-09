@@ -7,7 +7,6 @@ export function isSimpleGreeting(message) {
 }
 
 const LOCAL_CONTEXT_PATTERN = /之前|记得|记忆|资料|文档|知识|项目|工作|代码|文件|我们讨论|上次|history|remember|document|knowledge|project|code|file|previous/iu;
-const FOLLOWUP_PATTERN = /(?:它|他们|她们|它们)|(?:这个|那个)(?:方法|函数|问题|文件|模块|模型|方案|结果|条件|符号)|这份|那份|这篇|那篇|继续|刚才|上面|\b(?:it|its|continue|what about|(?:this|that)\s+(?:method|function|question|file|module|model|result|constraint))\b/iu;
 const SMALL_TALK_PATTERN = /^(?:谢谢(?:你)?|多谢|好的|好吧|没事|嗯|聊聊天|陪我聊聊|讲个笑话|最近怎么样|今天心情怎么样|thanks?(?: you)?|okay|ok|how are you|tell me a joke)[\s!！?？。.~～]*$/iu;
 const KNOWLEDGE_DEPENDENCY_PATTERN = /资料|文档|知识|记忆|记得|回忆|历史|我们讨论|上次|(?:之前|以前).{0,16}(?:说|讲|讨论|决定|确认|记)|\b(?:history|remember|recall|knowledge|documentation|docs?|previous\s+(?:discussion|decision|conversation)|saved\s+(?:memory|notes?))\b/iu;
 const ANALYSIS_REQUEST_PATTERN = /分析|解释|讲解|总结|概括|归纳|比较|对比|权衡|架构|方案|研究|调查|综述|审查|评审|诊断|为何|为什么|如何|怎么|怎样|哪里|在哪|何处|何时|什么时候|是否|是什么|有哪些|逻辑|原理|机制|报错原因|缺陷|漏洞|\b(?:explain|analy[sz]e|summari[sz]e|compare|review|inspect|diagnose|investigate|research|architecture|logic|implementation|semantics|why|where|when|which|what\s+(?:is|are|does)|how\s+(?:to|is|are|does|do|can|should)|find\s+(?:bugs?|errors?))\b/iu;
@@ -157,7 +156,7 @@ export function retrievalPlan(message, { history = [], maximumTokens, taskContex
   const taskDomain = taskContextDomain(taskContext);
   const taskReference = !['topic-switch', 'correction'].includes(taskRelation.type) && taskDomain !== 'mixed' &&
     !EXTERNAL_CONTEXT_PATTERN.test(planningText) && ANALYSIS_REQUEST_PATTERN.test(planningText) &&
-    (TASK_DETAIL_PATTERN.test(planningText) || FOLLOWUP_PATTERN.test(planningText));
+    (TASK_DETAIL_PATTERN.test(planningText) || taskRelation.allowsInheritance);
   if (taskReference && !localRequest && taskRelation.type === 'new')
     taskRelation = { type: 'uncertain', allowsInheritance: false, reason: 'technical-detail-may-relate-to-current-task' };
   const followup = !isGreeting && !isSmallTalk && !directExecution && !quotedFileNameDiscussion && taskRelation.allowsInheritance;
@@ -237,7 +236,7 @@ function requestedChangeText(query) {
   // Kept negative requirements remain in the query, but do not request a write or its validation.
   // 保留下来的否定约束仍属于原查询，但不能据其“修改”字样误认定写入或验证请求。
   return requestInstructionText(analyzeRequestClauses(query).activeText).split(/[，。；,;!?！？\n]+/u)
-    .filter(clause => !/^(?:(?:请|先|暂时|目前|这次|我|你)\s*|(?:please|for now|currently)\s+)*(?:不要|不用|不必|无需|不能|不许|别|勿|禁止|避免|do\s+not\b|don['’]t\b|never\b|not\b)/iu.test(clause.trim())).join('，');
+    .filter(clause => !/^(?:(?:请|先|暂时|目前|这次|我|你)\s*|(?:please|for now|currently)\s+)*(?:不是|并非|不要|不用|不必|无需|不能|不许|别|勿|禁止|避免|do\s+not\b|don['’]t\b|never\b|not\b)/iu.test(clause.trim())).join('，');
 }
 
 function requiresCodeValidation(query, intent) {

@@ -11,6 +11,8 @@ import { OFFICIAL_SKILLS_DIRECTORY, officialSkillIdentity } from './official-too
 const MAX_SKILL_BYTES = 256 * 1024;
 const MAX_SKILLS = 128;
 const MAX_CANDIDATES_PER_DIRECTORY = 512;
+const MAX_METADATA_CACHE_ENTRIES = 256;
+const METADATA_CACHE_TTL_MS = 60000;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const defaultBundledDirectory = OFFICIAL_SKILLS_DIRECTORY;
 
@@ -22,6 +24,8 @@ export class AppSkillService {
     this.bundledDirectory = bundledDirectory === null ? null : resolve(bundledDirectory);
     this.discovery = new WeakMap();
     this.imports = new Map();
+    this.metadataCache = new Map();
+    this.metadataCacheStats = { hits: 0, reads: 0 };
     this.resourceDeny = denyResource;
     this.canonicalRoot = this.root;
     this.canonicalDataRoot = this.ownedDataRoot;
@@ -101,8 +105,22 @@ export class AppSkillService {
     await this._ensureResourceScope();
     assertSkillResourceAllowed(file, this.denyResource);
     const info = await inspectLocalPath(file, { allowMissing: true });
-    if (!info) return null;
+    const cacheKey = this._sourceKey(file);
+    if (!info) { this.metadataCache.delete(cacheKey); return null; }
     if (!info.isFile() || info.size > MAX_SKILL_BYTES) throw toolFailure('应用技能文件过大或结构无效。', 'INVALID_APP_SKILL');
+    // A header cache stores no authorization. Recheck canonical access and the
+    // full file identity on every hit; reading the body always hashes fresh bytes.
+    // 元数据缓存不保存授权；每次命中复核真实路径权限及文件身份，正文读取始终重新读取并计算哈希。
+    assertSkillResourceAllowed(await realpath(file), this.denyResource);
+    const identity = [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode].join(':');
+    const cached = this.metadataCache.get(cacheKey);
+    if (!includeContent && cached?.identity === identity && Date.now() - cached.checkedAt < METADATA_CACHE_TTL_MS) {
+      signal?.throwIfAborted();
+      this.metadataCache.delete(cacheKey); this.metadataCache.set(cacheKey, cached);
+      this.metadataCacheStats.hits++;
+      return structuredClone(cached.metadata);
+    }
+    this.metadataCacheStats.reads++;
     const data = await readSkillFile(file, { maxBytes: MAX_SKILL_BYTES, signal, denyResource: this.denyResource }), bytes = data.bytes;
     if (bytes.length > MAX_SKILL_BYTES) throw toolFailure('应用技能文件过大。', 'INVALID_APP_SKILL');
     let content;
@@ -112,8 +130,12 @@ export class AppSkillService {
     if (!header) throw toolFailure('应用技能元数据无效，原文件已保留。', 'INVALID_APP_SKILL');
     const validation = validateSkillFrontmatter(content, { directoryName: basename(dirname(file)) });
     const { id } = this._skillIdentity(file);
-    return { id, ...header, source: resolve(file), sha256: data.sha256,
-      standardCompliant: validation.valid, diagnostics: validation.diagnostics, ...(includeContent ? { content } : {}) };
+    const metadata = { id, ...header, source: resolve(file), sha256: data.sha256,
+      standardCompliant: validation.valid, diagnostics: validation.diagnostics };
+    this.metadataCache.delete(cacheKey);
+    this.metadataCache.set(cacheKey, { identity, checkedAt: Date.now(), metadata: structuredClone(metadata) });
+    while (this.metadataCache.size > MAX_METADATA_CACHE_ENTRIES) this.metadataCache.delete(this.metadataCache.keys().next().value);
+    return { ...metadata, ...(includeContent ? { content } : {}) };
   }
 
   async list(context, config, { includeDisabled = false, signal } = {}) {

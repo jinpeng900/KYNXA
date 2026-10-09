@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { historicalCallId } from '../platform/model-transcript.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
@@ -219,20 +220,52 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
 
 test('a model discovers and calls a real official-SDK MCP server, then consumes its tool result', async t => {
   const f = await fixture(t, 'openai-completions', 'mcp.synthetic.echo');
+  let planFailure;
   const log = join(f.root, 'mcp-events.jsonl');
   await f.runtime.tools.updateConfig({ version: 1, expectedRevision: 0, skillDirectories: [],
     mcpServers: [{ id: 'synthetic', name: 'Synthetic SDK service', command: process.execPath,
       args: [fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url)), log], enabled: true }] });
-  const answer = await f.runtime.reply({ ...f.input, permissionMode: 'full' });
+  f.setPlan((body, marker, round) => {
+    try {
+    const observed = body.messages.findLast(item => item.role === 'tool');
+    let receipt, observation;
+    if (observed) {
+      receipt = JSON.parse(observed.content);
+      assert.equal(receipt.status, 'completed');
+      observation = round <= 3 ? JSON.parse(receipt.output) : receipt.output;
+    }
+    if (round === 4) {
+      assert.equal(observation, `echo:${marker}`);
+      return nativeText('openai-completions', `Observed tool result: ${observation}`);
+    }
+    const operation = round === 1 ? 'tool.search' : round === 2 ? 'tool.load' : 'mcp.synthetic.echo';
+    const descriptor = body.tools.find(tool => tool.function.description.startsWith(operation + ':'));
+    assert.ok(descriptor, `The actual request declares ${operation}.`);
+    if (round === 1) assert.ok(!body.tools.some(tool => tool.function.description.startsWith('mcp.synthetic.echo:')),
+      'A cold unrelated service has not fabricated tool schemas.');
+    if (round === 2) {
+      assert.ok(observation.servers.some(server => server.loadName === 'mcp.synthetic' && server.executable === false));
+      assert.ok(!observation.tools.some(tool => tool.name === 'mcp.synthetic.echo'));
+    }
+    if (round === 3) assert.ok(observation.loaded.includes('mcp.synthetic.echo'));
+    const args = round === 1 ? { query: 'synthetic' } : round === 2 ? { names: ['mcp.synthetic'] }
+      : { arguments: { value: marker }, policy: { reason: 'Use the explicitly configured synthetic MCP service.' } };
+    const result = nativeTool('openai-completions', descriptor.function.name, args);
+    result.choices[0].message.tool_calls[0].id = `sdk-call-${round}`;
+    return result;
+    } catch (error) { planFailure = error; throw error; }
+  });
+  const answer = await f.runtime.reply({ ...f.input, message: '发现已启用工具并验证返回值。', permissionMode: 'full' })
+    .catch(error => { throw planFailure ?? error; });
   assert.ok(answer.includes(`echo:${f.marker}`), answer);
-  assert.equal(f.seen.length, 2);
+  assert.equal(f.seen.length, 4);
   const effects = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.equal(effects.filter(item => item.event === 'started').length, 1);
   assert.deepEqual(effects.filter(item => item.event === 'echo'), [{ event: 'echo', value: f.marker }]);
   const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
-  assert.equal(saved.ToolActivities[0].name, 'mcp.synthetic.echo');
-  assert.equal(saved.ToolActivities[0].status, 'completed');
-  assert.equal(saved.ToolActivities[0].result, `echo:${f.marker}`);
+  assert.deepEqual(saved.ToolActivities.map(item => item.name), ['tool.search', 'tool.load', 'mcp.synthetic.echo']);
+  assert.ok(saved.ToolActivities.every(item => item.status === 'completed'));
+  assert.equal(saved.ToolActivities[2].result, `echo:${f.marker}`);
 });
 
 test('connection edits during preparation cannot mix protocol, tool schema and continuation within a turn', async t => {
@@ -253,9 +286,10 @@ test('connection edits during preparation cannot mix protocol, tool schema and c
 test('a real model HTTP loop discovers, loads and executes a deferred tool from a 100-tool MCP server', async t => {
   const f = await fixture(t);
   const target = 'mcp.synthetic.large_099';
+  const log = join(f.root, 'many-events.jsonl');
   await f.runtime.tools.updateConfig({ version: 1, expectedRevision: 0, skillDirectories: [],
     mcpServers: [{ id: 'synthetic', name: 'Synthetic large catalog', command: process.execPath,
-      args: [fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url)), join(f.root, 'many-events.jsonl'), 'many'], enabled: true }] });
+      args: [fileURLToPath(new URL('./fixtures/mcp-tool-server.mjs', import.meta.url)), log, 'many'], enabled: true }] });
   f.setPlan((body, marker, round) => {
     assert.ok(body.tools.length <= 96);
     const name = round === 1 ? 'tool.search' : round === 2 ? 'tool.load' : target;
@@ -269,10 +303,16 @@ test('a real model HTTP loop discovers, loads and executes a deferred tool from 
     result.choices[0].message.tool_calls[0].id = 'call_' + round;
     return result;
   });
-  const response = await fetch(f.address + '/api/chat/stream', { method: 'POST', body: JSON.stringify({ ...f.input, permissionMode: 'full' }) });
+  const response = await fetch(f.address + '/api/chat/stream', { method: 'POST', body: JSON.stringify({ ...f.input,
+    message: 'Inspect synthetic service capabilities.', permissionMode: 'full' }) });
   const events = []; for await (const raw of readSse(response.body)) events.push(JSON.parse(raw.data));
   assert.equal(events.at(-1).type, 'completed'); assert.ok(events.at(-1).content.includes('large_099:' + f.marker));
   assert.equal(f.seen.length, 4);
+  const effects = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(effects.filter(item => item.event === 'started').length, 1);
+  assert.deepEqual(effects.filter(item => item.event === 'large_099'), [{ event: 'large_099', arguments: { value: f.marker } }]);
+  const connection = [...f.runtime.tools.mcp.readyConnections.values()].find(item => item.serverId === 'synthetic');
+  assert.ok(connection?.tools.length >= 100, 'the same real SDK directory remains larger than the model schema limit');
   assert.deepEqual(events.filter(item => item.type === 'tool_result').map(item => item.tool.name), ['tool.search', 'tool.load', target]);
   const tool = events.find(item => item.type === 'tool_result' && item.tool.name === target).tool;
   assert.ok(tool.resultRef);
@@ -323,7 +363,7 @@ test('noninteractive Ask write is denied; unknown/repeated call does not repeat 
   await assert.rejects(readFile(join(f.workspace, 'made.txt')), { code: 'ENOENT' });
   const g = await fixture(t, 'openai-completions', 'filesystem.write'); g.setRepeat(true);
   const full = { ...g.input, permissionMode: 'full' };
-  await assert.rejects(g.runtime.reply(full), /重复/);
+  assert.match(await g.runtime.reply(full), /未能可靠恢复|could not be recovered reliably/);
   assert.equal(await readFile(join(g.workspace, 'made.txt'), 'utf8'), 'via-tool');
   const calls = g.seen.length;
   await assert.rejects(g.runtime.reply(full), /不能自动重做/); assert.equal(g.seen.length, calls);
@@ -514,17 +554,20 @@ test('configuration failures without a broker-confirmed non-execution proof stil
   assert.equal((await f.conversations.readMessages(f.input.conversationId)).at(-1).Status, 'interrupted');
 });
 
-for (const action of ['run', 'start', 'stop']) test(`unknown terminal.host.${action} effects save their receipt and stop without replay`, async () => {
+for (const action of ['run', 'start', 'stop']) test(`unknown terminal.host.${action} effects save their receipt and explain without replay`, async () => {
   let rounds = 0, executions = 0;
   const saved = [], call = { id: 'unknown-host-effect', name: `terminal.host.${action}`, arguments: {} };
-  await assert.rejects(runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
+  const result = await runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
     inputBudgetTokens: 32000, declarations: [], emit: () => {}, saveActivity: async activity => saved.push(activity),
     service: { execute: async () => { executions++; return { content: 'A dispatched host effect has an unknown outcome.',
       isError: true, status: 'unknown', code: 'TOOL_TIMED_OUT' }; } },
-    requestTurn: async () => { rounds++; return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
+    requestTurn: async () => { rounds++;
+      if (rounds > 1) return { content: 'The dispatched host outcome remains unconfirmed.', reasoning: '', calls: [], continuation: [] };
+      return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
       content: '', tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: '{}' } }] }] }; }
-  }), { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
-  assert.equal(rounds, 1); assert.equal(executions, 1);
+  });
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(rounds, 2); assert.equal(executions, 1);
   assert.equal(saved.at(-1).status, 'unknown'); assert.equal(saved.at(-1).name, call.name);
 });
 
@@ -544,6 +587,46 @@ test('a round decodes its exact declared catalog when availability changes while
   assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
   assert.equal(saved.ToolActivities[0].status, 'completed');
 });
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages'])
+  test(`${protocol}: real HTTP decoder recovery rebinds reused write receipts and survives the next question`, async t => {
+    const f = await fixture(t, protocol, 'filesystem.write');
+    let writeName;
+    const args = { path: 'made.txt', content: 'via-tool', expectedHash: null };
+    f.setPlan((body, _marker, round) => {
+      if (round === 4) return nativeText(protocol, 'Recovered write preserved.');
+      if (round === 1) writeName = body.tools.find(item =>
+        (item.description ?? item.function?.description).startsWith('filesystem.write:'));
+      const native = withCallId(protocol, nativeTool(protocol, writeName.name ?? writeName.function.name, args),
+        round === 1 ? 'original_effect' : 'replacement_effect');
+      if (round === 2) {
+        if (protocol === 'anthropic-messages') native.content.find(item => item.type === 'tool_use').input = [];
+        else if (protocol === 'openai-responses') native.output.find(item => item.type === 'function_call').arguments = '{';
+        else native.choices[0].message.tool_calls[0].function.arguments = '{';
+      }
+      return native;
+    });
+    const events = [];
+    const result = await f.runtime.replyStream({ ...f.input, permissionMode: 'full' }, event => events.push(event));
+    assert.equal(result.content, 'Recovered write preserved.');
+    assert.equal(await readFile(join(f.workspace, 'made.txt'), 'utf8'), 'via-tool');
+    const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
+    assert.equal(saved.Status, 'completed');
+    assert.equal(saved.ToolRun.diagnostics.executedToolCalls, 1);
+    assert.equal(saved.ToolRun.diagnostics.reusedToolCalls, 1);
+    assert.equal(saved.ToolActivities.at(-1).reused, true);
+    assert.notEqual(saved.ToolActivities[0].resultRef.id, saved.ToolActivities.at(-1).resultRef.id);
+    await f.runtime.tools.results.modelResult({ conversationId: f.input.conversationId }, saved.ToolActivities.at(-1).resultRef,
+      { requestId: f.input.requestId, toolCallId: 'replacement_effect', toolName: 'filesystem.write' });
+    f.setPlan(body => {
+      const nativeHistory = JSON.stringify(body.messages ?? body.input);
+      assert.ok(nativeHistory.includes(historicalCallId(f.input.requestId, 3, 'replacement_effect')));
+      assert.ok(!nativeHistory.includes('TOOL_RESULT_REFERENCE_MISMATCH'));
+      return nativeText(protocol, 'The previous write record remains available.');
+    });
+    assert.match(await f.runtime.reply({ ...f.input, permissionMode: 'full', requestId: randomUUID(), userMessageId: randomUUID(),
+      message: 'What was written?' }), /remains available/);
+  });
 
 test('two searches, blocked public reads and a stale exhausted tool name still yield a normal final answer', async t => {
   const f = await fixture(t);
@@ -588,3 +671,48 @@ test('two searches, blocked public reads and a stale exhausted tool name still y
   assert.ok(JSON.stringify(next.messages).includes('MODEL_TOOL_UNAVAILABLE'));
   await f.runtime.tools.releaseContext(next.toolContext);
 });
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  for (const streaming of [false, true]) {
+    test(`${protocol}: ${streaming ? 'SSE' : 'JSON'} preserves an unconfirmed result and accepts the next user message`, async t => {
+      const f = await fixture(t, protocol, 'filesystem.write');
+      let executions = 0;
+      f.runtime.tools.execute = async () => {
+        executions++;
+        return { content: 'Dispatched operation outcome is not confirmed.', status: 'unknown',
+          isError: true, code: 'TOOL_TIMED_OUT' };
+      };
+      f.setPlan((body, _marker, round) => {
+        if (round === 2) return nativeText(protocol, 'The file operation remains unconfirmed; its record is saved.');
+        if (round > 2) return nativeText(protocol, 'The next message works.');
+        const descriptor = body.tools.find(item =>
+          (item.description ?? item.function?.description).startsWith('filesystem.write:'));
+        assert.ok(descriptor);
+        return nativeTool(protocol, descriptor.name ?? descriptor.function.name,
+          { path: 'unconfirmed.txt', content: 'Unconfirmed content', expectedHash: null });
+      });
+      const input = { ...f.input, message: 'Create a file in the mounted workspace', permissionMode: 'full' };
+      const endpoint = f.address + (streaming ? '/api/chat/stream' : '/api/chat');
+      const response = await fetch(endpoint, { method: 'POST', body: JSON.stringify(input) });
+      assert.equal(response.status, 200);
+      let result;
+      if (streaming) {
+        const events = [];
+        for await (const item of readSse(response.body)) events.push(JSON.parse(item.data));
+        result = events.at(-1);
+        assert.equal(result.type, 'interrupted');
+        assert.ok(result.assistantSegments.every(item => item.phase !== 'final_answer'));
+      } else result = await response.json();
+      assert.equal(result.completionStatus, 'interrupted');
+      assert.equal(result.taskCompletion.state, 'execution-unconfirmed');
+      assert.match(result.content, /remains unconfirmed/);
+      const saved = (await f.conversations.readMessages(input.conversationId)).at(-1);
+      assert.equal(saved.Status, 'interrupted');
+      assert.equal(saved.ToolActivities[0].status, 'unknown');
+      assert.equal(saved.ToolRun.phase, 'interrupted');
+      const next = await f.runtime.reply({ ...input, requestId: randomUUID(), userMessageId: randomUUID(), message: 'Next question' });
+      assert.equal(next, 'The next message works.');
+      assert.equal(executions, 1, 'later messages do not replay the unconfirmed operation');
+    });
+  }
+}
