@@ -45,6 +45,41 @@ test('approved threads replace fixed two-thread/four-item settings without chang
   assert.equal(resourceService.leases.size, 0);
 });
 
+test('thread and backend audits distinguish requested resources from approved and session-configured values', async () => {
+  const resourceService = resourceFixture();
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, cpuThreads: 12, resourceService });
+  assert.equal(reservation.status().cpuThreadAudit.requested, 12);
+  assert.equal(reservation.status().cpuThreadAudit.configuredInSession, null);
+  const grant = await reservation.acquire();
+  await reservation.backend({ device: 'cpu', cpuThreads: grant.cpuThreads, gpuValidated: false,
+    diagnostic: { code: 'GPU_BACKEND_NOT_BUNDLED', requestedDevice: 'dml' } });
+  assert.deepEqual(reservation.status().cpuThreadAudit, { requested: 12, granted: 6, configuredInSession: 6,
+    source: 'worker-ready-session-options', physicalActiveThreadsMeasured: false });
+  assert.equal(reservation.status().appliedBackend.device, 'cpu');
+  assert.equal(reservation.status().appliedBackend.diagnostic.code, 'GPU_BACKEND_NOT_BUNDLED');
+  await reservation.idle();
+  assert.equal(reservation.status().cpuThreadAudit.granted, 0, 'idle releases active execution capacity');
+  assert.equal(reservation.status().cpuThreadAudit.configuredInSession, 6, 'resident session configuration remains observable');
+  await reservation.close();
+});
+
+test('owned native hot batches expose padding measurements without admitting parent or cold-load samples', async () => {
+  const resourceService = resourceFixture();
+  resourceService.registerExecutor = async () => ({ status: 'registered' });
+  const reservation = new InferenceResourceReservation({ profile: BUILTIN_EMBEDDING_PROFILE, resourceService });
+  await reservation.acquire(); await reservation.registerExecutor(7654321);
+  const sample = { phase: 'hot-inference', backend: 'cpu', processId: 7654321,
+    sequenceTokens: 64, batchSize: 2, inputTokens: 96, paddedTokens: 128, bucketMinimumTokens: 32, latencyMs: 10 };
+  await reservation.report({ ...sample, processId: process.pid });
+  assert.equal(reservation.status().lastBatchMeasurement, undefined);
+  await reservation.report({ ...sample, phase: 'cold-load' });
+  assert.equal(reservation.status().lastBatchMeasurement, undefined);
+  await reservation.report(sample);
+  assert.equal(reservation.status().lastBatchMeasurement.paddingTokens, 32);
+  assert.equal(reservation.status().lastBatchMeasurement.source, 'owned-worker-hot-inference');
+  await reservation.close();
+});
+
 test('GPU batch capacity follows memory and tokens independently from CPU thread grants', () => {
   const memory = { memoryBytes: 1024 ** 3, gpuMemoryBytes: 4 * 1024 ** 3, device: 'dml' };
   const oneThread = inferenceBatchBudget({ ...memory, cpuThreads: 1 });
@@ -182,9 +217,14 @@ test('executor registration and measured feedback update later batch grants thro
   await reservation.close(); assert.equal(resourceService.leases.size, 0);
 });
 
-test('a GPU-qualified vector profile refuses CPU-only resource grants instead of emitting legacy vectors', async () => {
+test('a GPU-qualified vector profile refuses CPU-only resource grants instead of emitting legacy vectors', async t => {
   const resourceService = resourceFixture(); let workers = 0;
-  const service = new EmbeddingService({ profileId: 'builtin-multilingual-dml-q8', resourceService,
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-gpu-admission-'));
+  for (const asset of BUILTIN_EMBEDDING_PROFILE.files) {
+    await mkdir(dirname(join(root, asset.path)), { recursive: true }); await writeFile(join(root, asset.path), 'Synthetic admission fixture.');
+  }
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const service = new EmbeddingService({ modelRoot: root, profileId: 'builtin-multilingual-dml-q8', resourceService,
     workerFactory: () => { workers++; throw new Error('GPU denial must be checked before process creation.'); } });
   try {
     await assert.rejects(service.embedQuery('Synthetic GPU-required query.'), { code: 'EMBEDDING_GPU_REQUIRED' });
@@ -271,10 +311,30 @@ test('token-aware inference batches reduce padding, preserve input order and shr
     onPressure: state => pressure.push(state),
   });
   assert.deepEqual(values, ['LONG', 'SHORT', 'MEDIUM']);
-  assert.deepEqual(attempted[0], ['short', 'medium', 'long']);
+  assert.deepEqual(attempted[0], ['short'], 'short inputs do not share padding with much longer sequences');
+  assert.deepEqual(attempted[1], ['medium', 'long']);
   assert.equal(pressure.length, 1);
   assert.equal(pressure[0].batchSize, 1);
   await assert.rejects(executeInferenceBatches(['single'], { tokenLengths: [10], infer: async () => { throw new Error('out of memory'); } }), /out of memory/u);
+});
+
+test('length buckets preserve result mapping and report actual padding while single inputs respect the batch grant', async () => {
+  const batches = [], measurements = [];
+  const result = await executeInferenceBatches(['long-a', 'short-a', 'medium', 'long-b', 'short-b'], {
+    batchSize: 8, batchTokenBudget: 2048, tokenLengths: [500, 16, 200, 480, 24],
+    infer: async values => { batches.push(values); return values.map(value => `${value}-done`); },
+    onMeasurement: value => measurements.push(value) });
+  assert.deepEqual(result, ['long-a-done', 'short-a-done', 'medium-done', 'long-b-done', 'short-b-done']);
+  assert.deepEqual(batches, [['short-a', 'short-b'], ['medium'], ['long-b', 'long-a']]);
+  assert.ok(measurements.every(value => value.sequenceTokens <= value.bucketMinimumTokens * 2));
+  assert.equal(measurements[0].paddingTokens, 8);
+  assert.equal(measurements[0].paddedTokens, 48);
+  let executions = 0;
+  await assert.rejects(executeInferenceBatches(['too-long'], { tokenLengths: [128], batchTokenBudget: 64,
+    infer: async () => { executions++; return ['unexpected']; } }), { code: 'INFERENCE_RESOURCE_BUSY' });
+  assert.equal(executions, 0);
+  await assert.rejects(executeInferenceBatches(['invalid'], { tokenLengths: [NaN], infer: async () => [] }),
+    { code: 'INFERENCE_INVALID_BATCH' });
 });
 
 test('cancelled batches never retry or return a partial result', async () => {

@@ -46,6 +46,8 @@ function waitForBrowserDispatch(operation, signal, hasDispatched) {
 const MAX_CONNECTIONS = 32;
 const MAX_MCP_TOOLS = 128;
 const CONNECT_TIMEOUT_MS = 15000;
+const MAX_CATALOG_METADATA_ENTRIES = 64;
+const MAX_CATALOG_METADATA_BYTES = 8 * 1024 * 1024;
 
 function nestedArgumentSchema(originalInputSchema) {
   const schema = structuredClone(originalInputSchema);
@@ -174,6 +176,44 @@ export class McpToolClients {
     this.serverResets = new Map();
     this.serverGenerations = new Map();
     this.serverPolicies = new Map();
+    this.catalogMetadata = new Map();
+    this.readyConnections = new Map();
+    this.catalogMetadataBytes = 0;
+  }
+
+  _rememberCatalog(server, key, tools) {
+    this._forgetCatalog(key);
+    const bytes = Buffer.byteLength(JSON.stringify(tools));
+    if (bytes > MAX_CATALOG_METADATA_BYTES) return;
+    this.catalogMetadata.set(key, { serverId: server.id, tools: structuredClone(tools), bytes });
+    this.catalogMetadataBytes += bytes;
+    while (this.catalogMetadata.size > MAX_CATALOG_METADATA_ENTRIES || this.catalogMetadataBytes > MAX_CATALOG_METADATA_BYTES)
+      this._forgetCatalog(this.catalogMetadata.keys().next().value);
+  }
+
+  _forgetCatalog(key) {
+    this.catalogMetadataBytes -= this.catalogMetadata.get(key)?.bytes ?? 0;
+    this.catalogMetadata.delete(key);
+  }
+
+  /** Configuration headers and previously validated catalogs do not start a
+   * process, authorize a call, or claim a disconnected tool is executable.
+   * 配置服务头和已验证目录缓存不启动进程、不授权调用，也不将未连接工具标为可执行。
+   */
+  discovery(config, context) {
+    return (config.mcpServers ?? []).filter(server => server.enabled).map(server => {
+      const key = this._key(server, context), cached = this.catalogMetadata.get(key);
+      const ready = this.readyConnections.get(key);
+      const state = ready && !ready.closed ? this.states.get(server.id)?.state ?? 'ready' :
+        this.connections.has(key) ? 'connecting' : this.errors.has(server.id) ? 'error' : 'disconnected';
+      return { id: server.id, name: `mcp.${server.id}`, description: `${server.name}: configured MCP service; load this name to connect and verify its current tools.`,
+        transport: server.transport ?? 'stdio', state,
+        // Never expose connection arguments, secret references or unverified schemas as facts.
+        // 不暴露连接参数、密钥引用，也不把未经验证的 schema 当成当前事实。
+        tools: (cached?.tools ?? []).filter(tool => !server.disabledTools?.includes(tool.toolName)).map(tool => ({ ...structuredClone(tool),
+          description: `${server.name}: ${tool.description.slice(tool.description.indexOf(':') + 1).trim()}`,
+          discoveryOnly: true, catalogVerified: false, needsConnection: true })) };
+    });
   }
 
   /** Update execution policy synchronously without changing transport ownership.
@@ -233,6 +273,7 @@ export class McpToolClients {
     if (connection.closeOperation) return connection.closeOperation;
     const operation = this.connections.get(key);
     connection.closed = true; connection.closing = true;
+    if (this.readyConnections.get(key) === connection) this.readyConnections.delete(key);
     this.browserSessions.remove(key);
     connection.closeOperation = Promise.resolve().then(async () => {
       let failed = false;
@@ -288,6 +329,7 @@ export class McpToolClients {
                 ? await client.listTools({}, { timeout: CONNECT_TIMEOUT_MS, maxTotalTimeout: CONNECT_TIMEOUT_MS, cacheMode: 'refresh' }) : { tools: [] };
               if (connection.closed || this.connections.get(key) !== operation) return;
               connection.tools = descriptors(server, key, listing, connection.capabilities);
+              this._rememberCatalog(server, key, connection.tools);
               this.browserSessions.invalidate(key);
               state.toolCount = connection.tools.length; state.generation++;
               this._recordRecovery(connection, diagnosticRevision);
@@ -326,6 +368,8 @@ export class McpToolClients {
           key, operation, diagnosticState: state,
           artifactContext: { server: structuredClone(server), context: { workspaceRoot: context?.workspaceRoot } } };
         state.state = 'ready'; state.toolCount = connection.tools.length; state.lastConnectedAt = new Date().toISOString();
+        this._rememberCatalog(server, key, connection.tools);
+        this.readyConnections.set(key, connection);
         if (this.states.get(server.id) === state) { delete state.code; this.errors.delete(server.id); }
         state.resourceCapabilities = { resources: !!capabilities.resources, templates: !!capabilities.resources };
         client.onclose = () => {
@@ -333,6 +377,7 @@ export class McpToolClients {
           if (connection.closing) return; // The explicit owner records success/failure before releasing its reference. 显式所有者先记录清理成功或失败，再释放自己拥有的引用。
           if (this.connections.get(key) !== operation) return;
           this.connections.delete(key); state.state = 'disconnected'; state.toolCount = 0; state.code = 'MCP_CONNECTION_LOST';
+          if (this.readyConnections.get(key) === connection) this.readyConnections.delete(key);
           this.connectionOwners.delete(key);
           this.browserSessions.remove(key);
           this.errors.set(server.id, state.code);
@@ -359,10 +404,11 @@ export class McpToolClients {
     }
   }
 
-  async catalog(config, context, { connect = false, refresh = false } = {}) {
+  async catalog(config, context, { connect = false, refresh = false, serverIds } = {}) {
     const generation = this.connectionGeneration;
     this._assertConnectionGeneration(generation);
     const tools = [];
+    const requested = serverIds === undefined ? null : new Set(serverIds);
     const servers = config.mcpServers.filter(server => server.enabled);
     const serverGenerations = new Map(servers.map(server => [server.id, this.serverGenerations.get(server.id) ?? 0]));
     const assertServerCurrent = server => {
@@ -377,8 +423,16 @@ export class McpToolClients {
         toolCount: 0, resourceCapabilities: { resources: false, templates: false }, generation: 0 });
       const key = this._key(server, context);
       const existing = this.connections.has(key);
-      if (!connect && !existing) return [];
       try {
+        if (!connect || requested && !requested.has(server.id)) {
+          // Reuse ready transports without joining an unrelated in-flight handshake.
+          // 复用已就绪连接，不等待其他请求正在启动的不相关服务。
+          const ready = this.readyConnections.get(key);
+          if (!ready || ready.closed) return [];
+          if (refresh) await ready.refreshCatalog();
+          this._assertConnectionGeneration(generation); assertServerCurrent(server);
+          return ready.closed ? [] : ready.tools;
+        }
         const connection = await this._connect(server, context);
         this._assertConnectionGeneration(generation);
         assertServerCurrent(server);
@@ -531,6 +585,7 @@ export class McpToolClients {
     const operations = ids.map(serverId => {
       if (this.serverResets.has(serverId)) return this.serverResets.get(serverId);
       this.serverGenerations.set(serverId, (this.serverGenerations.get(serverId) ?? 0) + 1);
+      for (const [key, cached] of this.catalogMetadata) if (cached.serverId === serverId) this._forgetCatalog(key);
       const pending = [...this.connections.entries()].filter(([key]) => this.connectionOwners.get(key) === serverId);
       let resetting;
       resetting = Promise.resolve().then(async () => {
@@ -686,6 +741,8 @@ export class McpToolClients {
       // 只释放本次重置拥有的引用；即使以后调整调度，重置完成前仍禁止新连接。
       for (const [key, startup] of pending) if (this.connections.get(key) === startup) this.connections.delete(key);
       this.errors.clear(); this.states.clear(); this.servers.clear();
+      this.catalogMetadata.clear();
+      this.catalogMetadataBytes = 0; this.readyConnections.clear();
       this.connectionOwners.clear();
     }).finally(() => { if (this.resetOperation === operation) this.resetOperation = null; });
     this.resetOperation = operation;

@@ -101,6 +101,7 @@ export class InferenceResourceReservation {
   #admissions = new Set();
   #executorProcessId; #feedback;
   #adjustments = [];
+  #appliedBackend; #lastBatchMeasurement;
 
   constructor({ profile, cpuThreads, resourceService, kind = 'background', devicePreference = 'auto' }) {
     if (!['auto', 'cpu'].includes(devicePreference)) throw new TypeError('Unsupported inference device preference.');
@@ -263,6 +264,19 @@ export class InferenceResourceReservation {
   }
 
   async backend(status) {
+    if (['cpu', 'dml', 'cuda'].includes(status?.device)) {
+      // Worker-ready confirms session configuration, not the number of runnable OS threads or GPU speed.
+      // worker-ready 确认的是会话配置，不冒充操作系统实际活跃线程数或 GPU 提速测量。
+      const sessionConfigured = Number.isSafeInteger(status.cpuThreads) && status.cpuThreads > 0;
+      this.#appliedBackend = { device: status.device,
+        cpuThreads: sessionConfigured ? status.cpuThreads : null,
+        source: sessionConfigured ? 'worker-ready-session-options' : 'backend-retirement',
+        sessionInitialized: sessionConfigured, gpuValidated: status.gpuValidated === true,
+        ...(status.deviceId !== undefined ? { deviceId: status.deviceId } : {}),
+        ...(status.executionMode ? { executionMode: status.executionMode } : {}),
+        cpuOperatorFallback: status.cpuOperatorFallback === true,
+        ...(status.diagnostic ?? this.#diagnostic ? { diagnostic: status.diagnostic ?? this.#diagnostic } : {}) };
+    }
     if (status?.device !== 'cpu' || !this.#gpuResident) return;
     // The worker reports CPU only after disposing its attempted GPU session.
     // worker 仅在释放尝试过的 GPU 会话后报告 CPU，届时才可解除显存预留。
@@ -291,6 +305,19 @@ export class InferenceResourceReservation {
 
   async report(feedback) {
     rememberCost(this.#profile, feedback, this.#executorProcessId);
+    if (feedback.phase === 'hot-inference' && this.#executorProcessId && feedback.processId === this.#executorProcessId &&
+        Number.isSafeInteger(feedback.sequenceTokens) && feedback.sequenceTokens > 0 &&
+        Number.isSafeInteger(feedback.batchSize) && feedback.batchSize > 0 && feedback.batchSize <= 128 &&
+        Number.isSafeInteger(feedback.inputTokens) && feedback.inputTokens > 0 &&
+        Number.isSafeInteger(feedback.paddedTokens) && feedback.paddedTokens >= feedback.inputTokens) {
+      this.#lastBatchMeasurement = { processId: feedback.processId, backend: feedback.backend,
+        sequenceTokens: feedback.sequenceTokens, batchSize: feedback.batchSize,
+        inputTokens: feedback.inputTokens, paddedTokens: feedback.paddedTokens,
+        paddingTokens: feedback.paddedTokens - feedback.inputTokens,
+        ...(Number.isSafeInteger(feedback.bucketMinimumTokens) ? { bucketMinimumTokens: feedback.bucketMinimumTokens } : {}),
+        ...(Number.isFinite(feedback.latencyMs) ? { latencyMs: feedback.latencyMs } : {}),
+        source: 'owned-worker-hot-inference' };
+    }
     this.#request = inferenceResourceRequest(this.#profile, this.#request.cpuThreads,
       { backend: feedback.backend ?? 'cpu', sequenceTokens: feedback.sequenceTokens ?? 128, batchSize: feedback.batchSize ?? 16 });
     // Cold load, queueing and tokenization do not train the hot inference throughput controller.
@@ -320,6 +347,11 @@ export class InferenceResourceReservation {
       gpuMemoryBytes: this.#gpuResident?.gpuMemoryBytes ?? 0, leaseRenewalFailed: Boolean(this.#renewError),
       ...(this.#feedback ? { feedback: this.#feedback } : {}),
       memoryEstimate: this.#request.memoryEstimate, adjustments: this.#adjustments,
+      cpuThreadAudit: { requested: this.#request.cpuThreads, granted: this.#execution?.cpuThreads ?? 0,
+        configuredInSession: this.#appliedBackend?.cpuThreads ?? null, source: this.#appliedBackend?.source ?? 'not-reported',
+        physicalActiveThreadsMeasured: false },
+      ...(this.#appliedBackend ? { appliedBackend: this.#appliedBackend } : {}),
+      ...(this.#lastBatchMeasurement ? { lastBatchMeasurement: this.#lastBatchMeasurement } : {}),
       ...(this.#lastGrant ? { lastGrant: this.#lastGrant } : {}), ...(this.#diagnostic ? { diagnostic: this.#diagnostic } : {}) };
   }
 }

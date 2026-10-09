@@ -8,6 +8,19 @@ import { validateAnnOptions } from './ann-store.mjs';
 
 export { chunkSource } from './retrieval-text.mjs';
 
+const DEFAULT_SEARCH_TIMEOUT_MS = 15000;
+const MAX_SEARCH_TIMEOUT_MS = 120000;
+const READ_ONLY_METHODS = new Set(['search', 'read', 'readWindow', 'relations', 'coverage', 'verifyReference',
+  'listSources', 'scopeVersion', 'vectorSpaceStatus', 'status']);
+const searchTimeout = timeoutMs => Object.assign(retrievalFailure(
+  'Retrieval search deadline exceeded. / 检索搜索超过截止时间。', 'RETRIEVAL_SEARCH_TIMEOUT', 504), { timeoutMs });
+const cancelledSearch = () => Object.assign(new Error('Retrieval cancelled. / 检索已取消。'), { name: 'AbortError', code: 'ABORT_ERR' });
+
+function cleanupPending(pending) {
+  clearTimeout(pending.timer);
+  pending.signal?.removeEventListener('abort', pending.abort);
+}
+
 function boundedInteger(value, fallback, minimum, maximum) {
   value ??= fallback;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
@@ -18,12 +31,13 @@ function boundedInteger(value, fallback, minimum, maximum) {
 /** SQLite and text work stays in one owned worker, away from SSE and the desktop UI.
  * SQLite 与文本计算由网关拥有的单个 worker 执行，不阻塞 SSE 或桌面界面。 */
 export class RetrievalIndex {
-  constructor({ root, vectorEnabled = true, ann, resourceService }) {
+  constructor({ root, vectorEnabled = true, ann, resourceService, workerFactory = (url, options) => new Worker(url, options) }) {
     if (typeof root !== 'string' || !root.trim()) throw retrievalFailure('A managed data root is required. / 必须提供统一数据根目录。');
     this.root = resolve(root);
     this.vectorEnabled = vectorEnabled;
     this.ann = validateAnnOptions(ann);
     this.resources = resourceService;
+    this.workerFactory = workerFactory;
     this.worker = null;
     this.pending = new Map();
     this.sequence = 0;
@@ -32,11 +46,13 @@ export class RetrievalIndex {
     this.failed = null;
     this.restartTimes = [];
     this.workerRestarts = 0;
+    this.searchTimeouts = 0;
+    this.hardSearchRetirements = 0;
   }
 
   _start() {
     if (this.worker) return;
-    this.worker = new Worker(new URL('./index-worker.mjs', import.meta.url), {
+    this.worker = this.workerFactory(new URL('./index-worker.mjs', import.meta.url), {
       // Test/debug launcher flags can be process-only; this worker needs no custom VM flags.
       // 测试或调试启动参数可能只允许主进程使用，本 worker 无需继承它们。
       execArgv: [],
@@ -45,19 +61,35 @@ export class RetrievalIndex {
     if (this.resources) attachResourceWorkerBridge(this.worker, this.resources, {
       context: { taskIdPrefix: 'retrieval-index', kind: 'background' } });
     this.worker.on('message', message => {
+      if (this.searchRetiring === worker) return;
+      if (message?.type === 'operation_started') {
+        this.activeOperation = { worker, id: message.id, canRetire: message.canRetire === true };
+        this._tryRetireExpiredSearches();
+        return;
+      }
+      if (message?.type === 'search_retirement_guard') {
+        if (this.activeOperation?.worker === worker && this.activeOperation.id === message.id)
+          this.activeOperation.canRetire = message.canRetire === true;
+        return;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      pending.signal?.removeEventListener('abort', pending.abort);
-      if (message.error) pending.reject(Object.assign(new Error(message.error.message), message.error));
+      cleanupPending(pending);
+      if (this.activeOperation?.id === message.id) this.activeOperation = null;
+      if (pending.method === 'search' && pending.signal?.aborted) pending.reject(cancelledSearch());
+      else if (pending.timedOut) pending.reject(searchTimeout(pending.timeoutMs));
+      else if (message.error) pending.reject(Object.assign(new Error(message.error.message), message.error));
       else pending.resolve(message.result);
       if (!this.pending.size) this.worker?.unref();
+      this._tryRetireExpiredSearches();
     });
     const fail = error => {
       if (this.worker !== worker) return;
+      if (this.searchRetiring === worker) return;
       this.failed = error;
       for (const pending of this.pending.values()) {
-        pending.signal?.removeEventListener('abort', pending.abort);
+        cleanupPending(pending);
         pending.reject(error);
       }
       this.pending.clear();
@@ -66,12 +98,42 @@ export class RetrievalIndex {
     };
     this.worker.on('error', fail);
     this.worker.on('exit', code => {
+      if (this.searchRetiring === worker) return;
       // An unexpected exit must settle callers even while shutdown is waiting for its receipt.
       // 意外退出即使发生在关闭期间，也必须结算等待回执的调用，不能留下悬挂请求。
       if (this.pending.size || !this.closed && !this.closing)
         fail(retrievalFailure(`Retrieval worker exited (${code}). / 检索 worker 已退出。`, 'RETRIEVAL_WORKER_EXITED', 500));
     });
     this.worker.unref();
+  }
+
+  _tryRetireExpiredSearches() {
+    if (this.retiring || this.closing || !this.activeOperation?.canRetire || this.activeOperation.worker !== this.worker) return;
+    const expired = [...this.pending.values()].find(pending => pending.method === 'search' && pending.deadlineExpired);
+    // Termination is safe only with a verified read-only active phase and no mutation queued anywhere in this owner.
+    // 仅在 worker 确认只读阶段、且拥有者整个待执行队列无写操作时退役，不能截停未知提交或 ANN 子进程。
+    if (!expired || [...this.pending.values()].some(pending => !pending.canRetireByContract)) return;
+    const worker = this.worker, error = expired.signal?.aborted ? cancelledSearch() : searchTimeout(expired.timeoutMs);
+    this.searchRetiring = worker;
+    this.failed = error;
+    this.hardSearchRetirements++;
+    this.retiring = worker.terminate().then(() => {
+      for (const pending of this.pending.values()) {
+        cleanupPending(pending);
+        pending.reject(pending.method === 'search' && pending.signal?.aborted ? cancelledSearch() :
+          pending.method === 'search' && pending.timedOut ? searchTimeout(pending.timeoutMs) :
+          retrievalFailure('Read cancelled when its search worker retired. / 搜索 worker 退役，排队读取已取消。',
+            'RETRIEVAL_READ_CANCELLED_BY_DEADLINE', 504));
+      }
+      this.pending.clear();
+      if (this.worker === worker) this.worker = null;
+    }).catch(error => {
+      this.retirementFailed = true;
+      for (const pending of this.pending.values()) { cleanupPending(pending); pending.reject(error); }
+      this.pending.clear();
+    }).finally(() => {
+      this.searchRetiring = null; this.activeOperation = null; this.retiring = null;
+    });
   }
 
   async _recover(signal) {
@@ -104,16 +166,29 @@ export class RetrievalIndex {
     const cancelFlag = new Int32Array(cancelBuffer);
     // Cancellation stops an uncommitted batch. Returned committed receipts remain observable.
     // 取消只阻止未提交批次；已经提交并返回的回执仍交付调用方。
-    const abort = () => { Atomics.store(cancelFlag, 0, 1); };
+    const abort = () => { Atomics.compareExchange(cancelFlag, 0, 0, 1); };
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     return new Promise((resolveResult, reject) => {
-      this.pending.set(id, { resolve: resolveResult, reject, signal, abort, cancelFlag });
+      const pending = { resolve: resolveResult, reject, signal, abort, cancelFlag, method,
+        canRetireByContract: READ_ONLY_METHODS.has(method) &&
+          !(method === 'search' && input.queryVector !== undefined && input.queryVector !== null),
+        timeoutMs: method === 'search' ? input.timeoutMs : null, timedOut: false };
+      if (method === 'search') pending.timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        pending.deadlineExpired = true;
+        if (!signal?.aborted) {
+          pending.timedOut = true; this.searchTimeouts++;
+          Atomics.compareExchange(cancelFlag, 0, 0, 2);
+        }
+        this._tryRetireExpiredSearches();
+      }, input.timeoutMs);
+      this.pending.set(id, pending);
       this.worker.ref();
       try { this.worker.postMessage({ id, method, input, cancelBuffer }); }
       catch (error) {
         this.pending.delete(id);
-        signal?.removeEventListener('abort', abort);
+        cleanupPending(pending);
         if (!this.pending.size) this.worker?.unref();
         reject(error);
       }
@@ -126,12 +201,14 @@ export class RetrievalIndex {
     return this._request('vectorSpaceStatus', { scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
   }
 
-  search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit, channelCandidates = 40, signal }) {
+  search({ query, scopeKeys, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId, retrievalIntent, ann, limit,
+    channelCandidates = 40, timeoutMs = DEFAULT_SEARCH_TIMEOUT_MS, signal }) {
     if (typeof query !== 'string' || !query.trim() || query.length > MAX_QUERY_CHARACTERS)
       return Promise.reject(retrievalFailure('Invalid retrieval query. / 检索查询为空或过长。'));
     const scopes = retrievalScopeKeys(scopeKeys);
     limit = boundedInteger(limit, 8, 1, 192);
     channelCandidates = boundedInteger(channelCandidates, 40, 1, 160);
+    timeoutMs = boundedInteger(timeoutMs, DEFAULT_SEARCH_TIMEOUT_MS, 1, MAX_SEARCH_TIMEOUT_MS);
     if (queryVector !== undefined && queryVector !== null) {
       if (!(Array.isArray(queryVector) || queryVector instanceof Float32Array) || !queryVector.length || queryVector.length > 4096)
         return Promise.reject(retrievalFailure('Invalid query embedding. / 查询向量或嵌入模型配置无效。'));
@@ -147,7 +224,7 @@ export class RetrievalIndex {
     if (ann !== undefined) validateAnnOptions(ann);
     return this._request('search', { query, scopeKeys: scopes, queryVector, embeddingProfileId, embeddingModelVersion, embeddingSpaceId,
       retrievalIntent: validateRetrievalIntent(retrievalIntent),
-      ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }), limit, channelCandidates }, signal);
+      ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }), limit, channelCandidates, timeoutMs }, signal);
   }
 
   read({ sourceId, sourceRef, scopeKeys, offset, limit, signal }) {
@@ -211,7 +288,11 @@ export class RetrievalIndex {
       ...(ann === undefined ? {} : { ann: validateAnnOptions({ ...this.ann, ...ann }) }) }, signal);
   }
 
-  async status() { return { ...await this._request('status'), workerRestarts: this.workerRestarts }; }
+  async status() { return { ...await this._request('status'), workerRestarts: this.workerRestarts,
+    searchTimeouts: this.searchTimeouts, hardSearchRetirements: this.hardSearchRetirements,
+    searchDeadlinePolicy: { defaultTimeoutMs: DEFAULT_SEARCH_TIMEOUT_MS, maximumTimeoutMs: MAX_SEARCH_TIMEOUT_MS,
+      nativeSqliteProgressHandler: false, terminationRequiresReadOnlyPhase: true,
+      mutationOrAnnRequiresAcknowledgement: true, initializationRequiresAcknowledgement: true } }; }
 
   close() {
     if (this.closed) return Promise.resolve({ closed: true });

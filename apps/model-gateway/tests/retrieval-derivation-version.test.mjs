@@ -71,7 +71,7 @@ test('identical derivation retains vectors; lexical-only version updates keep co
   assert.equal((await index.status()).vectorChunks, before.length);
 });
 
-test('parser, chunker, embedding projection and embedding space changes reject stale vector reuse', async t => {
+test('derivation changes invalidate vectors while space transitions retain only old compatible tuples', async t => {
   const { index } = await fixture(t);
   for (const [name, extra] of Object.entries({ parser: { parserVersion: 'markdown-parser-v2' },
     chunker: { chunkerVersion: 'structure-lines-v2' }, projection: { embeddingInputVersion: 'source-context-v2' },
@@ -84,7 +84,18 @@ test('parser, chunker, embedding projection and embedding space changes reject s
     const result = await index.search({ query: 'unmatchedterm', scopeKeys: ['project:one'], queryVector: [1, 0],
       embeddingProfileId: original.embeddingProfileId, embeddingModelVersion: original.embeddingModelVersion,
       embeddingSpaceId: original.embeddingSpaceId });
-    assert.ok(!result.items.some(item => item.sourceId === original.sourceId), name);
+    if (['parser', 'chunker', 'projection', 'model'].includes(name))
+      assert.ok(!result.items.some(item => item.sourceId === original.sourceId), name);
+    else {
+      // An unchanged embedding input may keep the old tuple for migration fallback, never for the unpublished new tuple.
+      // 嵌入输入未变时可为迁移回退保留旧元组，不能把旧向量借给尚未发布的新配置元组。
+      assert.ok(result.items.some(item => item.sourceId === original.sourceId), `${name}: old compatible tuple stays readable`);
+      const unpublished = await index.search({ query: 'unmatchedterm', scopeKeys: ['project:one'], queryVector: [1, 0],
+        embeddingProfileId: extra.embeddingProfileId ?? original.embeddingProfileId,
+        embeddingModelVersion: extra.embeddingModelVersion ?? original.embeddingModelVersion,
+        embeddingSpaceId: extra.embeddingSpaceId ?? original.embeddingSpaceId });
+      assert.ok(!unpublished.items.some(item => item.sourceId === original.sourceId), `${name}: new tuple cannot borrow old vectors`);
+    }
   }
   assert.equal((await index.status()).vectorChunks, 0);
 });

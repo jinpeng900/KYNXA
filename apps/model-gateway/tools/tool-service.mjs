@@ -41,6 +41,9 @@ const MAX_TOOL_RESULT_CHARS = 65536;
 const filesystemReadTools = new Set(['filesystem.read', 'filesystem.list', 'filesystem.search', 'filesystem.stat']);
 const safeErrorCode = (error, fallback = 'TOOL_FAILED') => typeof error?.code === 'string' && /^[A-Z0-9_]{1,100}$/.test(error.code)
   ? error.code : fallback;
+const GENERIC_MCP_STARTUP_TERMS = new Set(['the', 'this', 'that', 'these', 'those', 'and', 'for', 'with', 'from', 'into', 'about',
+  'please', 'check', 'show', 'read', 'write', 'find', 'get', 'use', 'open', 'run', 'tool', 'tools', 'service', 'services',
+  'server', 'servers', 'local', 'current', 'now', 'help', '工具', '服务', '使用', '检查', '查看', '打开', '读取', '运行', '当前', '本地', '这些', '这个', '那个']);
 
 function publicDescriptor(descriptor) {
   return { name: descriptor.name, description: descriptor.description, inputSchema: structuredClone(descriptor.inputSchema), source: descriptor.source,
@@ -48,6 +51,27 @@ function publicDescriptor(descriptor) {
     ...(descriptor.executionEnvironment ? { executionEnvironment: descriptor.executionEnvironment } : {}),
     ...(descriptor.available !== undefined ? { available: descriptor.available,
       ...(descriptor.unavailableCode ? { unavailableCode: descriptor.unavailableCode } : {}) } : {}) };
+}
+
+function relevantMcpServerIds(servers, context) {
+  const signals = context?.toolIntent ?? toolSelectionSignals(context?.message ?? '');
+  const retainedNames = signals.retainedNames ?? new Set();
+  const explicitBrowser = context?.browserTaskIntent?.explicitBrowserTask === true;
+  return servers.filter(server => {
+    const label = `${server.id} ${server.name}`.normalize('NFKC').toLowerCase();
+    const components = new Set(label.match(/[a-z0-9]+/gu) ?? []);
+    if ([...retainedNames].some(name => name.startsWith(`mcp.${server.id}.`))) return true;
+    if (/playwright|chrome[-_.]?devtools|puppeteer|browser/.test(label)) return explicitBrowser;
+    if (signals.web && /exa|brave|search/.test(label)) return true;
+    if (signals.docs && /context7|deepwiki|documentation|docs/.test(label)) return true;
+    // Warm-up clues rank startup candidates only. Latin words match complete
+    // identifier components; Chinese names retain character matching. Discovery
+    // and permission are unchanged when a generic word does not warm a service.
+    // 预热线索仅选择启动候选；拉丁词匹配完整标识符组件，中文名称保留字符匹配，忽略通用词不影响发现或权限。
+    return (signals.terms ?? []).some(term => !GENERIC_MCP_STARTUP_TERMS.has(term) &&
+      (/\p{Script=Han}/u.test(term) ? term.length >= 2 && label.includes(term) : term.length >= 3 &&
+        (components.has(term) || term === server.id.toLowerCase())));
+  }).slice(0, 4).map(server => server.id);
 }
 
 function nativeToolAvailability(context, descriptor) {
@@ -301,12 +325,15 @@ export class ToolService {
       { sandboxCapabilities: context?.sandboxCapabilities ?? await this._sandboxCapabilities() });
   }
 
-  async catalog(context, { connectMcp = false, refreshMcpCatalog = false, includeDisabled = false } = {}) {
+  async catalog(context, { connectMcp = false, refreshMcpCatalog = false, includeDisabled = false, mcpServerIds } = {}) {
     if (context) this._assertContext(context);
+    const previousSnapshot = context ? this.catalogs.get(context) : undefined;
     const generation = this.configGeneration;
     const config = await this.getConfig();
     const allowedServers = config.mcpServers.filter(server => canUseBrowserServer(context, server));
-    const remote = await this.mcp.catalog({ ...config, mcpServers: allowedServers }, context, { connect: connectMcp, refresh: refreshMcpCatalog });
+    const selectedServerIds = mcpServerIds ?? (connectMcp === 'relevant' ? relevantMcpServerIds(allowedServers, context) : undefined);
+    const remote = await this.mcp.catalog({ ...config, mcpServers: allowedServers }, context,
+      { connect: Boolean(connectMcp), refresh: refreshMcpCatalog, serverIds: selectedServerIds });
     const effectiveConfig = generation === this.configGeneration ? config : await this.getConfig();
     const all = [...builtinDescriptors.map(tool => ({ ...tool, ...nativeToolAvailability(context, tool) })), ...remote.map(tool => ({ ...tool,
       enabled: isConfiguredToolEnabled(effectiveConfig, tool) && !hasToolConfigurationChanged(config, effectiveConfig, tool) }))]
@@ -318,8 +345,17 @@ export class ToolService {
       (!tool.name.startsWith('knowledge.') || this.retrieval && retrievalSettings?.local.enabled !== false) &&
       (retrievalSettings?.web.browserRead !== 'off' || !isAutomaticBrowserRead(context, tool)) &&
       (retrievalSettings?.web.mode !== 'off' || !(tool.name.startsWith('web.') || isPublicSearchTool(tool) || isPublicFetchTool(tool))));
+    const mcpDiscovery = this.mcp.discovery({ ...effectiveConfig,
+      mcpServers: effectiveConfig.mcpServers.filter(server => canUseBrowserServer(context, server)) }, context);
+    // Remember revocation for accurate diagnostics after rediscovery, never as
+    // an executable declaration or preserved authorization.
+    // 再发现后保留撤销分类以准确诊断，不能将其当成可执行声明或保留的授权。
+    const revokedNames = new Set(previousSnapshot?.revokedNames ?? []);
+    for (const descriptor of previousSnapshot?.descriptors.values() ?? [])
+      if (descriptor.source.startsWith('mcp:') && !isConfiguredToolEnabled(effectiveConfig, descriptor)) revokedNames.add(descriptor.name);
+    for (const descriptor of descriptors) revokedNames.delete(descriptor.name);
     if (context) this.catalogs.set(context, { generation, config: structuredClone(config), descriptors: new Map(descriptors.map(item => [item.name, item])),
-      inventory: new Map(all.map(item => [item.name, item])), servers,
+      inventory: new Map(all.map(item => [item.name, item])), servers, mcpDiscovery, revokedNames,
       browserPrompt: browserConnectionPrompt(effectiveConfig.mcpServers.filter(server => descriptors.some(tool => tool.serverId === server.id))) });
     return (includeDisabled ? all : descriptors).map(publicDescriptor);
   }
@@ -353,7 +389,7 @@ export class ToolService {
         snapshot.generation === this.configGeneration && !this.mcp.errors.size) return snapshot;
     this.discoveryRefreshes.add(context);
     const selected = snapshot.model?.selected.map(tool => tool.name) ?? [];
-    await this.catalog(context, { connectMcp: true });
+    await this.catalog(context);
     const refreshed = this.catalogs.get(context);
     if (snapshot.modelOptions) {
       this.configureModelCatalog(context, snapshot.modelOptions);
@@ -365,6 +401,25 @@ export class ToolService {
           // 刷新后的 schema 变大不能阻断目录发现，保留新目录按预算选定的工具即可。
           if (error.code !== 'TOOL_CATALOG_BUDGET') throw error;
         }
+      }
+    }
+    return refreshed;
+  }
+
+  /** Connecting requested metadata is separate from executing a tool. Preserve
+   * request model selection while replacing cached schemas with the live catalog.
+   * 连接所请求的元信息与执行工具分开；用实时目录替换缓存 schema 时保留本请求的模型工具选择。
+   */
+  async _connectRequestedServers(context, serverIds) {
+    const snapshot = this.catalogs.get(context), selected = snapshot?.model?.selected.map(tool => tool.name) ?? [];
+    await this.catalog(context, { connectMcp: true, mcpServerIds: [...new Set(serverIds)] });
+    const refreshed = this.catalogs.get(context);
+    if (snapshot?.modelOptions) {
+      this.configureModelCatalog(context, snapshot.modelOptions);
+      const retained = selected.filter(name => refreshed.descriptors.has(name));
+      if (retained.length) {
+        try { refreshed.model.load(retained); }
+        catch (error) { if (error.code !== 'TOOL_CATALOG_BUDGET') throw error; }
       }
     }
     return refreshed;
@@ -429,7 +484,7 @@ export class ToolService {
   executionEnvironmentFor(context, name) {
     const snapshot = this.catalogs.get(context);
     const descriptor = snapshot?.inventory?.get(name) ?? builtinDescriptors.find(item => item.name === name);
-    return resolveToolExecutionEnvironment(descriptor ?? {}, { servers: [...(snapshot?.servers.values() ?? [])], context });
+    return resolveToolExecutionEnvironment(descriptor ?? {}, { servers: [...(snapshot?.servers?.values() ?? [])], context });
   }
 
   async execute(context, call, { signal, emit, interactive = true, onApprovalWait = () => {} } = {}) {
@@ -452,6 +507,9 @@ export class ToolService {
       await this.storageBoundary.refresh();
       let snapshot = this.catalogs.get(context);
       const descriptor = snapshot?.descriptors.get(call.name) ?? builtinDescriptors.find(item => item.name === call.name);
+      if (!descriptor && snapshot?.revokedNames?.has(call.name))
+        throw Object.assign(toolFailure('此工具曾可用，但当前配置已撤销；请发现其他能力。', 'AGENT_CONFIG_CHANGED', 409),
+          { toolConfigurationRevoked: true });
       if (!descriptor) throw toolFailure('工具不存在或尚未发现。', 'TOOL_NOT_FOUND', 404);
       await this._assertToolConfiguration(context, descriptor, call.arguments);
       if (descriptor.source.startsWith('mcp:'))
@@ -645,8 +703,17 @@ export class ToolService {
             this.storageBoundary.aliases(candidate).some(alias => this.workspaces.isControlPath(alias)) ||
             (context.permissionMode !== 'full' && !sensitiveRead && isSensitiveFilePath(candidate)) });
       else if (call.name === 'web.fetch') return await this._finishResult(context, call, await this.webFetcher.run(call.arguments, signal));
-      else if (call.name === 'web.search') return await this._finishResult(context, call,
-        await this.webSearch.run(context, call.arguments, { signal, emit, interactive, onApprovalWait }));
+      else if (call.name === 'web.search') {
+        if (![...snapshot.descriptors.values()].some(isPublicSearchTool)) {
+          const settings = this.retrieval ? await this.retrieval.effective(context.projectId) : null;
+          const providers = (snapshot.mcpDiscovery ?? []).filter(server => (/(?:exa|brave)/i.test(server.id + ' ' + server.description) ||
+            server.tools.some(isPublicSearchTool)) &&
+            (!settings?.web.providerId || settings.web.providerId === 'auto' || settings.web.providerId === server.id));
+          if (providers.length) snapshot = await this._connectRequestedServers(context, [providers[0].id]);
+        }
+        return await this._finishResult(context, call,
+          await this.webSearch.run(context, call.arguments, { signal, emit, interactive, onApprovalWait }));
+      }
       else if (call.name.startsWith('knowledge.')) {
         if (!this.retrieval) throw toolFailure('本地检索不可用。', 'RETRIEVAL_UNAVAILABLE', 503);
         if (call.name === 'knowledge.search') {
@@ -667,29 +734,88 @@ export class ToolService {
         // Discovery may recover a changed/failed connection once; never replay a business operation.
         // 目录发现可有界恢复一次变化或失败连接，不重放任何业务操作。
         snapshot = await this._refreshDiscoveryOnce(context, snapshot);
-        const all = searchTools([...(snapshot?.descriptors.values() ?? [])].filter(tool =>
-          isConfiguredToolEnabled(this.liveConfig ?? snapshot.config, tool) && this.webSearch.available(context, tool)), call.arguments.query ?? '');
+        const discoveryConfig = this.liveConfig ?? snapshot.config;
+        const discoveryHeaders = this.mcp.discovery({ ...discoveryConfig,
+          mcpServers: discoveryConfig.mcpServers.filter(server => canUseBrowserServer(context, server)) }, context);
+        const discovered = [...(snapshot?.descriptors.values() ?? [])], existing = new Set(discovered.map(tool => tool.name));
+        for (const server of discoveryHeaders) for (const tool of server.tools)
+          if (!existing.has(tool.name)) { existing.add(tool.name); discovered.push(tool); }
+        const all = searchTools(discovered.filter(tool =>
+          isConfiguredToolEnabled(discoveryConfig, tool) && !hasToolConfigurationChanged(snapshot.config, discoveryConfig, tool) &&
+            this.webSearch.available(context, tool)), call.arguments.query ?? '');
         const offset = boundedInteger(call.arguments.offset, 0, 0, 100000);
         const limit = boundedInteger(call.arguments.limit, 10, 1, 20);
+        const serverHeads = searchTools(discoveryHeaders.map(({ tools, ...server }) => server), call.arguments.query ?? '');
         result = { tools: all.slice(offset, offset + limit).map(tool => ({ ...publicDescriptor(tool),
-          schemaState: snapshot.model?.selected.some(item => item.name === tool.name) ? 'loaded' : 'deferred' })), offset,
+          schemaState: tool.discoveryOnly ? 'needs-connection' : snapshot.model?.selected.some(item => item.name === tool.name) ? 'loaded' : 'deferred',
+          ...(tool.discoveryOnly ? { catalogVerified: false, executable: false } : {}) })), offset,
           nextOffset: Math.min(all.length, offset + limit), total: all.length, hasMore: offset + limit < all.length };
+        if (serverHeads.length) Object.assign(result, { servers: serverHeads.slice(offset, offset + limit).map(server => ({ ...server,
+          schemaState: 'service-header', loadName: server.name, executable: false })), serverTotal: serverHeads.length,
+          serverNextOffset: Math.min(serverHeads.length, offset + limit), serverHasMore: offset + limit < serverHeads.length });
         if (toolSelectionSignals(call.arguments.query ?? '').deviceState || context.toolIntent?.deviceState)
           result.capabilityCheck = this.capabilitySnapshot(context);
       }
       else if (call.name === 'tool.load') {
         if (!snapshot?.model) throw toolFailure('当前请求没有模型工具预算。', 'TOOL_CATALOG_UNAVAILABLE', 409);
-        call.arguments.names = snapshot.model.resolveNames(call.arguments.names);
+        call.arguments.names = [...new Set(snapshot.model.resolveNames(call.arguments.names))];
+        const currentConfig = this.liveConfig ?? snapshot.config;
+        const currentHeaders = this.mcp.discovery({ ...currentConfig,
+          mcpServers: currentConfig.mcpServers.filter(server => canUseBrowserServer(context, server)) }, context);
+        const requestedServers = [], requestedHeads = [];
+        for (const name of call.arguments.names) {
+          const existing = snapshot.descriptors.get(name);
+          if (existing && !isConfiguredToolEnabled(currentConfig, existing)) continue;
+          const server = currentHeaders.find(item => item.name === name || item.tools.some(tool => tool.name === name) || existing?.serverId === item.id);
+          const ready = existing && this.mcp.readyConnections.get(existing.key);
+          const liveDescriptor = ready && !ready.closed && ready.tools.find(tool => tool.name === name);
+          // A retained request schema is not a live connection or current directory.
+          // Rebind just this service after disconnect/schema change; never replay its calls.
+          // 请求保留的 schema 不代表连接就绪或目录仍有效；断连或 schema 变化仅重新绑定该服务，不重放业务调用。
+          const liveSchemaMatches = liveDescriptor && liveDescriptor.operation === existing.operation && liveDescriptor.toolName === existing.toolName &&
+            isDeepStrictEqual(liveDescriptor.inputSchema, existing.inputSchema) && isDeepStrictEqual(liveDescriptor.originalInputSchema, existing.originalInputSchema);
+          if (!server || liveSchemaMatches && !hasToolConfigurationChanged(snapshot.config, currentConfig, existing)) continue;
+          requestedServers.push(server.id);
+          if (server.name === name) requestedHeads.push(name);
+        }
+        if (requestedServers.length) snapshot = await this._connectRequestedServers(context, requestedServers);
         const availableNames = [], unavailable = [];
         for (const name of call.arguments.names) {
+          if (requestedHeads.includes(name)) {
+            const serverId = name.slice('mcp.'.length);
+            const tools = [...snapshot.descriptors.values()].filter(tool => tool.serverId === serverId);
+            const beforeCount = availableNames.length;
+            if (!tools.length) unavailable.push({ name, code: this.mcp.errors.get(serverId) ?? 'MCP_NO_ENABLED_TOOLS' });
+            // A service can expose more schemas than this model accepts. Load a
+            // bounded real subset; all remaining verified names stay searchable.
+            // 服务 schema 可超过当前模型额度；仅装入预算容纳的真实子集，其余已核验工具仍可发现。
+            for (const tool of tools) {
+              if (availableNames.includes(tool.name) || !this.webSearch.available(context, tool)) continue;
+              const trial = [...availableNames, tool.name];
+              const keep = [...snapshot.descriptors.values()].filter(item => ['tool.search', 'tool.load', 'tool.result.read'].includes(item.name));
+              if (snapshot.model.fits([...keep, ...trial.map(id => snapshot.descriptors.get(id))])) availableNames.push(tool.name);
+            }
+            if (tools.length && availableNames.length === beforeCount)
+              unavailable.push({ name, code: tools.every(tool => !this.webSearch.available(context, tool))
+                ? 'WEB_STAGE_BUDGET_EXHAUSTED' : 'TOOL_CATALOG_BUDGET' });
+            continue;
+          }
           const tool = snapshot.descriptors.get(name);
-          if (!tool || !isConfiguredToolEnabled(this.liveConfig ?? snapshot.config, tool))
-            unavailable.push({ name, code: 'TOOL_NOT_FOUND' });
+          if (!tool || !isConfiguredToolEnabled(this.liveConfig ?? snapshot.config, tool)) {
+            const revoked = snapshot.revokedNames?.has(name) || tool && hasToolConfigurationChanged(snapshot.config, this.liveConfig ?? snapshot.config, tool);
+            unavailable.push({ name, code: revoked ? 'AGENT_CONFIG_CHANGED' : 'TOOL_NOT_FOUND',
+              ...(revoked ? { executed: false, recoverable: true } : {}) });
+          }
           else if (!this.webSearch.available(context, tool)) unavailable.push({ name, code: 'WEB_STAGE_BUDGET_EXHAUSTED' });
-          else availableNames.push(name);
+          else if (!availableNames.includes(name)) availableNames.push(name);
         }
-        if (!availableNames.length) throw toolFailure('请求的工具当前不可用，请发现其他能力。',
-          unavailable.some(item => item.code === 'WEB_STAGE_BUDGET_EXHAUSTED') ? 'WEB_STAGE_BUDGET_EXHAUSTED' : 'TOOL_NOT_FOUND', 409);
+        if (!availableNames.length) {
+          const code = unavailable.some(item => item.code === 'WEB_STAGE_BUDGET_EXHAUSTED') ? 'WEB_STAGE_BUDGET_EXHAUSTED' :
+            unavailable.some(item => item.code === 'TOOL_CATALOG_BUDGET') ? 'TOOL_CATALOG_BUDGET' :
+              unavailable.some(item => item.code === 'AGENT_CONFIG_CHANGED') ? 'AGENT_CONFIG_CHANGED' : 'TOOL_NOT_FOUND';
+          throw Object.assign(toolFailure('请求的工具当前不可用，请发现其他能力。', code, 409),
+            code === 'AGENT_CONFIG_CHANGED' ? { toolConfigurationRevoked: true } : {});
+        }
         result = { ...snapshot.model.load(availableNames), ...(unavailable.length ? { unavailable } : {}) };
       }
       else if (call.name === 'tool.result.read') result = await (this.results.readModel ?? this.results.read).call(
@@ -811,7 +937,8 @@ export class ToolService {
       return { content: boundedContent(modelMessage), isError: true, code, outsideWorkspace,
         executionEnvironment: this.executionEnvironmentFor(context, callName),
         ...(notDispatched ? { executed: false } : {}),
-        ...(error.toolConfigurationRevoked === true && !executionStarted ? { executed: false, recoverable: true } : {}),
+        ...(error.toolConfigurationRevoked === true && (!executionStarted || callName === 'tool.load')
+          ? { executed: false, recoverable: true } : {}),
         ...(unknown ? { status: 'unknown' } : {}) };
     }
   }

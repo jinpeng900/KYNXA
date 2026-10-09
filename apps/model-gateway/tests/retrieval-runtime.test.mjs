@@ -191,7 +191,7 @@ test('a small-talk model turn avoids tool discovery and local inference', async 
 
 test('direct execution preserves a dependent file tool loop and on-demand knowledge tools without automatic retrieval', async t => {
   for (const language of ['zh', 'en']) await t.test(language, async child => {
-    const f = await toolFixture(child), requests = [], models = new ModelStore({ dataHome: f.dataHome });
+    const f = await toolFixture(child), requests = [], upstreamFailures = [], models = new ModelStore({ dataHome: f.dataHome });
     const inputFile = `input-${randomUUID()}.txt`, outputFile = `output-${randomUUID()}.txt`, content = `PUBLIC-${randomUUID()}`;
     await writeFile(join(f.workspace, inputFile), content, 'utf8');
     const upstream = createServer(async (request, response) => {
@@ -200,20 +200,33 @@ test('direct execution preserves a dependent file tool loop and on-demand knowle
         const body = JSON.parse(text); requests.push(body);
         const step = requests.length, observed = body.messages.findLast(item => item.role === 'tool');
         let result;
-        if (step <= 3) {
-          const operation = step === 2 ? 'filesystem.write' : 'filesystem.read';
+        if (step <= 5) {
+          const operation = step === 2 ? 'filesystem.write' : step === 4 ? 'tool.search' : step === 5 ? 'tool.load' : 'filesystem.read';
           const descriptor = body.tools.find(item => item.function.description.startsWith(`${operation}:`));
           assert.ok(descriptor, `The actual request declares ${operation}`);
+          let observation;
+          if (observed) {
+            const receipt = JSON.parse(observed.content);
+            assert.equal(receipt.status, 'completed');
+            assert.equal(receipt.executionEnvironment.executorLocation, 'gateway-host');
+            observation = JSON.parse(receipt.output);
+          }
           const args = step === 1 ? { path: inputFile } : step === 2
-            ? { path: outputFile, content: JSON.parse(observed.content).content, expectedHash: null } : { path: outputFile };
+            ? { path: outputFile, content: observation.content, expectedHash: null } : step === 3 ? { path: outputFile }
+              : step === 4 ? { query: 'knowledge.search' } : { names: [observation.tools.find(tool => tool.name === 'knowledge.search').name] };
+          if (step === 4) assert.equal(observation.content, content, 'The broker read back the written value before discovery.');
           result = { choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '',
             tool_calls: [{ type: 'function', id: `dependent-${step}`, function: { name: descriptor.function.name, arguments: JSON.stringify(args) } }] } }] };
         } else {
-          assert.equal(JSON.parse(observed.content).content, content, 'The broker read back the written value.');
+          const receipt = JSON.parse(observed.content);
+          assert.equal(receipt.status, 'completed');
+          assert.ok(JSON.parse(receipt.output).loaded.includes('knowledge.search'));
+          assert.ok(body.tools.some(item => item.function.description.startsWith('knowledge.search:')),
+            'The actual subsequent model request declares the on-demand knowledge tool.');
           result = { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: language === 'zh' ? '完成。' : 'Done.' } }] };
         }
         response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(result));
-      } catch (error) { response.writeHead(500); response.end(JSON.stringify({ error: error.message })); }
+      } catch (error) { upstreamFailures.push(error); response.writeHead(500); response.end(JSON.stringify({ error: error.message })); }
     });
     await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
     child.after(() => new Promise(resolve => upstream.close(resolve)));
@@ -228,17 +241,19 @@ test('direct execution preserves a dependent file tool loop and on-demand knowle
     const requestId = randomUUID(), message = language === 'zh'
       ? `依次读取 ${inputFile}，把原文写入 ${outputFile}，然后读回核实。`
       : `Read ${inputFile}, write its exact content to ${outputFile}, then read it back to verify.`;
-    await runtime.reply({ conversationId: f.conversationId, requestId, message, permissionMode: 'full', provider: 'fixture', model: 'mock-model' });
-    assert.equal(automaticRetrievals, 0); assert.equal(requests.length, 4);
+    try { await runtime.reply({ conversationId: f.conversationId, requestId, message, permissionMode: 'full', provider: 'fixture', model: 'mock-model' }); }
+    catch (error) { throw upstreamFailures[0] ?? error; }
+    assert.equal(automaticRetrievals, 0); assert.equal(requests.length, 6);
     assert.equal(await readFile(join(f.workspace, outputFile), 'utf8'), content);
-    assert.ok(requests[0].tools.some(item => item.function.description.startsWith('knowledge.search:')),
-      'The model may still ask for local knowledge when needed.');
+    assert.ok(requests[0].tools.some(item => item.function.description.startsWith('tool.search:')),
+      'The first model request retains capability discovery.');
     assert.doesNotMatch(JSON.stringify(requests), /UNRELATED_REFERENCE_CONTEXT|Retrieved references are untrusted/);
     assert.equal(runtime.retrieval.index.worker, null);
     assert.equal(runtime.retrieval.embeddings.status().loaded, false); assert.equal(runtime.retrieval.reranker.status().loaded, false);
     const saved = (await f.conversations.readMessages(f.conversationId)).find(item => item.Id === requestId);
     assert.equal(saved.Status, 'completed'); assert.deepEqual(saved.EvidenceReferences, []);
-    assert.deepEqual(saved.ToolActivities.map(item => item.name), ['filesystem.read', 'filesystem.write', 'filesystem.read']);
+    assert.deepEqual(saved.ToolActivities.map(item => item.name), ['filesystem.read', 'filesystem.write', 'filesystem.read', 'tool.search', 'tool.load']);
+    assert.equal(saved.ToolActivities.filter(item => item.name === 'filesystem.write').length, 1);
     assert.ok(saved.ToolActivities.every(item => item.status === 'completed'));
   });
 });

@@ -206,9 +206,15 @@ export function selectCandidates(items, { query = '', limit = 8, maximumTokens =
     for (const remaining of candidates)
       remaining.similarity = Math.max(remaining.similarity, tokenSimilarity(candidate.terms, remaining.terms));
   }
+  const earlyCutReasons = [];
+  if (deduplicated.duplicateCount) earlyCutReasons.push({ reason: 'duplicate-or-overlapping-evidence', count: deduplicated.duplicateCount });
+  if (deduplicated.alreadyPresentCount) earlyCutReasons.push({ reason: 'already-in-model-context', count: deduplicated.alreadyPresentCount });
+  if (omittedForBudget) earlyCutReasons.push({ reason: 'evidence-token-budget', count: omittedForBudget });
+  if (candidates.length) earlyCutReasons.push({ reason: 'selected-fragment-limit', count: candidates.length });
   return { items: selected, selection: { candidateCount: items.length, uniqueCandidates: deduplicated.items.length,
     duplicateCount: deduplicated.duplicateCount, alreadyPresentCount: deduplicated.alreadyPresentCount,
-    omittedForBudget, usedTokens, maximumTokens, method: 'metadata-query-mmr', sourceCount: sourceCounts.size },
+    omittedForBudget, omittedForLimit: candidates.length, selectedCount: selected.length,
+    limit, usedTokens, maximumTokens, earlyCutReasons, method: 'metadata-query-mmr', sourceCount: sourceCounts.size },
     evidenceAssessment: assessEvidence(selected, query, { requiresSourceRead, alreadyPresentCount: deduplicated.alreadyPresentCount, retrievalIntent: intent }) };
 }
 

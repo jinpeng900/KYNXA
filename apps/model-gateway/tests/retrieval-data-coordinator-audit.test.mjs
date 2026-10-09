@@ -162,6 +162,12 @@ test('deferred evidence archives only final injected excerpts without another se
   assert.equal(final.resultRef, 'final-evidence-result'); assert.equal(final.prepared, undefined);
   assert.doesNotMatch(final.prompt, /校验数据库检查点/); assert.match(final.prompt, /访问策略/);
   assert.equal(archives[0].structuredContent.items.length, 1);
+  assert.equal(draft.budgetAudit.projections[0].phase, 'prepare');
+  assert.equal(draft.budgetAudit.actual.projectedCount, 2);
+  assert.equal(final.budgetAudit.projections[1].phase, 'finalize');
+  assert.equal(final.budgetAudit.actual.projectedCount, 1);
+  assert.equal(final.budgetAudit.earlyCutReasons.find(item => item.phase === 'finalize' && item.reason === 'already-in-model-context').count, 1);
+  assert.equal(archives[0].structuredContent.selection.projectionSupport.semanticSupportVerified, false);
   assert.equal(archives[0].structuredContent.items[0].sourceRef, final.references[0].sourceRef);
   assert.ok(estimateTokens(final.prompt) <= estimateTokens(draft.prompt));
   await assert.rejects(retrieval.finalizeEvidence(context, draft), { code: 'RETRIEVAL_PREPARATION_INVALID' });
@@ -183,6 +189,9 @@ test('final evidence can shrink to empty without saving unused references or exp
   const empty = await retrieval.finalizeEvidence(context, smaller, { maximumTokens: 0 });
   assert.equal(empty.prompt, ''); assert.deepEqual(empty.references, []); assert.equal(archives, 0);
   assert.equal(empty.outcome.state, 'evidence-budget-exhausted');
+  assert.equal(empty.budgetAudit.actual.projectedCount, 0);
+  assert.equal(empty.budgetAudit.projections.at(-1).requested.remainingContextTokens, 0);
+  assert.ok(empty.budgetAudit.earlyCutReasons.some(item => item.reason === 'model-context-exhausted'));
   assert.equal(empty.outcome.next, 'use-current-evidence-or-state-context-limit');
 });
 
@@ -262,8 +271,9 @@ test('revision caches avoid whole-source rescans but re-read hits and reject cha
 test('conditional reranking preserves source identity and falls back without a configured profile', async t => {
   let calls = 0;
   const reranker = { status: () => ({ state: 'ready', profileId: 'builtin-multilingual-reranker' }), close: async () => {},
-    rerank: async ({ candidates }) => {
+    rerank: async ({ candidates, limit }) => {
       calls++;
+      assert.equal(limit, 40);
       return { profileId: 'builtin-multilingual-reranker', modelVersion: 'fixture-reranker',
         items: candidates.toReversed().map(item => ({ ...item, excerpt: 'FORGED', rerankScore: 0.8 })) };
     } };
@@ -272,18 +282,43 @@ test('conditional reranking preserves source identity and falls back without a c
     { path: join(f.workspace, 'b.md'), title: 'Permissions', text: '恢复访问权限需要验证审计记录。' }], { scope: 'user' });
   await retrieval.search(f.context, { query: '恢复', taskType: 'research' });
   assert.equal(calls, 0);
-  await retrieval.settings.patchGlobal({ expectedRevision: 1, patch: { local: { rerankProfileId: 'builtin-multilingual-reranker' } } });
+  await retrieval.settings.patchGlobal({ expectedRevision: 1, patch: { local: { rerankProfileId: 'builtin-multilingual-reranker', rerankCandidates: 40 } } });
   await retrieval.search(f.context, { query: '恢复', taskType: 'lookup' });
   assert.equal(calls, 0);
-  const result = await retrieval.search(f.context, { query: '恢复', taskType: 'research' });
+  const result = await retrieval.search(f.context, { query: '恢复', gap: 'Compare backup recovery with permission recovery', taskType: 'research' });
   assert.equal(calls, 1);
   assert.equal(result.rerank.profileId, 'builtin-multilingual-reranker');
   assert.equal(result.items.length, 2);
+  assert.equal(result.budget.audit.configured.localRerankCandidates, 40);
+  assert.equal(result.budget.audit.approved.rerankCandidates, 40);
+  assert.equal(result.budget.audit.actual.rerankScoredCandidates, 2);
+  assert.equal(result.budget.audit.rerankBudgetSource, 'local-setting');
   assert.ok(result.items.every(item => item.sourceRef && item.excerpt !== 'FORGED' && item.score > 0));
   reranker.rerank = async () => { throw Object.assign(new Error('Fixture failed'), { code: 'RERANK_FIXTURE_FAILED' }); };
-  const fallback = await retrieval.search(f.context, { query: '恢复', taskType: 'research' });
+  const fallback = await retrieval.search(f.context, { query: '恢复', gap: 'Compare backup recovery with permission recovery', taskType: 'research' });
   assert.equal(fallback.items.length, 2);
   assert.equal(fallback.rerankDiagnostic, 'RERANK_FIXTURE_FAILED');
+});
+
+test('adaptive rerank tiers use resource suggestions only when local configuration explicitly allows them', async t => {
+  const observed = [], resources = { acquire: async () => ({ leaseId: 'fixture-lease',
+    suggestions: { rerankCandidates: 60 } }), renew: async () => {}, release: async () => {},
+  report: async () => {}, snapshot: async () => ({ memory: { availableBytes: 16 * 1024 ** 3 } }) };
+  const reranker = { status: () => ({ state: 'ready', profileId: 'builtin-multilingual-reranker' }), close: async () => {},
+    rerank: async ({ candidates, limit }) => { observed.push(limit);
+      return { items: candidates.map(item => ({ ...item, rerankScore: 0.8 })) }; } };
+  const f = await auditCoordinator(t, { resources, reranker });
+  await f.retrieval.library.add([{ path: join(f.workspace, 'a.md'), title: 'Alpha', text: 'alpha original evidence' },
+    { path: join(f.workspace, 'b.md'), title: 'Other alpha', text: 'alpha independent explanation' }], { scope: 'user' });
+  let revision = 1;
+  for (const configured of [20, 40, 60, null]) {
+    await f.retrieval.settings.patchGlobal({ expectedRevision: revision++, patch: { local: {
+      rerankProfileId: 'builtin-multilingual-reranker', rerankCandidates: configured } } });
+    const result = await f.retrieval.search(f.context, { query: 'alpha', gap: 'Compare the two accounts', taskType: 'research' });
+    assert.equal(observed.at(-1), configured ?? 60);
+    assert.equal(result.budget.audit.rerankBudgetSource, configured === null ? 'resource-suggestion' : 'local-setting');
+    assert.equal(result.budget.audit.approved.rerankCandidates, configured ?? 60);
+  }
 });
 
 test('a stale preferred duplicate falls back to a current source without publishing the stale reference', async t => {

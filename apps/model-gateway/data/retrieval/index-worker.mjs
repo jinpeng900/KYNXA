@@ -26,7 +26,10 @@ const identityPath = join(identityDirectory, 'source-identities.json');
 const CHUNK_ROW_COLUMNS = `c.*, s.scope_key, s.source_type, s.title, s.locator, s.content_hash, s.source_revision, s.binding_revision, s.active_generation, s.derivation_signature, ${RETRIEVAL_DOMAIN_SQL} AS actual_domain`;
 const PREFERRED_DOMAIN_RRF_BONUS = 0.05 / 61;
 const resourceService = workerData.resourceBridge ? createResourceWorkerClient(parentPort) : null;
+const READ_ONLY_METHODS = new Set(['search', 'read', 'readWindow', 'relations', 'coverage', 'verifyReference',
+  'listSources', 'scopeVersion', 'vectorSpaceStatus', 'status']);
 let database, lexicalRanker, relationStore, coverageStore, vectorSpaces, vectorSearch, vectorAvailable = false, vectorVersion = null, vectorError = null;
+let activeOperationId;
 
 function checkPath(path, isDirectory = false) {
   if (!existsSync(path)) return;
@@ -241,6 +244,8 @@ function refreshMigratedDerivation(sourceId) {
 }
 
 function cancelled(flag) {
+  if (flag && Atomics.load(flag, 0) === 2)
+    throw retrievalFailure('Retrieval search deadline exceeded. / 检索搜索超过截止时间。', 'RETRIEVAL_SEARCH_TIMEOUT', 504);
   if (flag && Atomics.load(flag, 0)) throw Object.assign(new Error('Retrieval cancelled. / 检索已取消。'), { name: 'AbortError', code: 'ABORT_ERR' });
 }
 
@@ -560,6 +565,9 @@ async function search({ query, scopeKeys, queryVector, embeddingProfileId, embed
   if (queryVector && embeddingProfileId) {
     if (!vectorAvailable) degradedReason = vectorError;
     else {
+      // Native ANN work owns processes and persistent derived graphs; never terminate its parent as a plain read.
+      // 原生 ANN 拥有子进程及派生图，进入向量阶段前撤销纯读取退役许可，避免遗留执行器或未确认资源。
+      parentPort.postMessage({ type: 'search_retirement_guard', id: activeOperationId, canRetire: false });
       const vectorResult = await vectorSearch.search({ scopeKeys: scopes, queryVector, embeddingProfileId,
         embeddingModelVersion, embeddingSpaceId, requestedDomain, ann, channelCandidates: candidateLimit }, () => cancelled(flag));
       semantic = vectorResult.items;
@@ -837,6 +845,14 @@ parentPort.on('message', message => {
       const operations = { upsertSources, search, read, readWindow, relations, recordCoverage, coverage, verifyReference, removeSource, listSources, invalidateScope, scopeVersion, prepareVectors, vectorSpaceStatus: input => vectorSpaces.status(retrievalScopeKeys(input.scopeKeys)), status, close };
       const operation = operations[message.method];
       if (!operation || !database) throw retrievalFailure('Retrieval index is closed. / 检索索引已关闭。', 'RETRIEVAL_INDEX_CLOSED', 409);
+      activeOperationId = message.id;
+      const native = vectorSearch.status();
+      // Vector search can start native helpers immediately; deny retirement before any owner acknowledgement race.
+      // 向量搜索可能立即启动原生子进程，必须在初始阶段就禁止退役，不能依赖后续消息及时送达。
+      const canStartVectorWork = message.method === 'search' && message.input?.queryVector !== undefined && message.input?.queryVector !== null;
+      parentPort.postMessage({ type: 'operation_started', id: message.id,
+        canRetire: READ_ONLY_METHODS.has(message.method) && !canStartVectorWork &&
+          !native.helperPid && !native.pendingBuilds && !native.activeBuilds });
       const result = await operation(message.input ?? {}, flag);
       parentPort.postMessage({ id: message.id, result });
     } catch (error) {

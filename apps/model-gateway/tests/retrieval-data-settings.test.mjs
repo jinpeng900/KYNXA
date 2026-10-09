@@ -47,7 +47,7 @@ test('capacity and ANN settings inherit deeply without changing old model and UI
   assert.equal(initial.local.ann.mode, 'auto');
   const global = await settings.patchGlobal({ expectedRevision: 0,
     patch: { local: { indexing: { maximumFiles: 40000 }, ann: { expansionSearch: 256 } } } });
-  assert.equal(global.local.indexing.maximumSourceBytes, 2097152);
+  assert.equal(global.local.indexing.maximumSourceBytes, 32 * 1024 * 1024);
   await settings.patchProject('work-a', { expectedRevision: 0,
     patch: { overrides: { local: { indexing: { maximumTotalBytes: 1073741824 }, ann: { mode: 'exact' } } } } });
   await settings.patchProject('work-a', { expectedRevision: 1,
@@ -65,6 +65,26 @@ test('capacity and ANN settings inherit deeply without changing old model and UI
     { ann: { mode: 'remote' } }, { ann: { threshold: 0 } }, { ann: { maxShardBytes: 1 } }])
     await assert.rejects(async () => settings.patchGlobal({ expectedRevision: 1, patch: { local: patch } }), { code: 'INVALID_RETRIEVAL_INPUT' });
   assert.equal((await settings.getGlobal()).revision, 1);
+});
+
+test('rerank candidate tiers persist and project overrides preserve unspecified backend policy', async t => {
+  const { settings, conversations } = await fixture(t);
+  assert.equal((await settings.getGlobal()).local.rerankCandidates, 20);
+  await settings.patchGlobal({ expectedRevision: 0, patch: { local: { rerankCandidates: 40 } } });
+  await settings.patchProject('work-a', { expectedRevision: 0,
+    patch: { overrides: { local: { rerankCandidates: 60 } } } });
+  assert.equal((await settings.getEffective('work-a')).local.rerankCandidates, 60);
+  await settings.patchProject('work-a', { expectedRevision: 1,
+    patch: { overrides: { local: { enabled: false } } } });
+  assert.equal((await settings.getEffective('work-a')).local.rerankCandidates, 60);
+  const restarted = new RetrievalSettingsStore({ conversationStore: conversations });
+  assert.equal((await restarted.getGlobal()).local.rerankCandidates, 40);
+  await settings.patchGlobal({ expectedRevision: 1, patch: { local: { rerankCandidates: null } } });
+  assert.equal((await restarted.getGlobal()).local.rerankCandidates, null);
+  for (const value of [0, 19, 21, 61, '40', false, {}])
+    await assert.rejects(async () => settings.patchGlobal({ expectedRevision: 2, patch: { local: { rerankCandidates: value } } }),
+      { code: 'INVALID_RETRIEVAL_INPUT' });
+  assert.equal((await settings.getGlobal()).revision, 2);
 });
 
 test('project overrides inherit global settings, clear explicitly and cannot supply permissions or binding revisions', async t => {

@@ -48,7 +48,10 @@ test('a real model request reads a short reference at its matching section and r
   assert.equal(requests.length, 2);
   assert.equal(sourceRef?.length, 29);
   assert.doesNotMatch(JSON.stringify(requests), /rag1:/u, 'Only the model view uses short handles; the original archive stays complete.');
-  const read = JSON.parse(requests[1].messages.findLast(message => message.role === 'tool').content);
+  const envelope = JSON.parse(requests[1].messages.findLast(message => message.role === 'tool').content);
+  // Current tool transcripts add status/environment metadata around the complete JSON output.
+  // 当前工具历史在完整 JSON 输出外附带状态及执行环境信息，先解开契约外层再核对原文。
+  const read = typeof envelope.output === 'string' ? JSON.parse(envelope.output) : envelope;
   assert.match(read.text, /Mara Chen/);
   assert.match(read.text, /not approved/);
   assert.ok(read.offset > 1000, 'The source read starts near the retrieved section, not the long introduction.');

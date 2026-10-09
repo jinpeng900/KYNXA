@@ -12,6 +12,9 @@ import { EmbeddingService } from '../../apps/model-gateway/models/retrieval/embe
 import { BUILTIN_EMBEDDING_PROFILE } from '../../apps/model-gateway/models/retrieval/embedding-profile.mjs';
 import * as retrievalText from '../../apps/model-gateway/data/retrieval/retrieval-text.mjs';
 import { selectCandidates, RETRIEVAL_CANDIDATE_LIMIT } from '../../apps/model-gateway/orchestration/retrieval/candidate-selection.mjs';
+import { retrievalBudget } from '../../apps/model-gateway/orchestration/retrieval/retrieval-budget.mjs';
+import { projectEvidence } from '../../apps/model-gateway/orchestration/retrieval/source-projection.mjs';
+import { allocateEvidenceArchiveId, evidenceSourceRef } from '../../apps/model-gateway/data/retrieval/evidence-references.mjs';
 import { RETRIEVAL_CUTOFFS, retrievalMetrics, meanMetrics, evidenceMetrics, meanEvidenceMetrics,
   latencySummary, verifyMetricExamples } from './metrics.mjs';
 import { BenchmarkVectorCache } from './vector-cache.mjs';
@@ -28,7 +31,10 @@ const DATASET_FILE_HASHES = Object.freeze({
 const COMPONENT_FILES = ['apps/model-gateway/data/retrieval/index.mjs', 'apps/model-gateway/data/retrieval/index-worker.mjs',
   'apps/model-gateway/data/retrieval/retrieval-text.mjs', 'apps/model-gateway/models/retrieval/embedding-service.mjs',
   'apps/model-gateway/models/retrieval/embedding-worker.mjs', 'apps/model-gateway/models/retrieval/embedding-profile.mjs',
-  'apps/model-gateway/orchestration/retrieval/candidate-selection.mjs'];
+  'apps/model-gateway/orchestration/retrieval/candidate-selection.mjs',
+  'apps/model-gateway/data/retrieval/scoped-lexical-rank.mjs',
+  'apps/model-gateway/orchestration/retrieval/source-projection.mjs',
+  'apps/model-gateway/orchestration/retrieval/retrieval-budget.mjs'];
 const EVIDENCE_TOKEN_BUDGETS = Object.freeze([2048, 4096, 6144, 8192]);
 const compareIds = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const digest = (bytes, algorithm = 'sha256') => createHash(algorithm).update(bytes).digest('hex');
@@ -44,7 +50,7 @@ const progress = (phase, details = {}) => {
 
 function options() {
   const result = { queries: 40, documents: 500, seed: 20261005, repeats: 3, offline: false, full: false,
-    embeddingInput: 'contextual', rerank: false,
+    embeddingInput: 'contextual', rerank: false, policyEvidence: false,
     cache: join(REPOSITORY_ROOT, 'artifacts', 'verification', 'rag-benchmark', 'datasets'),
     vectorCache: join(REPOSITORY_ROOT, 'artifacts', 'verification', 'rag-benchmark', 'vectors') };
   const numeric = new Set(['queries', 'documents', 'seed', 'repeats']);
@@ -53,6 +59,7 @@ function options() {
     if (flag === '--offline') { result.offline = true; continue; }
     if (flag === '--full') { result.full = true; result.queries = 300; result.documents = 5183; continue; }
     if (flag === '--rerank') { result.rerank = true; continue; }
+    if (flag === '--policy-evidence') { result.policyEvidence = true; continue; }
     const name = flag.replace(/^--/u, ''), value = process.argv[++index];
     if (!value || !['queries', 'documents', 'seed', 'repeats', 'cache', 'output', 'model-root',
       'embedding-input', 'vector-cache', 'reranker-root', 'baseline-root'].includes(name))
@@ -191,7 +198,15 @@ const coverageOnly = metrics => ({ recall: metrics.recall, hit: metrics.hit });
 const meanCoverage = values => Object.fromEntries(['recall', 'hit'].map(name =>
   [name, values.reduce((sum, value) => sum + value[name], 0) / values.length]));
 
+// Fixed-width provisional references simulate model accounting without publishing benchmark-only archives.
+// 固定宽度占位引用模拟模型计费，不发布只存在于评测中的正式证据归档。
+function modelBudgetCandidates(items) {
+  const modelSourceRef = evidenceSourceRef(allocateEvidenceArchiveId(), 1);
+  return items.map(item => ({ ...item, modelSourceRef }));
+}
+
 function evidenceBudgetSweep(items, query, relevance) {
+  items = modelBudgetCandidates(items);
   return Object.fromEntries(EVIDENCE_TOKEN_BUDGETS.map(maximumTokens => {
     const selected = selectCandidates(items, { query, limit: 6, maximumTokens });
     return [maximumTokens, { metrics: evidenceMetrics(selected.items.map(item => item.locator.beirDocumentId), relevance),
@@ -265,18 +280,22 @@ async function main() {
       unjudgedDocuments: 'Random distractors are unjudged, treated as nonrelevant under the public qrels; no fabricated negative judgments' },
     implementation: { gitHead, componentSha256: componentHashes, modelId: BUILTIN_EMBEDDING_PROFILE.modelId,
       modelVersion: BUILTIN_EMBEDDING_PROFILE.modelVersion, dimensions: BUILTIN_EMBEDDING_PROFILE.dimensions,
-      cpuThreads: 2, actualLocalVectors: true, productionCandidateLimits: { lexicalChunks: 40, denseChunks: 40, returnedChunks: 60 },
+      cpuThreads: 2, actualLocalVectors: true, benchmarkCandidateLimits: { lexicalChunks: 40, denseChunks: 40, returnedChunks: 60 },
       embeddingInputVersion, modelIdentity, baselineRoot: settings.baselineRoot ?? null,
       indexedEmbeddingModelVersion: settings.embeddingInput === 'legacy' ? BUILTIN_EMBEDDING_PROFILE.modelVersion
         : `${BUILTIN_EMBEDDING_PROFILE.modelVersion}|${embeddingInputVersion}`,
       baselineComponentSha256: baselineHashes,
       selectedEvidence: { candidateLimit: RETRIEVAL_CANDIDATE_LIMIT, chunkLimit: 6, maximumTokens: 2048,
+        policy: 'legacy-six-fragment-diagnostic; not the current production budget',
+        referenceAccounting: 'fixed-length ev1 provisional references; canonical references retained',
         additionalTokenBudgets: EVIDENCE_TOKEN_BUDGETS.slice(1),
         helper: 'Actual orchestration selectCandidates; no existing chat context in this public corpus benchmark' },
       lexicalAndHybrid: 'Actual RetrievalIndex.search; public authorized scope only',
       denseAblation: 'Diagnostic exact cosine over every selected document chunk; document score=max chunk cosine; raw files retain top 60 documents; no production-only dense mode exists',
       documentMetrics: 'Collapse repeated chunks by first returned occurrence, then score top k documents',
-      productionEvidence6: 'First six actual returned chunks, unique gold document hits; this is not six unique documents' },
+      legacyEvidence6: 'First six actual returned chunks, unique gold document hits; this is not six unique documents or current production policy',
+      policyEvidence: settings.policyEvidence ? { ...retrievalBudget({ taskType: 'research' }),
+        scope: 'production policy projection simulation; no model answer, coordinator freshness or finalization evaluation' } : null },
     system: { node: process.version, platform: process.platform, architecture: process.arch, cpu: cpus()[0]?.model,
       availableParallelism: availableParallelism(), totalMemoryBytes: totalmem() }, latency: { repeats: settings.repeats,
       networkIncluded: false, modelGenerationIncluded: false, coordinatorPreparationIncluded: false, concurrency: 1 } };
@@ -356,14 +375,28 @@ async function main() {
       const hybrid = await index.search({ query: query.text, scopeKeys, limit: 60, ...vectorOptions(vector) });
       assert.equal(hybrid.strategy, 'hybrid'); assert.equal(hybrid.degradedReason, undefined);
       const dense = denseDocumentRanking(vector, sources), relevance = judgments.relevance.get(query.id);
-      const selectedLexical = selectCandidates(lexical.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT),
+      const selectedLexical = selectCandidates(modelBudgetCandidates(lexical.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT)),
         { query: query.text, limit: 6, maximumTokens: 2048 });
-      const selectedHybrid = selectCandidates(hybrid.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT),
+      const selectedHybrid = selectCandidates(modelBudgetCandidates(hybrid.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT)),
         { query: query.text, limit: 6, maximumTokens: 2048 });
       let rerankRecord;
+      let policyEvidence;
+      if (settings.policyEvidence) {
+        const policy = retrievalBudget({ taskType: 'research' }), policyStarted = performance.now();
+        const pool = await index.search({ query: query.text, scopeKeys, ...vectorOptions(vector),
+          limit: policy.fusedCandidates, channelCandidates: policy.channelCandidates });
+        const selected = selectCandidates(modelBudgetCandidates(pool.items), { query: query.text,
+          limit: policy.limit, maximumTokens: policy.maximumTokens });
+        const projection = projectEvidence(selected.items, 65536,
+          { maximumTokens: policy.maximumTokens, assessment: selected.evidenceAssessment });
+        policyEvidence = { policy, returnedCandidates: pool.items.length, selection: selected.selection,
+          projection: projection.audit, selectedDocumentIds: projection.items.map(item => item.locator.beirDocumentId),
+          metrics: evidenceMetrics(projection.items.map(item => item.locator.beirDocumentId), relevance),
+          simulationOnly: true, durationMs: duration(policyStarted) };
+      }
       if (reranker) {
         const startedRerank = performance.now();
-        const candidates = selectCandidates(hybrid.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT),
+        const candidates = selectCandidates(modelBudgetCandidates(hybrid.items.slice(0, RETRIEVAL_CANDIDATE_LIMIT)),
           { query: query.text, limit: 20, maximumTokens: 16384, lambda: 1 }).items;
         const reranked = await reranker.rerank({ query: query.text, candidates, limit: 20 });
         const selected = selectCandidates(reranked.items, { query: query.text, limit: 6, maximumTokens: 2048 });
@@ -388,7 +421,7 @@ async function main() {
             selection: selected.selection, evidenceAssessment: selected.evidenceAssessment, chunks: chunkRanking(selected.items) }])),
         evidenceBudgetSweep: Object.fromEntries([['lexical', lexical.items], ['hybrid', hybrid.items]].map(([mode, items]) =>
           [mode, evidenceBudgetSweep(items.slice(0, RETRIEVAL_CANDIDATE_LIMIT), query.text, relevance)])),
-        ...(rerankRecord ? { neuralRerank: rerankRecord } : {}) });
+        ...(rerankRecord ? { neuralRerank: rerankRecord } : {}), ...(policyEvidence ? { policyEvidence } : {}) });
       appendFileSync(join(output, 'rankings.jsonl'), JSON.stringify(rankings.at(-1)) + '\n');
       progress('score-query', { completed: rankings.length, total: sample.queries.length, queryId: query.id });
     }
@@ -421,7 +454,7 @@ async function main() {
       const vector = (await embeddings.embedQuery(query.text)).vector;
       const lexical = await index.search({ query: query.text, scopeKeys, limit: 6 });
       const hybrid = await index.search({ query: query.text, scopeKeys, limit: 6, ...vectorOptions(vector) });
-      const selected = selectCandidates(hybrid.items, { query: query.text, limit: 6, maximumTokens: 2048 });
+      const selected = selectCandidates(modelBudgetCandidates(hybrid.items), { query: query.text, limit: 6, maximumTokens: 2048 });
       diagnostics.push({ ...query, diagnosticOnly: true, scoredAgainstPublicQrels: false, goldCount: 0,
         lexical: { nonempty: lexical.items.length > 0, returnedChunks: lexical.items.length, documentIds: documentRanking(lexical.items) },
         hybrid: { nonempty: hybrid.items.length > 0, returnedChunks: hybrid.items.length, documentIds: documentRanking(hybrid.items) },
@@ -434,7 +467,11 @@ async function main() {
     const metrics = Object.fromEntries(['lexical', 'hybrid', 'denseAblation', ...(reranker ? ['neuralRerank'] : [])].map(mode => [mode,
       Object.fromEntries(RETRIEVAL_CUTOFFS.map(cutoff => [cutoff, meanMetrics(rankings.map(record => record[mode].metrics[cutoff]))]))]));
     const indexStatus = await index.status();
-    const results = { schemaVersion: 2, label: manifest.label, sample: { queries: rankings.length, documents: sources.length, chunks: chunks.length,
+    const results = { schemaVersion: 2, label: manifest.label,
+      evidence6Policy: 'legacy-six-fragment-diagnostic; not current production evidence limits',
+      ...(settings.policyEvidence ? { policyEvidence: { policy: 'research', simulationOnly: true,
+        metrics: meanEvidenceMetrics(rankings.map(record => record.policyEvidence.metrics)) } } : {}),
+      sample: { queries: rankings.length, documents: sources.length, chunks: chunks.length,
       seed: settings.seed, goldDocumentCount: sample.goldIds.length, allSampleGoldIncluded: true }, metrics,
       productionEvidence6Chunks: Object.fromEntries(['lexical', 'hybrid'].map(mode => [mode, meanCoverage(rankings.map(record => record[mode].evidence6))])),
       selectedEvidence6Chunks: Object.fromEntries(['lexical', 'hybrid', ...(reranker ? ['neuralRerank'] : [])].map(mode =>

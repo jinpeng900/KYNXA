@@ -214,7 +214,8 @@ export function createModelServer(options = {}) {
             const result = await modelRuntime.replyStream({ conversationId: body.conversationId,
               message: body.message, provider: body.provider, model: body.model, requestId: identity.requestId,
               userMessageId: body.userMessageId, permissionMode: body.permissionMode, runLimits }, emit, controller.signal);
-            emit({ type: 'completed', ...result });
+            emit({ type: result.completionStatus ?? 'completed', ...result,
+              ...(result.completionStatus === 'interrupted' ? { error: '部分步骤尚未完成，已保留执行记录和结果说明。' } : {}) });
           } catch (error) {
             emit({ type: error instanceof StreamFailure ? error.type : 'error',
               content: error.content ?? '', reasoning: error.reasoning ?? '',

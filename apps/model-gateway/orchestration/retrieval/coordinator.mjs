@@ -239,7 +239,7 @@ export class RetrievalCoordinator {
     }
   }
 
-  async _rerank(context, query, candidates, snapshot, taskType, signal, decision) {
+  async _rerank(context, query, candidates, snapshot, taskType, signal, decision, rerankCandidates = 20) {
     decision ??= this._planEvidence({ query, items: candidates, taskType,
       rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
     if (['complex', 'research'].includes(taskType) && snapshot.settings.local.rerankProfileId && this.reranker &&
@@ -254,7 +254,7 @@ export class RetrievalCoordinator {
       return { items: candidates, diagnostic: status.errorCode ?? 'RERANK_UNAVAILABLE' };
     try {
       const result = await this.reranker.rerank({ profileId: snapshot.settings.local.rerankProfileId,
-        context, query, candidates, settings: snapshot.settings, signal, limit: 20 });
+        context, query, candidates, settings: snapshot.settings, signal, limit: rerankCandidates });
       if (result.profileId !== undefined && result.profileId !== snapshot.settings.local.rerankProfileId ||
           hasModelMetadataMismatch(status, result))
         throw retrievalFailure('Reranking result belongs to another model. / 重排结果不属于所选模型配置。', 'RERANK_PROFILE_MISMATCH', 409);
@@ -269,7 +269,11 @@ export class RetrievalCoordinator {
           scoredCount++; ranked.push({ ...original, rerankScore: item.rerankScore, rerankRank: scoredCount });
         } else ranked.push(original);
       }
+      // A partial reranker response only changes its scored prefix; unscored candidates remain selectable.
+      // 部分重排回执只调整已评分前缀，其余候选仍可入选，不能在下游静默丢掉召回池。
+      for (const item of candidates) if (!seen.has(item.sourceRef)) ranked.push(item);
       return scoredCount ? { items: ranked, rerank: { profileId: result.profileId, modelVersion: result.modelVersion,
+        candidateLimit: rerankCandidates, scoredCandidates: scoredCount,
         truncatedInputsCount: result.truncatedInputsCount } } : { items: candidates, diagnostic: 'RERANK_EMPTY' };
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -286,6 +290,9 @@ export class RetrievalCoordinator {
       const budget = { ...retrievalBudget({ taskType, suggestions: lease?.suggestions, limit, maximumTokens }),
         ...this.evaluationPolicy?.fixedBudget };
       budget.maximumTokens = Math.min(budget.maximumTokens, maximumTokens ?? 32768);
+      budget.audit = { ...budget.audit, approved: { channelCandidates: budget.channelCandidates,
+        fusedCandidates: budget.fusedCandidates, limit: budget.limit, maximumTokens: budget.maximumTokens,
+        rerankCandidates: budget.rerankCandidates } };
       limit = budget.limit; maximumTokens = budget.maximumTokens;
       if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
       if (typeof query !== 'string' || !query.trim() || query.length > MAX_QUERY_CHARACTERS ||
@@ -295,12 +302,21 @@ export class RetrievalCoordinator {
       validateEvidenceGap(gap);
       if (maximumTokens === 0) return { items: [], strategy: 'context-budget-exhausted', vectorAvailable: false,
         outcome: retrievalOutcome({ strategy: 'context-budget-exhausted' }),
-        budget, evidenceAssessment: { ...assessEvidence([], query), reason: 'no-remaining-model-context' },
+        budget: { ...budget, audit: { ...budget.audit, actual: { candidates: 0, selectedCount: 0, usedTokens: 0 },
+          earlyCutReasons: [{ reason: 'model-context-exhausted', count: 0 }] } },
+        evidenceAssessment: { ...assessEvidence([], query), reason: 'no-remaining-model-context' },
         acquisition: { shouldContinue: false, next: 'answer-with-current-evidence-or-state-the-context-limit' } };
       const withModelReferences = items => modelReferences
         ? items.map((item, index) => ({ ...item, modelSourceRef: evidenceSourceRef(archiveId, index + 1) })) : items;
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
+      const configuredRerankCandidates = snapshot.settings.local.rerankCandidates;
+      budget.rerankCandidates = configuredRerankCandidates ?? budget.rerankCandidates;
+      budget.audit = { ...budget.audit,
+        configured: { ...budget.audit.configured, localRerankCandidates: configuredRerankCandidates ?? null },
+        approved: { ...budget.audit.approved, rerankCandidates: budget.rerankCandidates },
+        rerankBudgetSource: configuredRerankCandidates != null ? 'local-setting' :
+          lease?.suggestions?.rerankCandidates !== undefined ? 'resource-suggestion' : 'task-policy' };
       // Automatic evidence uses intent derived from the current utterance, not historical query additions.
       // 自动证据使用从本轮原话提取的约束，历史补充文本不能重新变成硬路径或领域限制。
       const retrievalIntent = preparedIntent === undefined
@@ -407,10 +423,22 @@ export class RetrievalCoordinator {
           }
         }
       }
-      const result = lexical && !embedded ? lexical : await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
+      let result = lexical && !embedded ? lexical : await this.index.search({ query, scopeKeys: snapshot.scopes, limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
         retrievalIntent, ann: snapshot.settings.local.ann,
         queryVector: embedded?.vector, embeddingProfileId: embedded?.profileId,
         embeddingModelVersion: embeddingVersion(embedded?.modelVersion), embeddingSpaceId: embedded?.embeddingSpaceId, signal });
+      const originalQuery = context.message?.trim();
+      // One empty automatic derived query may fall back to the original utterance in exactly the same authorized scope.
+      // 自动派生查询为空时最多回退一次用户原话，授权范围不变；显式领域、路径、符号限制不放宽。
+      if (!result.items.length && preparedIntent !== undefined && retrievalIntent.domain === 'mixed' &&
+          !retrievalIntent.path && !retrievalIntent.symbol && originalQuery && originalQuery.length <= MAX_QUERY_CHARACTERS &&
+          originalQuery.normalize('NFKC') !== query.normalize('NFKC')) {
+        const fallback = await this.index.search({ query: originalQuery, scopeKeys: snapshot.scopes,
+          limit: budget.fusedCandidates, channelCandidates: budget.channelCandidates,
+          retrievalIntent, ann: snapshot.settings.local.ann, signal });
+        result = { ...fallback, fallback: { attempted: true, kind: 'original-query', attempts: 1,
+          authorizationExpanded: false, explicitConstraintsPreserved: true, recoveredCandidates: fallback.items.length } };
+      }
       if (snapshot.indexingPending) result.indexingPending = true;
       if (snapshot.indexingPartial || snapshot.sourceScan?.coverage?.complete === false) {
         result.indexingPartial = true; result.sourceCoverage = snapshot.sourceScan?.coverage;
@@ -425,7 +453,12 @@ export class RetrievalCoordinator {
       // 搜索只提供有界候选证据，不能冒充对符号引用的穷举。
       result.coverage = { ...result.coverage, operation: 'search', complete: false, candidateLimit: budget.fusedCandidates };
       result.budget = budget;
-      result.items = withModelReferences(result.items);
+      // Candidate pools may exceed 60; a fixed-length placeholder preserves token accounting before selection.
+      // 候选池可超过 60；选择前使用固定长度占位引用计算 token，唯一的真实引用只分配给最终入选证据。
+      if (modelReferences) {
+        const provisionalModelSourceRef = evidenceSourceRef(archiveId, 1);
+        result.items = result.items.map(item => ({ ...item, modelSourceRef: provisionalModelSourceRef }));
+      }
       // Targeted current reads replace the second whole-library/history/tree snapshot.
       // 只回读命中来源并复核其版本，避免第二次全量资料、聊天和目录扫描。
       const candidateCount = result.items.length, freshChecks = new Map();
@@ -434,7 +467,7 @@ export class RetrievalCoordinator {
       const rerankDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
         items: unique.items, assessment: candidateAssessment,
         rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
-      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal, rerankDecision);
+      const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal, rerankDecision, budget.rerankCandidates);
       result.rerankDecision = { executed: Boolean(reranked.rerank), reason: rerankDecision.rerankReason };
       let current = reranked.items, selected;
       const invalidSourceIds = new Set();
@@ -462,6 +495,15 @@ export class RetrievalCoordinator {
       result.selection = { ...selected.selection,
         candidateCount, currentCandidates: current.length, staleSourceCount: invalidSourceIds.size,
         duplicateCount: unique.duplicateCount, alreadyPresentCount: unique.alreadyPresentCount };
+      const earlyCutReasons = [...budget.audit.earlyCutReasons, ...selected.selection.earlyCutReasons];
+      if (unique.duplicateCount) earlyCutReasons.push({ reason: 'duplicate-or-overlapping-evidence', count: unique.duplicateCount });
+      if (unique.alreadyPresentCount) earlyCutReasons.push({ reason: 'already-in-model-context', count: unique.alreadyPresentCount });
+      if (invalidSourceIds.size) earlyCutReasons.push({ reason: 'stale-or-revoked-source', count: invalidSourceIds.size, unit: 'sources' });
+      budget.audit = { ...budget.audit, actual: { candidates: candidateCount, uniqueCandidates: unique.items.length,
+        currentCandidates: current.length, selectedCount: result.items.length, usedTokens: selected.selection.usedTokens,
+        rerankScoredCandidates: reranked.rerank?.scoredCandidates ?? 0 }, earlyCutReasons,
+        ann: { configured: snapshot.settings.local.ann, executedBackend: result.semanticBackend ?? 'none',
+          actualPerShardParameters: 'not-reported-by-search' } };
       result.evidenceAssessment = selected.evidenceAssessment;
       if (!result.items.length && unique.alreadyPresentCount)
         result.evidenceAssessment = assessEvidence([], query, { alreadyPresentCount: unique.alreadyPresentCount });

@@ -36,6 +36,36 @@ async function fixture(t) {
   return { root, data, service, save, available };
 }
 
+test('skill header cache skips repeated body reads while revalidating changes, disablement and private paths', async t => {
+  const f = await fixture(t), folder = await f.save(join(f.data, 'Skills'), 'cached-skill');
+  const first = await f.available('cached-skill'), coldReads = f.service.metadataCacheStats.reads;
+  assert.equal(coldReads, 1);
+  first.diagnostics.push({ code: 'CALLER_MUTATION', message: 'Must not mutate cached metadata.' });
+  const warm = await f.available('cached-skill');
+  assert.equal(f.service.metadataCacheStats.reads, coldReads);
+  assert.ok(f.service.metadataCacheStats.hits >= 1);
+  assert.equal(warm.diagnostics.some(item => item.code === 'CALLER_MUTATION'), false);
+  const disabled = { ...config, disabledSkills: [warm.id] };
+  assert.deepEqual(await f.service.list(null, disabled), []);
+  await assert.rejects(f.service.read(warm.id, null, disabled), { code: 'APP_SKILL_DISABLED' });
+  assert.equal(f.service.metadataCacheStats.reads, coldReads);
+  const body = await f.service.read(warm.id, null, config);
+  assert.equal(f.service.metadataCacheStats.reads, coldReads + 1, 'body reads always re-hash the real file');
+  assert.ok(body.content.includes('Read resources'));
+  await writeFile(join(folder, 'SKILL.md'), content('cached-skill', '', 'Changed instructions for a fresh task.'));
+  const changed = await f.available('cached-skill');
+  assert.notEqual(changed.sha256, warm.sha256);
+  assert.equal(f.service.metadataCacheStats.reads, coldReads + 2);
+  f.service.resourceDeny = path => path === join(folder, 'SKILL.md');
+  const denied = await f.available('cached-skill');
+  assert.equal(denied.status, 'unavailable');
+  assert.equal(denied.diagnostics[0].code, 'PROTECTED_SKILL_RESOURCE');
+  f.service.resourceDeny = undefined;
+  await rm(join(folder, 'SKILL.md'));
+  assert.equal(await f.available('cached-skill'), undefined);
+  assert.equal(f.service.metadataCache.size, 0);
+});
+
 test('standard validation enforces exact limits, international names, directory match and string metadata without rejecting readable legacy files', () => {
   const name = 'n'.repeat(64);
   const source = `---\nname: ${name}\ndescription: ${'d'.repeat(1024)}\ncompatibility: ${'c'.repeat(500)}\nmetadata: {version: "1.0"}\nallowed-tools: filesystem.read\n---\n`;

@@ -24,7 +24,8 @@ for (const protocol of protocols) test(`${protocol}: real 8K preparation include
   const prepared = await runtime.prepare(input, input.conversationId);
   assert.equal(prepared.contextMetrics.contextWindowTokens, 8192);
   for (const name of ['terminal.host.run', 'tool.search', 'tool.load', 'tool.result.read'])
-    assert.ok(prepared.catalog.some(tool => tool.name === name), name);
+    assert.ok(prepared.catalog.some(tool => tool.name === name), JSON.stringify({ missing: name,
+      selected: prepared.catalog.map(tool => tool.name), assembly: prepared.assistant.ContextAssembly }));
   assert.match(prepared.requestOptions.system, /Runtime device capability check/);
 });
 

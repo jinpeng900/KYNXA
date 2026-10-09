@@ -180,7 +180,11 @@ public static class ChatStreamReader
             throw InvalidSegment();
         if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment => !knownSegments.TryGetValue(segment.Id, out var prior) || prior.Round != segment.Round || prior.Order != segment.Order)))
             throw InvalidSegment();
-        if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment => segment.Status != "completed") || assistantSegments[^1].Phase != "final_answer"))
+        // An interrupted model step may recover into a complete final answer; it remains a truthful commentary trace.
+        // 中断的模型步骤可以恢复并得到完整最终回答；先前中断段仍保留为真实的过程轨迹。
+        if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment =>
+            segment.Status != "completed" && !(segment.Phase == "commentary" && segment.Status == "interrupted")) ||
+            assistantSegments[^1].Phase != "final_answer" || assistantSegments[^1].Status != "completed"))
             throw InvalidSegment();
     }
 

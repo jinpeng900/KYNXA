@@ -90,7 +90,7 @@ test('per-tool revocation does not reconnect servers and mixed loading retains a
     mcpServers: current.mcpServers.map(item => item.id === 'synthetic-a' ? { ...item, disabledTools: ['echo'] } : item) });
   const loaded = parsed(await f.run(context, 'tool.load', { names: ['mcp.synthetic-a.echo', 'mcp.synthetic-b.echo'] }));
   assert.deepEqual(loaded.loaded, ['mcp.synthetic-b.echo']);
-  assert.deepEqual(loaded.unavailable, [{ name: 'mcp.synthetic-a.echo', code: 'TOOL_NOT_FOUND' }]);
+  assert.deepEqual(loaded.unavailable, [{ name: 'mcp.synthetic-a.echo', code: 'AGENT_CONFIG_CHANGED', executed: false, recoverable: true }]);
   assert.deepEqual(f.reset, []);
   assert.equal((await f.run(context, 'mcp.synthetic-a.echo', envelope)).code, 'AGENT_CONFIG_CHANGED');
   assert.equal((await f.run(context, 'mcp.synthetic-b.echo', envelope)).status, 'completed');

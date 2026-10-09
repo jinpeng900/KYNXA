@@ -64,9 +64,11 @@ export class ToolRunProgress {
       executedToolCalls: 0, reusedToolCalls: 0, noProgressRounds: 0, modelRounds: [], toolCallsTiming: [] };
   }
 
-  observeTurn(turn) {
-    this.generatedTokens += estimateTokens(turn.content ?? '') + estimateTokens(turn.reasoning ?? '')
+  observeTurn(turn, { estimatedGeneratedTokens } = {}) {
+    const visibleTokens = estimateTokens(turn.content ?? '') + estimateTokens(turn.reasoning ?? '')
       + estimateTokens(JSON.stringify(turn.calls ?? []));
+    this.generatedTokens += Math.max(visibleTokens,
+      Number.isSafeInteger(estimatedGeneratedTokens) && estimatedGeneratedTokens > 0 ? estimatedGeneratedTokens : 0);
     if (this.generatedTokens > this.limits.maxGeneratedTokens) throw runLimitFailure('TOOL_RUN_OUTPUT_LIMIT');
   }
 
@@ -106,7 +108,7 @@ export class ToolRunProgress {
    * 只记录工具实际返回的验证回执，不接受模型宣称或检索到的测试源码作为执行证明。 */
   observeOutcome(call, result) {
     const completed = !result.isError && !['unknown', 'cancelled', 'error'].includes(result.status);
-    if (completed && ['filesystem.write', 'filesystem.edit', 'filesystem.mkdir', 'filesystem.move',
+    if (completed && !result.reused && ['filesystem.write', 'filesystem.edit', 'filesystem.mkdir', 'filesystem.move',
       'filesystem.delete'].includes(call.name)) this.mutationRevision++;
     if (!['terminal.run', 'terminal.host.run'].includes(call.name)) return;
     let command = call.name === 'terminal.host.run' ? call.arguments?.script ?? call.arguments?.command :

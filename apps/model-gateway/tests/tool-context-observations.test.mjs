@@ -31,6 +31,14 @@ function outputs(messages) {
         .map(block => ({ id: block.tool_use_id, text: block.content })) : []);
 }
 
+// Check business fields inside the broker envelope without discarding its native wire metadata.
+// 在代理封装内检查业务字段，同时保留对原生传输元信息的完整断言。
+function businessOutput(text) {
+  const projected = JSON.parse(text);
+  if (!projected.executionEnvironment || !Object.hasOwn(projected, 'output')) return projected;
+  return typeof projected.output === 'string' ? JSON.parse(projected.output) : projected.output;
+}
+
 function assertPairs(messages) {
   const calls = messages.flatMap(message => [...(message.tool_calls ?? []).map(call => call.id),
     ...(message.type === 'function_call' ? [message.call_id] : []),
@@ -74,7 +82,8 @@ for (const protocol of protocols) {
     assert.equal(envelope.reason, 'duplicate-observation'); assert.equal(envelope.status, 'completed');
     assert.equal(envelope.resultRef.id, f.observed[0].result.resultRef.id);
     assert.equal(envelope.replacedBy.resultRef.id, f.observed[1].result.resultRef.id);
-    assert.equal(results.at(-1).text, f.observed.at(-1).result.content);
+    assert.equal(results.at(-1).text, outputs(original).at(-1).text, 'the newest complete native result is unchanged');
+    assert.deepEqual(businessOutput(results.at(-1).text), JSON.parse(f.observed.at(-1).result.content));
     assert.deepEqual(result.messages.filter(message => !['tool', 'function_call_output'].includes(message.role ?? message.type)
       && !(Array.isArray(message.content) && message.content.some(block => block.type === 'tool_result'))),
     original.filter(message => !['tool', 'function_call_output'].includes(message.role ?? message.type)
@@ -95,8 +104,10 @@ for (const protocol of protocols) {
     assert.equal(envelope.observedVersion.sha256, JSON.parse(f.observed[0].result.content).sha256);
     assert.equal(envelope.replacedBy.observedVersion.sha256, JSON.parse(f.observed[2].result.content).sha256);
     assert.notEqual(envelope.observedVersion.sha256, envelope.replacedBy.observedVersion.sha256);
-    assert.equal(observed[1].text, f.observed[1].result.content, 'the completed write receipt is retained verbatim');
-    assert.equal(observed[2].text, f.observed[2].result.content);
+    assert.equal(observed[1].text, outputs(original)[1].text, 'the completed native write receipt is retained verbatim');
+    assert.equal(observed[2].text, outputs(original)[2].text);
+    assert.deepEqual(businessOutput(observed[1].text), JSON.parse(f.observed[1].result.content));
+    assert.deepEqual(businessOutput(observed[2].text), JSON.parse(f.observed[2].result.content));
     assert.equal(result.metrics.observationCompaction.supersededCount, 1);
     assert.equal(result.metrics.observationCompaction.duplicateCount, 0);
   });
@@ -117,11 +128,14 @@ for (const protocol of protocols) {
       resultContext: { conversationId: f.conversationId, projectId: f.projectId }, inputBudgetTokens: BUDGET,
       availableTools: [{ name: 'filesystem.read' }] });
     await view.loadResults();
+    const beforeCompaction = view.historyTurns.flatMap(turn => view.projectTurn(turn));
     const metrics = view.compact({ inputBudgetTokens: BUDGET }), messages = view.historyTurns.flatMap(turn => view.projectTurn(turn));
     assertPairs(messages); assert.deepEqual(history, original);
     assert.equal(metrics.observationCompaction.duplicateCount, 1); assert.equal(metrics.observationCompaction.verifiedArchiveCount, 2);
     assert.equal(JSON.parse(outputs(messages)[0].text).reason, 'duplicate-observation');
-    assert.equal(JSON.parse(outputs(messages)[1].text).structuredContent.content, text);
+    assert.equal(outputs(messages)[1].text, outputs(beforeCompaction)[1].text,
+      'the newest archived model projection retains its execution environment and complete output');
+    assert.equal(businessOutput(outputs(messages)[1].text).structuredContent.content, text);
   });
 
   test(`${protocol}: different legal evidence handles and follow-up gaps still compact the same verified read fact`, async t => {
