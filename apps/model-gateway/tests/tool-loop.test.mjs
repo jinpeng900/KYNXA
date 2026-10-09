@@ -151,6 +151,9 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const f = await fixture(t, protocol);
     const content = await f.runtime.reply(f.input);
     assert.ok(content.includes(f.marker), content); assert.equal(f.seen.length, 2);
+    const offered = f.seen[0].tools;
+    const chosenIndex = offered.findIndex(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+    assert.ok(chosenIndex > 0, 'the model can choose an offered tool below the first candidate');
     const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
     assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
     assert.equal(saved.ToolActivities[0].status, 'completed');
@@ -165,6 +168,8 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     assert.equal(saved.ToolRun.phase, 'completed');
     assert.equal(saved.ToolRun.rounds, 2);
     assert.equal(saved.ToolRun.toolCalls, 1);
+    assert.deepEqual(saved.ToolActivities.map(item => item.name), ['filesystem.read'],
+      'only the model-selected tool executes, not the first ranked candidate');
     const runResponse = await fetch(f.address + '/api/conversations/' + f.input.conversationId + '/runs/' + f.input.requestId);
     assert.equal(runResponse.status, 200);
     assert.equal((await runResponse.json()).run.phase, 'completed');

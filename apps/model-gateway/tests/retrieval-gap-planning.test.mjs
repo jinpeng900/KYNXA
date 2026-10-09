@@ -30,7 +30,8 @@ test('candidate support identifies missing roles without calling retrieved tests
   const items = [evidence('src/cancel.mjs', 'The cancellation implementation aborts queued jobs.')];
   const assessment = assessEvidence(items, 'Review cancellation implementation and tests');
   assert.deepEqual(assessment.missingEvidence, [{ kind: 'requested-role', role: 'tests' }]);
-  const decision = planEvidenceAcquisition({ query: 'Fix cancellation implementation and tests', items, assessment });
+  const decision = planEvidenceAcquisition({ query: 'Fix cancellation implementation and tests', items, assessment,
+    intent: { domain: 'code' } });
   assert.equal(decision.next, 'read-source');
   assert.equal(decision.requiresVerification, true);
   assert.deepEqual(decision.requiredChecks, ['re-read-current-source', 'run-relevant-validation']);

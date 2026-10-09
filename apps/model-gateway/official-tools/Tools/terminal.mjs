@@ -1,6 +1,6 @@
 export const hostTerminalDescriptor = {
   name: 'terminal.host.run', source: 'builtin',
-  description: 'Run local CMD/PowerShell with the app host PATH, outside the sandbox; Ask/Smart approval required. Shell profiles are not loaded: resolve Conda or initialize the selected environment in this same script. Captured output is returned. Maximum 120 seconds; use terminal.host.start/read/stop for controlled background work. Use visible:true only for a requested separate window. Interrupted effects need verification, never replay.',
+  description: 'Run host CMD/PowerShell with app PATH outside sandbox; Ask/Smart approval required. Verify current shell/cwd/target. Diagnostics inspect adapters/proxy/ports, not social networks. No profiles: resolve/init Conda in the same script. Captured output; maximum 120 seconds. Use terminal.host.start/read/stop for background jobs, visible:true for a requested window. Verify interrupted effects; never replay.',
   inputSchema: { type: 'object', additionalProperties: false,
     properties: { shell: { type: 'string', enum: ['cmd', 'powershell'] },
       script: { type: 'string', minLength: 1, maxLength: 16384 },
