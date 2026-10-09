@@ -5,6 +5,33 @@ namespace TranscriptUiSmoke;
 
 public partial class App
 {
+    private async Task ClickAndAwaitNativeCopyAsync(string buttonExpression, string description)
+    {
+        await EvalAsync<bool>($$"""
+            (() => {
+              const button={{buttonExpression}}, original=chrome.webview.postMessage;
+              let expected=null; window.__nativeCopyReceipt=null;
+              window.__nativeCopyListener=event => {
+                if(event.data?.type==='copyResult' && expected && event.data.requestId===expected.requestId
+                  && event.data.conversationId===expected.conversationId) window.__nativeCopyReceipt=event.data;
+              };
+              chrome.webview.addEventListener('message',__nativeCopyListener);
+              chrome.webview.postMessage=request => { if(request.type==='copy') expected=request; original.call(chrome.webview,request); };
+              try { button.click(); } finally { chrome.webview.postMessage=original; }
+              return true;
+            })()
+            """);
+        try
+        {
+            await WaitAsync("window.__nativeCopyReceipt!==null", description + " receives its matching native clipboard result");
+            Check(await EvalAsync<bool>("__nativeCopyReceipt.success===true"), description + " native copy succeeds");
+        }
+        finally
+        {
+            await EvalAsync<bool>("(() => { chrome.webview.removeEventListener('message',__nativeCopyListener); return true; })()");
+        }
+    }
+
     private async Task CheckTranscriptActionsAsync()
     {
         var chat = Guid.NewGuid();
@@ -38,19 +65,14 @@ public partial class App
             "late old-DOM scroll notification cannot cancel a new conversation's first bottom frame");
         Check(await EvalAsync<bool>("document.getElementById('jump-to-latest').hidden"), "jump control stays hidden at bottom");
 
-        var feedback = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        EventHandler<string> callback = (_, text) => feedback.TrySetResult(text);
-        _transcript.ActionFeedbackRequested += callback;
-        try
         {
             Check(await EvalAsync<bool>("(() => { const copy = document.querySelector('[data-role=assistant] .copy-message'); copy.click(); return !copy.dataset.copyState; })()"),
                 "copy click does not report success before native acknowledgement");
-            string result = await feedback.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(result == KYNXA_Desktop.Services.UiText.Get("已复制"), "copy action reports the actual native clipboard result");
             await WaitAsync("document.querySelector('[data-role=assistant] .copy-message').dataset.copyState === 'success'", "matching native acknowledgement changes the copy button");
+            Check(await EvalAsync<bool>("document.querySelector('[data-role=assistant] .message-copy-status').textContent === '已复制' && !document.querySelector('[data-role=assistant] .copy-message').hasAttribute('title')"),
+                "successful copy displays only local feedback without a floating title");
             Check(await Clipboard.GetContent().GetTextAsync() == copiedMarkdown, "native clipboard contains original Markdown, TeX and indentation");
         }
-        finally { _transcript.ActionFeedbackRequested -= callback; }
 
         await EvalAsync<bool>("__transcriptSmoke.scrollUp()");
         await WaitAsync("!document.getElementById('jump-to-latest').hidden && !window.transcriptState().following", "upward reading exposes jump control and pauses following");

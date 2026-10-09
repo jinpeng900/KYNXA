@@ -39,6 +39,9 @@ public partial class App : Application
     {
         File.WriteAllText(ResultPath, "RUNNING: isolated production tool management window\n");
         UiText.Initialize("zh-CN");
+        // Match production startup so focus and selection are tested with the active palette.
+        // 与正式启动保持一致，使用当前配色验证焦点与选区。
+        AppearanceService.Apply(AppearanceService.DefaultPaletteId);
         _api = new FakeAgentApi(Path.Combine(_directory, "Skills"));
         if (_officialToolsOnly) _api.InstallOfficialLayers();
         if (_browserOnly) _api.InstallBrowserFixtures();
@@ -376,8 +379,15 @@ public partial class App : Application
             await WaitAsync(() => _api.ResultPages == 1 && NativeUi.ByName<TextBox>(viewer.Dialog, "ToolResultText").Text.Length == 16000,
                 "result dialog initially loads only the first bounded text page");
             Check(_api.ResultReads == 0 && viewer.Dialog.DefaultButton == ContentDialogButton.None, "result opening does not fetch media or perform an automatic action");
-            Check(NativeUi.ByName<TextBox>(viewer.Dialog, "ToolResultText").Resources["TextControlBorderBrushFocused"] is
-                Microsoft.UI.Xaml.Media.SolidColorBrush { Color.R: 136, Color.G: 136, Color.B: 136 }, "result viewer uses the neutral gray focus border");
+            var resultText = NativeUi.ByName<TextBox>(viewer.Dialog, "ToolResultText");
+            Check(resultText.Focus(FocusState.Keyboard), "the read-only result text accepts keyboard focus for selection");
+            await SettleAsync();
+            var focusBorder = NativeUi.ByName<Border>(resultText, "BorderElement");
+            Check(resultText.FocusState != FocusState.Unfocused &&
+                ReferenceEquals(resultText.Resources["TextControlBorderBrushFocused"], AppearanceService.GetBrush("KynxaFocusBrush")) &&
+                focusBorder.BorderBrush is Microsoft.UI.Xaml.Media.SolidColorBrush focusBrush &&
+                focusBrush.Color == AppearanceService.ParseColor(AppearanceService.Current.Accent),
+                "the focused result text renders the shared palette accent border");
             NativeUi.Invoke(NativeUi.ByName<Button>(viewer.Dialog, "ToolResultMore"));
             await WaitAsync(() => _api.ResultPages == 2 && NativeUi.ByName<TextBox>(viewer.Dialog, "ToolResultText").Text.Contains("尾文"), "explicit next section appends the remaining result text");
             Check(_api.LastResultOffset == 16000 && NativeUi.ByName<Button>(viewer.Dialog, "ToolResultMore").Visibility == Visibility.Collapsed,

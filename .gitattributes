@@ -5,3 +5,11 @@ apps/model-gateway/official-tools/Skills/internal-comms/examples/** whitespace=-
 # Preserve the pinned benchmark dependency lock bytes across checkout and installation.
 # 保留固定基准依赖锁的原始字节，检出和安装不能改变已登记的哈希。
 tests/agent-performance-benchmark/pi-sdk-lock/*.json -text
+
+# Keep the bundled Mermaid distribution and notices byte-for-byte across Git operations.
+# 保留随包 Mermaid 发行文件与许可证的原始字节，避免 Git 转换换行。
+apps/desktop/Resources/Diagrams/Mermaid/** -text whitespace=cr-at-eol
+
+# Preserve whitespace embedded in the original third-party browser bundle.
+# 保留第三方浏览器包原文内的空白，不为提交检查改写发行文件。
+apps/desktop/Resources/Diagrams/Mermaid/mermaid.min.js whitespace=-blank-at-eol,cr-at-eol

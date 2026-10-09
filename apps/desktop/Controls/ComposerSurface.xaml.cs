@@ -1,4 +1,5 @@
 using KYNXA_Desktop.Layout;
+using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -26,7 +27,27 @@ public sealed partial class ComposerSurface : UserControl
     public double FooterHeight => IsFooterVisible ? FooterSurface.Height : 0;
     public double SurfaceHeight => EditorHeight + FooterHeight;
 
-    public ComposerSurface() { InitializeComponent(); UpdateFooterVisibility(); }
+    public ComposerSurface()
+    {
+        InitializeComponent();
+        UpdateFooterVisibility();
+        GotFocus += (_, _) => UpdateFocusBorder();
+        LostFocus += (_, _) => DispatcherQueue.TryEnqueue(UpdateFocusBorder);
+    }
+
+    private void UpdateFocusBorder()
+    {
+        bool editorFocused = false;
+        if (XamlRoot is not null)
+        {
+            for (var element = Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+                element is not null; element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element))
+            {
+                if (element == EditorSurface) { editorFocused = true; break; }
+            }
+        }
+        EditorSurface.BorderBrush = AppearanceService.GetBrush(editorFocused ? "KynxaFocusBrush" : "KynxaComposerBorderBrush");
+    }
 
     private static void OnFooterVisibilityChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args) =>
         ((ComposerSurface)sender).UpdateFooterVisibility();

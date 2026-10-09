@@ -63,7 +63,9 @@ public partial class App
         _transcript.ShowConversation(chat, [user, reply]);
         await WaitAsync("document.querySelectorAll('.assistant-segment').length === 3 && document.querySelector('[data-segment-id=round-3] .message-body').textContent === 'FINAL_DRAFT'", "real DTO shows all true prose/tool stages");
         Check(await EvalAsync<bool>("[...document.querySelectorAll('.assistant-segment')].map(row=>row.dataset.round).join(',') === '1,2,3' && !document.querySelector('.assistant-segment .reasoning')"), "active stages remain in real order without repeated thinking cards");
-        Check(await EvalAsync<bool>("(() => { const body=document.querySelector('[data-segment-id=round-1] .message-body'); const style=getComputedStyle(body); window.__activeProseStyle={fontSize:style.fontSize,color:style.color}; return style.fontSize==='15px' && style.color==='rgb(35, 35, 35)' && !!body.querySelector('strong') && !!body.querySelector('pre code') && getComputedStyle(document.querySelector('.tool-title')).fontSize==='12px'; })()"), "intermediate prose uses normal 15px dark Markdown while tool labels stay small");
+        var proseColor = AppearanceService.ParseColor(AppearanceService.Current.Text);
+        string expectedProseColor = JsonSerializer.Serialize($"rgb({proseColor.R}, {proseColor.G}, {proseColor.B})");
+        Check(await EvalAsync<bool>("(() => { const body=document.querySelector('[data-segment-id=round-1] .message-body'); const style=getComputedStyle(body); window.__activeProseStyle={fontSize:style.fontSize,color:style.color}; return style.fontSize==='15px' && style.color===" + expectedProseColor + " && !!body.querySelector('strong') && !!body.querySelector('pre code') && getComputedStyle(document.querySelector('.tool-title')).fontSize==='12px'; })()"), "intermediate prose uses normal 15px Markdown in the current palette text color while tool labels stay small");
         Check(await EvalAsync<bool>("document.querySelector('[data-segment-id=round-1] [data-tool-call-id=timeline-1]') !== null && document.querySelector('[data-segment-id=round-2] [data-tool-call-id=timeline-2]') !== null && !!(document.querySelector('[data-segment-id=round-1] .message-body').compareDocumentPosition(document.querySelector('[data-tool-call-id=timeline-1]')) & Node.DOCUMENT_POSITION_FOLLOWING)"), "compact tool events still follow their actual stage body");
         await EvalAsync<bool>("(() => { window.__timelineFirst=document.querySelector('[data-segment-id=round-1] .message-body').firstChild; const range=document.createRange(); range.selectNodeContents(window.__timelineFirst); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()");
         reply.Message.AssistantSegments[^1] = reply.Message.AssistantSegments[^1] with { Status = "completed", Content = "STAGE_THREE" };
@@ -85,9 +87,9 @@ public partial class App
         reply.Refresh();
         await WaitAsync("document.querySelectorAll('.assistant-segment').length === 5 && document.querySelector('[data-segment-id=round-5]').dataset.phase === 'final_answer' && document.querySelector('[data-segment-id=round-5] .katex') !== null", "decoded final phase remains alongside earlier prose while the request is still streaming");
         Check(await EvalAsync<bool>("document.getElementById('messages').textContent.includes('STAGE_ONE') && document.getElementById('messages').textContent.includes('STAGE_FOUR') && !document.querySelector('.final-answer') && document.querySelector('.assistant .message-elapsed').hidden"), "final phase alone does not erase progress or present a successful elapsed answer");
-        await EvalAsync<bool>("(() => { document.querySelector('.assistant .copy-message').click(); return true; })()");
-        await Task.Delay(100);
-        Check(await Clipboard.GetContent().GetTextAsync() == string.Join("\n\n", reply.Message.AssistantSegments.Select(segment => segment.Content)), "active clipboard includes all received prose until successful convergence");
+        string activeExpected = string.Join("\n\n", reply.Message.AssistantSegments.Select(segment => segment.Content));
+        string activeClipboard = await CopyProgressMessageAsync(".assistant .copy-message", activeExpected, "activeProgressClipboard");
+        Check(activeClipboard == activeExpected, "active clipboard includes all received prose until successful convergence");
         await EvalAsync<bool>("(() => { const range=document.createRange(); range.selectNodeContents(document.querySelector('[data-segment-id=round-4] .message-body').firstChild); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()");
         reply.Message.Status = "completed";
         reply.Message.DurationMs = 17000;
@@ -99,9 +101,8 @@ public partial class App
         Check(await EvalAsync<bool>("!document.querySelector('.assistant .reasoning,.assistant .tool-activities,.assistant .tool-activity') && !!(document.querySelector('.assistant .message-elapsed').compareDocumentPosition(document.querySelector('.final-answer')) & Node.DOCUMENT_POSITION_FOLLOWING)"), "terminal success removes process DOM and puts elapsed text above final answer");
         Check(await EvalAsync<bool>("(() => { const style=getComputedStyle(document.querySelector('.final-answer .message-body')); return style.fontSize===window.__activeProseStyle.fontSize && style.color===window.__activeProseStyle.color; })()"), "successful final prose keeps the same type size and color as the intermediate prose");
         Check(reply.Message.AssistantSegments.Count == 5 && reply.Message.ToolActivities.Count == 4 && reply.Message.AssistantSegments[0].Content.Contains("STAGE_ONE"), "successful UI convergence preserves every formal stage and tool");
-        await EvalAsync<bool>("(() => { document.querySelector('.assistant .message-actions > .copy-message').click(); return true; })()");
-        await Task.Delay(100);
-        Check(await Clipboard.GetContent().GetTextAsync() == reply.Message.Content, "whole-reply clipboard contains exactly the displayed final Markdown");
+        string finalClipboard = await CopyProgressMessageAsync(".assistant .message-actions > .copy-message", reply.Message.Content, "completedProgressClipboard");
+        Check(finalClipboard == reply.Message.Content, "whole-reply clipboard contains exactly the displayed final Markdown");
         await EvalAsync<bool>("(() => { window.__finalNode=document.querySelector('.final-answer .message-body').firstChild; window.__elapsed=document.querySelector('.assistant .message-elapsed').textContent; return true; })()");
         string language = UiText.Language;
         try
@@ -117,6 +118,18 @@ public partial class App
         _transcript.ShowConversation(chat, [user, reply]);
         await WaitAsync("document.querySelectorAll('.assistant-segment').length === 1 && document.querySelector('[data-segment-id=round-5]').dataset.phase === 'final_answer'", "reopening saved completed history stays converged to final text");
         Check(await EvalAsync<bool>("document.querySelector('.final-answer .message-body').firstChild === window.__finalNode && !document.querySelector('.tool-activity')"), "cached reopen reuses final body without resurrecting process");
+    }
+
+    private async Task<string> CopyProgressMessageAsync(string selector, string expected, string metricName)
+    {
+        // Clipboard IPC completion is asynchronous; use the actual native acknowledgement instead of a delay.
+        // 剪贴板跨进程操作异步完成；等待真实原生回执，避免固定延时读取到上一次的内容。
+        {
+            await ClickAndAwaitNativeCopyAsync($"document.querySelector({JsonSerializer.Serialize(selector)})", metricName);
+            string actual = await Clipboard.GetContent().GetTextAsync();
+            _metrics[metricName] = new { expected, actual };
+            return actual;
+        }
     }
 
     private async Task CheckPartialProgressAsync()

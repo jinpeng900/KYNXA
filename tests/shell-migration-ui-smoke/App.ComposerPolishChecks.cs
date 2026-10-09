@@ -49,10 +49,11 @@ public partial class App
             NativeUi.SetText(Prompt, "Synthetic nonempty draft");
             await SettleAsync();
             var activeBackground = PresentedBackground(send);
-            Check(send.IsEnabled && activeBackground is not null && activeBackground.Color.R is 0x26 or 0x40 or 0x17 &&
-                activeBackground.Color.G == activeBackground.Color.R && activeBackground.Color.B == activeBackground.Color.R &&
+            Check(send.IsEnabled && activeBackground is not null &&
+                new[] { AppearanceService.Current.Accent, AppearanceService.Current.AccentHover, AppearanceService.Current.AccentPressed }
+                    .Select(AppearanceService.ParseColor).Contains(activeBackground.Color) &&
                 Element<Image>("SendArrow").Source is SvgImageSource enabled && enabled.UriSource.AbsolutePath.EndsWith("send-arrow.svg"),
-                "typing enables the real dark Send button and restores its white arrow");
+                "typing enables the real Send button in the current palette and restores its white arrow");
 
             // Insert only an owned in-memory pending state. No stream, store, model or tool request is started.
             // 只加入夹具拥有的内存生成状态；不启动流、存储、模型或工具请求。

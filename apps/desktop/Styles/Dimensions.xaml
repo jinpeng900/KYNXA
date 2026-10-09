@@ -14,6 +14,11 @@
     <x:Double x:Key="KynxaRowActionSize">24</x:Double>
     <x:Double x:Key="KynxaPickerContentWidth">250</x:Double>
     <CornerRadius x:Key="KynxaControlRadius">8</CornerRadius>
+    <Thickness x:Key="KynxaSidebarItemMargin">0,0,16,0</Thickness>
+    <!-- Match the native ListViewItemPresenter backplate inset; row hit targets stay full height.
+         对齐原生 ListViewItemPresenter 背景内缩，整行命中高度保持不变。
+    -->
+    <Thickness x:Key="KynxaSidebarSurfaceInset">4,2,4,2</Thickness>
     <CornerRadius x:Key="KynxaMenuRadius">16</CornerRadius>
     <CornerRadius x:Key="KynxaComposerRadius">24</CornerRadius>
 </ResourceDictionary>

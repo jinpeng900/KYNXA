@@ -48,7 +48,7 @@ public sealed class ToolResultDialog : IDisposable
         _reference = tool.ResultRef ?? throw new ArgumentException("A result reference is required.");
         _screenshot = ConversationScreenshotSources.IsScreenshotTool(tool.Name);
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _text.Resources["TextControlBorderBrushFocused"] = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 136, 136, 136));
+        _text.Resources["TextControlBorderBrushFocused"] = AppearanceService.GetBrush("KynxaFocusBrush");
         _more.Style = _media.Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"];
         UiLocalization.Bind(_more, ContentControl.ContentProperty, "加载下一段");
         UiLocalization.Bind(_media, ContentControl.ContentProperty, _screenshot ? "查看截图" : "查看媒体与资源");
@@ -235,7 +235,7 @@ public sealed class ToolResultDialog : IDisposable
     private void AddLiteral(string text)
     {
         var field = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 180, Text = text };
-        field.Resources["TextControlBorderBrushFocused"] = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 136, 136, 136));
+        field.Resources["TextControlBorderBrushFocused"] = AppearanceService.GetBrush("KynxaFocusBrush");
         _resources.Children.Add(field);
     }
     private void AddNotice(string key)

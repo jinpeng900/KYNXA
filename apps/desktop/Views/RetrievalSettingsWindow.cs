@@ -36,6 +36,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         _api = api ?? new RetrievalApiClient();
         _ownsApi = api is null;
         BuildLayout();
+        AppearanceService.TrackWindow(this);
         Title = UiText.Get("KYNXA · 检索与网页搜索");
         AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 760));
         if (AppWindowTitleBar.IsCustomizationSupported())
@@ -70,8 +71,11 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         Title = UiText.Get("KYNXA · 检索与网页搜索");
+        // The last status snapshot can predate job polling; language changes must retain the newer observation.
+        // 状态快照可能早于任务轮询；切换语言时保留较新的任务观察，不退回旧状态。
+        var currentJob = _job;
         if (_status is { } status) RenderStatus(status);
-        if (_job is { } job) ShowJob(job);
+        if (currentJob is { } job) ShowJob(job);
     }
 
     private async Task LoadAsync()
@@ -254,27 +258,52 @@ public sealed partial class RetrievalSettingsWindow : Window
             _ => UiText.Get("模型未就绪，使用关键词检索")
         };
         _indexStatus.Text = string.Format(UiText.Get("{0} 个资料来源 · {1} 个索引片段"), status.SourceCount, status.ChunkCount);
-        if (status.Jobs.LastOrDefault(job => job.Status is "queued" or "running") is { } active) ShowJob(active);
+        var latestJob = status.Jobs.LastOrDefault(job => IsActiveJob(job.Status)) ?? status.Jobs.LastOrDefault();
+        if (latestJob is { } job && (IsActiveJob(job.Status) || job.Status == "partial")) ShowJob(job);
+        else
+        {
+            _job = null;
+            _jobTimer.Stop();
+            _cancelJob.Visibility = Visibility.Collapsed;
+            _rebuild.IsEnabled = true;
+        }
     }
+
+    private static bool IsActiveJob(string status) => status is "queued" or "running" or "paused";
 
     private void ShowJob(RetrievalIndexJob job)
     {
         if (_closed) return;
         _job = job;
-        bool active = job.Status is "queued" or "running";
+        // Paused checkpoints remain owned by the gateway; polling can observe recovery, but UI never resumes them.
+        // 暂停检查点仍归网关所有；轮询只观察恢复，界面不自行恢复或重复创建任务。
+        bool active = IsActiveJob(job.Status);
         _cancelJob.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         _rebuild.IsEnabled = !active;
         _indexStatus.Text = job.Status switch
         {
             "queued" => UiText.Get("索引任务等待中"),
             "running" => string.Format(UiText.Get("正在更新索引 · {0}/{1}"), job.CompletedSources, job.TotalSources),
+            "paused" => UiText.Get("索引任务已暂停，等待恢复"),
             "completed" => UiText.Get("索引已更新"),
+            "partial" => PartialJobSummary(job),
             "cancelled" => UiText.Get("索引任务已取消"),
             _ => UiText.Get("索引更新失败，请重试")
         };
         if (active) _jobTimer.Start();
         else _jobTimer.Stop();
         if (job.Status == "failed") ShowError(job.Error ?? UiText.Get("索引更新失败，请重试"));
+    }
+
+    private static string PartialJobSummary(RetrievalIndexJob job)
+    {
+        // Processed sources do not prove complete lexical or semantic coverage; display the actual receipt separately.
+        // 已处理来源不代表关键词或语义覆盖完整；有覆盖回执时分别显示真实数量。
+        if (job.Coverage is not { } coverage)
+            return string.Format(UiText.Get("索引部分完成 · 已处理 {0}/{1} 个来源"), job.CompletedSources, job.TotalSources);
+        return UiText.Get("索引部分完成") + "\n" + string.Format(
+            UiText.Get("来源 {0} · 关键词覆盖 {1} · 语义覆盖 {2} · 失败 {3} · 跳过 {4} · 部分 {5}"),
+            coverage.Discovered, coverage.Lexical, coverage.Semantic, coverage.Failed, coverage.Skipped, coverage.Partial);
     }
 
     private async Task PollJobAsync()

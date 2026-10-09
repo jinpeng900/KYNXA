@@ -43,6 +43,9 @@ public partial class App : Application
     {
         File.WriteAllText(ResultPath, "RUNNING: isolated production model settings and loopback fake gateway\n");
         UiText.Initialize("zh-CN");
+        // Match the production application's palette initialization before any native controls are created.
+        // 与正式应用保持一致，在创建任何原生控件前初始化配色资源。
+        AppearanceService.Apply(AppearanceService.DefaultPaletteId);
         _anchor = new Window { Content = new Grid() };
         _anchor.AppWindow.Hide();
         _window = new ModelManagementWindow();
@@ -85,7 +88,9 @@ public partial class App : Application
         $"editingId={_window?.EditingProviderIdForTest ?? "(new)"}; " +
         $"compactVisible={NativeUi.IsVisible(Element<ComboBox>("CompactConnectionPicker"))}; " +
         $"savedListVisible={NativeUi.IsVisible(Element<Grid>("SavedConnectionsList"))}; " +
-        $"dialogVisible={(_root.XamlRoot is not null && NativeUi.OpenDialog(_root) is not null)}";
+        $"dialogVisible={(_root.XamlRoot is not null && NativeUi.OpenDialog(_root) is not null)}; " +
+        $"listReads={_gateway.ListReads}; providerRows={Element<StackPanel>("ProviderList").Children.Count}; " +
+        $"status={Element<TextBlock>("StatusText").Text}";
 
     private async Task SetModelIdsAsync(string models)
     {
@@ -492,9 +497,25 @@ public partial class App : Application
             await SettleAsync();
             Check(CustomOutput.Text == "12345" && ChoiceValue(ContextChoice) == "1000000" &&
                 Element<TextBox>("NameBox").Text == "Small / 两个模型", "language switching preserves output drafts, one-million context and user-written connection names");
-            Check(OutputChoice.FontSize == 13 && CustomOutput.FontSize == 13 &&
-                _root.Resources["TextControlBorderBrushFocused"] is SolidColorBrush { Color.R: 136, Color.G: 136, Color.B: 136 },
-                "output controls share the existing 13-point fonts and neutral focus border");
+            Check(OutputChoice.FontSize == 13 && CustomOutput.FontSize == 13,
+                "output controls retain the existing 13-point fonts");
+            // Inspect the rendered focus borders rather than an obsolete window-local gray resource.
+            // 检查实际渲染的焦点边框，不再读取已删除的窗口局部灰色资源。
+            await BringOutputIntoViewAsync();
+            Check(CustomOutput.Focus(FocusState.Keyboard), "the custom output editor accepts keyboard focus");
+            await SettleAsync();
+            var textFocusBorder = NativeUi.ByName<Border>(CustomOutput, "BorderElement");
+            var accent = AppearanceService.ParseColor(AppearanceService.Current.Accent);
+            Check(CustomOutput.FocusState != FocusState.Unfocused &&
+                textFocusBorder.BorderBrush is SolidColorBrush textFocusBrush && textFocusBrush.Color == accent,
+                "the actual focused custom output TextBox renders the shared palette accent border");
+            Check(OutputChoice.Focus(FocusState.Keyboard), "the output selector accepts keyboard focus");
+            await SettleAsync();
+            var choiceFocusBorder = NativeUi.ByName<Border>(OutputChoice, "HighlightBackground");
+            Check(OutputChoice.FocusState != FocusState.Unfocused && choiceFocusBorder.Opacity > 0 &&
+                choiceFocusBorder.BorderBrush is SolidColorBrush choiceFocusBrush && choiceFocusBrush.Color == accent &&
+                CustomOutput.Text == "12345" && ChoiceValue(OutputChoice) == "custom",
+                "the actual focused output ComboBox renders the shared palette accent border without changing the token draft");
             await ProbeAsync(12345);
             ResizeInDips(760, 720);
             await SettleAsync();

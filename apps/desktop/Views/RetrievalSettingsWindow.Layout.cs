@@ -29,19 +29,19 @@ public sealed partial class RetrievalSettingsWindow
 
     private void BuildLayout()
     {
-        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
+        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = AppearanceService.GetBrush("KynxaMainBrush") };
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var focusBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 112, 112, 112));
+        var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
         foreach (string key in new[] { "ComboBoxBackgroundBorderBrushFocused", "SystemControlFocusVisualPrimaryBrush",
             "ComboBoxItemPillFillBrush", "CheckBoxCheckBackgroundFillChecked", "CheckBoxCheckBackgroundFillCheckedPointerOver",
             "CheckBoxCheckBackgroundFillCheckedPressed", "CheckBoxCheckBorderBrushChecked", "CheckBoxCheckBorderBrushCheckedPointerOver",
             "CheckBoxCheckBorderBrushCheckedPressed" })
             root.Resources[key] = focusBrush;
         foreach (string key in new[] { "ComboBoxItemBorderBrushSelected", "ComboBoxItemBorderBrushSelectedPointerOver", "ComboBoxItemBorderBrushSelectedPressed" })
-            root.Resources[key] = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 200, 200, 200));
+            root.Resources[key] = AppearanceService.GetBrush("KynxaSelectionBrush");
 
-        var titleBar = new Grid { Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 250, 249, 248)) };
+        var titleBar = new Grid { Background = AppearanceService.GetBrush("KynxaTitleBarBrush") };
         var title = Label("KYNXA  /  检索与网页搜索");
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
@@ -142,7 +142,7 @@ public sealed partial class RetrievalSettingsWindow
     private static Grid Row(string key, FrameworkElement control)
     {
         var row = new Grid { ColumnSpacing = 16, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(10),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247)) };
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.Children.Add(Label(key));

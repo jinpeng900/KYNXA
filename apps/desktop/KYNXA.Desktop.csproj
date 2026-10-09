@@ -28,6 +28,7 @@
     <Content Include="Resources\UI\Brand\kynxa-logo.png" />
     <Content Include="Resources\UI\Icons\*.svg" />
     <Content Include="Resources\Math\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Resources\Diagrams\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Transcript\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Build\node-runtime.json" Link="node-runtime.json" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
   </ItemGroup>

@@ -53,10 +53,14 @@ public sealed partial class ShellPage
             chats.RemoveAt(index);
             CancelPendingReply(chat.Id);
             await SaveChatChangesAsync(project);
+            await MessageTimePresentation.RestoreAsync(chat.Id, chat.Messages.ToArray());
+            if (!await MessageTimePresentation.RemoveConversationAsync(chat.Id))
+                ShowActionFeedback(UiText.Get("回复时间未能保存到本机缓存，聊天内容不受影响。"));
             _undoSidebarChange = async () =>
             {
                 chats.Insert(Math.Min(index, chats.Count), chat);
                 await SaveChatChangesAsync(project);
+                await RestoreDeletedChatTimesAsync(chat);
             };
             ShowChatNotice(string.Format(UiText.Get("已删除“{0}”"), chat.Title));
         });

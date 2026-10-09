@@ -65,7 +65,9 @@ public sealed partial class ShellPage : Page
     private async void PageRoot_Loaded(object sender, RoutedEventArgs e)
     {
         AttachLanguageUpdates();
+        MessageTimePresentation.ConfigureCache(StoragePaths.DesktopDirectory);
         _layout = _layoutStateService.Load();
+        AppearanceService.Apply(_layout.AppearancePaletteId);
         UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
         InitializeModelPicker();
@@ -163,15 +165,22 @@ public sealed partial class ShellPage : Page
 
     private void SidebarToggle_Click(object sender, RoutedEventArgs e)
     {
+        FocusState focusState = (sender as Control)?.FocusState == FocusState.Keyboard
+            ? FocusState.Keyboard : FocusState.Programmatic;
         if (_isCompactLayout)
         {
             _temporarySidebarOpen = !_temporarySidebarOpen;
-            ApplyLayout();
-            return;
         }
-        _layout.SidebarCollapsed = !_layout.SidebarCollapsed;
+        else
+        {
+            _layout.SidebarCollapsed = !_layout.SidebarCollapsed;
+        }
         ApplyLayout();
-        SaveLayout();
+        // Keep keyboard focus on the visible counterpart after hiding the clicked button.
+        // 隐藏被点击的按钮后，将键盘焦点交给当前可见的对应按钮。
+        (CompactSidebarButton.Visibility == Visibility.Visible ? CompactSidebarButton : CollapseSidebarButton)
+            .Focus(focusState);
+        if (!_isCompactLayout) SaveLayout();
     }
 
     private void SidebarGrip_DragStarted(object? sender, EventArgs e) =>

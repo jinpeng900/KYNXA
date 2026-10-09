@@ -22,7 +22,7 @@ public sealed class StorageLocationRow : Grid
         ColumnSpacing = 14;
         Padding = new Thickness(14, 12, 14, 12);
         CornerRadius = new CornerRadius(12);
-        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 247, 247));
+        Background = AppearanceService.GetBrush("KynxaSettingsCardBrush");
         ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageEndTimeCache.cs" Link="MessageEndTimeCache.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageTimePresentation.cs" Link="MessageTimePresentation.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+  </ItemGroup>
+</Project>

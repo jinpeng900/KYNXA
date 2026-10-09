@@ -12,8 +12,8 @@ using Markdig.Syntax.Inlines;
 namespace KYNXA_Desktop.Services;
 
 /// <summary>
-/// Renders conversation Markdown as selectable HTML with deferred, source-preserving math.
-/// 把聊天 Markdown 渲染为可选择 HTML，公式延迟渲染且保留源文。
+/// Renders selectable conversation HTML with deferred, source-preserving math and diagrams.
+/// 把聊天 Markdown 渲染为可选择 HTML，公式和图表延迟渲染且保留源文。
 /// </summary>
 internal static class TranscriptMarkdown
 {
@@ -99,12 +99,28 @@ internal static class TranscriptMarkdown
             string language = code is FencedCodeBlock fence
                 ? (fence.Info ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty
                 : string.Empty;
+            if (code is FencedCodeBlock mermaidFence && string.Equals(language, "mermaid", StringComparison.OrdinalIgnoreCase))
+            {
+                // A cancelled or truncated final reply can still have an open fence; only a real closer permits rendering.
+                // 取消或截断的最终回复也可能没有闭合围栏；只有真正闭合后才允许渲染，源码仅作为转义文本传递。
+                bool isComplete = mermaidFence.ClosingFencedCharCount >= mermaidFence.OpeningFencedCharCount;
+                renderer.Write("<div class=\"mermaid-block\" data-mermaid-ready=\"")
+                    .Write(isComplete ? "true" : "false").Write("\"><pre class=\"mermaid-source\">")
+                    .Write("<code class=\"language-mermaid\" data-language=\"mermaid\">")
+                    .WriteEscape(source).WriteLine("</code></pre></div>");
+                return;
+            }
             if (!streaming && string.Equals(language, "math", StringComparison.OrdinalIgnoreCase))
             {
                 WriteFormula(renderer, source, display: true);
                 return;
             }
-            renderer.Write("<pre><code");
+            // Earlier closed blocks are complete even while later prose is streaming.
+            // 前面的框已闭合时应视为完整；后面的正文仍流式生成不影响它的复制提示。
+            bool codeComplete = code is FencedCodeBlock codeFence
+                ? codeFence.ClosingFencedCharCount >= codeFence.OpeningFencedCharCount
+                : !streaming;
+            renderer.Write("<pre data-code-complete=\"").Write(codeComplete ? "true" : "false").Write("\"><code");
             if (language.Length > 0)
                 renderer.Write(" class=\"language-").Write(WebUtility.HtmlEncode(language))
                     .Write("\" data-language=\"").Write(WebUtility.HtmlEncode(language)).Write("\"");

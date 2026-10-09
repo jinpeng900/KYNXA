@@ -29,7 +29,7 @@ public partial class App : Application
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
-        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only"))
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--message-time-cache-only"))
         {
             _window.AppWindow.Show(activateWindow: false);
         }
@@ -51,6 +51,54 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--format-only", StringComparer.Ordinal))
+            {
+                await CheckOutputFormatAndResizeAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native output-format checks; 480/980/1600 code scrolling, prose/table wrapping, exact source and native clipboard, shell, empty txt, long txt, ordinary text, quotes, special symbols and blank-line boundaries. Preview: kynxa-transcript-output-format.png.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--block-copy-only", StringComparer.Ordinal))
+            {
+                await CheckBlockCopyAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native content-block copy checks; exact visible source, clipboard acknowledgement, streaming, selection, cache, localization, palettes, keyboard and narrow layout.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--typography-only", StringComparer.Ordinal))
+            {
+                await CheckTypographyAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native transcript typography checks; actual platform glyph fonts, Chinese/English UI, monospaced code, math, diagram labels and narrow layout.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--diagrams-only", StringComparer.Ordinal))
+            {
+                await CheckDiagramsAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native Mermaid diagram checks; bundled SVG types, streaming fences, safe source fallback, native acknowledged copy, palettes, resize, zoom/pan, fullscreen Escape and conversation isolation.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--message-time-cache-only", StringComparer.Ordinal))
+            {
+                await CheckMessageTimeCacheAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native message end-time cache checks; restart restoration, conversation/root isolation, final-content validation, retry, deletion/undo, write failure and rapid navigation without changing formal messages.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--metadata-only", StringComparer.Ordinal))
+            {
+                await CheckMessageMetadataAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} persistent message time checks; no message hover popup, exact terminal states, 480/980 layout, localization, selection and native acknowledged copy.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--reply-timing-only", StringComparer.Ordinal))
             {
                 await CheckReplyTimingAsync();
@@ -135,8 +183,12 @@ public partial class App : Application
             await CheckReplyTimingAsync();
             await CheckTranscriptActionsAsync();
             await CheckMessageMetadataAsync();
+            await CheckMessageTimeCacheAsync();
+            await CheckTypographyAsync();
+            await CheckDiagramsAsync();
+            await CheckBlockCopyAsync();
             await CheckMultilineRepliesAsync();
-            await CheckWrappingAndResizeAsync();
+            await CheckOutputFormatAndResizeAsync();
             await CheckLongInlineMathAsync();
             await CaptureVisualPreviewAsync();
             bool pointerRequested = Environment.GetCommandLineArgs().Contains("--pointer");
@@ -150,7 +202,7 @@ public partial class App : Application
             _metrics["checks"] = _checks;
             _metrics["finalState"] = await EvalAsync<JsonElement>("window.transcriptState()");
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
-            File.WriteAllText(_result, $"PASS: {_checks} DOM transcript checks; cold150={_metrics["cold150IncludingInitializationMs"]}ms, warmAppend={_metrics["warmAppend150Ms"]}ms. Native tables/math, exact code copy, live language switching, 480/980/1600 wrapping and width, selected-content preservation, deferred final updates, opening/following scroll. Pointer diagnostic: {(pointerRequested ? "passed" : "not requested (--pointer)")}. Preview: kynxa-transcript-preview.png.");
+            File.WriteAllText(_result, $"PASS: {_checks} DOM transcript checks; cold150={_metrics["cold150IncludingInitializationMs"]}ms, warmAppend={_metrics["warmAppend150Ms"]}ms. Native tables/math, exact code copy, live language switching, 480/980/1600 code scrolling and prose wrapping, output-format boundaries, selected-content preservation, deferred final updates, opening/following scroll. Pointer diagnostic: {(pointerRequested ? "passed" : "not requested (--pointer)")}. Preview: kynxa-transcript-preview.png.");
         }
         catch (Exception error)
         {
