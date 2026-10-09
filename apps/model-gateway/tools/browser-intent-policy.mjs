@@ -2,6 +2,7 @@ import { win32 } from 'node:path';
 import { browserConnection, isBackgroundBrowserConnection } from './browser-connections.mjs';
 import { currentBrowserInstructionText } from './browser-sessions.mjs';
 import { toolFailure } from '../platform/tool-paths.mjs';
+import { analyzeRequestClauses, requestInstructionText } from '../platform/request-clause-signals.mjs';
 
 const browserName = '(?:浏览器|\\bbrowser\\b|\\b(?:chrome|msedge|edge|firefox|chromium|brave)\\b|\\bgoogle\\b\\s*(?:浏览器|\\bbrowser\\b))';
 const browserControlAction = '(?:打开|开启|启动|操作|控制|显示|切换|激活|截图|截屏|截取|缩放|放大|缩小|调整|最小化|最大化|恢复|刷新|重新加载|关闭|滚动|点击|填写|输入|\\b(?:open|launch|start|operate|control|show|capture|screenshot|focus|activate|resize|zoom|reload|refresh|close|scroll|click|fill|type)\\b)';
@@ -21,11 +22,34 @@ const browserExecutables = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe', '
 const browserExecutableNames = new Map([['chrome', 'chrome.exe'], ['edge', 'msedge.exe'], ['firefox', 'firefox.exe'],
   ['chromium', 'chromium.exe'], ['brave', 'brave.exe'], ['opera', 'opera.exe'], ['vivaldi', 'vivaldi.exe']]);
 
+function browserInstructionText(message) {
+  const browserLiteral = new RegExp(`^${browserName}$`, 'iu');
+  const instruction = requestInstructionText(currentBrowserInstructionText(message),
+    { preserveQuotedLiteral: value => browserLiteral.test(value.trim()) });
+  // A quoted brand is a literal target; quoted operations remain source text rather than current commands.
+  // 引号内完整品牌可作为字面目标；引文中的操作仍是资料文字，不能变成当前执行要求。
+  return instruction.replace(new RegExp(`["“‘「『']\\s*(${browserName})\\s*["”’」』']`, 'giu'), '$1');
+}
+
+function forbiddenBrowserExecutables(clause) {
+  const instruction = browserInstructionText(clause);
+  const restriction = localBrowserForbidden.exec(instruction);
+  if (!restriction) return [];
+  const objectSuffix = instruction.slice(restriction.index + restriction[0].length);
+  // Scope follows the prohibited object, not explanatory words elsewhere in the clause.
+  // 限制范围跟随被禁止的对象，不能由子句其他位置的解释性词语扩大或缩小。
+  const objectBeforeBrowser = /窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b/iu.test(restriction[0]);
+  const objectAfterBrowser = /^\s*(?:(?:浏览器|browser)\s*)?(?:(?:的|['’]s)\s*)?(?:(?:新|当前|已有|已打开|这个|该|无痕|隐私|new|current|existing|private)\s*)*(?:窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b)/iu.test(objectSuffix);
+  if (objectBeforeBrowser || objectAfterBrowser) return [];
+  return [...browserExecutableNames].filter(([name]) => new RegExp(`\\b${name}\\b`, 'iu').test(restriction[0]))
+    .map(([, executable]) => executable);
+}
+
 /** A continuation describes a page action; unrelated research does not retain browser control.
  * 后续消息可以描述页面操作；无关资料检索不能继承浏览器控制。
  */
 export function isBrowserTaskFollowUp(message = '') {
-  const text = currentBrowserInstructionText(message).trim();
+  const text = browserInstructionText(message).trim();
   if (informationalQuestion.test(text) && !explicitExecutionRequest.test(text)) return false;
   if (researchPrefix.test(text) && !/(?:当前|这个|该|本页).{0,8}(?:网页|页面|网站|标签)|作业|账户|账号|二维码/u.test(text)) return false;
   return /^(?:再来|继续|重试|再次尝试|再次尝试打开|再试(?:一次)?|再试试|再尝试(?:一次)?|再次打开|打不开|还是打不开|try again|retry|continue)[。.!！?？\s]*$/iu.test(text) ||
@@ -56,14 +80,20 @@ function clauseRequestsBrowserOperation(clause) {
 }
 
 function currentBrowserIntent(message) {
-  const text = currentBrowserInstructionText(message);
-  const clauses = text.split(/[，。；,.!?;\n]/u);
+  const text = browserInstructionText(message);
+  const projection = analyzeRequestClauses(text);
+  const clauses = projection.activeText.split(/[，。；,.!?;\n]/u);
   let explicitBrowserTask = false, allowLocalBrowser = false;
   const excludedBrowserExecutables = [];
+  // Excluded clauses never provide a positive operation; explicit brand restrictions still bind their object.
+  // 已排除子句不能提供正向操作意图；明确的浏览器品牌限制仍约束其自身对象。
+  for (const clause of projection.excludedClauses) {
+    if (['explicit-task-exit', 'superseded-by-task-boundary'].includes(clause.basis)) continue;
+    excludedBrowserExecutables.push(...forbiddenBrowserExecutables(clause.text));
+  }
   for (const clause of clauses) {
     if (localBrowserForbidden.test(clause)) {
-      for (const [name, executable] of browserExecutableNames)
-        if (new RegExp(`\\b${name}\\b`, 'iu').test(clause)) excludedBrowserExecutables.push(executable);
+      excludedBrowserExecutables.push(...forbiddenBrowserExecutables(clause));
       continue;
     }
     if (!clauseRequestsBrowserOperation(clause)) continue;
@@ -81,16 +111,19 @@ function currentBrowserIntent(message) {
 
 export function inferBrowserTaskIntent(message = '', previousUserMessages = []) {
   const current = currentBrowserIntent(message);
-  const text = currentBrowserInstructionText(message);
-  if (!isBrowserTaskFollowUp(message) || new RegExp(browserName, 'iu').test(text)) return { ...current, inherited: false };
+  const text = browserInstructionText(message);
+  if (analyzeRequestClauses(text).boundary !== 'none' || !isBrowserTaskFollowUp(message) ||
+      new RegExp(browserName, 'iu').test(text)) return { ...current, inherited: false };
   let active;
   const history = [...previousUserMessages];
   if (history.at(-1) === message) history.pop();
   for (const previous of history) {
+    const boundary = analyzeRequestClauses(currentBrowserInstructionText(previous)).boundary;
+    if (boundary !== 'none') active = undefined;
     const intent = currentBrowserIntent(previous);
     if (intent.explicitBrowserTask && (new RegExp(browserName, 'iu').test(currentBrowserInstructionText(previous)) ||
         !isBrowserTaskFollowUp(previous) || !active)) active = intent;
-    else if (!isBrowserTaskFollowUp(previous)) active = undefined;
+    else if (boundary !== 'none' || !isBrowserTaskFollowUp(previous)) active = undefined;
   }
   if (active) return { ...active, inherited: true };
   return { ...current, inherited: false };

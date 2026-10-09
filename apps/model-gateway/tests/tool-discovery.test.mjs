@@ -6,6 +6,7 @@ import { searchTools, toolDiscoveryCategory, toolSelectionSignals } from '../too
 import { estimateTokens } from '../models/context.mjs';
 import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
+import { analyzeRequestClauses } from '../platform/request-clause-signals.mjs';
 
 const remote = (name, description = 'Browser automation.') => ({ name, description, source: 'mcp:synthetic',
   inputSchema: { type: 'object', properties: {}, additionalProperties: false } });
@@ -281,4 +282,136 @@ test('broker tool loading retains a valid screenshot schema beside an unavailabl
   assert.deepEqual(result.unavailable, [{ name: 'mcp.unconnected.browser_screenshot', code: 'TOOL_NOT_FOUND' }]);
   assert.ok(f.service.modelCatalog(context).some(tool => tool.name === 'computer.screenshot'));
   assert.equal(f.service.mcp.connections.size, 0, 'loading cannot start an absent provider or perform desktop actions');
+});
+
+test('task switches, corrections and uncertain requests do not revive previous capability names', () => {
+  const historySignals = ['打开本机浏览器', '查看我的IP'];
+  const previousToolNames = ['computer.launch', 'terminal.host.run', 'mcp.chrome-devtools.list_pages'];
+  for (const [message, taskRelation] of [
+    ['换个话题，看看蛋糕为什么干', undefined],
+    ['我说的是人际网络，看看怎么维护', undefined],
+    ['看看大家如何 react to criticism', undefined],
+    ['this cake seems dry', undefined],
+    ['继续讨论另一件事情', { type: 'topic-switch', allowsInheritance: false }],
+    ['再来', { type: 'correction', allowsInheritance: true }],
+    ['再来', { type: 'new', allowsInheritance: false }],
+    ['再来', { type: 'uncertain', allowsInheritance: false }]
+  ]) {
+    const signals = toolSelectionSignals(message, { historySignals, previousToolNames, taskRelation });
+    assert.equal(signals.retainedNames.size, 0, message);
+    assert.equal(signals.hostTerminal, false, message);
+    assert.equal(signals.desktop, false, message);
+    assert.equal(signals.browser, false, message);
+    for (const protocol of protocols) {
+      const catalog = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 16000, message,
+        historySignals, previousToolNames, taskRelation });
+      assert.ok(!catalog.selected.some(tool => tool.name.startsWith('terminal.host.') || tool.name.startsWith('computer.')), message);
+      for (const name of ['tool.search', 'tool.load']) assert.ok(catalog.selected.some(tool => tool.name === name));
+      catalog.load(['terminal.host.run']);
+      assert.ok(catalog.selected.some(tool => tool.name === 'terminal.host.run'), 'deferred capabilities remain discoverable');
+    }
+  }
+});
+
+test('social networks, react as a verb and brands are candidate clues rather than device/code decisions', () => {
+  for (const message of ['检查我的人际网络', '查看我的关系网络', 'Check my professional network',
+    'Inspect my network of mentors', 'How should I react to criticism?', '看看 OpenAI 品牌的历史']) {
+    const signals = toolSelectionSignals(message, { historySignals: ['查看我的IP', '打开本机浏览器'],
+      previousToolNames: ['terminal.host.run', 'computer.launch'] });
+    assert.equal(signals.deviceState, false, message);
+    assert.equal(signals.hostTerminal, false, message);
+    assert.equal(signals.docs, false, message);
+    assert.equal(signals.retainedNames.size, 0, message);
+  }
+  assert.equal(toolSelectionSignals('React framework documentation').docs, true);
+  const socialSearch = remote('mcp.directory.search_people', 'Find professional relationships and a social network.');
+  assert.ok(names(searchTools([...descriptors, socialSearch], 'professional relationships')).includes(socialSearch.name));
+  assert.ok(names(searchTools([...descriptors, socialSearch], 'Inspect my network of mentors')).includes(socialSearch.name),
+    'ambiguous lexical matches retain the social candidate for model evaluation rather than deciding intent');
+});
+
+test('continuations retain only the latest subject and explicit task relation cannot copy historical arguments', () => {
+  const historySignals = ['调用本机终端', '打开本机浏览器'];
+  const previousToolNames = ['terminal.host.run', 'computer.launch', 'mcp.chrome-devtools.list_pages'];
+  const signals = toolSelectionSignals('继续', { historySignals, previousToolNames,
+    taskRelation: { type: 'continue', allowsInheritance: true } });
+  assert.equal(signals.hostTerminal, false);
+  assert.equal(signals.desktop, true);
+  assert.deepEqual([...signals.retainedNames], ['computer.launch', 'mcp.chrome-devtools.list_pages']);
+  const correction = toolSelectionSignals('改为远程浏览器', { historySignals, previousToolNames,
+    taskRelation: { type: 'continue', allowsInheritance: true } });
+  assert.equal(correction.remoteBrowser, true);
+  assert.equal(correction.desktop, false);
+  assert.equal(correction.retainedNames.size, 0);
+  const research = toolSelectionSignals('再来', { historySignals: ['打开Chrome', '查证今天的官方新闻'],
+    previousToolNames: ['computer.launch'] });
+  assert.equal(research.desktop, false, 'continuing a later research task does not resurrect an older browser boundary');
+  assert.equal(research.browser, false);
+  assert.equal(research.web, true, 'only the latest research capability hint is continued');
+  assert.equal(research.retainedNames.size, 0);
+  for (const latest of ['换个话题，蛋糕为什么干', '我说的是人际网络', '蛋糕为什么干']) {
+    const next = toolSelectionSignals('再来', { historySignals: ['打开Chrome', latest],
+      previousToolNames: ['computer.launch'] });
+    assert.equal(next.desktop, false, latest);
+    assert.equal(next.retainedNames.size, 0, latest);
+  }
+  assert.equal(toolSelectionSignals('再来', { historySignals: ['打开Chrome', '再来', '再试'] }).desktop, true,
+    'a bounded chain of explicit retries can retain its original active capability');
+});
+
+test('negated and abandoned clauses cannot supply positive capability hints or revive old tool names', () => {
+  const historySignals = ['在本机浏览器打开项目页面'], previousToolNames = ['computer.launch', 'mcp.chrome.navigate_page'];
+  for (const message of ['先不聊浏览器了，谈谈人际网络怎么建立。',
+    '不是打开浏览器，是研究 React 论文的方法。', '暂且搁置本机终端，介绍 OpenAI 品牌。',
+    '别再谈浏览器，解释人际信任。', 'Not launching Chrome; explain a social network instead.',
+    'Stop discussing the desktop. Discuss the recipe.', '不要检查我的IP，谈谈人际网络',
+    '算了，聊点别的：这个方法如何帮助建立人际信任？',
+    'Never mind the previous task. How can this method improve a social network?',
+    '请注意：不是打开浏览器，是研究 React 论文的方法。', '我说的不是打开浏览器，是研究论文的方法。']) {
+    const signals = toolSelectionSignals(message, { historySignals, previousToolNames });
+    assert.equal(signals.browser, false, message); assert.equal(signals.desktop, false, message);
+    assert.equal(signals.hostTerminal, false, message); assert.equal(signals.deviceState, false, message);
+    assert.equal(signals.retainedNames.size, 0, message);
+    for (const name of ['tool.search', 'tool.load']) {
+      const catalog = new ModelToolCatalog(descriptors, { protocol: protocols[0], tokenBudget: 16000,
+        message, historySignals, previousToolNames });
+      assert.ok(catalog.selected.some(tool => tool.name === name), message);
+    }
+  }
+  const lateExit = toolSelectionSignals('打开Chrome，算了，改为解释人际网络', { historySignals, previousToolNames });
+  assert.equal(lateExit.desktop, false); assert.equal(lateExit.browser, false);
+  assert.equal(lateExit.retainedNames.size, 0);
+  for (const message of ['不要开新窗口，在当前本机浏览器读取页面', '不是打开Chrome，而是打开本机Edge',
+    'Do not open the local browser, use the remote browser to read the page']) {
+    const signals = toolSelectionSignals(message, { historySignals, previousToolNames });
+    assert.equal(signals.browser, true, message);
+    assert.equal(signals.retainedNames.size, 0, 'the positive clause supplies its own candidate, without old names');
+  }
+});
+
+test('shared clause projection retains original text and records only explicit syntactic exclusions', () => {
+  const original = '不是让你查看 src/worker.ts，我是想了解人际网络怎么建立';
+  const projected = analyzeRequestClauses(original);
+  assert.equal(original, '不是让你查看 src/worker.ts，我是想了解人际网络怎么建立');
+  assert.equal(projected.boundary, 'correction');
+  assert.doesNotMatch(projected.activeText, /src\/worker\.ts/);
+  assert.match(projected.activeText, /人际网络/);
+  for (const clause of projected.excludedClauses)
+    assert.equal(original.slice(clause.startOffset, clause.endOffset), clause.text);
+  assert.equal(projected.originalPreserved, true); assert.equal(projected.semanticVerified, false);
+  const abandoned = '打开Chrome，算了，改为解释人际网络';
+  const exited = analyzeRequestClauses(abandoned);
+  assert.equal(exited.activeText, '改为解释人际网络');
+  assert.ok(exited.excludedClauses.some(clause => clause.text === '打开Chrome' && clause.basis === 'superseded-by-task-boundary'));
+  assert.ok(exited.provenance.some(item => item.rejected === '打开Chrome' && item.accepted === exited.activeText));
+  for (const clause of exited.excludedClauses)
+    assert.equal(abandoned.slice(clause.startOffset, clause.endOffset), clause.text);
+  const english = analyzeRequestClauses('Correction: not open the browser; explain a paper instead.');
+  assert.match(english.activeText, /explain a paper instead/);
+  assert.doesNotMatch(english.activeText, /open the browser/);
+  assert.match(analyzeRequestClauses('Rather than opening Chrome, explain a paper').activeText, /explain a paper/);
+  assert.match(analyzeRequestClauses('更正：我要的是2026年英文论文，不是2025年').activeText, /2026/);
+  assert.doesNotMatch(analyzeRequestClauses('更正：我要的是2026年英文论文，不是2025年').activeText, /2025/);
+  for (const value of ['方法是实验方法，不涉及操作', 'open Chrome', 'src/worker.ts', 'https://example.invalid/path', 'C:\\Work\\note.ts'])
+    assert.equal(analyzeRequestClauses(value).activeText, value, 'ordinary inputs remain unchanged');
 });

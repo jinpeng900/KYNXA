@@ -1,4 +1,5 @@
 import { wireCatalog } from '../models/tool-protocols.mjs';
+import { analyzeRequestClauses } from '../platform/request-clause-signals.mjs';
 
 const computerAliases = {
   windows: 'windows window list 窗口 窗口列表 当前窗口',
@@ -72,6 +73,15 @@ function queryTerms(query) {
   return [...terms].slice(0, 32);
 }
 
+/**
+ * A generic network mention is a lexical clue; concrete runtime subjects can rank host diagnostics.
+ * 普通 network/网络 只是词法线索；具体运行时对象才提升宿主诊断候选的排序。
+ */
+function hasDeviceSubject(text) {
+  return /网卡|适配器|代理(?:设置|配置)|dns(?:设置|配置|服务器)|进程|端口|\b(?:ip(?:v[46])?|dns|proxy|adapters?|interfaces?|process(?:es)?|ports?|ipconfig|netstat|tasklist|get-process|get-nettcpconnection|get-netadapter|get-netipconfiguration|ping|tracert|traceroute|nslookup|resolve-dnsname|test-netconnection)\b/.test(text) ||
+    /网络(?:配置|状态)|当前(?:的)?网络|现在(?:的)?网络|\b(?:current network|network (?:status|configuration|adapters?))\b/.test(text);
+}
+
 /** Local state and public-IP explanation are different discovery subjects, not different permission levels.
  * 本机状态与公网 IP/网络概念属于不同发现主题，不改变终端权限、审批或运行时可用性。 */
 function deviceStateTopic(text) {
@@ -99,7 +109,7 @@ function deviceStateTopic(text) {
     /^(?:please\s+)?(?:check|inspect|list|show|read)\s+(?:(?:my|current|local)\s+)?(?:proxy|dns|network|network adapters?|processes|listening ports?)[?.!\s]*$/.test(text);
   const portOwner = /(?:哪个|什么|谁).{0,12}(?:程序|进程|软件|应用)?.{0,12}(?:占用|占了|占|监听).{0,16}(?:端口|port)|端口.{0,12}(?:谁|哪个(?:程序|进程)).{0,12}(?:占用|占了|占|监听)/.test(text) ||
     /\b(?:which|what)\s+(?:process|program|application|app)\b.{0,32}\b(?:port|listening)\b|\bwhat(?:'s| is) using (?:port|[0-9]{2,5})\b/.test(text);
-  return localOwner || command || inspection && localStatus || directStatus || portOwner ? 'device' : null;
+  return localOwner && hasDeviceSubject(text) || command || inspection && localStatus || directStatus || portOwner ? 'device' : null;
 }
 
 /**
@@ -115,7 +125,7 @@ export function searchTools(descriptors, query = '') {
   const wireIdentityQuery = /^k_[a-z0-9_]+_[a-f0-9]{8}$/.test(text);
   return enabled.map((tool, index) => {
     const name = normalized(tool.name, 256), description = normalized(tool.description, 8000), alias = aliases(tool,
-      { includeDeviceState: !['external', 'explanation'].includes(deviceTopic) });
+      { includeDeviceState: !['external', 'explanation'].includes(deviceTopic) && hasDeviceSubject(text) });
     // A complete dotted tool identity is not a bag of generic provider/name words.
     // If that identity is absent or disabled, unrelated tools must not look like replacements.
     // 完整带点工具身份不能拆成通用名称关键词；该身份缺失或禁用时，不能把无关工具当成替代项。
@@ -139,7 +149,7 @@ export function searchTools(descriptors, query = '') {
 }
 
 function currentSignals(message) {
-  const text = normalized(message, 2000), terms = queryTerms(text);
+  const text = analyzeRequestClauses(normalized(message, 2000)).activeText, terms = queryTerms(text);
   const browser = /浏览器|网页|网站|网址|页面|chrome|firefox|playwright|devtools|\bedge\b|\bbrowser\b/.test(text);
   const remoteBrowser = /(?:云端|远程).{0,16}浏览器|\b(?:remote|cloud)\s+browser\b/.test(text);
   const deviceTopic = deviceStateTopic(text);
@@ -149,7 +159,7 @@ function currentSignals(message) {
     web: /最新|最近|当前|现在|今天|今日|新闻|官网|官方|上线|发布|搜索|查询|查证|联网|搜一下|是谁|什么时候|什么时间|多少钱/.test(text) ||
       /\b(?:latest|current|recent|today|news|official|released?|announced?|search|who|when|price|weather)\b|\blook\s+up\b/.test(text),
     docs: /文档|接口|代码|编程|开发|框架|库的|库怎么/.test(text) ||
-      /\b(?:api|sdk|docs?|documentation|library|libraries|framework|programming|code|typescript|python|dotnet|winui|react)\b/.test(text),
+      /\b(?:api|sdk|docs?|documentation|library|libraries|framework|programming|code|typescript|python|dotnet|winui)\b/.test(text),
     desktop: /截图|截屏|屏幕|鼠标|键盘|光标|输入框|桌面|打开软件|打开应用|控制本机|浏览器|记事本|计算器|打开界面|可见窗口|调整窗口|窗口大小|最大化|最小化|恢复窗口/.test(text) ||
       /(?:输入|键入|填写|填入|填进|粘贴).{0,24}(?:窗口|界面|页面|输入框)|\b(?:type|enter|paste)\b.{0,40}\b(?:caret|focused field|text field|input field)\b/.test(text) ||
       /(?:打开|访问|浏览|查看|看看).{0,30}(?:网站|网页|网址|页面)/.test(text) ||
@@ -176,6 +186,7 @@ function currentSignals(message) {
 }
 
 function browserBoundary(text) {
+  text = analyzeRequestClauses(text).activeText;
   const local = [...text.matchAll(/(?:本机|本地|可见|我的|自己的).{0,16}(?:浏览器|chrome|edge|窗口)|\blocal\s+(?:browser|chrome|edge)\b/g)].at(-1);
   const remote = [...text.matchAll(/(?:云端|远程).{0,16}浏览器|\b(?:remote|cloud)\s+browser\b/g)].at(-1);
   if (local || remote) return local && (!remote || local.index > remote.index) ? 'local' : 'remote';
@@ -186,39 +197,67 @@ function browserBoundary(text) {
 }
 
 /**
+ * Task relation is a context hint, never an execution or permission contract.
+ * 任务关系只提示上下文继承，不构成执行或权限合同。
+ */
+function discoveryTaskRelation(text, taskRelation) {
+  const clauseBoundary = analyzeRequestClauses(text).boundary;
+  if (clauseBoundary !== 'none') return clauseBoundary;
+  if (/新任务|换个话题|另外一件|另一个问题|\b(?:new task|different topic|change (?:the )?topic)\b/.test(text)) return 'topic-switch';
+  if (/更正|纠正|我说的是|不是.{0,32}(?:而是|是)|改为|改成|\b(?:correction|instead|i mean|rather than)\b/.test(text)) return 'correction';
+  const type = typeof taskRelation === 'string' ? taskRelation : taskRelation?.type;
+  if (['continue', 'supplement', 'correction', 'topic-switch', 'switch', 'new', 'uncertain'].includes(type)) return type;
+  // Only a short, explicit continuation invites old capability hints; a fresh "look at X" does not.
+  // 只有简短明确的续问才继承旧能力提示；新出现的“看看 X”不会单独承接旧主题。
+  return text.length <= 240 && (/^(?:请|帮我|please\s+)?(?:继续|再来|重试|再次|再试|尝试|打不开|还是|再(?:查|看)|刷新|现在呢|\b(?:again|retry|continue|try again|refresh)\b)/.test(text) ||
+    /^what about now[?.!\s]*$|^(?:那|这个|那个|它|it|that|this)(?:呢)?[?.!？。！\s]*$/.test(text)) ? 'continue' : 'uncertain';
+}
+
+/**
  * Recent subject hints select schemas only. They never import old approval, arguments or capability status.
  * 近期主题提示只选择 schema，不继承历史审批、参数或能力状态。
  * deviceState marks the current device-inspection subject or its short retry, never an execution grant.
  * deviceState 表示当前本机状态查询或其短续问，不表示执行授权或宿主工具就绪。
  */
-export function toolSelectionSignals(message, { historySignals = [], previousToolNames = [] } = {}) {
-  const text = normalized(message, 2000), signals = currentSignals(text);
+export function toolSelectionSignals(message, { historySignals = [], previousToolNames = [], taskRelation } = {}) {
+  const text = normalized(message, 2000), clauseProjection = analyzeRequestClauses(text), signals = currentSignals(text);
   const currentBoundary = browserBoundary(text);
   const recent = Array.isArray(historySignals) ? historySignals.slice(-3).filter(item => typeof item === 'string')
     .map(item => normalized(item, 1000)) : [];
   const priorNames = Array.isArray(previousToolNames) ? previousToolNames.slice(-32)
     .filter(name => typeof name === 'string' && /^[a-zA-Z0-9._-]{1,256}$/.test(name)) : [];
   const previous = recent.map(currentSignals);
-  const followup = text.length <= 240 && (/继续|再来|重试|再次|再试|尝试|打不开|还是|那|查看|看看|访问|打开|登录|界面|本机|本地|\b(?:again|retry|continue|it|that|this|open|view|visit)\b/.test(text) ||
-    previous.some(item => item.deviceState) && /再(?:查|看)|刷新|现在呢|\b(?:refresh|now)\b/.test(text));
-  const explicitNewTask = /新任务|换个话题|另外一件|另一个问题|\b(?:new task|different topic)\b/.test(text) ||
+  const relation = discoveryTaskRelation(text, taskRelation);
+  const followup = ['continue', 'supplement'].includes(relation) && taskRelation?.allowsInheritance !== false &&
+    !clauseProjection.excludedClauses.length;
+  const explicitNewTask =
     signals.docs && !signals.desktop && !signals.browser && !signals.hostTerminal ||
-    signals.deviceState && !signals.desktop && !signals.browser || ['external', 'explanation'].includes(deviceStateTopic(text));
+    signals.deviceState && !signals.desktop && !signals.browser || ['external', 'explanation'].includes(deviceStateTopic(clauseProjection.activeText));
   const retainedNames = new Set();
   let boundary = currentBoundary;
   if (followup && !explicitNewTask) {
-    const recentSubject = [...previous].reverse().find(item => item.desktop || item.browser || item.hostTerminal || item.deviceState || item.docs || item.web);
+    // A later unrecognized topic is still a boundary; only a chain of explicit retries can reach older clues.
+    // 后来的未识别主题仍构成边界；只有连续的明确续问才允许查找更早的线索。
+    let subjectIndex = -1;
+    for (let index = previous.length - 1; index >= 0; index--) {
+      const item = previous[index];
+      if (item.desktop || item.browser || item.hostTerminal || item.deviceState || item.docs || item.web) { subjectIndex = index; break; }
+      if (!['continue', 'supplement'].includes(discoveryTaskRelation(recent[index]))) break;
+    }
+    const recentSubject = previous[subjectIndex];
     const deviceFollowup = recentSubject?.deviceState && !recentSubject.browser && !recentSubject.desktop && !signals.browser && !signals.desktop;
-    const subjects = deviceFollowup ? [recentSubject] : previous;
-    for (const key of ['desktop', 'browser', 'hostTerminal'])
+    const subjects = recentSubject ? [recentSubject] : [];
+    for (const key of ['desktop', 'browser', 'hostTerminal', 'docs', 'web'])
       signals[key] ||= subjects.some(item => item[key]);
     signals.deviceState ||= Boolean(deviceFollowup);
-    if (!deviceFollowup) boundary ??= [...recent].reverse().map(browserBoundary).find(item => item !== null) ?? null;
+    if (recentSubject?.browser && !deviceFollowup) boundary ??= browserBoundary(recent[subjectIndex]);
     for (const name of priorNames) {
-      // A retry of the latest device inspection must not resurrect an older browser topic.
-      // 最新设备查询的重试不能复活更早的浏览器主题；原浏览器续问规则保持。
+      // Retained names belong to the latest subject, never every old attempted capability.
+      // 保留工具名称仅属于最新主题，不能复活所有曾尝试过的旧能力。
       const category = toolDiscoveryCategory({ name });
-      if (deviceFollowup && ['computer', 'browser'].includes(category)) continue;
+      if (!(category === 'computer' && recentSubject?.desktop || category === 'host-terminal' && recentSubject?.hostTerminal ||
+          category === 'browser' && recentSubject?.browser || category === 'web-search' && recentSubject?.web ||
+          category === 'web-fetch' && (recentSubject?.web || recentSubject?.url))) continue;
       retainedNames.add(name);
       if (category === 'computer') signals.desktop = true;
       else if (category === 'host-terminal') signals.hostTerminal = true;
@@ -233,7 +272,7 @@ export function toolSelectionSignals(message, { historySignals = [], previousToo
     signals.browser = true;
     signals.desktop = boundary === 'local';
   }
-  if (signals.remoteBrowser && !/本机桌面|本地窗口|\blocal desktop\b/.test(text)) signals.desktop = false;
+  if (signals.remoteBrowser && !/本机桌面|本地窗口|\blocal desktop\b/.test(clauseProjection.activeText)) signals.desktop = false;
   if (signals.deviceState) signals.hostTerminal = true;
-  return { ...signals, retainedNames };
+  return { ...signals, retainedNames, taskRelation: relation };
 }

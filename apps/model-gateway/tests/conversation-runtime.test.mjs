@@ -40,7 +40,11 @@ test('one transcript survives model/provider switches and restart; other convers
   await f.runtime.reply(first);
   await f.restart();
   await f.runtime.replyStream({ ...first, provider: 'provider-b', model: 'model-b', message: 'continue', requestId: randomUUID() }, () => {});
-  assert.deepEqual(f.seen[1].messages.map(item => item.content), ['remember my project', 'answer-1', 'continue']);
+  // Derived task hints are separate system data; the provider-neutral dialogue remains exact.
+  // 派生任务线索放在独立系统数据中，跨供应商对话原文仍须逐条保持一致。
+  assert.deepEqual(f.seen[1].messages.filter(item => item.role !== 'system').map(item => item.content),
+    ['remember my project', 'answer-1', 'continue']);
+  assert.match(f.seen[1].messages.find(item => item.role === 'system').content, /"relation":"continue"/u);
   await f.runtime.reply({ ...first, message: 'back to first model', requestId: randomUUID() });
   assert.deepEqual(f.seen[2].messages.map(item => item.content), ['remember my project', 'answer-1', 'continue', 'answer-2', 'back to first model']);
   const log = await f.runtime.conversations.readMessages(conversationId);
