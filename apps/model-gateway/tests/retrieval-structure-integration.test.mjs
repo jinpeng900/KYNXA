@@ -31,13 +31,18 @@ async function indexFixture(t) {
   return { root, structures, legacy, upgraded };
 }
 
-test('code queries reach automatic retrieval and exact file names are not mistaken for declarations', () => {
-  for (const message of ['查找 CancelJob 方法的定义', '仓库中的 CancelJob 在哪里', '解释 `JobIndex.CancelJob`']) {
+test('local code queries retrieve candidates with a soft domain and exact files remain distinct from declarations', () => {
+  for (const message of ['仓库中的 CancelJob 在哪里', '解释 `JobIndex.CancelJob`']) {
     assert.equal(retrievalPlan(message).shouldRetrieve, true, message);
-    assert.equal(retrievalPlan(message).domain, 'code', message);
+    assert.equal(retrievalPlan(message).domain, 'mixed', message);
+    assert.equal(retrievalPlan(message).preferredDomain, 'code', message);
   }
+  assert.equal(retrievalPlan('查找 CancelJob 方法的定义').domain, 'mixed');
+  assert.equal(buildRetrievalIntent('查找 CancelJob 方法的定义').symbol, undefined,
+    'a bare method-shaped name still needs evidence that it is a code declaration');
   assert.deepEqual(buildRetrievalIntent('查看 `settings.json` 中的设置'), { domain: 'mixed', path: 'settings.json' });
-  assert.deepEqual(buildRetrievalIntent('在 JobIndex.cs 查找 CancelJob 方法'), { domain: 'code', symbol: 'CancelJob', path: 'jobindex.cs' });
+  assert.deepEqual(buildRetrievalIntent('在 JobIndex.cs 查找 CancelJob 方法'),
+    { domain: 'mixed', symbol: 'CancelJob', path: 'jobindex.cs', preferredDomain: 'code' });
   assert.equal(retrievalPlan('你好').shouldRetrieve, false);
   assert.equal(retrievalPlan('运行 node 验证脚本').shouldRetrieve, false);
   assert.equal(retrievalPlan('然后它怎么处理取消', { history: [{ Role: 'user', Content: '仓库中 CancelJob 方法如何处理取消' }] }).shouldRetrieve, true);

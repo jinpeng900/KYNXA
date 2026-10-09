@@ -29,10 +29,10 @@ const terminalDescriptor = { name: 'terminal.run', description: 'Run Node.js or 
     args: { type: 'array', items: { type: 'string' }, maxItems: 64 }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 } },
   required: ['command', 'args'], additionalProperties: false }, source: 'builtin' };
 const catalogDescriptors = [
-  { name: 'tool.search', description: 'Discover enabled tools and schemas by name or capability. Use returned names with tool.load before calling deferred tools.',
+  { name: 'tool.search', description: 'Rank enabled tools by capability/name, not intent. Empty query pages all. Load exact returned names with tool.load; no execution/permission grant.',
     inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, offset: { type: 'integer', minimum: 0, maximum: 100000 },
       limit: { type: 'integer', minimum: 1, maximum: 20 } }, additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.load', description: 'Select enabled names or exact model aliases within the schema budget. Keeps discovery. Reports missing items; does not execute.',
+  { name: 'tool.load', description: 'Load enabled exact names/aliases within budget. Keep discovery, report missing items; no execution/permission or readiness.',
     inputSchema: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, maxItems: 32 } }, required: ['names'], additionalProperties: false }, source: 'builtin' },
   { name: 'tool.result.read', description: 'Page a saved result by opaque id in this chat. Media remains typed references; private MCP metadata is excluded.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },

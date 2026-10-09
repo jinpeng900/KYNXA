@@ -177,9 +177,13 @@ test('final evidence can shrink to empty without saving unused references or exp
   const final = await retrieval.finalizeEvidence(context, draft, { existingContext: [text], maximumTokens: 4096 });
   assert.equal(final.prompt, ''); assert.deepEqual(final.references, []); assert.equal(final.resultRef, undefined);
   assert.equal(final.evidenceAssessment.reason, 'already-in-context'); assert.equal(archives, 0);
+  assert.equal(final.outcome.state, 'evidence-already-in-context');
+  assert.equal(final.outcome.next, 'check-existing-context-support');
   const smaller = await retrieval.evidence(context, '根据资料如何恢复备份？', { maximumTokens: 4096, deferArchive: true });
   const empty = await retrieval.finalizeEvidence(context, smaller, { maximumTokens: 0 });
   assert.equal(empty.prompt, ''); assert.deepEqual(empty.references, []); assert.equal(archives, 0);
+  assert.equal(empty.outcome.state, 'evidence-budget-exhausted');
+  assert.equal(empty.outcome.next, 'use-current-evidence-or-state-context-limit');
 });
 
 test('deferred evidence rechecks revocation, source bytes, enabled settings and project scope before publication', async t => {
@@ -205,6 +209,7 @@ test('deferred evidence rechecks revocation, source bytes, enabled settings and 
     else {
       const final = await retrieval.finalizeEvidence(context, draft);
       assert.equal(final.prompt, ''); assert.deepEqual(final.references, []); assert.equal(final.resultRef, undefined);
+      assert.equal(final.outcome.state, 'source-changed');
     }
     assert.equal(archived, 0); retrieval.search = search;
   });

@@ -1,0 +1,21 @@
+{
+  "scope": "Frozen runtime scenarios; labels precede execution. Mock model responses test gateway interpretation and request assembly, not LLM semantic accuracy.",
+  "cases": [
+    { "id": "cake-after-code", "turns": ["解释 src/tasks.ts 中的队列机制", "换个话题：海绵蛋糕为何发干？", "继续解释这个方法为什么能保持湿润"], "expected": { "automatic": false, "forbiddenDerived": ["src/tasks.ts"] } },
+    { "id": "implicit-english-topic", "turns": ["Explain cancellation in src/jobs.ts", "Why is a sponge cake dry?", "How does its texture change overnight?"], "expected": { "automatic": false, "forbiddenDerived": ["src/jobs.ts"] } },
+    { "id": "negated-current-path", "turns": ["解释 src/cache.ts 中的过期机制", "先不谈代码了，聊聊人际信任", "请不要再分析 src/cache.ts，我想知道人际网络如何形成信任"], "expected": { "automatic": false, "forbiddenDerived": ["src/cache.ts"] } },
+    { "id": "negated-current-path-english", "turns": ["Explain src/cache.ts", "Let's change the subject to friendship", "Please don't read src/cache.ts; explain how social networks build trust."], "expected": { "automatic": false, "forbiddenDerived": ["src/cache.ts"] } },
+    { "id": "correct-paper-year", "turns": ["比较论文的 2024 年中文实验结果", "更正：比较 2026 年英文论文实验，不是 2024 年中文实验", "继续比较这个方法的效应"], "expected": { "automatic": true, "requiredDerived": ["2026"], "forbiddenDerived": ["2024"] } },
+    { "id": "latest-document-only", "turns": ["解释 src/queue.ts 中恢复的实现", "换个话题：解释 docs/refunds.md 中退款期限", "继续讲这个条件的例外"], "expected": { "automatic": true, "requiredDerived": ["docs/refunds.md"], "forbiddenDerived": ["src/queue.ts"] } },
+    { "id": "latest-code-only", "turns": ["解释 docs/refunds.md 中的退款期限", "换个话题：解释 src/clock.ts 中时钟漂移", "继续解释这个方法的副作用"], "expected": { "automatic": true, "requiredDerived": ["src/clock.ts"], "forbiddenDerived": ["docs/refunds.md"] } },
+    { "id": "explicit-file-execution", "turns": ["解释 src/store.ts 的序列化方案", "好的，谢谢", "读取 docs/install.md"], "expected": { "automatic": false, "forbiddenDerived": ["src/store.ts"] } },
+    { "id": "source-correction-bilingual", "turns": ["Explain src/optimizer.ts", "I meant docs/optimizer.md, not src/optimizer.ts", "Continue explaining its stopping condition"], "expected": { "automatic": true, "requiredDerived": ["docs/optimizer.md"], "forbiddenDerived": ["src/optimizer.ts"] } },
+    { "id": "two-resets", "turns": ["解释 src/net.ts 里的 socket", "换个话题：解释 docs/social.md 中的人际网络", "先不谈文档了，为什么朋友会失去联系？"], "expected": { "automatic": false, "forbiddenDerived": ["src/net.ts", "docs/social.md"] } },
+    { "id": "ambiguous-brand-after-social", "turns": ["解释 src/react.ts 里的组件", "换个话题：社会心理学中的反应机制", "How do people react when a brand changes its name?"], "expected": { "automatic": false, "forbiddenDerived": ["src/react.ts"] } },
+    { "id": "current-source-overrides-old", "turns": ["解释 src/cancel.ts 中的 cancellation", "解释 docs/protocol.md 中的实验协议", "另外，分析 docs/safety.md 的停止条件"], "expected": { "automatic": true, "requiredDerived": ["docs/safety.md"], "forbiddenDerived": ["src/cancel.ts", "docs/protocol.md"] } },
+    { "id": "function-social-role", "turns": ["解释 src/functions.ts 中的函数", "What is the social function of reciprocity?", "Continue explaining its role in small groups"], "expected": { "automatic": false, "forbiddenDerived": ["src/functions.ts"] } },
+    { "id": "correct-symbol-source", "turns": ["解释 src/a.ts 里函数 `ResetCache` 的定义", "更正：我要的是 src/b.ts 中函数 `ResetClock` 的定义，不是 ResetCache", "继续分析这个函数的调用关系"], "expected": { "automatic": true, "requiredDerived": ["src/b.ts", "ResetClock"], "forbiddenDerived": ["src/a.ts", "ResetCache"] } },
+    { "id": "research-after-cancelled-read", "turns": ["解释 src/network.ts 的超时", "不用读取 src/network.ts", "这种 network effect 在经济学中为什么存在？"], "expected": { "automatic": false, "forbiddenDerived": ["src/network.ts"] } },
+    { "id": "negative-time-preservation", "turns": ["比较论文 2025 年的实验", "更正：看 2026 年文档，不是 2025 年论文", "继续解释这个条件：不晚于 2026 年 10 月 4 日"], "expected": { "automatic": true, "requiredDerived": ["2026 年 10 月 4 日"], "forbiddenDerived": ["2025"] } }
+  ]
+}

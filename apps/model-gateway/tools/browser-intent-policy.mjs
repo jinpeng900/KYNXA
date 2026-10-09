@@ -2,8 +2,9 @@ import { win32 } from 'node:path';
 import { browserConnection, isBackgroundBrowserConnection } from './browser-connections.mjs';
 import { currentBrowserInstructionText } from './browser-sessions.mjs';
 import { toolFailure } from '../platform/tool-paths.mjs';
+import { analyzeRequestClauses, requestInstructionText } from '../platform/request-clause-signals.mjs';
 
-const browserName = '(?:浏览器|\\bbrowser\\b|\\b(?:chrome|msedge|edge|firefox|chromium|brave)\\b|\\bgoogle\\b\\s*(?:浏览器|\\bbrowser\\b))';
+const browserName = '(?:浏览器|\\bbrowser\\b|\\b(?:chrome|msedge|edge|firefox|chromium|brave|opera|vivaldi)\\b|\\bgoogle\\b\\s*(?:浏览器|\\bbrowser\\b))';
 const browserControlAction = '(?:打开|开启|启动|操作|控制|显示|切换|激活|截图|截屏|截取|缩放|放大|缩小|调整|最小化|最大化|恢复|刷新|重新加载|关闭|滚动|点击|填写|输入|\\b(?:open|launch|start|operate|control|show|capture|screenshot|focus|activate|resize|zoom|reload|refresh|close|scroll|click|fill|type)\\b)';
 const browserModifiers = '(?:(?:本机|本地|当前|已打开|我的|自己的|云端|远程|the|my|local|current|remote|cloud)\\s*)*';
 const actionBeforeBrowser = new RegExp(`${browserControlAction}[^，。；,.!?;\\n]{0,24}(${browserName})`, 'giu');
@@ -16,16 +17,72 @@ const researchSuffix = /^\s*(?:(?:浏览器|browser)\s*)?(?:的\s*)?(?:最新(?:
 const researchPrefix = /^\s*(?:请\s*)?(?:搜索|查询|查找|检索|查|了解|研究|查看|读取|\b(?:search|find|read|inspect|research)\b|look\s+up)/iu;
 const informationalQuestion = /怎么|如何|怎样|\bhow\b/iu;
 const explicitExecutionRequest = /(?:帮我|替我|请你)\s*(?:实际|直接)?\s*(?:用|使用|操作|执行|演示|打开|启动|截图|截屏)|(?:请\s*)?(?:实际|直接)\s*(?:演示|操作|执行|用|使用)|\b(?:please\s+)?(?:actually\s+demonstrate|demonstrate|help\s+me\s+use|do\s+this\s+for\s+me)\b/iu;
-const localBrowserForbidden = new RegExp(`(?:不要|别|不必|禁止|不能|不许|不允许|不希望|避免|无需|do not|don't|never|without)[^，。；,.!?;\\n]{0,24}(?:打开|开启|启动|操作|使用|用|开|open|launch|start|use|operate|control)[^，。；,.!?;\\n]{0,16}${browserName}|(?:不用|不使用)[^，。；,.!?;\\n]{0,16}${browserName}`, 'iu');
+const localBrowserForbidden = new RegExp(`(?:不要|别|不必|禁止|不能|不许|不允许|不希望|避免|无需|do not|don['’]t|never|without)[^，。；,.!?;\\n]{0,24}?(?:打开|开启|启动|操作|使用|用|开|open|launch|start|use|operate|control)(?<objectPrefix>[^，。；,.!?;\\n]{0,16}?)(?<browserObject>${browserName})|(?:不用|不使用)(?<useObjectPrefix>[^，。；,.!?;\\n]{0,16}?)(?<useBrowserObject>${browserName})`, 'iu');
+const browserObjectModifier = '(?:(?:本机|本地|当前|已有|已打开|这个|该|新|无痕|隐私|的|a|an|the|new|current|existing|private)\\s*)*';
+const windowObject = new RegExp(`^\\s*(?:(?:浏览器|browser)\\s*)?(?:(?:的|['’]s)\\s*)?${browserObjectModifier}(?:窗口|标签(?:页)?|页面|网页|\\b(?:windows?|tabs?|pages?)\\b)`, 'iu');
+const coordinatedBrowserObject = new RegExp(`^\\s*(?:和|与|及|以及|或(?:者)?|、|/|&|\\b(?:and|or)\\b)\\s*(?:(?:谷歌|微软|Microsoft|Google|Mozilla|a|an|the|local)\\s*)*(?<browserObject>${browserName})`, 'iu');
 const browserExecutables = new Set(['chrome.exe', 'msedge.exe', 'firefox.exe', 'chromium.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe']);
-const browserExecutableNames = new Map([['chrome', 'chrome.exe'], ['edge', 'msedge.exe'], ['firefox', 'firefox.exe'],
+const browserExecutableNames = new Map([['chrome', 'chrome.exe'], ['msedge', 'msedge.exe'], ['edge', 'msedge.exe'], ['firefox', 'firefox.exe'],
   ['chromium', 'chromium.exe'], ['brave', 'brave.exe'], ['opera', 'opera.exe'], ['vivaldi', 'vivaldi.exe']]);
+
+function browserInstructionText(message) {
+  const browserLiteral = new RegExp(`^${browserName}$`, 'iu');
+  const instruction = requestInstructionText(currentBrowserInstructionText(message),
+    { preserveQuotedLiteral: value => browserLiteral.test(value.trim()) });
+  // A quoted brand is a literal target; quoted operations remain source text rather than current commands.
+  // 引号内完整品牌可作为字面目标；引文中的操作仍是资料文字，不能变成当前执行要求。
+  return instruction.replace(new RegExp(`["“‘「『']\\s*(${browserName})\\s*["”’」』']`, 'giu'), '$1');
+}
+
+function forbiddenBrowserExecutables(clause) {
+  const instruction = browserInstructionText(clause);
+  return [...new Set([...instruction.matchAll(new RegExp(localBrowserForbidden.source, 'giu'))]
+    .flatMap(restriction => restrictedBrowserObjects(instruction, restriction)))];
+}
+
+function restrictedBrowserObjects(instruction, restriction) {
+  let objectSuffix = instruction.slice(restriction.index + restriction[0].length);
+  // Only text after the matched operation can name its object; preceding reasons cannot relax an app ban.
+  // 只有命中操作之后的文本可说明其对象；操作前的理由不能放宽应用禁令。
+  const objectPrefix = restriction.groups?.objectPrefix ?? restriction.groups?.useObjectPrefix ?? '';
+  const objectBeforeBrowser = /窗口|标签(?:页)?|页面|网页|\b(?:windows?|tabs?|pages?)\b/iu.test(objectPrefix);
+  if (objectBeforeBrowser) return [];
+  const objects = [{ browser: restriction.groups?.browserObject ?? restriction.groups?.useBrowserObject,
+    windowScoped: windowObject.test(objectSuffix) }];
+  for (;;) {
+    const window = windowObject.exec(objectSuffix);
+    const remaining = window ? objectSuffix.slice(window[0].length) : objectSuffix;
+    const next = coordinatedBrowserObject.exec(remaining);
+    if (!next) break;
+    objectSuffix = remaining.slice(next[0].length);
+    objects.push({ browser: next.groups.browserObject, windowScoped: windowObject.test(objectSuffix) });
+  }
+  // A shared trailing window object scopes the whole coordinated list; an earlier
+  // per-brand window object keeps a later app restriction independent.
+  // 合取列表末尾共享的窗口对象约束整组；前面品牌的独立窗口对象不取消后续应用禁令。
+  const sharedWindowScope = objects.length > 1 && objects.at(-1).windowScoped &&
+    objects.slice(0, -1).every(object => !object.windowScoped);
+  return [...new Set(objects.filter(object => !object.windowScoped && !sharedWindowScope)
+    .map(object => browserExecutableNames.get(object.browser.toLowerCase())).filter(Boolean))];
+}
+
+function isReferencedBrowserInstruction(clause, instructionContext = clause) {
+  const text = clause.trim().replace(/^(?:请\s*)?/u, '');
+  const reporting = /^(?:文档|说明|教程|日志|文章|示例|原文|他|她|他们).{0,16}(?:说|写|要求|建议|提到)|^(?:(?:the|a)\s+)?(?:guide|document|tutorial|log|example|article|he|she|they)\b.{0,24}\b(?:says?|said|asks?|asked|mentions?|mentioned|instructs?)\b/iu;
+  const imaginedRequest = /^(?:如果|假如|假设|设想).{0,12}(?:我(?:让|要求|请求)|(?:要求|请求|让你))|^(?:if|suppose|imagine|assuming)\b.{0,24}\b(?:asked|were\s+to\s+ask|ask\s+you|asking\s+you)\b/iu;
+  const hypotheticalQuestion = /^(?:如果|假如|假设|设想)|^(?:if|suppose|imagine|assuming)\b/iu.test(text) &&
+    /会怎样|会怎么|怎么办|应该怎么|\b(?:what\s+(?:would|happens|should)|how\s+would|would\s+you)\b/iu.test(instructionContext);
+  // Describing an imagined/reported command does not execute it. Independent
+  // affirmative clauses remain available without an extra clarification round.
+  // 描述假设或转述命令不执行它；独立的正向指令仍可执行，不额外增加确认轮次。
+  return reporting.test(text) || imaginedRequest.test(text) || hypotheticalQuestion;
+}
 
 /** A continuation describes a page action; unrelated research does not retain browser control.
  * 后续消息可以描述页面操作；无关资料检索不能继承浏览器控制。
  */
 export function isBrowserTaskFollowUp(message = '') {
-  const text = currentBrowserInstructionText(message).trim();
+  const text = browserInstructionText(message).trim();
   if (informationalQuestion.test(text) && !explicitExecutionRequest.test(text)) return false;
   if (researchPrefix.test(text) && !/(?:当前|这个|该|本页).{0,8}(?:网页|页面|网站|标签)|作业|账户|账号|二维码/u.test(text)) return false;
   return /^(?:再来|继续|重试|再次尝试|再次尝试打开|再试(?:一次)?|再试试|再尝试(?:一次)?|再次打开|打不开|还是打不开|try again|retry|continue)[。.!！?？\s]*$/iu.test(text) ||
@@ -56,14 +113,22 @@ function clauseRequestsBrowserOperation(clause) {
 }
 
 function currentBrowserIntent(message) {
-  const text = currentBrowserInstructionText(message);
-  const clauses = text.split(/[，。；,.!?;\n]/u);
+  const text = browserInstructionText(message);
+  const projection = analyzeRequestClauses(text);
+  const clauses = projection.activeText.split(/[，。；,.!?;！？\n]/u);
   let explicitBrowserTask = false, allowLocalBrowser = false;
   const excludedBrowserExecutables = [];
+  // Excluded clauses never provide a positive operation; explicit brand restrictions still bind their object.
+  // 已排除子句不能提供正向操作意图；明确的浏览器品牌限制仍约束其自身对象。
+  for (const clause of projection.excludedClauses) {
+    if (['explicit-task-exit', 'superseded-by-task-boundary'].includes(clause.basis)) continue;
+    if (isReferencedBrowserInstruction(clause.text, text)) continue;
+    excludedBrowserExecutables.push(...forbiddenBrowserExecutables(clause.text));
+  }
   for (const clause of clauses) {
+    if (isReferencedBrowserInstruction(clause, text)) continue;
     if (localBrowserForbidden.test(clause)) {
-      for (const [name, executable] of browserExecutableNames)
-        if (new RegExp(`\\b${name}\\b`, 'iu').test(clause)) excludedBrowserExecutables.push(executable);
+      excludedBrowserExecutables.push(...forbiddenBrowserExecutables(clause));
       continue;
     }
     if (!clauseRequestsBrowserOperation(clause)) continue;
@@ -81,16 +146,19 @@ function currentBrowserIntent(message) {
 
 export function inferBrowserTaskIntent(message = '', previousUserMessages = []) {
   const current = currentBrowserIntent(message);
-  const text = currentBrowserInstructionText(message);
-  if (!isBrowserTaskFollowUp(message) || new RegExp(browserName, 'iu').test(text)) return { ...current, inherited: false };
+  const text = browserInstructionText(message);
+  if (analyzeRequestClauses(text).boundary !== 'none' || !isBrowserTaskFollowUp(message) ||
+      new RegExp(browserName, 'iu').test(text)) return { ...current, inherited: false };
   let active;
   const history = [...previousUserMessages];
   if (history.at(-1) === message) history.pop();
   for (const previous of history) {
+    const boundary = analyzeRequestClauses(currentBrowserInstructionText(previous)).boundary;
+    if (boundary !== 'none') active = undefined;
     const intent = currentBrowserIntent(previous);
     if (intent.explicitBrowserTask && (new RegExp(browserName, 'iu').test(currentBrowserInstructionText(previous)) ||
         !isBrowserTaskFollowUp(previous) || !active)) active = intent;
-    else if (!isBrowserTaskFollowUp(previous)) active = undefined;
+    else if (boundary !== 'none' || !isBrowserTaskFollowUp(previous)) active = undefined;
   }
   if (active) return { ...active, inherited: true };
   return { ...current, inherited: false };

@@ -5,6 +5,7 @@ import { estimateTokens } from '../../models/context-tokens.mjs';
 import { deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
 import { retrievalPlan } from './query-plan.mjs';
 import { EVIDENCE_NOTICE, projectEvidence } from './source-projection.mjs';
+import { retrievalOutcome } from '../request-interpretation.mjs';
 
 /** Evidence preparation owns opaque handles, bounded projection and one durable final publication.
  * 证据装配负责不透明句柄、有界视图和一次正式归档，来源与查询执行仍由注入服务拥有。 */
@@ -64,15 +65,19 @@ export class RetrievalEvidenceService {
       return { prompt: '', references: [], evidenceAssessment: assessEvidence([], query), plan: route };
     const promptTokens = Math.max(0, Math.min(route.evidenceTokens, maximumTokens ?? route.evidenceTokens));
     const reservedTokens = estimateTokens(EVIDENCE_NOTICE) + 120;
-    const result = await this.search(context, { query: route.query, domain: route.domain, taskType: route.taskType,
+    const result = await this.search(context, { query: route.query, domain: route.domain,
+      preferredDomain: route.preferredDomain, taskType: route.taskType,
       maximumTokens: Math.max(0, promptTokens - reservedTokens), existingContext, requiresSourceRead: route.requiresSourceRead },
-    { signal, modelReferences: Boolean(this.resultStore), allowColdInference: false });
+    { signal, modelReferences: Boolean(this.resultStore), allowColdInference: false,
+      retrievalIntent: route.retrievalIntent });
     const projection = projectEvidence(result.items, maximumCharacters, { maximumTokens: promptTokens, assessment: result.evidenceAssessment });
+    const projectionOmittedCount = result.items.length - projection.items.length;
     result.items = projection.items;
     result.evidenceAssessment = assessEvidence(result.items, query, { requiresSourceRead: route.requiresSourceRead,
       alreadyPresentCount: result.selection?.alreadyPresentCount });
-    result.plan = route; result.selection = { ...result.selection, promptTokens: projection.usedTokens };
-    if (!result.items.length) return { prompt: '', references: [], evidenceAssessment: result.evidenceAssessment, plan: route };
+    result.plan = route; result.selection = { ...result.selection, promptTokens: projection.usedTokens, projectionOmittedCount };
+    if (!result.items.length) return { prompt: '', references: [], evidenceAssessment: result.evidenceAssessment,
+      outcome: retrievalOutcome(result), plan: route };
     // The opaque handle keeps validated excerpts internal until the final model projection exists.
     // 以不透明句柄保存已验证片段，最终请求视图确定后才去重并归档，不把临时数据暴露给模型或事件。
     const prepared = Object.freeze({});
@@ -80,7 +85,8 @@ export class RetrievalEvidenceService {
     this.#preparedEvidence.set(prepared, { result, query, route, maximumTokens: promptTokens, maximumCharacters,
       projectedTokens: projection.usedTokens, projectedCharacters: projection.prompt.length,
       contextKey: this._evidenceContextKey(context), finalizing: false });
-    const draft = { prompt: projection.prompt, prepared, evidenceAssessment: result.evidenceAssessment, plan: route,
+    const draft = { prompt: projection.prompt, prepared, evidenceAssessment: result.evidenceAssessment,
+      outcome: retrievalOutcome(result), plan: route,
       references: result.items.map(({ sourceRef, modelSourceRef, sourceId,
       scopeKey, sourceRevision, contentHash, title, locator }) => ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
     return deferArchive ? draft : this.finalize(context, draft, { signal });
@@ -142,7 +148,9 @@ export class RetrievalEvidenceService {
         const result = { ...state.result, items: projection.items, evidenceAssessment: assessment,
           evidenceState: { authorization: 'checked', freshness: projection.items.length ? 'current' : 'no-evidence', conclusion: 'not-verified' },
           selection: { ...state.result.selection, alreadyPresentCount, promptTokens: projection.usedTokens,
+            projectionOmittedCount: (state.result.selection?.projectionOmittedCount ?? 0) + unique.items.length - projection.items.length,
             finalStaleSourceCount: new Set(state.result.items.filter((_, index) => !checked[index].value).map(item => item.sourceId)).size } };
+        result.outcome = retrievalOutcome(result);
         let resultRef;
         if (result.items.length && context.requestId && this.resultStore) resultRef = await this.resultStore.save(context,
           { id: `retrieval:${context.requestId}`, name: 'knowledge.search' }, { content: [], structuredContent: result, isError: false },
@@ -151,7 +159,8 @@ export class RetrievalEvidenceService {
         // A saved archive is a completed publication; a later stop cannot make the handle retryable.
         // 归档回执已返回即表示发布完成，随后取消不能把该句柄变成可重试状态。
         if (!resultRef) signal?.throwIfAborted();
-        return { prompt: projection.prompt, resultRef, evidenceAssessment: assessment, plan: state.route,
+        return { prompt: projection.prompt, resultRef, evidenceAssessment: assessment,
+          outcome: result.outcome, plan: state.route,
           references: result.items.map(({ sourceRef, modelSourceRef, sourceId, scopeKey, sourceRevision, contentHash, title, locator }) =>
             ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
       } catch (error) {
