@@ -10,6 +10,8 @@ import { MemoryService } from '../data/memory-service.mjs';
 import { buildContext, ContextError, estimateTokens, estimateMessageTokens } from '../models/context.mjs';
 
 import { ToolService } from '../tools/tool-service.mjs';
+import { isBrowserTaskFollowUp } from '../tools/browser-intent-policy.mjs';
+import { analyzeRequestClauses } from '../platform/request-clause-signals.mjs';
 import { SandboxRunner } from '../tools/sandbox-runner.mjs';
 import { DesktopRunner } from '../tools/desktop-runner.mjs';
 import { HostTerminalRunner } from '../tools/host-terminal-runner.mjs';
@@ -129,12 +131,18 @@ export class ModelRuntime {
     const previousUserHistory = history.filter(item => item.Role === 'user' && item.Id !== currentUserId);
     const taskPlan = retrievalPlan(input.message, { history: previousUserHistory,
       taskContext: previousUserHistory.at(-1)?.Content });
+    // Browser retries use the browser policy's own follow-up contract within the current task only.
+    // 浏览器重试沿用浏览器策略自己的续问合同；只传递最近任务边界后的正式原话，不能复活旧授权。
+    const previousTaskBoundary = previousUserHistory.findLastIndex(item =>
+      analyzeRequestClauses(item.Content ?? '').boundary !== 'none');
+    const currentTaskHistory = previousUserHistory.slice(Math.max(0, previousTaskBoundary));
+    const browserFollowup = !['topic-switch', 'correction'].includes(taskPlan.taskRelation.type) && isBrowserTaskFollowUp(input.message);
     const toolContext = input.permissionMode == null || greeting || smallTalk ? null : await this.tools.createContext(id,
       { requestId, permissionMode: input.permissionMode, message: input.message,
         // Reuse formal user history already loaded here; caller/model metadata cannot supply authorization.
         // 复用此处已经读取的正式用户历史，调用方或模型元数据不能提供授权。
-        previousUserMessages: taskPlan.taskRelation?.allowsInheritance
-          ? previousUserHistory.map(item => item.Content ?? '') : [] });
+        previousUserMessages: taskPlan.taskRelation?.allowsInheritance || browserFollowup
+          ? currentTaskHistory.map(item => item.Content ?? '') : [] });
     const policyHash = toolContext ? toolPolicyHash(toolContext) : null;
     const previous = history.find(item => item.Id === requestId && item.Role === 'assistant');
     if (previous && (previous.RequestHash !== hash || (previous.ToolPolicyHash && previous.ToolPolicyHash !== policyHash)))
@@ -200,6 +208,8 @@ export class ModelRuntime {
       const previousUser = retrievalHistory.filter(item => item.Role === 'user' && (!item.Status || item.Status === 'completed')).at(-1);
       const evidencePlan = retrievalPlan(input.message, { history: retrievalHistory,
         taskContext: previousUser?.Content, maximumTokens: evidenceBudgetTokens });
+      if (toolContext?.browserTaskIntent?.inherited && !evidencePlan.taskRelation.allowsInheritance)
+        evidencePlan.taskRelation = { type: 'continue', allowsInheritance: true, reason: 'browser-task-follow-up' };
       assistant.RequestInterpretation = requestInterpretation(evidencePlan);
       const interpretationPrompt = greeting || smallTalk ? '' : requestInterpretationPrompt(
         assistant.RequestInterpretation, Math.min(192, Math.floor(context.metrics.inputBudgetTokens * .03)));

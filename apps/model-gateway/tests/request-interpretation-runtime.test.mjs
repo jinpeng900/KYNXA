@@ -200,3 +200,65 @@ test('independent three-turn ambiguity scenarios preserve current intent through
     assert.equal(fixture.requests.length, scenario.turns.length, 'no extra classifier model request');
   });
 });
+
+test('automatic evidence respects filename discussion and successive continuation intent', async t => {
+  await t.test('quoted example with a denied read', async child => {
+    const fixture = await runtimeFixture(child);
+    let searches = 0;
+    fixture.runtime.retrieval.evidence = async () => { searches++; return { prompt: '', references: [] }; };
+    const message = '讨论一个示例文件名“src/ghost.ts”的命名风格，不要读取它。';
+    await fixture.reply(message);
+    assert.equal(searches, 0);
+    assert.equal(fixture.requests[0].messages.at(-1).content, message);
+  });
+  await t.test('second continuation retains the first source', async child => {
+    const fixture = await runtimeFixture(child);
+    await fixture.seed('解释 docs/design.md 的恢复步骤');
+    await fixture.seed('继续分析它的失败原因');
+    let observed;
+    fixture.runtime.retrieval.evidence = async (_context, _query, options) => {
+      observed = options.plan; return { prompt: '', references: [] };
+    };
+    const message = '继续比较它们的恢复方案';
+    await fixture.reply(message);
+    assert.ok(observed);
+    assert.match(observed.query, /docs\/design\.md/u);
+    assert.equal(observed.retrievalIntent.path, undefined, 'historical source is a clue, not a current hard target');
+    assert.equal(fixture.requests[0].messages.at(-1).content, message);
+  });
+});
+
+test('runtime browser retries retain the current browser task without crossing task boundaries', async t => {
+  for (const message of ['重试', '再试一次', '再次尝试', '再次打开', '刷新', '还是打不开', 'retry'])
+    await t.test(message, async child => {
+      const fixture = await runtimeFixture(child);
+      await fixture.seed('打开本机Chrome浏览器');
+      const prepared = await fixture.runtime.prepare({ provider: 'fixture', model: 'mock-model', message,
+        permissionMode: 'full' }, fixture.conversationId);
+      assert.equal(prepared.toolContext.browserTaskIntent.allowLocalBrowser, true);
+      assert.equal(prepared.toolContext.browserTaskIntent.inherited, true);
+      assert.equal(prepared.toolContext.toolIntent.browser, true);
+      assert.equal(prepared.assistant.RequestInterpretation.taskRelation.type, 'continue');
+      assert.equal(prepared.assistant.RequestInterpretation.grantsPermission, false);
+      assert.equal(prepared.messages.at(-1).content, message);
+    });
+  for (const boundary of ['换个话题，解释论文', '不是浏览器，是品牌发音', '取消全部操作', '解释蛋糕为什么干'])
+    await t.test(boundary, async child => {
+      const fixture = await runtimeFixture(child);
+      await fixture.seed('打开本机Chrome浏览器');
+      await fixture.seed(boundary);
+      const prepared = await fixture.runtime.prepare({ provider: 'fixture', model: 'mock-model', message: '再次尝试',
+        permissionMode: 'full' }, fixture.conversationId);
+      assert.equal(prepared.toolContext.browserTaskIntent.allowLocalBrowser, false);
+      assert.equal(prepared.toolContext.browserTaskIntent.inherited, false);
+    });
+  await t.test('a new explicit browser task after a boundary can be retried', async child => {
+    const fixture = await runtimeFixture(child);
+    await fixture.seed('打开本机Chrome浏览器');
+    await fixture.seed('换个话题，打开本机Edge浏览器');
+    const prepared = await fixture.runtime.prepare({ provider: 'fixture', model: 'mock-model', message: '再次尝试',
+      permissionMode: 'full' }, fixture.conversationId);
+    assert.equal(prepared.toolContext.browserTaskIntent.allowLocalBrowser, true);
+    assert.equal(prepared.toolContext.browserTaskIntent.inherited, true);
+  });
+});

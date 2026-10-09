@@ -1,5 +1,5 @@
 import { MAX_QUERY_CHARACTERS, validateRetrievalIntent } from '../../data/retrieval/retrieval-contracts.mjs';
-import { analyzeRequestClauses } from '../../platform/request-clause-signals.mjs';
+import { analyzeRequestClauses, requestInstructionText } from '../../platform/request-clause-signals.mjs';
 
 export function isSimpleGreeting(message) {
   return /^(?:你好|您好|嗨|哈喽|早上好|晚上好|早安|晚安|hello|hi|hey|good morning|good evening)[\s!！。.~～]*$/iu.test(message.trim());
@@ -19,7 +19,7 @@ const CODE_SOURCE_PATTERN = /代码|源码|源文件|仓库|代码库|调用方|
 const DOCUMENT_SOURCE_PATTERN = /论文|文档|知识库|章节|笔记|\b(?:documentation|documents?|docs?|manuals?|chapters?)\b|\b(?:papers?)\s+(?:methods?|results?|experiments?|findings?)\b|\b(?:explain|analy[sz]e|review|read|summari[sz]e|compare)\b.{0,48}\b(?:papers?|notes?)\b/iu;
 const DECLARATION_TARGET_PATTERN = /(?:函数|方法|符号|类型).{0,12}(?:定义|实现|调用方|引用)|(?:查找|找到|定位).{0,40}定义|\b(?:find|locate|go\s+to)\b.{0,48}\b(?:definition|declaration)\b|\b(?:function|method|symbol|type)\b.{0,24}\b(?:definition|implementation|references|callers)\b/iu;
 const IDENTIFIER_PATTERN = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/gu;
-const TARGET_PATH_PATTERN = /(?<![\w\p{Script=Han}./\\-])(?:[\w\p{Script=Han}.-]+[\\/])*[\w\p{Script=Han}.-]+\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|py|rs|go|java|cpp|c|h|ps1|sql|json|yaml|yml|xaml|xml|toml|html|css|md|markdown|txt|pdf|docx)\b/giu;
+const TARGET_PATH_PATTERN = /(?<![\w\p{Script=Han}./\\-])(?:[A-Za-z]:[\\/])?(?:[\w\p{Script=Han}.-]+[\\/])*[\w\p{Script=Han}.-]+\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|py|rs|go|java|cpp|c|h|ps1|sql|json|yaml|yml|xaml|xml|toml|html|css|md|markdown|txt|pdf|docx)\b/giu;
 const CODE_PATH_PATTERN = /\.(?:cs|[cm]?js|jsx|[cm]?ts|tsx|py|rs|go|java|cpp|c|h|ps1|sql|xaml|html|css)$/iu;
 const DOCUMENT_PATH_PATTERN = /\.(?:md|markdown|txt|pdf|docx)$/iu;
 const SUPPLEMENT_PATTERN = /^(?:补充|还有|另外[，,]|此外|\b(?:also|additionally|one\s+more\s+thing)\b)/iu;
@@ -157,26 +157,42 @@ export function retrievalPlan(message, { history = [], maximumTokens, taskContex
   const isSmallTalk = SMALL_TALK_PATTERN.test(planningText.trim());
   const directExecution = isDirectExecutionTask(planningText);
   const explicitFile = queryPaths(planningText).length > 0;
-  const localRequest = LOCAL_CONTEXT_PATTERN.test(planningText) || KNOWLEDGE_DEPENDENCY_PATTERN.test(planningText) ||
+  const instructionText = requestInstructionText(planningText);
+  // Discussing a quoted filename's naming style does not request the file's contents.
+  // 讨论引号内文件名的命名风格不表示请求文件内容，尤其不能让否定读取变成检索触发。
+  const quotedFileNameDiscussion = /文件(?:名|名称)|\b(?:file\s*names?|filenames?)\b/iu.test(instructionText) &&
+    /命名|名字|名称|风格|\b(?:naming|names?|style|convention)\b/iu.test(instructionText) &&
+    !queryPaths(instructionText).length && !KNOWLEDGE_DEPENDENCY_PATTERN.test(instructionText) &&
+    !CODE_SOURCE_PATTERN.test(instructionText) &&
+    !/读取|查看|内容|实现|定义|源码|源文件|\b(?:read|contents?|implementation|definition|source)\b/iu.test(instructionText);
+  const localRequest = !quotedFileNameDiscussion && (LOCAL_CONTEXT_PATTERN.test(planningText) || KNOWLEDGE_DEPENDENCY_PATTERN.test(planningText) ||
     CODE_SOURCE_PATTERN.test(planningText) || DOCUMENT_SOURCE_PATTERN.test(planningText) ||
-    Boolean(currentInterpretation.intent.symbol) || explicitFile;
+    Boolean(currentInterpretation.intent.symbol) || explicitFile);
   const taskDomain = taskContextDomain(taskContext);
   const taskReference = !['topic-switch', 'correction'].includes(taskRelation.type) && taskDomain !== 'mixed' &&
     !EXTERNAL_CONTEXT_PATTERN.test(planningText) && ANALYSIS_REQUEST_PATTERN.test(planningText) &&
     (TASK_DETAIL_PATTERN.test(planningText) || FOLLOWUP_PATTERN.test(planningText));
   if (taskReference && !localRequest && taskRelation.type === 'new')
     taskRelation = { type: 'uncertain', allowsInheritance: false, reason: 'technical-detail-may-relate-to-current-task' };
-  const followup = !isGreeting && !isSmallTalk && !directExecution && taskRelation.allowsInheritance;
-  // Inspect the latest completed user turn; searching older turns would cross a later topic change.
-  // 只检查最近一条完成的用户消息，向前挑选旧线索会越过后来的话题变化。
+  const followup = !isGreeting && !isSmallTalk && !directExecution && !quotedFileNameDiscussion && taskRelation.allowsInheritance;
+  // Follow a chain of explicit continuations, stopping at the first unrelated turn or task boundary.
+  // 沿明确续问链寻找来源锚点，遇到无关消息或任务边界即停止，不能越过换题复活旧来源。
   const completedUsers = followup ? history.filter(item => (item.Role ?? item.role) === 'user' &&
     (!(item.Status ?? item.status) || (item.Status ?? item.status) === 'completed') &&
     String(item.Content ?? item.content ?? '').trim() !== currentText) : [];
-  const latest = completedUsers.at(-1);
-  const priorText = analyzeRequestClauses(String(latest?.Content ?? latest?.content ?? '')).activeText;
-  let previous = latest && !isDirectExecutionTask(priorText) && (LOCAL_CONTEXT_PATTERN.test(priorText) ||
-    KNOWLEDGE_DEPENDENCY_PATTERN.test(priorText) || CODE_SOURCE_PATTERN.test(priorText) ||
-    DOCUMENT_SOURCE_PATTERN.test(priorText) || queryPaths(priorText).length > 0) ? latest : null;
+  let previous = null, priorText = '';
+  for (let index = completedUsers.length - 1; index >= 0; index--) {
+    const candidate = completedUsers[index];
+    const candidateText = String(candidate.Content ?? candidate.content ?? '');
+    const candidateProjection = analyzeRequestClauses(candidateText);
+    const candidateQuery = candidateProjection.activeText;
+    if (isDirectExecutionTask(candidateQuery)) break;
+    if (LOCAL_CONTEXT_PATTERN.test(candidateQuery) || KNOWLEDGE_DEPENDENCY_PATTERN.test(candidateQuery) ||
+        CODE_SOURCE_PATTERN.test(candidateQuery) || DOCUMENT_SOURCE_PATTERN.test(candidateQuery) || queryPaths(candidateQuery).length > 0) {
+      previous = candidate; priorText = candidateQuery; break;
+    }
+    if (!classifyTaskRelation(candidateText).allowsInheritance) break;
+  }
   if (previous) {
     const currentIntent = currentInterpretation.intent, priorIntent = buildRetrievalIntent(priorText);
     const sourceConflict = currentIntent.preferredDomain && priorIntent.preferredDomain &&
