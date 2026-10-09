@@ -24,12 +24,14 @@ public sealed partial class ShellPage
     private bool _presentationDialogOpen;
     private bool _isCompactLayout;
     private bool _temporarySidebarOpen;
-    private bool _presentationActionsAttached;
     private sealed record HistorySearchRow(Guid Id, Guid? ProjectId, string Title, string Scope);
 
     private void InitializePresentationActions()
     {
         AutomationProperties.SetLiveSetting(ActionFeedbackText, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
+        // Page-wide shortcuts must not create an automatic tooltip over the transcript.
+        // 页面级快捷键不在聊天正文上生成自动提示；按钮自己的说明提示继续保留。
+        KeyboardAcceleratorPlacementMode = Microsoft.UI.Xaml.Input.KeyboardAcceleratorPlacementMode.Hidden;
         // Register SDK key enums in code so the XAML compiler need not inspect their metadata.
         // 在代码中注册 SDK 按键枚举，避免 XAML 编译器解析其元数据。
         var search = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
@@ -45,22 +47,12 @@ public sealed partial class ShellPage
         KeyboardAccelerators.Add(newChat);
         KeyboardAccelerators.Add(help);
         KeyDown += Presentation_KeyDown;
-        Loaded += (_, _) =>
-        {
-            if (_presentationActionsAttached) return;
-            ConversationMessages.ActionFeedbackRequested += Transcript_ActionFeedbackRequested;
-            _presentationActionsAttached = true;
-        };
         Unloaded += (_, _) =>
         {
-            ConversationMessages.ActionFeedbackRequested -= Transcript_ActionFeedbackRequested;
-            _presentationActionsAttached = false;
             _historySearchFlyout?.Hide();
             ClearActionFeedback();
         };
     }
-
-    private void Transcript_ActionFeedbackRequested(object? sender, string text) => ShowActionFeedback(text);
 
     private void ShowActionFeedback(string text)
     {
@@ -97,6 +89,7 @@ public sealed partial class ShellPage
         SidebarScrim.Visibility = _isCompactLayout && expanded ? Visibility.Visible : Visibility.Collapsed;
         RecentArea.Visibility = GlobalNavigationArea.Visibility = ChatWorkSwitcher.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         CompactSidebarButton.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
+        CollapseSidebarButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         SidebarGrip.Visibility = _isCompactLayout ? Visibility.Collapsed : Visibility.Visible;
         HistorySearchButton.Visibility = ModelStatusButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         SidebarFooter.Margin = expanded ? new Thickness(14, 0, 10, 0) : new Thickness(8, 0, 8, 0);

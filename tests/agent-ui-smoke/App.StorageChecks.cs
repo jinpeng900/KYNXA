@@ -30,8 +30,11 @@ public partial class App
             "storage rows show both current paths without an idle status notice");
         Check(data.Padding == extensions.Padding && data.CornerRadius == extensions.CornerRadius &&
             data.ChangeButton.Style == extensions.ChangeButton.Style && data.Background is SolidColorBrush dataFill &&
-            extensions.Background is SolidColorBrush extensionFill && dataFill.Color == extensionFill.Color && dataFill.Color.R == 247,
-            "data and extension rows share the production gray layout and quiet button style");
+            extensions.Background is SolidColorBrush extensionFill && dataFill.Color == extensionFill.Color &&
+            ReferenceEquals(data.Background, AppearanceService.GetBrush("KynxaSettingsCardBrush")) &&
+            ReferenceEquals(extensions.Background, data.Background) &&
+            dataFill.Color == AppearanceService.ParseColor(AppearanceService.Current.Sidebar),
+            "data and extension rows share the current palette card brush, layout and quiet button style");
         Check(data.LocationLabel.Text == "数据存储" && extensions.LocationLabel.Text == "工具与技能存储" &&
             data.ChangeButton.Content?.ToString() == "更改位置" && extensions.ChangeButton.Content?.ToString() == "更改位置",
             "both storage choices use the same native button format");

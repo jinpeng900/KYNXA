@@ -139,6 +139,7 @@ public partial class App : Application
             NativeUi.Invoke(Button("RetrievalCancelIndex"));
             await WaitAsync(() => _api.CancelledJobs == 1 && Button("RetrievalCancelIndex").Visibility == Visibility.Collapsed && !_window!.HasPendingChanges,
                 "Cancelling the owned index job leaves the settings window usable.");
+            await VerifyJobStatesAsync();
             await NativeWindowCapture.CaptureAsync(_window!, Path.Combine(_directory, "project-zh.png"));
             passed = true;
         }

@@ -46,6 +46,7 @@ public sealed partial class ToolManagementWindow : Window
     public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null)
     {
         InitializeComponent();
+        AppearanceService.TrackWindow(this);
         _api = api ?? new AgentApiClient();
         _ownsApi = api is null;
         _conversationId = conversationId;

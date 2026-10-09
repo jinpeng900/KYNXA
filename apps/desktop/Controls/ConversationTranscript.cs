@@ -2,9 +2,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using KYNXA.Contracts;
+using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
-using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
@@ -21,7 +21,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
 {
     private const string HostName = "kynxa-transcript.local";
     private const string PageUrl = "https://" + HostName + "/Transcript/index.html";
-    private readonly WebView2 _browser = new() { DefaultBackgroundColor = Colors.White };
+    private readonly WebView2 _browser = new() { DefaultBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Main) };
     private readonly TextBlock _notice = new() { Text = UiText.Get("正在加载聊天…"), Margin = new Thickness(12), TextWrapping = TextWrapping.Wrap };
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromMilliseconds(40) };
@@ -37,6 +37,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private long _cacheCharacters;
     private IReadOnlyList<ConversationMessageViewModel> _messages = [];
     private Guid? _conversationId;
+    private CancellationTokenSource? _timeRestoreCancellation;
     private Task? _initialization;
     private string _noticeKey = "正在加载聊天…";
     private long _revision, _generation;
@@ -61,7 +62,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public event EventHandler<Guid>? RetryRequested;
     public event EventHandler<ToolResultRequest>? ToolResultRequested;
     public event EventHandler? ConversationChanged;
-    public event EventHandler<string>? ActionFeedbackRequested;
 
     public ConversationTranscript()
     {
@@ -70,6 +70,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         Loaded += (_, _) => Preload();
         _refresh.Tick += async (_, _) => { _refresh.Stop(); await FlushAsync(); };
         UiText.LanguageChanged += LanguageChanged;
+        AppearanceService.Changed += AppearanceChanged;
     }
 
     public void Preload()
@@ -88,6 +89,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         _generation++;
         _messages = messages.ToArray();
         foreach (var message in _messages) message.PropertyChanged += MessageChanged;
+        _timeRestoreCancellation?.Cancel();
+        _timeRestoreCancellation?.Dispose();
+        _timeRestoreCancellation = new();
+        if (conversationId is Guid timeScope)
+            _ = RestoreMessageTimesAsync(timeScope, _messages.Select(row => row.Message).ToArray(), _generation, _timeRestoreCancellation.Token);
         _openAtBottom |= changed || openAtBottom;
         // The browser can restore a recently visited conversation while updated content is parsed.
         // 解析更新内容期间，浏览器可先恢复最近访问过的聊天。
@@ -98,9 +104,49 @@ public sealed class ConversationTranscript : Grid, IDisposable
         if (!_rendering && _ready.Task.IsCompletedSuccessfully) { _refresh.Stop(); _ = FlushAsync(); }
     }
 
+    private async Task RestoreMessageTimesAsync(Guid conversationId, ChatMessageState[] messages, long generation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await MessageTimePresentation.RestoreAsync(conversationId, messages, cancellationToken);
+            if (!_disposed && _generation == generation && _conversationId == conversationId) QueueRefresh();
+        }
+        catch (Exception error)
+        {
+            // A display cache must never break navigation or expose message content in diagnostics.
+            // 显示缓存不能破坏会话切换，也不能在诊断中暴露消息内容。
+            Debug.WriteLine($"Message time cache restore: {error.GetType().Name}");
+        }
+    }
+
     public void BeforeSend() => Post(new { type = "beforeSend" });
     public void ClearSelection() => Post(new { type = "clearSelection" });
     public void JumpToLatest() => Post(new { type = "jumpToLatest" });
+    private void AppearanceChanged(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        if (DispatcherQueue.HasThreadAccess) RefreshAppearance();
+        else DispatcherQueue.TryEnqueue(RefreshAppearance);
+    }
+
+    private void RefreshAppearance()
+    {
+        if (_disposed) return;
+        var palette = AppearanceService.Current;
+        _browser.DefaultBackgroundColor = AppearanceService.ParseColor(palette.Main);
+        // Appearance updates only CSS colors; message DOM, selection and scroll ownership remain intact.
+        // 外观更新只修改 CSS 颜色，保留消息 DOM、选区和滚动归属。
+        Post(new
+        {
+            type = "setAppearance",
+            palette = new
+            {
+                main = palette.Main, soft = palette.Soft, accent = palette.Accent, selection = palette.Selection,
+                text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar
+            }
+        });
+    }
+
     private void LanguageChanged(object? sender, EventArgs e)
     {
         if (_disposed) return;
@@ -123,8 +169,19 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 conversation = UiText.Get("对话"), transcript = UiText.Get("聊天记录"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),
-                messageSentAt = UiText.Get("发送时间"), replyCreatedAt = UiText.Get("回复创建时间"),
-                replyEndedAt = UiText.Get("回复结束时间"), localEndTime = UiText.Get("本机记录"), timeNotRecorded = UiText.Get("未记录"),
+                copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
+                messageSentAt = UiText.Get("发送时间"), replyCompletedAt = UiText.Get("回复完成时间"),
+                replyEndedAt = UiText.Get("回复结束时间"), timeNotRecorded = UiText.Get("未记录"),
+                diagramWaiting = UiText.Get("等待图表代码完整…"), diagramRendering = UiText.Get("正在绘制图表…"),
+                diagramFailed = UiText.Get("图表未能绘制，请查看源码。"),
+                diagramUnsafe = UiText.Get("图表含不支持的交互或配置，已保留源码。"),
+                diagramTooLarge = UiText.Get("图表过于复杂，已保留源码。"),
+                diagramUnsupported = UiText.Get("暂不支持此图表类型，已保留源码。"),
+                diagramSource = UiText.Get("查看源码"), diagramHideSource = UiText.Get("收起源码"), diagramCopySource = UiText.Get("复制源码"),
+                diagramZoomIn = UiText.Get("放大图表"), diagramZoomOut = UiText.Get("缩小图表"), diagramFit = UiText.Get("适应窗口"),
+                diagramFullscreen = UiText.Get("全屏查看图表"), diagramClose = UiText.Get("关闭图表"),
+                diagramViewport = UiText.Get("Mermaid 图表，可缩放和平移"),
+                diagramViewerHint = UiText.Get("拖动平移 · Ctrl＋滚轮缩放 · ＋／－缩放 · 0 适应窗口 · Esc 关闭"),
                 reasoning = UiText.Get("思考过程"), thinking = UiText.Get("正在思考…"),
                 reasoningDuration = UiText.Get("思考过程 · {0} 秒"), stopped = UiText.Get("已停止生成"),
                 interrupted = UiText.Get("回复中断，请重试。"),
@@ -238,6 +295,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             {
                 case "ready":
                     _ready.TrySetResult();
+                    RefreshAppearance();
                     RefreshLanguage();
                     QueueRefresh();
                     break;
@@ -289,7 +347,6 @@ public sealed class ConversationTranscript : Grid, IDisposable
         // A browser click is only a request; acknowledge the actual clipboard result for this chat and operation.
         // 浏览器点击仅代表请求；回执绑定当前聊天与本次操作，反映剪贴板实际结果。
         Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
-        ActionFeedbackRequested?.Invoke(this, UiText.Get(succeeded ? "已复制" : "复制失败，请重试。"));
     }
 
     private bool MatchesConversation(JsonElement message) => message.TryGetProperty("conversationId", out var id)
@@ -326,7 +383,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
                         ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null,
                     row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
-                    MessageTimePresentation.GetEnd(row.Message)?.ToUnixTimeMilliseconds());
+                    MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds());
             }).ToArray();
             var rendered = new (Snapshot Row, CachedHtml? Cache)[snapshots.Length];
             var previousCaches = new CachedHtml?[snapshots.Length];
@@ -446,10 +503,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _timeRestoreCancellation?.Cancel();
+        _timeRestoreCancellation?.Dispose();
         _generation++;
         _ready.TrySetCanceled();
         ConversationChanged?.Invoke(this, EventArgs.Empty);
         UiText.LanguageChanged -= LanguageChanged;
+        AppearanceService.Changed -= AppearanceChanged;
         _refresh.Stop();
         foreach (var message in _messages) message.PropertyChanged -= MessageChanged;
         _messages = [];

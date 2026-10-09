@@ -22,7 +22,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
     private readonly CancellationTokenSource _lifetime;
     private readonly CancellationTokenRegistration _cancellation;
     private readonly TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Grid _root = new() { Name = "ScreenshotViewerRoot", Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
+    private readonly Grid _root = new() { Name = "ScreenshotViewerRoot", Background = AppearanceService.GetBrush("KynxaMainBrush") };
     private readonly Image _image = new() { Name = "ScreenshotViewerImage", Stretch = Stretch.Uniform };
     private readonly ScrollViewer _scroll = new()
     {
@@ -65,6 +65,7 @@ public sealed class ScreenshotViewerWindow : Window, IDisposable
         _scroll.Content = _image; Grid.SetRow(_scroll, 1); _root.Children.Add(_scroll);
         Grid.SetRow(_notice, 1); _root.Children.Add(_notice); _notice.IsHitTestVisible = false;
         Content = _root;
+        AppearanceService.TrackWindow(this);
         _fit.Click += FitClicked; _actual.Click += ActualClicked; _close.Click += CloseClicked;
         _retry.Click += RetryClicked;
         AutomationProperties.SetLiveSetting(_notice, AutomationLiveSetting.Polite);

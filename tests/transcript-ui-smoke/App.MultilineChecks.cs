@@ -196,20 +196,10 @@ public partial class App
 
     private async Task CheckMultilineWholeCopyAsync(Guid messageId, string source, string description)
     {
-        var feedback = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        EventHandler<string> callback = (_, text) => feedback.TrySetResult(text);
-        _transcript.ActionFeedbackRequested += callback;
-        try
         {
-            await EvalAsync<bool>($"(() => {{ document.querySelector('article[data-message-id=\"{messageId}\"] .copy-message').click(); return true; }})()");
-            Check(await feedback.Task.WaitAsync(TimeSpan.FromSeconds(5)) == UiText.Get("已复制"),
-                description + " whole-message copy receives the real native acknowledgement");
+            await ClickAndAwaitNativeCopyAsync($"document.querySelector('article[data-message-id=\"{messageId}\"] .copy-message')", description);
             Check(await Clipboard.GetContent().GetTextAsync() == source,
                 description + " whole-message clipboard retains exact original LF or CRLF source");
-        }
-        finally
-        {
-            _transcript.ActionFeedbackRequested -= callback;
         }
     }
 }

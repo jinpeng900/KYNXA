@@ -33,6 +33,11 @@ public partial class App : Application
     private readonly ShellGatewayFixture _gateway;
     private ShellPage _shell = null!;
     private Exception? _unhandled;
+    private bool _shortcutTooltipOnly;
+    private bool _appearanceOnly;
+    private bool _sidebarControlsOnly;
+    private bool _sidebarRoundnessOnly;
+    private bool _typographyOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
     private string DesktopDirectory => Path.Combine(DataDirectory, "Desktop");
     private string WebViewDirectory => Path.Combine(_directory, "WebView");
@@ -70,6 +75,21 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        _shortcutTooltipOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--shortcut-tooltip-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--shortcut-tooltip-only", StringComparer.Ordinal);
+        _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--appearance-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
+        _sidebarControlsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--sidebar-controls-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--sidebar-controls-only", StringComparer.Ordinal);
+        _sidebarRoundnessOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--sidebar-roundness-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--sidebar-roundness-only", StringComparer.Ordinal);
+        _typographyOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--typography-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--typography-only", StringComparer.Ordinal);
         File.WriteAllText(ResultPath, "RUNNING production MainWindow/ShellPage with temporary storage, mock HTTP and isolated WebView\n");
         UiText.Initialize("zh-CN");
         Window = new MainWindow();
@@ -423,6 +443,51 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
+            if (_typographyOnly)
+            {
+                await CheckTypographyAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused typography checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell typography checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_sidebarRoundnessOnly)
+            {
+                await CheckSidebarRoundnessAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused sidebar roundness checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell sidebar roundness checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_sidebarControlsOnly)
+            {
+                await CheckSidebarControlsAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused sidebar control checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell sidebar control checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_shortcutTooltipOnly)
+            {
+                await CheckShortcutTooltipsAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused shortcut tooltip checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell shortcut tooltip checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_appearanceOnly)
+            {
+                await CheckAppearanceAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused appearance checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell appearance checks.\nPreviews: {_directory}");
+                return;
+            }
             await CheckEmptyComposerPolishAsync();
             _gateway.FailModelReads = true;
             Check(!await RefreshModelsAsync() && AutomationProperties.GetName(Element<Button>("ModelStatusButton")).Contains("无法读取模型连接") &&
@@ -483,6 +548,11 @@ public partial class App : Application
             await CheckPanelPolishAsync();
             await CheckComprehensiveShellAsync();
             await CheckRetrievalNavigationAsync();
+            await CheckSidebarControlsAsync();
+            await CheckSidebarRoundnessAsync();
+            await CheckTypographyAsync();
+            await CheckAppearanceAsync();
+            await CheckShortcutTooltipsAsync();
             Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
                 "native Shell migration checks complete without formal data writes, upstream model calls or unhandled errors");
             File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} production Shell UI migration checks.\nPreviews: {_directory}");

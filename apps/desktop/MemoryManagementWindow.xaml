@@ -5,13 +5,6 @@
     xmlns:services="using:KYNXA_Desktop.Services">
     <Grid x:Name="MemoryRoot" Background="{StaticResource KynxaMainBrush}" Loaded="MemoryRoot_Loaded" SizeChanged="MemoryRoot_SizeChanged">
         <Grid.Resources>
-            <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#888888" />
-            <SolidColorBrush x:Key="ComboBoxBackgroundBorderBrushFocused" Color="#888888" />
-            <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="#888888" />
-            <SolidColorBrush x:Key="ComboBoxItemPillFillBrush" Color="#888888" />
-            <SolidColorBrush x:Key="ComboBoxItemBorderBrushSelected" Color="#C8C8C8" />
-            <SolidColorBrush x:Key="ComboBoxItemBorderBrushSelectedPointerOver" Color="#C8C8C8" />
-            <SolidColorBrush x:Key="ComboBoxItemBorderBrushSelectedPressed" Color="#C8C8C8" />
             <Style TargetType="TextBlock">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />

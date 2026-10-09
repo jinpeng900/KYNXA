@@ -34,6 +34,7 @@ public sealed partial class ModelManagementWindow : Window
     public ModelManagementWindow()
     {
         InitializeComponent();
+        AppearanceService.TrackWindow(this);
         InitializeDraftPresentation();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(ModelTitleBar);
@@ -172,7 +173,7 @@ public sealed partial class ModelManagementWindow : Window
                 Content = content, HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(12, 11, 12, 11),
                 Background = _editing?.ProviderId == provider.ProviderId
-                    ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 234, 233))
+                    ? AppearanceService.GetBrush("KynxaSelectionBrush")
                     : new SolidColorBrush(Microsoft.UI.Colors.Transparent)
             };
             ToolTipService.SetToolTip(button, provider.DisplayName);

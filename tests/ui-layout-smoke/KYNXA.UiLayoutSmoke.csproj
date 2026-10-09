@@ -9,5 +9,6 @@
     <Compile Include="..\..\apps\desktop\Layout\ShellLayoutMetrics.cs" Link="ShellLayoutMetrics.cs" />
     <Compile Include="..\..\apps\desktop\Layout\WorkSidebarLayout.cs" Link="WorkSidebarLayout.cs" />
     <Compile Include="..\..\apps\desktop\Models\UI\LayoutState.cs" Link="LayoutState.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
   </ItemGroup>
 </Project>
