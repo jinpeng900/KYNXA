@@ -70,7 +70,7 @@ public static class ToolApprovalDialog
             TextWrapping = TextWrapping.Wrap, MaxHeight = 240,
             Text = tool.Arguments is { } arguments ? JsonSerializer.Serialize(arguments,
                 new JsonSerializerOptions { WriteIndented = true }) : "{}" };
-        parameters.Resources["TextControlBorderBrushFocused"] = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 136, 136, 136));
+        parameters.Resources["TextControlBorderBrushFocused"] = AppearanceService.GetBrush("KynxaFocusBrush");
         content.Children.Add(parameters);
     }
 

@@ -30,7 +30,7 @@ public sealed partial class MarkdownReply : UserControl
     private static readonly FontFamily CodeFont = new("Cascadia Mono, Consolas, Microsoft YaHei UI");
     private readonly RichTextBlock _document = new()
     {
-        FontFamily = new FontFamily("Microsoft YaHei UI"), FontSize = 14,
+        FontSize = 14,
         LineHeight = 23, LineStackingStrategy = LineStackingStrategy.MaxHeight,
         IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap,
         HorizontalAlignment = HorizontalAlignment.Stretch,

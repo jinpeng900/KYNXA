@@ -24,6 +24,7 @@ public sealed class LayoutState
     public double PreviewWidth { get; set; }
     public string PermissionMode { get; set; } = "ask";
     public string InterfaceLanguage { get; set; } = "zh-CN";
+    public string AppearancePaletteId { get; set; } = AppearancePalette.DefaultId;
     public double ComposerWidth { get; set; } = ShellLayoutMetrics.ComposerWidthDefault;
     public double ComposerHeight { get; set; } = ShellLayoutMetrics.ComposerHeightDefault;
     public string LastPrimaryContent { get; set; } = "chat";

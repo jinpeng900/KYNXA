@@ -18,15 +18,20 @@
     <PackageReference Include="Markdig" Version="1.4.0" />
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/ConversationTranscript.cs" Link="ConversationTranscript.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageTimePresentation.cs" Link="MessageTimePresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageEndTimeCache.cs" Link="MessageEndTimeCache.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/MathMarkdown.cs" Link="MathMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/CodeSyntaxHighlighter.cs" Link="CodeSyntaxHighlighter.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
     <Content Include="../../apps/desktop/Resources/Transcript/**/*" Link="Resources/Transcript/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/Math/**/*" Link="Resources/Math/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../apps/desktop/Resources/Diagrams/**/*" Link="Resources/Diagrams/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/UI/Brand/**/*" Link="Resources/UI/Brand/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Checks.js" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

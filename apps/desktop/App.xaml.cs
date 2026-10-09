@@ -28,9 +28,11 @@ public partial class App : Application
 
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
-        // Restore interface language before creating controls; settings can change it live.
-        // 创建控件前恢复界面语言；设置中切换语言应即时生效。
-        Services.UiText.Initialize(new Services.LayoutStateService().Load().InterfaceLanguage);
+        // Restore language and appearance before creating controls to avoid a different first frame.
+        // 创建控件前恢复语言与外观，避免首帧使用不同的配色。
+        var preferences = new Services.LayoutStateService().Load();
+        Services.UiText.Initialize(preferences.InterfaceLanguage);
+        Services.AppearanceService.Apply(preferences.AppearancePaletteId);
         Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
             ? Services.StoragePaths.DesktopDirectory : null;
         string? configuredModelHome = Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME");

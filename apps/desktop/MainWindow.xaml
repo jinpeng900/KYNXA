@@ -19,7 +19,7 @@
             <TextBlock
                 Margin="20,0,0,0"
                 VerticalAlignment="Center"
-                FontFamily="Segoe UI"
+                FontFamily="{StaticResource KynxaUIFont}"
                 FontSize="14"
                 FontWeight="SemiBold"
                 Foreground="{StaticResource KynxaTextBrush}"

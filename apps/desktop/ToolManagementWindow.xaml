@@ -5,23 +5,9 @@
     xmlns:services="using:KYNXA_Desktop.Services">
     <Grid x:Name="AgentRoot" Background="{StaticResource KynxaMainBrush}" Loaded="AgentRoot_Loaded" SizeChanged="AgentRoot_SizeChanged">
         <Grid.Resources>
-            <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#888888" />
-            <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="#888888" />
-            <SolidColorBrush x:Key="ListViewItemSelectionIndicatorBrush" Color="#888888" />
-            <SolidColorBrush x:Key="PivotHeaderItemSelectedPipeFill" Color="#888888" />
-            <SolidColorBrush x:Key="PivotHeaderItemFocusPipeFill" Color="#888888" />
             <x:Double x:Key="PivotHeaderItemFontSize">13</x:Double>
-            <SolidColorBrush x:Key="ExpanderHeaderBackground" Color="#F7F7F7" />
+            <SolidColorBrush x:Key="ExpanderHeaderBackground" Color="{Binding Color, Source={StaticResource KynxaSettingsCardBrush}}" />
             <SolidColorBrush x:Key="ExpanderHeaderBorderBrush" Color="Transparent" />
-            <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#888888" />
-            <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#777777" />
-            <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#999999" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="#888888" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="#777777" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPressed" Color="#999999" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="#888888" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="#777777" />
-            <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" Color="#999999" />
             <Style TargetType="TextBlock">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />
@@ -56,7 +42,7 @@
                 <Setter Property="FontSize" Value="13" />
                 <Setter Property="HorizontalAlignment" Value="Stretch" />
                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                <Setter Property="Background" Value="#F7F7F7" />
+                <Setter Property="Background" Value="{StaticResource KynxaSettingsCardBrush}" />
                 <Setter Property="BorderBrush" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="0" />
                 <Setter Property="CornerRadius" Value="8" />

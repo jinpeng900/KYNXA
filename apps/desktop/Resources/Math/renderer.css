@@ -1,5 +1,6 @@
+:root { --ui-font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif; }
 html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-body { color: #232323; }
+body { color: #232323; font-family: var(--ui-font); }
 .row { display: block; width: max-content; }
 .formula { display: inline-block; padding: 4px; white-space: nowrap; line-height: 1; }
 .formula.inline { font-size: 24px; }
@@ -7,5 +8,5 @@ body { color: #232323; }
 .katex { font-size: 1em; text-rendering: auto; }
 .katex-display { display: inline-block; margin: 0; }
 .katex-display > .katex { display: inline-block; white-space: nowrap; }
-.katex .cjk_fallback { font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif; }
+.katex .cjk_fallback { font-family: var(--ui-font); }
 .baseline { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
