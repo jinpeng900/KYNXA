@@ -3,7 +3,8 @@ import { lstat, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { atomicJson } from '../platform/atomic-json.mjs';
 import { MEMORY_SCHEMA_VERSION, MAX_MEMORY_ENTRIES, memoryFailure, memoryId, memoryScope,
-  memoryContent, memoryKind, expectedMemoryRevision, validateMemoryDocument, validateMemorySource } from './memory-contracts.mjs';
+  memoryContent, memoryKind, memoryStatus, memorySourceId, memoryCandidateFingerprint, expectedMemoryRevision,
+  validateMemoryDocument, validateMemorySource, validateMemoryCandidate } from './memory-contracts.mjs';
 
 // All gateway instances in this process share a file queue. The gateway remains the sole writer of Data.
 // 同一进程中的所有网关实例共用文件队列，网关仍是 Data 的唯一正式写入者。
@@ -15,6 +16,26 @@ export class MemoryRepository {
     if (!conversationStore?.root) throw memoryFailure('缺少会话存储。');
     this.conversations = conversationStore;
     this.root = resolve(conversationStore.root);
+    this.listeners = new Set();
+    this.pendingChanges = new WeakMap();
+  }
+
+  onChange(listener) {
+    if (typeof listener !== 'function') throw new TypeError('Memory change listener is required.');
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async _publish(document) {
+    const changes = this.pendingChanges.get(document) ?? [];
+    this.pendingChanges.delete(document);
+    // Subscribers run only after catalog/file guards release; incremental indexing may itself read the catalog.
+    // 订阅通知仅在目录和文件保护释放后执行，增量索引可安全地再次读取目录。
+    for (const change of changes) for (const listener of this.listeners) {
+      try { await listener({ ...change }); }
+      catch (error) { this.lastChangeError = { code: typeof error?.code === 'string' ? error.code : 'MEMORY_CHANGE_NOTIFICATION_FAILED' }; }
+    }
+    return document;
   }
 
   async relationship(conversationId) {
@@ -135,17 +156,18 @@ export class MemoryRepository {
   }
 
   async mutate(conversationId, scope, expectedRevision, operation) {
-    return this._withScope(conversationId, scope, location => this._mutate(location, expectedRevision, operation));
+    return this._publish(await this._withScope(conversationId, scope, location => this._mutate(location, expectedRevision, operation)));
   }
 
-  mutateScope(scope, scopeId, expectedRevision, operation) {
-    return this._withManagedScope(scope, scopeId, location => this._mutate(location, expectedRevision, operation));
+  async mutateScope(scope, scopeId, expectedRevision, operation) {
+    return this._publish(await this._withManagedScope(scope, scopeId, location => this._mutate(location, expectedRevision, operation)));
   }
 
   async _mutate(location, expectedRevision, operation) {
     const document = await this._read(location);
     if (expectedRevision !== undefined && document.revision !== expectedMemoryRevision(expectedRevision))
       throw memoryFailure('记忆已更新，请重新读取后重试。', 'MEMORY_CONFLICT', 409);
+    const previousEntries = new Map(document.entries.map(entry => [entry.id, structuredClone(entry)]));
     const changed = await operation(document);
     if (changed === false) return structuredClone(document);
     document.revision++;
@@ -157,7 +179,44 @@ export class MemoryRepository {
     await this._safe(location.folder, { create: true });
     await this._safe(location.file, { file: true });
     await atomicJson(location.file, validated);
-    return structuredClone(validated);
+    const result = structuredClone(validated), entries = new Map(result.entries.map(entry => [entry.id, entry]));
+    const changes = [];
+    for (const id of new Set([...previousEntries.keys(), ...entries.keys()])) {
+      const previous = previousEntries.get(id), entry = entries.get(id);
+      if (JSON.stringify(previous) === JSON.stringify(entry)) continue;
+      const record = entry ?? previous;
+      changes.push({ scope: result.scope, scopeId: result.scopeId,
+        scopeKey: result.scope === 'user' ? 'user' : `${result.scope}:${result.scopeId}`,
+        sourceId: memorySourceId(result.scope, result.scopeId, id), memoryId: id,
+        previousStatus: previous?.status ?? null, status: entry?.status ?? null,
+        previousEntryRevision: previous?.revision ?? null, entryRevision: entry?.revision ?? null, revision: result.revision,
+        operation: !previous ? 'create' : !entry ? 'delete' : previous.status === 'draft' && entry.status === 'confirmed' ? 'confirm' : 'update',
+        ...(record.source.conversationId ? { conversationId: record.source.conversationId } : {}) });
+    }
+    this.pendingChanges.set(result, changes);
+    return result;
+  }
+
+  async createCandidate(conversationId, input) {
+    const scope = memoryScope(input.scope), content = memoryContent(input.content), kind = memoryKind(input.kind, scope);
+    const source = validateMemorySource(input.source), candidate = validateMemoryCandidate(input.candidate, source);
+    if (candidate.fingerprint !== memoryCandidateFingerprint(scope, content)) throw memoryFailure('候选内容身份不一致。');
+    const candidateId = randomUUID();
+    const document = await this.mutate(conversationId, scope, undefined, document => {
+      if (document.scopeId !== input.scopeId) throw memoryFailure('候选来源范围已改变。', 'MEMORY_SCOPE_CHANGED', 409);
+      const sourceIds = new Set(candidate.quotes.map(quote => quote.messageId));
+      if (document.dismissedSources.some(item => item.candidateFingerprint === candidate.fingerprint ||
+          item.conversationId === source.conversationId && sourceIds.has(item.messageId)) ||
+          document.entries.some(entry => memoryCandidateFingerprint(scope, entry.content) === candidate.fingerprint ||
+            entry.source.type === 'user-message' && entry.source.conversationId === source.conversationId &&
+            (sourceIds.has(entry.source.messageId) || entry.candidate?.quotes.some(quote => sourceIds.has(quote.messageId))))) return false;
+      if (document.entries.length >= MAX_MEMORY_ENTRIES) throw memoryFailure('此作用域的记忆已达上限，请先整理或删除。');
+      const now = new Date().toISOString();
+      document.entries.push({ id: candidateId, scope, scopeId: document.scopeId, content, kind, status: 'draft',
+        source, candidate, revision: 1, createdAt: now, updatedAt: now });
+    });
+    const entry = document.entries.find(entry => entry.id === candidateId);
+    return { document, created: Boolean(entry), entry };
   }
 
   create(conversationId, input) {
@@ -169,6 +228,8 @@ export class MemoryRepository {
   }
 
   _create(input, mutate) {
+    if (input.candidate !== undefined || input.status !== undefined && input.status !== 'confirmed')
+      throw memoryFailure('自动候选不能通过手动创建入口伪造。');
     const scope = memoryScope(input.scope), content = memoryContent(input.content), kind = memoryKind(input.kind, scope);
     const source = validateMemorySource(input.source);
     return mutate(scope, expectedMemoryRevision(input.expectedRevision), document => {
@@ -198,12 +259,16 @@ export class MemoryRepository {
     const expected = expectedMemoryRevision(input.expectedRevision, true);
     const content = input.content === undefined ? undefined : memoryContent(input.content);
     const kind = input.kind === undefined ? undefined : memoryKind(input.kind, scope);
-    if (content === undefined && kind === undefined) throw memoryFailure('请提供要更新的记忆内容或类型。');
+    const status = input.status === undefined ? undefined : memoryStatus(input.status);
+    if (content === undefined && kind === undefined && status === undefined) throw memoryFailure('请提供要更新的记忆内容、类型或确认状态。');
     return mutate(scope, expected, document => {
       const entry = document.entries.find(item => item.id === id);
       if (!entry) throw memoryFailure('记忆不存在。', 'MEMORY_NOT_FOUND', 404);
+      if (status === 'draft' && entry.status === 'confirmed') throw memoryFailure('已确认记忆不能退回自动草稿。');
+      if (content === undefined && kind === undefined && status === entry.status) return false;
       if (content !== undefined) entry.content = content;
       if (kind !== undefined) entry.kind = kind;
+      if (status !== undefined) entry.status = status;
       entry.revision++; entry.updatedAt = new Date().toISOString();
     });
   }
@@ -222,9 +287,13 @@ export class MemoryRepository {
       const index = document.entries.findIndex(item => item.id === id);
       if (index < 0) throw memoryFailure('记忆不存在。', 'MEMORY_NOT_FOUND', 404);
       const entry = document.entries[index];
-      if (entry.source.type === 'user-message') document.dismissedSources.push({
-        conversationId: entry.source.conversationId, messageId: entry.source.messageId, deletedAt: new Date().toISOString()
-      });
+      if (entry.source.type === 'user-message') {
+        const deletedAt = new Date().toISOString();
+        for (const messageId of new Set([entry.source.messageId, ...(entry.candidate?.quotes.map(quote => quote.messageId) ?? [])]))
+          document.dismissedSources.push({ conversationId: entry.source.conversationId, messageId, deletedAt,
+            ...(entry.candidate ? { candidateFingerprint: entry.candidate.fingerprint } : {}),
+            ...(entry.candidate?.batchThroughMessageId ? { candidateBatchThroughMessageId: entry.candidate.batchThroughMessageId } : {}) });
+      }
       document.entries.splice(index, 1);
     });
   }

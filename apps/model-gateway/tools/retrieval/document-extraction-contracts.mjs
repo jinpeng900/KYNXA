@@ -1,7 +1,21 @@
 export const DOCUMENT_EXTRACTION_VERSIONS = Object.freeze({
-  pdf: 'pdfjs-dist-6.4.299:text-v1',
+  pdf: 'pdfjs-dist-6.4.299:text-v2',
   docx: 'mammoth-1.13.0:yauzl-3.4.0:text-v1'
 });
+
+/** Page cursors bind one original byte revision; per-window page budgets remain independent of total page count.
+ * 页面游标绑定单份原文件字节版本；单窗口页预算独立于整份 PDF 的总页数。 */
+export function validateDocumentPageWindow(value, maximumPages = DOCUMENT_EXTRACTION_LIMITS.maximumPages) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => !['startPage', 'endPage', 'rawContentHash'].includes(key)) ||
+      !Number.isSafeInteger(value.startPage) || value.startPage < 1 || value.startPage > 1000000 ||
+      value.endPage !== undefined && (!Number.isSafeInteger(value.endPage) || value.endPage < value.startPage ||
+        value.endPage > 1000000 || value.endPage - value.startPage + 1 > maximumPages) ||
+      value.rawContentHash !== undefined && !/^[a-f0-9]{64}$/u.test(value.rawContentHash))
+    throw documentExtractionFailure('DOCUMENT_INVALID_PAGE_WINDOW');
+  return { ...value };
+}
 
 export const DOCUMENT_EXTRACTION_LIMITS = Object.freeze({
   maximumInputBytes: 32 * 1024 * 1024, maximumOutputBytes: 2 * 1024 * 1024,

@@ -87,6 +87,23 @@ test('rerank candidate tiers persist and project overrides preserve unspecified 
   assert.equal((await settings.getGlobal()).revision, 2);
 });
 
+test('rerank device policy persists independently from embedding policy and inherits through project overrides', async t => {
+  const { settings, conversations } = await fixture(t);
+  assert.equal((await settings.getGlobal()).local.rerankDevicePolicy, 'auto');
+  await settings.patchGlobal({ expectedRevision: 0,
+    patch: { local: { embeddingDevicePolicy: 'cpu', rerankDevicePolicy: 'gpu' } } });
+  await settings.patchProject('work-a', { expectedRevision: 0,
+    patch: { overrides: { local: { rerankDevicePolicy: 'cpu' } } } });
+  const reopened = new RetrievalSettingsStore({ conversationStore: conversations });
+  assert.equal((await reopened.getGlobal()).local.rerankDevicePolicy, 'gpu');
+  assert.equal((await reopened.getEffective('work-a')).local.rerankDevicePolicy, 'cpu');
+  assert.equal((await reopened.getEffective('work-a')).local.embeddingDevicePolicy, 'cpu');
+  for (const rerankDevicePolicy of ['dml', 'cuda', false, {}])
+    await assert.rejects(async () => settings.patchGlobal({ expectedRevision: 1, patch: { local: { rerankDevicePolicy } } }),
+      { code: 'INVALID_RETRIEVAL_INPUT' });
+  assert.equal((await reopened.getGlobal()).revision, 1);
+});
+
 test('project overrides inherit global settings, clear explicitly and cannot supply permissions or binding revisions', async t => {
   const { settings } = await fixture(t);
   assert.equal((await settings.getEffective('work-a')).projectIndexing.mountedFolder, false);

@@ -248,6 +248,10 @@ export class RetrievalIndex {
     return this._request('recordCoverage', { entries, scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
   }
 
+  reconcileCoverage({ scopeKeys, sourceTypes, sourceIds, signal }) {
+    return this._request('reconcileCoverage', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceTypes, sourceIds }, signal);
+  }
+
   coverage({ scopeKeys, sourceId, limit = 1000, signal }) {
     if (sourceId) retrievalSourceId(sourceId);
     return this._request('coverage', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceId,

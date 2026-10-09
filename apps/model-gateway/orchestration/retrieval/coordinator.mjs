@@ -7,12 +7,12 @@ import { MAX_QUERY_CHARACTERS, retrievalFailure, validateRetrievalIntent } from 
 import { SourceLibrary } from '../../data/retrieval/source-library.mjs';
 import { RetrievalJobStore } from '../../data/retrieval/job-store.mjs';
 import { EmbeddingRouter } from '../../models/retrieval/embedding-router.mjs';
-import { RerankerService } from '../../models/retrieval/reranker-service.mjs';
+import { RerankerRouter } from '../../models/retrieval/reranker-router.mjs';
 import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
 import { sourceFileRevision } from '../../data/retrieval/retrieval-contracts.mjs';
 import { validateId } from '../../platform/conversation-id.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
-import { sourceIdentity, visibleScopes, projectConversationSources } from './source-projection.mjs';
+import { sourceHash, sourceIdentity, visibleScopes, projectConversationSources } from './source-projection.mjs';
 import { selectCandidates, deduplicateCandidates, assessEvidence } from './candidate-selection.mjs';
 import { EvidenceAcquisition, validateEvidenceGap } from './evidence-acquisition.mjs';
 import { SourceIndexService, sourceScanSummary } from './source-manager.mjs';
@@ -34,6 +34,18 @@ function hasModelMetadataMismatch(expected, result) {
     result[field] !== undefined && expected[field] !== result[field]);
 }
 
+// GPU policy selects the registered strict DML contract; CPU policy also constrains the execution session.
+// GPU 策略选择已注册的严格 DML 合同；CPU 策略同时约束实际执行会话。
+function rerankerExecution(local) {
+  let profileId = local.rerankProfileId;
+  const devicePreference = local.rerankDevicePolicy === 'cpu' ? 'cpu' : 'auto';
+  if (['builtin-multilingual-reranker', 'builtin-multilingual-reranker-dml-q8'].includes(profileId)) {
+    if (local.rerankDevicePolicy === 'cpu') profileId = 'builtin-multilingual-reranker';
+    else if (local.rerankDevicePolicy === 'gpu') profileId = 'builtin-multilingual-reranker-dml-q8';
+  }
+  return { profileId, devicePreference };
+}
+
 /** Application coordinator composes E-owned storage, C-owned inference and D-owned file reads.
  * 应用协调层组合数据存储、嵌入推理和工具文件读取，不改变正式会话或记忆归属。 */
 export class RetrievalCoordinator {
@@ -49,8 +61,8 @@ export class RetrievalCoordinator {
     this.structures = structures ?? new RetrievalStructureService({ resourceService: this.resources });
     this.embeddings = embeddings ?? new EmbeddingRouter({ resourceService: this.resources });
     this.spacePolicy = new EmbeddingSpacePolicy({ resources: this.resources,
-      embeddings: { status: profileId => this.embeddings.status(profileId) }, index: this.index });
-    this.reranker = reranker === undefined ? new RerankerService({ resourceService: this.resources }) : reranker;
+      embeddings: { status: (...args) => this.embeddings.status(...args) }, index: this.index });
+    this.reranker = reranker === undefined ? new RerankerRouter({ resourceService: this.resources }) : reranker;
     this.library = new SourceLibrary({ root: conversations.root, conversationStore: conversations });
     this.evidenceReferences = tools.results ? new EvidenceReferenceStore({ conversationStore: conversations, resultStore: tools.results }) : null;
     this.jobs = new RetrievalJobStore(conversations.root);
@@ -58,6 +70,8 @@ export class RetrievalCoordinator {
     this.excludedRoots = [conversations.root, ...excludedRoots].filter(Boolean);
     this.acquisitions = new WeakMap();
     this.queue = Promise.resolve(); this.closed = false;
+    this.memoryIndexPending = new Map();
+    this.memoryIndexState = { publishedUpdates: 0, partialUpdates: 0, skippedUpdates: 0, deferred: 0, errorCode: null };
     this.shutdown = new AbortController();
     this.sourceService = new SourceIndexService({ library: this.library, index: this.index, jobs: this.jobs,
       resourceService: this.resources,
@@ -92,6 +106,24 @@ export class RetrievalCoordinator {
 
   async effective(projectId) { return this.settings.getEffective(projectId); }
 
+  /** Apply only retrieval model policy; draining old sessions never cancels accepted work or touches generation/MCP.
+   * 仅应用检索模型策略；旧会话排空不取消已接纳请求，也不修改生成模型或 MCP。
+   */
+  async configureInferenceSettings(projectId = null, { previous, signal = this.shutdown.signal } = {}) {
+    const settings = await this.effective(projectId), local = settings.local;
+    const changed = fields => !previous || fields.some(field => previous.local[field] !== local[field]);
+    if (changed(['enabled', 'semantic', 'embeddingProfileId', 'embeddingDevicePolicy'])) {
+      if (!local.enabled || local.semantic === 'off' || local.embeddingProfileId === null) await this.embeddings.retire?.({ signal });
+      else await this.embeddings.configure?.({ profileId: await this.spacePolicy.target(settings, signal),
+        devicePreference: local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto', retireOtherProfiles: true, signal });
+    }
+    if (changed(['enabled', 'rerankProfileId', 'rerankDevicePolicy'])) {
+      if (!local.enabled || local.rerankProfileId === null) await this.reranker?.retire?.({ signal });
+      else await this.reranker?.configure?.({ ...rerankerExecution(local), retireOtherProfiles: true, signal });
+    }
+    return settings;
+  }
+
   _planEvidence(input) {
     if (this.evaluationPolicy?.gaps !== false) return planEvidenceAcquisition(input);
     return { channels: ['lexical', ...(input.semanticEnabled && input.embeddingStatus?.loaded ? ['vector'] : [])],
@@ -103,18 +135,129 @@ export class RetrievalCoordinator {
   async status() {
     await this.initialize();
     const settings = await this.effective();
-    const indexed = await this.index.status(), embedding = this.embeddings.status(settings.local.embeddingProfileId);
+    const observedProfileId = await this.spacePolicy.target(settings, this.shutdown.signal);
+    const indexed = await this.index.status(), embedding = this.embeddings.status(observedProfileId,
+      { devicePreference: settings.local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto' });
+    const reranking = rerankerExecution(settings.local);
     const jobs = await this.jobs.list();
     return { ...indexed, backend: 'sqlite', sourceCount: indexed.sources, chunkCount: indexed.chunks,
       embedding: { ...embedding, available: ['ready', 'loading'].includes(embedding.state) },
       configuredEmbeddingProfileId: settings.local.embeddingProfileId,
       embeddingProfiles: this.modelProfiles().filter(profile => profile.kind === 'embedding').map(profile => this.embeddings.status(profile.id)),
-      reranking: settings.local.rerankProfileId ? this.reranker?.status(settings.local.rerankProfileId) ?? { state: 'unavailable', loaded: false }
+      reranking: reranking.profileId ? this.reranker?.status(reranking.profileId, { devicePreference: reranking.devicePreference }) ?? { state: 'unavailable', loaded: false }
         : { state: 'disabled', loaded: false },
       modelProfiles: this.modelProfiles(), parsing: this.structures.status?.(), jobs,
       resources: await this.resources.snapshot(), vectorSpacePolicy: this.spacePolicy.status(jobs),
       externalModels: this.externalModelStatus?.() ?? [],
+      memoryIndexing: { ...this.memoryIndexState, pending: this.memoryIndexPending?.size ?? 0 },
       deployment: { platform: 'windows', gpu: 'single-nvidia-dml-verified', otherPlatformsSupported: false } };
+  }
+
+  /** Persisted memory changes revoke old evidence first; only confirmed live entries enter the selective index.
+   * 正式记忆变更先使旧证据失效；仅已确认且来源有效的条目进入选择性索引，草稿不成为模型事实。
+   */
+  async onMemoryChanged(event) {
+    if (this.closed || event.previousStatus !== 'confirmed' && event.status !== 'confirmed') return;
+    const expectedScope = event.scope === 'user' ? 'user' : `${event.scope}:${event.scopeId?.toLowerCase()}`;
+    if (expectedScope !== event.scopeKey || event.sourceId !== sourceIdentity('memory', expectedScope, event.memoryId))
+      throw toolFailure('记忆变更身份无效。', 'INVALID_MEMORY_CHANGE', 409);
+    await this._serialize(async () => {
+      if (this.closed) return;
+      await this.index.removeSource(event.sourceId, { scopeKeys: [event.scopeKey], permanent: false, signal: this.shutdown.signal });
+      this.sourceService.indexer.invalidate(event.sourceId);
+      this.sourceService.corpusSyncCache.clear();
+      this.sourceService.sync.conversationCache.clear();
+    });
+    if (this.closed || event.status !== 'confirmed') { this.memoryIndexPending.delete(event.sourceId); return; }
+    this.memoryIndexPending.set(event.sourceId, event);
+    // Queue limits bound background demand; deferred entries remain discoverable through authoritative scope sync.
+    // 队列限制后台需求；被延后的条目仍由正式作用域同步发现，不能扩大范围或把未索引当作不存在。
+    while (this.memoryIndexPending.size > 256) {
+      this.memoryIndexPending.delete(this.memoryIndexPending.keys().next().value);
+      this.memoryIndexState.deferred++;
+    }
+    this._startMemoryIndex();
+  }
+
+  _startMemoryIndex() {
+    if (this.closed || this.memoryIndexWork || !this.memoryIndexPending.size) return;
+    const work = Promise.resolve().then(() => this._indexChangedMemories()).catch(error => {
+      if (!this.closed) this.memoryIndexState.errorCode = /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code ?? '')
+        ? error.code : 'MEMORY_INDEX_FAILED';
+    }).finally(() => {
+      if (this.memoryIndexWork === work) this.memoryIndexWork = null;
+      // A change arriving between loop completion and this microtask still needs its own wakeup.
+      // 循环结束和清理微任务之间到达的变更仍须唤醒；关闭后不能重启后台工作。
+      this._startMemoryIndex();
+    });
+    this.memoryIndexWork = work;
+  }
+
+  async _currentMemorySource(event) {
+    if (event.scope === 'project') {
+      const project = await this.conversations.describeProject(event.scopeId);
+      if (project.isArchived || project.isFolderlessWorkspace) return null;
+    } else if (event.scope === 'chat') {
+      const relationship = await this.conversations.describeConversation(event.scopeId);
+      if (relationship.isArchived || relationship.projectArchived) return null;
+    }
+    const document = event.scope === 'chat'
+      ? (await this.memory.listFor(event.scopeId)).scopes.find(value => value.scope === 'chat')
+      : await this.memory.listScope(event.scope, event.scopeId);
+    const entry = document.entries.find(value => value.id === event.memoryId);
+    if (!entry || entry.status !== 'confirmed' || entry.active === false || entry.revision !== event.entryRevision) return null;
+    return { sourceId: event.sourceId, scopeKey: event.scopeKey, sourceType: 'memory', title: entry.kind || 'Memory',
+      locator: { memoryId: entry.id }, text: entry.content, contentHash: sourceHash(entry.content), sourceRevision: entry.revision };
+  }
+
+  async _indexChangedMemories() {
+    while (this.memoryIndexPending.size && !this.closed) {
+      const [id, event] = this.memoryIndexPending.entries().next().value;
+      this.memoryIndexPending.delete(id);
+      try {
+        const source = await this._currentMemorySource(event);
+        if (!source || this.closed) continue;
+        const projectId = event.scope === 'project' ? event.scopeId : event.scope === 'chat'
+          ? (await this.conversations.describeConversation(event.scopeId)).projectId : null;
+        const settings = await this.spacePolicy.indexingSettings(await this.effective(projectId), this.shutdown.signal);
+        if (!settings.local.enabled) continue;
+        const isCurrent = async current => {
+          const live = await this._currentMemorySource(event);
+          const effective = await this.spacePolicy.indexingSettings(await this.effective(projectId), this.shutdown.signal);
+          return Boolean(live && live.contentHash === current.contentHash && effective.local.enabled &&
+            effective.local.semantic === settings.local.semantic && effective.local.embeddingProfileId === settings.local.embeddingProfileId &&
+            effective.local.embeddingDevicePolicy === settings.local.embeddingDevicePolicy);
+        };
+        // Lexical availability precedes optional embedding; a missing GPU/model cannot delay confirmed memory use.
+        // 词法可用先于可选嵌入；显卡或模型缺失不能阻碍已确认记忆使用。
+        const lexical = await this._serialize(() => this.sourceService.upsert([source], settings, this.shutdown.signal, undefined,
+          { semantic: false, isCurrent }));
+        const lexicalEntry = lexical.coverage?.sources.find(value => value.sourceId === id);
+        if (lexicalEntry?.lexical !== 'ready') {
+          this.memoryIndexState.skippedUpdates++;
+          this.memoryIndexState.errorCode = lexicalEntry?.errorCode ?? lexical.semantic?.diagnosticCodes[0] ?? 'MEMORY_PUBLICATION_UNVERIFIED';
+          continue;
+        }
+        let semantic;
+        if (settings.local.semantic !== 'off' && settings.local.embeddingProfileId !== null)
+          semantic = await this.sourceService.upsert([source], settings, this.shutdown.signal, undefined, { semantic: true, isCurrent });
+        if (!await this._currentMemorySource(event)) { this.memoryIndexState.skippedUpdates++; continue; }
+        this.memoryIndexState.publishedUpdates++;
+        const semanticEntry = semantic?.coverage?.sources.find(value => value.sourceId === id);
+        if (semantic && semanticEntry?.semantic !== 'ready') {
+          this.memoryIndexState.partialUpdates++;
+          this.memoryIndexState.errorCode = semanticEntry?.errorCode ?? semantic.semantic?.diagnosticCodes[0] ?? 'MEMORY_SEMANTIC_PENDING';
+        } else this.memoryIndexState.errorCode = null;
+      } catch (error) {
+        if (this.closed || this.shutdown.signal.aborted) break;
+        this.memoryIndexState.errorCode = /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code ?? '') ? error.code : 'MEMORY_INDEX_FAILED';
+      }
+    }
+  }
+
+  async flushMemoryIndex() {
+    this._startMemoryIndex();
+    while (this.memoryIndexWork) await this.memoryIndexWork;
   }
 
   async _project(projectId) {
@@ -185,7 +328,8 @@ export class RetrievalCoordinator {
       ['knowledge', 'work-file'].includes(item.sourceType)) return false;
     if (source.unavailable) return false;
     if (source.sourceType === 'knowledge') {
-      source = await this.library.readSource(item.sourceId, { scopeKeys: snapshot.scopes, sourceRevision: item.sourceRevision, signal });
+      source = await this.library.readSource(item.sourceId, { scopeKeys: snapshot.scopes, sourceRevision: item.sourceRevision,
+        limits: snapshot.settings.local.indexing, signal });
     } else if (source.sourceType === 'memory' || source.sourceType === 'message') {
       const type = source.sourceType;
       if (!checks.has(type)) checks.set(type, (async () => {
@@ -208,7 +352,13 @@ export class RetrievalCoordinator {
           !project?.FolderPath || resolve(project.FolderPath) !== source.locator.root) return false;
       try {
         const options = { root: source.locator.root, excludedRoots: this.excludedRoots,
-          maximumSourceBytes: snapshot.settings.local.indexing?.maximumSourceBytes, resourceService: this.resources, signal };
+          maximumSourceBytes: snapshot.settings.local.indexing?.maximumSourceBytes,
+          maximumDocumentInputBytes: snapshot.settings.local.indexing?.maximumDocumentInputBytes,
+          maximumDocumentOutputBytes: snapshot.settings.local.indexing?.maximumDocumentOutputBytes,
+          maximumPdfPages: snapshot.settings.local.indexing?.maximumPdfPages, resourceService: this.resources, signal,
+          ...(source.locator.extraction?.pageWindow ? { pdfPageWindow: { startPage: source.locator.extraction.pageWindow.startPage,
+            endPage: source.locator.extraction.pageWindow.endPage,
+            rawContentHash: source.locator.extraction.rawContentHash } } : {}) };
         const file = source.locator.fileWindow
           ? await readSourceFileWindow(source.locator.path, source.locator.fileWindow, options)
           : await readSourceFile(source.locator.path, options);
@@ -240,22 +390,23 @@ export class RetrievalCoordinator {
   }
 
   async _rerank(context, query, candidates, snapshot, taskType, signal, decision, rerankCandidates = 20) {
+    const execution = rerankerExecution(snapshot.settings.local);
     decision ??= this._planEvidence({ query, items: candidates, taskType,
-      rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+      rerankerStatus: execution.profileId ? this.reranker?.status(execution.profileId, { devicePreference: execution.devicePreference }) : null });
     if (['complex', 'research'].includes(taskType) && snapshot.settings.local.rerankProfileId && this.reranker &&
         decision?.rerankReason === 'optional-model-not-ready')
-      return { items: candidates, diagnostic: this.reranker.status(snapshot.settings.local.rerankProfileId).errorCode ?? 'RERANK_UNAVAILABLE' };
+      return { items: candidates, diagnostic: this.reranker.status(execution.profileId, { devicePreference: execution.devicePreference }).errorCode ?? 'RERANK_UNAVAILABLE' };
     if (!decision?.shouldRerank || !snapshot.settings.local.rerankProfileId || !this.reranker || candidates.length < 2)
       return { items: candidates };
-    try { resolveRetrievalModelProfile('reranker', snapshot.settings.local.rerankProfileId); }
+    try { resolveRetrievalModelProfile('reranker', execution.profileId); }
     catch (error) { return { items: candidates, diagnostic: error.code }; }
-    const status = this.reranker.status(snapshot.settings.local.rerankProfileId);
-    if (status.profileId !== snapshot.settings.local.rerankProfileId || !['ready', 'loading'].includes(status.state))
+    const status = this.reranker.status(execution.profileId, { devicePreference: execution.devicePreference });
+    if (status.profileId !== execution.profileId || !['ready', 'loading'].includes(status.state))
       return { items: candidates, diagnostic: status.errorCode ?? 'RERANK_UNAVAILABLE' };
     try {
-      const result = await this.reranker.rerank({ profileId: snapshot.settings.local.rerankProfileId,
+      const result = await this.reranker.rerank({ ...execution,
         context, query, candidates, settings: snapshot.settings, signal, limit: rerankCandidates });
-      if (result.profileId !== undefined && result.profileId !== snapshot.settings.local.rerankProfileId ||
+      if (result.profileId !== undefined && result.profileId !== execution.profileId ||
           hasModelMetadataMismatch(status, result))
         throw retrievalFailure('Reranking result belongs to another model. / 重排结果不属于所选模型配置。', 'RERANK_PROFILE_MISMATCH', 409);
       const originals = new Map(candidates.map(item => [item.sourceRef, item]));
@@ -311,12 +462,19 @@ export class RetrievalCoordinator {
       await this.initialize();
       const snapshot = await this._snapshot(context, signal);
       const configuredRerankCandidates = snapshot.settings.local.rerankCandidates;
-      budget.rerankCandidates = configuredRerankCandidates ?? budget.rerankCandidates;
+      const requestedRerankCandidates = configuredRerankCandidates ?? budget.rerankCandidates;
+      const resourceRerankLimit = [20, 40, 60].includes(lease?.suggestions?.rerankCandidateLimit)
+        ? lease.suggestions.rerankCandidateLimit : 60;
+      budget.rerankCandidates = Math.min(requestedRerankCandidates, resourceRerankLimit);
       budget.audit = { ...budget.audit,
         configured: { ...budget.audit.configured, localRerankCandidates: configuredRerankCandidates ?? null },
         approved: { ...budget.audit.approved, rerankCandidates: budget.rerankCandidates },
+        rerankRequestedCandidates: requestedRerankCandidates, resourceRerankLimit,
         rerankBudgetSource: configuredRerankCandidates != null ? 'local-setting' :
           lease?.suggestions?.rerankCandidates !== undefined ? 'resource-suggestion' : 'task-policy' };
+      if (budget.rerankCandidates < requestedRerankCandidates)
+        budget.audit.earlyCutReasons.push({ reason: 'resource-grant', field: 'rerankCandidates',
+          proposed: requestedRerankCandidates, approved: budget.rerankCandidates, unit: 'candidates' });
       // Automatic evidence uses intent derived from the current utterance, not historical query additions.
       // 自动证据使用从本轮原话提取的约束，历史补充文本不能重新变成硬路径或领域限制。
       const retrievalIntent = preparedIntent === undefined
@@ -352,7 +510,9 @@ export class RetrievalCoordinator {
           await this._assertCurrent(context, snapshot);
           signal?.throwIfAborted();
           const cached = structuredClone(ticket.cached);
-          return { ...cached, items: withModelReferences(cached.items),
+          const items = withModelReferences(cached.items);
+          acquisition.observeProjection(items);
+          return { ...cached, items,
             ...(modelReferences ? { evidenceArchiveId: archiveId } : {}),
             acquisition: acquisition.observe(ticket, cached, { reused: true }) };
         }
@@ -375,7 +535,8 @@ export class RetrievalCoordinator {
         snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, space.targetProfileId,
         () => this.sourceService.rebuild({ projectId: snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId,
           signal: this.shutdown.signal }));
-      const status = this.embeddings.status(profileId);
+      const initialDevicePreference = profileId !== space.targetProfileId ? 'cpu' : space.devicePreference;
+      const status = this.embeddings.status(profileId, { devicePreference: initialDevicePreference });
       const semanticEnabled = snapshot.settings.local.semantic !== 'off' && profileId !== null;
       // Exact paths/symbols start with current lexical/structural evidence, without waiting for model loading.
       // 精确路径或符号先使用当前词法及结构证据，不等待模型加载；可选冷模型不阻塞自动上下文准备。
@@ -398,10 +559,11 @@ export class RetrievalCoordinator {
       if (snapshot.sources.length && initialDecision.shouldEmbed) {
         for (const candidateProfile of [...new Set([profileId, space.fallbackProfileId].filter(Boolean))]) {
           profileId = candidateProfile;
+          const devicePreference = profileId !== space.targetProfileId ? 'cpu' : space.devicePreference;
           try {
             const profile = resolveRetrievalModelProfile('embedding', profileId);
-            embedded = await this.embeddings.embedQuery(query, { signal, profileId });
-            const status = this.embeddings.status(profileId);
+            embedded = await this.embeddings.embedQuery(query, { signal, profileId, devicePreference });
+            const status = this.embeddings.status(profileId, { devicePreference });
             // Registered model/space identity determines dimensions; legacy seams may omit optional metadata.
             // 注册模型或空间身份确定维数；旧接口可省略可选元信息，但声明的维数必须与实际向量一致。
             const registeredModel = status.embeddingSpaceId === profile.embeddingSpaceId || embedded.embeddingSpaceId === profile.embeddingSpaceId ||
@@ -464,9 +626,11 @@ export class RetrievalCoordinator {
       const candidateCount = result.items.length, freshChecks = new Map();
       const unique = deduplicateCandidates(result.items, { existingContext, retrievalIntent });
       const candidateAssessment = assessEvidence(unique.items, query, { requiresSourceRead, retrievalIntent });
+      const reranking = rerankerExecution(snapshot.settings.local);
       const rerankDecision = this._planEvidence({ query, gap, intent: retrievalIntent, taskType,
         items: unique.items, assessment: candidateAssessment,
-        rerankerStatus: snapshot.settings.local.rerankProfileId ? this.reranker?.status(snapshot.settings.local.rerankProfileId) : null });
+        rerankerStatus: reranking.profileId ? this.reranker?.status(reranking.profileId,
+          { devicePreference: reranking.devicePreference }) : null });
       const reranked = await this._rerank(context, query, unique.items, snapshot, taskType, signal, rerankDecision, budget.rerankCandidates);
       result.rerankDecision = { executed: Boolean(reranked.rerank), reason: rerankDecision.rerankReason };
       let current = reranked.items, selected;
@@ -513,6 +677,9 @@ export class RetrievalCoordinator {
       // worker 与文件 IO 等待后复核工作关联和开关，旧请求不能复活已禁用资料。
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
+      // Only returned evidence creates final version dependencies; selection does not certify a full source read.
+      // 仅实际返回的证据登记最终版本依赖；选入摘录不能冒充已回读完整来源。
+      acquisition.observeProjection(result.items);
       result.evidenceState = { authorization: 'checked', freshness: 'current', conclusion: 'not-verified' };
       result.outcome = retrievalOutcome(result);
       result.acquisition = this.evaluationPolicy?.gaps === false ? { state: 'disabled', remainingSearches: 0,
@@ -548,11 +715,15 @@ export class RetrievalCoordinator {
         throw toolFailure('资料已更改或撤销，请重新检索。', 'STALE_RETRIEVAL_SOURCE', 409);
       await this._assertCurrent(context, snapshot);
       signal?.throwIfAborted();
-      const acquisition = this.acquisitions.get(context);
+      // A valid reference may come from an earlier turn; direct reads still own this turn's final version dependencies.
+      // 有效引用可来自上轮；本轮直接回读仍须登记最终答复依赖的来源版本，不能依赖先执行搜索。
+      let acquisition = this.acquisitions.get(context);
+      if (!acquisition) {
+        acquisition = new EvidenceAcquisition({ research: retrievalPlan(context.message ?? gap ?? '').taskType === 'research' });
+        this.acquisitions.set(context, acquisition);
+      }
       return { ...item, ...(canonicalSourceRef !== sourceRef ? { sourceRef } : {}),
-        evidenceDecision: acquisition?.observeRead(item, { gap, mode, sourceRef: canonicalSourceRef }) ?? { sufficiency: 'not-evaluated',
-          missingInformation: gap ?? null, sourceVersionChecked: true, contentRead: true,
-          next: 'answer-if-this-context-supports-the-requested-facts-otherwise-name-the-remaining-gap' } };
+        evidenceDecision: acquisition.observeRead(item, { gap, mode, sourceRef: canonicalSourceRef }) };
     });
   }
 
@@ -580,6 +751,7 @@ export class RetrievalCoordinator {
 
   async _close() {
     this.closed = true;
+    this.memoryIndexPending.clear();
     this.shutdown.abort();
     await this.spacePolicy.close();
     const closures = await Promise.allSettled([this.sourceService.close({
@@ -588,7 +760,7 @@ export class RetrievalCoordinator {
         const failure = released.find(item => item.status === 'rejected');
         if (failure) throw failure.reason;
       }
-    }), this.queue.catch(() => {})]);
+    }), this.queue.catch(() => {}), this.memoryIndexWork]);
     const indexClosure = await Promise.allSettled([this.index.close()]);
     const resourceClosure = await Promise.allSettled([this.ownsResources ? this.resources.close() : Promise.resolve()]);
     const failure = [...closures, ...indexClosure, ...resourceClosure].find(item => item.status === 'rejected' && item.reason?.name !== 'AbortError');

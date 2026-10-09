@@ -61,7 +61,10 @@ export function planExternalModelDemand(snapshot, { contextTokens, hardware } = 
   const weightIncrementBytes = snapshot.loaded ? 0 : estimatedWeightBytes;
   if (kvIncrementBytes === null && !hasPartialContext) return unknownPlan(snapshot, 'EXTERNAL_MODEL_DEMAND_EXCEEDS_BOUND', breakdown);
 
-  const reasons = [hasPartialContext ? 'CONTEXT_TARGET_UNKNOWN' : 'KV_DTYPE_ASSUMED_F16', 'RUNTIME_SCRATCH_ESTIMATED'];
+  const kvEstimate = snapshot.kvCacheEstimate;
+  const reasons = [hasPartialContext ? 'CONTEXT_TARGET_UNKNOWN' : kvEstimate?.dtype === 'unknown'
+    ? 'KV_DTYPE_NOT_REPORTED_F16_UPPER_BOUND' : 'KV_DTYPE_ASSUMED_F16', 'RUNTIME_SCRATCH_ESTIMATED'];
+  if (kvEstimate?.parallelSlots === 'unknown') reasons.push('KV_PARALLEL_SLOTS_NOT_REPORTED');
   let placement;
   if (snapshot.loaded) {
     const observedGpuMemoryBytes = boundedBytes(snapshot.observedGpuMemoryBytes);
@@ -70,10 +73,11 @@ export function planExternalModelDemand(snapshot, { contextTokens, hardware } = 
     if (placement === 'gpu-upper-bound') reasons.push('KV_OFFLOAD_DISTRIBUTION_UNKNOWN');
   } else {
     const gpuState = hardware?.gpu?.state;
-    if (gpuState !== 'available' && gpuState !== 'unavailable') {
+    const isConfiguredCpu = snapshot.backendSelection?.configuredGpuLayers === 0;
+    if (!isConfiguredCpu && gpuState !== 'available' && gpuState !== 'unavailable') {
       return unknownPlan(snapshot, 'EXTERNAL_MODEL_GPU_CAPACITY_UNKNOWN', breakdown);
     }
-    placement = gpuState === 'available' ? 'gpu-upper-bound' : 'cpu';
+    placement = !isConfiguredCpu && gpuState === 'available' ? 'gpu-upper-bound' : 'cpu';
     reasons.push('WEIGHTS_ESTIMATED_FROM_QUANTIZATION');
     if (placement === 'gpu-upper-bound') reasons.push('INITIAL_OFFLOAD_DISTRIBUTION_UNKNOWN');
   }
@@ -88,12 +92,16 @@ export function planExternalModelDemand(snapshot, { contextTokens, hardware } = 
   const memoryBytes = boundedBytes(pendingBytes + uncertaintyMarginBytes);
   const gpuMemoryBytes = placement === 'gpu-upper-bound' ? boundedBytes(pendingBytes + uncertaintyMarginBytes) : 0;
   if (memoryBytes === null || gpuMemoryBytes === null) return unknownPlan(snapshot, 'EXTERNAL_MODEL_DEMAND_EXCEEDS_BOUND', breakdown);
-  return { state: hasPartialContext ? 'partial' : 'ready', requiresAdmission: memoryBytes > 0 || gpuMemoryBytes > 0,
+  const hasUnknownParallelSlots = !hasPartialContext && kvEstimate?.parallelSlots === 'unknown';
+  return { state: hasPartialContext || hasUnknownParallelSlots ? 'partial' : 'ready', requiresAdmission: memoryBytes > 0 || gpuMemoryBytes > 0,
     memoryBytes, gpuMemoryBytes, observationOnly: true, memoryOwnership: 'external',
-    partialCoverage: hasPartialContext, unknownComponents: hasPartialContext ? ['kv-cache'] : [],
+    partialCoverage: hasPartialContext || hasUnknownParallelSlots,
+    unknownComponents: hasPartialContext ? ['kv-cache'] : hasUnknownParallelSlots ? ['kv-parallel-slots'] : [],
     observedAt: snapshot.observedAt ?? null,
-    uncertainty: { state: 'estimated-upper-bound', reasons, marginBytes: uncertaintyMarginBytes },
+    uncertainty: { state: hasUnknownParallelSlots ? 'estimated-per-slot-upper-bound' : 'estimated-upper-bound', reasons, marginBytes: uncertaintyMarginBytes },
     breakdown: { ...breakdown, weightIncrementBytes, kvIncrementBytes, placement,
-      kvEstimateDtype: hasPartialContext ? null : 'assumed-f16', memoryIncludesTransientStaging: !snapshot.loaded,
+      kvEstimateDtype: hasPartialContext ? null : kvEstimate?.reservationDtype ?? 'assumed-f16',
+      reportedKvDtype: kvEstimate?.dtype ?? 'unknown', backendSelection: snapshot.backendSelection ?? null,
+      kvParallelSlots: kvEstimate?.parallelSlots ?? 'unknown', memoryIncludesTransientStaging: !snapshot.loaded,
       gpuReservationIncludesOnlyPendingAllocations: true } };
 }

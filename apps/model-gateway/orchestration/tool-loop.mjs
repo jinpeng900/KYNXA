@@ -24,7 +24,7 @@ export function toolPolicyHash(context) {
  */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
   context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, catalogForRound, signal, interactive = false,
-  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal }) {
+  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal, systemForRound }) {
   const seenIds = new Set();
   const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId,
     resultStore: service.results, resultContext: context });
@@ -35,9 +35,18 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
   const observations = new ToolProgressGuard();
   const readFailures = new ToolReadFailureGuard();
   const recovery = new ToolRecoveryLedger();
-  let repairRequests = 0, recoveryFinal = false;
+  let repairRequests = 0, recoveryFinal = false, unknownObservationRounds = 0;
   const recoveredResult = async content => {
     signal?.throwIfAborted();
+    let evidenceValidation;
+    try { evidenceValidation = await validateFinal?.({ signal }); }
+    catch (error) {
+      signal?.throwIfAborted();
+      evidenceValidation = { current: false, code: error.code ?? 'RETRIEVAL_VALIDATION_UNAVAILABLE' };
+    }
+    if (evidenceValidation?.current === false) content += /\p{Script=Han}/u.test(context.message ?? '')
+      ? '\n\n部分来源或记忆已经变化、撤销或无法核验；依赖这些内容的结论仍待重新确认，不能当作已验证结果。'
+      : '\n\nSome sources or memories changed, were revoked, or could not be rechecked. Conclusions depending on them remain unverified and need current evidence.';
     segments.finish({ content, reasoning: '', calls: [] }, { final: false });
     await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
     await progress.save('interrupted', { code: 'TOOL_RECOVERY_EXHAUSTED' });
@@ -54,7 +63,17 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
   try {
     for (let round = 0; round < progress.limits.maxRounds; round++) {
       signal?.throwIfAborted();
+      if (recovery.hasUnknownEffects && !recoveryFinal &&
+          (unknownObservationRounds >= 8 || round === progress.limits.maxRounds - 1)) {
+        // State recovery has its own bounded stage; leave one normal response instead of wasting the whole task budget.
+        // 状态恢复阶段单独有界；保留一次正常回答机会，不能把整个任务额度耗在未知结果上。
+        recoveryFinal = summarizeOnly = true;
+        recovery.record('TOOL_EFFECT_UNCONFIRMED', 'summarize-without-tools', round + 1);
+        messages.push({ role: 'user', content: '[KYNXA_UNKNOWN_EFFECT_FINAL] State checks did not verify an earlier dispatch. Tools are disabled. Give a normal partial answer with verified receipts and the unresolved outcome; do not replay operations or claim completion.' });
+      }
+      if (recovery.hasUnknownEffects && !recoveryFinal) unknownObservationRounds++;
       progress.rounds = round + 1;
+      if (systemForRound) system = await systemForRound(system, signal);
       segments.start(round + 1);
       await progress.save('model');
       // The schemas and decoder share one snapshot, even if a stage expires during generation.
@@ -72,24 +91,37 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       service.setEvidenceBudget?.(context, Math.max(0, inputBudgetTokens -
         estimateToolMessageTokens(messages, system) - estimateTokens(JSON.stringify(roundDeclarations)) - 512));
       if (compacted.metrics) await onContextCompacted(compacted.metrics);
-      const modelElapsed = startRunTimer();
+      let modelElapsed;
+      let modelTimingRecorded = false;
+      const recordModelTiming = () => {
+        if (modelTimingRecorded || !modelElapsed) return;
+        progress.recordModel(modelElapsed());
+        modelTimingRecorded = true;
+      };
       let turn;
       try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
         workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', cpuThreads: 1,
         memoryBytes: 16 * 1024 * 1024 },
-        () => requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog), { signal });
+        async () => {
+          modelElapsed = startRunTimer();
+          try { return await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog, system); }
+          finally { recordModelTiming(); }
+        }, { signal });
         signal?.throwIfAborted();
         if (turn.calls.some(call => seenIds.has(call.id)))
           throw new ToolCallDecodeFailure('工具调用 ID 重复，未再次执行。', 'MODEL_TOOL_IDENTITY_INVALID');
       }
       catch (error) {
+        // Persist failure/finalization only after this attempt's timing and buffered output have been counted.
+        // 本次模型尝试的耗时和缓冲输出计量完成后才保存失败/收束状态，避免 return/finally 顺序漏记。
+        recordModelTiming();
+        if (modelElapsed) progress.observeTurn(turn ?? { content: segments.current.content, reasoning: segments.current.reasoning, calls: [] },
+          { estimatedGeneratedTokens: error.estimatedGeneratedTokens });
         signal?.throwIfAborted();
         if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(error.code)) throw error;
         if (recovery.classify(error) !== 'repair-unexecuted-model-step' && !recoveryFinal) throw error;
         // Failed output consumed generation too; decoder accounting includes buffered arguments without logging them.
         // 失败输出也消耗生成预算；解码器只提供缓冲参数的计量，不把参数内容写入诊断。
-        progress.observeTurn(turn ?? { content: segments.current.content, reasoning: segments.current.reasoning, calls: [] },
-          { estimatedGeneratedTokens: error.estimatedGeneratedTokens });
         if (recoveryFinal) return await recoveredResult(recovery.fallback(context.message));
         recovery.protectCompletedEffects();
         segments.interrupt();
@@ -106,12 +138,12 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         await progress.save('continuing', { code: error.code });
         continue;
       }
-      finally { progress.recordModel(modelElapsed()); }
-      // Persist the decoded model step before executing its effects. Results remain owned by saveActivity.
-      // 执行副作用前先保存已解码模型步骤，结果仍由 saveActivity 负责保存。
-      await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations });
+      finally { recordModelTiming(); }
+      // Count generation before persistence/cancellation, while still journaling the decoded step before any effect.
+      // 持久化失败或取消前先计量生成，但任何副作用仍须等已解码步骤完成日志保存后执行。
+      try { progress.observeTurn(turn); }
+      finally { await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations }); }
       signal?.throwIfAborted();
-      progress.observeTurn(turn);
       if (recoveryFinal) return await recoveredResult(turn.calls.length ? recovery.fallback(context.message) : turn.content || recovery.fallback(context.message));
       const evidenceValidation = !turn.calls.length && validateFinal ? await validateFinal({ signal }) : null;
       const needsEvidenceRepair = evidenceValidation?.current === false && !summarizeOnly && evidenceRepairRequests < 2;
@@ -225,6 +257,11 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           if (result.recoveryOfToolCallId) completed.recoveryOfToolCallId = result.recoveryOfToolCallId; }
         await saveActivity(completed);
         recovery.observe(call, result);
+        if (recovery.hasUnknownEffects && !result.isError && isRecoveryObservation(call) && service.verifyUnknownEffects) {
+          const proofs = await service.verifyUnknownEffects(context, [...recovery.unknown.values()], { call, result });
+          if (recovery.resolveVerified(proofs)) messages.push({ role: 'user', content:
+            '[KYNXA_EFFECT_VERIFIED] The broker verified dispatch from its owned job state. The original unknown receipt and verification are retained. Do not repeat the original operation. A started process does not certify that its command or the overall task succeeded.' });
+        }
         progress.observeOutcome(call, result);
         emit({ type: 'tool_result', tool: completed });
         await progress.save('continuing', { toolCallId: call.id });
@@ -306,6 +343,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       }
       await progress.save('continuing', { toolCallId: results.at(-1)?.call.id ?? null });
     }
+    if (recovery.hasUnknownEffects) return await recoveredResult(recovery.fallback(context.message));
     throw runLimitFailure('TOOL_RUN_ROUND_LIMIT');
   } catch (error) {
     segments.interrupt();

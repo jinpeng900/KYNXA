@@ -14,14 +14,31 @@ internal static class Program
         Console.InputEncoding = Encoding.UTF8;
         Console.OutputEncoding = new UTF8Encoding(false);
         bool desktopRequest = false, hostTerminalRequest = false;
+        bool documentOcrRequest = args.Length == 1 && args[0] == "--document-ocr";
         try
         {
             string input = await Console.In.ReadLineAsync()
                 ?? throw new SandboxException("SANDBOX_INVALID_REQUEST", "Missing sandbox request.");
-            if (input.Length > 128 * 1024) throw new SandboxException("SANDBOX_INVALID_REQUEST", "Sandbox request is too large.");
+            if (input.Length > (documentOcrRequest ? DocumentOcr.MaximumFrameCharacters : 128 * 1024))
+                throw new SandboxException("SANDBOX_INVALID_REQUEST", "Native request is too large.");
             using JsonDocument document = JsonDocument.Parse(input);
             string? operation = document.RootElement.TryGetProperty("operation", out JsonElement value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString() : null;
+            if (documentOcrRequest)
+            {
+                if (operation == "document_ocr_capabilities")
+                    Console.WriteLine(JsonSerializer.Serialize(DocumentOcr.Capabilities(), JsonOptions));
+                else if (operation == "document_ocr")
+                {
+                    var ocr = JsonSerializer.Deserialize<DocumentOcrRequest>(input, JsonOptions)
+                        ?? throw new DocumentOcrException("OCR_INVALID_REQUEST", "Missing document OCR request.");
+                    using var cancelOcr = new CancellationTokenSource();
+                    _ = Task.Run(() => MonitorCancellationAsync(cancelOcr));
+                    Console.WriteLine(JsonSerializer.Serialize(await DocumentOcr.RunAsync(ocr, cancelOcr.Token), JsonOptions));
+                }
+                else throw new DocumentOcrException("OCR_INVALID_REQUEST", "Unknown document OCR operation.");
+                return 0;
+            }
             if (operation is "host_terminal_capabilities" or "host_terminal" or "host_terminal_visible" or "host_terminal_job")
             {
                 hostTerminalRequest = true;
@@ -77,6 +94,15 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            if (documentOcrRequest)
+            {
+                string ocrCode = exception switch { DocumentOcrException failure => failure.Code,
+                    OperationCanceledException => "OCR_CANCELLED", JsonException => "OCR_INVALID_REQUEST", _ => "OCR_UNAVAILABLE" };
+                Console.WriteLine(JsonSerializer.Serialize(new { protocolVersion = 1, schemaVersion = 1, boundary = "document-ocr", completed = false, errorCode = ocrCode,
+                    error = new { code = ocrCode, message = exception is DocumentOcrException ? exception.Message
+                        : "Windows document OCR is unavailable. / 当前 Windows 文档 OCR 不可用。" } }, JsonOptions));
+                return 1;
+            }
             if (hostTerminalRequest)
             {
                 string terminalCode = exception switch { HostTerminalException failure => failure.Code,

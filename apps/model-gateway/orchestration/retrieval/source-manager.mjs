@@ -94,6 +94,14 @@ export class SourceIndexService {
         const completeScan = snapshot.sourceScan?.coverage?.complete !== false && !snapshot.sourceScan?.incomplete && !snapshot.sourceScan?.backgroundPending;
         if (completeScan) await this.indexer.prune({ scopes: snapshot.scopes,
           identities: new Set(snapshot.sources.map(source => source.sourceId)) }, signal, { sourceTypes: ['knowledge', 'work-file'] });
+        // Failed file content does not make its directory inventory incomplete; failed IDs must survive reconciliation.
+        // 文件正文失败不表示目录清单未完成；清理覆盖时须保留本轮仍存在的失败文件身份。
+        const scan = snapshot.sourceScan;
+        if (!scan?.incomplete && !scan?.backgroundPending && !scan?.failureReportTruncated &&
+            !scan?.failures?.some(failure => failure.directory))
+          await this.index.reconcileCoverage?.({ scopeKeys: snapshot.scopes, sourceTypes: ['knowledge', 'work-file'],
+            sourceIds: [...new Set([...snapshot.sources.map(source => source.sourceId),
+              ...(scan?.failures ?? []).map(failure => failure.sourceId).filter(Boolean)])], signal });
         if (snapshot.preparationFailures === this.indexer.preparationFailures)
           await this.cacheCorpus(snapshot.sources, snapshot.scopes, snapshot.settings, signal, { complete: completeScan });
         // Warm stable generations only after derivation ends, not after every embedding batch.
@@ -225,6 +233,8 @@ export class SourceIndexService {
       const limits = settings.local.indexing;
       const scanStats = {}, options = { excludedRoots: this.excludedRoots, stats: scanStats, resourceService: this.resources,
         maximumFiles: limits?.maximumFiles ?? 512, maximumSourceBytes: limits?.maximumSourceBytes,
+        maximumDocumentInputBytes: limits?.maximumDocumentInputBytes, maximumDocumentOutputBytes: limits?.maximumDocumentOutputBytes,
+        maximumPdfPages: limits?.maximumPdfPages,
         maximumBytes: limits?.maximumTotalBytes, maximumEntries: limits?.maximumEntries, signal: ownedSignal };
       const files = this.readTree === readSourceTree ? readSourceImportTree(input.path, options) : await this.readTree(input.path, options);
       ownedSignal.throwIfAborted();
@@ -243,7 +253,9 @@ export class SourceIndexService {
       return { id: first.id, title: first.title, scope: first.scope, projectId: first.projectId, path: first.originalPath,
         revision: first.revision, status: 'ready', importedCount: result.sources.length,
         sourceCoverage: { discovered: scanStats.discoveredFiles ?? result.sources.length,
-          failed: scanStats.failedFiles ?? 0, importedWindows: result.sources.length, failures: scanStats.failures ?? [] },
+          failed: scanStats.failedFiles ?? 0, importedWindows: result.sources.length, failures: scanStats.failures ?? [],
+          complete: !scanStats.incomplete && !scanStats.failedFiles,
+          ...(scanStats.documentWindows ? { documentWindows: scanStats.documentWindows } : {}) },
         ...(job ? { jobId: job.jobId } : { indexingStatus: 'pending' }) };
     }, signal);
   }

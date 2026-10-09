@@ -23,6 +23,25 @@ function options(requestTurn, service, extra = {}) {
     declarations: [], emit: () => {}, saveActivity: async () => {}, requestTurn, service, ...extra };
 }
 
+test('each round budgets, dispatches and saves the refreshed system without replaying a completed action', async () => {
+  const savedSystems = [], dispatchedSystems = [];
+  let rounds = 0, effects = 0;
+  const result = await runToolLoop(options(async (_messages, _tools, _signal, _receive, _catalog, system) => {
+    dispatchedSystems.push(system);
+    rounds++;
+    if (rounds === 2) return finalTurn('The current source has been checked.');
+    return decodeToolTurn('openai-completions', rawTurn('openai-completions', 'once', { path: 'fixture', content: 'once' }), catalog);
+  }, { execute: async () => { effects++; return { status: 'completed', isError: false, content: 'saved once' }; } }, {
+    system: 'old confirmed memory', declarations: toolDeclarations('openai-completions', catalog), catalogForRound: () => catalog,
+    systemForRound: async () => rounds ? 'current confirmed memory' : 'old confirmed memory',
+    saveModelRound: async step => savedSystems.push(step.system)
+  }));
+  assert.equal(effects, 1);
+  assert.equal(result.content, 'The current source has been checked.');
+  assert.deepEqual(dispatchedSystems, ['old confirmed memory', 'current confirmed memory']);
+  assert.deepEqual(savedSystems, dispatchedSystems);
+});
+
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
   test(`${protocol}: failed model step repairs without replaying a completed write or losing tool pairs`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'kynxa-step-recovery-'));
@@ -66,6 +85,135 @@ test('repeated decoder errors make one repair and one no-tool summary; no partia
   assert.equal(rounds, 3); assert.equal(effects, 0);
   assert.equal(result.completionStatus, 'interrupted');
   assert.match(result.content, /尚未执行/);
+});
+
+test('the last failed summary and transport output are counted before the interrupted state is saved', async () => {
+  let rounds = 0, state;
+  const result = await runToolLoop(options(async () => {
+    rounds++;
+    throw Object.assign(new ToolCallDecodeFailure('Unusable response', 'MODEL_TOOL_ARGUMENT_INVALID'),
+      { estimatedGeneratedTokens: 123 });
+  }, {}, { saveRunState: async value => { state = structuredClone(value); } }));
+  assert.equal(rounds, 3);
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(state.diagnostics.modelCalls, rounds);
+  assert.equal(state.estimatedGeneratedTokens, 369);
+  assert.equal(state.diagnostics.modelRounds.at(-1).round, rounds);
+  rounds = 0;
+  await assert.rejects(runToolLoop(options(async () => {
+    rounds++;
+    throw Object.assign(new Error('Transport lost after partial generation'), { estimatedGeneratedTokens: 251 });
+  }, {}, { saveRunState: async value => { state = structuredClone(value); } })), /Transport lost/);
+  assert.equal(state.diagnostics.modelCalls, 1);
+  assert.equal(state.estimatedGeneratedTokens, 251);
+});
+
+test('resource admission failure retains its category without counting a model request that was never dispatched', async () => {
+  let state;
+  await assert.rejects(runToolLoop(options(async () => assert.fail('resource denial cannot invoke the model'),
+    { resources: { acquire: async () => ({ status: 'denied', reason: 'RESOURCE_PRESSURE' }) } },
+    { saveRunState: async value => { state = structuredClone(value); } })), { code: 'RESOURCE_PRESSURE' });
+  assert.equal(state.diagnostics.modelCalls, 0);
+  assert.equal(state.estimatedGeneratedTokens, 0);
+});
+
+test('decoded generation is counted even when journaling fails before dispatch', async () => {
+  let state;
+  await assert.rejects(runToolLoop(options(async () => finalTurn('Produced before persistence failed. '.repeat(200)),
+    { execute: async () => assert.fail('unsaved steps cannot execute') }, {
+      saveModelRound: async () => { throw new Error('synthetic journal failure'); },
+      saveRunState: async value => { state = structuredClone(value); }
+    })), /synthetic journal failure/);
+  assert.equal(state.diagnostics.modelCalls, 1);
+  assert.ok(state.estimatedGeneratedTokens > 1024);
+});
+
+test('non-streaming incomplete Responses also charges complete-looking tool arguments without executing', async () => {
+  let state;
+  await assert.rejects(runToolLoop(options(async () => decodeToolTurn('openai-responses', { status: 'incomplete', incomplete_details: { reason: 'stop' },
+    output: [{ type: 'function_call', call_id: 'incomplete', name: catalog[0].wireName,
+      arguments: JSON.stringify({ content: 'nonstream argument '.repeat(1000) }) }] }, catalog),
+    { execute: async () => assert.fail('incomplete model steps cannot execute') }, {
+      saveRunState: async value => { state = structuredClone(value); }
+    })), /未完整结束/);
+  assert.equal(state.diagnostics.modelCalls, 1);
+  assert.ok(state.estimatedGeneratedTokens > 1024);
+});
+
+test('recovery summaries still verify revoked sources and preserve a normal answer if verification is unavailable', async () => {
+  for (const unavailable of [false, true]) {
+    let checked = 0;
+    const result = await runToolLoop(options(async () => {
+      throw new ToolCallDecodeFailure('unusable output', 'MODEL_TOOL_ARGUMENT_INVALID');
+    }, {}, { validateFinal: async () => {
+      checked++;
+      if (unavailable) throw Object.assign(new Error('scope changed'), { code: 'RETRIEVAL_SCOPE_CHANGED' });
+      return { current: false, invalidSources: [{ sourceId: 'revoked-fixture' }] };
+    } }));
+    assert.equal(checked, 1);
+    assert.equal(result.completionStatus, 'interrupted');
+    assert.match(result.content, /撤销或无法核验/);
+    assert.match(result.content, /记录已保留/);
+  }
+});
+
+test('uncertain effects have a bounded observation stage and a normal partial answer without replay', async () => {
+  let rounds = 0, effects = 0;
+  const result = await runToolLoop(options(async (_messages, declarations) => {
+    rounds++;
+    if (!declarations.length) return finalTurn('The original dispatch remains unconfirmed; saved results are preserved.');
+    const call = rounds === 1 ? { id: 'unknown-start', name: 'terminal.host.start', arguments: {} }
+      : { id: `read-${rounds}`, name: 'filesystem.read', arguments: { path: `state-${rounds}.txt` } };
+    return { content: '', reasoning: '', calls: [call], continuation: [] };
+  }, { execute: async (_context, call) => {
+    if (call.name === 'terminal.host.start') { effects++; return { content: 'unconfirmed', status: 'unknown', isError: true }; }
+    return { content: `New observation ${rounds}`, status: 'completed', isError: false };
+  } }, { declarations: [{ fixture: true }] }));
+  assert.equal(effects, 1);
+  assert.equal(rounds, 10);
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(result.taskCompletion.state, 'execution-unconfirmed');
+  assert.match(result.content, /preserved/);
+  assert.equal(result.recovery.events.at(-1).code, 'TOOL_EFFECT_UNCONFIRMED');
+});
+
+test('broker-confirmed dispatch resumes independent work while protecting the verified original effect', async () => {
+  const original = { id: 'start', name: 'terminal.host.start', arguments: { command: 'once' } };
+  let rounds = 0;
+  const executions = [], receipts = [];
+  const result = await runToolLoop(options(async () => {
+    rounds++;
+    const call = rounds === 1 ? original : rounds === 2
+      ? { id: 'read', name: 'terminal.host.read', arguments: { jobId: 'owned-job' } } : rounds === 3
+        ? { ...original, id: 'repeated-start' } : rounds === 4
+          ? { id: 'independent', name: 'filesystem.write', arguments: { path: 'next.txt' } } : null;
+    return call ? { content: '', reasoning: '', calls: [call], continuation: [] } : finalTurn('Started once; independent work is finished.');
+  }, { execute: async (_context, call) => {
+    executions.push(call.name);
+    return call.id === 'start' ? { content: 'lost acknowledgement', status: 'unknown', isError: true }
+      : { content: 'observed or saved', status: 'completed', isError: false };
+  }, verifyUnknownEffects: async (_context, records, observation) => {
+    assert.equal(records[0].call.id, original.id);
+    assert.equal(observation.call.id, 'read');
+    return [{ toolCallId: original.id, observationToolCallId: 'read', outcome: 'dispatch-confirmed',
+      result: { content: 'broker verified start only', status: 'completed', isError: false } }];
+  } }, { saveActivity: async receipt => receipts.push(receipt) }));
+  assert.deepEqual(executions, ['terminal.host.start', 'terminal.host.read', 'filesystem.write']);
+  assert.equal(receipts.find(item => item.toolCallId === 'repeated-start' && item.status === 'completed').reused, true);
+  assert.equal(result.recovery.unknownEffects, 0);
+  assert.equal(result.recovery.verifiedEffects.length, 1);
+  assert.equal(result.completionStatus, undefined);
+});
+
+test('an uncertain final-round dispatch still returns saved partial results without obtaining a fresh budget', async () => {
+  let modelCalls = 0;
+  const result = await runToolLoop(options(async () => {
+    modelCalls++;
+    return { content: '', reasoning: '', calls: [{ id: 'last-dispatch', name: 'terminal.host.start', arguments: {} }], continuation: [] };
+  }, { execute: async () => ({ content: 'unknown', isError: true, status: 'unknown' }) }, { limits: { maxRounds: 1 } }));
+  assert.equal(modelCalls, 1);
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.match(result.content, /记录已保留/);
 });
 
 test('unknown side effects allow state observation but never replay or certify completion', async () => {

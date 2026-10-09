@@ -3,6 +3,7 @@ import { open, readFile, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicJson } from '../../platform/atomic-json.mjs';
 import { ensureLocalDirectory, inspectLocalPath, toolFailure } from '../../platform/tool-paths.mjs';
+import { validateDocumentCoverage } from './document-coverage.mjs';
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'paused']);
 const MAX_CHECKPOINT_BYTES = 128 * 1024 * 1024;
@@ -74,7 +75,8 @@ function validateSemanticProgress(value) {
 }
 
 function validateCoverageProgress(value) {
-  const fields = ['discovered', 'files', 'lexical', 'semantic', 'failed', 'skipped', 'partial', 'complete', 'sources', 'failures', 'reportTruncated'];
+  const fields = ['discovered', 'files', 'lexical', 'semantic', 'failed', 'skipped', 'partial', 'complete', 'sources', 'failures',
+    'reportTruncated', 'limit', 'limits', 'effectiveLimits'];
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key)) ||
       typeof value.complete !== 'boolean') throw toolFailure('索引覆盖进度无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
   for (const key of ['discovered', 'lexical', 'semantic', 'failed', 'skipped'])
@@ -92,6 +94,18 @@ function validateCoverageProgress(value) {
     throw toolFailure('索引来源失败记录无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
   if (value.reportTruncated !== undefined && typeof value.reportTruncated !== 'boolean')
     throw toolFailure('索引覆盖截断标记无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  for (const entry of [...(value.sources ?? []), ...(value.failures ?? [])])
+    if (entry.documentCoverage !== undefined) validateDocumentCoverage(entry.documentCoverage);
+  const limits = value.limits ?? [];
+  if (!Array.isArray(limits) || limits.length > 50 || [...limits, ...(value.limit ? [value.limit] : [])].some(limit => !limit || typeof limit.dimension !== 'string' ||
+      limit.dimension.length > 64 || !Number.isSafeInteger(limit.limit) || limit.limit < 1 ||
+      !Number.isSafeInteger(limit.observed) || limit.observed < 0))
+    throw toolFailure('索引覆盖限额无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+  if (value.effectiveLimits !== undefined && (!value.effectiveLimits || typeof value.effectiveLimits !== 'object' ||
+      Array.isArray(value.effectiveLimits) || Object.keys(value.effectiveLimits).some(key => !['maximumFiles', 'maximumSourceBytes',
+        'maximumBytes', 'maximumEntries', 'maximumDocumentInputBytes', 'maximumDocumentOutputBytes', 'maximumPdfPages'].includes(key)) ||
+      Object.values(value.effectiveLimits).some(limit => !Number.isSafeInteger(limit) || limit < 1)))
+    throw toolFailure('索引有效限额无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
   return structuredClone(value);
 }
 

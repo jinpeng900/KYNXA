@@ -92,6 +92,11 @@ export class HostTerminalJobs {
       await started;
       signal?.throwIfAborted();
       return this._view(job);
+    } catch (error) {
+      // Retain the broker's handle even when a startup acknowledgement is lost; it never authorizes a replay.
+      // 启动确认丢失时仍保留代理分配的任务句柄；句柄只供查询，不授权重放命令。
+      if (error && typeof error === 'object') error.jobId = job.id;
+      throw error;
     } finally {
       clearTimeout(deadline);
       signal?.removeEventListener('abort', abortStartup);

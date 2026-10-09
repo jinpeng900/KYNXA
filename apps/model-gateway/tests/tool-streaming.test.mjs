@@ -1,10 +1,42 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readToolStream } from '../models/tool-streaming.mjs';
+import { StreamFailure } from '../models/streaming.mjs';
+import { estimateTokens } from '../models/context-tokens.mjs';
 import { wireCatalog } from '../models/tool-protocols.mjs';
 
 const frame = (item, type) => `${type ? `event: ${type}\n` : ''}data: ${JSON.stringify(item)}\n\n`;
 const response = body => new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+
+test('provider failure after streamed arguments retains generation accounting without executable calls', async () => {
+  const catalog = wireCatalog([{ name: 'filesystem.write', description: 'Write', inputSchema: { type: 'object' } }]);
+  const body = frame({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'partial',
+    function: { name: catalog[0].wireName, arguments: JSON.stringify({ content: 'partial generated value '.repeat(1000) }) } }] } }] })
+    + frame({ error: { message: 'synthetic transport/provider failure' } });
+  await assert.rejects(readToolStream(response(body), 'openai-completions', catalog), error =>
+    error instanceof StreamFailure && error.estimatedGeneratedTokens > 1024);
+});
+
+test('non-streaming truncated tool output also charges buffered arguments and preserves its draft', async () => {
+  const catalog = wireCatalog([{ name: 'filesystem.write', description: 'Write', inputSchema: { type: 'object' } }]), events = [];
+  const body = { choices: [{ finish_reason: 'length', message: { content: 'Saved draft',
+    tool_calls: [{ id: 'partial-json', type: 'function', function: { name: catalog[0].wireName,
+      arguments: JSON.stringify({ content: 'generated value '.repeat(1000) }) } }] } }] };
+  await assert.rejects(readToolStream(new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }),
+    'openai-completions', catalog, event => events.push(event)), error => error.estimatedGeneratedTokens > 1024);
+  assert.equal(events.at(-1).content, 'Saved draft');
+});
+
+test('Responses argument-only failure counts deltas and treats done as a snapshot', async () => {
+  const argumentsText = JSON.stringify({ content: 'partial generated arguments '.repeat(1000) });
+  for (const snapshot of [false, true]) {
+    const body = frame({ type: 'response.function_call_arguments.delta', item_id: 'argument-only', output_index: 3,
+      delta: argumentsText }) + (snapshot ? frame({ type: 'response.function_call_arguments.done', item_id: 'argument-only',
+      output_index: 3, arguments: argumentsText }) : '') + frame({ type: 'error', error: { message: 'synthetic' } });
+    await assert.rejects(readToolStream(response(body), 'openai-responses', []), error =>
+      error instanceof StreamFailure && error.estimatedGeneratedTokens === estimateTokens(argumentsText));
+  }
+});
 
 test('tool-enabled Chat Completions retains text and reasoning content arrays', async () => {
   const events = [];

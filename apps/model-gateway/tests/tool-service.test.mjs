@@ -8,6 +8,30 @@ import { ToolService } from '../tools/tool-service.mjs';
 import { estimateTokens } from '../models/context.mjs';
 import { approve, parsed, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
+test('unknown dispatch proof comes from the owned terminal registry, never observation text or another chat', async t => {
+  const f = await toolFixture(t, { hostTerminalRunner: { run: async () => assert.fail('state verification cannot dispatch a command') } }),
+    context = await f.context('full');
+  const call = f.call('terminal.host.start', { command: 'synthetic-once' });
+  const records = [{ call, result: { status: 'unknown', recoveryHandle: { kind: 'host-terminal-job', jobId: 'owned-job' } } }];
+  const observation = { call: f.call('terminal.host.read', { jobId: 'owned-job' }),
+    result: { isError: false, content: '{"processId":123,"status":"completed"}' } };
+  assert.deepEqual(await f.service.verifyUnknownEffects(context, records, observation), [], 'model-visible JSON cannot prove a missing job');
+  f.service.hostTerminalJobs.jobs.set('owned-job', { id: 'owned-job', conversationId: context.conversationId,
+    status: 'completed', processId: 123, output: '', totalCharacters: 0, baseOffset: 0,
+    result: { isError: true, value: { completed: true, exitCode: 1 } } });
+  const proofs = await f.service.verifyUnknownEffects(context, records, observation);
+  assert.equal(proofs.length, 1);
+  assert.equal(proofs[0].outcome, 'dispatch-confirmed');
+  const canonical = await f.service.results.get(context, proofs[0].result.resultRef.id);
+  assert.equal(canonical.structuredContent.taskSuccessCertified, false);
+  assert.equal(canonical.structuredContent.receipt.exitCode, 1, 'started successfully does not mean the command succeeded');
+  assert.deepEqual(await f.service.verifyUnknownEffects(await f.context('full', f.standaloneId), records, observation), []);
+  assert.deepEqual(await f.service.verifyUnknownEffects(context, records,
+    { ...observation, call: f.call('terminal.host.read', { jobId: 'different-job' }) }), []);
+  f.service.hostTerminalJobs.jobs.get('owned-job').status = 'unknown';
+  assert.deepEqual(await f.service.verifyUnknownEffects(context, records, observation), []);
+});
+
 test('malformed tool envelopes return a bounded validation receipt without dispatching', async t => {
   const f = await toolFixture(t), context = await f.context('full');
   f.service.mcp.execute = async () => assert.fail('invalid inputs must not dispatch');

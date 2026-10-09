@@ -19,25 +19,88 @@ function waitForRetirement(completion, signal) {
 export class EmbeddingRouter {
   constructor({ resourceService, factory = options => new EmbeddingService(options) } = {}) {
     this.resources = resourceService; this.factory = factory; this.instances = new Map(); this.retiring = new Map(); this.closed = false;
+    this.preferences = new Map(); this.configuration = Promise.resolve();
   }
-  _instance(profileId = 'builtin-multilingual') {
+  _instance(profileId = 'builtin-multilingual', devicePreference = this.preferences.get(profileId) ?? 'auto') {
     resolveRetrievalModelProfile('embedding', profileId);
     if (this.closed) throw Object.assign(new Error('Embedding router is closed. / 嵌入路由已关闭。'), { code: 'EMBEDDING_CLOSED' });
-    if (!this.instances.has(profileId)) this.instances.set(profileId, this.factory({ resourceService: this.resources, profileId }));
+    if (!this.instances.has(profileId)) {
+      this.instances.set(profileId, this.factory({ resourceService: this.resources, profileId, devicePreference }));
+      this.preferences.set(profileId, devicePreference);
+    }
     return this.instances.get(profileId);
   }
-  status(profileId = 'builtin-multilingual') {
-    try { return (this.retiring.get(profileId)?.instance ?? this._instance(profileId)).status(profileId); }
+  status(profileId = 'builtin-multilingual', { devicePreference } = {}) {
+    try {
+      const retirement = this.retiring.get(profileId);
+      const preference = retirement?.preference ?? this.preferences.get(profileId) ?? devicePreference ?? 'auto';
+      const result = (retirement?.instance ?? this._instance(profileId, preference)).status(profileId);
+      // Observation never switches a configured CPU session back to the legacy automatic default.
+      // 状态查询不能把已配置的 CPU 会话切回旧的自动默认值，也不能在退役期间创建替代进程。
+      return { ...result, devicePreference: preference, executionIdentity: `${profileId}:${preference}`,
+        ...(devicePreference && devicePreference !== preference ? { requestedDevicePreference: devicePreference,
+          requiresReconfiguration: true } : {}) };
+    }
     catch (error) {
       if (error.code !== 'RETRIEVAL_MODEL_PROFILE_UNSUPPORTED') throw error;
       return this._instance().status(profileId);
     }
   }
+  _retire(profileId, instance) {
+    this.instances.delete(profileId);
+    const retirement = { instance, preference: this.preferences.get(profileId), completion: undefined };
+    retirement.completion = Promise.resolve().then(() => instance.retire?.() ?? instance.close()).then(() => {
+      if (this.retiring.get(profileId) === retirement) this.retiring.delete(profileId);
+    });
+    // Keep a failed drain as a barrier; the next configuration cannot hide uncertain native cleanup.
+    // 排空失败保留屏障，下一次配置不能掩盖原生清理状态不确定的问题。
+    this.retiring.set(profileId, retirement);
+    return retirement.completion;
+  }
+  configure({ profileId = 'builtin-multilingual', devicePreference = 'auto', retireOtherProfiles = false, signal } = {}, dispatch) {
+    const profile = resolveRetrievalModelProfile('embedding', profileId);
+    if (!['auto', 'cpu'].includes(devicePreference)) throw new TypeError('Unsupported inference device preference.');
+    if (profile.requiredDevice && devicePreference === 'cpu')
+      throw Object.assign(new Error('The selected GPU space cannot use a CPU preference. / GPU 空间不能使用 CPU 偏好。'),
+        { code: 'EMBEDDING_GPU_REQUIRED' });
+    const operation = this.configuration.then(async () => {
+      if (signal?.aborted) await waitForRetirement(Promise.resolve(), signal);
+      if (this.closed) throw Object.assign(new Error('Embedding router is closed. / 嵌入路由已关闭。'), { code: 'EMBEDDING_CLOSED' });
+      for (const [id, instance] of this.instances)
+        if (id === profileId ? this.preferences.get(id) !== devicePreference : retireOtherProfiles) this._retire(id, instance);
+      // A cold status read between drain completion and activation must construct the selected preference.
+      // 排空完成到激活之间的冷状态读取必须沿已选偏好创建会话，不能恢复旧偏好。
+      this.preferences.set(profileId, devicePreference);
+      await Promise.all([...this.retiring].filter(([id]) => id === profileId || retireOtherProfiles).map(([, entry]) => entry.completion));
+      if (signal?.aborted) await waitForRetirement(Promise.resolve(), signal);
+      const instance = this._instance(profileId, devicePreference);
+      // Admission belongs to this configuration step; two opposite waiters must not alternate empty sessions forever.
+      // 请求接纳归当前配置步骤所有；两个相反偏好的等待者不能在空会话之间无限翻转。
+      const request = dispatch?.(instance);
+      request?.catch(() => {});
+      return { profileId, devicePreference, executionIdentity: `${profileId}:${devicePreference}`,
+        ...(request ? { request } : {}) };
+    });
+    this.configuration = operation.catch(() => {});
+    return waitForRetirement(operation, signal);
+  }
+  retire({ profileId, signal } = {}) {
+    if (profileId !== undefined) resolveRetrievalModelProfile('embedding', profileId);
+    const operation = this.configuration.then(async () => {
+      if (signal?.aborted) await waitForRetirement(Promise.resolve(), signal);
+      for (const [id, instance] of this.instances) if (profileId === undefined || id === profileId) this._retire(id, instance);
+      await Promise.all([...this.retiring].filter(([id]) => profileId === undefined || id === profileId).map(([, entry]) => entry.completion));
+      return { retired: true, profileId: profileId ?? null };
+    });
+    this.configuration = operation.catch(() => {});
+    return waitForRetirement(operation, signal);
+  }
   async _request(method, input, options) {
     const profileId = options.profileId ?? 'builtin-multilingual';
-    const retiring = this.retiring.get(profileId);
-    if (retiring) await waitForRetirement(retiring.completion, options.signal);
-    return this._instance(profileId)[method](input, options);
+    const devicePreference = options.devicePreference ?? this.preferences.get(profileId) ?? 'auto';
+    const configured = await this.configure({ profileId, devicePreference, signal: options.signal },
+      instance => instance[method](input, { ...options, devicePreference }));
+    return configured.request;
   }
   fitDocuments(documents, options = {}) { return this._request('fitDocuments', documents, options); }
   embedDocuments(texts, options = {}) { return this._request('embedDocuments', texts, options); }
@@ -68,6 +131,7 @@ export class EmbeddingRouter {
   async close() {
     this.closed = true;
     await Promise.all([...this.instances.values()].map(instance => instance.close())
-      .concat([...this.retiring.values()].map(retirement => retirement.completion)));
+      .concat([...this.retiring.values()].map(retirement => Promise.all([retirement.instance.close(), retirement.completion]))));
+    await this.configuration.catch(() => {});
   }
 }

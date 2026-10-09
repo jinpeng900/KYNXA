@@ -15,7 +15,8 @@ public sealed record RetrievalLocalSettings(bool Enabled, string Semantic, strin
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingDevicePolicy = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalIndexingLimits? Indexing = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalAnnSettings? Ann = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RerankDevicePolicy = null);
 
 // Missing optional settings stay omitted, so an older settings screen cannot reset backend-owned policy.
 // 可选设置未指定时保持省略，防止旧设置界面把后端设备策略与容量配置重置为默认值。
@@ -24,7 +25,10 @@ public sealed record RetrievalIndexingLimits(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumSourceBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumTotalBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumEntries = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentInputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentOutputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumPdfPages = null);
 public sealed record RetrievalAnnSettings(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Mode = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Adaptive = null,

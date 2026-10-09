@@ -28,6 +28,7 @@ test('shared file clues preserve original offsets and ignore URL paths without c
     assert.equal(reference.domain, 'code');
   }
   assert.equal(requestFileReferences('notes/plan.markdown')[0].domain, 'knowledge');
+  assert.equal(requestFileReferences('请读取types/service.pyi')[0].domain, 'code');
   assert.equal(classifyRequestTaskRelation('新的问题：你好').allowsInheritance, false);
   assert.equal(classifyRequestTaskRelation('我说的是论文，不是 src/jobs.ts').allowsInheritance, false);
 });

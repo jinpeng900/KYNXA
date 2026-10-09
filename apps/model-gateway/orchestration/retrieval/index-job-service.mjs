@@ -161,6 +161,8 @@ export class IndexJobService {
           active.recovered = undefined;
         } else await this.reuseSources?.(prepared, active.projectId, signal);
         for (const source of prepared.sources) plannedSourceIds.add(source.sourceId);
+        for (const failure of prepared.sourceScan?.failures ?? []) if (failure.sourceId && !failure.directory)
+          plannedSourceIds.add(failure.sourceId);
         active.totalSources = Math.max(active.totalSources, plannedSourceIds.size);
         await this.jobs.update(active.jobId, { totalSources: active.totalSources });
         for (const code of previousPassDiagnostics) if (priorDiagnosticCodes.size < 8) priorDiagnosticCodes.add(code);
@@ -180,7 +182,7 @@ export class IndexJobService {
           }
           return this.jobs.update(active.jobId, patch);
         }, { loadSource: prepared.loadSource, isCurrent: prepared.isCurrent,
-          priorities: active.priorities });
+          priorities: active.priorities, sourceFailures: prepared.sourceScan?.failures ?? [] });
         signal.throwIfAborted();
         if (report?.coverage || prepared.sourceScan?.coverage) {
           const coverage = report?.coverage ?? { discovered: prepared.sources.length, lexical: 0, semantic: 0,
@@ -195,6 +197,7 @@ export class IndexJobService {
             complete: coverage.complete && scan?.coverage?.complete !== false && !failures.length && !scan?.truncated && !scan?.backgroundPending,
             ...(scan?.coverage?.limit ? { limit: scan.coverage.limit } : {}),
             ...(scan?.coverage?.limits ? { limits: scan.coverage.limits.slice(0, 50) } : {}),
+            ...(scan?.coverage?.effectiveLimits ? { effectiveLimits: scan.coverage.effectiveLimits } : {}),
             reportTruncated: failures.length > 50 || (coverage.sources?.length ?? 0) > 50 || Boolean(coverage.reportTruncated) };
           await this.jobs.update(active.jobId, { coverage: active.coverage });
         }
