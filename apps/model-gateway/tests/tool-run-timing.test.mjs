@@ -5,6 +5,13 @@ import { DEFAULT_TOOL_RUN_LIMITS, ToolRunProgress, startRunTimer } from '../orch
 import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { validateAssistantSegments } from '../platform/assistant-segments.mjs';
 
+// Synthetic broker snapshots exercise the version contract, not real file hashing or repository-wide coverage.
+// 合成代理快照只验证版本合同，不冒充真实文件哈希计算或全仓覆盖验收。
+function codeVersionSnapshot(signature = 'a'.repeat(64)) {
+  return { signature, complete: true, files: [{ pathId: 'b'.repeat(64), state: 'present', sha256: signature }],
+    coverage: 'observed-filesystem-targets', exhaustive: false };
+}
+
 test('a draft followed by required validation does not seal final segments before the task finishes', async () => {
   const events = [], activities = [], checks = [];
   const turns = [
@@ -17,7 +24,7 @@ test('a draft followed by required validation does not seal final segments befor
       function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) } : {}) }] }));
   const result = await runToolLoop({ protocol: 'openai-completions', context: { message: '修复代码并验证' },
     messages: [], system: '', declarations: [], inputBudgetTokens: 32768,
-    service: { execute: async (_context, call) => {
+    service: { captureTaskCodeVersion: async () => codeVersionSnapshot(), execute: async (_context, call) => {
       checks.push(call.id);
       return { status: 'completed', isError: false, content: JSON.stringify({ exitCode: 0 }) };
     } }, requestTurn: async () => turns.shift(), emit: event => events.push(event),
@@ -33,6 +40,7 @@ test('a draft followed by required validation does not seal final segments befor
 
 test('validation records require executed commands and a later edit invalidates earlier passed checks', async () => {
   const states = [], progress = new ToolRunProgress(undefined, state => states.push(state));
+  const versions = { beforeVersion: codeVersionSnapshot(), afterVersion: codeVersionSnapshot() };
   const receipt = (exitCode, extra = {}) => ({ status: 'completed', isError: exitCode !== 0,
     content: JSON.stringify({ exitCode, ...extra }) });
   progress.observeOutcome({ id: 'write-1', name: 'filesystem.write', arguments: {} }, receipt(0));
@@ -42,21 +50,69 @@ test('validation records require executed commands and a later edit invalidates 
   assert.equal(states.at(-1).verification.pendingValidation, true);
   assert.deepEqual(states.at(-1).verification.receipts, []);
   progress.observeOutcome({ id: 'failed-test', name: 'terminal.host.run', arguments: { command: 'npm test' } }, receipt(1));
-  progress.observeOutcome({ id: 'timed-out', name: 'terminal.host.run', arguments: { command: 'npm test' } }, receipt(0, { timedOut: true }));
   assert.equal(progress.checkedMutationRevision, 0);
-  progress.observeOutcome({ id: 'passed-test', name: 'terminal.host.run', arguments: { command: 'node --test test.mjs' } }, receipt(0));
+  progress.observeOutcome({ id: 'unbound-test', name: 'terminal.host.run', arguments: { command: 'node --test test.mjs' } }, receipt(0));
+  assert.equal(progress.verification().receipts.at(-1).passed, true);
+  assert.equal(progress.verification().receipts.at(-1).coversObservedRevision, false);
+  assert.equal(progress.verification().state, 'checks-version-unverified');
+  assert.equal(progress.verification().pendingValidation, true);
+  assert.equal(progress.needsValidation('修复代码'), false, 'missing hash coverage alone must not repeat a passing command');
+  progress.observeOutcome({ id: 'passed-test', name: 'terminal.host.run', arguments: { command: 'node --test test.mjs' } }, receipt(0), versions);
   await progress.save('continuing');
   assert.equal(states.at(-1).verification.pendingValidation, false);
-  assert.equal(states.at(-1).verification.receipts.length, 2);
+  assert.equal(states.at(-1).verification.receipts.length, 3);
+  assert.equal(states.at(-1).verification.codeVersionCoverage.actualFileHashesVerified, true);
+  assert.equal(states.at(-1).verification.codeVersionCoverage.wholeRepositoryCertified, false);
   assert.equal(states.at(-1).verification.conclusion, 'task-correctness-not-certified');
   progress.observeOutcome({ id: 'write-2', name: 'filesystem.edit', arguments: {} }, receipt(0));
   await progress.save('finalizing');
   assert.equal(states.at(-1).verification.pendingValidation, true);
-  progress.observeOutcome({ id: 'cmd-validation', name: 'terminal.run', arguments: { command: 'cmd', args: ['/d', '/c', 'node --test check.mjs'] } }, receipt(0));
+  progress.observeOutcome({ id: 'cmd-validation', name: 'terminal.run', arguments: { command: 'cmd', args: ['/d', '/c', 'node --test check.mjs'] } },
+    receipt(0, { sandbox: 'appcontainer', tokenVerified: true, workspaceCopy: true }), versions);
+  assert.equal(progress.verification().receipts.at(-1).passed, true);
+  assert.equal(progress.verification().receipts.at(-1).codeVersionCoverage.sandboxSnapshotVersion, 'unverified');
+  assert.equal(progress.verification().pendingValidation, true, 'host hashes cannot certify the starting version of a sandbox copy');
+  progress.observeOutcome({ id: 'current-host-test', name: 'terminal.host.run', arguments: { command: 'node --test check.mjs' } }, receipt(0), versions);
   assert.equal(progress.verification().pendingValidation, false);
+  progress.observeFinalCodeVersion(codeVersionSnapshot('c'.repeat(64)));
+  assert.equal(progress.verification().pendingValidation, true, 'an external change invalidates the earlier host check');
+  assert.equal(progress.verification().codeVersionCoverage.actualFileHashesVerified, false);
   progress.observeOutcome({ id: 'latest-failure', name: 'terminal.host.run', arguments: { script: 'node --test check.mjs' } }, receipt(1));
   assert.equal(progress.verification().state, 'checks-failed');
   assert.equal(progress.verification().pendingValidation, true);
+});
+
+test('unknown, cancelled and timed-out operations cannot retain a prior version-bound pass', () => {
+  const versions = { beforeVersion: codeVersionSnapshot(), afterVersion: codeVersionSnapshot() };
+  const check = { id: 'initial-check', name: 'terminal.host.run', arguments: { script: 'node --test check.mjs' } };
+  const passing = { status: 'completed', isError: false, content: JSON.stringify({ exitCode: 0 }) };
+  const outcomes = [
+    { status: 'unknown', code: 'TOOL_OUTCOME_UNKNOWN', expected: 'unknown', output: {} },
+    { status: 'cancelled', code: 'TOOL_CANCELLED', expected: 'cancelled', output: { exitCode: 0, cancelled: true } },
+    { status: 'error', code: 'TOOL_TIMED_OUT', expected: 'timed-out', output: { exitCode: 0, timedOut: true } }
+  ];
+  for (const outcome of outcomes) {
+    const progress = new ToolRunProgress();
+    progress.observeOutcome(check, passing, versions);
+    assert.equal(progress.verification().pendingValidation, false);
+    progress.observeOutcome({ ...check, id: 'interrupted-check' }, { status: outcome.status, code: outcome.code,
+      isError: true, content: JSON.stringify(outcome.output) }, versions);
+    const verification = progress.verification();
+    assert.equal(verification.receipts.at(-1).status, outcome.expected);
+    assert.notEqual(verification.receipts.at(-1).status, 'failed', 'missing or interrupted execution is not an assertion failure');
+    assert.equal(verification.pendingValidation, true);
+    assert.equal(verification.state, 'execution-unconfirmed');
+    assert.equal(verification.codeVersionCoverage.actualFileHashesVerified, false);
+    assert.equal(progress.needsValidation('修复代码'), false, 'unconfirmed effects require state verification rather than a replay');
+  }
+  for (const status of ['unknown', 'cancelled']) {
+    const progress = new ToolRunProgress();
+    progress.observeOutcome(check, passing, versions);
+    progress.observeOutcome({ id: 'uncertain-write', name: 'filesystem.edit', arguments: {} },
+      { status, isError: true, content: 'Write outcome is unconfirmed.' });
+    assert.equal(progress.verification().state, 'execution-unconfirmed');
+    assert.equal(progress.verification().codeVersionCoverage.actualFileHashesVerified, false);
+  }
 });
 
 test('numeric diagnostics distinguish model, execution and approval spans without treating parallel totals as wall time', async () => {

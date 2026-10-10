@@ -101,6 +101,15 @@ test('task priority reorders admitted metadata without adding sources, mutating 
   assert.equal(sources[0].title, 'large.csv');
 });
 
+test('explicit absolute targets precede changed files without excluding unchanged admitted sources', () => {
+  const sources = ['src/untouched.mjs', 'notes/recent.md', 'docs/current.md', 'archive.csv']
+    .map(title => ({ ...evidence(title, 'synthetic'), locator: { relativePath: title, path: `C:/fixture/${title}` } }));
+  const reordered = prioritizeEvidenceSources(sources, new Set(['c:/fixture/docs/current.md']), new Set(['notes/recent.md']));
+  assert.deepEqual(reordered.map(source => source.title), ['docs/current.md', 'notes/recent.md', 'src/untouched.mjs', 'archive.csv']);
+  assert.deepEqual(new Set(reordered), new Set(sources));
+  assert.equal(sources[0].title, 'src/untouched.mjs');
+});
+
 test('a newly requested path changes only remaining publication batches and reports their actual identities', async () => {
   const sources = ['a.md', 'b.md', 'c.md'].map((title, index) => ({ sourceId: `source-${index}`, scopeKey: 'user',
     sourceType: 'knowledge', title, text: `Evidence in ${title}`, sourceRevision: 1, locator: { relativePath: title } }));

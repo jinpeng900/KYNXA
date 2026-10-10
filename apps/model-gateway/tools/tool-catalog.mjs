@@ -4,7 +4,9 @@ import { toolFailure } from '../platform/tool-paths.mjs';
 import { toolDiscoveryCategory, toolSelectionSignals } from './tool-discovery.mjs';
 
 const discoveryNames = new Set(['tool.search', 'tool.load', 'tool.result.read']);
-const coreTool = tool => tool.source === 'builtin' && !tool.name.startsWith('computer.');
+const requiredDiscoveryNames = new Set(['tool.search', 'tool.load']);
+const coreTool = tool => tool.source === 'builtin' && tool.modelExposure !== 'on-demand' &&
+  !['computer', 'host-terminal'].includes(toolDiscoveryCategory(tool));
 
 function relevanceScore(tool, signals) {
   const name = tool.name.toLowerCase(), description = String(tool.description ?? '').toLowerCase();
@@ -32,7 +34,7 @@ function relevanceScore(tool, signals) {
  */
 export class ModelToolCatalog {
   constructor(descriptors, { protocol, tokenBudget = 16000, message = '', historySignals = [], previousToolNames = [], taskRelation } = {}) {
-    this.descriptors = descriptors.filter(tool => tool.enabled !== false);
+    this.descriptors = descriptors.filter(tool => tool.enabled !== false && tool.available !== false);
     this.canonicalNames = new Map(this.descriptors.flatMap(tool => [[tool.name, tool.name],
       [wireCatalog([tool])[0].wireName, tool.name]]));
     this.protocol = protocol;
@@ -40,14 +42,21 @@ export class ModelToolCatalog {
     this.selected = [];
     const signals = toolSelectionSignals(message, { historySignals, previousToolNames, taskRelation });
     const scores = new Map(this.descriptors.map(tool => [tool, relevanceScore(tool, signals)]));
-    const ordered = this.descriptors.filter(tool => (!tool.name.startsWith('computer.') || signals.desktop) &&
-      (!tool.name.startsWith('terminal.host.') || signals.hostTerminal)).sort((left, right) =>
+    // Hints rank schema candidates; only runtime/configuration facts remove an executable descriptor.
+    // Unknown wording must retain a discovery/load path rather than become a semantic prohibition.
+    // 线索只排序 schema 候选，只有运行时或配置事实移除可执行描述符；陌生表达保留发现与加载路径，不变成语义禁令。
+    const ordered = [...this.descriptors].sort((left, right) =>
+      Number(requiredDiscoveryNames.has(right.name)) - Number(requiredDiscoveryNames.has(left.name)) ||
       Number(discoveryNames.has(right.name)) - Number(discoveryNames.has(left.name)) ||
       // A device inspection needs the real host shell before less relevant builtin schemas fill the budget.
       // 本机状态查询先保留真实宿主终端，避免其他内置 schema 先占满预算；执行审批保持原规则。
       (signals.deviceState ? Number(right.name === 'terminal.host.run') - Number(left.name === 'terminal.host.run') : 0) ||
+      (signals.hostTerminal ? Number(right.name.startsWith('terminal.host.')) - Number(left.name.startsWith('terminal.host.')) : 0) ||
       (signals.remoteBrowser ? Number(toolDiscoveryCategory(right) === 'browser') - Number(toolDiscoveryCategory(left) === 'browser') : 0) ||
       (signals.desktop ? Number(right.name.startsWith('computer.')) - Number(left.name.startsWith('computer.')) : 0) ||
+      // Optional planning/draft interfaces must not displace the actual execution schema in a small window.
+      // 可选的规划和草稿接口不能挤占小窗口的实际执行 schema；完整目录与显式加载仍保留它们。
+      Number(left.modelExposure === 'on-demand') - Number(right.modelExposure === 'on-demand') ||
       Number(coreTool(right)) - Number(coreTool(left)) || scores.get(right) - scores.get(left) ||
       left.name.localeCompare(right.name));
     for (const descriptor of ordered) if (this.fits([...this.selected, descriptor])) this.selected.push(descriptor);
@@ -66,6 +75,26 @@ export class ModelToolCatalog {
     return names.map(name => this.canonicalNames.get(name) ?? name);
   }
 
+  _loadableSelection(requestedDescriptors) {
+    const requested = [];
+    for (const descriptor of requestedDescriptors) {
+      const current = this.descriptors.find(tool => tool.name === descriptor?.name);
+      if (!current) return null;
+      if (!requested.some(tool => tool.name === current.name)) requested.push(current);
+    }
+    // Result paging can be deferred to fit an explicitly requested action; search/load always stay reachable.
+    // Explicitly requested result paging remains mandatory, and its descriptor is never removed from the full catalog.
+    // 为容纳明确请求的动作可延后结果分页，搜索/加载始终可达；明确请求的结果分页仍须装入，完整目录不删除其描述符。
+    for (const keptNames of [discoveryNames, requiredDiscoveryNames]) {
+      const next = this.descriptors.filter(tool => keptNames.has(tool.name));
+      for (const descriptor of requested) if (!next.some(tool => tool.name === descriptor.name)) next.push(descriptor);
+      if (this.fits(next)) return next;
+    }
+    return null;
+  }
+
+  canLoad(requestedDescriptors) { return this._loadableSelection(requestedDescriptors) !== null; }
+
   load(names) {
     const resolved = [...new Set(this.resolveNames(names))];
     const requested = resolved.map(name => this.descriptors.find(tool => tool.name === name)).filter(Boolean);
@@ -74,14 +103,14 @@ export class ModelToolCatalog {
     // Explicit discovery may replace ordinary builtin schemas as well as remote ones.
     // Keeping every builtin prevents a small-window model from ever loading the requested capability.
     // 显式发现可以替换普通内置 schema 或远程 schema；小窗口模型若强制保留全部内置工具，将无法装入请求的能力。
-    const keep = this.descriptors.filter(tool => discoveryNames.has(tool.name));
-    const next = [...keep];
-    for (const descriptor of requested) if (!next.some(tool => tool.name === descriptor.name)) next.push(descriptor);
-    if (!this.fits(next)) throw toolFailure('请求的工具定义超过本轮模型预算，请减少选择。', 'TOOL_CATALOG_BUDGET', 413);
+    const next = this._loadableSelection(requested);
+    if (!next) throw toolFailure('请求的工具定义超过本轮模型预算，请减少选择。', 'TOOL_CATALOG_BUDGET', 413);
     for (const descriptor of this.selected) if (!next.some(tool => tool.name === descriptor.name) && this.fits([...next, descriptor])) next.push(descriptor);
     this.selected = next;
     return { loaded: requested.map(tool => tool.name), selectedCount: next.length,
       availableCount: this.descriptors.length, deferredCount: this.descriptors.length - next.length,
+      ...(this.descriptors.some(tool => tool.name === 'tool.result.read') && !next.some(tool => tool.name === 'tool.result.read')
+        ? { deferredDiscovery: ['tool.result.read'] } : {}),
       ...(unavailable.length ? { unavailable } : {}) };
   }
 }

@@ -23,6 +23,18 @@ async function temporaryRoot(t) {
   return root;
 }
 
+test('recent file priorities are bounded independently from explicit task targets', () => {
+  const lifecycle = new IndexJobService({});
+  lifecycle.prioritize('project-a', 'src/target.mjs');
+  for (let index = 0; index < 24; index++) lifecycle.prioritize('project-a', `changed-${index}.md`, { recent: true });
+  const priorities = lifecycle.prioritiesFor('project-a');
+  assert.deepEqual([...priorities.paths], ['src/target.mjs']);
+  assert.equal(priorities.recentPaths.size, 16);
+  assert.equal(priorities.recentPaths.has('changed-0.md'), false);
+  assert.equal(priorities.recentPaths.has('changed-23.md'), true);
+  assert.equal(lifecycle.active.size, 0, 'priority hints never restart a cancelled or absent job');
+});
+
 function chunkFixture(count, characters = 40, tokenCount = 20) {
   const text = `${'x'.repeat(characters - 1)}\n`;
   const chunks = Array.from({ length: count }, (_, index) => ({ chunkIndex: index,
@@ -129,6 +141,54 @@ test('cancelling enlarged batches drains inference and keeps only acknowledged p
   assert.equal(coverage.length, 1); assert.equal(coverage[0].status, 'ready');
   assert.ok(indexer.fingerprints.has('capacity-source:semantic'));
   assert.equal(indexer.fingerprints.has('capacity-second:semantic'), false);
+});
+
+test('user cancellation blocks automatic successors across restart and explicit rebuild resumes the same scope', async t => {
+  const root = await temporaryRoot(t), jobs = new RetrievalJobStore(root);
+  let enter, release, prepares = 0;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const preparing = new Promise(resolve => { release = resolve; });
+  const options = { jobs, scopeIdentity: async () => 'a'.repeat(64),
+    prepareSources: async () => { prepares++; enter(); await preparing; return { sources: [], settings: {} }; },
+    publishSources: async () => ({}) };
+  const first = new IndexJobService(options), job = await first.rebuild();
+  await entered;
+  const cancelling = first.cancelJob(job.jobId);
+  release();
+  assert.equal((await cancelling).status, 'cancelled');
+  const automatic = await first.rebuild({ automatic: true, dirty: true });
+  assert.equal(automatic.jobId, job.jobId);
+  assert.equal(automatic.automaticRebuildState, 'cancelled-by-user');
+  assert.equal(prepares, 1);
+  const restarted = new IndexJobService({ ...options, jobs: new RetrievalJobStore(root) });
+  const blocked = await restarted.rebuild({ automatic: true });
+  assert.equal(blocked.automaticRebuildBlocked, true);
+  assert.equal(restarted.active.size, 0);
+  assert.equal(prepares, 1);
+  const explicit = await restarted.rebuild();
+  await restarted.executionQueue;
+  assert.notEqual(explicit.jobId, job.jobId);
+  assert.equal(prepares, 2);
+  assert.equal((await jobs.get(job.jobId)).automaticRebuildBlocked, false);
+  const finalRuntime = new IndexJobService({ ...options, jobs: new RetrievalJobStore(root) });
+  const resumed = await finalRuntime.rebuild({ automatic: true });
+  await finalRuntime.executionQueue;
+  assert.equal(resumed.automaticRebuildBlocked, undefined);
+  assert.equal(prepares, 3);
+});
+
+test('active cancellation policy survives ordinary terminal history retention', async t => {
+  const root = await temporaryRoot(t), jobs = new RetrievalJobStore(root);
+  const stopped = await jobs.create('project-a', { automaticRebuildScope: 'a'.repeat(64) });
+  await jobs.update(stopped.jobId, { status: 'cancelled', error: 'INDEX_CANCELLED', automaticRebuildBlocked: true });
+  for (let index = 0; index < 100; index++) {
+    const other = await jobs.create('project-b');
+    await jobs.update(other.jobId, { status: 'failed', error: 'FIXTURE_COMPLETE' });
+  }
+  assert.equal((await jobs.get(stopped.jobId)).automaticRebuildBlocked, true);
+  await jobs.create('project-a', { automaticRebuildScope: 'a'.repeat(64), resumeAutomatic: true });
+  const previous = (await jobs.list()).find(job => job.jobId === stopped.jobId);
+  assert.ok(!previous || previous.automaticRebuildBlocked === false);
 });
 
 test('new failed PDFs retain bounded page diagnostics across SQLite coverage migration and restart', async t => {

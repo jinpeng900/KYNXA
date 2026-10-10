@@ -11,6 +11,7 @@ import { sourceIdentity, visibleScopes, projectConversationSources } from './sou
 const SOURCE_CACHE_TTL_MS = 2000;
 const MAX_SOURCE_CACHE_ENTRIES = 32;
 const MAX_DIRTY_PATHS = 2048;
+const MAX_RECENT_CHANGED_PATHS = 16;
 const RECONCILIATION_INTERVAL_MS = 30000;
 
 function sourceLimits(settings) {
@@ -425,15 +426,27 @@ export class SourceSyncService {
     if (current?.root === root) return;
     current?.close();
     let timer, watcher, watcherError;
+    const recentChangedPaths = new Set();
     const notify = filename => {
       // The first manifest may be written before a state exists; the watcher still knows its bound root.
       // 首次清单写入时状态可能尚未建立，监听器仍拥有已绑定的根目录用于排除路径。
       const name = filename?.toString();
       if (name && this.excludedRoots.some(folder => within(folder, resolve(root, name)))) return;
       if (this.markChanged(projectId, filename) === false) return;
+      // Only concrete in-root notifications influence priority; reconciliation does not invent file targets.
+      // 仅根目录内的明确文件通知影响优先级，定时对账不能凭空生成文件目标。
+      if (name && within(root, resolve(root, name)) && !/(?:^|[\\/])(?:\.gitignore|\.git)(?:[\\/]|$)/u.test(name)) {
+        const changedPath = relative(root, resolve(root, name));
+        recentChangedPaths.delete(changedPath);
+        recentChangedPaths.add(changedPath);
+        while (recentChangedPaths.size > MAX_RECENT_CHANGED_PATHS)
+          recentChangedPaths.delete(recentChangedPaths.values().next().value);
+      }
       clearTimeout(timer);
       timer = setTimeout(() => {
-        if (!this.closed) Promise.resolve().then(() => this.onFolderChanged?.(projectId)).catch(() => {});
+        const changedPaths = [...recentChangedPaths];
+        recentChangedPaths.clear();
+        if (!this.closed) Promise.resolve().then(() => this.onFolderChanged?.(projectId, { changedPaths })).catch(() => {});
       }, 800);
       timer.unref();
     };

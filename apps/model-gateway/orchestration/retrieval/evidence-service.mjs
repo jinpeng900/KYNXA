@@ -5,6 +5,7 @@ import { deduplicateCandidates, assessEvidence } from './candidate-selection.mjs
 import { retrievalPlan } from './query-plan.mjs';
 import { projectEvidence } from './source-projection.mjs';
 import { retrievalOutcome } from '../request-interpretation.mjs';
+import { DecisionWorkspace } from './decision-workspace.mjs';
 
 function projectionBudgetAudit(result, projection, phase, requested) {
   const previous = result.budget?.audit ?? {};
@@ -18,6 +19,7 @@ function projectionBudgetAudit(result, projection, phase, requested) {
  * 证据装配负责不透明句柄、有界视图和一次正式归档，来源与查询执行仍由注入服务拥有。 */
 export class RetrievalEvidenceService {
   #preparedEvidence = new WeakMap();
+  #decisionWorkspaces = new WeakMap();
   constructor({ search, scopeSnapshot, isFresh, assertCurrent, serialize, resultStore, getResultStore, signalFor, isClosed,
     index, getAcquisition, getReferenceStore, experiences, getTaskVerification, evaluationPolicy }) {
     this.search = search; this._scopeSnapshot = scopeSnapshot; this._fresh = isFresh;
@@ -194,8 +196,9 @@ export class RetrievalEvidenceService {
         // A saved archive is a completed publication; a later stop cannot make the handle retryable.
         // 归档回执已返回即表示发布完成，随后取消不能把该句柄变成可重试状态。
         if (!resultRef) signal?.throwIfAborted();
+        const evidenceDelivery = this.getAcquisition(context)?.observeProvidedOriginals?.(result.items);
         return { prompt: projection.prompt, resultRef, evidenceAssessment: assessment,
-          outcome: result.outcome, plan: state.route, budgetAudit: result.budget.audit,
+          outcome: result.outcome, plan: state.route, budgetAudit: result.budget.audit, evidenceDelivery,
           references: result.items.map(({ sourceRef, modelSourceRef, sourceId, scopeKey, sourceRevision, contentHash, title, locator }) =>
             ({ sourceRef, ...(modelSourceRef ? { modelSourceRef } : {}), sourceId, scopeKey, sourceRevision, contentHash, title, locator })) };
       } catch (error) {
@@ -204,6 +207,61 @@ export class RetrievalEvidenceService {
       }
     });
   }
+  plan(context, input, { signal } = {}) {
+    signal = this.signalFor(signal);
+    return this._serialize(async () => {
+      const snapshot = await this._scopeSnapshot(context, signal);
+      if (!snapshot.settings.local.enabled) throw toolFailure('本地检索已关闭。', 'RETRIEVAL_DISABLED', 409);
+      const workspace = this.#decisionWorkspaces.get(context)?.fork() ?? new DecisionWorkspace(context.message);
+      const { offset = 0, limit = 32, ...action } = input;
+      workspace.validate(action);
+      // Validate every candidate before publishing a new semantic state. A guessed reference never widens scope.
+      // 所有候选都通过核验后再发布语义状态；猜测引用不能扩大作用域。
+      const candidates = [], checks = new Map();
+      for (const candidate of action.candidates ?? []) {
+        signal.throwIfAborted();
+        const sourceRef = candidate.sourceRef.startsWith('ev1:') ? (await this.getReferenceStore().resolve(context,
+          candidate.sourceRef, { scopeKeys: snapshot.scopes, signal })).canonicalSourceRef : candidate.sourceRef;
+        const source = await this.index.read({ sourceRef, scopeKeys: snapshot.scopes, limit: 2, signal });
+        if (!await this._fresh(source, snapshot, signal, checks, context))
+          throw toolFailure('候选来源已变化，需要重新检索。', 'STALE_RETRIEVAL_SOURCE', 409);
+        candidates.push({ ...candidate, canonicalSourceRef: sourceRef, sourceId: source.sourceId,
+          scopeKey: source.scopeKey, sourceRevision: source.sourceRevision, contentHash: source.contentHash,
+          versionChecked: true, checkedAt: new Date().toISOString() });
+      }
+      await this._assertCurrent(context, snapshot);
+      // Page validation also precedes mutation, so malformed calls cannot partially update a plan.
+      // 分页参数同样在修改前验证，非法调用不能留下部分计划更新。
+      workspace.snapshot({ offset, limit });
+      workspace.update(action, candidates);
+      const acquisition = this.getAcquisition(context);
+      const view = workspace.snapshot({ offset, limit });
+      for (const candidate of view.candidates) {
+        try {
+          const source = await this.index.read({ sourceRef: candidate.canonicalSourceRef,
+            scopeKeys: snapshot.scopes, limit: 2, signal });
+          candidate.versionCurrent = await this._fresh(source, snapshot, signal, checks, context);
+          candidate.currentState = candidate.versionCurrent ? 'current' : 'stale';
+        } catch (error) {
+          signal.throwIfAborted();
+          candidate.versionCurrent = false;
+          candidate.currentState = 'unavailable-or-stale';
+          candidate.currentCode = /^[A-Z0-9_]{1,100}$/u.test(error.code ?? '') ? error.code : 'RETRIEVAL_UNAVAILABLE';
+        }
+        candidate.checkedAt = new Date().toISOString();
+      }
+      await this._assertCurrent(context, snapshot);
+      signal.throwIfAborted();
+      this.#decisionWorkspaces.set(context, workspace);
+      return { ...view,
+        programState: { authorizedScopes: snapshot.scopes, localEnabled: true,
+          webMode: snapshot.settings.web.mode, availableEvidenceTokens: null,
+          searchesUsed: acquisition?.searches ?? 0, searchLimit: acquisition?.maximumSearches ?? null,
+          verification: this.getTaskVerification?.(context) ?? null,
+          navigationBackend: 'indexed-syntax-and-lexical-relations', languageServiceAvailable: false } };
+    });
+  }
+
   relations(context, input, { signal } = {}) {
     if (this.evaluationPolicy?.relations === false) throw toolFailure('关系导航在当前消融组禁用。', 'EVALUATION_FEATURE_DISABLED', 409);
     signal = this.signalFor(signal);
@@ -255,7 +313,11 @@ export class RetrievalEvidenceService {
         result.checks = result.checks.map(check => {
           const receipt = taskVerification?.receipts.find(item => item.toolCallId === check.toolCallId &&
             item.mutationRevision === taskVerification.mutationRevision);
-          return { ...check, state: receipt?.passed ? 'passed' : receipt ? 'failed' : 'unverified' };
+          const currentVersion = receipt?.coversObservedRevision === true &&
+            taskVerification?.codeVersionCoverage?.actualFileHashesVerified === true;
+          return { ...check, state: receipt?.passed && currentVersion ? 'passed' : receipt?.status === 'failed' ? 'failed' : 'unverified',
+            ...(receipt ? { executionPassed: receipt.passed, executionStatus: receipt.status ?? 'unknown', codeVersionVerified: currentVersion,
+              ...(receipt.resultRef ? { resultRef: receipt.resultRef } : {}) } : {}) };
         });
         if (result.checks.every(check => check.state === 'passed') && !result.unresolved.length && !result.contradictions.length &&
             result.claims.every(claim => claim.state === 'cited-source-read')) result.state = 'ready-to-answer';

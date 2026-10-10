@@ -1,5 +1,18 @@
+import { MAX_SOURCE_CHARACTERS } from '../../data/retrieval/retrieval-contracts.mjs';
+
 const reason = { type: 'string', minLength: 1, maxLength: 2000 };
 export const retrievalDescriptors = [
+  { name: 'knowledge.plan', source: 'builtin', modelExposure: 'on-demand', description: 'Optional revisable request/candidate plan; {} reads it. sourceRefs require current authorization/version; expectedRevision guards updates. No permission, truth or execution; search/read separately.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      expectedRevision: { type: 'integer', minimum: 0 }, meaning: { type: 'string', minLength: 1, maxLength: 2000 },
+      taskRelation: { type: 'string', enum: ['new', 'continue', 'supplement', 'correction'] },
+      channel: { type: 'string', enum: ['none', 'local', 'source-read', 'relations', 'web', 'tools'] },
+      gaps: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+      stop: { type: 'string', enum: ['continue', 'answer-supported', 'insufficient'] },
+      candidates: { type: 'array', maxItems: 32, items: { type: 'object', additionalProperties: false,
+        required: ['sourceRef', 'decision', 'reason'], properties: { sourceRef: { type: 'string', minLength: 1, maxLength: 4096 },
+          decision: { type: 'string', enum: ['investigate', 'defer', 'reject'] }, reason: { type: 'string', minLength: 1, maxLength: 1000 } } } },
+      offset: { type: 'integer', minimum: 0, maximum: 128 }, limit: { type: 'integer', minimum: 1, maximum: 32 } } } },
   { name: 'knowledge.search', source: 'builtin', description: 'Search authorized local documents and code. domain is an explicit scope; choose it from the user or verified source, not words like method/function or brand capitalization. Keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing mean only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['query'], properties: {
       query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 48 },
@@ -11,10 +24,10 @@ export const retrievalDescriptors = [
       gap: { type: 'string', minLength: 1, maxLength: 1000, description: 'Specific unanswered fact or omitted condition, not a restatement of the entire task.' } } } },
   { name: 'knowledge.read', source: 'builtin', description: 'Read current authorized evidence using a sourceRef returned by retrieval; never invent a reference or reuse a stale version. Use section for its chapter, unit for an indexed function/method or document block, or window for nearby text. Bounded reads report omitted parts and fall back when structure is unavailable. Name the missing fact in gap. Changed/revoked sources require a new search; incomplete coverage is not source absence.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['sourceRef'], properties: {
-      sourceRef: { type: 'string', minLength: 1, maxLength: 4096 }, offset: { type: 'integer', minimum: 0, maximum: 2097152 },
+      sourceRef: { type: 'string', minLength: 1, maxLength: 4096 }, offset: { type: 'integer', minimum: 0, maximum: MAX_SOURCE_CHARACTERS },
       limit: { type: 'integer', minimum: 1, maximum: 16000, description: 'Maximum characters. Page mode accepts 1 or more; window, section and unit require at least 2 to preserve complete UTF-16 characters.' },
       mode: { type: 'string', enum: ['page', 'window', 'section', 'unit'] },
-      anchorOffset: { type: 'integer', minimum: 0, maximum: 2097152 },
+      anchorOffset: { type: 'integer', minimum: 0, maximum: MAX_SOURCE_CHARACTERS },
       beforeCharacters: { type: 'integer', minimum: 0, maximum: 4000 },
       gap: { type: 'string', minLength: 1, maxLength: 1000 } } } },
   { name: 'knowledge.relations', source: 'builtin', description: 'Navigate current authorized definitions, syntax ownership, document sections or textual symbol mentions using an existing sourceRef or explicit symbol. A brand name or a word like method alone does not prove a symbol. Lexical references are uncertain and non-exhaustive, not a language-service call graph. Read each related source before drawing conclusions.',
@@ -27,6 +40,7 @@ export const retrievalDescriptors = [
       conclusionId: { type: 'string', minLength: 1, maxLength: 128 },
       claims: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', additionalProperties: false,
         required: ['statement', 'support'], properties: { statement: { type: 'string', minLength: 1, maxLength: 2000 },
+          semanticSupport: { type: 'string', enum: ['supports', 'partial', 'contradicts', 'uncertain'], description: 'Your revisable judgement of entailment, separate from program checks that a quote exists. Partial, uncertain or contradictory support cannot mark a claim ready.' },
           support: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false,
             required: ['sourceRef', 'quote'], properties: { sourceRef: { type: 'string', minLength: 1, maxLength: 4096 },
               quote: { type: 'string', minLength: 1, maxLength: 8000 } } } } } } },

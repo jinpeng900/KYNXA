@@ -49,7 +49,10 @@ export function toolDeclarations(protocol, catalog) {
     const describesExecution = /^(?:web\.|terminal\.|computer\.|mcp\.)/u.test(tool.name);
     const location = environment && describesExecution
       ? ` Execution process: ${environment.executorLocation}; network origin: ${environment.network.requestOrigin}.` : '';
-    const spec = { name: tool.wireName, description: `${tool.name}: ${tool.description}${location}`, parameters: tool.inputSchema };
+    // Capability labels differ from provider function identities; make the callable name explicit for small models.
+    // 功能标签不同于供应商函数身份；明确可调用名称，避免小模型用功能标签发出未声明的调用。
+    const spec = { name: tool.wireName,
+      description: `${tool.wireName}: ${tool.description}${location}`, parameters: tool.inputSchema };
     if (protocol === 'anthropic-messages') return { name: spec.name, description: spec.description, input_schema: spec.parameters };
     if (protocol === 'openai-responses') return { type: 'function', ...spec, strict: false };
     return { type: 'function', function: spec };
@@ -121,6 +124,14 @@ export function decodeToolTurn(protocol, result, catalog) {
     } else checkFinish(parts.finish);
     if (protocol === 'openai-responses' && result.status && result.status !== 'completed')
       throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
+    const explicitRefusal = protocol === 'openai-completions'
+      ? Boolean(result.choices?.[0]?.message?.refusal)
+      : (result.output ?? result.content ?? []).some(item => item.type === 'refusal' ||
+        item.content?.some?.(part => part.type === 'refusal'));
+    // A blank provider response dispatches no tool; recover this step before treating it as a final answer.
+    // 供应商空回复没有派发工具；在当作最终回答之前恢复当前步骤，已有执行回执仍然有效。
+    if (!calls.length && !parts.content?.trim() && !explicitRefusal)
+      throw new ToolCallDecodeFailure('模型返回空回复，当前步骤未执行工具。', 'MODEL_RESPONSE_EMPTY');
     return { ...parts, calls, continuation };
   } catch (error) {
     // Truncated and transport-shaped decoder failures consumed output too; the estimate never contains raw parameters.

@@ -1,6 +1,8 @@
 import { EmbeddingService } from './embedding-service.mjs';
 import { resolveRetrievalModelProfile } from './model-registry.mjs';
 
+const DEFAULT_IDLE_RELEASE_MS = 120_000;
+
 function waitForRetirement(completion, signal) {
   const cancelled = () => Object.assign(new Error('Embedding request was cancelled. / 嵌入请求已取消。'),
     { code: 'EMBEDDING_CANCELLED', name: 'AbortError' });
@@ -17,9 +19,12 @@ function waitForRetirement(completion, signal) {
 /** Each selected profile owns its own session and vector identity; no profile is relabeled on fallback.
  * 每个配置拥有独立会话与向量身份，回退不能给另一配置的向量改标签。 */
 export class EmbeddingRouter {
-  constructor({ resourceService, factory = options => new EmbeddingService(options) } = {}) {
+  constructor({ resourceService, idleReleaseMs = DEFAULT_IDLE_RELEASE_MS, factory = options => new EmbeddingService(options) } = {}) {
     this.resources = resourceService; this.factory = factory; this.instances = new Map(); this.retiring = new Map(); this.closed = false;
     this.preferences = new Map(); this.configuration = Promise.resolve();
+    this.idleReleaseMs = Number.isFinite(idleReleaseMs) && idleReleaseMs > 0 ? idleReleaseMs : DEFAULT_IDLE_RELEASE_MS;
+    this.idleReleaseTimer = undefined;
+    this.idleReleaseDiagnostic = undefined;
   }
   _instance(profileId = 'builtin-multilingual', devicePreference = this.preferences.get(profileId) ?? 'auto') {
     resolveRetrievalModelProfile('embedding', profileId);
@@ -27,6 +32,7 @@ export class EmbeddingRouter {
     if (!this.instances.has(profileId)) {
       this.instances.set(profileId, this.factory({ resourceService: this.resources, profileId, devicePreference }));
       this.preferences.set(profileId, devicePreference);
+      this._startIdleRelease();
     }
     return this.instances.get(profileId);
   }
@@ -38,6 +44,8 @@ export class EmbeddingRouter {
       // Observation never switches a configured CPU session back to the legacy automatic default.
       // 状态查询不能把已配置的 CPU 会话切回旧的自动默认值，也不能在退役期间创建替代进程。
       return { ...result, devicePreference: preference, executionIdentity: `${profileId}:${preference}`,
+        idleReleaseMs: this.idleReleaseMs,
+        ...(this.idleReleaseDiagnostic ? { idleReleaseDiagnostic: this.idleReleaseDiagnostic } : {}),
         ...(devicePreference && devicePreference !== preference ? { requestedDevicePreference: devicePreference,
           requiresReconfiguration: true } : {}) };
     }
@@ -109,27 +117,48 @@ export class EmbeddingRouter {
   // New calls wait for confirmed retirement, then create a lazy session with the same vector identity.
   // 新调用等待安全退役回执，再按同一向量身份创建按需会话；旧请求不会自动重放。
   async releaseIdleGpu({ signal } = {}) {
+    return this._releaseIdle({ signal, gpuOnly: true, reason: 'gpu-pressure' });
+  }
+  async releaseIdleResources({ signal, minimumIdleMs = 0, reason = 'memory-pressure' } = {}) {
+    return this._releaseIdle({ signal, minimumIdleMs, reason });
+  }
+  _startIdleRelease() {
+    if (this.idleReleaseTimer || this.closed) return;
+    // Keep short query bursts warm; only acknowledged idle workers are eligible for periodic retirement.
+    // 连续查询保温；定期回收只处理已经收到原生空闲回执的 worker，取消中的工作也不能提前释放。
+    this.idleReleaseTimer = setInterval(() => {
+      this.releaseIdleResources({ minimumIdleMs: this.idleReleaseMs, reason: 'idle-timeout' })
+        .catch(error => { this.idleReleaseDiagnostic = { code: error.code ?? 'EMBEDDING_CLOSE_FAILED' }; });
+    }, Math.max(25, Math.min(30_000, this.idleReleaseMs)));
+    this.idleReleaseTimer.unref();
+  }
+  async _releaseIdle({ signal, gpuOnly = false, minimumIdleMs = 0, reason }) {
     if (signal?.aborted) await waitForRetirement(Promise.resolve(), signal);
     const results = [], completions = [...this.retiring.values()].map(retirement => retirement.completion);
     for (const [profileId, instance] of this.instances) {
-      const claim = instance.tryRetireIdleGpu?.({ signal }) ?? { retiring: false, reason: 'retirement-unsupported' };
+      const claim = (gpuOnly ? instance.tryRetireIdleGpu?.({ signal })
+        : instance.tryRetireIdleResources?.({ signal, minimumIdleMs })) ?? { retiring: false, reason: 'retirement-unsupported' };
       if (!claim.retiring) { results.push({ profileId, released: false, reason: claim.reason }); continue; }
       this.instances.delete(profileId);
-      const retirement = { instance, completion: undefined };
+      const retirement = { instance, preference: this.preferences.get(profileId), completion: undefined };
       retirement.completion = claim.completion.then(() => {
         if (this.retiring.get(profileId) === retirement) this.retiring.delete(profileId);
-        return { profileId, released: true, gpuMemoryBytes: claim.gpuMemoryBytes };
+        this.idleReleaseDiagnostic = undefined;
+        return { profileId, released: true, gpuMemoryBytes: claim.gpuMemoryBytes,
+          residentMemoryBytes: claim.residentMemoryBytes, reason };
       });
       // Failed retirement remains a barrier; do not load a replacement while owned cleanup is uncertain.
       // 退役失败保留屏障，不能在本应用旧进程清理状态不确定时加载替代模型。
       this.retiring.set(profileId, retirement);
       completions.push(retirement.completion);
     }
-    results.push(...await Promise.all(completions));
+    results.push(...(await Promise.all(completions)).filter(Boolean));
     return { released: results.some(result => result.released), results };
   }
   async close() {
     this.closed = true;
+    clearInterval(this.idleReleaseTimer);
+    this.idleReleaseTimer = undefined;
     await Promise.all([...this.instances.values()].map(instance => instance.close())
       .concat([...this.retiring.values()].map(retirement => Promise.all([retirement.instance.close(), retirement.completion]))));
     await this.configuration.catch(() => {});

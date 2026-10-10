@@ -296,10 +296,32 @@ export class ConversationStore {
    * Scope IO holds the same catalog guard as session IO, including work removal and global memory initialization.
    * 范围 I/O 与会话 I/O 使用同一目录保护，包括工作删除和全局记忆初始化。
    */
-  withCatalogStorage(operation) { return this._run(operation); }
+  withCatalogStorage(operation) { return this._run(() => operation(this._storageReader())); }
 
   withProjectStorage(projectId, operation) {
-    return this._run(() => operation(this._projectRelationship(projectId)));
+    return this._run(() => operation(this._projectRelationship(projectId), this._storageReader()));
+  }
+
+  /** Read canonical source state inside the existing storage guard without reentering its queue.
+   * 在既有存储保护内读取正式来源状态，避免重新排队导致死锁和确认竞态。 */
+  _storageReader() {
+    return { readConversation: async conversationId => {
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      const owner = location.ProjectId == null ? null :
+        this.document.Projects.find(project => key(project.Id) === key(location.ProjectId));
+      return { conversationId: location.Id, projectId: owner?.Id ?? null,
+        isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace), isArchived: Boolean(location.Chat.IsArchived),
+        messages: clone((await this._readLog(location)).map(publicConversationMessage)) };
+    }, readModelMessages: async conversationId => {
+      // Internal checkpoint validation needs the formal model rounds while holding this same guard.
+      // 内部检查点复验须在同一保护内读取正式模型轮次，公开会话接口继续排除原生续接状态。
+      this._notDeleted(conversationId);
+      const location = this._find(conversationId);
+      if (!location) throw failure('聊天不存在。', 'CONVERSATION_NOT_FOUND', 404);
+      return clone(await this._readLog(location));
+    } };
   }
 
   resolveSessionDirectory(conversationId) {
@@ -328,7 +350,7 @@ export class ConversationStore {
       return operation({ conversationId: location.Id, projectId: owner?.Id ?? null,
         projectName: owner?.Name ?? null, isFolderlessWorkspace: Boolean(owner?.IsFolderlessWorkspace),
         isArchived: Boolean(location.Chat.IsArchived), projectArchived: Boolean(owner?.IsArchived),
-        sessionDirectory: this._directory(location) });
+        sessionDirectory: this._directory(location) }, this._storageReader());
     });
   }
 

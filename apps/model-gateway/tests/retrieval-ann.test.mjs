@@ -5,7 +5,9 @@ import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { RetrievalIndex, chunkSource } from '../data/retrieval/index.mjs';
 import { LocalAnnStore, validateAnnOptions } from '../data/retrieval/ann-store.mjs';
+import { RetrievalVectorSearch } from '../data/retrieval/vector-search.mjs';
 import { DatabaseSync } from 'node:sqlite';
+import { load as loadSqliteVec } from 'sqlite-vec';
 import { setTimeout as delay } from 'node:timers/promises';
 
 async function fixture(t, options = {}) {
@@ -213,6 +215,74 @@ test('automatic prebuild preserves foreground lexical evidence and becomes query
   assert.equal(status.pendingBuilds, 0);
   assert.equal(status.failedBuilds, 0);
   assert.equal((await search(index, { ann: { mode: 'auto' } })).semanticBackend, 'ann');
+});
+
+async function pendingVectorFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-ann-pending-'));
+  const index = new RetrievalIndex({ root });
+  let database, vectors;
+  t.after(async () => {
+    await vectors?.close(); database?.close(); await index.close().catch(() => {});
+    const suffix = relative(resolve(tmpdir()), resolve(root));
+    assert.ok(suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`));
+    await rm(root, { recursive: true, force: true });
+  });
+  await index.upsertSources([source('allowed-nearest', [1, 0]), source('allowed-second', [0, 1]),
+    source('forbidden-nearest', [1, 0], { scopeKey: 'project:other' }),
+    source('different-space', [1, 0], { embeddingSpaceId: 'b'.repeat(64) }),
+    source('different-model', [1, 0], { embeddingModelVersion: 'v2' }),
+    source('different-domain', [1, 0], { sourceType: 'document' })]);
+  await index.close();
+  database = new DatabaseSync(join(root, 'Index', 'retrieval.sqlite'), { allowExtension: true });
+  loadSqliteVec(database);
+  database.enableLoadExtension(false);
+  vectors = new RetrievalVectorSearch({ database, directory: join(root, 'Index'), epoch: 'pending-fixture',
+    options: { mode: 'auto', threshold: 1, adaptive: false } });
+  // Only graph readiness is controlled; exact vectors and all scope/model/domain filtering use real SQLite.
+  // 仅控制图未就绪这一条件；精确向量与范围、模型、领域过滤均通过真实 SQLite 验证。
+  const attempts = [];
+  vectors.ann.search = async descriptor => {
+    attempts.push(descriptor);
+    throw Object.assign(new Error('Synthetic pending graph.'), { code: 'RETRIEVAL_ANN_BUILD_PENDING' });
+  };
+  const input = { scopeKeys: ['project:one'], queryVector: [1, 0], embeddingProfileId: 'fixture',
+    embeddingModelVersion: 'v1', embeddingSpaceId: 'a'.repeat(64), requestedDomain: 'code', channelCandidates: 4 };
+  return { vectors, input, attempts };
+}
+
+test('pending automatic ANN preserves existing bounded exact vectors without exposing another scope or claiming a ready graph', async t => {
+  const { vectors, input, attempts } = await pendingVectorFixture(t);
+  const result = await vectors.search(input, () => {});
+  assert.equal(result.semanticBackend, 'exact');
+  assert.equal(result.degradedReason, null);
+  assert.deepEqual(result.items.map(item => item.source_id), ['allowed-nearest', 'allowed-second']);
+  assert.ok(result.items.every(item => item.scope_key === 'project:one' && item.actual_domain === 'code'));
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].count, 2);
+  assert.equal(attempts[0].scope_key, 'project:one');
+  assert.equal(vectors.status().built, 0);
+  assert.equal(vectors.status().cachedShards, 0);
+  assert.equal(vectors.status().helperPid, null);
+});
+
+test('pending ANN exact fallback retains both the configured scan limit and the nonadaptive fifty-thousand ceiling', async t => {
+  const { vectors, input, attempts } = await pendingVectorFixture(t);
+  const configured = await vectors.search({ ...input, ann: { exactScanLimit: 1 } }, () => {});
+  assert.deepEqual(configured.items, []);
+  assert.equal(configured.semanticBackend, null);
+  assert.equal(configured.degradedReason, 'RETRIEVAL_VECTOR_SCAN_LIMIT');
+  const descriptors = vectors._descriptors.bind(vectors);
+  // Descriptor-only scale exercises refusal before any large scan, without allocating fifty thousand vectors.
+  // 仅放大标量目录数量，验证大扫描开始前的拒绝；不分配五万份向量。
+  vectors._descriptors = options => descriptors(options).map(descriptor => ({ ...descriptor, count: 50001 }));
+  const bounded = await vectors.search({ ...input, ann: { exactScanLimit: 1000000 } }, () => {});
+  assert.deepEqual(bounded.items, []);
+  assert.equal(bounded.semanticBackend, null);
+  assert.equal(bounded.degradedReason, 'RETRIEVAL_VECTOR_SCAN_LIMIT');
+  assert.ok(attempts.every(descriptor => descriptor.scope_key === 'project:one' && descriptor.domain === 'code'));
+  assert.equal(vectors.status().built, 0);
+  assert.equal(vectors.status().cachedShards, 0);
+  assert.equal(vectors.status().helperPid, null);
 });
 
 test('ANN resource failures preserve lexical results and return truthful degradation without executing native builds', async t => {

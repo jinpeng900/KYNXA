@@ -5,6 +5,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { hashText, sourceFileRevision } from '../data/retrieval/retrieval-contracts.mjs';
 import { RetrievalIndex } from '../data/retrieval/index.mjs';
+import { RetrievalStructureService } from '../data/retrieval/structure-service.mjs';
 import { SourceLibrary } from '../data/retrieval/source-library.mjs';
 import { RetrievalJobStore } from '../data/retrieval/job-store.mjs';
 import { SourceManifestStore } from '../data/retrieval/source-manifest.mjs';
@@ -143,6 +144,70 @@ test('failed changed sources retain old metadata without blocking publication of
   assert.equal(report.coverage.failed, 1); assert.equal(report.coverage.lexical, 1); assert.equal(report.coverage.complete, false);
   assert.equal((await f.index.read({ sourceId: bad.sourceId, scopeKeys: ['project:project-a'] })).text, 'Previously valid original');
   assert.match((await f.index.search({ query: 'SUCCESSFUL_NEW_EVIDENCE', scopeKeys: ['project:project-a'] })).items[0].excerpt, /SUCCESSFUL_NEW_EVIDENCE/);
+});
+
+test('real mounted code and documents remain searchable through deferred fitting, edits, deletion and cancelled semantic publication', async t => {
+  const f = await fixture(t), structures = new RetrievalStructureService();
+  t.after(() => structures.close());
+  f.settings.local.semantic = 'auto'; f.settings.local.embeddingProfileId = 'fixture';
+  await writeFile(join(f.workspace, 'Queue.cs'), 'class Queue { public bool CancelJob() { return true; } }');
+  await writeFile(join(f.workspace, 'worker.py'), 'def process_queue():\n    return "WORKER_ORIGINAL"\n');
+  await writeFile(join(f.workspace, 'notes.md'), '# Operation guide\nPERSISTENT_DOCUMENT_EVIDENCE');
+  const metadata = { state: 'ready', profileId: 'fixture', modelVersion: 'v1', inputProjectionVersion: 'fixture-v1',
+    dimensions: 2, embeddingSpaceId: hashText('lexical-lifecycle-space'), fittingVersion: 'fixture-tokenizer-v1', maxInputTokens: 512 };
+  let fittingCalls = 0, embeddingCalls = 0, releaseFitting, enteredFitting;
+  const embeddings = { status: () => metadata, fitDocuments: async projections => {
+    fittingCalls++;
+    if (enteredFitting) {
+      enteredFitting(); enteredFitting = undefined;
+      await new Promise(resolveFitting => { releaseFitting = resolveFitting; });
+    }
+    return { ...metadata, documents: projections.map(({ text }) => ({ tokenCount: 100,
+      segments: [{ start: 0, end: text.length, tokenCount: 100 }] })) };
+  }, embedDocuments: async texts => { embeddingCalls++; return { ...metadata, vectors: texts.map(() => [1, 0]) }; } };
+  const createIndexer = () => new SourceIndexer({ library: {}, index: f.index, structures, embeddings,
+    serialize: operation => operation(), getProject: async () => f.project, effectiveSettings: async () => f.settings });
+  const indexer = createIndexer(), scopes = ['project:project-a'];
+  const first = await f.sync.mountedSnapshot('project-a', f.settings);
+  const options = snapshot => ({ loadSource: snapshot.loadSource, isCurrent: snapshot.isCurrent });
+  const lexical = await indexer.upsert(first.sources, f.settings, undefined, undefined, { ...options(first), semantic: false });
+  assert.equal(lexical.coverage.lexical, 3);
+  assert.equal(fittingCalls, 0); assert.equal(embeddingCalls, 0);
+  const original = (await f.index.search({ query: 'CancelJob', symbol: 'CancelJob', domain: 'code', scopeKeys: scopes })).items[0];
+  assert.equal(original.structure.symbolName, 'CancelJob');
+  assert.match((await f.index.read({ sourceRef: original.sourceRef, scopeKeys: scopes })).text, /return true/);
+  assert.equal((await f.index.search({ query: 'PERSISTENT_DOCUMENT_EVIDENCE', scopeKeys: scopes })).items.length, 1);
+  const semantic = await indexer.upsert(first.sources, f.settings, undefined, undefined, options(first));
+  assert.equal(semantic.semantic.state, 'complete'); assert.ok(semantic.semantic.vectorChunks > 0);
+  await assert.rejects(f.index.read({ sourceRef: original.sourceRef, scopeKeys: scopes }), { code: 'STALE_RETRIEVAL_SOURCE' });
+  const fittedCalls = fittingCalls, fittedVectors = (await f.index.status()).vectorChunks;
+  await createIndexer().upsert(first.sources, f.settings, undefined, undefined, { ...options(first), semantic: false });
+  assert.equal(fittingCalls, fittedCalls); assert.equal((await f.index.status()).vectorChunks, fittedVectors);
+  const fittedReference = (await f.index.search({ query: 'CancelJob', symbol: 'CancelJob', scopeKeys: scopes })).items[0].sourceRef;
+
+  await writeFile(join(f.workspace, 'Queue.cs'), 'class Queue { public bool CancelPending() { return false; } }');
+  await rm(join(f.workspace, 'worker.py'));
+  f.sync.markChanged('project-a', null);
+  const changed = await f.sync.mountedSnapshot('project-a', f.settings);
+  await indexer.upsert(changed.sources, f.settings, undefined, undefined, { ...options(changed), semantic: false });
+  await indexer.prune({ scopes, identities: new Set(changed.sources.map(source => source.sourceId)) }, undefined, { sourceTypes: ['work-file'] });
+  await assert.rejects(f.index.read({ sourceRef: fittedReference, scopeKeys: scopes }), { code: 'STALE_RETRIEVAL_SOURCE' });
+  assert.equal((await f.index.search({ query: 'WORKER_ORIGINAL', scopeKeys: scopes })).items.length, 0);
+  const changedHit = (await f.index.search({ query: 'CancelPending', symbol: 'CancelPending', domain: 'code', scopeKeys: scopes })).items[0];
+  assert.equal(changedHit.structure.symbolName, 'CancelPending');
+  assert.match((await f.index.read({ sourceRef: changedHit.sourceRef, scopeKeys: scopes })).text, /return false/);
+  const beforeCancellation = await f.index.listSources({ scopeKeys: scopes });
+  const fittingEntered = new Promise(resolveEntered => { enteredFitting = resolveEntered; });
+  const controller = new AbortController();
+  const pending = indexer.upsert(changed.sources, f.settings, controller.signal, undefined, options(changed));
+  const stopped = assert.rejects(pending, { name: 'AbortError' });
+  await fittingEntered; controller.abort(); releaseFitting(); await stopped;
+  assert.deepEqual(await f.index.listSources({ scopeKeys: scopes }), beforeCancellation,
+    'a late tokenizer reply cannot replace committed lexical revisions after cancellation');
+  assert.equal((await f.index.read({ sourceRef: changedHit.sourceRef, scopeKeys: scopes })).sourceRevision, changedHit.sourceRevision);
+  const recovered = await indexer.upsert(changed.sources, f.settings, undefined, undefined, options(changed));
+  assert.equal(recovered.semantic.state, 'complete'); assert.equal(recovered.coverage.lexical, 2);
+  assert.equal((await f.index.listSources({ scopeKeys: scopes })).length, 2);
 });
 
 test('a failed lexical publication isolates its source and cannot be counted as committed progress', async t => {

@@ -77,7 +77,9 @@ export class EmbeddingService {
   #closeTimeoutMs;
   #worker;
   #workerExit;
+  #workerExitConfirmed = false;
   #workerPhase = 'stopped';
+  #idleSince = 0;
   #closePromise;
   #pending = new Map();
   #nextRequestId = 0;
@@ -123,7 +125,7 @@ export class EmbeddingService {
       devicePreference: this.#devicePreference, retiring: this.#retiring,
       fittingVersion: EMBEDDING_DOCUMENT_FITTING_VERSION,
       maxInputTokens: this.#profile.maxInputTokens, cpuThreads: this.#cpuThreads,
-      pendingRequests: this.#pending.size, workerPhase: this.#workerPhase,
+      pendingRequests: this.#pending.size, workerPhase: this.#workerPhase, idleSince: this.#idleSince || null,
       resourceReservation, batchSuggestions: resourceReservation.batchSuggestions,
       ...(resourceReservation.lastGrant ? { batchSize: resourceReservation.lastGrant.batchSize,
         batchTokenBudget: resourceReservation.lastGrant.batchTokenBudget } : {}),
@@ -187,6 +189,7 @@ export class EmbeddingService {
       throw error;
     }
     this.#worker = worker;
+    this.#workerExitConfirmed = false;
     this.#resources.registerExecutor(worker.pid).catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_EXECUTOR_REGISTRATION_FAILED' }; });
     this.#workerPhase = 'starting';
     let resolveExit, rejectExit, shutdownAcknowledged = false;
@@ -212,6 +215,7 @@ export class EmbeddingService {
           if (requestId <= message.throughId) { this.#admission.release(ticket); this.#nativeTickets.delete(requestId); }
         if (!this.#closed && message.throughId === this.#nextRequestId && !this.#pending.size && !this.#preparingRequests) {
           this.#workerPhase = 'idle';
+          this.#idleSince ||= Date.now();
           if (!this.#loaded && this.#state === 'loading') this.#state = 'ready';
           worker.unref();
           this.#resources.idle().catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
@@ -279,9 +283,11 @@ export class EmbeddingService {
     worker.on('exit', (exitCode, signal) => {
       resolveExit({ exitCode, shutdownAcknowledged });
       if (this.#worker !== worker) return;
+      this.#workerExitConfirmed = true;
       this.#worker = undefined;
       this.#admission.clear(); this.#nativeTickets.clear();
       this.#workerPhase = 'stopped';
+      this.#idleSince = 0;
       if (!this.#closed && !shutdownAcknowledged && this.#resources.status().gpuMemoryBytes > 0)
         this.#resources.backend({ device: 'cpu', diagnostic: { code: 'GPU_WORKER_FAILED' } })
           .catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
@@ -360,6 +366,7 @@ export class EmbeddingService {
     const worker = this.#worker;
     worker.ref();
     this.#workerPhase = 'queued';
+    this.#idleSince = 0;
     const id = ++this.#nextRequestId;
     this.#nativeTickets.set(id, ticket);
     return new Promise((resolveRequest, rejectRequest) => {
@@ -392,14 +399,31 @@ export class EmbeddingService {
   // Claim retirement synchronously; the router removes this instance before another request can enter it.
   // 同步认领退役；路由在下一个请求进入前移除旧实例，原生取消回执未到时不能认领。
   tryRetireIdleGpu({ signal } = {}) {
+    return this.#tryRetireIdle({ signal, gpuOnly: true });
+  }
+
+  tryRetireIdleResources({ signal, minimumIdleMs = 0 } = {}) {
+    return this.#tryRetireIdle({ signal, minimumIdleMs });
+  }
+
+  #tryRetireIdle({ signal, gpuOnly = false, minimumIdleMs = 0 }) {
     if (signal?.aborted) throw abortedError();
     if (this.#closed) return { retiring: false, reason: 'closed' };
     if (this.#pending.size || this.#preparingRequests || this.#nativeTickets.size || this.#admission.status().activeRequests)
       return { retiring: false, reason: 'native-work-outstanding' };
-    const gpuMemoryBytes = this.#resources.status().gpuMemoryBytes;
-    if (!gpuMemoryBytes) return { retiring: false, reason: 'no-gpu-residency' };
+    const { gpuMemoryBytes, residentMemoryBytes } = this.#resources.status();
+    if (gpuOnly && !gpuMemoryBytes) return { retiring: false, reason: 'no-gpu-residency' };
+    // A recorded native exit may leave restart reservations; pressure may reclaim those without waiting for an impossible idle event.
+    // 已确认原生退出后仍可能保留重启预约；资源压力下可回收这类预约，不等待已经退出的进程再发送空闲事件。
+    if (!this.#worker && this.#workerExitConfirmed && this.#workerPhase === 'stopped' && minimumIdleMs === 0 &&
+        (gpuMemoryBytes > 0 || residentMemoryBytes > 0))
+      return { retiring: true, gpuMemoryBytes, residentMemoryBytes, completion: this.close() };
     if (!this.#worker || this.#workerPhase !== 'idle') return { retiring: false, reason: 'worker-not-idle' };
-    return { retiring: true, gpuMemoryBytes, completion: this.close() };
+    if (minimumIdleMs > 0 && (!this.#idleSince || Date.now() - this.#idleSince < minimumIdleMs))
+      return { retiring: false, reason: 'idle-grace-period' };
+    // CPU weights and tokenizer residency have the same ownership boundary as GPU memory.
+    // CPU 权重与分词器驻留采用和显存相同的所有权边界：确认原生进程退出后才归还租约。
+    return { retiring: true, gpuMemoryBytes, residentMemoryBytes, completion: this.close() };
   }
 
   #assertDevicePreference(devicePreference) {

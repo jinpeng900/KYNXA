@@ -57,6 +57,7 @@ Orchestration 可将同一 `resourceService` 注入嵌入与重排构造函数�
 
 - tokenizer、驻留模型内存、GPU 显存与执行 CPU 分开预约。冷 `fitDocuments` 只申请 tokenizer 内存和 CPU，不提前加载模型或申请 GPU；真正推理时只申请模型内存差额。
 - CPU 执行预约在 worker 确认 idle 后释放；调用方取消不代表原生任务已结束。驻留 RAM/GPU 在模型空闲时仍计入总账，正常退役或确认 CPU 回退后才释放对应资源。
+- `EmbeddingRouter` 对已有会话执行空闲回收：默认连续空闲两分钟后，在至多三十秒的巡检间隔内退役 CPU/GPU worker；连续查询重新开始保温期。前台资源准入不足时可调用 `releaseIdleResources` 提前让出已空闲会话，实际归还额度仍等待原生释放确认与进程退出。正在准备、执行或取消但尚未收到 settled/idle 的请求不能回收。新请求等待同一退役屏障后按原 profile 与设备偏好重建，旧操作不重放；失败的退役不能创建未核验的替代进程。
 - 预约定期续期；监控无法续期时停止接受新任务，不把未知资源当作空闲。服务失效的保守降级由 Platform 统一处理。
 - 多个调用方共享启动申请；取消其中一个不会取消其他调用方。线程额度变化只在完成请求后重建原生会话，保持 tokenizer、权重、dtype、池化和归一化不变。
 - CPU batch 受批准线程、RAM 和 token 预算限制；GPU batch 独立按显存、主机供数缓冲和 token 预算计算，不因 CPU 只分到一个线程而固定降到四条。输入先按实际 token 分桶，短输入可以采用更大组，长输入仍受 padding token 上限限制。内存分配失败最多减批五次；兼容 CPU profile 的 GPU 单条批次仍失败时，释放 GPU 会话后用已预约 CPU 重算一次。独立 GPU profile 拒绝改用 CPU 产生向量。取消永远不会触发恢复。

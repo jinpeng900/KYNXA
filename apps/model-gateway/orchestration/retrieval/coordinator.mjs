@@ -509,7 +509,9 @@ export class RetrievalCoordinator {
         if (verified.every(item => item.value)) {
           await this._assertCurrent(context, snapshot);
           signal?.throwIfAborted();
-          const cached = structuredClone(ticket.cached);
+          const cached = { ...structuredClone(ticket.cached), indexingPending: Boolean(snapshot.indexingPending),
+            indexingPartial: Boolean(snapshot.indexingPartial || snapshot.sourceScan?.coverage?.complete === false),
+            indexingPaused: Boolean(snapshot.indexingPaused), indexingDiagnostic: snapshot.indexingDiagnostic };
           const items = withModelReferences(cached.items);
           acquisition.observeProjection(items);
           return { ...cached, items,
@@ -534,7 +536,7 @@ export class RetrievalCoordinator {
       if (space.canMigrate && this.evaluationPolicy?.resources !== false) this.spacePolicy.schedule(
         snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId, space.targetProfileId,
         () => this.sourceService.rebuild({ projectId: snapshot.relationship.isFolderlessWorkspace ? null : snapshot.relationship.projectId,
-          signal: this.shutdown.signal }));
+          signal: this.shutdown.signal, automatic: true }));
       const initialDevicePreference = profileId !== space.targetProfileId ? 'cpu' : space.devicePreference;
       const status = this.embeddings.status(profileId, { devicePreference: initialDevicePreference });
       const semanticEnabled = snapshot.settings.local.semantic !== 'off' && profileId !== null;
@@ -602,6 +604,9 @@ export class RetrievalCoordinator {
           authorizationExpanded: false, explicitConstraintsPreserved: true, recoveredCandidates: fallback.items.length } };
       }
       if (snapshot.indexingPending) result.indexingPending = true;
+      if (snapshot.indexingPaused) {
+        result.indexingPaused = true; result.indexingDiagnostic = snapshot.indexingDiagnostic ?? 'INDEX_CANCELLED';
+      }
       if (snapshot.indexingPartial || snapshot.sourceScan?.coverage?.complete === false) {
         result.indexingPartial = true; result.sourceCoverage = snapshot.sourceScan?.coverage;
       }
@@ -692,7 +697,11 @@ export class RetrievalCoordinator {
         acquisition.applyProgressDecision(nextDecision, result.acquisition);
       result.acquisition.next = result.acquisition.decision.next;
       return result;
-    }, { signal }));
+    }, { signal, onCapacityUnavailable: options => this.embeddings.releaseIdleResources?.(options) }));
+  }
+
+  observeProvidedOriginals(context, items) {
+    return this.acquisitions.get(context)?.observeProvidedOriginals(items);
   }
 
   read(context, { sourceRef, offset = 0, limit = 8000, mode = 'page', anchorOffset, beforeCharacters = 384, gap }, { signal } = {}) {
@@ -722,7 +731,13 @@ export class RetrievalCoordinator {
         acquisition = new EvidenceAcquisition({ research: retrievalPlan(context.message ?? gap ?? '').taskType === 'research' });
         this.acquisitions.set(context, acquisition);
       }
-      return { ...item, ...(canonicalSourceRef !== sourceRef ? { sourceRef } : {}),
+      // A completed heading/section can still precede unread source text; give an exact forward page, not a guessed anchor.
+      // 标题或章节读完并不等于整份来源读完；提供准确的正文续读位置，避免模型反复猜测锚点。
+      const continuation = Number.isSafeInteger(item.nextOffset) && item.nextOffset < item.totalCharacters
+        ? { tool: 'knowledge.read', arguments: { sourceRef, mode: 'page', offset: item.nextOffset, limit },
+          offsetUnit: 'utf16-code-units', remainingRange: { startOffset: item.nextOffset, endOffset: item.totalCharacters } }
+        : null;
+      return { ...item, ...(canonicalSourceRef !== sourceRef ? { sourceRef } : {}), continuation,
         evidenceDecision: acquisition.observeRead(item, { gap, mode, sourceRef: canonicalSourceRef }) };
     });
   }
@@ -731,6 +746,7 @@ export class RetrievalCoordinator {
     return signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
   }
 
+  plan(...args) { return this.evidenceService.plan(...args); }
   relations(...args) { return this.evidenceService.relations(...args); }
   assess(...args) { return this.evidenceService.assess(...args); }
   experience(...args) { return this.evidenceService.experience(...args); }

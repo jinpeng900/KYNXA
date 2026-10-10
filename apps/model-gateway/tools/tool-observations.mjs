@@ -14,6 +14,26 @@ export function observationFingerprint(value) {
   try { return hash(JSON.stringify(stable(value))); } catch { return null; }
 }
 
+/** Compare returned source/version/range, not changing reasons, scores, archive IDs or read diagnostics.
+ * 比较实际返回的来源、版本、范围，忽略调用理由、排名、归档 ID 与读取诊断的变化；文件变化仍算新信息。 */
+export function sourceObservation(call, value) {
+  if (!value || typeof value !== 'object') return null;
+  const source = item => [item.scopeKey, item.sourceId, item.sourceRevision, item.contentHash,
+    item.derivationSignature, item.bindingRevision, item.offset ?? item.locator?.startOffset,
+    item.nextOffset ?? item.locator?.endOffset, item.text ?? item.excerpt];
+  let observation;
+  if (call.name === 'knowledge.read' && typeof value.text === 'string' && value.sourceId && value.contentHash)
+    observation = source(value);
+  else if (call.name === 'knowledge.search' && Array.isArray(value.items) && value.items.length &&
+      value.items.every(item => item.sourceId && item.contentHash && typeof item.excerpt === 'string'))
+    observation = value.items.map(source).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  else if (call.name === 'filesystem.read' && value.path && value.sha256 && typeof value.content === 'string')
+    observation = [value.path, value.sha256, value.offset, value.nextOffset, value.content];
+  else return null;
+  const fingerprint = observationFingerprint([call.name, observation]);
+  return fingerprint ? { observationKey: `${call.name}:${fingerprint}`, observationHash: fingerprint } : null;
+}
+
 function callKey(call) {
   const input = call.name.startsWith('mcp.') ? call.arguments?.arguments : call.arguments;
   return observationFingerprint([call.name, input]);
@@ -75,7 +95,7 @@ export class ToolProgressGuard {
         this.observations.clear(); this.stagnantRounds = 0;
         return { repeated: false, warning: false, finalize: false };
       }
-      const key = callKey(call);
+      const key = result.observationKey ?? callKey(call);
       const fingerprint = result.observationHash ?? result.resultRef?.sha256 ?? observationFingerprint(result.content);
       if (!key || !fingerprint || this.observations.get(key) !== fingerprint) repeated = false;
       if (key && fingerprint) observations.set(key, fingerprint);

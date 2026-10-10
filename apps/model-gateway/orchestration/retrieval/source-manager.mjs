@@ -48,9 +48,19 @@ export class SourceIndexService {
     this.corpusSyncCache = new Map();
     this.closed = false;
     this.sync = new SourceSyncService({ library, getProject, excludedRoots, readTree, resourceService,
-      onFolderChanged: projectId => this.rebuild({ projectId, dirty: true }) });
+      onFolderChanged: (projectId, { changedPaths = [] } = {}) => {
+        for (const path of changedPaths) this.lifecycle.prioritize(projectId, path, { recent: true });
+        return this.rebuild({ projectId, dirty: true, automatic: true });
+      } });
     this.indexer = new SourceIndexer({ library, index, embeddings, structures, serialize, effectiveSettings, getProject, excludedRoots, readFile, resourceService });
     this.lifecycle = new IndexJobService({ jobs, validateProject,
+      scopeIdentity: async (projectId, signal) => {
+        const project = projectId ? await getProject(projectId) : null;
+        signal?.throwIfAborted();
+        // Disabling the same root must not release cancellation; only a different actual binding is a new scope.
+        // 关闭同一目录不能解除取消，只有实际目录绑定改变才属于新范围。
+        return sourceIdentity(projectId, project?.FolderPath ? resolve(project.FolderPath) : null);
+      },
       prepareSources: async (projectId, signal) => {
         const settings = await effectiveSettings(projectId);
         signal.throwIfAborted();
@@ -166,9 +176,13 @@ export class SourceIndexService {
       // 大型冷语料由持久作业派生；目录发现未完成时绝不能裁掉尚未发现的来源。
       const projectId = snapshot.relationship?.isFolderlessWorkspace ? null
         : snapshot.relationship?.projectId ?? snapshot.settings.projectId ?? null;
-      await this.rebuild({ projectId });
+      const job = await this.rebuild({ projectId, automatic: true });
       canCacheCorpus = false;
-      snapshot.indexingPending = true;
+      if (job.automaticRebuildBlocked) {
+        snapshot.indexingPaused = true;
+        snapshot.indexingPartial = true;
+        snapshot.indexingDiagnostic = 'INDEX_CANCELLED';
+      } else snapshot.indexingPending = true;
     } else if (!cached) {
       // Only complete corpus metadata plus the actual database epoch can skip synchronization; chat messages remain separate.
       // 只有完整语料元信息和真实数据库代次共同一致才跳过同步，聊天消息仍独立处理。

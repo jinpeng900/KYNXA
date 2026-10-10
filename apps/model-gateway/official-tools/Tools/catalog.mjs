@@ -4,6 +4,7 @@ import { webFetchDescriptor } from '../../tools/web-fetch.mjs';
 import { retrievalDescriptors } from '../../tools/retrieval/descriptors.mjs';
 import { computerDescriptors } from './computer.mjs';
 import { hostTerminalDescriptor, hostTerminalJobDescriptors } from './terminal.mjs';
+import { memoryActionDescriptors } from '../../tools/memory-actions.mjs';
 
 const skillDescriptors = [
   { name: 'skill.list', description: 'Page application skill metadata from official-tools/Skills, user extension Skills, configured directories and this work\'s .kynxa/skills. Discovery is limited to 128 skills and 512 candidates per source directory. Does not execute scripts.',
@@ -29,13 +30,13 @@ const terminalDescriptor = { name: 'terminal.run', description: 'Run Node.js or 
     args: { type: 'array', items: { type: 'string' }, maxItems: 64 }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 } },
   required: ['command', 'args'], additionalProperties: false }, source: 'builtin' };
 const catalogDescriptors = [
-  { name: 'tool.search', description: 'Find enabled tools and separately paged MCP service headers. Empty query pages all. Load exact returned names; discovery does not connect or grant permission.',
+  { name: 'tool.search', description: 'Find enabled tools and paged MCP headers. Empty query pages all; load exact names. Discovery neither connects nor grants permission.',
     inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, offset: { type: 'integer', minimum: 0, maximum: 100000 },
       limit: { type: 'integer', minimum: 1, maximum: 20 } }, additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.load', description: 'Load exact tools/aliases or returned mcp.<serverId> headers within budget. Connect only selected services and verify live schemas; no business execution or permission grant.',
+  { name: 'tool.load', description: 'Load exact tools/aliases or returned mcp.<serverId> headers within budget; connect selected services, verify live schemas. No execution/permission grant.',
     inputSchema: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, maxItems: 32 } }, required: ['names'], additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.result.read', description: 'Page a saved result by opaque id in this chat. Media remains typed references; private MCP metadata is excluded.',
+  { name: 'tool.result.read', description: "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },
       limit: { type: 'integer', minimum: 1, maximum: 16000 } }, required: ['id'], additionalProperties: false }, source: 'builtin' }
 ];
-export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...retrievalDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...hostTerminalJobDescriptors, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];
+export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...retrievalDescriptors, ...memoryActionDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...hostTerminalJobDescriptors, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];

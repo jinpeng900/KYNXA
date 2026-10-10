@@ -33,6 +33,7 @@ import { isSimpleGreeting, retrievalPlan } from './retrieval/source-projection.m
 import { LocalModelResourceObserver } from '../models/local-model-resources.mjs';
 import { ExternalModelAdmission } from './external-model-admission.mjs';
 import { requestInterpretation, requestInterpretationPrompt, retrievalOutcome } from './request-interpretation.mjs';
+import { runSemanticSummary } from './semantic-summary-runner.mjs';
 
 // Keep presentation instructions independent of source language and the current tool catalog.
 // 回复语言遵循当前用户请求，资料语言和工具目录不能改变这一约定；无需相关的额外推导保持按需提供。
@@ -76,10 +77,12 @@ export class ModelRuntime {
       desktopRunner: new DesktopRunner(), hostTerminalRunner: new HostTerminalRunner(), sandboxRunner: new SandboxRunner({ conversationWorkspaceHome: dataHome, excludedRoots: [dataHome, this.conversations.root, this.extensionRoot,
         ...extensionControlPaths(extensionPointerPath()).map(path => dirname(path))].filter(Boolean) }) });
     this.timeoutMs = timeoutMs;
+    this.tools.memory = this.memory;
     this.idleTimeoutMs = idleTimeoutMs;
     this.streamTimeoutMs = streamTimeoutMs ?? DEFAULT_TOOL_RUN_LIMITS.maxDurationMs;
     this.hasStreamTimeoutOverride = streamTimeoutMs !== undefined;
     this.queues = new Map();
+    this.summaryCooldowns = new Map();
     this.shutdown = new AbortController();
     this.retrieval = new RetrievalCoordinator({ conversations: this.conversations, memory: this.memory, tools: this.tools,
       resources: this.resources, evaluationPolicy, excludedRoots: [dataHome, this.extensionRoot] });
@@ -134,7 +137,9 @@ export class ModelRuntime {
     finally { if (this.queues.get(key) === operation) this.queues.delete(key); }
   }
 
-  async prepare(input, id) {
+  async prepare(input, id, signal = this.shutdown.signal) {
+    signal = AbortSignal.any([signal, this.shutdown.signal]);
+    signal.throwIfAborted();
     const limits = toolRunLimits(input.runLimits);
     const preparationStartedAtMonotonicMs = performance.now();
     await this.conversations.ensureConversation(id, { title: input.message.slice(0, 24) });
@@ -200,7 +205,7 @@ export class ModelRuntime {
       // A greeting reuses known limits without waiting on optional process observation APIs.
       // 问候复用已知上限，不等待可选模型进程观察接口；实际任务才刷新外部运行时信息。
       const localModel = greeting ? this.localModelSnapshots.get(localModelKey) ?? {
-        diagnostic: { code: 'LOCAL_MODEL_OBSERVATION_DEFERRED' } } : await this.localModels.observe(connection, { signal: this.shutdown.signal,
+        diagnostic: { code: 'LOCAL_MODEL_OBSERVATION_DEFERRED' } } : await this.localModels.observe(connection, { signal: signal,
         contextTokens: connection.contextWindowTokens, modelId: input.model });
       if (!['LOCAL_MODEL_OBSERVATION_NOT_LOCAL', 'LOCAL_MODEL_OBSERVATION_DEFERRED'].includes(localModel.diagnostic?.code)) {
         const key = localModelKey;
@@ -239,11 +244,11 @@ export class ModelRuntime {
       if (evidencePlan.shouldRetrieve && evidencePlan.evidenceTokens > 0) {
         try {
           retrievalEvidence = await this.retrieval.evidence(toolContext ?? { conversationId: id, requestId, currentMessageId: userId, projectId: contextInput.projectId }, input.message,
-            { signal: this.shutdown.signal, maximumTokens: evidencePlan.evidenceTokens,
+            { signal: signal, maximumTokens: evidencePlan.evidenceTokens,
               maximumCharacters: evidencePlan.evidenceTokens * 4, plan: evidencePlan,
               history: history.filter(item => item.Id !== userId), deferArchive: true });
         } catch (error) {
-          if (this.shutdown.signal.aborted) throw error;
+          if (signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
           assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
         }
@@ -283,6 +288,10 @@ export class ModelRuntime {
           previousToolNames: recentHistory.filter(item => item.Role === 'assistant').flatMap(item =>
             (item.ToolActivities ?? []).filter(activity => ['completed', 'error', 'unknown'].includes(activity.status)).map(activity => activity.name)).slice(-32) });
         declarations = toolDeclarations(connection.protocol, catalog);
+        // Refresh capability facts after schema selection without enlarging the reserved prompt.
+        // schema 选择后刷新真实能力事实，仍使用原提示预算，不扩大预留额度。
+        toolSystem = await this.tools.systemPrompt(toolContext, { maximumTokens: Math.min(maximumPromptTokens,
+          estimateMessageTokens([], toolSystem)) });
       }
       const projection = new ModelHistoryProjection({ history, beforeUserId: userId, protocol: connection.protocol,
         resultStore: this.tools.results, resultContext: toolContext ?? { conversationId: id, requestId },
@@ -303,7 +312,8 @@ export class ModelRuntime {
         - schemaTokens - estimateMessageTokens([], context.system);
       const historyCompaction = projection.compact({ inputBudgetTokens: historyBudget });
       const projectedInput = { ...contextInput, historyTurns: projection.historyTurns,
-        projectTurn: item => projection.projectTurn(item), estimateContextMessages: estimateToolMessageTokens, additionalSystem };
+        projectTurn: item => projection.projectTurn(item), projectSummaryTurn: item => projection.summarySource(item),
+        estimateContextMessages: estimateToolMessageTokens, additionalSystem };
       try { context = buildContext({ ...projectedInput, reservedInputTokens: schemaTokens }); }
       catch (error) {
         if (!catalog.length || (!(error instanceof ContextError) && !(error instanceof OutputBudgetError))) throw error;
@@ -323,11 +333,11 @@ export class ModelRuntime {
         try {
           retrievalEvidence = await this.retrieval.finalizeEvidence(toolContext ?? { conversationId: id, requestId,
             currentMessageId: userId, projectId: contextInput.projectId }, retrievalEvidence,
-          { signal: this.shutdown.signal, existingContext: [baseSystem, ...context.messages,
+          { signal: signal, existingContext: [baseSystem, ...context.messages,
             ...context.memoryProjection.filter(item => item.content !== undefined).map(item => ({ content: item.content }))],
             maximumTokens: finalEvidenceBudgetTokens });
         } catch (error) {
-          if (this.shutdown.signal.aborted) throw error;
+          if (signal.aborted) throw error;
           assistant.RetrievalDiagnostic = { code: error.code ?? 'RETRIEVAL_UNAVAILABLE' };
           assistant.RetrievalOutcome = retrievalOutcome(undefined, error);
           retrievalEvidence = { prompt: '', references: [] };
@@ -340,9 +350,37 @@ export class ModelRuntime {
       assistant.EvidenceReferences = retrievalEvidence.references;
       if (retrievalEvidence.outcome) assistant.RetrievalOutcome = retrievalEvidence.outcome;
       if (retrievalEvidence.resultRef) assistant.RetrievalResultRef = retrievalEvidence.resultRef;
+      let semanticSummaryAudit;
+      if (context.semanticSummaryPlan) {
+        const summarized = await runSemanticSummary({ plan: context.semanticSummaryPlan, connection,
+          repository: this.memory.repository, cooldowns: this.summaryCooldowns, signal: signal,
+          projectionOptions: { history, beforeUserId: userId, protocol: connection.protocol, resultStore: this.tools.results,
+            resultContext: toolContext ?? { conversationId: id, requestId }, inputBudgetTokens: context.metrics.inputBudgetTokens },
+          generate: async (request, dispatched) => {
+            const summaryTurn = { connection, conversationId: id, requestOptions: { system: request.system } };
+            return runResourceTask(this.resources, { taskId: `summary:${requestId}`, workspaceId: contextInput.projectId ?? id,
+              kind: 'foreground', cpuThreads: 1, memoryBytes: 32 * 1024 * 1024 },
+            () => this.consumeModelResponse(summaryTurn, input.model,
+              chatRequest(connection, input.model, request.messages, { system: request.system, maxOutputTokens: request.maxOutputTokens }),
+              AbortSignal.any([signal, AbortSignal.timeout(Math.min(this.timeoutMs, 120000))]), parseModelJson,
+              { refreshMemory: false, onDispatched: dispatched }), { signal: signal });
+          } });
+        semanticSummaryAudit = summarized.audit;
+        if (summarized.value) {
+          try { context = buildContext({ ...projectedInput, additionalSystem,
+            summary: summarized.value, reservedInputTokens: schemaTokens, semanticSummaryTrigger: 'none' }); }
+          catch (error) {
+            if (!(error instanceof ContextError) && !(error instanceof OutputBudgetError)) throw error;
+            // A valid checkpoint may be reused later; an optional projection must not break the prepared request.
+            // 有效检查点可留待后续复用，可选视图不能中断已经准备好的请求。
+            semanticSummaryAudit.currentProjection = 'deferred-for-context-budget';
+          }
+        }
+      }
       // Record exposure separately from later model calls and execution receipts; absence is not a selection error.
       // 记录本轮初始可见能力，与后续模型调用及执行回执分开；未展示不能算作模型错选。
       assistant.ContextAssembly = { schemaVersion: 1, initialToolNames: catalog.map(tool => tool.name),
+        ...(semanticSummaryAudit ? { semanticSummary: semanticSummaryAudit } : {}),
         schemaTokens: catalog.length ? schemaTokens : 0, interpretationTokens,
         evidenceTokens: estimateTokens(retrievalEvidence.prompt),
         estimatedInputTokens: context.metrics.estimatedInputTokens,
@@ -361,12 +399,16 @@ export class ModelRuntime {
         inputBudgetTokens: context.metrics.inputBudgetTokens,
         requestOptions: { system: context.system, maxOutputTokens: context.maxOutputTokens }, startedAtMonotonicMs: performance.now() };
     } catch (error) {
+      if (error.semanticSummaryAudit) assistant.ContextAssembly = { ...assistant.ContextAssembly,
+        schemaVersion: 1, semanticSummary: error.semanticSummaryAudit };
+      if (signal.aborted) error = Object.assign(new StreamFailure('本次请求已停止，已保留完成的记录。', 'interrupted'),
+        { code: this.shutdown.signal.aborted ? 'MODEL_SERVICE_STOPPED' : 'MODEL_REQUEST_CANCELLED' });
       const publicError = error instanceof ContextError || error instanceof OutputBudgetError || error.code?.includes('MEMORY') || error.code?.includes('SUMMARY');
       const failure = publicError
         ? Object.assign(new StreamFailure(error.message), { code: error.code, statusCode: error.statusCode })
         : safeFailure(error);
       failure.durationMs = replyDurationMs(preparationStartedAtMonotonicMs);
-      await this.conversations.upsertMessage(id, { ...assistant, DurationMs: failure.durationMs, Status: 'error', Error: failure.message });
+      await this.conversations.upsertMessage(id, { ...assistant, DurationMs: failure.durationMs, Status: failure.type ?? 'error', Error: failure.message });
       throw failure;
     }
   }
@@ -417,18 +459,19 @@ export class ModelRuntime {
     return nextSystem;
   }
 
-  async consumeModelResponse(turn, modelId, request, signal, readResponse, { streaming = false } = {}) {
+  async consumeModelResponse(turn, modelId, request, signal, readResponse, { streaming = false, refreshMemory = true, onDispatched } = {}) {
     const admission = await this.externalAdmissions.acquire(turn.connection, { modelId, signal });
     let stopLocal;
     try {
       signal?.throwIfAborted();
       // Admission can wait for local model loading; recheck revoked records after that wait, before dispatch.
       // 准入可能等待本地模型加载；等待结束后、正式派发前再次核对撤销记录。
-      const system = this.refreshMemorySystem
+      const system = refreshMemory && this.refreshMemorySystem
         ? await this.refreshMemorySystem(turn, turn.requestOptions?.system ?? '', signal) : turn.requestOptions?.system ?? '';
       const liveRequest = typeof request === 'function' ? request(system) : request;
       turn.lastDispatchedSystem = system;
       admission.dispatched();
+      onDispatched?.();
       stopLocal = this.beginLocalGeneration(turn, modelId);
       const response = await requestModelResponse(turn.connection, liveRequest, signal, { streaming });
       if (!response.ok) admission.settled();
@@ -553,7 +596,8 @@ export class ModelRuntime {
             if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止。', 'interrupted');
             throw error;
           }
-        }, { signal: this.shutdown.signal });
+        }, { signal: this.shutdown.signal,
+          onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
         const parts = finalParts(connection.protocol, result);
         const evidenceValidation = await this.validateFinalEvidence(turn, this.shutdown.signal);
         const content = parts.content + (evidenceValidation.current ? '' : evidenceWarning(input.message));
@@ -661,7 +705,7 @@ export class ModelRuntime {
     };
     try {
       throwIfCancelled();
-      turn = await this.prepare(input, id);
+      turn = await this.prepare(input, id, signal);
       if (turn.receipt) return turn.receipt;
       throwIfCancelled();
       timeout = setTimeout(() => lifetime.abort(), this.runTimingAudit(turn).effectiveDurationMs);
@@ -733,7 +777,7 @@ export class ModelRuntime {
           throwIfCancelled();
           throw error;
         }
-      }, { signal });
+      }, { signal, onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
       throwIfCancelled();
       const evidenceValidation = await this.validateFinalEvidence(turn, signal);
       if (!evidenceValidation.current) result.content += evidenceWarning(input.message);
