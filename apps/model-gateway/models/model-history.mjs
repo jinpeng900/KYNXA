@@ -238,6 +238,35 @@ export class ModelHistoryProjection {
 
   sourceFor(message) { return this.source.get(message); }
 
+  /**
+   * Immutable public source for semantic navigation, before request-only pruning and without native/thinking data.
+   * 语义导航使用裁减请求前的不可变公开来源，不包含供应商原生续接或思考数据。
+   */
+  summarySource(turn) {
+    const assistant = turn.assistant;
+    let checkpointComplete = ['completed', 'error', 'interrupted'].includes(assistant.Status);
+    const rounds = transcriptRounds(assistant).map(round => ({ round: round.round, text: round.text ?? '',
+      tools: round.calls.map(call => {
+        const activity = assistant.ToolActivities?.find(item => item.toolCallId === call.id && item.name === call.name &&
+          (!Number.isSafeInteger(item.round) || item.round === round.round));
+        if (!activity || !states.has(activity.status) || activity.status === 'running' ||
+          JSON.stringify(activity.arguments) !== JSON.stringify(call.arguments)) checkpointComplete = false;
+        const metadata = formalBrokerMetadata(activity), resultRef = validRef(activity?.resultRef) ? {
+          id: activity.resultRef.id, bytes: activity.resultRef.bytes, sha256: activity.resultRef.sha256 } : undefined;
+        return { callId: call.id, name: call.name, arguments: call.arguments,
+          status: activity?.status ?? 'unknown', observation: publicResultText(activity),
+          ...(metadata ?? {}), ...(resultRef ? { resultRef } : {}) };
+      }) }));
+    return { user: { messageId: turn.user.Id, content: turn.user.Content, status: turn.user.Status ?? 'completed' },
+      assistant: { messageId: assistant.Id, replyTo: assistant.ReplyTo ?? turn.user.Id, status: assistant.Status,
+        finalText: assistant.Status === 'completed' ? assistant.Content : '',
+        segments: (assistant.AssistantSegments ?? []).filter(segment => segment.kind !== 'reasoning' && typeof segment.content === 'string')
+          .map(segment => ({ round: segment.round, order: segment.order, phase: segment.phase, status: segment.status, content: segment.content })) },
+      rounds, checkpointComplete };
+  }
+
+  summarySources() { return this.historyTurns.map(turn => this.summarySource(turn)); }
+
   compact({ inputBudgetTokens }) {
     const available = Math.max(0, inputBudgetTokens), records = [...this.records.values()];
     const observations = records.flatMap(record => record.rounds.flatMap(round => round.observations.map(item => ({

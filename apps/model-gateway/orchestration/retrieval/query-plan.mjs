@@ -193,7 +193,7 @@ export function retrievalPlan(message, { history = [], maximumTokens, taskContex
   let taskType = explicitFile ? 'file' : /记忆|回忆|历史|之前|上次|讨论|history|remember|recall|previous/iu.test(planningText) ? 'recall' : 'lookup';
   if (/比较|对比|权衡|架构|方案|全面|综述|调查|研究|compare|research|trade.?off/iu.test(planningText)) taskType = 'research';
   if (directExecution) taskType = 'execution';
-  const defaultTokens = { recall: 4096, lookup: 8192, file: 12288, research: 16384, execution: 0 }[taskType];
+  const defaultTokens = { recall: 8192, lookup: 8192, file: 16384, research: 32768, execution: 0 }[taskType];
   const evidenceTokens = maximumTokens === undefined ? defaultTokens : Math.max(0, Math.min(defaultTokens, Math.floor(maximumTokens)));
   const additionBudget = Math.max(0, Math.min(256, MAX_QUERY_CHARACTERS - planningText.length - 1));
   let priorQuery = previous ? priorText.trim().slice(0, additionBudget) : '';
@@ -292,14 +292,16 @@ export function planEvidenceAcquisition({ query = '', gap, intent = buildRetriev
 
 /** Reorder only admitted source metadata; priority cannot add files or change authorization.
  * 只调整已接纳来源元信息的顺序，任务优先级不能新增文件或改变授权范围。 */
-export function prioritizeEvidenceSources(sources, priorityPaths = new Set()) {
+export function prioritizeEvidenceSources(sources, priorityPaths = new Set(), recentPaths = new Set()) {
+  const matches = (path, targets) => [...targets].some(target => path === target.toLowerCase() ||
+    path.startsWith(`${target.toLowerCase()}/`) || path.endsWith(`/${target.toLowerCase()}`));
   const rank = source => {
     const path = String(source.locator?.relativePath ?? source.title ?? '').replace(/\\/gu, '/').toLowerCase();
-    const targeted = [...priorityPaths].some(target => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`) ||
-      path.endsWith(`/${target.toLowerCase()}`));
-    if (targeted) return 0;
-    if (/(?:^|\/)(?:readme|agents)(?:\.|$)|(?:^|\/)(?:tests?|src)(?:\/|$)|\.(?:cs|[cm]?js|[cm]?ts|py|rs|go|json|ya?ml|toml)$/iu.test(path)) return 1;
-    return 2;
+    const absolutePath = String(source.locator?.path ?? '').replace(/\\/gu, '/').toLowerCase();
+    if (matches(path, priorityPaths) || absolutePath && matches(absolutePath, priorityPaths)) return 0;
+    if (matches(path, recentPaths) || absolutePath && matches(absolutePath, recentPaths)) return 1;
+    if (/(?:^|\/)(?:readme|agents)(?:\.|$)|(?:^|\/)(?:tests?|src)(?:\/|$)|\.(?:cs|[cm]?js|[cm]?ts|py|rs|go|json|ya?ml|toml)$/iu.test(path)) return 2;
+    return 3;
   };
   return sources.map((source, index) => ({ source, index, rank: rank(source) }))
     .sort((left, right) => left.rank - right.rank || left.index - right.index).map(item => item.source);

@@ -277,7 +277,11 @@ test('conditional reranking preserves source identity and falls back without a c
       return { profileId: 'builtin-multilingual-reranker', modelVersion: 'fixture-reranker',
         items: candidates.toReversed().map(item => ({ ...item, excerpt: 'FORGED', rerankScore: 0.8 })) };
     } };
-  const f = await auditCoordinator(t, { reranker }), retrieval = f.retrieval;
+  // Identity/ranking coverage has an adequate explicit lease; resource clipping is covered separately below.
+  // 身份与排序验证使用明确充足授额；资源裁限在下面独立覆盖，不能依赖测试机瞬时压力。
+  const resources = { acquire: async () => ({ leaseId: 'identity-fixture-lease', suggestions: { rerankCandidateLimit: 60 } }),
+    renew: async () => {}, release: async () => {}, report: async () => {} };
+  const f = await auditCoordinator(t, { reranker, resources }), retrieval = f.retrieval;
   await retrieval.library.add([{ path: join(f.workspace, 'a.md'), title: 'Database', text: '恢复数据库需要验证完整备份。' },
     { path: join(f.workspace, 'b.md'), title: 'Permissions', text: '恢复访问权限需要验证审计记录。' }], { scope: 'user' });
   await retrieval.search(f.context, { query: '恢复', taskType: 'research' });
@@ -301,8 +305,9 @@ test('conditional reranking preserves source identity and falls back without a c
 });
 
 test('adaptive rerank tiers use resource suggestions only when local configuration explicitly allows them', async t => {
+  let resourceRerankLimit = 60;
   const observed = [], resources = { acquire: async () => ({ leaseId: 'fixture-lease',
-    suggestions: { rerankCandidates: 60 } }), renew: async () => {}, release: async () => {},
+    suggestions: { rerankCandidates: 60, rerankCandidateLimit: resourceRerankLimit } }), renew: async () => {}, release: async () => {},
   report: async () => {}, snapshot: async () => ({ memory: { availableBytes: 16 * 1024 ** 3 } }) };
   const reranker = { status: () => ({ state: 'ready', profileId: 'builtin-multilingual-reranker' }), close: async () => {},
     rerank: async ({ candidates, limit }) => { observed.push(limit);
@@ -319,6 +324,14 @@ test('adaptive rerank tiers use resource suggestions only when local configurati
     assert.equal(result.budget.audit.rerankBudgetSource, configured === null ? 'resource-suggestion' : 'local-setting');
     assert.equal(result.budget.audit.approved.rerankCandidates, configured ?? 60);
   }
+  resourceRerankLimit = 20;
+  await f.retrieval.settings.patchGlobal({ expectedRevision: revision++, patch: { local: { rerankCandidates: 40 } } });
+  const reduced = await f.retrieval.search(f.context, { query: 'alpha', gap: 'Compare the accounts under pressure', taskType: 'research' });
+  assert.equal(observed.at(-1), 20);
+  assert.equal(reduced.budget.audit.configured.localRerankCandidates, 40);
+  assert.equal(reduced.budget.audit.rerankRequestedCandidates, 40);
+  assert.equal(reduced.budget.audit.approved.rerankCandidates, 20);
+  assert.ok(reduced.budget.audit.earlyCutReasons.some(item => item.reason === 'resource-grant' && item.field === 'rerankCandidates'));
 });
 
 test('a stale preferred duplicate falls back to a current source without publishing the stale reference', async t => {

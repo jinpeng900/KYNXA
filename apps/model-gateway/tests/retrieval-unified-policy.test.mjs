@@ -41,9 +41,9 @@ async function temporary(t, closers = []) {
 test('research budgets expand candidates and evidence while respecting explicit context limits', () => {
   const simple = retrievalBudget(), research = retrievalBudget({ taskType: 'research' });
   assert.ok(research.fusedCandidates > simple.fusedCandidates);
-  assert.equal(research.limit, 18); assert.equal(research.maximumTokens, 16384);
+  assert.equal(research.limit, 40); assert.equal(research.maximumTokens, 32768);
   assert.equal(retrievalBudget({ taskType: 'research', maximumTokens: 500, limit: 2 }).maximumTokens, 500);
-  assert.equal(retrievalPlan('研究项目架构').evidenceTokens, 16384);
+  assert.equal(retrievalPlan('研究项目架构').evidenceTokens, 32768);
   assert.equal(retrievalPlan('你好').evidenceTokens > 0 && retrievalPlan('你好').shouldRetrieve, false);
 });
 

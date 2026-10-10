@@ -17,14 +17,18 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     public int CancelledJobs { get; private set; }
     public int JobReads { get; private set; }
     public string? LastCancelledJobId { get; private set; }
-    public RetrievalIndexJob[] StatusJobs { get; set; } = [];
+    private RetrievalIndexJob[]? _statusJobs;
+    // Observe the current automatic job unless a test explicitly supplies a status snapshot or an empty result.
+    // 默认观察当前自动任务；测试可显式提供旧状态快照或空列表，不能混淆尚未指定与没有任务。
+    public RetrievalIndexJob[] StatusJobs { get => _statusJobs ?? [Job]; set => _statusJobs = value; }
     public RetrievalSource[] Sources { get; set; } = [];
     public bool ConflictNextSave { get; set; }
     public TaskCompletionSource? SaveGate { get; set; }
 
     public FakeRetrievalApi()
     {
-        Project = new(1, ProjectId, 2, new(), new(new(false), []), new(Global.Local, Global.Web, Global.Cache, new(false, 0, [])));
+        Project = new(1, ProjectId, 2, new(), new(new(true), []), new(Global.Local, Global.Web, Global.Cache, new(true, 0, [])));
+        Job = Job with { ProjectId = ProjectId };
     }
 
     public Task<RetrievalSettingsDocument> GetSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(Global);
@@ -48,7 +52,7 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     {
         ProjectWrites++;
         if (request.ExpectedRevision != Project.Revision) throw new GatewayApiException("Synthetic conflict", HttpStatusCode.Conflict);
-        var mounted = new RetrievalMountedFolderSettings(request.Patch.IndexingSources.MountedFolder.Enabled, Project.IndexingSources.MountedFolder.BindingRevision + 1);
+        var mounted = Project.IndexingSources.MountedFolder;
         Project = Project with { Revision = Project.Revision + 1, Overrides = request.Patch.Overrides,
             IndexingSources = Project.IndexingSources with { MountedFolder = mounted },
             Effective = new(request.Patch.Overrides.Local ?? Global.Local, request.Patch.Overrides.Web ?? Global.Web, Global.Cache,

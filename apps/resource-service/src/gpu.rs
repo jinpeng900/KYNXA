@@ -2,6 +2,30 @@ use serde::Serialize;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GpuProcessMemory {
+    pub process_id: u32,
+    pub memory_bytes: Option<u64>,
+}
+
+pub struct GpuProcessSample {
+    pub processes: Vec<GpuProcessMemory>,
+    pub is_complete: bool,
+    pub reason: Option<&'static str>,
+}
+
+impl GpuProcessSample {
+    pub fn unknown(reason: &'static str) -> Self {
+        Self { processes: Vec::new(), is_complete: false, reason: Some(reason) }
+    }
+
+    pub fn memory_for(&self, process_id: u32) -> Option<u64> {
+        self.processes.iter().find(|process| process.process_id == process_id)
+            .map(|process| process.memory_bytes).unwrap_or(if self.is_complete { Some(0) } else { None })
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuSnapshot {
     pub state: &'static str,
     pub device_id: Option<u32>,
@@ -32,7 +56,8 @@ impl GpuSnapshot {
 
 #[cfg(windows)]
 mod windows {
-    use super::GpuSnapshot;
+    use super::{GpuProcessMemory, GpuProcessSample, GpuSnapshot};
+    use std::collections::HashMap;
     use std::ffi::{c_char, c_void};
     use std::ptr;
 
@@ -44,6 +69,18 @@ mod windows {
     type NvmlDeviceMemory = unsafe extern "C" fn(NvmlDevice, *mut NvmlMemory) -> u32;
     type NvmlDeviceUtilization = unsafe extern "C" fn(NvmlDevice, *mut NvmlUtilization) -> u32;
     type NvmlDeviceUuid = unsafe extern "C" fn(NvmlDevice, *mut c_char, u32) -> u32;
+    type NvmlDeviceProcesses = unsafe extern "C" fn(NvmlDevice, *mut u32, *mut NvmlProcessInfo) -> u32;
+
+    // NVML v3 uses the v2 process layout; WDDM reports u64::MAX when attribution is unavailable.
+    // NVML v3 使用 v2 进程布局；WDDM 无法归属时返回 u64::MAX，绝不能当作占用或零。
+    #[repr(C)]
+    #[derive(Clone, Default)]
+    struct NvmlProcessInfo {
+        pid: u32,
+        used_gpu_memory: u64,
+        gpu_instance_id: u32,
+        compute_instance_id: u32,
+    }
 
     #[repr(C)]
     #[derive(Default)]
@@ -73,6 +110,8 @@ mod windows {
         shutdown: NvmlShutdown,
         memory: NvmlDeviceMemory,
         utilization: Option<NvmlDeviceUtilization>,
+        compute_processes: Option<NvmlDeviceProcesses>,
+        graphics_processes: Option<NvmlDeviceProcesses>,
         adapter_identity: Option<crate::gpu_mapping::AdapterIdentity>,
     }
 
@@ -94,6 +133,8 @@ mod windows {
                 let utilization =
                     GetProcAddress(library, c"nvmlDeviceGetUtilizationRates".as_ptr());
                 let uuid = GetProcAddress(library, c"nvmlDeviceGetUUID".as_ptr());
+                let compute_processes = GetProcAddress(library, c"nvmlDeviceGetComputeRunningProcesses_v3".as_ptr());
+                let graphics_processes = GetProcAddress(library, c"nvmlDeviceGetGraphicsRunningProcesses_v3".as_ptr());
                 if [init, shutdown, count, handle, memory]
                     .iter()
                     .any(|symbol| symbol.is_null())
@@ -133,6 +174,10 @@ mod windows {
                             utilization,
                         ))
                     },
+                    compute_processes: if compute_processes.is_null() { None } else {
+                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(compute_processes)) },
+                    graphics_processes: if graphics_processes.is_null() { None } else {
+                        Some(std::mem::transmute::<*mut c_void, NvmlDeviceProcesses>(graphics_processes)) },
                     adapter_identity: if uuid.is_null() {
                         None
                     } else {
@@ -185,6 +230,70 @@ mod windows {
                 },
             }
         }
+
+        pub fn sample_processes(&self) -> GpuProcessSample {
+            query_processes(self.device, self.compute_processes, self.graphics_processes)
+        }
+    }
+
+    fn query_processes(device: NvmlDevice, compute: Option<NvmlDeviceProcesses>, graphics: Option<NvmlDeviceProcesses>) -> GpuProcessSample {
+        let mut processes: HashMap<u32, Option<u64>> = HashMap::new();
+        let mut is_complete = true;
+        for query in [compute, graphics] {
+            let Some(query) = query else { is_complete = false; continue; };
+            // Fixed bounds prevent driver churn from allocating unbounded IPC or process lists.
+            // 固定上限防止驱动进程变化导致无界分配或 IPC，列表收紧失败明确未知。
+            let mut count = 128_u32;
+            let mut records = vec![NvmlProcessInfo::default(); count as usize];
+            let status = unsafe { query(device, &mut count, records.as_mut_ptr()) };
+            if status != 0 || count > records.len() as u32 { is_complete = false; continue; }
+            for record in records.into_iter().take(count as usize) {
+                if record.pid == 0 { continue; }
+                let bytes = if record.used_gpu_memory == u64::MAX { None } else { Some(record.used_gpu_memory) };
+                // Compute and graphics return total application memory, so duplicate PIDs are never summed.
+                // 计算与图形接口都返回应用总占用，同一 PID 的两份记录不能相加；任一未知保持未知。
+                processes.entry(record.pid).and_modify(|previous| *previous = match (*previous, bytes) {
+                    (Some(first), Some(second)) => Some(first.min(second)), _ => None,
+                }).or_insert(bytes);
+            }
+        }
+        let has_unknown = processes.values().any(Option::is_none);
+        GpuProcessSample { processes: processes.into_iter().map(|(process_id, memory_bytes)|
+            GpuProcessMemory { process_id, memory_bytes }).collect(), is_complete,
+            reason: if has_unknown { Some("GPU_PROCESS_MEMORY_DRIVER_UNAVAILABLE") }
+                else if !is_complete { Some("GPU_PROCESS_MEMORY_QUERY_UNAVAILABLE") } else { None } }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        unsafe extern "C" fn reported(_device: NvmlDevice, count: *mut u32, records: *mut NvmlProcessInfo) -> u32 {
+            unsafe { *count = 2;
+                records.write(NvmlProcessInfo { pid: 8, used_gpu_memory: 100, ..Default::default() });
+                records.add(1).write(NvmlProcessInfo { pid: 12, used_gpu_memory: u64::MAX, ..Default::default() }); }
+            0
+        }
+        unsafe extern "C" fn too_many(_device: NvmlDevice, count: *mut u32, _records: *mut NvmlProcessInfo) -> u32 {
+            unsafe { *count = 129; } 7
+        }
+        #[test]
+        fn driver_lists_deduplicate_contexts_and_keep_wddm_sentinel_unknown() {
+            let sample = query_processes(ptr::null_mut(), Some(reported), Some(reported));
+            assert!(sample.is_complete);
+            assert_eq!(sample.processes.len(), 2);
+            assert_eq!(sample.memory_for(8), Some(100));
+            assert_eq!(sample.memory_for(12), None);
+            assert_eq!(sample.reason, Some("GPU_PROCESS_MEMORY_DRIVER_UNAVAILABLE"));
+        }
+        #[test]
+        fn oversized_or_unsupported_lists_cannot_fabricate_absent_process_zeroes() {
+            for query in [None, Some(too_many as NvmlDeviceProcesses)] {
+                let sample = query_processes(ptr::null_mut(), query, Some(reported));
+                assert!(!sample.is_complete);
+                assert_eq!(sample.memory_for(999), None);
+                assert_eq!(sample.memory_for(8), Some(100));
+            }
+        }
     }
 
     impl Drop for GpuSensor {
@@ -209,5 +318,24 @@ impl GpuSensor {
     }
     pub fn sample(&self) -> GpuSnapshot {
         GpuSnapshot::unknown("GPU_SENSOR_PLATFORM_UNSUPPORTED")
+    }
+    pub fn sample_processes(&self) -> GpuProcessSample {
+        GpuProcessSample::unknown("GPU_SENSOR_PLATFORM_UNSUPPORTED")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn process_absence_is_zero_only_for_a_complete_driver_list() {
+        let mut sample = GpuProcessSample::unknown("fixture");
+        assert_eq!(sample.memory_for(1), None);
+        sample.is_complete = true;
+        assert_eq!(sample.memory_for(1), Some(0));
+        sample.processes.push(GpuProcessMemory { process_id: 1, memory_bytes: None });
+        assert_eq!(sample.memory_for(1), None);
+        sample.processes[0].memory_bytes = Some(100);
+        assert_eq!(sample.memory_for(1), Some(100));
     }
 }

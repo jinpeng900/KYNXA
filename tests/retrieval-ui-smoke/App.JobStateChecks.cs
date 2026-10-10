@@ -15,7 +15,7 @@ public partial class App
     {
         int initialRebuilds = _api.Rebuilds;
         int initialCancellations = _api.CancelledJobs;
-        _api.Job = new("synthetic_checkpoint", "paused", 3, 20);
+        _api.Job = new("synthetic_checkpoint", "paused", 3, 20, ProjectId: _api.ProjectId);
         _api.StatusJobs = [_api.Job];
         NativeUi.Invoke(Button("RetrievalRefresh"));
         await WaitAsync(() => HasIndexText("索引任务已暂停，等待恢复") && !_window!.HasPendingChanges,
@@ -57,7 +57,7 @@ public partial class App
         await WaitAsync(() => HasIndexText("索引部分完成 · 已处理 18/20 个来源") && !_window!.HasPendingChanges,
             "Partial status without optional coverage stays readable and labels processed sources honestly.");
 
-        _api.Job = new("synthetic_cancel_paused", "paused", 2, 20);
+        _api.Job = new("synthetic_cancel_paused", "paused", 2, 20, ProjectId: _api.ProjectId);
         _api.StatusJobs = [_api.Job];
         NativeUi.Invoke(Button("RetrievalRefresh"));
         await WaitAsync(() => HasIndexText("索引任务已暂停，等待恢复") && !_window!.HasPendingChanges,

@@ -105,8 +105,6 @@ public sealed partial class RetrievalSettingsWindow : Window
             var local = _project?.Effective.Local ?? _global.Local;
             var web = _project?.Effective.Web ?? _global.Web;
             _inherit.IsChecked = _project?.Overrides is { Local: null, Web: null };
-            _mountedFolder.IsChecked = _project?.IndexingSources.MountedFolder.Enabled ?? false;
-            _mountedFolder.IsEnabled = !string.IsNullOrWhiteSpace(_mountedPath);
             Select(_localMode, local.Enabled ? "true" : "false");
             Select(_semanticMode, local.Semantic);
             if (local.RerankProfileId is { } profileId && !_rerankMode.Items.OfType<ComboBoxItem>().Any(item => Equals(item.Tag, profileId)))
@@ -152,7 +150,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         var web = previousWeb with { Mode = Value(_webMode, previousWeb.Mode), ProviderId = Value(_webProvider, previousWeb.ProviderId),
             Depth = Value(_webDepth, previousWeb.Depth), Language = Value(_webLanguage, previousWeb.Language) };
         bool inherits = _inherit.IsChecked == true;
-        bool indexesMountedFolder = _mountedFolder.IsChecked == true;
         await RunOperationAsync(async () =>
         {
             try
@@ -160,9 +157,8 @@ public sealed partial class RetrievalSettingsWindow : Window
                 if (_projectId is { } projectId && _project is { } project)
                 {
                     var overrides = inherits ? new RetrievalSettingsOverrides() : new RetrievalSettingsOverrides(local, web);
-                    var sources = new RetrievalIndexingSourcesPatch(new(indexesMountedFolder));
                     var updated = await _api.SaveProjectSettingsAsync(projectId,
-                        new(project.Revision, new(overrides, sources)), _lifetime.Token);
+                        new(project.Revision, new(overrides)), _lifetime.Token);
                     if (!_closed) _project = updated;
                 }
                 else
@@ -258,14 +254,16 @@ public sealed partial class RetrievalSettingsWindow : Window
             _ => UiText.Get("模型未就绪，使用关键词检索")
         };
         _indexStatus.Text = string.Format(UiText.Get("{0} 个资料来源 · {1} 个索引片段"), status.SourceCount, status.ChunkCount);
-        var latestJob = status.Jobs.LastOrDefault(job => IsActiveJob(job.Status)) ?? status.Jobs.LastOrDefault();
-        if (latestJob is { } job && (IsActiveJob(job.Status) || job.Status == "partial")) ShowJob(job);
+        var scopedJobs = status.Jobs.Where(job => job.ProjectId == _projectId).ToArray();
+        var latestJob = scopedJobs.LastOrDefault(job => IsActiveJob(job.Status)) ?? scopedJobs.LastOrDefault();
+        if (latestJob is { } job) ShowJob(job);
         else
         {
             _job = null;
             _jobTimer.Stop();
             _cancelJob.Visibility = Visibility.Collapsed;
             _rebuild.IsEnabled = true;
+            _rebuild.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -280,6 +278,10 @@ public sealed partial class RetrievalSettingsWindow : Window
         bool active = IsActiveJob(job.Status);
         _cancelJob.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         _rebuild.IsEnabled = !active;
+        // Normal work needs no indexing action; only an interrupted or incomplete job exposes recovery.
+        // 正常工作无需索引操作；只有中断或未完整完成的任务才显示恢复入口。
+        _rebuild.Visibility = job.Error != "INDEX_SUPERSEDED" && (job.Status is "cancelled" or "failed" or "partial")
+            ? Visibility.Visible : Visibility.Collapsed;
         _indexStatus.Text = job.Status switch
         {
             "queued" => UiText.Get("索引任务等待中"),
@@ -287,6 +289,7 @@ public sealed partial class RetrievalSettingsWindow : Window
             "paused" => UiText.Get("索引任务已暂停，等待恢复"),
             "completed" => UiText.Get("索引已更新"),
             "partial" => PartialJobSummary(job),
+            "cancelled" when job.Error == "INDEX_SUPERSEDED" => UiText.Get("工作目录已变更，旧资料任务已停止"),
             "cancelled" => UiText.Get("索引任务已取消"),
             _ => UiText.Get("索引更新失败，请重试")
         };

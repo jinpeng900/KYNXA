@@ -4,7 +4,7 @@ import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
 import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
 import { searchTools, toolDiscoveryCategory, toolSelectionSignals } from '../tools/tool-discovery.mjs';
 import { estimateTokens } from '../models/context.mjs';
-import { MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
+import { decodeToolTurn, MAX_MODEL_TOOLS, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
 import { parsed, toolFixture } from './tool-fixture.mjs';
 import { analyzeRequestClauses } from '../platform/request-clause-signals.mjs';
 import { classifyTaskRelation, retrievalPlan } from '../orchestration/retrieval/query-plan.mjs';
@@ -92,8 +92,13 @@ test('device state search aliases rank the enabled host execution schema and nev
     assert.equal(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
   const disabled = descriptors.map(tool => tool.name === 'terminal.host.run' ? { ...tool, enabled: false } : tool);
   assert.ok(!names(searchTools(disabled, '我的IP')).includes('terminal.host.run'));
-  for (const query of ['查询8.8.8.8的归属', 'Who owns IP 8.8.8.8?', 'IP和DNS区别', 'Explain ipconfig'])
-    assert.notEqual(searchTools(descriptors, query)[0]?.name, 'terminal.host.run', query);
+  for (const query of ['查询8.8.8.8的归属', 'Who owns IP 8.8.8.8?', 'IP和DNS区别', 'Explain ipconfig']) {
+    assert.equal(toolSelectionSignals(query).deviceState, false, query);
+    const reference = remote('mcp.reference.read', query);
+    assert.equal(searchTools([...descriptors, reference], query)[0]?.name, reference.name, query);
+  }
+  assert.ok(names(searchTools(descriptors, 'IP和DNS区别')).includes('terminal.host.run'),
+    'an explanation can still discover a lexically related tool; the model decides whether to execute it');
 });
 
 test('ordinary Chinese typing requests discover and select existing desktop input schemas', () => {
@@ -106,6 +111,45 @@ test('ordinary Chinese typing requests discover and select existing desktop inpu
     .includes('mcp.playwright.browser_fill_form'));
   assert.equal(toolSelectionSignals('写一个处理输入文本的函数').desktop, false,
     'code input is not automatically desktop input');
+});
+
+test('unrecognized wording and ambiguous subjects never remove permitted tools from the complete catalog', () => {
+  const unavailable = { ...remote('mcp.synthetic.offline', 'Unavailable runtime capability.'), available: false };
+  const source = [...descriptors, unavailable];
+  for (const message of ['劳驾把这句搁到闪烁的竖线那里', '我这张关系网卡住了，帮我捋一捋',
+    '那个方框里的数再挪一下', 'Please put this where the blinking bar is']) {
+    for (const protocol of protocols) {
+      const catalog = new ModelToolCatalog(source, { protocol, tokenBudget: 32000, message });
+      assert.ok(names(catalog.selected).includes('computer.type'), message);
+      assert.ok(names(catalog.selected).includes('terminal.host.run'), message);
+      assert.ok(!names(catalog.descriptors).includes(unavailable.name));
+      assert.deepEqual(catalog.load(['computer.type']).loaded, ['computer.type']);
+      assert.ok(estimateTokens(JSON.stringify(toolDeclarations(protocol, catalog.wire()))) <= 32000);
+    }
+  }
+  assert.ok(!names(searchTools(source, '')).includes(unavailable.name));
+  assert.deepEqual(searchTools(source, unavailable.name), []);
+});
+
+test('a zero-match Chinese expression recovers through real empty-query paging and exact loading without effects', async t => {
+  const f = await toolFixture(t, nativeCapabilities), context = await f.context('full');
+  await f.service.catalog(context);
+  f.service.configureModelCatalog(context, { protocol: protocols[0], tokenBudget: 4000,
+    message: '劳驾把这句搁到闪烁的竖线那里' });
+  const unmatched = parsed(await f.run(context, 'tool.search', { query: '搁到闪烁竖线' }));
+  assert.equal(unmatched.total, 0);
+  const discovered = [];
+  let offset = 0, hasMore;
+  do {
+    const page = parsed(await f.run(context, 'tool.search', { query: '', offset, limit: 20 }));
+    discovered.push(...page.tools);
+    offset = page.nextOffset; hasMore = page.hasMore;
+  } while (hasMore);
+  const typing = discovered.find(tool => tool.name === 'computer.type');
+  assert.ok(typing);
+  assert.ok(['loaded', 'deferred'].includes(typing.schemaState));
+  assert.deepEqual(parsed(await f.run(context, 'tool.load', { names: [typing.name] })).loaded, [typing.name]);
+  assert.equal(f.service.approvals.pending.size, 0);
 });
 
 test('exact identities outrank partial metadata, disabled tools stay absent and paging order is stable', () => {
@@ -138,6 +182,46 @@ test('wire aliases load only exact enabled tools and one unavailable item cannot
   assert.deepEqual(catalog.selected, before, 'unknown or disabled aliases never mutate the usable selection');
 });
 
+test('three provider declarations distinguish callable aliases from stable business names used by tool.load', async t => {
+  const f = await toolFixture(t);
+  const rawTurn = (protocol, name, args) => protocol === 'anthropic-messages'
+    ? { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'alias-fixture-call', name, input: args }] }
+    : protocol === 'openai-responses'
+      ? { status: 'completed', output: [{ type: 'function_call', call_id: 'alias-fixture-call', name, arguments: JSON.stringify(args) }] }
+      : { choices: [{ finish_reason: 'tool_calls', message: { content: '', tool_calls: [
+        { id: 'alias-fixture-call', type: 'function', function: { name, arguments: JSON.stringify(args) } }
+      ] } }] };
+  for (const protocol of protocols) {
+    const context = await f.context('full');
+    await f.service.catalog(context);
+    f.service.configureModelCatalog(context, { protocol, tokenBudget: 16000 });
+    const catalog = f.service.modelCatalog(context);
+    for (const tool of catalog) {
+      const declaration = toolDeclarations(protocol, [tool])[0];
+      const spec = protocol === 'openai-completions' ? declaration.function : declaration;
+      assert.equal(spec.name, tool.wireName, protocol);
+      assert.notEqual(spec.name, tool.name, protocol);
+      assert.ok(spec.description.startsWith(`${tool.wireName}: `), protocol);
+      assert.ok(spec.description.includes(tool.description), 'wire guidance preserves the existing operation description');
+      assert.deepEqual(spec.input_schema ?? spec.parameters, tool.inputSchema, protocol);
+    }
+    // Provider calls use aliases; loading arguments and broker receipts retain the existing business identity.
+    // 供应商调用使用别名；加载参数及代理回执继续保留既有业务身份。
+    const loader = catalog.find(tool => tool.name === 'tool.load');
+    const [call] = decodeToolTurn(protocol, rawTurn(protocol, loader.wireName, { names: ['filesystem.read'] }), catalog).calls;
+    assert.equal(call.name, 'tool.load');
+    assert.deepEqual(call.arguments.names, ['filesystem.read']);
+    assert.deepEqual(parsed(await f.service.execute(context, call)).loaded, ['filesystem.read']);
+    const loaded = f.service.modelCatalog(context), reader = loaded.find(tool => tool.name === 'filesystem.read');
+    const [aliasCall] = decodeToolTurn(protocol, rawTurn(protocol, reader.wireName, { path: 'fixture.txt', reason: 'Fixture inspection.' }), loaded).calls;
+    assert.equal(aliasCall.name, 'filesystem.read');
+    assert.equal(aliasCall.unavailable, undefined);
+    const [logicalCall] = decodeToolTurn(protocol, rawTurn(protocol, reader.name, aliasCall.arguments), loaded).calls;
+    assert.equal(logicalCall.unavailable, true, 'an undeclared logical label must never implicitly load or dispatch a tool');
+    await f.service.releaseContext(context);
+  }
+});
+
 test('tool classifications distinguish host control, host shell and browser automation without availability claims', () => {
   assert.equal(toolDiscoveryCategory({ name: 'computer.launch' }), 'computer');
   assert.equal(toolDiscoveryCategory({ name: 'terminal.host.run' }), 'host-terminal');
@@ -149,10 +233,11 @@ test('tool classifications distinguish host control, host shell and browser auto
   assert.equal(toolDiscoveryCategory({ name: 'mcp.exa.web_search_exa' }), 'web-search');
 });
 
-test('background host jobs are discoverable for terminal tasks and deferred during unrelated conversations', () => {
+test('background host jobs are discoverable and terminal clues affect ordering without excluding neutral tools', () => {
   for (const protocol of protocols) {
     const unrelated = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '你好' });
-    assert.ok(!unrelated.selected.some(tool => tool.name.startsWith('terminal.host.')));
+    assert.ok(unrelated.selected.some(tool => tool.name === 'terminal.host.run'));
+    assert.ok(names(unrelated.selected).indexOf('filesystem.read') < names(unrelated.selected).indexOf('terminal.host.run'));
     const background = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 32000, message: '启动后台终端进程并监控输出' });
     for (const action of ['start', 'read', 'stop']) {
       const name = `terminal.host.${action}`;
@@ -174,11 +259,13 @@ for (const protocol of protocols) test(`${protocol}: browser followups retain re
   }
   const fresh = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 16000,
     message: '另外一件，写一个Node.js代码测试', historySignals, previousToolNames });
-  assert.ok(!fresh.selected.some(tool => tool.name.startsWith('computer.')));
-  assert.ok(!fresh.selected.some(tool => tool.name === 'terminal.host.run'));
+  assert.equal(toolSelectionSignals('另外一件，写一个Node.js代码测试', { historySignals, previousToolNames }).desktop, false);
+  assert.ok(names(fresh.descriptors).includes('computer.launch'));
+  assert.deepEqual(fresh.load(['computer.launch']).loaded, ['computer.launch']);
   const ordinary = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 16000,
     message: '查证今天的官方新闻', historySignals, previousToolNames });
-  assert.ok(!ordinary.selected.some(tool => tool.name.startsWith('computer.')));
+  assert.equal(toolSelectionSignals('查证今天的官方新闻', { historySignals, previousToolNames }).desktop, false);
+  assert.ok(names(ordinary.descriptors).includes('computer.launch'));
 });
 
 test('direct short browser requests work without old history; no old permission or call arguments are imported', () => {
@@ -258,6 +345,43 @@ test('tiny budgets keep discovery and allow loading individual capabilities with
   }
 });
 
+test('optional planning exposure cannot consume the execution schema slot and remains explicitly loadable', () => {
+  const discovery = builtinDescriptors.filter(tool => ['tool.search', 'tool.load', 'tool.result.read'].includes(tool.name));
+  const host = builtinDescriptors.find(tool => tool.name === 'terminal.host.run');
+  const plan = { ...remote('knowledge.plan', 'Optional semantic planning interface.'), source: 'builtin', modelExposure: 'on-demand' };
+  for (const protocol of protocols) {
+    const tokenBudget = estimateTokens(JSON.stringify(toolDeclarations(protocol, wireCatalog([...discovery, host]))));
+    const catalog = new ModelToolCatalog([...discovery, plan, host], { protocol, tokenBudget,
+      message: '解释这个规划思路，不预先决定我想怎样做' });
+    assert.ok(names(catalog.selected).includes(host.name));
+    assert.ok(!names(catalog.selected).includes(plan.name));
+    assert.ok(names(catalog.descriptors).includes(plan.name));
+    assert.deepEqual(catalog.load([plan.name]).loaded, [plan.name]);
+    assert.ok(estimateTokens(JSON.stringify(toolDeclarations(protocol, catalog.wire()))) <= tokenBudget);
+  }
+});
+
+test('canLoad and load share the minimum discovery selection without permanently hiding result paging', () => {
+  const discovery = builtinDescriptors.filter(tool => ['tool.search', 'tool.load', 'tool.result.read'].includes(tool.name));
+  const action = remote('mcp.synthetic.large-action', 'Bounded synthetic schema description. '.repeat(30));
+  for (const protocol of protocols) {
+    const required = discovery.filter(tool => tool.name !== 'tool.result.read').concat(action);
+    const tokenBudget = estimateTokens(JSON.stringify(toolDeclarations(protocol, wireCatalog(required))));
+    const catalog = new ModelToolCatalog([...discovery, action], { protocol, tokenBudget });
+    const before = structuredClone(catalog.selected);
+    assert.equal(catalog.canLoad([action]), true);
+    assert.equal(catalog.canLoad([remote('mcp.synthetic.missing')]), false);
+    assert.deepEqual(catalog.selected, before, 'admission checks must not change selected schemas');
+    const loaded = catalog.load([action.name]);
+    assert.deepEqual(loaded.deferredDiscovery, ['tool.result.read']);
+    assert.ok(names(catalog.selected).includes(action.name));
+    assert.ok(names(searchTools(catalog.descriptors, '')).includes('tool.result.read'));
+    assert.deepEqual(catalog.load(['tool.result.read']).loaded, ['tool.result.read']);
+    assert.ok(names(catalog.selected).includes('tool.result.read'));
+    assert.equal(catalog.tokenBudget, tokenBudget);
+  }
+});
+
 test('tool.search exposes ranked bilingual matches through the real service with ordinary pagination', async t => {
   const f = await toolFixture(t, nativeCapabilities), ctx = await f.context('full');
   await f.service.catalog(ctx);
@@ -306,7 +430,9 @@ test('task switches, corrections and uncertain requests do not revive previous c
     for (const protocol of protocols) {
       const catalog = new ModelToolCatalog(descriptors, { protocol, tokenBudget: 16000, message,
         historySignals, previousToolNames, taskRelation });
-      assert.ok(!catalog.selected.some(tool => tool.name.startsWith('terminal.host.') || tool.name.startsWith('computer.')), message);
+      assert.equal(signals.selectionOnly, true, message);
+      assert.equal(signals.semanticVerified, false, message);
+      assert.ok(names(catalog.descriptors).includes('terminal.host.run'), message);
       for (const name of ['tool.search', 'tool.load']) assert.ok(catalog.selected.some(tool => tool.name === name));
       catalog.load(['terminal.host.run']);
       assert.ok(catalog.selected.some(tool => tool.name === 'terminal.host.run'), 'deferred capabilities remain discoverable');

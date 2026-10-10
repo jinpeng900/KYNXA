@@ -11,7 +11,9 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
   const usage = { content: '', reasoning: '', argumentParts: [] };
   try { return await decodeToolStream(response, protocol, catalog, emit, activity, usage); }
   catch (error) {
-    if (error instanceof ToolCallDecodeFailure) error.estimatedGeneratedTokens = Math.max(error.estimatedGeneratedTokens ?? 0,
+    // Transport failures also consume partial output; retain only its estimate, never raw arguments in diagnostics.
+    // 网络/取消故障同样消耗部分输出；诊断仅保留估算量，不记录原始工具参数。
+    if (error && typeof error === 'object') error.estimatedGeneratedTokens = Math.max(error.estimatedGeneratedTokens ?? 0,
       estimateTokens(usage.content) + estimateTokens(usage.reasoning) + estimateTokens(usage.argumentParts.join('')));
     throw error;
   }
@@ -35,7 +37,17 @@ async function decodeToolStream(response, protocol, catalog, emit, activity, usa
       // treating incomplete tool arguments as an executable call.
       // 本地服务可能忽略 stream:true；保留其返回草稿，但不把未完成工具参数当成可执行调用。
       const parts = finalParts(protocol, result);
-      emit({ type: 'content_snapshot', content: parts.content || content, reasoning: parts.reasoning || reasoning });
+      usage.content = parts.content || content; usage.reasoning = parts.reasoning || reasoning;
+      const returnedCalls = protocol === 'openai-completions' ? result.choices?.[0]?.message?.tool_calls
+        : protocol === 'openai-responses' ? result.output : result.content;
+      usage.argumentParts = (Array.isArray(returnedCalls) ? returnedCalls : []).filter(call => call &&
+        (protocol === 'openai-completions' || protocol === 'openai-responses' && call.type === 'function_call' ||
+          protocol === 'anthropic-messages' && call.type === 'tool_use')).map(call => {
+        const argumentsValue = protocol === 'openai-completions' ? call.function?.arguments
+          : protocol === 'openai-responses' ? call.arguments : call.input;
+        return typeof argumentsValue === 'string' ? argumentsValue : JSON.stringify(argumentsValue ?? {});
+      });
+      emit({ type: 'content_snapshot', content: usage.content, reasoning: usage.reasoning });
       throw error;
     }
     if (turn.content.startsWith(content)) send('text_delta', turn.content.slice(content.length));
@@ -51,7 +63,7 @@ async function decodeToolStream(response, protocol, catalog, emit, activity, usa
     try { result = await response.json(); } catch { throw new StreamFailure('模型接口返回了无效的 JSON 响应。'); }
     return finish(result);
   }
-  const calls = new Map(), blocks = new Map();
+  const calls = new Map(), blocks = new Map(), responseArguments = new Map();
   let stopReason, rawReasoning = '';
   for await (const frame of readSse(response.body, activity)) {
     if (frame.data === '[DONE]') {
@@ -71,6 +83,18 @@ async function decodeToolStream(response, protocol, catalog, emit, activity, usa
     if (protocol === 'openai-responses') {
       if (type === 'response.output_text.delta') send('text_delta', item.delta);
       if (['response.reasoning_summary_text.delta', 'response.reasoning_text.delta'].includes(type)) send('reasoning_delta', item.delta);
+      if (['response.function_call_arguments.delta', 'response.function_call_arguments.done'].includes(type)) {
+        // Account argument-only streams without dispatching them; a done snapshot must not double-count its deltas.
+        // 纯参数流仍需计量但不能执行；done 完整快照不能再次累计已收到的 delta。
+        const key = item.item_id ?? item.output_index ?? 'unbound', previous = responseArguments.get(key) ?? '';
+        const next = type.endsWith('.delta') ? previous + (typeof item.delta === 'string' ? item.delta : '')
+          : typeof item.arguments === 'string' && item.arguments.length >= previous.length ? item.arguments : previous;
+        responseArguments.set(key, next);
+        usage.argumentParts = [...responseArguments.values()];
+        validateTurnCallCount(responseArguments.size);
+        validateArgumentBuffer(key === 'unbound' ? '' : next,
+          usage.argumentParts.reduce((sum, argumentsText) => sum + argumentsText.length, 0));
+      }
       if (type === 'response.completed') return finish(item.response ?? item);
       if (['response.incomplete', 'response.failed', 'response.cancelled'].includes(type)) {
         if (item.response) return finish({ ...item.response, status: type.slice('response.'.length) });

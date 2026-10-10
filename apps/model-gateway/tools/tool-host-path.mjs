@@ -13,8 +13,9 @@ export async function findNativeToolHost(toolHostPath, unavailableCode) {
   if (process.platform !== 'win32') throw Object.assign(new Error('The native tool host requires Windows.'), { code: unavailableCode });
   const candidates = toolHostPath ? [resolve(toolHostPath)] : [join(directory, '..', 'ToolHost', 'KYNXA.ToolHost.exe'),
     join(directory, '..', 'tool-host', 'KYNXA.ToolHost.exe'),
-    ...['Debug', 'Release'].flatMap(configuration => [`win-${process.arch}`, ''].map(runtime =>
-      join(directory, '..', 'tool-host', 'bin', configuration, 'net10.0-windows', runtime, 'KYNXA.ToolHost.exe')))];
+    ...['Debug', 'Release'].flatMap(configuration => ['net10.0-windows10.0.19041.0', 'net10.0-windows'].flatMap(framework =>
+      [`win-${process.arch}`, ''].map(runtime =>
+        join(directory, '..', 'tool-host', 'bin', configuration, framework, runtime, 'KYNXA.ToolHost.exe'))))];
   for (const path of candidates) {
     try {
       const info = await lstat(path);

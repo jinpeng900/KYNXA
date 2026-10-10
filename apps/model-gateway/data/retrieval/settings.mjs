@@ -9,13 +9,14 @@ const queues = new Map();
 const MAX_SETTINGS_BYTES = 8 * 1024 * 1024;
 
 export const DEFAULT_INDEXING_LIMITS = Object.freeze({ maximumFiles: 20000, maximumSourceBytes: 32 * 1024 * 1024,
-  maximumTotalBytes: 512 * 1024 * 1024, maximumEntries: 200000, batchSize: 32 });
+  maximumTotalBytes: 512 * 1024 * 1024, maximumEntries: 200000, batchSize: 32,
+  maximumDocumentInputBytes: 32 * 1024 * 1024, maximumDocumentOutputBytes: 2 * 1024 * 1024, maximumPdfPages: 100 });
 export const DEFAULT_ANN_SETTINGS = DEFAULT_ANN_OPTIONS;
 
 export const DEFAULT_RETRIEVAL_SETTINGS = Object.freeze({
   schemaVersion: RETRIEVAL_SCHEMA_VERSION, revision: 0,
   local: Object.freeze({ enabled: true, semantic: 'auto', vectorBackend: 'sqlite',
-    embeddingProfileId: 'builtin-multilingual', embeddingDevicePolicy: 'auto', rerankProfileId: null, rerankCandidates: 20,
+    embeddingProfileId: 'builtin-multilingual', embeddingDevicePolicy: 'auto', rerankProfileId: null, rerankCandidates: 20, rerankDevicePolicy: 'auto',
     indexing: DEFAULT_INDEXING_LIMITS, ann: DEFAULT_ANN_SETTINGS }),
   web: Object.freeze({ mode: 'auto', providerId: 'auto', depth: 'standard', language: 'auto', browserRead: 'auto' }),
   cache: Object.freeze({ memoryLimitBytes: 64 * 1024 * 1024, diskLimitBytes: 512 * 1024 * 1024 })
@@ -47,7 +48,8 @@ function integer(value, minimum, maximum, name) {
 export function validateIndexingLimits(value = {}, { partial = false } = {}) {
   requireKeys(value, Object.keys(DEFAULT_INDEXING_LIMITS), 'indexing limits');
   const ranges = { maximumFiles: [1, 100000], maximumSourceBytes: [1, 256 * 1024 * 1024],
-    maximumTotalBytes: [1, 8 * 1024 * 1024 * 1024], maximumEntries: [1, 2000000], batchSize: [1, 128] };
+    maximumTotalBytes: [1, 8 * 1024 * 1024 * 1024], maximumEntries: [1, 2000000], batchSize: [1, 128],
+    maximumDocumentInputBytes: [1, 32 * 1024 * 1024], maximumDocumentOutputBytes: [1, 2 * 1024 * 1024], maximumPdfPages: [1, 100] };
   const clean = Object.fromEntries(Object.entries(value).map(([name, item]) => [name, integer(item, ...ranges[name], name)]));
   return partial ? clean : { ...DEFAULT_INDEXING_LIMITS, ...clean };
 }
@@ -68,12 +70,12 @@ function settingsPatch(value) {
   requireKeys(value, ['local', 'web', 'cache'], 'retrieval settings');
   const result = {};
   if (value.local !== undefined) {
-    requireKeys(value.local, ['enabled', 'semantic', 'vectorBackend', 'embeddingProfileId', 'embeddingDevicePolicy', 'rerankProfileId', 'rerankCandidates', 'indexing', 'ann'], 'local');
+    requireKeys(value.local, ['enabled', 'semantic', 'vectorBackend', 'embeddingProfileId', 'embeddingDevicePolicy', 'rerankProfileId', 'rerankCandidates', 'rerankDevicePolicy', 'indexing', 'ann'], 'local');
     const local = {};
     for (const [name, item] of Object.entries(value.local)) {
       if (name === 'enabled') local[name] = boolean(item, name);
       else if (name === 'semantic') local[name] = choice(item, ['auto', 'off'], name);
-      else if (name === 'embeddingDevicePolicy') local[name] = choice(item, ['auto', 'cpu', 'gpu'], name);
+      else if (name === 'embeddingDevicePolicy' || name === 'rerankDevicePolicy') local[name] = choice(item, ['auto', 'cpu', 'gpu'], name);
       // Null explicitly requests adaptive policy; fixed tiers remain bounded and survive old UI patches.
       // null 明确使用自适应策略；固定档位保持有界，旧界面的局部补丁不能重置它。
       else if (name === 'rerankCandidates') local[name] = choice(item, [null, 20, 40, 60], name);
@@ -140,7 +142,7 @@ function projectPatch(value) {
 
 function defaultProject(projectId) {
   return { schemaVersion: RETRIEVAL_SCHEMA_VERSION, projectId, revision: 0, overrides: {},
-    indexingSources: { mountedFolder: { enabled: false, bindingRevision: 0 }, knowledgeIds: [] } };
+    indexingSources: { mountedFolder: { enabled: true, bindingRevision: 0 }, knowledgeIds: [] } };
 }
 
 function validateDocument(value, projectId = null) {
@@ -162,6 +164,9 @@ function validateDocument(value, projectId = null) {
   const clean = projectPatch({ indexingSources: { mountedFolder: { enabled: sources.mountedFolder.enabled },
     knowledgeIds: sources.knowledgeIds ?? [] } }).indexingSources;
   clean.mountedFolder.bindingRevision = integer(sources.mountedFolder.bindingRevision, 0, Number.MAX_SAFE_INTEGER, 'bindingRevision');
+  // Mounted work is prepared automatically; the legacy opt-in field no longer gates source discovery.
+  // 挂载工作自动准备资料；兼容旧配置字段，但旧版默认关闭值不再阻止来源发现。
+  clean.mountedFolder.enabled = true;
   return { ...defaults, revision: value.revision, overrides, indexingSources: clean };
 }
 
@@ -253,7 +258,7 @@ export class RetrievalSettingsStore {
       const project = await this._read(filename, relationship.projectId);
       const sources = project.indexingSources;
       return { ...mergeSettings(global, project.overrides), projectId: relationship.projectId, projectRevision: project.revision,
-        projectIndexing: { mountedFolder: sources.mountedFolder.enabled && !relationship.isFolderlessWorkspace,
+        projectIndexing: { mountedFolder: Boolean(relationship.folderPath) && !relationship.isFolderlessWorkspace && !relationship.isArchived,
           bindingRevision: sources.mountedFolder.bindingRevision, knowledgeIds: [...sources.knowledgeIds] } };
     });
   }
@@ -291,6 +296,7 @@ export class RetrievalSettingsStore {
             : { ...current.overrides[name], ...mutation.patch.overrides?.[name] }])),
         indexingSources: { ...current.indexingSources, ...mutation.patch.indexingSources,
           mountedFolder: { ...current.indexingSources.mountedFolder, ...mutation.patch.indexingSources?.mountedFolder } } };
+      next.indexingSources.mountedFolder.enabled = true;
       if (current.indexingSources.mountedFolder.enabled !== next.indexingSources.mountedFolder.enabled)
         next.indexingSources.mountedFolder.bindingRevision++;
       await this._write(filename, next);

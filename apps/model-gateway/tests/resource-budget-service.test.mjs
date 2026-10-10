@@ -145,3 +145,53 @@ test('waiting has a finite deadline rather than failing the monitor itself', asy
     assert.equal(result.reason, 'RESOURCE_WAIT_TIMEOUT'); assert.equal(service.status().mode, 'fallback');
   } finally { await service.close(); }
 });
+
+test('idle advice and comparable hot throughput explore beyond startup while pressure cuts approved capacity immediately', async () => {
+  let now = 1000;
+  const service = new ResourceBudgetService({ executablePath: null, sampler: hardware, clock: () => now });
+  try {
+    const initial = await service.acquire(allocation('adaptive', 1, 8 * 2 ** 20));
+    assert.equal(initial.suggestions.batchProbeMultiplier, 2);
+    assert.equal(initial.suggestions.rerankCandidateLimit, 60);
+    const feedback = { phase: 'hot-inference', unit: 'tokens', backend: 'cpu', sequenceTokens: 64,
+      inputTokens: 64, latencyMs: 10, throughputPerSecond: 6400, queueDepth: 128, batchSize: 1, cpuThreads: 1 };
+    await service.report(initial.leaseId, feedback);
+    now += 6000;
+    const grown = await service.report(initial.leaseId, { ...feedback, inputTokens: 128, latencyMs: 15, throughputPerSecond: 128000 / 15, batchSize: 2 });
+    assert.equal(grown.feedback.backgroundFraction, 2, 'larger batches compare cost per token rather than whole-batch latency');
+    assert.equal(grown.feedback.latencyMs, 11.25, 'public latency remains milliseconds per batch');
+    now += 6000;
+    const separated = await service.report(initial.leaseId, { ...feedback, sequenceTokens: 512, inputTokens: 512,
+      latencyMs: 5, throughputPerSecond: 102400 });
+    assert.equal(separated.feedback.backgroundFraction, 2, 'different sequence classes cannot manufacture a throughput gain');
+    now += 6000;
+    const peak = await service.report(initial.leaseId, { ...feedback, throughputPerSecond: 12800, latencyMs: 5 });
+    assert.equal(peak.feedback.backgroundFraction, 4);
+    const pressure = await service.report(initial.leaseId, { backend: 'cpu', foregroundLatencyMs: 300 });
+    assert.equal(pressure.feedback.backgroundFraction, 0.5);
+    await service.release(initial.leaseId);
+    const smaller = await service.acquire(allocation('adaptive', 4, 128 * 2 ** 20));
+    assert.equal(smaller.cpuThreads, 2);
+    assert.equal(smaller.suggestions.rerankCandidateLimit, 20);
+    assert.equal(smaller.suggestions.batchProbeMultiplier, 0.5);
+    await assert.rejects(service.report(smaller.leaseId, { sequenceTokens: 513 }), { code: 'RESOURCE_INVALID_FEEDBACK' });
+  } finally { await service.close(); }
+});
+
+test('a one-thread search lease plans reranking from remaining authority headroom and actual pressure', async () => {
+  let usagePercent = 10, availableBytes = 8 * 2 ** 30;
+  const service = new ResourceBudgetService({ executablePath: null,
+    sampler: () => ({ ...hardware(), cpu: { logicalCores: 8, usagePercent }, memory: { totalBytes: 16 * 2 ** 30, availableBytes } }) });
+  try {
+    for (const [cpuThreads, expected] of [[1, 60], [2, 40], [4, 20]]) {
+      const lease = await service.acquire(allocation('reranker', cpuThreads));
+      assert.equal(lease.suggestions.rerankCandidates, expected); await service.release(lease.leaseId);
+    }
+    availableBytes = 1024 ** 3;
+    const constrained = await service.acquire(allocation('reranker', 1, 8 * 2 ** 20));
+    assert.equal(constrained.suggestions.rerankCandidateLimit, 20); await service.release(constrained.leaseId);
+    usagePercent = 86;
+    const pressure = await service.acquire(allocation('reranker', 4));
+    assert.equal(pressure.suggestions.rerankCandidates, 20);
+  } finally { await service.close(); }
+});

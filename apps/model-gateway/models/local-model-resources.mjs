@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 const MIB = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CACHE_ENTRIES = 32;
+const MAX_ESTIMATED_BYTES = 8 * 1024 ** 4;
 
 function cancelledError() {
   return Object.assign(new Error('Local model observation cancelled.'), { name: 'AbortError', code: 'LOCAL_MODEL_OBSERVATION_CANCELLED' });
@@ -69,6 +70,32 @@ function allocationMetadata(show, running, shape, modelFileBytes) {
       source: modelFileBytes ? 'serialized-size' : 'parameter-count-and-quantization', includesRuntimeScratch: false,
       ...(modelFileBytes ? { includesQuantizationMetadata: true } : {}) } : null,
     kvBytesPerToken: Number.isSafeInteger(kvBytesPerToken) && kvBytesPerToken > 0 ? kvBytesPerToken : null };
+}
+
+function allocationBackend(running, configuredGpuLayers) {
+  const sizeBytes = positiveInteger(running?.size), gpuBytes = positiveInteger(running?.size_vram);
+  const state = running && gpuBytes !== null && sizeBytes > 0 && gpuBytes <= sizeBytes
+    ? gpuBytes === 0 ? 'cpu' : gpuBytes < sizeBytes ? 'mixed' : 'gpu' : 'unknown';
+  return { state, source: state === 'unknown' ? 'unreported' : 'ollama-api-ps-residency',
+    configuredGpuLayers, executionBackend: 'unknown', gpuDeviceIdentity: 'unknown', exact: false };
+}
+
+function kvCacheEstimate(shape, contextTokens, backend) {
+  if (!contextTokens || !shape.layers || !shape.kvHeads || !shape.keyLength || !shape.valueLength ||
+      shape.layers > 512 || shape.kvHeads > 256 || shape.keyLength > 4096 || shape.valueLength > 4096) return null;
+  const f16PerToken = shape.layers * shape.kvHeads * (shape.keyLength + shape.valueLength) * 2;
+  // The public API does not report OLLAMA_KV_CACHE_TYPE. Weight quantization and gateway env are not KV evidence.
+  // 公开 API 不报告 OLLAMA_KV_CACHE_TYPE；权重量化和网关环境变量都不能冒充外部服务 KV dtype。
+  const quantizedPerToken = blockBytes => shape.layers * shape.kvHeads *
+    (Math.ceil(shape.keyLength / 32) + Math.ceil(shape.valueLength / 32)) * blockBytes;
+  const maximumBytes = contextTokens * f16PerToken;
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes > MAX_ESTIMATED_BYTES) return null;
+  return { dtype: 'unknown', dtypeSource: 'ollama-api-not-reported', reservationDtype: 'f16-upper-bound',
+    supportedDtypeEstimates: { f16BytesPerToken: f16PerToken, q8_0BytesPerToken: quantizedPerToken(34),
+      q4_0BytesPerToken: quantizedPerToken(18) },
+    minimumBytes: contextTokens * Math.min(f16PerToken, quantizedPerToken(18)), maximumBytes,
+    contextTokens, backend: backend.state, parallelSlots: 'unknown', accountsForSlidingWindow: false,
+    includesParallelSlotMultiplication: false, exact: false };
 }
 
 /** Read-only coordination for a user-owned local inference server. Never load/unload or stop its models.
@@ -162,13 +189,15 @@ export class LocalModelResourceObserver {
     const running = hasRunningList ? matchingModel(runningResult.value.models.slice(0, 128), model) : undefined;
     const show = detailsResult.status === 'fulfilled' ? detailsResult.value : undefined;
     const shape = architectureInfo(show);
-    const configuredContext = typeof show?.parameters === 'string' && show.parameters.length <= 16_384
-      ? positiveInteger(Number(/^\s*num_ctx\s+(\d+)\s*$/mu.exec(show.parameters)?.[1])) : null;
+    const parameters = typeof show?.parameters === 'string' && show.parameters.length <= 16_384 ? show.parameters : '';
+    const configuredContext = positiveInteger(Number(/^\s*num_ctx\s+(\d+)\s*$/mu.exec(parameters)?.[1]));
+    const configuredGpuLayers = positiveInteger(Number(/^\s*num_gpu\s+(\d+)\s*$/mu.exec(parameters)?.[1]));
     const runtimeContext = positiveInteger(running?.context_length);
     const effectiveContext = runtimeContext || configuredContext || null;
     const estimationContext = requestedContext || effectiveContext;
-    const estimatedKvCacheBytes = estimationContext && shape.layers && shape.kvHeads && shape.keyLength && shape.valueLength
-      ? Math.min(Number.MAX_SAFE_INTEGER, estimationContext * shape.layers * shape.kvHeads * (shape.keyLength + shape.valueLength) * 2) : null;
+    const backendSelection = allocationBackend(running, configuredGpuLayers);
+    const kvEstimate = kvCacheEstimate(shape, estimationContext, backendSelection);
+    const estimatedKvCacheBytes = kvEstimate?.maximumBytes ?? null;
     const observedMemoryBytes = positiveInteger(running?.size), observedGpuMemoryBytes = positiveInteger(running?.size_vram);
     let modelFileBytes = null;
     if (!running && hasCompleteRunningList) {
@@ -192,9 +221,12 @@ export class LocalModelResourceObserver {
       contextTokens: effectiveContext, runtimeContextTokens: runtimeContext, configuredContextTokens: configuredContext,
       modelMaximumContextTokens: shape.maximumContextTokens ?? null,
       observedMemoryBytes, observedGpuMemoryBytes, estimatedKvCacheBytes, ...allocation,
+      backendSelection,
+      kvBytesPerToken: kvEstimate?.supportedDtypeEstimates.f16BytesPerToken ?? null,
       observedMemoryScope: 'server-reported-model-size-not-host-rss',
-      kvCacheEstimate: estimatedKvCacheBytes ? { dtype: 'assumed-f16', accountsForSlidingWindow: false,
-        contextTokens: estimationContext, exact: false } : null,
+      kvCacheEstimate: kvEstimate,
+      uncertaintyComponents: ['kv-dtype-not-reported', 'parallel-slots-not-reported', 'runtime-scratch-not-reported',
+        ...(backendSelection.state === 'unknown' ? ['execution-device-not-reported'] : [])],
       // The server may already include KV buffers in size/size_vram. Never add this estimate to measured residency.
       // 服务返回的 size/size_vram 可能已含 KV 缓冲，估算只描述不确定性，不能再次叠加扣除已观测驻留量。
       uncertaintyMarginBytes: Math.ceil(Math.max(256 * MIB, (observedMemoryBytes ?? estimatedKvCacheBytes ?? 0) * 0.2)),

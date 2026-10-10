@@ -19,6 +19,37 @@ function stub() {
   } };
 }
 
+test('lost startup acknowledgement is verified through the owned job receipt without relaunching', async t => {
+  let launches = 0, rounds = 0;
+  const runner = { capabilities: async () => ({ ...capabilities, backgroundJobs: true }), run: async () => {
+    launches++;
+    return { value: { completed: true, processId: 1234, boundary: 'host-terminal', exitCode: 1 }, isError: true };
+  } };
+  const f = await toolFixture(t, { hostTerminalRunner: runner }), context = await f.context('full');
+  await f.service.catalog(context);
+  const original = f.call('terminal.host.start', input), receipts = [];
+  const result = await runToolLoop({ protocol: 'openai-completions', context,
+    messages: [{ role: 'user', content: 'Start the synthetic job once and check its outcome.' }],
+    system: '', declarations: [], inputBudgetTokens: 32000, service: f.service, emit: () => {},
+    saveActivity: async receipt => receipts.push(receipt), requestTurn: async () => {
+      rounds++;
+      const call = rounds === 1 ? original : rounds === 2
+        ? f.call('terminal.host.read', { jobId: [...f.service.hostTerminalJobs.jobs.keys()][0] })
+        : rounds === 3 ? { ...original, id: randomUUID() } : null;
+      return { content: call ? '' : 'The job started once and returned exit 1; the command did not succeed.',
+        reasoning: '', calls: call ? [call] : [], continuation: [] };
+    } });
+  assert.equal(launches, 1);
+  assert.equal(result.recovery.unknownEffects, 0, JSON.stringify(receipts.map(item => ({ name: item.name, status: item.status,
+    code: item.code, result: item.result }))));
+  assert.equal(receipts.find(receipt => receipt.toolCallId === original.id && receipt.status === 'unknown').code,
+    'HOST_TERMINAL_INVALID_RESULT');
+  assert.equal(receipts.at(-1).reused, true);
+  assert.equal(result.recovery.unknownEffects, 0);
+  assert.equal(result.recovery.verifiedEffects.length, 1);
+  assert.match(result.content, /did not succeed/);
+});
+
 test('host commands require Ask/Smart approval, never use the sandbox, and retain immutable arguments', async t => {
   const runner = stub(), f = await toolFixture(t, { hostTerminalRunner: runner });
   for (const mode of ['ask', 'smart']) {
@@ -149,18 +180,23 @@ test('host tool is directly discoverable for conda and deferred for unrelated ta
   }
 });
 
-test('an unknown host effect is recorded before the loop stops without another command or model call', async () => {
+test('an unknown host effect is recorded before a normal partial answer without another command', async () => {
   let rounds = 0, executions = 0;
   const saved = [];
   const call = { id: 'host-effect', name: 'terminal.host.run', arguments: input };
-  await assert.rejects(runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
+  const result = await runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
     inputBudgetTokens: 32000, declarations: [], emit: () => {}, saveActivity: async activity => saved.push(activity),
     service: { execute: async () => { executions++; return { content: 'partial host output', isError: true,
       status: 'unknown', code: 'TOOL_TIMED_OUT', resultRef: { id: randomUUID() } }; } },
-    requestTurn: async () => { rounds++; return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
+    requestTurn: async () => { rounds++;
+      if (rounds > 1) return { content: 'The dispatch remains unconfirmed; prior results are saved.', reasoning: '', calls: [], continuation: [] };
+      return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
       content: '', tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(input) } }] }] }; }
-  }), { code: 'HOST_TERMINAL_OUTCOME_UNKNOWN' });
-  assert.equal(rounds, 1); assert.equal(executions, 1);
+  });
+  assert.equal(rounds, 2); assert.equal(executions, 1);
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(result.taskCompletion.state, 'execution-unconfirmed');
+  assert.match(result.content, /prior results are saved/);
   assert.equal(saved.at(-1).status, 'unknown'); assert.ok(saved.at(-1).resultRef);
 });
 

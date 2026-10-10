@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { attachResourceWorkerBridge } from '../../platform/resources/resource-worker-client.mjs';
-import { MAX_QUERY_CHARACTERS, retrievalFailure, retrievalScopeKeys, retrievalSourceId, validateRetrievalIntent } from './retrieval-contracts.mjs';
+import { MAX_QUERY_CHARACTERS, MAX_SOURCE_CHARACTERS, retrievalFailure, retrievalScopeKeys, retrievalSourceId, validateRetrievalIntent } from './retrieval-contracts.mjs';
 import { validateSourceWindowOptions } from './source-window.mjs';
 import { validatedEvidenceReference } from './evidence-references.mjs';
 import { validateAnnOptions } from './ann-store.mjs';
@@ -230,7 +230,7 @@ export class RetrievalIndex {
   read({ sourceId, sourceRef, scopeKeys, offset, limit, signal }) {
     if (!sourceRef) retrievalSourceId(sourceId);
     return this._request('read', { sourceId, sourceRef, scopeKeys: retrievalScopeKeys(scopeKeys),
-      offset: boundedInteger(offset, 0, 0, 2 * 1024 * 1024), limit: boundedInteger(limit, 12000, 1, 65536) }, signal);
+      offset: boundedInteger(offset, 0, 0, MAX_SOURCE_CHARACTERS), limit: boundedInteger(limit, 12000, 1, 65536) }, signal);
   }
 
   verifyReference({ sourceRef, scopeKeys, signal }) {
@@ -246,6 +246,10 @@ export class RetrievalIndex {
 
   recordCoverage({ entries, scopeKeys, signal }) {
     return this._request('recordCoverage', { entries, scopeKeys: retrievalScopeKeys(scopeKeys) }, signal);
+  }
+
+  reconcileCoverage({ scopeKeys, sourceTypes, sourceIds, signal }) {
+    return this._request('reconcileCoverage', { scopeKeys: retrievalScopeKeys(scopeKeys), sourceTypes, sourceIds }, signal);
   }
 
   coverage({ scopeKeys, sourceId, limit = 1000, signal }) {

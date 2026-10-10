@@ -1,6 +1,8 @@
 import { retrievalFailure, retrievalSourceId } from './retrieval-contracts.mjs';
+import { validateDocumentCoverage } from './document-coverage.mjs';
 
 const STATES = new Set(['pending', 'ready', 'partial', 'failed', 'skipped', 'unverified', 'disabled']);
+const validSourceType = value => typeof value === 'string' && value.length > 0 && value.length <= 100;
 
 /** Coverage is a receipt of discovery/publication/failure, never a promise that every source was searched.
  * 覆盖状态记录发现、发布和失败回执，不保证所有来源已经检索或验证结论。
@@ -12,24 +14,59 @@ export class SourceCoverageStore {
       scope_key TEXT NOT NULL,source_id TEXT NOT NULL,relative_path TEXT NOT NULL,status TEXT NOT NULL,
       lexical TEXT NOT NULL,semantic TEXT NOT NULL,parser TEXT NOT NULL,error_code TEXT,
       source_revision TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(scope_key,source_id));`);
+    if (!database.prepare('PRAGMA table_info(source_coverage)').all().some(column => column.name === 'document_coverage'))
+      database.exec('ALTER TABLE source_coverage ADD COLUMN document_coverage TEXT');
+    if (!database.prepare('PRAGMA table_info(source_coverage)').all().some(column => column.name === 'source_type'))
+      database.exec("ALTER TABLE source_coverage ADD COLUMN source_type TEXT NOT NULL DEFAULT ''");
+    // Repair interrupted backfills too; discovery-only failures have no revision and never create source authority.
+    // 同时修复中断的类型补写；目录发现失败没有来源版本，补写诊断类型不能产生来源授权。
+    const publishedType = database.prepare('PRAGMA table_info(sources)').all().some(column => column.name === 'source_type')
+      ? '(SELECT source_type FROM sources WHERE sources.source_id=source_coverage.source_id AND sources.scope_key=source_coverage.scope_key)' : 'NULL';
+    database.exec(`UPDATE source_coverage SET source_type=COALESCE(${publishedType},
+      CASE WHEN source_revision='null' THEN 'work-file' ELSE '' END) WHERE source_type=''`);
   }
 
   record(entries, scopes, checkCancelled) {
     if (!Array.isArray(entries) || entries.length > 100) throw retrievalFailure('Coverage batch is too large. / 来源覆盖批次过大。');
-    const insert = this.database.prepare(`INSERT INTO source_coverage VALUES (?,?,?,?,?,?,?,?,?,?)
+    const insert = this.database.prepare(`INSERT INTO source_coverage
+      (scope_key,source_id,relative_path,status,lexical,semantic,parser,error_code,source_revision,updated_at,document_coverage,source_type)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(scope_key,source_id) DO UPDATE SET relative_path=excluded.relative_path,status=excluded.status,
       lexical=excluded.lexical,semantic=excluded.semantic,parser=excluded.parser,error_code=excluded.error_code,
-      source_revision=excluded.source_revision,updated_at=excluded.updated_at`);
+      source_revision=excluded.source_revision,updated_at=excluded.updated_at,document_coverage=excluded.document_coverage,
+      source_type=CASE WHEN excluded.source_type<>'' THEN excluded.source_type ELSE source_coverage.source_type END`);
     for (const entry of entries) {
       checkCancelled?.(); retrievalSourceId(entry.sourceId);
       if (!scopes.includes(entry.scopeKey) || typeof entry.relativePath !== 'string' || entry.relativePath.length > 4096 ||
           ['status', 'lexical', 'semantic', 'parser'].some(key => !STATES.has(entry[key])) ||
-          entry.errorCode !== undefined && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(entry.errorCode))
+          entry.errorCode !== undefined && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(entry.errorCode) ||
+          entry.sourceType !== undefined && !validSourceType(entry.sourceType))
         throw retrievalFailure('Invalid scoped source coverage. / 来源覆盖范围或状态无效。');
       insert.run(entry.scopeKey, entry.sourceId, entry.relativePath, entry.status, entry.lexical, entry.semantic, entry.parser,
-        entry.errorCode ?? null, JSON.stringify(entry.sourceRevision ?? null), new Date().toISOString());
+        entry.errorCode ?? null, JSON.stringify(entry.sourceRevision ?? null), new Date().toISOString(),
+        entry.documentCoverage ? JSON.stringify(validateDocumentCoverage(entry.documentCoverage)) : null, entry.sourceType ?? '');
     }
     return { recorded: entries.length };
+  }
+
+  /** Reconcile only a complete scoped inventory; active failed files remain in the inventory too.
+   * 仅用完整范围清单清理当前覆盖；仍存在的失败文件也须保留，历史作业回执不在此表中。
+   */
+  reconcile(scopes, sourceTypes, sourceIds, checkCancelled) {
+    if (!Array.isArray(sourceTypes) || !sourceTypes.length || sourceTypes.some(type => !validSourceType(type)) ||
+        !Array.isArray(sourceIds) || sourceIds.length > 2000000)
+      throw retrievalFailure('Invalid coverage inventory. / 来源覆盖清单无效。');
+    const keep = new Set(sourceIds.map(retrievalSourceId));
+    const rows = this.database.prepare(`SELECT scope_key,source_id FROM source_coverage
+      WHERE scope_key IN (${scopes.map(() => '?').join(',')}) AND source_type IN (${sourceTypes.map(() => '?').join(',')})`)
+      .all(...scopes, ...sourceTypes);
+    const remove = this.database.prepare('DELETE FROM source_coverage WHERE scope_key=? AND source_id=?');
+    let removed = 0;
+    for (const row of rows) {
+      checkCancelled?.();
+      if (!keep.has(row.source_id)) removed += remove.run(row.scope_key, row.source_id).changes;
+    }
+    return { removed };
   }
 
   query(scopes, { sourceId, limit = 100 } = {}, checkCancelled) {
@@ -61,6 +98,7 @@ export class SourceCoverageStore {
         return { sourceId: row.source_id, scopeKey: row.scope_key, relativePath: row.relative_path,
           status: row.status === 'ready' && (lexical === 'unverified' || semantic === 'unverified') ? 'unverified' : row.status,
           lexical, semantic, parser: row.parser, ...(row.error_code ? { errorCode: row.error_code } : {}),
+          ...(row.document_coverage ? { documentCoverage: validateDocumentCoverage(JSON.parse(row.document_coverage)) } : {}),
           sourceRevision: JSON.parse(row.source_revision), updatedAt: row.updated_at };
       }) };
   }

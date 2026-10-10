@@ -15,7 +15,8 @@ public sealed record RetrievalLocalSettings(bool Enabled, string Semantic, strin
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingDevicePolicy = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalIndexingLimits? Indexing = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalAnnSettings? Ann = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RerankCandidates = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RerankDevicePolicy = null);
 
 // Missing optional settings stay omitted, so an older settings screen cannot reset backend-owned policy.
 // 可选设置未指定时保持省略，防止旧设置界面把后端设备策略与容量配置重置为默认值。
@@ -24,7 +25,10 @@ public sealed record RetrievalIndexingLimits(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumSourceBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumTotalBytes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumEntries = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BatchSize = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentInputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaximumDocumentOutputBytes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaximumPdfPages = null);
 public sealed record RetrievalAnnSettings(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Mode = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Adaptive = null,
@@ -57,7 +61,7 @@ public sealed record ProjectRetrievalSettingsDocument(int SchemaVersion, Guid Pr
 public sealed record RetrievalMountedFolderPatch(bool Enabled);
 public sealed record RetrievalIndexingSourcesPatch(RetrievalMountedFolderPatch MountedFolder);
 public sealed record ProjectRetrievalSettingsPatch(RetrievalSettingsOverrides Overrides,
-    RetrievalIndexingSourcesPatch IndexingSources);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalIndexingSourcesPatch? IndexingSources = null);
 public sealed record ProjectRetrievalSettingsUpdateRequest(long ExpectedRevision, ProjectRetrievalSettingsPatch Patch);
 
 public sealed record RetrievalEmbeddingStatus(string State, string ProfileId, int Dimensions, bool Available,
@@ -107,7 +111,8 @@ public sealed record RetrievalIndexRebuildRequest(Guid? ProjectId = null);
 public sealed record RetrievalIndexJob(string JobId, string Status, int CompletedSources, int TotalSources,
     string? Error = null, DateTimeOffset? StartedAt = null, DateTimeOffset? FinishedAt = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalCoverageStatus? Coverage = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? ProjectId = null);
 
 // Status stays a string for forward compatibility, including partial; coverage describes actual eligible-source work.
 // 状态保留字符串兼容未来值和 partial；覆盖统计只说明实际来源处理，不代表答案或任务正确性。

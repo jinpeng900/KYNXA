@@ -3,8 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { RetrievalIndex, chunkSource } from '../data/retrieval/index.mjs';
 import { RetrievalStructureService } from '../data/retrieval/structure-service.mjs';
+import { SourceCoverageStore } from '../data/retrieval/source-coverage.mjs';
 
 test('syntax relations and uncertain textual references are scoped and replaced with their source version', async t => {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-relations-')), index = new RetrievalIndex({ root, vectorEnabled: false });
@@ -49,4 +51,53 @@ test('coverage counts and source rows both verify complete vectors in the curren
   await index.upsertSources([{ ...source, parserVersion: 'new-parser-v2' }]);
   const changed = await index.coverage({ scopeKeys: ['project:a'] });
   assert.equal(changed.counts.semantic, 0); assert.equal(changed.items[0].semantic, 'unverified');
+});
+
+test('coverage-only deletion honors scope and permits repaired sources without a fabricated permanent tombstone', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-coverage-only-')), index = new RetrievalIndex({ root, vectorEnabled: false });
+  t.after(async () => { await index.close(); const suffix = relative(resolve(tmpdir()), root);
+    assert.ok(suffix && !suffix.startsWith(`..${sep}`)); await rm(root, { recursive: true, force: true }); });
+  const failure = { scopeKey: 'project:a', sourceId: 'never-published', sourceType: 'work-file', relativePath: 'failed.pdf',
+    status: 'failed', lexical: 'unverified', semantic: 'disabled', parser: 'failed', errorCode: 'DOCUMENT_PARSE_FAILED' };
+  await index.recordCoverage({ scopeKeys: ['project:a'], entries: [failure] });
+  await index.removeSource(failure.sourceId, { scopeKeys: ['project:b'], permanent: false });
+  assert.equal((await index.coverage({ scopeKeys: ['project:a'] })).counts.failed, 1);
+  await index.removeSource(failure.sourceId, { scopeKeys: ['project:a'], permanent: false });
+  assert.equal((await index.coverage({ scopeKeys: ['project:a'] })).counts.failed, 0);
+  await index.upsertSources([{ sourceId: failure.sourceId, scopeKey: failure.scopeKey, sourceType: 'work-file',
+    sourceRevision: 1, title: 'Repaired', locator: {}, text: 'Current repaired source remains admissible' }]);
+  assert.equal((await index.search({ query: 'repaired', scopeKeys: ['project:a'] })).items.length, 1);
+});
+
+test('complete mounted coverage inventories retain active failures, registered knowledge and other scopes', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kynxa-coverage-inventory-')), index = new RetrievalIndex({ root, vectorEnabled: false });
+  t.after(async () => { await index.close(); const suffix = relative(resolve(tmpdir()), root);
+    assert.ok(suffix && !suffix.startsWith(`..${sep}`)); await rm(root, { recursive: true, force: true }); });
+  const failed = (sourceId, sourceType = 'work-file', scopeKey = 'project:a') => ({ sourceId, sourceType, scopeKey,
+    relativePath: `${sourceId}.pdf`, status: 'failed', lexical: 'unverified', semantic: 'disabled', parser: 'failed',
+    errorCode: 'DOCUMENT_PARSE_FAILED' });
+  await index.recordCoverage({ scopeKeys: ['project:a', 'project:b'], entries: [failed('removed'), failed('active'),
+    failed('registered', 'knowledge'), failed('other-scope', 'work-file', 'project:b')] });
+  const reconciled = await index.reconcileCoverage({ scopeKeys: ['project:a'], sourceTypes: ['work-file'], sourceIds: ['active'] });
+  assert.equal(reconciled.removed, 1);
+  assert.deepEqual((await index.coverage({ scopeKeys: ['project:a'] })).items.map(item => item.sourceId).sort(), ['active', 'registered']);
+  assert.equal((await index.coverage({ scopeKeys: ['project:b'] })).counts.failed, 1);
+});
+
+test('older discovery-only failure rows acquire a cleanup type without creating authoritative source rows', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    database.exec(`CREATE TABLE source_coverage (scope_key TEXT NOT NULL,source_id TEXT NOT NULL,relative_path TEXT NOT NULL,
+      status TEXT NOT NULL,lexical TEXT NOT NULL,semantic TEXT NOT NULL,parser TEXT NOT NULL,error_code TEXT,
+      source_revision TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(scope_key,source_id));
+      INSERT INTO source_coverage VALUES ('project:a','old-failure','old.pdf','failed','unverified','disabled','failed',
+        'DOCUMENT_PARSE_FAILED','null','2000-01-01T00:00:00.000Z');`);
+    const store = new SourceCoverageStore(database);
+    assert.equal(store.reconcile(['project:a'], ['work-file'], []).removed, 1);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM source_coverage').get().count, 0);
+    assert.equal(database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE name='sources'").get().count, 0);
+    database.exec(`INSERT INTO source_coverage (scope_key,source_id,relative_path,status,lexical,semantic,parser,source_revision,updated_at)
+      VALUES ('project:a','interrupted-failure','interrupted.pdf','failed','unverified','disabled','failed','null','2000-01-01T00:00:00.000Z')`);
+    assert.equal(new SourceCoverageStore(database).reconcile(['project:a'], ['work-file'], []).removed, 1);
+  } finally { database.close(); }
 });

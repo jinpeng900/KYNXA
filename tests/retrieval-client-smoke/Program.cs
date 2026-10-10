@@ -36,6 +36,20 @@ using (var patch = JsonDocument.Parse(transport.LastBody!))
     Check(patch.RootElement.GetProperty("expectedRevision").GetInt64() == 7, "Global writes carry the expected revision.");
     Check(!patch.RootElement.GetProperty("patch").TryGetProperty("local", out _), "Web-only updates do not overwrite local settings.");
 }
+var documentLimits = new RetrievalIndexingLimits(MaximumSourceBytes: 268435456,
+    MaximumDocumentInputBytes: 33554432, MaximumDocumentOutputBytes: 2097152, MaximumPdfPages: 100);
+transport.Respond = _ => Reply(global with { Local = global.Local with { Indexing = documentLimits } });
+var observedLimits = (await api.GetSettingsAsync()).Local.Indexing;
+Check(observedLimits is { MaximumSourceBytes: 268435456, MaximumDocumentInputBytes: 33554432,
+    MaximumDocumentOutputBytes: 2097152, MaximumPdfPages: 100 },
+    "Document decoder bounds remain independent from the generic source limit through C# transport.");
+using (var olderPatch = JsonDocument.Parse(JsonSerializer.Serialize(new RetrievalIndexingLimits(BatchSize: 16), jsonOptions)))
+{
+    Check(!olderPatch.RootElement.TryGetProperty("maximumDocumentInputBytes", out _)
+        && !olderPatch.RootElement.TryGetProperty("maximumDocumentOutputBytes", out _)
+        && !olderPatch.RootElement.TryGetProperty("maximumPdfPages", out _),
+        "Unspecified document limits stay omitted so older settings patches preserve backend-owned values.");
+}
 transport.Respond = _ => Reply(project);
 Check((await api.GetProjectSettingsAsync(projectId)).ProjectId == projectId, "Project identity is checked against its target.");
 await api.SaveProjectSettingsAsync(projectId, new(3, new(new(), new(new(true)))));
@@ -117,13 +131,14 @@ Check(observedStatus.ConfiguredEmbeddingProfileId == "builtin-multilingual" && o
     "Configured profile stays separate from the observed execution backend. / 配置项与实际执行后端保持分离。");
 
 var extendedLocal = JsonSerializer.Deserialize<RetrievalLocalSettings>("""
-    {"enabled":true,"semantic":"auto","embeddingProfileId":"builtin-multilingual","embeddingDevicePolicy":"gpu",
+    {"enabled":true,"semantic":"auto","embeddingProfileId":"builtin-multilingual","embeddingDevicePolicy":"gpu","rerankDevicePolicy":"cpu",
      "indexing":{"maximumFiles":50000,"maximumSourceBytes":33554432,"maximumTotalBytes":8589934592,"maximumEntries":300000,"batchSize":64},
      "ann":{"adaptive":true,"mode":"auto","threshold":10000,"maxCachedShards":8,"maxShardBytes":1073741824,
        "connectivity":32,"expansionAdd":256,"expansionSearch":128,"exactScanLimit":1000000}}
     """, jsonOptions)!;
 Check(extendedLocal.EmbeddingDevicePolicy == "gpu" && extendedLocal.Indexing?.MaximumTotalBytes == 8589934592,
     "Device policy and indexing capacity preserve values beyond 32-bit byte counts.");
+Check(extendedLocal.RerankDevicePolicy == "cpu", "Rerank device policy remains independent from embedding policy. / 重排设备策略独立于嵌入策略。");
 Check(extendedLocal.Ann?.Adaptive == true && extendedLocal.Ann?.ExpansionAdd == 256,
     "ANN policy retains independent adaptive and graph settings.");
 transport.Respond = _ => Reply(global);
@@ -131,7 +146,8 @@ await api.SaveSettingsAsync(new(7, new(Local: global.Local with { Semantic = "of
 using (var patch = JsonDocument.Parse(transport.LastBody!))
 {
     var local = patch.RootElement.GetProperty("patch").GetProperty("local");
-    Check(!local.TryGetProperty("embeddingDevicePolicy", out _) && !local.TryGetProperty("indexing", out _) && !local.TryGetProperty("ann", out _),
+    Check(!local.TryGetProperty("embeddingDevicePolicy", out _) && !local.TryGetProperty("rerankDevicePolicy", out _)
+        && !local.TryGetProperty("indexing", out _) && !local.TryGetProperty("ann", out _),
         "Legacy UI updates omit unset new fields, preserving backend-owned settings.");
 }
 var indexingPatch = JsonSerializer.Serialize(new RetrievalIndexingLimits(BatchSize: 16), jsonOptions);

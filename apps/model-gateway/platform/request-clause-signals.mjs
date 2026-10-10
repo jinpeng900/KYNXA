@@ -9,7 +9,7 @@ const NEGATED_ACTION = /^(?:不是|并非|不要|不必|不用|无需|不能|不
 const NEGATED_SOURCE = /^(?:不是|并非|not|rather\s+than)\s*(?:(?:a|the|this|that)\s+)?(?:代码|文档|文件|源码|仓库|知识库|code(?:\s+repository)?|documents?|docs?|files?|repository|[\w./\\-]+\.[A-Za-z]{1,8})(?:\s|$)/iu;
 const RETAINED_NEGATION = /^(?:不是|并非)\s*(?:不|所有|全部|每|任何|一定|总是)|^(?:不要|不能|不许|别|勿|禁止|避免)\s*(?:忽略|遗漏|省略|丢弃|改动|修改|改变|更改)|^(?:do\s+not|don['’]t|never|not)\s+(?:avoid|ignore|overlook|omit|drop|modify|change|all|every|always|necessarily|before|after)\b/iu;
 const CANCELLED_TASK = /^(?:取消|停止|结束)(?:全部|所有|当前|之前)?(?:的)?(?:任务|操作|浏览器操作)(?:了)?$|^(?:(?:浏览器|当前|之前|本次|全部|所有)\s*)*(?:任务|操作)(?:全部|都)?(?:已)?(?:取消|停止|结束)(?:了)?$|^(?:cancel|stop|end)\s+(?:(?:all|the|current|previous)\s+)*(?:browser\s+)?(?:tasks?|operations?)$/iu;
-const CODE_FILE_EXTENSIONS = new Set(['cs', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'mts', 'cts', 'tsx', 'py', 'rs', 'go',
+const CODE_FILE_EXTENSIONS = new Set(['cs', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'mts', 'cts', 'tsx', 'py', 'pyi', 'rs', 'go',
   'java', 'c', 'cpp', 'cxx', 'cc', 'h', 'hpp', 'hxx', 'ps1', 'psm1', 'sh', 'bat', 'cmd', 'sql', 'xaml', 'html', 'css']);
 const DOCUMENT_FILE_EXTENSIONS = new Set(['md', 'markdown', 'txt', 'pdf', 'docx']);
 const REQUEST_FILE_EXTENSIONS = [...CODE_FILE_EXTENSIONS, ...DOCUMENT_FILE_EXTENSIONS, 'json', 'yaml', 'yml', 'xml', 'toml', 'ini', 'csv'];
