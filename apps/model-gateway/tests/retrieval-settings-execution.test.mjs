@@ -41,6 +41,54 @@ function coordinatorFixture(settings = structuredClone(DEFAULT_RETRIEVAL_SETTING
   return { retrieval, settings, calls };
 }
 
+function mountedPreparationFixture() {
+  const retrieval = Object.create(RetrievalCoordinator.prototype), admitted = [], forgotten = [];
+  const local = structuredClone(DEFAULT_RETRIEVAL_SETTINGS.local);
+  Object.assign(retrieval, { closed: false, shutdown: new AbortController(), mountedProjectBindings: new Map(),
+    mountedProjectPreparation: null, pendingProjectCatalog: null, mountedProjectRefreshRequested: false,
+    mountedProjectCatalogRevision: -1, mountedProjectPreparationDiagnostic: null,
+    effective: async () => ({ local, projectIndexing: { bindingRevision: 0 } }),
+    sourceService: { forgetMounted: projectId => forgotten.push(projectId) },
+    rebuild: async request => { admitted.push(request); return { status: 'queued' }; } });
+  return { retrieval, admitted, forgotten, local };
+}
+
+test('committed mounts enqueue automatic preparation once; root changes and removal clear old watchers', async () => {
+  const { retrieval, admitted, forgotten } = mountedPreparationFixture();
+  const mount = { Id: 'work-a', FolderPath: 'synthetic-root-a', IsArchived: false, IsFolderlessWorkspace: false };
+  const catalog = { Revision: 1, Projects: [mount,
+    { Id: 'plain', FolderPath: null }, { Id: 'archived', FolderPath: 'archived-root', IsArchived: true }] };
+  retrieval.scheduleMountedProjects(catalog);
+  await retrieval.mountedProjectPreparation;
+  assert.deepEqual(admitted, [{ projectId: 'work-a', dirty: true, automatic: true }]);
+  retrieval.scheduleMountedProjects(catalog);
+  await retrieval.mountedProjectPreparation;
+  assert.equal(admitted.length, 1, 'reopening the same catalog does not submit another job');
+  retrieval.scheduleMountedProjects({ Revision: 2, Projects: [{ ...mount, FolderPath: 'synthetic-root-b' }] });
+  await retrieval.mountedProjectPreparation;
+  assert.equal(admitted.length, 2);
+  retrieval.scheduleMountedProjects({ Revision: 1, Projects: [mount] });
+  await retrieval.mountedProjectPreparation;
+  assert.equal(admitted.length, 2, 'older response cannot restore a replaced mount');
+  retrieval.scheduleMountedProjects({ Revision: 3, Projects: [] });
+  await retrieval.mountedProjectPreparation;
+  assert.equal(retrieval.mountedProjectBindings.size, 0);
+  assert.ok(forgotten.includes('work-a'));
+});
+
+test('a newer mount arriving during startup binding IO is retained for the next preparation pass', async () => {
+  const { retrieval, admitted } = mountedPreparationFixture();
+  let resolveBindings, started;
+  const entered = new Promise(resolve => { started = resolve; });
+  retrieval.conversations = { projectBindings: () => { started(); return new Promise(resolve => { resolveBindings = resolve; }); } };
+  retrieval.scheduleMountedProjects();
+  await entered;
+  retrieval.scheduleMountedProjects({ Revision: 2, Projects: [{ Id: 'work-a', FolderPath: 'synthetic-root' }] });
+  resolveBindings({ Revision: 1, Projects: [] });
+  await retrieval.mountedProjectPreparation;
+  assert.deepEqual(admitted, [{ projectId: 'work-a', dirty: true, automatic: true }]);
+});
+
 test('settings configure explicit CPU embedding and independent strict GPU rerank, then retire disabled services', async () => {
   const { retrieval, settings, calls } = coordinatorFixture();
   settings.local.embeddingDevicePolicy = 'cpu'; settings.local.rerankDevicePolicy = 'gpu';
@@ -139,7 +187,7 @@ test('project PATCH schedules dirty rebuild for unmount and knowledge selection 
       settings: { patchProject: async () => { persisted = true; events.push('persist'); return { revision: 1 }; } },
       configureInferenceSettings: async (projectId, options) => {
         assert.equal(projectId, 'synthetic-work'); assert.equal(options.previous, previous); events.push('configure'); },
-      rebuild: async options => { assert.deepEqual(options, { projectId: 'synthetic-work', dirty: true }); events.push('rebuild'); } };
+      rebuild: async options => { assert.deepEqual(options, { projectId: 'synthetic-work', dirty: true, automatic: true }); events.push('rebuild'); } };
     await patchRoute('/api/projects/synthetic-work/retrieval/settings', retrieval);
     assert.deepEqual(events, ['persist', 'configure', 'rebuild']);
   }

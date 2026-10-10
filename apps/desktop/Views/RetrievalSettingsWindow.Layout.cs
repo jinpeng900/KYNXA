@@ -15,7 +15,6 @@ public sealed partial class RetrievalSettingsWindow
     private readonly TextBlock _embeddingStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly TextBlock _indexStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly CheckBox _inherit = new();
-    private readonly CheckBox _mountedFolder = new();
     private readonly ComboBox _localMode = new();
     private readonly ComboBox _semanticMode = new();
     private readonly ComboBox _rerankMode = new();
@@ -64,9 +63,7 @@ public sealed partial class RetrievalSettingsWindow
             UiLocalization.Bind(_inherit, CheckBox.ContentProperty, "使用全局检索设置");
             AutomationProperties.SetAutomationId(_inherit, "RetrievalInheritGlobal");
             _settingsPanel.Children.Add(Row("设置范围", _inherit));
-            UiLocalization.Bind(_mountedFolder, CheckBox.ContentProperty, "索引挂载文件夹");
-            AutomationProperties.SetAutomationId(_mountedFolder, "RetrievalMountedFolder");
-            _settingsPanel.Children.Add(Row("工作文件", _mountedFolder));
+            _settingsPanel.Children.Add(Row("工作文件", Label("挂载后自动准备资料，可立即搜索和读取", 12, secondary: true)));
             if (!string.IsNullOrWhiteSpace(_mountedPath))
                 _settingsPanel.Children.Add(new TextBlock { Text = _mountedPath, FontSize = 12, Opacity = 0.65,
                     TextWrapping = TextWrapping.Wrap });
@@ -87,12 +84,13 @@ public sealed partial class RetrievalSettingsWindow
         _settingsPanel.Children.Add(Row(_projectId is null ? "全局资料" : "工作资料", sourcesActions));
         _settingsPanel.Children.Add(_sourcesPanel);
         var indexActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        ConfigureButton(_rebuild, "重建索引", "RetrievalRebuildIndex");
+        ConfigureButton(_rebuild, "继续准备资料", "RetrievalRebuildIndex");
+        _rebuild.Visibility = Visibility.Collapsed;
         ConfigureButton(_cancelJob, "取消", "RetrievalCancelIndex");
         _cancelJob.Visibility = Visibility.Collapsed;
         indexActions.Children.Add(_rebuild);
         indexActions.Children.Add(_cancelJob);
-        _settingsPanel.Children.Add(Row("检索索引", indexActions));
+        _settingsPanel.Children.Add(Row("资料准备", indexActions));
         _settingsPanel.Children.Add(_indexStatus);
         _settingsPanel.Children.Add(Label("网页搜索", 13, secondary: true));
         ConfigurePicker(_webMode, "RetrievalWebMode", "联网搜索", ("auto", "按需搜索"), ("off", "停用"));
@@ -117,8 +115,6 @@ public sealed partial class RetrievalSettingsWindow
             picker.SelectionChanged += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Checked += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Unchecked += async (_, _) => { if (!_rendering) await SaveAsync(); };
-        _mountedFolder.Checked += async (_, _) => { if (!_rendering) await SaveAsync(); };
-        _mountedFolder.Unchecked += async (_, _) => { if (!_rendering) await SaveAsync(); };
         addFile.Click += async (_, _) => await ImportAsync(folder: false);
         addFolder.Click += async (_, _) => await ImportAsync(folder: true);
         _rebuild.Click += async (_, _) => await RunOperationAsync(async () => ShowJob(await _api.RebuildIndexAsync(_projectId, _lifetime.Token)));

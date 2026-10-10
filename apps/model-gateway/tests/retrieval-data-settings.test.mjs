@@ -105,12 +105,16 @@ test('rerank device policy persists independently from embedding policy and inhe
 });
 
 test('project overrides inherit global settings, clear explicitly and cannot supply permissions or binding revisions', async t => {
-  const { settings } = await fixture(t);
+  const { settings, conversations, root } = await fixture(t);
   assert.equal((await settings.getEffective('work-a')).projectIndexing.mountedFolder, false);
+  const catalog = await conversations.catalog();
+  catalog.Projects.find(project => project.Id === 'work-a').FolderPath = join(root, 'mounted-fixture');
+  await conversations.saveCatalog(catalog);
+  assert.equal((await settings.getEffective('work-a')).projectIndexing.mountedFolder, true);
   await settings.patchGlobal({ expectedRevision: 0, patch: { web: { depth: 'deep' } } });
   const project = await settings.patchProject('work-a', { expectedRevision: 0,
     patch: { overrides: { web: { mode: 'off' } }, indexingSources: { mountedFolder: { enabled: true } } } });
-  assert.equal(project.indexingSources.mountedFolder.bindingRevision, 1);
+  assert.equal(project.indexingSources.mountedFolder.bindingRevision, 0);
   const effective = await settings.getEffective('work-a');
   assert.equal(effective.web.mode, 'off');
   assert.equal(effective.web.depth, 'deep');
@@ -124,6 +128,28 @@ test('project overrides inherit global settings, clear explicitly and cannot sup
   await assert.rejects(() => settings.patchProject('folderless', { expectedRevision: 0,
     patch: { indexingSources: { mountedFolder: { enabled: true } } } }), { code: 'RETRIEVAL_FOLDER_UNAVAILABLE' });
   await assert.rejects(() => settings.getProject('missing-project'), { code: 'PROJECT_NOT_FOUND' });
+});
+
+test('legacy mounted-folder defaults upgrade without changing model settings or enabling folderless work', async t => {
+  const { settings, conversations, root } = await fixture(t);
+  const catalog = await conversations.catalog();
+  catalog.Projects.find(project => project.Id === 'work-a').FolderPath = join(root, 'mounted-fixture');
+  await conversations.saveCatalog(catalog);
+  await settings.patchProject('work-a', { expectedRevision: 0, patch: { overrides: { web: { mode: 'off' } } } });
+  const filename = join(root, 'Projects', 'work-a', 'retrieval.json');
+  const saved = JSON.parse(await readFile(filename, 'utf8'));
+  saved.indexingSources.mountedFolder = { enabled: false, bindingRevision: 7 };
+  await writeFile(filename, JSON.stringify(saved));
+  const upgraded = await settings.getProject('work-a');
+  assert.equal(upgraded.revision, 1);
+  assert.deepEqual(upgraded.indexingSources.mountedFolder, { enabled: true, bindingRevision: 7 });
+  assert.equal((await settings.getEffective('work-a')).web.mode, 'off');
+  assert.equal((await settings.getEffective('work-a')).projectIndexing.mountedFolder, true);
+  assert.equal((await settings.getEffective('folderless')).projectIndexing.mountedFolder, false);
+  const compatible = await settings.patchProject('work-a', { expectedRevision: 1,
+    patch: { indexingSources: { mountedFolder: { enabled: false } } } });
+  assert.equal(compatible.indexingSources.mountedFolder.enabled, true);
+  assert.equal(compatible.indexingSources.mountedFolder.bindingRevision, 7);
 });
 
 test('large valid source selections reopen and oversized settings preserve the committed revision', async t => {

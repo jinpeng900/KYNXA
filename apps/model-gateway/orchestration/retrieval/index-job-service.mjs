@@ -59,6 +59,18 @@ export class IndexJobService {
     }
   }
 
+  /** Retire an obsolete binding without turning it into a persistent user cancellation.
+   * 旧目录绑定失效时停止其任务，不把目录替换误记为用户持久取消。 */
+  supersede(projectId) {
+    for (const active of this.active.values()) if (active.projectId === projectId && !active.cancelledByUser) {
+      active.superseded = true;
+      active.suspend = false;
+      active.acceptingRefresh = false;
+      active.controller.abort();
+      if (!active.hasStarted) this.cancelQueued(active).catch(error => { this.lastFailure ??= error; });
+    }
+  }
+
   initialize() {
     if (!this.initialization) this.initialization = this.jobs.recover({ resumable: true }).then(async recovered => {
       const history = (await this.jobs.list?.() ?? []).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
@@ -138,7 +150,8 @@ export class IndexJobService {
       // Queued work has admitted no reads or publications, so cancellation need not wait for another project.
       // 排队任务尚未接纳读取或发布，取消无需等待其他项目的运行任务。
       active.queuedCancellation = Promise.resolve(active.cancelMarker).then(() => this.jobs.update(active.jobId, {
-        status: 'cancelled', error: 'INDEX_CANCELLED', finishedAt: new Date().toISOString() })).then(receipt => {
+        status: 'cancelled', error: active.superseded && !active.cancelledByUser ? 'INDEX_SUPERSEDED' : 'INDEX_CANCELLED',
+        finishedAt: new Date().toISOString() })).then(receipt => {
         active.detachAbort();
         if (this.active.get(active.jobId) === active) this.active.delete(active.jobId);
         return receipt;
@@ -273,9 +286,10 @@ export class IndexJobService {
       await this.jobs.update(active.jobId, { status: partial ? 'partial' : 'completed', finishedAt: new Date().toISOString() });
     } catch (error) {
       await active.cancelMarker;
+      const superseded = active.superseded && !active.cancelledByUser;
       const suspended = signal.aborted && !active.cancelledByUser && active.suspend && (active.hasCheckpoint || active.recovered);
       await this.jobs.update(active.jobId, { status: suspended ? 'paused' : signal.aborted ? 'cancelled' : 'failed',
-        error: suspended ? 'INDEX_SUSPENDED' : signal.aborted ? 'INDEX_CANCELLED' : typeof error.code === 'string' ? error.code : 'INDEX_FAILED',
+        error: superseded ? 'INDEX_SUPERSEDED' : suspended ? 'INDEX_SUSPENDED' : signal.aborted ? 'INDEX_CANCELLED' : typeof error.code === 'string' ? error.code : 'INDEX_FAILED',
         finishedAt: new Date().toISOString() });
     }
   }
