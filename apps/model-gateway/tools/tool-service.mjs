@@ -38,6 +38,7 @@ import { isSensitiveFilePath } from './sensitive-files.mjs';
 import { projectEvidenceSearchResult, projectRetrievalModelView } from '../data/retrieval/evidence-references.mjs';
 import { HostTerminalJobs } from './host-terminal-jobs.mjs';
 import { validateBuiltinInput } from './tool-input-validation.mjs';
+import { prepareWorkDirectory } from './work-directory.mjs';
 
 const MAX_TOOL_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 65536;
@@ -140,6 +141,7 @@ export class ToolService {
     this.workspaces = new ConversationWorkspaces({ root: this.dataHome });
     this.approvals = new ToolApprovalRegistry({ ...(approvalTimeoutMs ? { timeoutMs: approvalTimeoutMs } : {}) });
     this.contexts = new WeakSet();
+    this.workBindingTransitions = new WeakMap();
     this.taskVerifications = new WeakMap();
     this.codeVersions = new WeakMap();
     this.evidenceBudgets = new WeakMap();
@@ -219,8 +221,12 @@ export class ToolService {
 
   async _assertOwnership(context) {
     const current = await this._ownership(context.conversationId);
-    if (current.projectId !== context.projectId || current.workspaceRoot !== context.linkedWorkspaceRoot ||
-        await this._usesConversationWorkspace(current) !== context.isolatedWorkspace)
+    const transition = this.workBindingTransitions.get(context);
+    // An owned successful bind permits continuation in the original scope, not authority over the new directory.
+    // 本轮成功关联允许继续使用原范围，不因此授予新目录权限；其他轮次或界面的目录改动仍使旧请求失效。
+    const ownTransition = transition && current.projectId === context.projectId && current.workspaceRoot === transition.workspaceRoot;
+    if (current.projectId !== context.projectId || !ownTransition && (current.workspaceRoot !== context.linkedWorkspaceRoot ||
+        await this._usesConversationWorkspace(current) !== context.isolatedWorkspace))
       throw toolFailure('聊天工作范围已变化，此工具调用已停止。', 'WORKSPACE_CHANGED', 409);
     if (context.isolatedWorkspace) await this.workspaces.verify(context.conversationId, context.workspaceRoot);
     if (context.workspaceBinding) await revalidateLocalPathBinding(context.workspaceBinding);
@@ -534,6 +540,10 @@ export class ToolService {
       if (descriptor.source === 'builtin') validateBuiltinInput(descriptor, call.arguments);
       let path;
       let sensitiveRead = false;
+      if (call.name === 'work.folder.bind') {
+        pathBinding = await prepareWorkDirectory(context, call.arguments, this.storageBoundary);
+        outsideWorkspace = pathBinding.outsideWorkspace;
+      }
       if (call.name.startsWith('filesystem.')) {
         const reading = filesystemReadTools.has(call.name);
         const target = resolveToolPath(context, call.arguments, [], { deferScopeCheck: true });
@@ -683,7 +693,11 @@ export class ToolService {
       }
       await this._assertOwnership(context);
       await this._assertToolConfiguration(context, descriptor, call.arguments);
-      if (pathBinding) await revalidateLocalPathBinding(pathBinding);
+      if (pathBinding) {
+        const info = await revalidateLocalPathBinding(pathBinding);
+        if (call.name === 'work.folder.bind' && !info?.isDirectory())
+          throw toolFailure('目标目录已变化，请重新检查关联路径。', 'WORK_BINDING_NOT_DIRECTORY', 409);
+      }
       if (call.name.startsWith('computer.')) await this._assertDesktopForegroundPolicy(context, call, signal);
       let observationConnection;
       if (canReuseObservation(call) && descriptor.source.startsWith('mcp:'))
@@ -716,6 +730,18 @@ export class ToolService {
           denyRead: candidate => this.storageBoundary.isCredential(candidate) || this.storageBoundary.isPrivateResult(candidate) ||
             this.storageBoundary.aliases(candidate).some(alias => this.workspaces.isControlPath(alias)) ||
             (context.permissionMode !== 'full' && !sensitiveRead && isSensitiveFilePath(candidate)) });
+      else if (call.name === 'work.folder.bind') {
+        const previous = this.workBindingTransitions.get(context)?.workspaceRoot ?? context.linkedWorkspaceRoot;
+        const binding = await this.conversations.bindWorkDirectory(context.conversationId, {
+          expectedProjectId: context.projectId, expectedFolderPath: previous, folderPath: pathBinding.path
+        }, { signal });
+        this.workBindingTransitions.set(context, { workspaceRoot: binding.folderPath });
+        this.observationCaches.get(context)?.clear();
+        this.retrieval?.scheduleMountedProjects();
+        result = { ...binding, automaticPreparation: Boolean(this.retrieval),
+          preparationState: this.retrieval ? 'scheduled' : 'unavailable', currentTurnScopeChanged: false,
+          continuation: 'Use absolute paths with reason for this folder in this turn; normal path approval still applies. The next turn uses the new work folder.' };
+      }
       else if (call.name === 'web.fetch') return await this._finishResult(context, call, await this.webFetcher.run(call.arguments, signal));
       else if (call.name === 'web.search') {
         if (![...snapshot.descriptors.values()].some(isPublicSearchTool)) {
@@ -1062,6 +1088,7 @@ export class ToolService {
     const stages = this.stages.get(context);
     this.stages.delete(context);
     this.contexts.delete(context);
+    this.workBindingTransitions.delete(context);
     this.catalogs.delete(context);
     this.observationCaches.delete(context);
     this.codeVersions.delete(context);

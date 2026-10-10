@@ -160,6 +160,7 @@
     "filesystem.edit",
     "filesystem.delete",
     "filesystem.mkdir",
+    "work.folder.bind",
     "web.fetch",
     "knowledge.search",
     "knowledge.read",

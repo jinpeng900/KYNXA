@@ -8,6 +8,55 @@ import { ToolService } from '../tools/tool-service.mjs';
 import { estimateTokens } from '../models/context.mjs';
 import { approve, parsed, pendingApproval, toolFixture } from './tool-fixture.mjs';
 
+test('ongoing work binds one directory, schedules preparation and continues without expanding the current scope', async t => {
+  const f = await toolFixture(t), root = join(f.root, 'ongoing-work');
+  await mkdir(root);
+  await writeFile(join(root, 'source.txt'), 'current work');
+  const unmounted = await f.conversations.catalog();
+  unmounted.Projects[0].FolderPath = null;
+  await f.conversations.saveCatalog(unmounted);
+  const context = await f.context('full'), staleContext = await f.context('full');
+  await writeFile(join(context.workspaceRoot, 'original.txt'), 'original scope');
+  const originalWorkspace = context.workspaceRoot;
+  const before = await f.conversations.catalog();
+  let schedules = 0;
+  f.service.retrieval = { scheduleMountedProjects: () => { schedules++; } };
+  const binding = parsed(await f.run(context, 'work.folder.bind', { path: root, reason: 'Continue working in this folder' }));
+  assert.equal(binding.folderPath, root);
+  assert.equal(binding.currentTurnScopeChanged, false);
+  assert.equal(context.workspaceRoot, originalWorkspace);
+  assert.equal(schedules, 1);
+  const current = await f.conversations.catalog();
+  assert.equal(current.Projects[0].FolderPath, root);
+  assert.deepEqual(current.Projects[0].Chats, before.Projects[0].Chats);
+  assert.deepEqual(current.Chats, before.Chats);
+  assert.equal(parsed(await f.run(context, 'filesystem.read', { path: 'original.txt' })).content, 'original scope');
+  assert.equal(parsed(await f.run(context, 'filesystem.read', { path: join(root, 'source.txt'), reason: 'Read ongoing work' })).content, 'current work');
+  assert.equal((await f.run(staleContext, 'filesystem.read', { path: 'original.txt' })).code, 'WORKSPACE_CHANGED');
+  parsed(await f.run(context, 'work.folder.bind', { path: root, reason: 'Same folder' }));
+  assert.equal((await f.conversations.catalog()).Revision, current.Revision, 'same binding is idempotent');
+  const next = await f.context('full');
+  assert.equal(next.workspaceRoot, root);
+  assert.equal(parsed(await f.run(next, 'filesystem.read', { path: 'source.txt' })).content, 'current work');
+});
+
+test('directory association requires existing directories and bound approval; temporary reads never bind', async t => {
+  const f = await toolFixture(t), root = join(f.root, 'requested-work');
+  await mkdir(root);
+  const context = await f.context('ask'), before = await f.conversations.catalog();
+  parsed(await f.run(context, 'filesystem.list', { path: '.' }));
+  assert.deepEqual(await f.conversations.catalog(), before);
+  const denied = await pendingApproval(f.service, context,
+    f.call('work.folder.bind', { path: root, reason: 'Ongoing folder work' }));
+  approve(f.service, context, denied.event.tool, false);
+  assert.equal((await denied.result).code, 'TOOL_DENIED');
+  assert.deepEqual(await f.conversations.catalog(), before);
+  assert.equal((await f.run(await f.context('full'), 'work.folder.bind', { path: '.', reason: 'ambiguous relative root' })).code,
+    'WORK_BINDING_PATH_REQUIRED');
+  assert.equal((await f.run(await f.context('full', f.standaloneId), 'work.folder.bind', { path: root, reason: 'No work owner' })).code,
+    'WORK_REQUIRED');
+});
+
 test('unknown dispatch proof comes from the owned terminal registry, never observation text or another chat', async t => {
   const f = await toolFixture(t, { hostTerminalRunner: { run: async () => assert.fail('state verification cannot dispatch a command') } }),
     context = await f.context('full');

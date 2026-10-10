@@ -41,6 +41,7 @@ export function toolDiscoveryCategory(tool) {
 
 function aliases(tool) {
   const name = normalized(tool.name, 256), category = toolDiscoveryCategory(tool);
+  if (name === 'work.folder.bind') return 'work project folder directory bind associate attach mount ongoing 长期工作 工作文件夹 工作目录 关联目录 绑定目录 挂载文件夹';
   if (category === 'computer') return 'computer desktop local host 本机 本地 桌面 桌面控制 ' +
     (computerAliases[name.slice('computer.'.length)] ?? '');
   if (category === 'host-terminal') return 'host terminal local terminal visible terminal background process job cmd powershell conda 本机终端 本地终端 可见终端 显示终端 终端窗口 宿主终端 本机命令 本地命令 命令提示符 后台进程 后台任务 监控进程 ' +

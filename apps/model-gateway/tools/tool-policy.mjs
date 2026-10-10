@@ -5,7 +5,7 @@ const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.se
   'tool.search', 'tool.load', 'tool.result.read', 'skill.resource.read', 'skill.inspect', 'skill.check',
   'conversation.history.search', 'conversation.history.read', 'knowledge.search', 'knowledge.read', 'knowledge.relations',
   'knowledge.plan', 'knowledge.assess', 'knowledge.experience', 'memory.read', 'memory.propose', 'web.search', 'terminal.host.read']);
-const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
+const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir', 'work.folder.bind']);
 const HOST_OBSERVATIONS = new Set(['computer.apps', 'computer.windows']);
 
 export function needsToolApproval(context, name, { outsideWorkspace = false, verifiedSandbox = false, sensitiveRead = false } = {}) {

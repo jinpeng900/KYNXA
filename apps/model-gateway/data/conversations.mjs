@@ -1,7 +1,7 @@
 import { validateId } from '../platform/conversation-id.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, truncate, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { atomicJson, readJson } from '../platform/atomic-json.mjs';
 import { ensureDataLayout, inspectDataLayout } from './data-layout.mjs';
 import { conversationDataRoot } from './storage.mjs';
@@ -438,6 +438,33 @@ export class ConversationStore {
       next.Revision++;
       await this._commit(next, moves, writes);
       return this._fullCatalog();
+    });
+  }
+
+  /** Change only the current work binding under the canonical catalog transaction and ownership check.
+   * 在正式目录事务中仅修改当前工作绑定，保留聊天、排序、消息和其他工作的元信息。 */
+  bindWorkDirectory(conversationId, { expectedProjectId, expectedFolderPath, folderPath }, { signal } = {}) {
+    return this._run(async () => {
+      signal?.throwIfAborted();
+      const location = this._find(conversationId);
+      const owner = location?.ProjectId && this.document.Projects.find(item => key(item.Id) === key(location.ProjectId));
+      if (!owner || key(owner.Id) !== key(expectedProjectId))
+        throw failure('聊天的工作归属已变化，请重新读取当前工作。', 'WORKSPACE_CHANGED', 409);
+      if (owner.IsArchived || owner.IsFolderlessWorkspace || location.Chat.IsArchived)
+        throw failure('当前工作或聊天不可关联目录。', 'WORK_UNAVAILABLE', 409);
+      if ((owner.FolderPath ? resolve(owner.FolderPath) : null) !== (expectedFolderPath ? resolve(expectedFolderPath) : null))
+        throw failure('工作目录已被修改，请重新读取后再关联。', 'WORKSPACE_CHANGED', 409);
+      if (typeof folderPath !== 'string' || !isAbsolute(folderPath) || /[\0\r\n]/.test(folderPath))
+        throw failure('工作目录路径无效。');
+      const changed = !owner.FolderPath || resolve(owner.FolderPath) !== folderPath;
+      if (changed) {
+        const next = clone(this.document);
+        next.Projects.find(item => key(item.Id) === key(owner.Id)).FolderPath = folderPath;
+        next.Revision++;
+        signal?.throwIfAborted();
+        await this._commit(next);
+      }
+      return { projectId: key(owner.Id), folderPath, revision: this.document.Revision, changed };
     });
   }
 
