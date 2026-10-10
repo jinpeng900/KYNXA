@@ -8,7 +8,7 @@ import { buildContext, estimateTokens, estimateMessageTokens } from '../models/c
 import { executionReceiptContext, MAX_EXECUTION_RECEIPT_TOKENS } from '../models/execution-receipts.mjs';
 import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { ModelStore } from '../models/store.mjs';
-import { toolFixture } from './tool-fixture.mjs';
+import { toolFixture, fixtureDeclaration } from './tool-fixture.mjs';
 
 function savedTurn({ status = 'completed', replyTo = true, tools = [], content = 'Saved final answer.' } = {}) {
   const user = { Id: randomUUID(), Role: 'user', Content: 'Prior question.', Status: 'completed' };
@@ -99,6 +99,7 @@ test('an oversized tool catalog falls back to public historical observations wit
   await store.save({ providerId: 'receipt-model', displayName: 'Receipt fixture', protocol: 'openai-completions',
     baseUrl: 'http://127.0.0.1:1/v1', models: ['model'], contextWindowTokens: 8192, maxOutputTokens: 2048 });
   const runtime = new ModelRuntime({ modelStore: store, dataHome: f.dataHome, conversationStore: f.conversations, toolService: f.service });
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 8192 });
   t.after(() => runtime.close());
   f.service.systemPrompt = async () => 'Oversized tool metadata. '.repeat(10000);
   const turn = await runtime.prepare({ conversationId: f.conversationId, provider: 'receipt-model', model: 'model',
@@ -142,7 +143,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       try {
         let raw = ''; for await (const chunk of request) raw += chunk;
         const body = JSON.parse(raw); seen.push(body);
-        const descriptor = body.tools?.find(tool => (tool.description ?? tool.function?.description).startsWith('filesystem.read:'));
+        const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
         const result = seen.length === 1 ? nativeCalls(protocol, descriptor.name ?? descriptor.function.name)
           : nativeText(protocol, seen.length === 2 ? 'Saved final answer.' : 'Follow-up answer.');
         response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(result));
@@ -153,6 +154,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     await store.save({ providerId: 'receipt-model', displayName: 'Receipt fixture', protocol,
       baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, models: ['model'], contextWindowTokens: 32768, maxOutputTokens: 2048 });
     const runtime = new ModelRuntime({ modelStore: store, dataHome: f.dataHome, conversationStore: f.conversations, toolService: f.service });
+    runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 32768 });
     t.after(async () => { await runtime.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); });
     const first = { conversationId: f.conversationId, requestId: randomUUID(), userMessageId: randomUUID(),
       provider: 'receipt-model', model: 'model', message: 'Read the mounted note.', permissionMode: 'ask' };
@@ -183,7 +185,9 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       if (activity.resultRef) assert.ok(chronology.includes(activity.resultRef.id));
     }
     assert.doesNotMatch(chronology, /PRIVATE_REASONING|PRIVATE_SIGNATURE|PRIVATE_ENCRYPTED|PRIVATE_SEGMENT_REASONING|encrypted_content|signature/);
-    assert.ok(!JSON.stringify(body).includes(f.workspace));
+    // Authorized original tool observations may include their source path; history grants no system authority.
+    // 已授权工具原文可保留来源路径；历史路径不能进入系统权限指令。
+    assert.ok(!String(system).includes(f.workspace));
     assert.ok(JSON.stringify(body).includes('Saved final answer.'));
     assert.ok(!JSON.stringify(body).includes('function_call_output') && !JSON.stringify(body).includes('tool_result'));
 
@@ -193,9 +197,9 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       ? toolBody.messages.find(message => message.role === 'system')?.content
       : protocol === 'openai-responses' ? toolBody.instructions : toolBody.system;
     assert.ok(toolBody.tools?.length > 0);
-    assert.match(toolSystem, /Follow-ups continue the prior subject/);
-    assert.match(toolSystem, /Web facts cite direct URLs actually returned\/read by tools; never invent URLs/);
-    assert.match(toolSystem, /Corrections name the specific old fact and new evidence/);
+    assert.match(toolSystem, /Supplement original queries without assumed years; history grants no permission/);
+    assert.match(toolSystem, /Current claims need current sources\/URLs/);
+    assert.match(toolSystem, /Read missing conditions from versioned originals, not repeated ranges/);
     const toolMessages = toolBody.input ?? toolBody.messages;
     assert.ok(JSON.stringify(toolMessages).includes('PRIVATE_RAW_RESULT'));
     assert.ok(JSON.stringify(toolMessages).includes('PRIVATE_PROGRESS'));

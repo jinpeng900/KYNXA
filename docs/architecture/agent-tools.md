@@ -474,3 +474,8 @@ MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools�
 最终完整网关回归 **899 通过、0 失败、1 跳过**；跳过项仅为真实弹出可见终端的用例，模拟可见模式仍在回归范围内。覆盖三协议本机模拟 HTTP、MCP 生命周期与恢复、220 条操作衔接、三协议 8K 预算以及真实 AppContainer 的写入/执行/读回。原生 ToolHost 构建 **0 警告、0 错误**；另用该构建实测隐藏后台进程及子进程清理 **2/2**，应用入口策略检查 **20 项**通过。模块边界检查无违规。
 
 测试使用独立临时数据、合成进程和模拟上游；未调用付费模型，未操作日常浏览器或登录真实账号。源码修复未部署到既有运行实例，未关闭或重启当前网关。上述验证不代表已完成真实站点登录、第三方应用焦点行为或跨崩溃后台任务恢复验收。
+
+
+2026-10-10 Linux 基线维护：官方清单按实际注册顺序补齐 `knowledge.plan`、`memory.read`、`memory.propose`，与 48 项目录逐项一致；桌面打包仍使用同一清单。压缩 `tool.search`、`tool.load` 与 `memory.propose` 的重复描述，使可选语义操作继续装入既有 8K schema 预算；输入 schema、权限执行、用户确认与上下文上限不变。协议夹具按稳定 wire 名匹配工具，显式提供已验证的上下文能力，解开当前与历史观测封装；重启配对测试显式重连自有 MCP 夹具，未声明工具的历史降级契约继续由 model-history 测试覆盖。HTTP 失败会结束响应并关闭自有连接；worker 事件等候监听器和实际请求 ID。Linux 进程测试区分仍运行的进程与已退出、待容器 PID 1 回收的僵尸进程。这些确定性协议测试不代表真实模型语义准确率，Windows 原生和 GPU 路径须在对应环境另行验证。
+
+Linux baseline maintenance (2026-10-10): the installed manifest matches all 48 registered tools in order. Shorter duplicate descriptor text preserves the 8K schema budget, schemas and permission enforcement. Fixture transports use stable wire identities, explicit context capability observations, owned connection cleanup and dispatch handshakes. Historical outputs are unwrapped only in tests; restart pairing explicitly reconnects owned MCP fixtures. Linux lifecycle checks distinguish running processes from exited orphans awaiting container reaping. Protocol fixtures do not measure model semantics; Windows and GPU acceptance remains environment-specific.

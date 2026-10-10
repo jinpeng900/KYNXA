@@ -16,14 +16,16 @@ test('unknown desktop effect is persisted and stops the loop before another laun
   let rounds = 0, executions = 0;
   const saved = [], events = [];
   const call = { id: 'desktop-effect', name: 'computer.launch', arguments: { appPath: 'fixture.exe' } };
-  await assert.rejects(runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
+  const result = await runToolLoop({ protocol: 'openai-completions', context: {}, messages: [], system: '',
     inputBudgetTokens: 32000, declarations: [], emit: event => events.push(event), saveActivity: async activity => saved.push(activity),
     service: { execute: async () => { executions++; return { content: 'launch outcome unknown', isError: true,
       status: 'unknown', code: 'DESKTOP_TIMED_OUT', resultRef: { id: randomUUID() } }; } },
     requestTurn: async () => { rounds++; return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant',
       content: '', tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] }] }; }
-  }), { code: 'DESKTOP_OUTCOME_UNKNOWN' });
-  assert.equal(rounds, 1); assert.equal(executions, 1);
+  });
+  assert.equal(result.completionStatus, 'interrupted');
+  assert.equal(result.taskCompletion.state, 'execution-unconfirmed');
+  assert.ok(rounds > 0 && rounds <= 10); assert.equal(executions, 1);
   assert.equal(saved.at(-1).status, 'unknown'); assert.ok(saved.at(-1).resultRef);
   assert.equal(events.findLast(event => event.type === 'tool_result').tool.status, 'unknown');
 });
@@ -90,7 +92,7 @@ test('background browser render options are approved exactly, bounded and absent
   assert.equal(desktopRunner.calls.length, 4);
 });
 
-test('Ask and Smart desktop reads and effects require an approval; Full still requires valid reason/schema', async t => {
+test('Ask and Smart allow typed enumeration while effects require approval; Full still validates reason/schema', async t => {
   const desktopRunner = desktopFixture(), f = await toolFixture(t, { desktopRunner });
   const appPath = await fixtureApplication(f);
   for (const mode of ['ask', 'smart']) {
@@ -100,9 +102,12 @@ test('Ask and Smart desktop reads and effects require an approval; Full still re
         : { ...target, ...(['move', 'click', 'scroll', 'drag'].includes(action) ? { x: 12, y: 14 } : {}),
           ...(action === 'scroll' ? { delta: -120 } : {}), ...(action === 'drag' ? { endX: 24, endY: 28 } : {}),
           ...(action === 'type' ? { text: 'Synthetic text' } : {}), ...(action === 'key' ? { key: 'ENTER' } : {}) };
-      assert.equal((await f.run(context, `computer.${action}`, args, { interactive: false })).code, 'TOOL_APPROVAL_REQUIRED', `${mode}/${action}`);
+      const before = desktopRunner.calls.length, observation = ['windows', 'apps'].includes(action);
+      const receipt = await f.run(context, `computer.${action}`, args, { interactive: false });
+      if (observation) assert.equal(receipt.status, 'completed');
+      else assert.equal(receipt.code, 'TOOL_APPROVAL_REQUIRED', `${mode}/${action}`);
+      assert.equal(desktopRunner.calls.length, before + Number(observation));
     }
-    assert.equal(desktopRunner.calls.length, 0);
     const pending = await pendingApproval(f.service, context, f.call('computer.read', target));
     assert.equal(pending.event.tool.outsideWorkspace, true);
     approve(f.service, context, pending.event.tool, false);
@@ -114,7 +119,7 @@ test('Ask and Smart desktop reads and effects require an approval; Full still re
   assert.equal(parsed(success).boundary, 'host-desktop');
   for (const args of [{ ...target, reason: '' }, { ...target, reason: '   ' }, { ...target, processId: -2 }, { ...target, surprise: true }])
     assert.equal((await f.run(context, 'computer.read', args)).isError, true);
-  assert.equal(desktopRunner.calls.length, 1);
+  assert.equal(desktopRunner.calls.length, 5);
 });
 
 test('approved desktop identity and input are immutable; scope changes stop execution while unrelated skill settings do not', async t => {
@@ -203,9 +208,11 @@ test('explicit background instructions block foreground fallback and are normali
   assert.equal((await f.run(ordinary, 'computer.activate', target)).status, 'completed', 'default DOM preference does not prohibit an authorized desktop fallback');
 });
 
-test('computer schemas are deferred for code/web tasks and discoverable on demand within the existing budget', () => {
+test('code/web tools rank ahead of computer schemas and computer tools remain discoverable within the existing budget', () => {
   const code = new ModelToolCatalog(builtinDescriptors, { protocol: 'openai-completions', message: '写一个Node.js测试', tokenBudget: 16000 });
-  assert.equal(code.selected.some(tool => tool.name.startsWith('computer.')), false);
+  const names = code.selected.map(tool => tool.name);
+  assert.ok(names.indexOf('filesystem.read') >= 0);
+  assert.ok(names.indexOf('filesystem.read') < names.findIndex(name => name.startsWith('computer.')));
   assert.deepEqual(code.load(['computer.read', 'computer.screenshot']).loaded, ['computer.read', 'computer.screenshot']);
   assert.ok(code.selected.find(tool => tool.name === 'terminal.run'));
   const desktop = new ModelToolCatalog(builtinDescriptors, { protocol: 'openai-completions', message: '打开记事本并截图', tokenBudget: 16000 });
