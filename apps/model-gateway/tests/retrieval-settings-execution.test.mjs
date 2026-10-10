@@ -89,6 +89,25 @@ test('a newer mount arriving during startup binding IO is retained for the next 
   assert.deepEqual(admitted, [{ projectId: 'work-a', dirty: true, automatic: true }]);
 });
 
+test('mount admission receipts distinguish disabled, cancelled, scheduled and unchanged without awaiting scanning', async () => {
+  const f = mountedPreparationFixture();
+  const catalog = { Revision: 1, Projects: [{ Id: 'work-a', FolderPath: 'root' }] };
+  f.local.enabled = false;
+  assert.equal((await f.retrieval.scheduleMountedProjects(catalog)).get('work-a').state, 'disabled');
+  assert.equal(f.admitted.length, 0);
+  f.local.enabled = true;
+  f.retrieval.rebuild = async () => ({ jobId: 'cancelled', automaticRebuildBlocked: true,
+    automaticRebuildState: 'cancelled-by-user' });
+  assert.deepEqual((await f.retrieval.scheduleMountedProjects(catalog)).get('work-a'),
+    { state: 'blocked', reason: 'cancelled-by-user', jobId: 'cancelled' });
+  f.retrieval.sourceService.lifecycle = { automaticState: async () => ({ state: 'unchanged' }) };
+  assert.equal((await f.retrieval.scheduleMountedProjects(catalog)).get('work-a').state, 'unchanged');
+  f.retrieval.rebuild = async () => ({ jobId: 'queued' });
+  const changed = { Revision: 2, Projects: [{ Id: 'work-a', FolderPath: 'new-root' }] };
+  assert.deepEqual((await f.retrieval.scheduleMountedProjects(changed)).get('work-a'),
+    { state: 'scheduled', jobId: 'queued' });
+});
+
 test('settings configure explicit CPU embedding and independent strict GPU rerank, then retire disabled services', async () => {
   const { retrieval, settings, calls } = coordinatorFixture();
   settings.local.embeddingDevicePolicy = 'cpu'; settings.local.rerankDevicePolicy = 'gpu';
@@ -191,4 +210,19 @@ test('project PATCH schedules dirty rebuild for unmount and knowledge selection 
     await patchRoute('/api/projects/synthetic-work/retrieval/settings', retrieval);
     assert.deepEqual(events, ['persist', 'configure', 'rebuild']);
   }
+});
+
+test('disabled project PATCH persists source changes without admitting any rebuild', async () => {
+  const previous = structuredClone(DEFAULT_RETRIEVAL_SETTINGS), effective = structuredClone(previous);
+  previous.projectIndexing = { mountedFolder: true, knowledgeIds: ['old'], bindingRevision: 1 };
+  effective.local.enabled = false;
+  effective.projectIndexing = { mountedFolder: true, knowledgeIds: ['new'], bindingRevision: 2 };
+  let persisted = false, configured = false;
+  const retrieval = { effective: async () => persisted ? effective : previous,
+    settings: { patchProject: async () => { persisted = true; return { revision: 1 }; } },
+    configureInferenceSettings: async () => { configured = true; },
+    rebuild: async () => assert.fail('disabled settings must never admit source preparation') };
+  const response = await patchRoute('/api/projects/synthetic-work/retrieval/settings', retrieval);
+  assert.equal(response.revision, 1); assert.equal(response.effective.local.enabled, false);
+  assert.equal(persisted, true); assert.equal(configured, true);
 });

@@ -64,6 +64,10 @@ export class SourceIndexService {
       prepareSources: async (projectId, signal) => {
         const settings = await effectiveSettings(projectId);
         signal.throwIfAborted();
+        // Disabled work must stop before source IO, decoding or admission of decoder resources.
+        // 有效关闭状态必须在读取来源、解码或申请解码资源前停止。
+        if (settings.local.enabled === false)
+          throw toolFailure('本地检索已停用，不能恢复索引任务。', 'RETRIEVAL_DISABLED', 409);
         const scopes = ['user', ...(projectId ? [`project:${projectId}`] : [])];
         const registered = await this.sync.librarySnapshot(scopes, settings, signal);
         const mounted = await this.sync.mountedSnapshot(projectId, settings, signal);

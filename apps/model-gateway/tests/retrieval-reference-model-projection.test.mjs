@@ -7,39 +7,48 @@ import { test } from 'node:test';
 import { ModelStore } from '../models/store.mjs';
 import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { RetrievalCoordinator } from '../orchestration/retrieval/coordinator.mjs';
-import { toolFixture } from './tool-fixture.mjs';
+import { toolFixture, fixtureDeclaration } from './tool-fixture.mjs';
 import { ToolProgressGuard } from '../tools/tool-observations.mjs';
 
-test('a real model request reads a short reference at its matching section and reuses it after restart', async t => {
+test('a real model request reads a short reference at its matching section and reuses it after restart', { timeout: 15000 }, async t => {
   const fixture = await toolFixture(t), requests = [], models = new ModelStore({ dataHome: fixture.dataHome });
   let sourceRef;
   const upstream = createServer(async (request, response) => {
-    let body = ''; for await (const part of request) body += part;
-    const input = JSON.parse(body); requests.push(input);
-    response.setHeader('Content-Type', 'application/json');
-    if (requests.length === 1) {
-      const evidence = input.messages.flatMap(message => typeof message.content === 'string' ? message.content.split('\n') : [])
-        .flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
-      sourceRef = evidence.find(item => item.excerpt?.includes('Mara Chen'))?.sourceRef;
-      const declaration = input.tools.find(tool => tool.function.description.startsWith('knowledge.read:'));
-      response.end(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '核对该章节中的条件。',
-        tool_calls: [{ id: 'read-matching-section', type: 'function', function: { name: declaration.function.name,
-          arguments: JSON.stringify({ sourceRef: sourceRef ?? 'missing-reference', mode: 'section', limit: 4000, gap: '确认 ORION 的实验窗口是否已批准' }) } }] } }] }));
-    } else response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant',
-      content: 'ORION 的审查人为 Mara Chen；实验窗口尚未批准。来源：orion-guide.md。' } }] }));
+    try {
+      let body = ''; for await (const part of request) body += part;
+      const input = JSON.parse(body); requests.push(input);
+      response.setHeader('Content-Type', 'application/json');
+      if (requests.length === 1) {
+        const evidence = input.messages.flatMap(message => typeof message.content === 'string' ? message.content.split('\n') : [])
+          .flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+        sourceRef = evidence.find(item => item.excerpt?.includes('Mara Chen'))?.sourceRef;
+        const declaration = fixtureDeclaration(input.tools, 'knowledge.read');
+        response.end(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '核对该章节中的条件。',
+          tool_calls: [{ id: 'read-matching-section', type: 'function', function: { name: declaration.function.name,
+            arguments: JSON.stringify({ sourceRef: sourceRef ?? 'missing-reference', mode: 'section', limit: 4000, gap: '确认 ORION 的实验窗口是否已批准' }) } }] } }] }));
+      } else response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant',
+        content: 'ORION 的审查人为 Mara Chen；实验窗口尚未批准。来源：orion-guide.md。' } }] }));
+    } catch (error) { response.writeHead(500); response.end(JSON.stringify({ error: error.message })); }
   });
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => upstream.close(resolve)));
   await models.save({ providerId: 'fixture', displayName: 'Fixture', baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
     models: ['mock-model'], contextWindowTokens: 32768, maxOutputTokens: 8192 });
   const runtime = new ModelRuntime({ modelStore: models, dataHome: fixture.dataHome,
     conversationStore: fixture.conversations, toolService: fixture.service });
-  t.after(() => runtime.close());
+  // Synthetic service capabilities are explicit, independent of legacy UI settings.
+  // 模拟服务明确提供能力，不依赖旧 UI 设置。
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 32768 });
+  t.after(async () => {
+    try { await runtime.close(); }
+    finally { upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); }
+  });
   await runtime.retrieval.settings.patchGlobal({ expectedRevision: 0, patch: { local: { semantic: 'off' } } });
   const text = '# Unrelated introduction\n' + 'Irrelevant background information. '.repeat(100)
     + '\n\n# ORION review conditions\nThe ORION reviewer is Mara Chen. Its experimental window is not approved.\n'
     + '\n# Other project\nThe VEGA reviewer is Beatrice Hall.\n';
-  const path = join(fixture.workspace, 'orion-guide.md'); await writeFile(path, text, 'utf8');
+  // This case owns an imported source; avoid a second independently valid mounted copy of the same file.
+  // 本例验证导入来源撤销；文件放在挂载目录外，避免另一独立有效工作文件来源。
+  const path = join(fixture.root, 'orion-guide.md'); await writeFile(path, text, 'utf8');
   const imported = await runtime.retrieval.importSource({ path, scope: 'user' });
   await runtime.retrieval.activeJobs.get(imported.jobId)?.promise;
   const requestId = randomUUID();

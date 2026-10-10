@@ -13,6 +13,12 @@ class ControlledWorker extends EventEmitter {
   failDispatch = false;
   failCloseDispatch = false;
   autoClose = true;
+  connected = new Promise(resolve => { this.resolveConnected = resolve; });
+  on(event, listener) {
+    const result = super.on(event, listener);
+    if (event === 'message') this.resolveConnected();
+    return result;
+  }
   ref() {}
   unref() {}
   postMessage(message) {
@@ -20,12 +26,21 @@ class ControlledWorker extends EventEmitter {
     if (this.failDispatch && ['embed', 'rerank'].includes(message.type)) throw new Error('Synthetic dispatch failure.');
     if (message.type === 'close' && this.failCloseDispatch) throw new Error('Synthetic IPC disconnect during natural retirement.');
     if (message.type === 'close' && this.autoClose) setImmediate(() => this.retire());
+    if (['embed', 'rerank'].includes(message.type)) this.emit('dispatch', message);
   }
   retire(disposed = true) {
     this.emit('message', { type: 'closed', disposed });
     this.emit('exit', 0);
   }
   reply(message) { this.emit('message', message); }
+  async requestAfter(id = 0) {
+    const dispatched = this.messages.find(message => ['embed', 'rerank'].includes(message.type) && message.id > id);
+    if (dispatched) return dispatched;
+    return new Promise(resolve => {
+      const observe = message => { if (message.id > id) { this.off('dispatch', observe); resolve(message); } };
+      this.on('dispatch', observe);
+    });
+  }
 }
 
 async function fixture(t, kind) {
@@ -39,7 +54,8 @@ async function fixture(t, kind) {
   const worker = new ControlledWorker();
   let workerOptions;
   const Service = kind === 'embedding' ? EmbeddingService : RerankerService;
-  const service = new Service({ modelRoot, profileId, workerFactory: (url, options) => {
+  const service = new Service({ modelRoot, profileId, timeoutMs: 3000, closeTimeoutMs: 3000,
+    requestLimits: { maxPendingRequests: kind === 'embedding' ? 32 : 8 }, workerFactory: (url, options) => {
     workerOptions = options;
     return worker;
   } });
@@ -61,16 +77,21 @@ for (const kind of ['embedding', 'reranker']) {
     const { service, worker, profileId } = setup;
     const controller = new AbortController();
     const cancelled = request(kind, service, { signal: controller.signal, profileId });
+    const previous = await worker.requestAfter();
     controller.abort();
     await assert.rejects(cancelled, { name: 'AbortError' });
     assert.equal(service.status().pendingRequests, 0);
     const next = request(kind, service, { profileId });
+    // Admission precedes worker creation; injected events must wait for the owned message listener.
+    // 接纳先于 worker 创建；注入事件须等待真实消息监听器，不能依赖同步启动。
+    await worker.connected;
+    const current = await worker.requestAfter(previous.id);
     assert.equal(setup.workerOptions.workerData.profileId, profileId);
     assert.deepEqual(setup.workerOptions.execArgv, []);
     worker.reply({ type: 'ready' });
-    worker.reply({ type: 'result', id: 1, vectors: [[NaN]], scores: [NaN], truncatedInputsCount: 0 });
+    worker.reply({ type: 'result', id: previous.id, vectors: [[NaN]], scores: [NaN], truncatedInputsCount: 0 });
     assert.equal(service.status().pendingRequests, 1, 'late result belongs only to the cancelled request');
-    worker.reply(successfulResult(kind, 2));
+    worker.reply(successfulResult(kind, current.id));
     const result = await next;
     assert.equal(result.profileId, profileId);
     if (kind === 'embedding') assert.equal(result.vector.length, 384);
@@ -90,6 +111,7 @@ for (const kind of ['embedding', 'reranker']) {
     const { service, worker } = await fixture(t, kind);
     const pending = request(kind, service);
     const code = kind === 'embedding' ? 'EMBEDDING_ASSET_INVALID' : 'RERANK_ASSET_INVALID';
+    await worker.connected;
     worker.reply({ type: 'fatal', code, message: 'Synthetic fixed-asset verification failure.' });
     await assert.rejects(pending, { code });
     worker.reply({ type: 'ready' });
@@ -102,6 +124,7 @@ for (const kind of ['embedding', 'reranker']) {
   test(`${kind} retirement rejects clients, waits for disposal, and never reopens on late events`, async t => {
     const { service, worker } = await fixture(t, kind);
     const pending = request(kind, service);
+    await worker.connected;
     worker.autoClose = false;
     const close = service.close();
     assert.equal(service.close(), close);
@@ -125,7 +148,7 @@ for (const kind of ['embedding', 'reranker']) {
     const admitted = controllers.map(controller => request(kind, service, { signal: controller.signal })
       .then(() => null, error => error));
     await assert.rejects(request(kind, service), { code: kind === 'embedding' ? 'EMBEDDING_BUSY' : 'RERANK_BUSY' });
-    assert.equal(service.status().pendingRequests, maximumRequests);
+    assert.equal(service.status().inputAdmission.activeRequests, maximumRequests);
     controllers.forEach(controller => controller.abort());
     assert.ok((await Promise.all(admitted)).every(error => error?.name === 'AbortError'));
     assert.equal(service.status().pendingRequests, 0);
@@ -135,6 +158,7 @@ for (const kind of ['embedding', 'reranker']) {
     const { service, worker } = await fixture(t, kind);
     const pending = request(kind, service);
     const rejected = assert.rejects(pending, { code: kind === 'embedding' ? 'EMBEDDING_CLOSED' : 'RERANK_CLOSED' });
+    await worker.connected;
     worker.failCloseDispatch = true;
     const close = service.close();
     setImmediate(() => worker.retire());
@@ -150,7 +174,9 @@ test('a reranker process exit rejects queued clients even after an earlier reque
   const first = request('reranker', service);
   const queued = request('reranker', service);
   const queuedOutcome = assert.rejects(queued, { code: 'RERANK_WORKER_FAILED' });
-  worker.reply({ type: 'error', id: 1, code: 'RERANK_FAILED', message: 'Synthetic scoring failure.' });
+  const dispatched = await worker.requestAfter();
+  await worker.requestAfter(dispatched.id);
+  worker.reply({ type: 'error', id: dispatched.id, code: 'RERANK_FAILED', message: 'Synthetic scoring failure.' });
   await assert.rejects(first, { code: 'RERANK_FAILED' });
   assert.equal(service.status().state, 'error');
   worker.emit('exit', 23);
@@ -161,7 +187,8 @@ test('a reranker process exit rejects queued clients even after an earlier reque
 test('embedding rejects malformed worker vectors before returning indexable metadata', async t => {
   const { service, worker } = await fixture(t, 'embedding');
   const pending = service.embedDocuments(['first', 'second']);
-  worker.reply({ type: 'result', id: 1, vectors: [Array(384).fill(0)] });
+  const dispatched = await worker.requestAfter();
+  worker.reply({ type: 'result', id: dispatched.id, vectors: [Array(384).fill(0)] });
   await assert.rejects(pending, { code: 'EMBEDDING_INVALID_VECTOR' });
   assert.equal(service.status().pendingRequests, 0);
 });

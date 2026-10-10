@@ -737,9 +737,15 @@ export class ToolService {
         }, { signal });
         this.workBindingTransitions.set(context, { workspaceRoot: binding.folderPath });
         this.observationCaches.get(context)?.clear();
-        this.retrieval?.scheduleMountedProjects();
-        result = { ...binding, automaticPreparation: Boolean(this.retrieval),
-          preparationState: this.retrieval ? 'scheduled' : 'unavailable', currentTurnScopeChanged: false,
+        // Wait for admission metadata only; source parsing and vectors remain background work.
+        // 只等待接纳元信息；来源解析及向量仍在后台完成。
+        let preparation;
+        try { preparation = (await this.retrieval?.scheduleMountedProjects())?.get(binding.projectId); }
+        catch (error) { preparation = { state: 'failed', reason: safeErrorCode(error, 'WORK_PREPARATION_FAILED') }; }
+        const preparationState = preparation?.state ?? (this.retrieval ? 'pending' : 'unavailable');
+        result = { ...binding, automaticPreparation: ['scheduled', 'unchanged'].includes(preparationState),
+          preparationState, ...(preparation?.reason ? { preparationReason: preparation.reason } : {}),
+          ...(preparation?.jobId ? { preparationJobId: preparation.jobId } : {}), currentTurnScopeChanged: false,
           continuation: 'Use absolute paths with reason for this folder in this turn; normal path approval still applies. The next turn uses the new work folder.' };
       }
       else if (call.name === 'web.fetch') return await this._finishResult(context, call, await this.webFetcher.run(call.arguments, signal));

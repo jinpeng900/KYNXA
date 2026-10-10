@@ -43,7 +43,8 @@ for (const protocol of protocols) test(`${protocol}: an unchanged 8K connection 
   assert.ok(prepared.catalog.some(tool => tool.name.startsWith('computer.')), 'explicit desktop intent receives an actual desktop schema');
   const verifyCatalog = () => {
     const catalog = f.service.modelCatalog(prepared.toolContext), names = catalog.map(tool => tool.name);
-    for (const name of discovery) assert.ok(names.includes(name), name);
+    for (const name of ['tool.search', 'tool.load']) assert.ok(names.includes(name), name);
+    assert.ok(f.service.catalogs.get(prepared.toolContext).descriptors.has('tool.result.read'));
     const declarations = toolDeclarations(protocol, catalog), schemaTokens = estimateTokens(JSON.stringify(declarations));
     assert.ok(schemaTokens <= Math.floor(prepared.inputBudgetTokens * .40));
     assert.ok(schemaTokens + estimateToolMessageTokens(prepared.messages, prepared.requestOptions.system) <= prepared.inputBudgetTokens,
@@ -57,11 +58,16 @@ for (const protocol of protocols) test(`${protocol}: an unchanged 8K connection 
       const loaded = await f.run(prepared.toolContext, 'tool.load', { names: [name] }, { interactive: false });
       assert.equal(loaded.isError, false, `${name}: ${loaded.code}; schema budget=${f.service.catalogs.get(prepared.toolContext).model.tokenBudget}`);
       assert.deepEqual(parsed(loaded).loaded, [name]);
+      if (!f.service.modelCatalog(prepared.toolContext).some(tool => tool.name === 'tool.result.read'))
+        assert.deepEqual(parsed(loaded).deferredDiscovery, ['tool.result.read']);
       assert.ok(verifyCatalog().some(tool => tool.name === name));
       const args = action === 'windows' || action === 'apps' ? { reason: target.reason }
         : action === 'launch' ? { appPath: fixtureApplication, reason: target.reason } : target;
       const result = await f.run(prepared.toolContext, name, args, { interactive: false });
       assert.equal(result.status, 'completed', result.content); assert.ok(result.resultRef);
+      const paging = await f.run(prepared.toolContext, 'tool.load', { names: ['tool.result.read'] });
+      assert.equal(paging.isError, false); verifyCatalog();
+      assert.equal((await f.run(prepared.toolContext, 'tool.result.read', { id: result.resultRef.id, offset: 0, limit: 200 })).isError, false);
     }
     assert.deepEqual(actions, desktopActions);
     const before = structuredClone(verifyCatalog());

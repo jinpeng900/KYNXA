@@ -67,7 +67,8 @@ async function dispatchRetrievalRoute(request, response, url, retrieval, signal)
       const reenabled = previous.local.enabled === false && effective.local.enabled !== false ||
         previous.local.semantic === 'off' && effective.local.semantic !== 'off' ||
         previous.projectIndexing?.mountedFolder === false && effective.projectIndexing?.mountedFolder === true;
-      if (reenabled || effective.projectIndexing?.mountedFolder || previous.projectIndexing?.mountedFolder || sourcesChanged)
+      if (effective.local.enabled !== false &&
+          (reenabled || effective.projectIndexing?.mountedFolder || previous.projectIndexing?.mountedFolder || sourcesChanged))
         await retrieval.rebuild({ projectId: projectSettings[1], dirty: true, automatic: !reenabled });
       return send({ ...result, effective });
     }
