@@ -5,6 +5,7 @@ import { retrievalDescriptors } from '../../tools/retrieval/descriptors.mjs';
 import { computerDescriptors } from './computer.mjs';
 import { hostTerminalDescriptor, hostTerminalJobDescriptors } from './terminal.mjs';
 import { memoryActionDescriptors } from '../../tools/memory-actions.mjs';
+import { workDirectoryDescriptor } from '../../tools/work-directory.mjs';
 
 const skillDescriptors = [
   { name: 'skill.list', description: 'Page application skill metadata from official-tools/Skills, user extension Skills, configured directories and this work\'s .kynxa/skills. Discovery is limited to 128 skills and 512 candidates per source directory. Does not execute scripts.',
@@ -39,4 +40,4 @@ const catalogDescriptors = [
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },
       limit: { type: 'integer', minimum: 1, maximum: 16000 } }, required: ['id'], additionalProperties: false }, source: 'builtin' }
 ];
-export const builtinDescriptors = [...filesystemDescriptors, webFetchDescriptor, ...retrievalDescriptors, ...memoryActionDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...hostTerminalJobDescriptors, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];
+export const builtinDescriptors = [...filesystemDescriptors, workDirectoryDescriptor, webFetchDescriptor, ...retrievalDescriptors, ...memoryActionDescriptors, ...skillDescriptors, terminalDescriptor, hostTerminalDescriptor, ...hostTerminalJobDescriptors, ...catalogDescriptors, ...historyDescriptors, ...computerDescriptors];
