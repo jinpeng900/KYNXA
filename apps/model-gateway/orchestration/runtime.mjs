@@ -23,7 +23,7 @@ import { DEFAULT_TOOL_RUN_LIMITS, toolRunLimits } from './tool-run.mjs';
 import { applyAssistantSegmentEvent, assistantSegmentText, AssistantSegments } from '../platform/assistant-segments.mjs';
 import { ModelHistoryProjection, MODEL_HISTORY_NOTICE } from '../models/model-history.mjs';
 import { appendModelRound, modelOrigin, modelPrefixFingerprint, nativeContinuation } from '../platform/model-transcript.mjs';
-import { resolveModelCapabilities } from '../models/model-capabilities.mjs';
+import { resolveModelCapabilities, resolveAutomaticContext } from '../models/model-capabilities.mjs';
 import { replyDurationMs } from '../platform/reply-timing.mjs';
 import { RetrievalCoordinator } from './retrieval/coordinator.mjs';
 import { runResourceTask } from '../platform/resources/resource-task.mjs';
@@ -40,6 +40,10 @@ import { runSemanticSummary } from './semantic-summary-runner.mjs';
 const REPLY_SCOPE_NOTICE = 'Reply in the current user request\'s language unless another language is requested. '
   + 'Answer the requested scope; omit unsolicited comparisons, calculations, raw hashes and implementation details. '
   + 'Once evidence and required verification are sufficient, answer; preserve explicit user requests for depth or further work.';
+
+function localModelSnapshotKey(connection, modelId) {
+  return `${connection.baseUrl}:${connection.protocol}:${connection.providerId}:${modelId}`;
+}
 
 // Compatibility helper for older callers. ModelRuntime uses buildContext below.
 // Failed attempts are visible in the transcript but excluded from model context.
@@ -91,7 +95,7 @@ export class ModelRuntime {
       yieldIdleGpu: async options => Promise.all([
         this.retrieval.embeddings.releaseIdleGpu?.(options), this.retrieval.reranker.releaseIdleGpu?.(options) ]),
       onState: (connection, modelId, { snapshot, ...allocation }) => {
-        const key = `${connection.providerId}:${modelId}`;
+        const key = localModelSnapshotKey(connection, modelId);
         this.localModelSnapshots.delete(key);
         this.localModelSnapshots.set(key, { ...snapshot, providerId: connection.providerId, modelId, allocation });
         while (this.localModelSnapshots.size > 32) this.localModelSnapshots.delete(this.localModelSnapshots.keys().next().value);
@@ -202,25 +206,24 @@ export class ModelRuntime {
       // 为本轮冻结同一已验证连接；MCP 发现期间编辑设置，不能混用一个供应商的 schema 和另一协议。
       const connection = Object.freeze(structuredClone(await this.connection(input)));
       const capabilities = resolveModelCapabilities(connection, input.model);
-      const localModelKey = `${connection.providerId}:${input.model}`;
+      const localModelKey = localModelSnapshotKey(connection, input.model);
       // A greeting reuses known limits without waiting on optional process observation APIs.
       // 问候复用已知上限，不等待可选模型进程观察接口；实际任务才刷新外部运行时信息。
       const localModel = greeting ? this.localModelSnapshots.get(localModelKey) ?? {
         diagnostic: { code: 'LOCAL_MODEL_OBSERVATION_DEFERRED' } } : await this.localModels.observe(connection, { signal: signal,
-        contextTokens: connection.contextWindowTokens, modelId: input.model });
+        modelId: input.model });
       if (!['LOCAL_MODEL_OBSERVATION_NOT_LOCAL', 'LOCAL_MODEL_OBSERVATION_DEFERRED'].includes(localModel.diagnostic?.code)) {
         const key = localModelKey;
         this.localModelSnapshots.delete(key); this.localModelSnapshots.set(key, { ...localModel,
           providerId: connection.providerId, modelId: input.model });
         while (this.localModelSnapshots.size > 32) this.localModelSnapshots.delete(this.localModelSnapshots.keys().next().value);
       }
+      const contextWindowResolution = resolveAutomaticContext(connection, input.model, localModel, capabilities);
       const contextInput = { conversationId: id,
         projectId: memory.isFolderlessWorkspace ? null : memory.projectId,
         history, currentMessage: input.message, beforeUserId: userId,
         memoryEntries: memory.entries, summary,
-        contextWindowTokens: Math.min(connection.contextWindowTokens ?? capabilities.contextWindowTokens ?? 8192,
-          capabilities.contextWindowTokens ?? Infinity, localModel.runtimeContextTokens || Infinity,
-          localModel.modelMaximumContextTokens || Infinity), maxOutputTokens: connection.maxOutputTokens,
+        contextWindowTokens: contextWindowResolution.effectiveTokens, maxOutputTokens: connection.maxOutputTokens,
         providerMaxOutputTokens: capabilities.maxOutputTokens, providerMaxInputTokens: capabilities.maxInputTokens };
       let context = buildContext(contextInput), catalog = [], declarations = [];
       let retrievalEvidence = { prompt: '', references: [] };
@@ -399,7 +402,7 @@ export class ModelRuntime {
         modelOrigin: modelOrigin(connection, { providerId: input.provider, model: input.model }),
         memorySnapshot: this.memory.snapshotFor?.(memory, context.metrics.memoryIncludedIds, context.memoryProjection),
         historySources: projection.historySources(context.messages, context.historySources),
-        contextMetrics: { ...context.metrics, historyCompaction, toolCompactions: [] },
+        contextMetrics: { ...context.metrics, contextWindowResolution, historyCompaction, toolCompactions: [] },
         inputBudgetTokens: context.metrics.inputBudgetTokens,
         requestOptions: { system: context.system, maxOutputTokens: context.maxOutputTokens }, startedAtMonotonicMs: performance.now() };
     } catch (error) {
@@ -494,7 +497,7 @@ export class ModelRuntime {
 
   beginLocalGeneration(turn, modelId) {
     const stop = this.localModels.beginGeneration(turn.connection, { modelId });
-    const key = `${turn.connection.providerId}:${modelId}`, snapshot = this.localModelSnapshots.get(key);
+    const key = localModelSnapshotKey(turn.connection, modelId), snapshot = this.localModelSnapshots.get(key);
     if (snapshot) this.localModelSnapshots.set(key, { ...snapshot, generationState: 'generating', applicationGenerationState: 'generating' });
     return () => {
       stop(); const current = this.localModelSnapshots.get(key);

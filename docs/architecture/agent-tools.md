@@ -1,5 +1,13 @@
 # 基础工具、MCP 与应用技能
 
+## 2026-10-10：后端自动上下文窗口
+
+连接的旧 `contextWindowTokens` 仍接受、保存和回传以兼容桌面客户端，运行时不再用它封顶；连接元信息新增 `contextWindowMode:automatic`。后端从已有已核验的官方端点及精确模型 ID 能力表、可信本地模型观察选择窗口，不调用模型猜测。代理、未知模型和同名本地模型不能继承官方能力；无法确认时明确回退 8192 tokens。该回退是未知能力的保守值，已知模型可使用更大窗口。
+
+本地观察使用已有 loopback Ollama 服务的运行窗口、冷模型配置和模型最大窗口：当前运行窗口优先于冷配置，再受模型最大能力限制。异常元数据加入保守回退限制；不把低于当前协议支持范围的真实窗口向上取整。问候复用的能力缓存绑定端点、协议、连接和模型，连接编辑后不复用旧端点限制。任意 `/models` 属性、模型名称猜测及外部代理元数据不授予能力。
+
+输出预留、供应商独立输入限制、安全余量和历史压缩继续由现有预算组件执行；`maxOutputTokens` 的存储与实际供应商上限语义保持。已有 `contextUsage` 诊断增加 `contextWindowResolution`，记录 `effectiveTokens`、`source`、`reason`、能力来源、候选限制以及 `legacyFieldIgnored`。这些估算不是供应商实际 token 消耗。本轮只改后端，旧界面字段可能仍显示历史保存值；有效窗口以运行诊断为准。
+
 本页描述当前工具闭环。设置中的“工具与技能”打开独立窗口，管理 MCP 服务、单个工具启停、应用技能与参数；扩展文件可单独选择存储目录。聊天输入区的三种权限参与真实执行判定。运行中聊天只展示简洁动作和来源链接；窗口截图在右侧小模块查看，完整工具记录保留在正式日志。
 
 ## 2026-10-10：大型仓库的直接文件入口
@@ -466,3 +474,8 @@ MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools�
 最终完整网关回归 **899 通过、0 失败、1 跳过**；跳过项仅为真实弹出可见终端的用例，模拟可见模式仍在回归范围内。覆盖三协议本机模拟 HTTP、MCP 生命周期与恢复、220 条操作衔接、三协议 8K 预算以及真实 AppContainer 的写入/执行/读回。原生 ToolHost 构建 **0 警告、0 错误**；另用该构建实测隐藏后台进程及子进程清理 **2/2**，应用入口策略检查 **20 项**通过。模块边界检查无违规。
 
 测试使用独立临时数据、合成进程和模拟上游；未调用付费模型，未操作日常浏览器或登录真实账号。源码修复未部署到既有运行实例，未关闭或重启当前网关。上述验证不代表已完成真实站点登录、第三方应用焦点行为或跨崩溃后台任务恢复验收。
+
+
+2026-10-10 Linux 基线维护：官方清单按实际注册顺序补齐 `knowledge.plan`、`memory.read`、`memory.propose`，与 48 项目录逐项一致；桌面打包仍使用同一清单。压缩 `tool.search`、`tool.load` 与 `memory.propose` 的重复描述，使可选语义操作继续装入既有 8K schema 预算；输入 schema、权限执行、用户确认与上下文上限不变。协议夹具按稳定 wire 名匹配工具，显式提供已验证的上下文能力，解开当前与历史观测封装；重启配对测试显式重连自有 MCP 夹具，未声明工具的历史降级契约继续由 model-history 测试覆盖。HTTP 失败会结束响应并关闭自有连接；worker 事件等候监听器和实际请求 ID。Linux 进程测试区分仍运行的进程与已退出、待容器 PID 1 回收的僵尸进程。这些确定性协议测试不代表真实模型语义准确率，Windows 原生和 GPU 路径须在对应环境另行验证。
+
+Linux baseline maintenance (2026-10-10): the installed manifest matches all 48 registered tools in order. Shorter duplicate descriptor text preserves the 8K schema budget, schemas and permission enforcement. Fixture transports use stable wire identities, explicit context capability observations, owned connection cleanup and dispatch handshakes. Historical outputs are unwrapped only in tests; restart pairing explicitly reconnects owned MCP fixtures. Linux lifecycle checks distinguish running processes from exited orphans awaiting container reaping. Protocol fixtures do not measure model semantics; Windows and GPU acceptance remains environment-specific.

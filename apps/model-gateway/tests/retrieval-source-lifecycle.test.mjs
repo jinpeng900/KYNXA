@@ -100,6 +100,19 @@ async function fixture(t, overrides = {}) {
   return { root, library, jobs, service, index, publications, settings };
 }
 
+test('disabled index work rejects before either registered or mounted source acquisition', async t => {
+  const f = await fixture(t);
+  f.settings.local.enabled = false;
+  f.service.sync.librarySnapshot = () => assert.fail('disabled work must not read the registry');
+  f.service.sync.mountedSnapshot = () => assert.fail('disabled work must not read or decode mounted files');
+  const job = await f.service.rebuild();
+  await Promise.all([...f.service.lifecycle.active.values()].map(active => active.promise));
+  const result = await f.jobs.get(job.jobId);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error, 'RETRIEVAL_DISABLED');
+  assert.deepEqual(f.publications, []);
+});
+
 test('cancelled import approval never reads or registers source bytes', async t => {
   const entered = gate(), approved = gate();
   let reads = 0, approvalSignal;

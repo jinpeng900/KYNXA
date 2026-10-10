@@ -64,6 +64,7 @@ export { readJson, atomicJson } from '../platform/atomic-json.mjs';
 
 function publicProvider({ apiKey, ...provider }) {
   return { ...provider, hasApiKey: Boolean(apiKey), protocol: provider.protocol ?? 'openai-completions',
+    contextWindowMode: 'automatic',
     maxOutputTokens: provider.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS };
 }
 

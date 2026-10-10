@@ -14,7 +14,7 @@ import { SandboxRunner } from '../tools/sandbox-runner.mjs';
 import { createModelServer } from '../server.mjs';
 import { readSse } from '../models/streaming.mjs';
 import { curatedMcpPresets } from '../tools/official-tools.mjs';
-import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
+import { isolateFixtureMcpCatalog, fixtureDeclaration } from './tool-fixture.mjs';
 
 const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages'];
 const sourceUrls = ['https://sources.example.test/release', 'https://sources.example.test/changelog'];
@@ -27,7 +27,7 @@ async function listen(server) {
 }
 async function close(server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 function wireName(body, name) {
-  const tool = body.tools.find(item => (item.description ?? item.function?.description ?? '').startsWith(name + ':'));
+  const tool = fixtureDeclaration(body.tools, name);
   assert.ok(tool, 'The actual upstream request declares ' + name);
   return tool.name ?? tool.function.name;
 }
@@ -65,11 +65,15 @@ function pairs(body, protocol, expected) {
     const observations = messages.filter(item => item.role === 'tool');
     results = observations.map(item => item.tool_call_id); outputs = observations.map(item => item.content);
   }
-  assert.equal(calls.length, expected); assert.deepEqual(results, calls); assert.equal(new Set(calls).size, expected);
+  assert.equal(calls.length, expected, JSON.stringify({ protocol, expected, roles: messages.map(item => item.role ?? item.type) }));
+  assert.deepEqual(results, calls); assert.equal(new Set(calls).size, expected);
   return { messages, calls, outputs };
 }
 function observationValue(text) {
-  const result = JSON.parse(text);
+  const result = typeof text === 'string' ? JSON.parse(text) : text;
+  // Public transcript observations wrap the original typed output; unwrap without dropping provenance in production.
+  // 公开工具历史封装原始带类型输出；夹具解开外层，生产链仍保留来源元信息。
+  if (result.output !== undefined) return observationValue(result.output);
   // Current-step previews and reloaded canonical typed archives are both legitimate observations.
   // 当前步骤的预览和重新加载的正式带类型归档都是有效的观测结果。
   if (result.structuredContent !== undefined) return result.structuredContent;
@@ -108,6 +112,7 @@ async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure
     service = new ToolService({ conversationStore: conversations, dataHome, extensionRoot, sandboxRunner, bundledDirectory: null, officialTools: true });
     isolateFixtureMcpCatalog(service);
     const runtime = new ModelRuntime({ modelStore: models, dataHome, extensionRoot, conversationStore: conversations, toolService: service });
+    runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 65536 });
     gateway = createModelServer({ modelStore: models, modelRuntime: runtime }); address = await listen(gateway);
   };
   const stop = async () => { if (gateway) { await gateway.shutdownModelRuntime(); await close(gateway); gateway = null; } };
@@ -136,7 +141,14 @@ async function workflowFixture(t, protocol, { sandboxRunner, scenario, configure
   }
   const saved = async id => (await conversations.readMessages(conversationId)).find(item => item.Id === id);
   return { root, dataHome, extensionRoot, workspace, conversationId, seen, upstreamErrors, input, post, stream, saved,
-    restart: async () => { await stop(); conversations = new ConversationStore({ dataHome, legacyDesktopDirectory: null }); await start(); },
+    restart: async () => {
+      await stop(); conversations = new ConversationStore({ dataHome, legacyDesktopDirectory: null }); await start();
+      // Native history requires declared tools. Explicitly reconnect only the owned fixture transports after restart.
+      // 原生历史配对要求工具已声明；重启后显式重连本夹具的传输，不依赖问题关键词触发发现。
+      const context = await service.createContext(conversationId, { requestId: randomUUID(), permissionMode: 'full' });
+      try { await service.catalog(context, { connectMcp: true }); }
+      finally { await service.releaseContext(context); }
+    },
     get: path => fetch(address + path) };
 }
 
@@ -169,7 +181,7 @@ for (const protocol of protocols) test(protocol + ': search, read two returned s
         return toolsReply(protocol, body, search.results.map((item, index) => ({ id: 'source_' + index, name: 'mcp.official-fetch.fetch',
           args: { arguments: { url: item.url }, policy: { reason: 'Read the source returned by the search.' } } })), round);
       }
-      for (const url of sourceUrls) assert.ok(history.outputs.some(text => observationValue(text).url === url));
+      for (const url of sourceUrls) assert.ok(history.outputs.some(text => observationValue(text).url === url), JSON.stringify({ round, observations: history.outputs.map(observationValue) }));
       if (round === 3) {
         originalIds = history.calls;
         if (protocol === 'anthropic-messages') assert.match(JSON.stringify(history.messages), /PRIVATE_WORKFLOW_SIGNATURE_1/);

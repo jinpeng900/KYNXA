@@ -31,10 +31,10 @@ const terminalDescriptor = { name: 'terminal.run', description: 'Run Node.js or 
     args: { type: 'array', items: { type: 'string' }, maxItems: 64 }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 } },
   required: ['command', 'args'], additionalProperties: false }, source: 'builtin' };
 const catalogDescriptors = [
-  { name: 'tool.search', description: 'Find enabled tools and paged MCP headers. Empty query pages all; load exact names. Discovery neither connects nor grants permission.',
+  { name: 'tool.search', description: 'Find enabled tools/MCP headers; empty query pages all.',
     inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, offset: { type: 'integer', minimum: 0, maximum: 100000 },
       limit: { type: 'integer', minimum: 1, maximum: 20 } }, additionalProperties: false }, source: 'builtin' },
-  { name: 'tool.load', description: 'Load exact tools/aliases or returned mcp.<serverId> headers within budget; connect selected services, verify live schemas. No execution/permission grant.',
+  { name: 'tool.load', description: 'Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service.',
     inputSchema: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, maxItems: 32 } }, required: ['names'], additionalProperties: false }, source: 'builtin' },
   { name: 'tool.result.read', description: "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0, maximum: 9000000 },
