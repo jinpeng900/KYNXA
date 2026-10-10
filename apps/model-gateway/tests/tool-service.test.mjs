@@ -20,10 +20,14 @@ test('ongoing work binds one directory, schedules preparation and continues with
   const originalWorkspace = context.workspaceRoot;
   const before = await f.conversations.catalog();
   let schedules = 0;
-  f.service.retrieval = { scheduleMountedProjects: () => { schedules++; } };
+  f.service.retrieval = { scheduleMountedProjects: () => {
+    schedules++; return Promise.resolve(new Map([[f.projectId, { state: 'scheduled', jobId: 'queued' }]]));
+  } };
   const binding = parsed(await f.run(context, 'work.folder.bind', { path: root, reason: 'Continue working in this folder' }));
   assert.equal(binding.folderPath, root);
   assert.equal(binding.currentTurnScopeChanged, false);
+  assert.equal(binding.preparationState, 'scheduled');
+  assert.equal(binding.preparationJobId, 'queued');
   assert.equal(context.workspaceRoot, originalWorkspace);
   assert.equal(schedules, 1);
   const current = await f.conversations.catalog();
@@ -55,6 +59,22 @@ test('directory association requires existing directories and bound approval; te
     'WORK_BINDING_PATH_REQUIRED');
   assert.equal((await f.run(await f.context('full', f.standaloneId), 'work.folder.bind', { path: root, reason: 'No work owner' })).code,
     'WORK_REQUIRED');
+});
+
+test('binding persists even when actual preparation is disabled, blocked, unchanged or failed', async t => {
+  const f = await toolFixture(t), context = await f.context('full');
+  for (const state of ['disabled', 'blocked', 'unchanged', 'failed']) {
+    f.service.retrieval = { scheduleMountedProjects: async () => new Map([[f.projectId, { state, reason: 'test-state' }]]) };
+    const result = parsed(await f.run(context, 'work.folder.bind', { path: f.workspace, reason: 'Retain ongoing work.' }));
+    assert.equal(result.preparationState, state);
+    assert.equal(result.automaticPreparation, state === 'unchanged');
+    assert.equal(result.preparationReason, 'test-state');
+  }
+  f.service.retrieval = { scheduleMountedProjects: async () => { throw Object.assign(new Error('admission failed'), { code: 'INDEX_FAILED' }); } };
+  const result = parsed(await f.run(context, 'work.folder.bind', { path: f.workspace, reason: 'Retain ongoing work.' }));
+  assert.equal(result.preparationState, 'failed');
+  assert.equal(result.preparationReason, 'INDEX_FAILED');
+  assert.equal((await f.conversations.catalog()).Projects[0].FolderPath, f.workspace);
 });
 
 test('unknown dispatch proof comes from the owned terminal registry, never observation text or another chat', async t => {

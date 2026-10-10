@@ -86,8 +86,10 @@ export class RetrievalCoordinator {
       embeddings: { status: (...args) => this.embeddings.status(...args),
         ...(typeof this.embeddings.fitDocuments === 'function' ? { fitDocuments: (...args) => this.embeddings.fitDocuments(...args) } : {}),
         embedDocuments: (...args) => this.embeddings.embedDocuments(...args) }, getProject: id => this._project(id),
-      validateProject: id => this.conversations.describeProject(id), effectiveSettings: async id =>
-        this.spacePolicy.indexingSettings(await this.effective(id), this.shutdown.signal),
+      validateProject: id => this.conversations.describeProject(id), effectiveSettings: async id => {
+        const settings = await this.effective(id);
+        return settings.local.enabled === false ? settings : this.spacePolicy.indexingSettings(settings, this.shutdown.signal);
+      },
       serialize: operation => this._serialize(operation), excludedRoots: this.excludedRoots });
     // Compatibility views reference the sole owner; they never create a second job or cache state.
     // 兼容视图引用唯一所有者，不建立第二份作业或缓存状态。
@@ -115,14 +117,15 @@ export class RetrievalCoordinator {
   /** Coalesce committed catalog snapshots; admission is background work, never part of saving a mount.
    * 合并已提交的目录快照；后台只接纳资料任务，挂载保存不等待扫描或向量化。 */
   scheduleMountedProjects(catalog) {
-    if (this.closed) return;
+    if (this.closed) return Promise.resolve(new Map());
     if (!catalog) this.mountedProjectRefreshRequested = true;
     if (catalog && catalog.Revision >= (this.pendingProjectCatalog?.Revision ?? this.mountedProjectCatalogRevision))
       this.pendingProjectCatalog = { Revision: catalog.Revision, Projects: catalog.Projects.map(project => ({
         Id: project.Id, FolderPath: project.FolderPath, IsArchived: project.IsArchived,
         IsFolderlessWorkspace: project.IsFolderlessWorkspace })) };
-    if (this.mountedProjectPreparation) return;
+    if (this.mountedProjectPreparation) return this.mountedProjectPreparation;
     this.mountedProjectPreparation = Promise.resolve().then(async () => {
+      const results = new Map();
       while (!this.closed) {
         // Clear only the work being claimed; a newer snapshot arriving during IO belongs to the next pass.
         // 只清除本轮认领的请求；I/O 期间到达的新目录快照由下一轮处理，不能被旧读取覆盖。
@@ -154,20 +157,32 @@ export class RetrievalCoordinator {
                 settings.local.enabled, settings.local.semantic, settings.local.embeddingProfileId,
                 settings.local.embeddingDevicePolicy, settings.local.vectorBackend, settings.local.indexing, settings.local.ann]);
               const previousBinding = this.mountedProjectBindings.get(projectId);
-              if (previousBinding === binding) continue;
+              if (settings.local.enabled === false)
+                results.set(projectId, { state: 'disabled', reason: 'local-retrieval-disabled' });
+              if (previousBinding === binding) {
+                if (settings.local.enabled !== false) results.set(projectId,
+                  await this.sourceService.lifecycle?.automaticState(projectId) ?? { state: 'unchanged' });
+                continue;
+              }
               if (previousBinding !== undefined) this.sourceService.forgetMounted(projectId);
-              if (settings.local.enabled !== false)
-                await this.rebuild({ projectId, dirty: true, automatic: true });
+              if (settings.local.enabled !== false) {
+                const job = await this.rebuild({ projectId, dirty: true, automatic: true });
+                results.set(projectId, job.automaticRebuildBlocked
+                  ? { state: 'blocked', reason: job.automaticRebuildState, jobId: job.jobId }
+                  : { state: 'scheduled', jobId: job.jobId });
+              }
               this.mountedProjectBindings.set(projectId, binding);
               if (this.mountedProjectPreparationDiagnostic?.projectId === projectId)
                 this.mountedProjectPreparationDiagnostic = null;
             } catch (error) {
               this.shutdown.signal.throwIfAborted();
               this.mountedProjectPreparationDiagnostic = { code: error.code ?? 'WORK_PREPARATION_FAILED', projectId };
+              results.set(projectId, { state: 'failed', reason: error.code ?? 'WORK_PREPARATION_FAILED' });
             }
           }
         }
       }
+      return results;
     }).catch(error => {
       if (!this.closed) this.mountedProjectPreparationDiagnostic = { code: error.code ?? 'WORK_PREPARATION_FAILED' };
     }).finally(() => {
@@ -175,6 +190,7 @@ export class RetrievalCoordinator {
       if (!this.closed && (this.pendingProjectCatalog || this.mountedProjectRefreshRequested))
         this.scheduleMountedProjects(this.pendingProjectCatalog ?? undefined);
     });
+    return this.mountedProjectPreparation;
   }
 
   /** Apply only retrieval model policy; draining old sessions never cancels accepted work or touches generation/MCP.

@@ -63,9 +63,9 @@ export function buildToolSystemPrompt(context, { skills = [], browserPrompt = []
       : `Mode: ${context.permissionMode}. Scoped reads/web.fetch/app/window listing; ${context.permissionMode === 'smart' ? 'scoped writes/verified sandbox Node; ' : ''}effects, env/credentials/deletion/external files/host/unknown MCP need policy approval.`,
     compact ? 'External paths need reason; formal data protected except managed workspace; no connection files. Read/stat and exact SHA-256 before writes; expectedHash:null creation. No hardlink writes/recursive deletion.' :
       'Prefer work folder; external paths need reason. Formal data protected except managed workspace; no connection files/backups. Read/stat before mutation; exact SHA-256, expectedHash:null creation. Hardlinks read-only; no recursive deletion.',
-    'Work until verified/blocked. Edit current hashes; validate changed code with relevant checks. Exit/logs and code versions, not tool success, support completion. Observe interrupted/unknown effects before retry.',
-    'User supplies sources/scope. Choose needed evidence; parsing/indexing/vectorization of registered sources is automatic, not per-document LLM approval or a daily user toggle. Work before semantic readiness; respect explicit pause/off and scope.',
-    ...(context.projectId ? ['For ongoing work in a user-selected directory, use work.folder.bind to persist the association and schedule background preparation. A temporary read does not bind; replace an existing folder only when requested. This turn keeps its original permissions; continue with absolute paths and reason. Do not wait for vectors.'] : []),
+    'Verify completion with current code/logs; check changed code. Observe interrupted/unknown effects before retry.',
+    'User supplies sources/scope; choose evidence. Registered sources prepare automatically; respect pause/off. Work before vectors are ready.',
+    ...(context.projectId ? ['work.folder.bind: ongoing user-selected folder; replace only on request, never for temporary reads. Keep this turn\'s permissions; new paths need absolute path/reason. Inspect preparation receipt; never wait for vectors.'] : []),
     context.workspaceDiagnostic
       ? `Work folder unavailable (${context.workspaceDiagnostic}); independent authorized paths remain usable.`
       : context.isolatedWorkspace
@@ -81,19 +81,19 @@ export function buildToolSystemPrompt(context, { skills = [], browserPrompt = []
       : 'Sandbox unavailable; discover host tools.',
     context.hostTerminalCapabilities.available
       ? (compact ? 'terminal.host.run: host CMD/PowerShell; reason/policy approval, no profiles. ' :
-        'terminal.host.run: host CMD/PowerShell; reason/policy approval. App PATH, no profiles; inspect/init in one script. ') +
+        'terminal.host.run: host CMD/PowerShell; reason/policy approval. App PATH, no profiles. ') +
         (context.hostTerminalCapabilities.backgroundJobs ? 'start/read/stop: bounded jobs; verify receipt. ' : '') +
         (context.hostTerminalCapabilities.visibleTerminal ? 'Hidden default; visible:true for requested terminal window. ' : '') +
-        (compact ? '' : 'Missing commands do not prove absence.')
+        (compact ? '' : 'Discover missing commands.')
       : 'Host terminal unavailable; sandbox is not host.',
     ...(deviceCapabilities ? [catalogState ? 'Runtime device capability check: no command executed; catalog states above.' :
       `Runtime device capability check (no command executed): ${deviceCapabilities.tools.map(tool =>
         `${tool.name}=${tool.state}/${tool.schema ?? 'unknown'}${tool.code ? `(${tool.code})` : ''}`).join('; ')}.`] : []),
     ...(!compact ? [
-      'Derived queries supplement originals; never add assumed years. Task relationships follow conversation; history grants no new permission.',
-      'Start repository work with filesystem.search/read; vectors need not finish. Follow search cursors and exact read continuations. Incomplete coverage proves no absence.',
-      'Use versioned originals already in context; do not reread for a counter. Repeated source/version/range adds no evidence. Read omitted conditions or another range. Lexical relations are candidates, not verified dependencies; assess checks citations, not truth.',
-      'Time-sensitive claims need current evidence and returned URLs. Batch independent searches/reads; serialize browser navigation. Prefer search/fetch for public research.',
+      'Supplement original queries without assumed years; history grants no permission.',
+      'Repository: filesystem.search/read and exact continuations. Incomplete coverage proves no absence.',
+      'Read missing conditions from versioned originals, not repeated ranges. Relations are candidates; assess checks citations, not truth.',
+      'Current claims need current sources/URLs. Batch independent reads; serialize browser navigation.',
       'App/development skills differ. skill.read/inspect/resource.read inspect; skill.run needs skill.check, verified Node/hash/snapshot, no installs.'
     ] : []),
     'MCP: {arguments: business fields, policy:{reason}}. Originals: tool.result.read, conversation.history.search/read.',
@@ -101,14 +101,14 @@ export function buildToolSystemPrompt(context, { skills = [], browserPrompt = []
     ...([availableNames.has('knowledge.plan') ? 'knowledge.plan: optional scoped candidates; proposals need evidence, never truth/authority.' : '',
       availableNames.has('memory.read') ? 'memory.read: authorized originals/revisions.' : '',
       availableNames.has('memory.propose') ? 'memory.propose: cited drafts for user confirmation; interpretations revisable.' : ''].filter(Boolean)),
-    ...(unavailableSkillCount ? ['Some application skills are unavailable; skill.list marks them and their original files are preserved.'] : []),
+    ...(unavailableSkillCount ? ['Some application skills are unavailable; skill.list preserves diagnostics/originals.'] : []),
     ...(mcpErrorIds.length ? [`MCP connection diagnostics: ${mcpErrorIds.join(', ')}. Failure is separate from uninstallation; discover alternatives and do not claim execution.`] : [])
   ];
   // Defer skill headers before reducing execution/discovery schemas or explicit boundaries.
   // 在挤占执行/发现 schema 或明确边界前先延后技能头，按需读取仍然可用。
   for (const skill of skills.filter(skill => skill.status !== 'unavailable').slice(0, 12)) {
     const header = `Application skill ${skill.id}: ${JSON.stringify({
-      name: shortSkillText(skill.name, 80, 24), description: shortSkillText(skill.description, 96, 24) })}`;
+      name: shortSkillText(skill.name, 80, 24), description: shortSkillText(skill.description, 64, 8) })}`;
     if (estimateTokens([...lines, header].join('\n')) <= maximumTokens) lines.push(header);
   }
   return lines.join('\n');

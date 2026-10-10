@@ -143,7 +143,7 @@ export function buildContext({ conversationId, projectId = null, history = [], c
   const { maxOutputTokens, safetyMarginTokens, inputBudgetTokens: fullInputBudgetTokens } = outputBudget;
   const inputBudgetTokens = fullInputBudgetTokens - reservedInputTokens - estimateMessageTokens([], additionalSystem);
   if (currentMessageTokens > inputBudgetTokens)
-    throw new ContextError(`当前消息预计约 ${currentMessageTokens} tokens，超过本次可用输入预算 ${inputBudgetTokens} tokens。请缩短消息，或在模型连接中提高上下文窗口配置后重试。`);
+    throw new ContextError(`当前消息预计约 ${currentMessageTokens} tokens，超过本次可用输入预算 ${inputBudgetTokens} tokens。请缩短消息，或选用实际支持更大窗口的模型后重试。`);
 
   const turns = historyTurns ?? completedTurns(history, beforeUserId);
   const memories = validMemories(memoryEntries, conversationId, projectId);

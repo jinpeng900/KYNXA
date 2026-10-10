@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resolveModelCapabilities } from '../models/model-capabilities.mjs';
+import { resolveModelCapabilities, resolveAutomaticContext } from '../models/model-capabilities.mjs';
 
 test('official model ceilings distinguish context, independent input and output budgets', () => {
   const deepseek = resolveModelCapabilities({ baseUrl: 'https://api.deepseek.com' }, 'deepseek-flash');
@@ -51,4 +51,21 @@ test('Kimi output defaults are not mistaken for hard limits, and lookups do not 
   current.contextWindowTokens = 1;
   assert.equal(resolveModelCapabilities(connection, 'kimi-k3').contextWindowTokens, 1_048_576);
   assert.deepEqual(connection, original);
+});
+
+test('automatic local metadata is bounded, honors runtime over configuration and never widens a small cap', () => {
+  const connection = { baseUrl: 'http://localhost:11434/v1', contextWindowTokens: 2_000_000 };
+  const current = resolveAutomaticContext(connection, 'local', { backend: 'ollama',
+    runtimeContextTokens: 32768, configuredContextTokens: 4096, modelMaximumContextTokens: 65536 });
+  assert.equal(current.effectiveTokens, 32768);
+  assert.equal(current.source, 'local-runtime');
+  for (const invalid of [3_000_000, '1000000', NaN, Infinity, -1]) {
+    const result = resolveAutomaticContext(connection, 'local', { backend: 'ollama',
+      runtimeContextTokens: invalid, modelMaximumContextTokens: 1_000_000 });
+    assert.equal(result.effectiveTokens, 8192);
+    assert.equal(result.reason, 'invalid-local-capability-metadata');
+  }
+  assert.equal(resolveAutomaticContext(connection, 'local', { backend: 'ollama',
+    runtimeContextTokens: 1024, modelMaximumContextTokens: 65536 }).effectiveTokens, 1024,
+    'a service window below the supported minimum must be rejected downstream, never rounded up');
 });

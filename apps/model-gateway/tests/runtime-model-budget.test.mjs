@@ -69,7 +69,7 @@ test('cold local metadata caps the request before loading without rewriting the 
   assert.equal(runtime.retrieval.embeddings.status().loaded, false);
 });
 
-test('runtime keeps explicit legacy small values and does not infer cloud limits for local aliases', async t => {
+test('runtime uses conservative automatic fallback and never infers cloud limits for local aliases', async t => {
   const { runtime } = await fixture(t, { baseUrl: 'http://127.0.0.1:1234/v1', protocol: 'openai-completions',
     models: ['gpt-6-astra'], contextWindowTokens: 8192, maxOutputTokens: 2048 });
   const input = { conversationId: 'local-budget-chat', message: 'Continue work', provider: 'budget-test', model: 'gpt-6-astra' };
@@ -78,6 +78,65 @@ test('runtime keeps explicit legacy small values and does not infer cloud limits
   assert.equal(prepared.requestOptions.maxOutputTokens, 2048);
   assert.equal(prepared.contextMetrics.providerMaxInputTokens, undefined);
   assert.equal(prepared.contextMetrics.providerMaxOutputTokens, undefined);
+  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unknown-model-capability');
+});
+
+test('legacy 8192 no longer caps an identified official model; model switches update the effective window', async t => {
+  const { runtime, store } = await fixture(t, { baseUrl: 'https://api.openai.com/v1', protocol: 'openai-responses',
+    models: ['gpt-6-astra', 'gpt-4o'], contextWindowTokens: 8192, maxOutputTokens: 2048 });
+  const first = await runtime.prepare({ conversationId: 'auto-large', message: 'Continue code review',
+    provider: 'budget-test', model: 'gpt-6-astra' }, 'auto-large');
+  assert.equal(first.contextMetrics.contextWindowTokens, 1_050_000);
+  assert.equal(first.contextMetrics.contextWindowResolution.source, 'official-capability');
+  assert.equal(first.contextMetrics.contextWindowResolution.legacyConfiguredTokens, 8192);
+  assert.equal(first.inputBudgetTokens, 913_808);
+  const next = await runtime.prepare({ conversationId: 'auto-switch', message: 'Continue code review',
+    provider: 'budget-test', model: 'gpt-4o' }, 'auto-switch');
+  assert.equal(next.contextMetrics.contextWindowTokens, 128_000);
+  assert.equal(next.requestOptions.maxOutputTokens, 2048);
+  assert.equal((await store.list())[0].contextWindowMode, 'automatic');
+  assert.equal((await store.connectionFor('budget-test')).contextWindowTokens, 8192);
+});
+
+test('trusted local runtime caps automatic context even when the legacy UI field is larger or smaller', async t => {
+  const { runtime } = await fixture(t, { baseUrl: 'http://127.0.0.1:1234/v1', models: ['local'],
+    contextWindowTokens: 2048, maxOutputTokens: 1024 });
+  runtime.localModels.observe = async (_connection, options) => {
+    assert.equal(options.contextTokens, undefined);
+    return { backend: 'ollama', runtimeContextTokens: 4096, configuredContextTokens: 32768,
+      modelMaximumContextTokens: 65536 };
+  };
+  const prepared = await runtime.prepare({ conversationId: 'auto-local', message: 'Review code',
+    provider: 'budget-test', model: 'local' }, 'auto-local');
+  assert.equal(prepared.contextMetrics.contextWindowTokens, 4096);
+  assert.equal(prepared.contextMetrics.contextWindowResolution.source, 'local-runtime');
+  assert.equal(prepared.requestOptions.maxOutputTokens, 1024);
+});
+
+test('unknown or proxy models ignore legacy million-token settings and untrusted model metadata', async t => {
+  const { runtime } = await fixture(t, { baseUrl: 'https://proxy.example/v1', models: ['gpt-6-astra'],
+    contextWindowTokens: 2_000_000, maxOutputTokens: 1024 });
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 1_000_000 });
+  const prepared = await runtime.prepare({ conversationId: 'auto-unknown', message: 'Review code',
+    provider: 'budget-test', model: 'gpt-6-astra' }, 'auto-unknown');
+  assert.equal(prepared.contextMetrics.contextWindowTokens, 8192);
+  assert.equal(prepared.contextMetrics.contextWindowResolution.source, 'conservative-fallback');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unknown-model-capability');
+});
+
+test('a greeting cannot reuse local context metadata after the same provider changes its endpoint', async t => {
+  const { runtime, store } = await fixture(t, { baseUrl: 'http://127.0.0.1:11434/v1', models: ['local'],
+    contextWindowTokens: 8192, maxOutputTokens: 1024 });
+  let observations = 0;
+  runtime.localModels.observe = async () => { observations++; return { backend: 'ollama', runtimeContextTokens: 32768 }; };
+  const input = { conversationId: 'endpoint-cache', message: 'Review code', provider: 'budget-test', model: 'local' };
+  assert.equal((await runtime.prepare(input, input.conversationId)).contextMetrics.contextWindowTokens, 32768);
+  assert.equal((await runtime.prepare({ ...input, message: 'Hello' }, 'same-endpoint-greeting')).contextMetrics.contextWindowTokens, 32768);
+  await store.save({ ...(await store.connectionFor('budget-test')), baseUrl: 'http://127.0.0.1:11435/v1' });
+  const changed = await runtime.prepare({ ...input, message: 'Hello' }, 'changed-endpoint-greeting');
+  assert.equal(changed.contextMetrics.contextWindowTokens, 8192);
+  assert.equal(changed.contextMetrics.contextWindowResolution.source, 'conservative-fallback');
+  assert.equal(observations, 1, 'greetings remain observation free');
 });
 
 test('a small configured output still respects the independent official input maximum', async t => {

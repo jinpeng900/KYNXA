@@ -198,6 +198,19 @@ export class IndexJobService {
     return pending;
   }
 
+  /** Observe admission for the current root without resuming or creating work.
+   * 观察当前根目录的接纳状态，不恢复或新建任务。 */
+  async automaticState(projectId) {
+    await this.initialize();
+    const scope = await this.scopeIdentity?.(projectId);
+    const stopped = this.automaticStops.get(projectId);
+    if (stopped && (!stopped.automaticRebuildScope || stopped.automaticRebuildScope === scope))
+      return { state: 'blocked', reason: 'cancelled-by-user', jobId: stopped.jobId };
+    const active = [...this.active.values()].find(job => job.projectId === projectId &&
+      !job.controller.signal.aborted && job.automaticRebuildScope === scope);
+    return active ? { state: 'scheduled', jobId: active.jobId } : { state: 'unchanged' };
+  }
+
   async run(active) {
     const signal = active.controller.signal;
     try {

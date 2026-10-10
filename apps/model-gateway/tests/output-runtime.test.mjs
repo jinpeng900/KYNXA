@@ -36,6 +36,9 @@ async function fixture(t, protocol) {
   await store.save({ providerId: 'output-model', displayName: 'Output model', protocol,
     baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, models: ['model'], contextWindowTokens: 128_000, maxOutputTokens: 32_768 });
   const runtime = new ModelRuntime({ modelStore: store, dataHome: root });
+  // This protocol fixture declares its service capability independently of the legacy UI field.
+  // 此协议夹具独立声明服务能力，不再把旧 UI 字段当作运行时窗口。
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 128_000 });
   isolateFixtureMcpCatalog(runtime.tools);
   t.after(async () => { await runtime.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const input = { conversationId: randomUUID(), requestId: randomUUID(), userMessageId: randomUUID(), provider: 'output-model', model: 'model', message: '现在写代码' };

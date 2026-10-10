@@ -2,6 +2,8 @@
 // ceilings, not connection defaults or promises of access for a particular key.
 // Exact IDs only: do not infer limits for fine-tunes, proxies or future aliases.
 // 此能力快照核对于 2026-10-04，只表示能力上限，不是连接默认值，也不保证任意密钥都有使用权限。
+import { isLocalEndpoint } from './store.mjs';
+
 const providers = new Map();
 
 function register(host, model, contextWindowTokens, maxOutputTokens, source, { aliases = [], maxInputTokens } = {}) {
@@ -84,4 +86,31 @@ export function resolveModelCapabilities(connection, model) {
   if (!['', '/', '/v1', '/v1/'].includes(endpoint.pathname)) return {};
   const capability = providers.get(endpoint.hostname)?.get(model);
   return capability ? { ...capability } : {};
+}
+
+/** Select from verified endpoint/model limits, never the legacy UI field or arbitrary /models attributes.
+ * 依据已核验端点/模型能力选择窗口，不使用旧 UI 字段或任意 /models 属性。 */
+export function resolveAutomaticContext(connection, model, localModel = {}, capabilities = resolveModelCapabilities(connection, model)) {
+  let local = false;
+  try { local = isLocalEndpoint(new URL(connection.baseUrl)); } catch { /* Invalid endpoints have no metadata authority. / 无效端点没有元数据授权。 */ }
+  const trustedLocal = local && localModel.backend === 'ollama';
+  const validLimit = value => Number.isSafeInteger(value) && value > 0 && value <= 2_000_000;
+  const localLimits = [localModel.runtimeContextTokens, localModel.configuredContextTokens, localModel.modelMaximumContextTokens];
+  const invalidMetadata = trustedLocal && localLimits.some(value => value != null && !validLimit(value));
+  const observed = trustedLocal ? [
+    validLimit(localModel.runtimeContextTokens) ? ['local-runtime', localModel.runtimeContextTokens]
+      : ['local-configured', localModel.configuredContextTokens],
+    ['local-model-metadata', localModel.modelMaximumContextTokens]
+  ].filter(([, value]) => validLimit(value)) : [];
+  const official = validLimit(capabilities.contextWindowTokens) ? capabilities.contextWindowTokens : null;
+  const candidates = [...observed, ...(official ? [['official-capability', official]] : []),
+    ...(invalidMetadata ? [['conservative-fallback', 8192]] : [])];
+  const selected = candidates.reduce((current, candidate) => !current || candidate[1] < current[1] ? candidate : current, null);
+  const effectiveTokens = selected?.[1] ?? 8192;
+  return { mode: 'automatic', effectiveTokens, source: selected?.[0] ?? 'conservative-fallback',
+    reason: invalidMetadata ? 'invalid-local-capability-metadata' : selected ? null
+      : trustedLocal ? 'local-window-unavailable' : 'unknown-model-capability',
+    ...(official ? { capabilitySource: capabilities.source } : {}),
+    legacyConfiguredTokens: connection.contextWindowTokens ?? null, legacyFieldIgnored: true,
+    limits: Object.fromEntries(candidates) };
 }
