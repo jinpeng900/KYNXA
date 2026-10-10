@@ -246,6 +246,14 @@ export class ConversationStore {
 
   catalog() { return this._run(() => this._fullCatalog()); }
 
+  /** Read canonical work bindings without loading private message bodies for background preparation.
+   * 后台准备只读取正式工作绑定元信息，不为目录发现加载私人聊天正文。 */
+  projectBindings() {
+    return this._run(() => ({ Revision: this.document.Revision, Projects: this.document.Projects.map(value => ({
+      Id: value.Id, FolderPath: value.FolderPath, IsArchived: value.IsArchived,
+      IsFolderlessWorkspace: value.IsFolderlessWorkspace })) }));
+  }
+
   readMessages(conversationId) {
     return this._readMessages(conversationId, false);
   }

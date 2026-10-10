@@ -93,7 +93,7 @@ public partial class App : Application
             {
                 _window.AppWindow.Resize(new SizeInt32(width, 760));
                 await Task.Delay(100);
-                foreach (string id in new[] { "RetrievalRerankMode", "RetrievalWebMode", "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage", "RetrievalRebuildIndex" })
+                foreach (string id in new[] { "RetrievalRerankMode", "RetrievalWebMode", "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage" })
                 {
                     var control = NativeUi.ById<FrameworkElement>(_root, id);
                     var bounds = control.TransformToVisual(_root).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
@@ -121,9 +121,11 @@ public partial class App : Application
                 "Project sources are manageable in their own settings window.");
             Check(!NativeUi.Descendants<Button>(_root).Any(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(button) == "RetrievalRemoveSource-synthetic_global"),
                 "Inherited global sources cannot be accidentally removed from the project window.");
-            Toggle("RetrievalMountedFolder").IsChecked = true;
-            await WaitAsync(() => _api.Project.IndexingSources.MountedFolder.Enabled && !_window!.HasPendingChanges,
-                "Mounted-folder indexing is an explicit per-project selection.");
+            Check(!NativeUi.Descendants<CheckBox>(_root).Any(control =>
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(control) == "RetrievalMountedFolder"),
+                "Mounted work does not require a separate indexing switch.");
+            Check(_api.Project.IndexingSources.MountedFolder.Enabled && Button("RetrievalRebuildIndex").Visibility == Visibility.Collapsed,
+                "Mounted work prepares automatically without a normal rebuild action.");
             Check(_api.Project.Overrides.Local is null && _api.Project.Overrides.Web is null, "Folder indexing does not replace inherited web and local settings.");
             Toggle("RetrievalInheritGlobal").IsChecked = false;
             await WaitAsync(() => Picker("RetrievalWebDepth").IsEnabled && !_window!.HasPendingChanges, "A project can opt into its own settings.");
@@ -133,12 +135,16 @@ public partial class App : Application
             Toggle("RetrievalInheritGlobal").IsChecked = true;
             await WaitAsync(() => _api.Project.Overrides.Web is null && Picker("RetrievalWebDepth").SelectedIndex == 1 && !_window!.HasPendingChanges,
                 "Restoring inheritance removes the project override.");
-            NativeUi.Invoke(Button("RetrievalRebuildIndex"));
-            await WaitAsync(() => _api.Rebuilds == 1 && Button("RetrievalCancelIndex").Visibility == Visibility.Visible && !_window!.HasPendingChanges,
-                "Rebuild starts a cancellable background job.");
+            await WaitAsync(() => Button("RetrievalCancelIndex").Visibility == Visibility.Visible && !_window!.HasPendingChanges,
+                "Automatic preparation remains cancellable without a rebuild action.");
             NativeUi.Invoke(Button("RetrievalCancelIndex"));
             await WaitAsync(() => _api.CancelledJobs == 1 && Button("RetrievalCancelIndex").Visibility == Visibility.Collapsed && !_window!.HasPendingChanges,
                 "Cancelling the owned index job leaves the settings window usable.");
+            Check(Button("RetrievalRebuildIndex").Visibility == Visibility.Visible, "Only cancelled preparation offers explicit recovery.");
+            _api.Job = _api.Job with { Status = "running" };
+            NativeUi.Invoke(Button("RetrievalRebuildIndex"));
+            await WaitAsync(() => _api.Rebuilds == 1 && Button("RetrievalRebuildIndex").Visibility == Visibility.Collapsed && !_window!.HasPendingChanges,
+                "Resuming preparation hides the recovery action after accepting a running job.");
             await NativeWindowCapture.CaptureAsync(_window!, Path.Combine(_directory, "project-zh.png"));
             passed = true;
         }

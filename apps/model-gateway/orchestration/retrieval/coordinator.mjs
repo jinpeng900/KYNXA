@@ -72,6 +72,12 @@ export class RetrievalCoordinator {
     this.queue = Promise.resolve(); this.closed = false;
     this.memoryIndexPending = new Map();
     this.memoryIndexState = { publishedUpdates: 0, partialUpdates: 0, skippedUpdates: 0, deferred: 0, errorCode: null };
+    this.mountedProjectBindings = new Map();
+    this.mountedProjectPreparation = null;
+    this.pendingProjectCatalog = null;
+    this.mountedProjectRefreshRequested = false;
+    this.mountedProjectCatalogRevision = -1;
+    this.mountedProjectPreparationDiagnostic = null;
     this.shutdown = new AbortController();
     this.sourceService = new SourceIndexService({ library: this.library, index: this.index, jobs: this.jobs,
       resourceService: this.resources,
@@ -105,6 +111,71 @@ export class RetrievalCoordinator {
   }
 
   async effective(projectId) { return this.settings.getEffective(projectId); }
+
+  /** Coalesce committed catalog snapshots; admission is background work, never part of saving a mount.
+   * 合并已提交的目录快照；后台只接纳资料任务，挂载保存不等待扫描或向量化。 */
+  scheduleMountedProjects(catalog) {
+    if (this.closed) return;
+    if (!catalog) this.mountedProjectRefreshRequested = true;
+    if (catalog && catalog.Revision >= (this.pendingProjectCatalog?.Revision ?? this.mountedProjectCatalogRevision))
+      this.pendingProjectCatalog = { Revision: catalog.Revision, Projects: catalog.Projects.map(project => ({
+        Id: project.Id, FolderPath: project.FolderPath, IsArchived: project.IsArchived,
+        IsFolderlessWorkspace: project.IsFolderlessWorkspace })) };
+    if (this.mountedProjectPreparation) return;
+    this.mountedProjectPreparation = Promise.resolve().then(async () => {
+      while (!this.closed) {
+        // Clear only the work being claimed; a newer snapshot arriving during IO belongs to the next pass.
+        // 只清除本轮认领的请求；I/O 期间到达的新目录快照由下一轮处理，不能被旧读取覆盖。
+        let current = this.pendingProjectCatalog;
+        this.pendingProjectCatalog = null;
+        const refresh = this.mountedProjectRefreshRequested;
+        this.mountedProjectRefreshRequested = false;
+        if (!current && refresh) current = await this.conversations.projectBindings();
+        if (!current) break;
+        if (current.Revision >= this.mountedProjectCatalogRevision) {
+          this.mountedProjectCatalogRevision = current.Revision;
+          const retained = new Set(current.Projects.map(project => project.Id.toLowerCase()));
+          for (const projectId of this.mountedProjectBindings.keys()) if (!retained.has(projectId)) {
+            this.sourceService.forgetMounted(projectId);
+            this.mountedProjectBindings.delete(projectId);
+          }
+          for (const project of current.Projects) {
+            this.shutdown.signal.throwIfAborted();
+            const projectId = project.Id.toLowerCase();
+            if (!project.FolderPath || project.IsArchived || project.IsFolderlessWorkspace) {
+              this.sourceService.forgetMounted(projectId);
+              this.mountedProjectBindings.delete(projectId);
+              continue;
+            }
+            try {
+              const settings = await this.effective(projectId);
+              this.shutdown.signal.throwIfAborted();
+              const binding = JSON.stringify([project.FolderPath, settings.projectIndexing.bindingRevision,
+                settings.local.enabled, settings.local.semantic, settings.local.embeddingProfileId,
+                settings.local.embeddingDevicePolicy, settings.local.vectorBackend, settings.local.indexing, settings.local.ann]);
+              const previousBinding = this.mountedProjectBindings.get(projectId);
+              if (previousBinding === binding) continue;
+              if (previousBinding !== undefined) this.sourceService.forgetMounted(projectId);
+              if (settings.local.enabled !== false)
+                await this.rebuild({ projectId, dirty: true, automatic: true });
+              this.mountedProjectBindings.set(projectId, binding);
+              if (this.mountedProjectPreparationDiagnostic?.projectId === projectId)
+                this.mountedProjectPreparationDiagnostic = null;
+            } catch (error) {
+              this.shutdown.signal.throwIfAborted();
+              this.mountedProjectPreparationDiagnostic = { code: error.code ?? 'WORK_PREPARATION_FAILED', projectId };
+            }
+          }
+        }
+      }
+    }).catch(error => {
+      if (!this.closed) this.mountedProjectPreparationDiagnostic = { code: error.code ?? 'WORK_PREPARATION_FAILED' };
+    }).finally(() => {
+      this.mountedProjectPreparation = null;
+      if (!this.closed && (this.pendingProjectCatalog || this.mountedProjectRefreshRequested))
+        this.scheduleMountedProjects(this.pendingProjectCatalog ?? undefined);
+    });
+  }
 
   /** Apply only retrieval model policy; draining old sessions never cancels accepted work or touches generation/MCP.
    * 仅应用检索模型策略；旧会话排空不取消已接纳请求，也不修改生成模型或 MCP。
@@ -150,6 +221,8 @@ export class RetrievalCoordinator {
       resources: await this.resources.snapshot(), vectorSpacePolicy: this.spacePolicy.status(jobs),
       externalModels: this.externalModelStatus?.() ?? [],
       memoryIndexing: { ...this.memoryIndexState, pending: this.memoryIndexPending?.size ?? 0 },
+      mountedWorkPreparation: { automatic: true, scheduling: Boolean(this.mountedProjectPreparation),
+        ...(this.mountedProjectPreparationDiagnostic ? { diagnostic: this.mountedProjectPreparationDiagnostic } : {}) },
       deployment: { platform: 'windows', gpu: 'single-nvidia-dml-verified', otherPlatformsSupported: false } };
   }
 
@@ -769,6 +842,7 @@ export class RetrievalCoordinator {
     this.closed = true;
     this.memoryIndexPending.clear();
     this.shutdown.abort();
+    await this.mountedProjectPreparation;
     await this.spacePolicy.close();
     const closures = await Promise.allSettled([this.sourceService.close({
       releaseInference: async () => {

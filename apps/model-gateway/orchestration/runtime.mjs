@@ -111,6 +111,7 @@ export class ModelRuntime {
 
   initializeExtensionStorage(options) {
     if (!this.extensionInitialization) this.extensionInitialization = ensureExtensionLayout(this.extensionRoot, options)
+      .then(result => { this.retrieval.scheduleMountedProjects(); return result; })
       .catch(error => { this.extensionInitialization = null; throw error; });
     return this.extensionInitialization;
   }

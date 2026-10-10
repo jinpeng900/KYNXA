@@ -132,6 +132,16 @@ export class SourceIndexService {
   upsert(...args) { return this.indexer.upsert(...args); }
   invalidateMounted(projectId) { this.sync.mountedCache.delete(projectId?.toLowerCase() ?? null); }
 
+  forgetMounted(projectId) {
+    const key = projectId?.toLowerCase() ?? null;
+    this.lifecycle.supersede(key);
+    this.sync.watchers.get(key)?.close();
+    this.sync.watchers.delete(key);
+    this.sync.mountedCache.delete(key);
+    this.sync.mountedStates.delete(key);
+    this.corpusSyncCache.clear();
+  }
+
   clearSourceCaches() {
     this.sync.libraryCache.clear();
     this.sync.conversationCache.clear();

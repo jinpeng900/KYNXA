@@ -376,7 +376,7 @@ test('chat history never includes sibling transcripts or the current question, a
   await assert.rejects(retrieval.read(context, { sourceRef: reference }), /不存在|撤销/);
 });
 
-test('mounted sources update by content version, honor gitignore and disappear immediately when indexing is disabled', async t => {
+test('mounted sources update by content version, honor gitignore and disappear immediately after unmounting', async t => {
   const f = await toolFixture(t), retrieval = coordinator(f); t.after(() => retrieval.close());
   // This case isolates mounted lexical freshness; deliberately absent embedding assets are covered separately.
   // 本例独立验证挂载资料词法时效，刻意缺失嵌入资产的降级另行覆盖。
@@ -393,7 +393,9 @@ test('mounted sources update by content version, honor gitignore and disappear i
   const update = await retrieval.rebuild({ projectId: f.projectId }); assert.equal((await waitJob(retrieval, update.jobId)).status, 'completed');
   assert.ok((await retrieval.search(context, { query: '版本乙功能' })).items.some(item => /版本乙/u.test(item.excerpt)));
   await assert.rejects(retrieval.read(context, { sourceRef: old.sourceRef }), /过期|更改|撤销/);
-  await retrieval.settings.patchProject(f.projectId, { expectedRevision: 1, patch: { indexingSources: { mountedFolder: { enabled: false } } } });
+  const catalog = await f.conversations.catalog();
+  catalog.Projects.find(project => project.Id === f.projectId).FolderPath = null;
+  await f.conversations.saveCatalog(catalog);
   assert.equal((await retrieval.search(context, { query: '版本乙功能' })).items.length, 0);
   await assert.rejects(retrieval.read(context, { sourceRef: old.sourceRef }), /不存在|撤销|更改/);
 });

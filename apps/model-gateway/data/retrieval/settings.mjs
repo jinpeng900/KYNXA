@@ -142,7 +142,7 @@ function projectPatch(value) {
 
 function defaultProject(projectId) {
   return { schemaVersion: RETRIEVAL_SCHEMA_VERSION, projectId, revision: 0, overrides: {},
-    indexingSources: { mountedFolder: { enabled: false, bindingRevision: 0 }, knowledgeIds: [] } };
+    indexingSources: { mountedFolder: { enabled: true, bindingRevision: 0 }, knowledgeIds: [] } };
 }
 
 function validateDocument(value, projectId = null) {
@@ -164,6 +164,9 @@ function validateDocument(value, projectId = null) {
   const clean = projectPatch({ indexingSources: { mountedFolder: { enabled: sources.mountedFolder.enabled },
     knowledgeIds: sources.knowledgeIds ?? [] } }).indexingSources;
   clean.mountedFolder.bindingRevision = integer(sources.mountedFolder.bindingRevision, 0, Number.MAX_SAFE_INTEGER, 'bindingRevision');
+  // Mounted work is prepared automatically; the legacy opt-in field no longer gates source discovery.
+  // 挂载工作自动准备资料；兼容旧配置字段，但旧版默认关闭值不再阻止来源发现。
+  clean.mountedFolder.enabled = true;
   return { ...defaults, revision: value.revision, overrides, indexingSources: clean };
 }
 
@@ -255,7 +258,7 @@ export class RetrievalSettingsStore {
       const project = await this._read(filename, relationship.projectId);
       const sources = project.indexingSources;
       return { ...mergeSettings(global, project.overrides), projectId: relationship.projectId, projectRevision: project.revision,
-        projectIndexing: { mountedFolder: sources.mountedFolder.enabled && !relationship.isFolderlessWorkspace,
+        projectIndexing: { mountedFolder: Boolean(relationship.folderPath) && !relationship.isFolderlessWorkspace && !relationship.isArchived,
           bindingRevision: sources.mountedFolder.bindingRevision, knowledgeIds: [...sources.knowledgeIds] } };
     });
   }
@@ -293,6 +296,7 @@ export class RetrievalSettingsStore {
             : { ...current.overrides[name], ...mutation.patch.overrides?.[name] }])),
         indexingSources: { ...current.indexingSources, ...mutation.patch.indexingSources,
           mountedFolder: { ...current.indexingSources.mountedFolder, ...mutation.patch.indexingSources?.mountedFolder } } };
+      next.indexingSources.mountedFolder.enabled = true;
       if (current.indexingSources.mountedFolder.enabled !== next.indexingSources.mountedFolder.enabled)
         next.indexingSources.mountedFolder.bindingRevision++;
       await this._write(filename, next);

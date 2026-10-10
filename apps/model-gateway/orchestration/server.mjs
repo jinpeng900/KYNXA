@@ -182,9 +182,12 @@ export function createModelServer(options = {}) {
       if (request.method === 'GET' && relationshipRoute)
         return sendJson(response, 200, await modelRuntime.conversations.relationships(relationshipRoute[1]));
       if (pathname === '/api/conversations/catalog') {
-        if (request.method === 'GET') return sendJson(response, 200, await modelRuntime.conversations.catalog());
-        if (request.method === 'PUT') return sendJson(response, 200,
-          await modelRuntime.conversations.saveCatalog(await readJsonBody(request, 32 * 1024 * 1024)));
+        if (request.method === 'GET' || request.method === 'PUT') {
+          const catalog = request.method === 'GET' ? await modelRuntime.conversations.catalog()
+            : await modelRuntime.conversations.saveCatalog(await readJsonBody(request, 32 * 1024 * 1024));
+          modelRuntime.retrieval?.scheduleMountedProjects?.(catalog);
+          return sendJson(response, 200, catalog);
+        }
       }
       if (request.method === 'GET' && pathname === '/api/models')
         return sendJson(response, 200, { providers: await modelStore.list() });

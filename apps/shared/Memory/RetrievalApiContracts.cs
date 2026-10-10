@@ -61,7 +61,7 @@ public sealed record ProjectRetrievalSettingsDocument(int SchemaVersion, Guid Pr
 public sealed record RetrievalMountedFolderPatch(bool Enabled);
 public sealed record RetrievalIndexingSourcesPatch(RetrievalMountedFolderPatch MountedFolder);
 public sealed record ProjectRetrievalSettingsPatch(RetrievalSettingsOverrides Overrides,
-    RetrievalIndexingSourcesPatch IndexingSources);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalIndexingSourcesPatch? IndexingSources = null);
 public sealed record ProjectRetrievalSettingsUpdateRequest(long ExpectedRevision, ProjectRetrievalSettingsPatch Patch);
 
 public sealed record RetrievalEmbeddingStatus(string State, string ProfileId, int Dimensions, bool Available,
@@ -111,7 +111,8 @@ public sealed record RetrievalIndexRebuildRequest(Guid? ProjectId = null);
 public sealed record RetrievalIndexJob(string JobId, string Status, int CompletedSources, int TotalSources,
     string? Error = null, DateTimeOffset? StartedAt = null, DateTimeOffset? FinishedAt = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalCoverageStatus? Coverage = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Semantic = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? ProjectId = null);
 
 // Status stays a string for forward compatibility, including partial; coverage describes actual eligible-source work.
 // 状态保留字符串兼容未来值和 partial；覆盖统计只说明实际来源处理，不代表答案或任务正确性。

@@ -39,6 +39,7 @@ async function dispatchRetrievalRoute(request, response, url, retrieval, signal)
       }
       const result = await retrieval.settings.patchGlobal(input);
       await retrieval.configureInferenceSettings?.(null, { previous });
+      retrieval.scheduleMountedProjects?.();
       // Resume only stopped scopes whose effective state really changed; explicit project overrides still apply.
       // 仅恢复有效状态确实从关闭变为开启的已取消范围，工作独立覆盖仍然生效。
       for (const [projectId, scopedPrevious] of previousScopes) {
