@@ -10,7 +10,7 @@ import { ModelStore } from '../models/store.mjs';
 import { storedReplyDurationMs } from '../platform/reply-timing.mjs';
 import { createModelServer } from '../server.mjs';
 import { readSse } from '../models/streaming.mjs';
-import { toolFixture } from './tool-fixture.mjs';
+import { toolFixture, fixtureDeclaration } from './tool-fixture.mjs';
 
 function text(protocol, content, truncated = false) {
   if (protocol === 'anthropic-messages') return { stop_reason: truncated ? 'max_tokens' : 'end_turn', content: [{ type: 'text', text: content }] };
@@ -28,18 +28,21 @@ async function fixture(t, protocol, { tool = false, truncated = false, preparati
   const f = await toolFixture(t); await writeFile(join(f.workspace, 'note.txt'), 'Public tool output');
   let requests = 0;
   const upstream = createServer(async (request, response) => {
+    try {
     let raw = ''; for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw); requests++;
     await delay(80);
-    const descriptor = body.tools?.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+    const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
     const result = tool && requests === 1 ? call(protocol, descriptor.name ?? descriptor.function.name) : text(protocol, 'Final answer.', truncated);
     response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(result));
+    } catch (error) { response.writeHead(500); response.end(JSON.stringify({ error: error.message })); }
   });
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
   const store = new ModelStore({ dataHome: f.dataHome });
   await store.save({ providerId: 'duration-fixture', displayName: 'Fixture', protocol, baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
     models: ['model'], contextWindowTokens: 32768, maxOutputTokens: 2048 });
   const runtime = new ModelRuntime({ modelStore: store, dataHome: f.dataHome, conversationStore: f.conversations, toolService: f.service });
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 32768 });
   if (preparationDelayMs) {
     const contextFor = runtime.memory.contextFor.bind(runtime.memory);
     runtime.memory.contextFor = async (...args) => { await delay(preparationDelayMs); return contextFor(...args); };

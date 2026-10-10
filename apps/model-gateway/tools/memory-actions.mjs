@@ -9,7 +9,7 @@ export const memoryActionDescriptors = [
       scopes: { type: 'array', maxItems: 3, items: scope }, query: { type: 'string', maxLength: 2000 },
       offset: { type: 'integer', minimum: 0, maximum: 3000 },
       limit: { type: 'integer', minimum: 1, maximum: 50 } } } },
-  { name: 'memory.propose', source: 'builtin', modelExposure: 'on-demand', description: 'Draft only; cite exact current-chat quotes. Update/delete needs unchanged memory.read target. noop writes nothing; user confirms. Meaning remains revisable.',
+  { name: 'memory.propose', source: 'builtin', modelExposure: 'on-demand', description: 'Drafts need user confirmation and exact chat quotes. update/delete: unchanged memory.read target. noop: no writes.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['action', 'reason', 'isInference'], properties: {
       action: { type: 'string', enum: ['add', 'update', 'delete', 'noop'] }, scope,
       scopeId: boundedString(64), content: boundedString(4000), kind: { type: 'string', enum: ['fact', 'preference', 'decision'] },

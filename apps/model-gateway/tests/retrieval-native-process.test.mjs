@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -137,13 +137,22 @@ test('an idle inference process retires after its owning parent exits', { timeou
   let stdout = '', stderr = '', ownedPid;
   owner.stdout.on('data', chunk => { stdout += chunk; });
   owner.stderr.on('data', chunk => { stderr += chunk; });
-  const isAlive = () => {
-    try { process.kill(ownedPid, 0); return true; }
-    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  const isAlive = async () => {
+    try {
+      process.kill(ownedPid, 0);
+      if (process.platform === 'linux') {
+        // Container PID 1 may leave an exited orphan unreaped; a zombie cannot run or hold model resources.
+        // 容器 PID 1 可能未回收已退出孤儿；僵尸进程不能执行或占用模型资源，不等于存活。
+        const stat = await readFile(`/proc/${ownedPid}/stat`, 'utf8');
+        const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+        if (state === 'Z') { t.diagnostic(`Owned native process ${ownedPid} exited; awaiting container PID 1 reaping.`); return false; }
+      }
+      return true;
+    } catch (error) { if (['ESRCH', 'ENOENT'].includes(error.code)) return false; throw error; }
   };
-  t.after(() => {
+  t.after(async () => {
     if (owner.exitCode === null) owner.kill('SIGKILL');
-    if (ownedPid && isAlive()) process.kill(ownedPid, 'SIGKILL');
+    if (ownedPid && await isAlive()) process.kill(ownedPid, 'SIGKILL');
   });
   const exitCode = await new Promise((resolveExit, rejectExit) => {
     owner.once('error', rejectExit);
@@ -153,8 +162,8 @@ test('an idle inference process retires after its owning parent exits', { timeou
   ownedPid = Number(stdout);
   assert.ok(Number.isInteger(ownedPid) && ownedPid > 0 && ownedPid !== process.pid);
   const deadline = Date.now() + 2000;
-  while (isAlive() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(isAlive(), false, 'the IPC disconnect retires the owned idle process');
+  while (await isAlive() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(await isAlive(), false, 'the IPC disconnect retires the owned idle process');
 });
 
 // Real model acceptance is opt-in and uses only synthetic text plus already pinned local assets.

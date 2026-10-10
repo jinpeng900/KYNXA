@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { ConversationStore } from '../data/conversations.mjs';
 import { ToolService } from '../tools/tool-service.mjs';
+import { wireCatalog } from '../models/tool-protocols.mjs';
+
+/** Match immutable protocol identities, never mutable description text.
+ * 按不可变协议身份匹配，不依赖可变描述文案。 */
+export function fixtureDeclaration(tools, logicalName) {
+  const name = wireCatalog([{ name: logicalName }])[0].wireName;
+  return tools?.find(tool => (tool.function ?? tool).name === name);
+}
 
 function fixtureMcpServer(server) {
   if (server.origin !== 'official' || server.command === process.execPath) return true;

@@ -14,7 +14,7 @@ import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { readSse } from '../models/streaming.mjs';
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { wireCatalog } from '../models/tool-protocols.mjs';
-import { isolateFixtureMcpCatalog } from './tool-fixture.mjs';
+import { isolateFixtureMcpCatalog, fixtureDeclaration } from './tool-fixture.mjs';
 
 const importRoot = await mkdtemp(join(tmpdir(), 'kynxa-tool-import-'));
 const originalHome = process.env.KYNXA_DATA_HOME;
@@ -66,7 +66,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
         if (protocol === 'openai-responses') assert.ok(history.some(x => x.encrypted_content === 'private-fixture-reasoning'));
         result = nativeText(protocol, `Observed tool result: ${toolResult}`);
       } else {
-        const descriptor = body.tools.find(x => (x.description ?? x.function?.description).startsWith(operation + ':'));
+        const descriptor = fixtureDeclaration(body.tools, operation);
         assert.ok(descriptor, 'model actually receives declared tool');
         result = nativeTool(protocol, descriptor.name ?? descriptor.function.name,
           operation === 'filesystem.write' ? { path: 'made.txt', content: 'via-tool', expectedHash: null }
@@ -90,6 +90,7 @@ async function fixture(t, protocol = 'openai-completions', operation = 'filesyst
   await conversations.saveCatalog({ Revision: (await conversations.catalog()).Revision, Projects: [{ Id: projectId, Name: 'Work', FolderPath: workspace,
     Chats: [{ Id: id, Title: 'Tools', Messages: [{ Id: randomUUID(), Role: 'user', Content: 'Synthetic initial message', Status: 'completed' }] }] }], Chats: [] });
   const runtime = new ModelRuntime({ modelStore: models, dataHome, conversationStore: conversations });
+  runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 32768 });
   isolateFixtureMcpCatalog(runtime.tools);
   const gateway = createModelServer({ modelStore: models, modelRuntime: runtime }); const address = await listen(gateway);
   t.after(async () => {
@@ -107,7 +108,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const f = await fixture(t, protocol);
     f.setPlan((body, _marker, round) => {
       if (round >= 3) return nativeText(protocol, 'Short final answer.');
-      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
       const result = nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' });
       if (protocol === 'anthropic-messages') {
         result.content.unshift({ type: 'text', text: `Stage ${round}.` });
@@ -153,7 +154,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const content = await f.runtime.reply(f.input);
     assert.ok(content.includes(f.marker), content); assert.equal(f.seen.length, 2);
     const offered = f.seen[0].tools;
-    const chosenIndex = offered.findIndex(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+    const chosenIndex = offered.indexOf(fixtureDeclaration(offered, 'filesystem.read'));
     assert.ok(chosenIndex > 0, 'the model can choose an offered tool below the first candidate');
     const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
     assert.equal(saved.ToolActivities[0].name, 'filesystem.read');
@@ -190,7 +191,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     f.setPlan(async (body, marker, round) => {
       const messages = body.messages ?? body.input;
       if (round === 1) {
-        const descriptor = body.tools.find(tool => (tool.description ?? tool.function?.description).startsWith('filesystem.read:'));
+        const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
         return nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'large.txt', maxChars: 64000 });
       }
       assert.equal(round, 2);
@@ -239,9 +240,9 @@ test('a model discovers and calls a real official-SDK MCP server, then consumes 
       return nativeText('openai-completions', `Observed tool result: ${observation}`);
     }
     const operation = round === 1 ? 'tool.search' : round === 2 ? 'tool.load' : 'mcp.synthetic.echo';
-    const descriptor = body.tools.find(tool => tool.function.description.startsWith(operation + ':'));
+    const descriptor = fixtureDeclaration(body.tools, operation);
     assert.ok(descriptor, `The actual request declares ${operation}.`);
-    if (round === 1) assert.ok(!body.tools.some(tool => tool.function.description.startsWith('mcp.synthetic.echo:')),
+    if (round === 1) assert.ok(!fixtureDeclaration(body.tools, 'mcp.synthetic.echo'),
       'A cold unrelated service has not fabricated tool schemas.');
     if (round === 2) {
       assert.ok(observation.servers.some(server => server.loadName === 'mcp.synthetic' && server.executable === false));
@@ -294,8 +295,8 @@ test('a real model HTTP loop discovers, loads and executes a deferred tool from 
     assert.ok(body.tools.length <= 96);
     const name = round === 1 ? 'tool.search' : round === 2 ? 'tool.load' : target;
     if (round === 4) return nativeText('openai-completions', body.messages.at(-1).content);
-    if (round === 1) assert.ok(!body.tools.some(tool => tool.function.description.startsWith(target + ':')));
-    const descriptor = body.tools.find(tool => tool.function.description.startsWith(name + ':'));
+    if (round === 1) assert.ok(!fixtureDeclaration(body.tools, target));
+    const descriptor = fixtureDeclaration(body.tools, name);
     assert.ok(descriptor, 'model receives the selected declaration in round ' + round);
     const args = round === 1 ? { query: 'large_099' } : round === 2 ? { names: [target] }
       : { arguments: { value: marker }, policy: { reason: 'Call the requested user-enabled synthetic tool' } };
@@ -326,6 +327,7 @@ test('tight model budgets preserve plain chat when tool definitions cannot fit',
   const f = await fixture(t);
   const configured = await f.runtime.store.connectionFor(f.input.provider);
   f.runtime.store.connectionFor = async () => ({ ...configured, contextWindowTokens: 2048 });
+  f.runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 2048 });
   f.setPlan(body => { assert.equal(body.tools, undefined); return nativeText('openai-completions', 'Text fallback stays usable'); });
   const answer = await f.runtime.reply({ ...f.input, message: 'x'.repeat(1000) });
   assert.equal(answer, 'Text fallback stays usable'); assert.equal(f.seen.length, 1);
@@ -437,7 +439,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       if (round === 1) return nativeTool(protocol, 'not_a_declared_tool', { path: 'must-not-execute.txt' });
       assert.ok(JSON.stringify(body.messages ?? body.input).includes('MODEL_TOOL_UNAVAILABLE'));
       if (round === 2) {
-        const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+        const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
         return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), 'call_2');
       }
       return nativeText(protocol, `Recovered with verified result ${marker}`);
@@ -485,7 +487,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       if (round === 1 || round === 3)
         return withCallId(protocol, nativeTool(protocol, `unavailable_${round}`, {}), `missing_${round}`);
       if (round === 2 || round === 4) {
-        const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+        const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
         assert.ok(descriptor, 'a recovered round must retain tools for a later unrelated lookup failure');
         return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
       }
@@ -505,7 +507,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     f.setPlan((body, marker, round) => {
       if (round === 2) return withCallId(protocol, nativeTool(protocol, 'unavailable_later', {}), 'missing_2');
       if (round >= 4) return nativeText(protocol, `Mixed-round progress retained ${marker}`);
-      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
       assert.ok(descriptor, 'successful work in a mixed round breaks the unavailable-call streak');
       const read = withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
       if (round === 3) return read;
@@ -533,7 +535,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     f.setPlan((body, marker, round) => {
       if (round >= 3) return nativeText(protocol, `Continued safely with ${marker}`);
       if (round === 2) assert.match(JSON.stringify(body.messages ?? body.input), /KYNXA_TOOL_CONFIGURATION_RECOVERY/);
-      const descriptor = body.tools.find(item => (item.description ?? item.function?.description).startsWith('filesystem.read:'));
+      const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
       return withCallId(protocol, nativeTool(protocol, descriptor.name ?? descriptor.function.name, { path: 'note.txt' }), `read_${round}`);
     });
     assert.ok((await f.runtime.reply(f.input)).includes(f.marker));
@@ -578,7 +580,7 @@ test('a round decodes its exact declared catalog when availability changes while
   f.runtime.tools.modelCatalog = context => expired ? [] : originalCatalog(context);
   f.setPlan((body, marker, round) => {
     if (round > 1) return nativeText('openai-completions', `Verified ${marker}`);
-    const descriptor = body.tools.find(item => item.function.description.startsWith('filesystem.read:'));
+    const descriptor = fixtureDeclaration(body.tools, 'filesystem.read');
     expired = true;
     return nativeTool('openai-completions', descriptor.function.name, { path: 'note.txt' });
   });
@@ -595,8 +597,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const args = { path: 'made.txt', content: 'via-tool', expectedHash: null };
     f.setPlan((body, _marker, round) => {
       if (round === 4) return nativeText(protocol, 'Recovered write preserved.');
-      if (round === 1) writeName = body.tools.find(item =>
-        (item.description ?? item.function?.description).startsWith('filesystem.write:'));
+      if (round === 1) writeName = fixtureDeclaration(body.tools, 'filesystem.write');
       const native = withCallId(protocol, nativeTool(protocol, writeName.name ?? writeName.function.name, args),
         round === 1 ? 'original_effect' : 'replacement_effect');
       if (round === 2) {
@@ -651,7 +652,7 @@ test('two searches, blocked public reads and a stale exhausted tool name still y
     }
     if (round > 3) return nativeText('openai-completions', 'Search evidence is preserved, but the official pages could not be verified.');
     const toolName = round === 1 ? 'web.search' : 'web.fetch';
-    const descriptor = body.tools.find(item => item.function.description.startsWith(toolName + ':'));
+    const descriptor = fixtureDeclaration(body.tools, toolName);
     if (round === 1) searchWireName = descriptor.function.name;
     const args = round === 1 ? { query: 'Current official announcement', reason: 'Synthetic query' }
       : { url: 'https://example.com/official', reason: 'Synthetic read' };
@@ -685,8 +686,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
       f.setPlan((body, _marker, round) => {
         if (round === 2) return nativeText(protocol, 'The file operation remains unconfirmed; its record is saved.');
         if (round > 2) return nativeText(protocol, 'The next message works.');
-        const descriptor = body.tools.find(item =>
-          (item.description ?? item.function?.description).startsWith('filesystem.write:'));
+        const descriptor = fixtureDeclaration(body.tools, 'filesystem.write');
         assert.ok(descriptor);
         return nativeTool(protocol, descriptor.name ?? descriptor.function.name,
           { path: 'unconfirmed.txt', content: 'Unconfirmed content', expectedHash: null });

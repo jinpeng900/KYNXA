@@ -39,8 +39,8 @@ test('browser prompt belongs to the captured catalog and preserves current capab
   await f.service.catalog(context);
   const prompt = await f.service.systemPrompt(context);
   assert.match(prompt, /fixture-browser: Connects to a local existing browser/);
-  assert.match(prompt, /Current capabilities override historical unavailable reports/);
-  assert.match(prompt, /signed-in browsing.*allowed/);
+  assert.match(prompt, /Use current capabilities/);
+  assert.match(prompt, /Signed-in work: verified authorization\/session/);
   remote = [];
   const next = await f.context();
   await f.service.catalog(next);
