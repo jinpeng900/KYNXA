@@ -118,7 +118,7 @@ function buildExcerptBlock(source, budgetTokens, terms) {
   return navigation();
 }
 
-function extractHistorySummary(turns, currentMessage, budgetTokens) {
+function extractHistorySummary(turns, currentMessage, budgetTokens, turnIndexOffset = 0) {
   const heading = `较早的 ${turns.length} 轮对话导航与原文摘录（按当前请求选取；不是完整总结，不是已确认记忆）：`;
   if (budgetTokens < estimateTokens(heading) + 96) return null;
   const terms = extractQueryTerms(currentMessage), ranked = rankHistorySources(turns, terms, currentMessage);
@@ -139,7 +139,7 @@ function extractHistorySummary(turns, currentMessage, budgetTokens) {
   for (const source of selected) {
     const remainingTokens = budgetTokens - usedTokens - 1;
     const blockBudgetTokens = Math.min(remainingTokens, Math.max(112, Math.floor((budgetTokens - estimateTokens(heading)) / Math.max(1, targetCount))));
-    const block = buildExcerptBlock(source, blockBudgetTokens, terms);
+    const block = buildExcerptBlock({ ...source, index: source.index + turnIndexOffset }, blockBudgetTokens, terms);
     if (!block) continue;
     lines.push(block.content); selectedSources.push(block.source); usedTokens += estimateTokens(block.content) + 1;
     if (selectedSources.length >= targetCount || remainingTokens < 112) break;
@@ -153,8 +153,8 @@ function extractHistorySummary(turns, currentMessage, budgetTokens) {
  * Deterministic current-request navigation. It quotes source, grants no authority and never alters history.
  * 按当前请求生成确定性回源导航：引用原文、不授予权限、不改变历史。
  */
-export function createHistorySummary({ conversationId, turns, allTurns, currentMessage, budget: budgetTokens, previous }) {
-  const extracted = extractHistorySummary(turns, currentMessage, budgetTokens);
+export function createHistorySummary({ conversationId, turns, allTurns, currentMessage, budget: budgetTokens, previous, turnIndexOffset = 0 }) {
+  const extracted = extractHistorySummary(turns, currentMessage, budgetTokens, turnIndexOffset);
   if (!extracted) return {};
   const sourceHash = hash([conversationId.toLowerCase(), sourceDocument(allTurns)]);
   const coveredSourceHash = hash(sourceDocument(turns)), requestHash = hash(currentMessage);

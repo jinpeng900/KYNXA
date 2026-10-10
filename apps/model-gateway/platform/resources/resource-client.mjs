@@ -13,6 +13,7 @@ const MAX_TTL_MS = 300_000;
 const MAX_WAIT_MS = 60_000;
 const MIN_RECOVERY_BACKOFF_MS = 1000;
 const MAX_RECOVERY_BACKOFF_MS = 30000;
+const MAX_BACKGROUND_FOREGROUND_YIELD_MS = 2000;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 export class ResourceBudgetError extends Error {
@@ -82,6 +83,8 @@ export class ResourceBudgetService {
   #recoveryFailures = 0;
   #recoveryRetryAt = 0;
   #recoveryReason;
+  #foregroundClaims = new Map();
+  #backgroundYieldWaiters = new Set();
 
   constructor({ executablePath = resourceExecutablePath(), executableArgs = [], timeoutMs = 2000,
     sampler, clock = Date.now, processFactory = spawn } = {}) {
@@ -95,6 +98,7 @@ export class ResourceBudgetService {
 
   status() {
     return { mode: this.#mode, closed: this.#closed, activeReservations: this.#leases.size,
+      admissionPriority: this.#priorityStatus(),
       recoveryState: this.#closed ? 'closed' : this.#recovering ? 'reconciling' :
         this.#mode === 'fallback' && this.#failureCode ? this.#executablePath && existsSync(this.#executablePath)
           ? 'backoff' : 'native-monitor-not-bundled' : 'ready',
@@ -111,7 +115,8 @@ export class ResourceBudgetService {
   async snapshot({ signal } = {}) {
     this.#assertOpen(signal); await this.#maybeRecover(signal); await this.#start();
     if (this.#mode === 'rust') {
-      try { this.#nativeSnapshot = await this.#request('snapshot'); return this.#nativeSnapshot; }
+      try { this.#nativeSnapshot = await this.#request('snapshot');
+        return { ...this.#nativeSnapshot, admissionPriority: this.#priorityStatus() }; }
       catch { /* Existing reservations remain quarantined in the gateway. 既有预约继续由网关隔离保留。 */ }
     }
     this.#assertOpen(signal);
@@ -129,6 +134,7 @@ export class ResourceBudgetService {
         state: 'monitor-unavailable-reservations-quarantined' },
       activeLeases, quarantinedLeases: this.#leases.size - activeLeases, maxLeases: MAX_LEASES, sampledAt: now,
       queuedRequests: this.#fallbackWaiters.size, feedback: { ...this.#feedback, backgroundFraction: this.#backgroundFraction },
+      admissionPriority: this.#priorityStatus(),
       executors: { measurementState: 'unknown', reason: 'RESOURCE_NATIVE_MONITOR_UNAVAILABLE', registeredLeases:
         [...this.#leases.values()].filter(lease => lease.executor).length, processes: [] },
       recoveryState: this.status().recoveryState, automaticRecovery: this.status().automaticRecovery,
@@ -140,6 +146,81 @@ export class ResourceBudgetService {
     const request = { workspaceId: '', kind: 'background', cpuThreads: 0, memoryBytes: 0,
       gpuMemoryBytes: 0, ttlMs: DEFAULT_TTL_MS, waitMs: 0, ...options };
     if (!validRequest(request)) throw new ResourceBudgetError('RESOURCE_INVALID_REQUEST', 'Invalid resource allocation request.');
+    const releasePriority = request.kind === 'foreground'
+      ? this.#holdForegroundPriority('pending-admission', signal) : undefined;
+    try {
+      const deferred = await this.#yieldToForeground(request, signal);
+      this.#assertOpen(signal);
+      if (deferred.denial) return deferred.denial;
+      const result = await this.#acquire({ ...request, waitMs: deferred.waitMs }, signal);
+      return deferred.yieldedMs > 0 ? { ...result, foregroundYieldMs: deferred.yieldedMs } : result;
+    } finally { releasePriority?.(); }
+  }
+
+  // This is an admission handoff, not another allocator or a pause of already executing native work.
+  // 这里只协调准入交接，不另建预算器，也不暂停已经执行的原生工作；续租和释放继续正常运行。
+  beginForegroundAdmission({ signal } = {}) {
+    this.#assertOpen(signal);
+    return this.#holdForegroundPriority('task-admission', signal);
+  }
+
+  #holdForegroundPriority(reason, signal) {
+    const claimId = randomUUID();
+    let timer;
+    const release = () => {
+      if (!this.#foregroundClaims.delete(claimId)) return;
+      clearTimeout(timer); signal?.removeEventListener('abort', release);
+      if (!this.#foregroundClaims.size)
+        for (const waiter of [...this.#backgroundYieldWaiters]) waiter.resume();
+    };
+    this.#foregroundClaims.set(claimId, { reason, startedAt: this.#clock(), release });
+    timer = setTimeout(release, MAX_WAIT_MS);
+    timer.unref?.();
+    signal?.addEventListener('abort', release, { once: true });
+    if (signal?.aborted) release();
+    return release;
+  }
+
+  #priorityStatus() {
+    const claims = [...this.#foregroundClaims.values()];
+    return { pendingForegroundAdmissions: claims.filter(claim => claim.reason === 'pending-admission').length,
+      protectedTaskAdmissions: claims.filter(claim => claim.reason === 'task-admission').length,
+      yieldingBackgroundRequests: this.#backgroundYieldWaiters.size,
+      maximumBackgroundYieldMs: MAX_BACKGROUND_FOREGROUND_YIELD_MS, maximumClaimMs: MAX_WAIT_MS,
+      oldestClaimStartedAt: claims.length ? Math.min(...claims.map(claim => claim.startedAt)) : null };
+  }
+
+  #yieldToForeground(request, signal) {
+    if (request.kind !== 'background' || !this.#foregroundClaims.size)
+      return Promise.resolve({ waitMs: request.waitMs, yieldedMs: 0 });
+    if (!request.waitMs) return Promise.resolve({ denial: { status: 'denied', reason: 'RESOURCE_PRESSURE', mode: this.#mode,
+      admissionPriority: { reason: 'foreground-admission-pending', retryable: true } } });
+    if (this.#backgroundYieldWaiters.size >= MAX_PENDING_REQUESTS)
+      return Promise.resolve({ denial: { status: 'denied', reason: 'RESOURCE_QUEUE_FULL', mode: this.#mode } });
+    // Existing native/fallback queues age background work after two seconds; this gate uses the same finite window.
+    // 现有原生/降级队列会让等待两秒的后台优先；入口让路也采用相同有界窗口，避免连续前台饿死建库。
+    const started = performance.now();
+    return new Promise((resolveYield, rejectYield) => {
+      let timer;
+      const cleanup = () => { this.#backgroundYieldWaiters.delete(waiter); clearTimeout(timer);
+        signal?.removeEventListener('abort', abort); };
+      const resume = () => {
+        cleanup();
+        const yieldedMs = Math.max(0, Math.ceil(performance.now() - started));
+        if (yieldedMs >= request.waitMs) resolveYield({ denial: { status: 'denied', reason: 'RESOURCE_WAIT_TIMEOUT',
+          mode: this.#mode, foregroundYieldMs: yieldedMs } });
+        else resolveYield({ waitMs: request.waitMs - yieldedMs, yieldedMs });
+      };
+      const abort = () => { cleanup(); rejectYield(cancellationError()); };
+      const waiter = { resume, reject: error => { cleanup(); rejectYield(error); } };
+      this.#backgroundYieldWaiters.add(waiter);
+      signal?.addEventListener('abort', abort, { once: true });
+      timer = setTimeout(resume, Math.min(request.waitMs, MAX_BACKGROUND_FOREGROUND_YIELD_MS));
+      if (signal?.aborted) abort();
+    });
+  }
+
+  async #acquire(request, signal) {
     await this.#maybeRecover(signal); await this.#start(); this.#assertOpen(signal);
     let result;
     if (this.#mode === 'rust') {
@@ -567,6 +648,9 @@ export class ResourceBudgetService {
   close() {
     if (this.#closing) return this.#closing;
     this.#closed = true;
+    for (const waiter of [...this.#backgroundYieldWaiters])
+      waiter.reject(new ResourceBudgetError('RESOURCE_CLOSED', 'Resource service is closed.'));
+    for (const claim of [...this.#foregroundClaims.values()]) claim.release();
     for (const waiter of this.#fallbackWaiters.values()) { waiter.cleanup(); waiter.reject(new ResourceBudgetError('RESOURCE_CLOSED', 'Resource service is closed.')); }
     this.#fallbackWaiters.clear(); clearInterval(this.#fallbackTimer);
     this.#closing = (async () => {

@@ -292,14 +292,16 @@ export function planEvidenceAcquisition({ query = '', gap, intent = buildRetriev
 
 /** Reorder only admitted source metadata; priority cannot add files or change authorization.
  * 只调整已接纳来源元信息的顺序，任务优先级不能新增文件或改变授权范围。 */
-export function prioritizeEvidenceSources(sources, priorityPaths = new Set()) {
+export function prioritizeEvidenceSources(sources, priorityPaths = new Set(), recentPaths = new Set()) {
+  const matches = (path, targets) => [...targets].some(target => path === target.toLowerCase() ||
+    path.startsWith(`${target.toLowerCase()}/`) || path.endsWith(`/${target.toLowerCase()}`));
   const rank = source => {
     const path = String(source.locator?.relativePath ?? source.title ?? '').replace(/\\/gu, '/').toLowerCase();
-    const targeted = [...priorityPaths].some(target => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`) ||
-      path.endsWith(`/${target.toLowerCase()}`));
-    if (targeted) return 0;
-    if (/(?:^|\/)(?:readme|agents)(?:\.|$)|(?:^|\/)(?:tests?|src)(?:\/|$)|\.(?:cs|[cm]?js|[cm]?ts|py|rs|go|json|ya?ml|toml)$/iu.test(path)) return 1;
-    return 2;
+    const absolutePath = String(source.locator?.path ?? '').replace(/\\/gu, '/').toLowerCase();
+    if (matches(path, priorityPaths) || absolutePath && matches(absolutePath, priorityPaths)) return 0;
+    if (matches(path, recentPaths) || absolutePath && matches(absolutePath, recentPaths)) return 1;
+    if (/(?:^|\/)(?:readme|agents)(?:\.|$)|(?:^|\/)(?:tests?|src)(?:\/|$)|\.(?:cs|[cm]?js|[cm]?ts|py|rs|go|json|ya?ml|toml)$/iu.test(path)) return 2;
+    return 3;
   };
   return sources.map((source, index) => ({ source, index, rank: rank(source) }))
     .sort((left, right) => left.rank - right.rank || left.index - right.index).map(item => item.source);

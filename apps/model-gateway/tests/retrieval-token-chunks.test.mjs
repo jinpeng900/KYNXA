@@ -77,7 +77,7 @@ test('fitted projection persists across SQLite restart and lexical refresh witho
   assert.equal(same.sources[0].unchanged, true);
 });
 
-test('indexer uses the same fitted ranges for foreground and background and explicitly retries an oversized context', async () => {
+test('semantic fitting preserves the complete body and explicitly retries an oversized context', async () => {
   const projectionsUsed = [], diagnostics = [];
   const embeddings = { status: () => ({ state: 'ready', fittingVersion: 'fixture-tokenizer-v1', maxInputTokens: 512 }),
     fitDocuments: async projections => {
@@ -118,23 +118,35 @@ async function outageFixture(t, initialState = 'ready') {
     library: { readSource: async () => current } };
   return { index, options, settings, input: () => current, state: value => { state = value; },
     fittingCalls: () => fittingCalls,
+    changeModel: () => { metadata.modelVersion = 'v2'; metadata.embeddingSpaceId = hashText('token-outage-space-v2'); },
     reorderLocator: () => { current = { ...current, locator: Object.fromEntries(Object.entries(current.locator).reverse()) }; },
     change: text => { current = validateSource({ ...current, text, contentHash: undefined, sourceRevision: 2 }); } };
 }
 
-test('unavailable fitting is never cached as completed and the first ready refresh fits the source', async t => {
+test('foreground publishes lexical text without fitting and only background preparation fits after model recovery', async t => {
   const fixture = await outageFixture(t, 'unavailable'), indexer = new SourceIndexer(fixture.options);
   const unavailable = await indexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
-  assert.ok(unavailable.semantic.diagnosticCodes.includes('EMBEDDING_PROFILE_UNAVAILABLE'));
-  assert.equal(indexer.fingerprints.size, 1, 'only a non-prepared fingerprint may exist for the lexical fallback');
-  assert.equal(indexer.fingerprints.values().next().value.preparation, undefined);
+  assert.deepEqual(unavailable.semantic.diagnosticCodes, []);
+  assert.equal(unavailable.coverage.lexical, 1);
+  assert.equal(fixture.fittingCalls(), 0);
+  assert.equal(indexer.fingerprints.has(`${source.sourceId}:semantic`), false);
+  assert.equal((await fixture.index.listSources({ scopeKeys: ['user'], sourceId: source.sourceId }))[0].chunkCount, 1);
+  const lexicalHit = (await fixture.index.search({ query: 'Second', scopeKeys: ['user'] })).items[0];
+  assert.equal((await fixture.index.read({ sourceRef: lexicalHit.sourceRef, scopeKeys: ['user'] })).text, fixture.input().text);
   fixture.state('ready');
-  await indexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  const repeated = await indexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  assert.equal(repeated.coverage.lexical, 1);
+  assert.equal(fixture.fittingCalls(), 0, 'foreground never admits a tokenizer merely because the model became ready');
+  await indexer.upsert([fixture.input()], fixture.settings);
   assert.equal(fixture.fittingCalls(), 1);
   assert.equal((await fixture.index.listSources({ scopeKeys: ['user'], sourceId: source.sourceId }))[0].chunkCount, 2);
+  await assert.rejects(fixture.index.read({ sourceRef: lexicalHit.sourceRef, scopeKeys: ['user'] }), { code: 'STALE_RETRIEVAL_SOURCE' });
+  const fittedRefresh = await indexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  assert.equal(fittedRefresh.semantic.totalChunks, 2, 'foreground reports the published fitted topology, not its obsolete first pass');
+  assert.equal(fixture.fittingCalls(), 1);
 });
 
-test('a cold foreground during a tokenizer outage retains unchanged vectors, then refits after recovery', async t => {
+test('a cold foreground retains unchanged fitted vectors and never enters tokenizer work during an outage or recovery', async t => {
   const fixture = await outageFixture(t), originalIndexer = new SourceIndexer(fixture.options);
   await originalIndexer.upsert([fixture.input()], fixture.settings);
   assert.equal((await fixture.index.status()).vectorChunks, 2);
@@ -142,11 +154,14 @@ test('a cold foreground during a tokenizer outage retains unchanged vectors, the
   fixture.reorderLocator();
   const coldIndexer = new SourceIndexer(fixture.options);
   const outage = await coldIndexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
-  assert.ok(outage.semantic.diagnosticCodes.includes('EMBEDDING_PROFILE_UNAVAILABLE'));
+  assert.deepEqual(outage.semantic.diagnosticCodes, []);
+  assert.equal(outage.coverage.lexical, 1);
   assert.equal((await fixture.index.status()).vectorChunks, 2);
-  assert.equal(coldIndexer.fingerprints.size, 0, 'preserving an old publication does not pretend a fitting operation completed');
+  assert.equal(coldIndexer.fingerprints.has(`${source.sourceId}:semantic`), false, 'lexical reuse does not claim semantic preparation');
   fixture.state('ready');
   await coldIndexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  assert.equal(fixture.fittingCalls(), 1);
+  await coldIndexer.upsert([fixture.input()], fixture.settings);
   assert.equal(fixture.fittingCalls(), 2);
   assert.equal((await fixture.index.status()).vectorChunks, 2);
 });
@@ -163,6 +178,27 @@ test('changed original text still replaces stale vectors during an outage and re
   const recovered = await indexer.upsert([fixture.input()], fixture.settings);
   assert.equal(recovered.semantic.state, 'complete');
   assert.equal((await fixture.index.status()).vectorChunks, 2);
+});
+
+test('restored fitted checkpoints keep lexical reuse independent while a changed vector space still rebuilds semantic data', async t => {
+  const fixture = await outageFixture(t), originalIndexer = new SourceIndexer(fixture.options), records = [];
+  await originalIndexer.upsert([fixture.input()], fixture.settings, undefined,
+    (_completed, details) => records.push(...(details.checkpointSources ?? [])));
+  const restoredIndexer = new SourceIndexer(fixture.options);
+  await restoredIndexer.restore([fixture.input()], fixture.settings, records);
+  await restoredIndexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  const cached = await restoredIndexer.upsert([fixture.input()], fixture.settings);
+  assert.equal(cached.semantic.cachedChunks, 2); assert.equal(fixture.fittingCalls(), 1);
+  const previous = (await fixture.index.listSources({ scopeKeys: ['user'] }))[0];
+  fixture.changeModel();
+  await restoredIndexer.upsert([fixture.input()], fixture.settings, undefined, undefined, { semantic: false });
+  assert.equal(fixture.fittingCalls(), 1, 'model changes do not block or re-tokenize a lexical request');
+  const rebuilt = await restoredIndexer.upsert([fixture.input()], fixture.settings);
+  assert.equal(rebuilt.semantic.cachedChunks, 0); assert.equal(rebuilt.semantic.vectorChunks, 2);
+  assert.equal(fixture.fittingCalls(), 2);
+  const current = (await fixture.index.listSources({ scopeKeys: ['user'] }))[0];
+  assert.notEqual(current.embeddingSpaceId, previous.embeddingSpaceId);
+  assert.equal(current.vectorChunks, current.chunkCount);
 });
 
 // Exercise the actual tokenizer, inference process, SQLite publication and checkpoint restore with existing offline assets.

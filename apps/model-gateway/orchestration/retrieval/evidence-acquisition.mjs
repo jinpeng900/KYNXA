@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { retrievalFailure } from '../../data/retrieval/retrieval-contracts.mjs';
+import { retrievalFailure, parseSourceReference } from '../../data/retrieval/retrieval-contracts.mjs';
 import { planEvidenceAcquisition } from './query-plan.mjs';
 
 const normalize = value => value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
@@ -116,6 +116,25 @@ export class EvidenceAcquisition {
     for (const [key, dependency] of dependencies) this.finalSourceDependencies.set(key, dependency);
   }
 
+  /** Admit only complete, hash-matching source chunks actually delivered in the final model context.
+   * 只登记最终模型上下文实际收到、哈希与引用一致的完整原文块；排序摘要和导航不能充当原文。 */
+  observeProvidedOriginals(items) {
+    let accepted = 0;
+    for (const item of items) {
+      if (item.navigationOnly || typeof item.excerpt !== 'string' || !item.excerpt.length || item.excerpt.length > 65536) continue;
+      let reference;
+      try { reference = parseSourceReference(item.sourceRef); } catch { continue; }
+      if (!reference.chunkHash || reference.chunkHash !== item.chunkHash || reference.chunkId !== item.chunkId ||
+          reference.sourceId !== item.sourceId || reference.scopeKey !== item.scopeKey ||
+          reference.contentHash !== item.contentHash || reference.sourceRevision !== item.sourceRevision ||
+          reference.derivationSignature !== item.derivationSignature ||
+          createHash('sha256').update(item.excerpt).digest('hex') !== reference.chunkHash) continue;
+      this.observeRead({ ...item, text: item.excerpt }, { mode: 'provided-original', sourceRef: item.sourceRef });
+      accepted++;
+    }
+    return { originalChunks: accepted, navigationOrUnverified: items.length - accepted, correctnessCertified: false };
+  }
+
   observeRead(item, { gap, mode = 'page', sourceRef } = {}) {
     const key = identity([item.scopeKey, item.sourceId]);
     if (!this.finalSourceDependencies.has(key) && this.finalSourceDependencies.size >= 1024)
@@ -128,18 +147,23 @@ export class EvidenceAcquisition {
     while (this.sourceVersions.size > 128) this.sourceVersions.delete(this.sourceVersions.keys().next().value);
     const previous = this.sourceReads.get(key);
     const fragments = previous?.version === version ? [...(previous.fragments ?? [])] : [];
-    const previousFragmentCount = fragments.length;
     const text = String(item.text ?? item.excerpt ?? '').slice(0, 65536);
+    const range = { startOffset: item.offset ?? item.locator?.startOffset ?? null,
+      endOffset: item.nextOffset ?? item.locator?.endOffset ?? null, offsetUnit: item.offsetUnit ?? item.locator?.offsetUnit ?? 'utf16-code-units' };
+    const observation = identity([version, range, text]);
+    const repeated = previous?.version === version && previous.observations?.includes(observation) === true;
+    const observations = [...(previous?.version === version ? previous.observations ?? [] : []).filter(value => value !== observation), observation].slice(-32);
     for (const reference of new Set([item.sourceRef, sourceRef].filter(Boolean)))
-      if (!fragments.some(fragment => fragment.sourceRef === reference && fragment.text === text)) fragments.push({ sourceRef: reference, text });
-    if (fragments.length !== previousFragmentCount) this.progressByStrategy.clear();
+      if (!fragments.some(fragment => fragment.sourceRef === reference && fragment.text === text)) fragments.push({ sourceRef: reference, text, range });
+    if (!repeated && text.length) this.progressByStrategy.clear();
     while (fragments.length > 16 || fragments.reduce((sum, fragment) => sum + fragment.text.length, 0) > 131072) fragments.shift();
-    this.sourceReads.set(key, { sourceRef: item.sourceRef, mode, text, version, fragments });
+    this.sourceReads.set(key, { sourceRef: item.sourceRef, mode, text, version, fragments, observations });
     this.finalSourceDependencies.set(key, { sourceRef: item.sourceRef, sourceId: item.sourceId,
       scopeKey: item.scopeKey, version });
     while (this.sourceReads.size > 64) this.sourceReads.delete(this.sourceReads.keys().next().value);
     return { sufficiency: 'not-evaluated', missingInformation: gap ?? null, sourceVersionChecked: true,
-      contentRead: true, next: 'evaluate-support-then-answer-or-name-the-remaining-gap' };
+      contentRead: true, repeated, newContent: !repeated && text.length > 0, range,
+      next: repeated ? 'use-existing-evidence-or-read-a-different-range' : 'evaluate-support-then-answer-or-name-the-remaining-gap' };
   }
 
   /** Track cited support and version dependencies without treating an LLM verdict as a truth proof.
@@ -168,8 +192,12 @@ export class EvidenceAcquisition {
         if (read) sourceKeys.add(read[0]);
         return { sourceRef: citation.sourceRef, contentRead: Boolean(read), versionCurrent, quotePresent };
       });
+      if (claim.semanticSupport !== undefined && !['supports', 'partial', 'contradicts', 'uncertain'].includes(claim.semanticSupport))
+        throw retrievalFailure('Invalid semantic support judgement. / 语义支持判断无效。');
       evidence.push({ statement: claim.statement, support: supports,
-        state: supports.length && supports.every(item => item.versionCurrent && item.quotePresent) ? 'cited-source-read' : 'missing-support' });
+        semanticSupport: { state: claim.semanticSupport ?? 'not-evaluated', author: 'model', correctnessCertified: false },
+        state: !supports.length || supports.some(item => !item.versionCurrent || !item.quotePresent) ? 'missing-support' :
+          claim.semanticSupport && claim.semanticSupport !== 'supports' ? 'semantic-support-unresolved' : 'cited-source-read' });
     }
     const checks = verification.map(check => ({ name: String(check?.name ?? '').slice(0, 200), state: 'unverified',
       reason: 'requires-execution-receipt', toolCallId: check?.toolCallId ?? null }));

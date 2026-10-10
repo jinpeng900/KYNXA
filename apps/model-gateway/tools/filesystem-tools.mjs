@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink } from 'node:fs/promises';
-import { basename, dirname, join, parse, relative } from 'node:path';
-import { boundedInteger, inspectLocalPath, revalidateLocalPathBinding, toolFailure, within } from '../platform/tool-paths.mjs';
+import { dirname, join, parse, relative } from 'node:path';
+import { boundedInteger, inspectLocalPath, revalidateLocalPathBinding, toolFailure } from '../platform/tool-paths.mjs';
+import { searchFilesystem } from './filesystem-search.mjs';
 
 export const MAX_TOOL_FILE_BYTES = 1024 * 1024;
 const fileQueues = new Map();
@@ -15,13 +16,18 @@ const descriptor = (name, description, properties, required = []) => ({ name: `f
 
 export const filesystemDescriptors = [
   descriptor('list', 'List one directory without following links. Returns bounded entries.', { limit: { type: 'integer', minimum: 1, maximum: 500 } }),
-  descriptor('read', 'Read a UTF-8 text page and full-file SHA-256. Continue with nextOffset while hasMore; restart if the hash changes.',
+  descriptor('read', 'Read UTF-8 text (file <=1 MiB) with full-file SHA-256. Optional startLine/endLine select inclusive 1-based lines. Continue nextOffset while hasMore, retaining the same line range; restart if hash changes.',
     { maxBytes: { type: 'integer', minimum: 1, maximum: MAX_TOOL_FILE_BYTES }, maxChars: { type: 'integer', minimum: 1, maximum: 64000 },
-      offset: { type: 'integer', minimum: 0, maximum: MAX_TOOL_FILE_BYTES, description: 'UTF-16 position; use nextOffset to avoid splitting characters.' } }, ['path']),
+      offset: { type: 'integer', minimum: 0, maximum: MAX_TOOL_FILE_BYTES, description: 'Absolute UTF-16 position; use nextOffset to avoid splitting characters.' },
+      startLine: { type: 'integer', minimum: 1, maximum: MAX_TOOL_FILE_BYTES + 1 },
+      endLine: { type: 'integer', minimum: 1, maximum: MAX_TOOL_FILE_BYTES + 1 } }, ['path']),
   descriptor('stat', 'Inspect a file/directory. Small regular files include a SHA-256 for conflict-safe changes.', {}, ['path']),
-  descriptor('search', 'Search UTF-8 files for literal text. Does not follow links; traversal, file size and matches are bounded.',
+  descriptor('search', 'Find literal UTF-8 content or paths without an index; path mode reads names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Ignore files apply by default. Changed sources require a fresh search.',
     { query: { type: 'string', minLength: 1, maxLength: 200 }, maxMatches: { type: 'integer', minimum: 1, maximum: 200 },
-      recursive: { type: 'boolean' } }, ['query']),
+      mode: { type: 'string', enum: ['content', 'path'], description: 'Default content; path matches a literal relative-path/name substring (case-insensitive on Windows).' },
+      respectIgnoreFiles: { type: 'boolean', description: 'Default true: honor .gitignore and .ignore. False includes ignored files; protected paths and generated-directory exclusions remain.' },
+      recursive: { type: 'boolean' }, cursor: { type: 'string', minLength: 32, maxLength: 32,
+        description: 'Opaque nextCursor from the preceding page in this request; omit to start over.' } }, ['query']),
   descriptor('write', 'Atomically write UTF-8 text. Existing files require their exact expectedHash; new files require null. Parent must exist.',
     { content: { type: 'string' }, expectedHash: hashProperty }, ['path', 'content', 'expectedHash']),
   descriptor('edit', 'Replace exactly one literal occurrence in a UTF-8 file. Requires its exact expectedHash and preserves all other text.',
@@ -77,6 +83,31 @@ function textPage(full, offset, maxChars) {
     hasMore, truncated: offset > 0 || hasMore };
 }
 
+function lineRangePage(full, input, maxChars) {
+  const requestedStartLine = boundedInteger(input.startLine, 1, 1, MAX_TOOL_FILE_BYTES + 1);
+  const requestedEndLine = boundedInteger(input.endLine, MAX_TOOL_FILE_BYTES + 1, 1, MAX_TOOL_FILE_BYTES + 1);
+  if (requestedEndLine < requestedStartLine) throw toolFailure('endLine 不能小于 startLine。');
+  let totalLines = 1, rangeStartOffset = requestedStartLine === 1 ? 0 : null, rangeEndOffset = full.length;
+  for (let index = full.indexOf('\n'); index >= 0; index = full.indexOf('\n', index + 1)) {
+    totalLines++;
+    if (totalLines === requestedStartLine) rangeStartOffset = index + 1;
+    if (totalLines === requestedEndLine + 1) rangeEndOffset = index + 1;
+  }
+  if (rangeStartOffset === null) throw toolFailure('startLine 超出当前文件行数，请重新读取文件状态。');
+  const offset = boundedInteger(input.offset, rangeStartOffset, 0, MAX_TOOL_FILE_BYTES);
+  if (offset < rangeStartOffset || offset > rangeEndOffset) throw toolFailure('offset 不在指定行范围中，请使用该范围返回的 nextOffset。');
+  // Character paging remains absolute, so a long individual line can continue without repeating its prefix.
+  // 字符分页始终使用绝对位置；单行过长时也能续读，不会重复该行前半段。
+  const page = textPage(full, offset, Math.min(maxChars, rangeEndOffset - offset));
+  const hasMore = page.nextOffset < rangeEndOffset;
+  let nextLine = requestedStartLine;
+  for (let index = full.indexOf('\n', rangeStartOffset); index >= 0 && index < page.nextOffset; index = full.indexOf('\n', index + 1)) nextLine++;
+  return { ...page, hasMore, lineRangeHasMore: hasMore, hasMoreInFile: page.nextOffset < full.length,
+    nextLine: hasMore ? nextLine : null,
+    lineRange: { startLine: requestedStartLine, endLine: Math.min(requestedEndLine, totalLines), totalLines,
+      startOffset: rangeStartOffset, endOffset: rangeEndOffset } };
+}
+
 async function checkHash(path, expectedHash) {
   const info = await inspectLocalPath(path, { allowMissing: true });
   if (!info) {
@@ -116,7 +147,7 @@ async function atomicText(path, bytes, expectedHash, signal, pathBinding) {
 }
 
 export async function executeFilesystem(name, context, input, path, signal, { protectedRoots = [], denyRead = () => false,
-  pathBinding } = {}) {
+  pathBinding, searchOwner } = {}) {
   signal?.throwIfAborted();
   if (pathBinding) await revalidateLocalPathBinding(pathBinding);
   if (name === 'filesystem.list') {
@@ -130,8 +161,9 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
   if (name === 'filesystem.read') {
     const value = await readBounded(path, boundedInteger(input.maxBytes, MAX_TOOL_FILE_BYTES, 1, MAX_TOOL_FILE_BYTES));
     const full = text(value.bytes), maxChars = boundedInteger(input.maxChars, 32000, 1, 64000);
-    const offset = boundedInteger(input.offset, 0, 0, MAX_TOOL_FILE_BYTES);
-    return { path, sha256: value.hash, bytes: value.bytes.length, ...textPage(full, offset, maxChars) };
+    const page = input.startLine !== undefined || input.endLine !== undefined ? lineRangePage(full, input, maxChars)
+      : textPage(full, boundedInteger(input.offset, 0, 0, MAX_TOOL_FILE_BYTES), maxChars);
+    return { path, sha256: value.hash, bytes: value.bytes.length, ...page };
   }
   if (name === 'filesystem.stat') {
     const info = await inspectLocalPath(path, { allowHardLinks: true });
@@ -139,7 +171,8 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
     return { path, type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', bytes: info.size,
       modifiedAt: info.mtime.toISOString(), sha256: hash };
   }
-  if (name === 'filesystem.search') return searchFiles(path, input, signal, protectedRoots, denyRead);
+  if (name === 'filesystem.search') return searchFilesystem(context, path, input, signal,
+    { protectedRoots, denyRead, searchOwner, workspaceRoot: pathBinding?.workspaceRoot ?? context.workspaceRoot });
   return queued(path, async () => {
     signal?.throwIfAborted();
     if (pathBinding) await revalidateLocalPathBinding(pathBinding);
@@ -180,44 +213,4 @@ export async function executeFilesystem(name, context, input, path, signal, { pr
     }
     throw toolFailure('未知文件工具。', 'TOOL_NOT_FOUND', 404);
   });
-}
-
-async function searchFiles(path, input, signal, protectedRoots, denyRead) {
-  if (typeof input.query !== 'string' || !input.query || input.query.length > 200) throw toolFailure('搜索文本须为 1–200 个字符。');
-  const maxMatches = boundedInteger(input.maxMatches, 100, 1, 200), matches = [];
-  let visited = 0, visitedEntries = 0, skipped = 0, truncated = false;
-  const excluded = new Set(['.git', 'node_modules', 'bin', 'obj']);
-  const walk = async (current, depth) => {
-    signal?.throwIfAborted();
-    if (protectedRoots.some(root => within(root, current)) || denyRead(current)) { skipped++; return; }
-    if (matches.length >= maxMatches || visited >= 1000 || visitedEntries >= 2000 || depth > 8) { truncated = true; return; }
-    visitedEntries++;
-    let info;
-    try { info = await inspectLocalPath(current, { allowHardLinks: true }); }
-    catch (error) {
-      if (['UNSAFE_TOOL_PATH', 'ENOENT', 'EACCES', 'EPERM'].includes(error.code)) { skipped++; return; }
-      throw error;
-    }
-    if (info.isDirectory()) {
-      const entries = await readdir(current, { withFileTypes: true });
-      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        if (entry.isSymbolicLink() || excluded.has(entry.name)) { skipped++; continue; }
-        if (entry.isDirectory() && (input.recursive === false || depth >= 8)) continue;
-        await walk(join(current, entry.name), depth + 1);
-        if (matches.length >= maxMatches || visited >= 1000 || visitedEntries >= 2000) { truncated = true; break; }
-      }
-      return;
-    }
-    if (!info.isFile()) { skipped++; return; }
-    visited++;
-    if (info.size > MAX_TOOL_FILE_BYTES) { skipped++; return; }
-    let value;
-    try { value = text((await readBounded(current)).bytes); }
-    catch (error) { if (error.code === 'NON_TEXT_FILE') { skipped++; return; } throw error; }
-    const lines = value.split(/\r?\n/);
-    for (let index = 0; index < lines.length && matches.length < maxMatches; index++)
-      if (lines[index].includes(input.query)) matches.push({ path: relative(path, current) || basename(current), line: index + 1, text: lines[index].slice(0, 400) });
-  };
-  await walk(path, 0);
-  return { path, query: input.query, matches, visitedFiles: visited, skipped, truncated };
 }

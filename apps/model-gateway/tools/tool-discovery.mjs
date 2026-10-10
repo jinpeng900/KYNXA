@@ -39,13 +39,13 @@ export function toolDiscoveryCategory(tool) {
   return 'other';
 }
 
-function aliases(tool, { includeDeviceState = true } = {}) {
+function aliases(tool) {
   const name = normalized(tool.name, 256), category = toolDiscoveryCategory(tool);
   if (category === 'computer') return 'computer desktop local host 本机 本地 桌面 桌面控制 ' +
     (computerAliases[name.slice('computer.'.length)] ?? '');
   if (category === 'host-terminal') return 'host terminal local terminal visible terminal background process job cmd powershell conda 本机终端 本地终端 可见终端 显示终端 终端窗口 宿主终端 本机命令 本地命令 命令提示符 后台进程 后台任务 监控进程 ' +
     ({ start: 'start launch 启动 运行', read: 'read inspect poll output 读取 查看 输出 状态', stop: 'stop cancel terminate 停止 关闭 终止 取消' }[name.split('.').at(-1)] ?? '') +
-    (includeDeviceState && name === 'terminal.host.run' ? ' device status current network my ip address public ip proxy dns adapter interfaces ipconfig tasklist processes listening port netstat get-nettcpconnection 本机状态 我的ip 当前网络 网络配置 代理设置 代理配置 dns设置 dns配置 dns服务器 网卡 网络适配器 本机进程 进程列表 端口占用 监听端口 哪个程序占端口' : '');
+    (name === 'terminal.host.run' ? ' device status current network my ip address public ip proxy dns adapter interfaces ipconfig tasklist processes listening port netstat get-nettcpconnection 本机状态 我的ip 当前网络 网络配置 代理设置 代理配置 dns设置 dns配置 dns服务器 网卡 网络适配器 本机进程 进程列表 端口占用 监听端口 哪个程序占端口' : '');
   if (category === 'sandbox-terminal') return 'sandbox terminal node 沙箱终端 隔离终端 运行代码 执行代码';
   if (category === 'web-search') return 'web search internet 搜索 联网 搜索网页 查资料 查证';
   if (category === 'web-fetch') return 'web fetch public webpage read url 页面 网页 网站 阅读网页 读取网页 网页内容 网址 获取正文';
@@ -123,15 +123,14 @@ function deviceStateTopic(text) {
  * 仅检索已启用描述符，排序确定且不执行；空查询按目录原顺序分页。
  */
 export function searchTools(descriptors, query = '') {
-  const enabled = descriptors.filter(tool => tool.enabled !== false), text = normalized(query);
+  const enabled = descriptors.filter(tool => tool.enabled !== false && tool.available !== false), text = normalized(query);
   if (!text) return enabled;
   const terms = queryTerms(text);
   const deviceTopic = deviceStateTopic(text);
   const identityQuery = /^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$/.test(text);
   const wireIdentityQuery = /^k_[a-z0-9_]+_[a-f0-9]{8}$/.test(text);
   return enabled.map((tool, index) => {
-    const name = normalized(tool.name, 256), description = normalized(tool.description, 8000), alias = aliases(tool,
-      { includeDeviceState: !['external', 'explanation', 'non-device'].includes(deviceTopic) && hasDeviceSubject(text) });
+    const name = normalized(tool.name, 256), description = normalized(tool.description, 8000), alias = aliases(tool);
     // A complete dotted tool identity is not a bag of generic provider/name words.
     // If that identity is absent or disabled, unrelated tools must not look like replacements.
     // 完整带点工具身份不能拆成通用名称关键词；该身份缺失或禁用时，不能把无关工具当成替代项。
@@ -278,5 +277,5 @@ export function toolSelectionSignals(message, { historySignals = [], previousToo
   }
   if (signals.remoteBrowser && !/本机桌面|本地窗口|\blocal desktop\b/.test(clauseProjection.activeText)) signals.desktop = false;
   if (signals.deviceState) signals.hostTerminal = true;
-  return { ...signals, retainedNames, taskRelation: relation };
+  return { ...signals, retainedNames, taskRelation: relation, selectionOnly: true, semanticVerified: false };
 }

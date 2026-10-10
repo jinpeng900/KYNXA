@@ -4,7 +4,7 @@ import { toolFailure } from '../platform/tool-paths.mjs';
 const READ_TOOLS = new Set(['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'skill.list', 'skill.read',
   'tool.search', 'tool.load', 'tool.result.read', 'skill.resource.read', 'skill.inspect', 'skill.check',
   'conversation.history.search', 'conversation.history.read', 'knowledge.search', 'knowledge.read', 'knowledge.relations',
-  'knowledge.assess', 'knowledge.experience', 'web.search', 'terminal.host.read']);
+  'knowledge.plan', 'knowledge.assess', 'knowledge.experience', 'memory.read', 'memory.propose', 'web.search', 'terminal.host.read']);
 const REVERSIBLE_TOOLS = new Set(['filesystem.write', 'filesystem.edit', 'filesystem.mkdir']);
 const HOST_OBSERVATIONS = new Set(['computer.apps', 'computer.windows']);
 

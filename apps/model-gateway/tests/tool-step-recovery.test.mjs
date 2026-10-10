@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, writeFile, appendFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { runToolLoop } from '../orchestration/tool-loop.mjs';
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { ToolCallDecodeFailure, MAX_TURN_TOOL_CALLS } from '../models/tool-call-validation.mjs';
@@ -16,12 +16,64 @@ function rawTurn(protocol, id, argumentsValue) {
   if (protocol === 'openai-responses') return { status: 'completed', output: [{ type: 'function_call', call_id: id, name, arguments: JSON.stringify(argumentsValue) }] };
   return { choices: [{ finish_reason: 'tool_calls', message: { content: '', tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(argumentsValue) } }] } }] };
 }
+function rawTextTurn(protocol, content = '') {
+  if (protocol === 'anthropic-messages') return { stop_reason: 'end_turn', content: [{ type: 'text', text: content }] };
+  if (protocol === 'openai-responses') return { status: 'completed', output: [
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: content }] }
+  ] };
+  return { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }] };
+}
 const finalTurn = content => ({ content, reasoning: '', calls: [], continuation: [] });
 function options(requestTurn, service, extra = {}) {
   return { protocol: 'openai-completions', context: { message: '创建文件并核验', conversationId: 'fixture' },
     messages: [{ role: 'user', content: 'Create the fixture once.' }], system: '', inputBudgetTokens: 32000,
     declarations: [], emit: () => {}, saveActivity: async () => {}, requestTurn, service, ...extra };
 }
+
+test('three protocols classify stopped empty and whitespace replies as unexecuted recoverable model steps', () => {
+  const ledger = new ToolRecoveryLedger();
+  for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+    for (const content of ['', ' \r\n\t']) assert.throws(() => decodeToolTurn(protocol, rawTextTurn(protocol, content), catalog), error => {
+      assert.ok(error instanceof ToolCallDecodeFailure, protocol);
+      assert.equal(error.code, 'MODEL_RESPONSE_EMPTY');
+      assert.equal(error.executed, false);
+      assert.equal(error.recoverable, true);
+      assert.equal(ledger.classify(error), 'repair-unexecuted-model-step');
+      assert.ok(Number.isFinite(error.estimatedGeneratedTokens));
+      return true;
+    });
+  }
+});
+
+test('three protocols preserve explicit refusal and truncation instead of retrying them as empty replies', () => {
+  const ledger = new ToolRecoveryLedger();
+  for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+    const refused = rawTextTurn(protocol);
+    if (protocol === 'openai-completions') refused.choices[0].message.refusal = 'Explicit provider refusal.';
+    else if (protocol === 'openai-responses') refused.output[0].content = [{ type: 'refusal', refusal: 'Explicit provider refusal.' }];
+    else refused.stop_reason = 'refusal';
+    if (protocol === 'anthropic-messages') assert.throws(() => decodeToolTurn(protocol, refused, catalog), error => {
+      assert.equal(error.type, 'interrupted');
+      assert.notEqual(error.code, 'MODEL_RESPONSE_EMPTY');
+      assert.equal(ledger.classify(error), 'stop');
+      return true;
+    });
+    else assert.equal(decodeToolTurn(protocol, refused, catalog).calls.length, 0, 'explicit refusal must not enter empty-response repair');
+    for (const content of ['', 'Partial output before the provider limit.']) {
+      const truncated = rawTextTurn(protocol, content);
+      if (protocol === 'openai-completions') truncated.choices[0].finish_reason = 'length';
+      else if (protocol === 'openai-responses') {
+        truncated.status = 'incomplete'; truncated.incomplete_details = { reason: 'max_output_tokens' };
+      } else truncated.stop_reason = 'max_tokens';
+      assert.throws(() => decodeToolTurn(protocol, truncated, catalog), error => {
+        assert.equal(error.type, 'interrupted');
+        assert.notEqual(error.code, 'MODEL_RESPONSE_EMPTY');
+        assert.equal(ledger.classify(error), 'stop');
+        return true;
+      });
+    }
+  }
+});
 
 test('each round budgets, dispatches and saves the refreshed system without replaying a completed action', async () => {
   const savedSystems = [], dispatchedSystems = [];
@@ -73,6 +125,72 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     assert.equal(result.assistantSegments.at(-1).phase, 'final_answer');
   });
 }
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  test(`${protocol}: an empty response repairs the current step without replaying a completed write`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'kynxa-empty-recovery-'));
+    t.after(async () => {
+      const suffix = relative(resolve(tmpdir()), resolve(root));
+      assert.ok(suffix && suffix !== '..' && !suffix.startsWith(`..${sep}`), 'cleanup stays in the owned temporary directory');
+      await rm(root, { recursive: true, force: true });
+    });
+    const file = join(root, 'once.txt'), receipts = [];
+    const argumentsValue = { path: 'once.txt', content: 'preserved', expectedHash: null };
+    let rounds = 0, effects = 0, state;
+    const result = await runToolLoop(options(async messages => {
+      rounds++;
+      if (rounds === 2) return decodeToolTurn(protocol, rawTextTurn(protocol), catalog);
+      if (rounds === 3) {
+        assert.match(JSON.stringify(messages), /MODEL_RESPONSE_EMPTY/);
+        assert.match(JSON.stringify(messages), /Return nonempty final text or a valid call using the exact declared function name/);
+        assert.match(JSON.stringify(messages), /first_write/);
+      }
+      return rounds === 4 ? decodeToolTurn(protocol, rawTextTurn(protocol, '已创建一次并保留结果。'), catalog)
+        : decodeToolTurn(protocol, rawTurn(protocol, rounds === 1 ? 'first_write' : 'repair_write', argumentsValue), catalog);
+    }, { execute: async () => {
+      effects++; await writeFile(file, 'preserved', { flag: 'wx' });
+      return { content: '{"written":true}', status: 'completed', isError: false };
+    } }, { protocol, declarations: toolDeclarations(protocol, catalog), catalogForRound: () => catalog,
+      saveActivity: async receipt => receipts.push(receipt), saveRunState: async value => { state = structuredClone(value); } }));
+    assert.equal(effects, 1);
+    assert.equal(await readFile(file, 'utf8'), 'preserved');
+    assert.equal(rounds, 4);
+    assert.equal(state.diagnostics.modelCalls, rounds);
+    assert.equal(receipts.at(-1).reused, true);
+    assert.equal(receipts.at(-1).recoveryOfToolCallId, 'first_write');
+    assert.equal(result.content, '已创建一次并保留结果。');
+    assert.deepEqual(result.recovery.events.map(event => event.code), ['MODEL_RESPONSE_EMPTY']);
+    assert.equal(result.assistantSegments.at(-1).phase, 'final_answer');
+  });
+}
+
+test('consecutive empty responses make one repair and one no-tool summary while counting every failed model attempt', async () => {
+  for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+    let rounds = 0, effects = 0, estimatedGeneratedTokens = 0, state;
+    const result = await runToolLoop(options(async (_messages, declarations) => {
+      rounds++;
+      if (rounds === 3) assert.equal(declarations.length, 0, 'the bounded final attempt cannot dispatch tools');
+      const raw = rawTextTurn(protocol), reasoning = 'Reasoning-only output still consumes the original generation budget. '.repeat(10);
+      if (protocol === 'openai-completions') raw.choices[0].message.reasoning_content = reasoning;
+      else if (protocol === 'openai-responses') raw.output.push({ type: 'reasoning', summary: [{ type: 'summary_text', text: reasoning }] });
+      else raw.content.push({ type: 'thinking', thinking: reasoning });
+      // Charge the actual decoder estimate, including reasoning-only output; never reset the request budget during repair.
+      // 计入解码器对仅推理输出的真实估算量；恢复过程中不能重置当前请求的生成预算。
+      try { return decodeToolTurn(protocol, raw, catalog); }
+      catch (error) { estimatedGeneratedTokens += error.estimatedGeneratedTokens; throw error; }
+    }, { execute: async () => { effects++; } }, { protocol, declarations: toolDeclarations(protocol, catalog),
+      saveRunState: async value => { state = structuredClone(value); } }));
+    assert.equal(rounds, 3, protocol);
+    assert.equal(effects, 0);
+    assert.equal(result.completionStatus, 'interrupted');
+    assert.match(result.content, /记录已保留/);
+    assert.equal(state.diagnostics.modelCalls, rounds);
+    assert.equal(state.diagnostics.modelRounds.length, rounds);
+    assert.ok(estimatedGeneratedTokens > 0);
+    assert.equal(state.estimatedGeneratedTokens, estimatedGeneratedTokens);
+    assert.deepEqual(result.recovery.events.map(event => event.code), ['MODEL_RESPONSE_EMPTY', 'MODEL_RESPONSE_EMPTY']);
+  }
+});
 
 test('repeated decoder errors make one repair and one no-tool summary; no partial arguments execute', async () => {
   let rounds = 0, effects = 0;

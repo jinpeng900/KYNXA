@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { ModelStore } from '../models/store.mjs';
 import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { ModelToolCatalog } from '../tools/tool-catalog.mjs';
+import { toolSelectionSignals } from '../tools/tool-discovery.mjs';
 import { builtinDescriptors } from '../official-tools/Tools/catalog.mjs';
 import { estimateTokens } from '../models/context.mjs';
 import { estimateToolMessageTokens, toolDeclarations, wireCatalog } from '../models/tool-protocols.mjs';
@@ -75,7 +76,8 @@ test('large catalogs preserve ordinary code/web selection and desktop discovery 
   for (const protocol of protocols) {
     for (const message of ['写一个Node.js测试', '查证今天的官方新闻']) {
       const catalog = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message });
-      assert.equal(catalog.selected.some(tool => tool.name.startsWith('computer.')), false);
+      assert.equal(toolSelectionSignals(message).desktop, false);
+      assert.ok(catalog.descriptors.some(tool => tool.name === 'computer.read'));
       assert.ok(catalog.selected.some(tool => tool.name === 'terminal.run'));
       catalog.load(['computer.read']);
       assert.ok(catalog.selected.some(tool => tool.name === 'computer.read'));
@@ -86,7 +88,7 @@ test('large catalogs preserve ordinary code/web selection and desktop discovery 
       assert.deepEqual(catalog.selected, before);
     }
     const desktop = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message: '打开记事本并截图' });
-    assert.ok(desktop.selected.length <= builtinDescriptors.filter(tool => !tool.name.startsWith('terminal.host.')).length);
+    assert.ok(desktop.selected.length <= builtinDescriptors.length);
     assert.ok(desktop.selected.some(tool => tool.name === 'computer.launch'));
     for (const name of discovery) assert.ok(desktop.selected.some(tool => tool.name === name));
     assert.ok(estimateTokens(JSON.stringify(toolDeclarations(protocol, desktop.wire()))) <= 16000);
@@ -107,6 +109,7 @@ for (const protocol of protocols) test(`${protocol}: device inspection reserves 
   assert.throws(() => unavailable.load(['terminal.host.run']), { code: 'TOOL_NOT_FOUND' });
   for (const message of ['查询8.8.8.8的归属', '解释DNS工作原理']) {
     const publicTask = new ModelToolCatalog(builtinDescriptors, { protocol, tokenBudget: 16000, message });
-    assert.ok(!publicTask.selected.some(tool => tool.name.startsWith('terminal.host.')), message);
+    assert.equal(toolSelectionSignals(message).hostTerminal, false, message);
+    assert.deepEqual(publicTask.load(['terminal.host.run']).loaded, ['terminal.host.run']);
   }
 });

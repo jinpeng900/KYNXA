@@ -7,6 +7,8 @@ export const MEMORY_KINDS = ['fact', 'preference', 'decision'];
 export const MAX_MEMORY_CONTENT = 4000;
 export const MAX_MEMORY_ENTRIES = 1000;
 export const MEMORY_CANDIDATE_ALGORITHM = 'conservative-extractive-v1';
+export const MEMORY_PROPOSAL_ALGORITHM = 'main-model-tool-v1';
+export const MEMORY_PROPOSAL_ACTIONS = ['add', 'update', 'delete', 'noop'];
 export const MEMORY_CANDIDATE_TRIGGERS = ['remember', 'correction', 'decision', 'task-complete', 'ordinary-batch'];
 export const DEFAULT_MEMORY_CANDIDATE_SETTINGS = Object.freeze({ enabled: true, minTurns: 6, maxTurns: 12,
   minTokens: 2048, maxTokens: 4096, maxCandidates: 8 });
@@ -61,6 +63,79 @@ export function memoryCandidateSettings(input = {}, previous = DEFAULT_MEMORY_CA
 
 export function memoryCandidateFingerprint(scope, content) {
   return createHash('sha256').update(JSON.stringify([scope, content.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()])).digest('hex');
+}
+
+/** Bind an edit to its complete stored identity, including source quotations and entry version.
+ * 修改绑定完整存储身份，包含来源原话和条目版本，不能凭相似度替代身份校验。 */
+export function memoryEntryIdentity(entry) {
+  return createHash('sha256').update(JSON.stringify([
+    entry.id, entry.scope, entry.scopeId, entry.revision, entry.kind, entry.content, entry.source,
+    entry.candidate ?? null, entry.proposal ?? null
+  ])).digest('hex');
+}
+
+export function memoryProposalFingerprint(scope, scopeId, content, kind, proposal) {
+  return createHash('sha256').update(JSON.stringify([scope, scopeId, proposal.action, content, kind,
+    proposal.quotes, proposal.target ?? null])).digest('hex');
+}
+
+export function validateMemoryProposalTarget(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => !['id', 'scope', 'scopeId', 'expectedRevision', 'entryRevision', 'identity'].includes(key)) ||
+      !Number.isSafeInteger(value.entryRevision) || value.entryRevision < 1 || !/^[a-f0-9]{64}$/u.test(value.identity))
+    throw memoryFailure('修改建议须绑定已读取的完整目标身份。');
+  const scope = memoryScope(value.scope);
+  if (scope === 'user' && value.scopeId !== 'user') throw memoryFailure('全局记忆范围身份无效。');
+  return { id: memoryId(value.id), scope, scopeId: scope === 'user' ? 'user' : memoryId(value.scopeId),
+    expectedRevision: expectedMemoryRevision(value.expectedRevision, true), entryRevision: value.entryRevision, identity: value.identity };
+}
+
+/** Model suggestions retain verified quotations and uncertainty; only the user can resolve their action.
+ * 模型建议保留核验后的原话和不确定性，仅用户确认后才能执行对应动作。 */
+export function validateMemoryProposal(value, source) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => !['algorithm', 'action', 'quotes', 'reason', 'isInference', 'conflicts', 'target', 'fingerprint', 'appliedAt'].includes(key)) ||
+      value.algorithm !== MEMORY_PROPOSAL_ALGORITHM || !['add', 'update', 'delete'].includes(value.action) ||
+      source.type !== 'user-message' || typeof value.isInference !== 'boolean' ||
+      typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 1000 || value.reason.includes('\0') ||
+      !/^[a-f0-9]{64}$/u.test(value.fingerprint) || !Array.isArray(value.quotes) ||
+      !value.quotes.length || value.quotes.length > 12 || !Array.isArray(value.conflicts) || value.conflicts.length > 8 ||
+      value.conflicts.some(conflict => typeof conflict !== 'string' || !conflict.trim() || conflict.length > 500 || conflict.includes('\0')))
+    throw memoryFailure('记忆动作建议的原话、理由或不确定性格式无效。');
+  const ids = new Set();
+  const quotes = value.quotes.map(quote => {
+    if (!quote || typeof quote !== 'object' || Array.isArray(quote) ||
+        Object.keys(quote).some(key => !['messageId', 'text'].includes(key)) || typeof quote.text !== 'string' ||
+        !quote.text.trim() || quote.text.length > MAX_MEMORY_CONTENT || quote.text.includes('\0'))
+      throw memoryFailure('记忆建议须引用完整、有界的用户原话。');
+    const messageId = memoryId(quote.messageId);
+    if (ids.has(messageId)) throw memoryFailure('记忆建议不能重复引用同一原话。');
+    ids.add(messageId);
+    return { messageId, text: quote.text };
+  });
+  if (!ids.has(source.messageId)) throw memoryFailure('建议主来源不属于原话记录。');
+  const target = value.target === undefined ? undefined : validateMemoryProposalTarget(value.target);
+  if ((value.action !== 'add') !== Boolean(target)) throw memoryFailure('更新或删除须指定目标；新增不能伪造目标。');
+  if (value.appliedAt !== undefined && value.action !== 'update') throw memoryFailure('只有已确认更新保留执行时间。');
+  return { algorithm: value.algorithm, action: value.action, quotes, reason: value.reason.trim(),
+    isInference: value.isInference, conflicts: [...new Set(value.conflicts.map(conflict => conflict.trim()))],
+    fingerprint: value.fingerprint, ...(target ? { target } : {}),
+    ...(value.appliedAt === undefined ? {} : { appliedAt: timestamp(value.appliedAt) }) };
+}
+
+export function validateMemoryUpdateInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      Object.keys(input).some(key => !['scope', 'content', 'kind', 'status', 'expectedRevision', 'proposalAction'].includes(key)))
+    throw memoryFailure('记忆更新输入无效。');
+  return input;
+}
+
+/** Legacy content confirmation cannot authorize an undisplayed destructive proposal action.
+ * 旧界面的正文确认不能授权尚未呈现的覆盖或删除动作，须明确提交提案动作。 */
+export function requireMemoryProposalConfirmation(entry, proposalAction) {
+  if (['update', 'delete'].includes(entry?.proposal?.action) && proposalAction !== entry.proposal.action)
+    throw memoryFailure('此建议需要明确确认更新或删除动作，请使用支持动作展示的确认入口。',
+      'MEMORY_PROPOSAL_CONFIRMATION_REQUIRED', 409);
 }
 
 export function memorySourceId(scope, scopeId, id) {
@@ -137,11 +212,20 @@ export function validateMemoryDocument(value, { scope, scopeId }) {
     ids.add(id);
     const source = validateMemorySource(entry.source);
     const candidate = entry.candidate === undefined ? undefined : validateMemoryCandidate(entry.candidate, source);
-    if (entry.status === 'draft' && !candidate) throw memoryFailure('草稿缺少候选来源。', 'CORRUPT_MEMORY', 500);
+    const proposal = entry.proposal === undefined ? undefined : validateMemoryProposal(entry.proposal, source);
+    if (candidate && proposal || entry.status === 'draft' && !candidate && !proposal)
+      throw memoryFailure('草稿来源缺失或候选类型冲突。', 'CORRUPT_MEMORY', 500);
+    if (proposal && (proposal.target && (proposal.target.scope !== scope || proposal.target.scopeId !== scopeId) ||
+        entry.status === 'draft' && proposal.appliedAt || entry.status === 'confirmed' &&
+        (proposal.action === 'delete' || proposal.action === 'update' && !proposal.appliedAt)))
+      throw memoryFailure('记忆建议范围或确认动作无效。', 'CORRUPT_MEMORY', 500);
+    if (proposal && entry.status === 'draft' &&
+        proposal.fingerprint !== memoryProposalFingerprint(scope, scopeId, memoryContent(entry.content), memoryKind(entry.kind, scope), proposal))
+      throw memoryFailure('记忆建议身份不一致。', 'CORRUPT_MEMORY', 500);
     if (candidate && candidate.fingerprint !== memoryCandidateFingerprint(scope, candidate.quotes.map(quote => quote.text.trim()).join('\n\n')))
       throw memoryFailure('候选原话身份不一致。', 'CORRUPT_MEMORY', 500);
     return { id, scope, scopeId, content: memoryContent(entry.content), kind: memoryKind(entry.kind, scope),
-      status: entry.status, source, ...(candidate ? { candidate } : {}), revision: entry.revision,
+      status: entry.status, source, ...(candidate ? { candidate } : {}), ...(proposal ? { proposal } : {}), revision: entry.revision,
       createdAt: timestamp(entry.createdAt), updatedAt: timestamp(entry.updatedAt) };
   });
   if (value.dismissedSources !== undefined && !Array.isArray(value.dismissedSources))
@@ -150,8 +234,11 @@ export function validateMemoryDocument(value, { scope, scopeId }) {
     object(source, '记忆撤销来源');
     if (source.candidateFingerprint !== undefined && !/^[a-f0-9]{64}$/u.test(source.candidateFingerprint))
       throw memoryFailure('候选撤销身份格式无效。', 'CORRUPT_MEMORY', 500);
+    if (source.proposalFingerprint !== undefined && !/^[a-f0-9]{64}$/u.test(source.proposalFingerprint))
+      throw memoryFailure('记忆建议撤销身份格式无效。', 'CORRUPT_MEMORY', 500);
     return { conversationId: memoryId(source.conversationId), messageId: memoryId(source.messageId), deletedAt: timestamp(source.deletedAt),
       ...(source.candidateFingerprint === undefined ? {} : { candidateFingerprint: source.candidateFingerprint }),
+      ...(source.proposalFingerprint === undefined ? {} : { proposalFingerprint: source.proposalFingerprint }),
       ...(source.candidateBatchThroughMessageId === undefined ? {} : { candidateBatchThroughMessageId: memoryId(source.candidateBatchThroughMessageId) }) };
   });
   let candidateConfiguration;

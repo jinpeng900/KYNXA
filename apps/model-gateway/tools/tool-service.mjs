@@ -12,6 +12,8 @@ import { OFFICIAL_TOOLS_ROOT, curatedMcpPresets, readOfficialToolsManifest, norm
 import { AppSkillService } from './skill-service.mjs';
 import { McpToolClients, isMcpExecutionNotDispatched } from './mcp-client.mjs';
 import { executeFilesystem } from './filesystem-tools.mjs';
+import { closeFilesystemSearches } from './filesystem-search.mjs';
+import { ToolCodeVersions } from './tool-code-versions.mjs';
 import { WebFetchTool } from './web-fetch.mjs';
 import { WebSearchTool, isPublicSearchTool, isPublicFetchTool, isAutomaticBrowserRead } from './retrieval/web-search.mjs';
 import { validatePublicWebUrl } from './web-http-transport.mjs';
@@ -27,7 +29,7 @@ import { supportsSkillExecution, verifiesSkillExecution } from './sandbox-skill.
 import { extensionPointerPath } from '../data/extension-storage.mjs';
 import { executeHistoryTool } from './tool-history.mjs';
 import { canRunInParallel } from './tool-scheduling.mjs';
-import { RequestObservationCache, canReuseObservation, observationFingerprint } from './tool-observations.mjs';
+import { RequestObservationCache, canReuseObservation, observationFingerprint, sourceObservation } from './tool-observations.mjs';
 import { ConversationWorkspaces } from '../data/sandbox-workspaces.mjs';
 import { isDesktopObservation } from './tool-outcomes.mjs';
 import { inferBrowserInteractionPolicy, isExplicitForegroundForbidden } from './browser-sessions.mjs';
@@ -35,6 +37,7 @@ import { prepareDesktopLaunchArguments } from './desktop-launch-options.mjs';
 import { isSensitiveFilePath } from './sensitive-files.mjs';
 import { projectEvidenceSearchResult, projectRetrievalModelView } from '../data/retrieval/evidence-references.mjs';
 import { HostTerminalJobs } from './host-terminal-jobs.mjs';
+import { validateBuiltinInput } from './tool-input-validation.mjs';
 
 const MAX_TOOL_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 65536;
@@ -47,6 +50,7 @@ const GENERIC_MCP_STARTUP_TERMS = new Set(['the', 'this', 'that', 'these', 'thos
 
 function publicDescriptor(descriptor) {
   return { name: descriptor.name, description: descriptor.description, inputSchema: structuredClone(descriptor.inputSchema), source: descriptor.source,
+    ...(descriptor.modelExposure ? { modelExposure: descriptor.modelExposure } : {}),
     ...(descriptor.toolName ? { rawName: descriptor.toolName } : {}), enabled: descriptor.enabled !== false,
     ...(descriptor.executionEnvironment ? { executionEnvironment: descriptor.executionEnvironment } : {}),
     ...(descriptor.available !== undefined ? { available: descriptor.available,
@@ -104,33 +108,15 @@ function boundedContent(content) {
   return preview + marker;
 }
 
-function validateBuiltinInput(descriptor, input) {
-  const schema = descriptor.inputSchema;
-  for (const required of schema.required ?? []) if (!Object.hasOwn(input, required)) throw toolFailure(`缺少工具参数 ${required}。`);
-  for (const [key, value] of Object.entries(input)) {
-    const property = schema.properties[key];
-    if (!property) throw toolFailure(`不支持工具参数 ${key}。`);
-    const types = Array.isArray(property.type) ? property.type : [property.type];
-    const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
-    if (!(types.includes(type) || (types.includes('integer') && Number.isSafeInteger(value)))) throw toolFailure(`工具参数 ${key} 类型无效。`);
-    if (property.enum && !property.enum.includes(value)) throw toolFailure(`工具参数 ${key} 值无效。`);
-    if (typeof value === 'string' && ((property.minLength !== undefined && value.length < property.minLength) ||
-        (property.maxLength !== undefined && value.length > property.maxLength))) throw toolFailure(`工具参数 ${key} 长度无效。`);
-    if (typeof value === 'number' && ((property.minimum !== undefined && value < property.minimum) || (property.maximum !== undefined && value > property.maximum)))
-      throw toolFailure(`工具参数 ${key} 超出范围。`);
-    if (Array.isArray(value) && (value.length > (property.maxItems ?? 64) || value.some(item => typeof item !== property.items?.type || item.includes('\0'))))
-      throw toolFailure(`工具参数 ${key} 无效。`);
-  }
-}
-
 /**
  * Tool authority is derived from canonical work ownership and immutable turn context, never model metadata.
  * 工具权限来自正式工作归属和不可变轮次上下文，不来自模型元信息。
  */
 export class ToolService {
-  constructor({ conversationStore, dataHome, extensionRoot, extensionPointer, sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, bundledDirectory, officialTools = bundledDirectory !== null } = {}) {
+  constructor({ conversationStore, dataHome, memoryService, extensionRoot, extensionPointer, sandboxRunner, desktopRunner, hostTerminalRunner, webFetcher, approvalTimeoutMs, bundledDirectory, officialTools = bundledDirectory !== null } = {}) {
     if (!conversationStore?.root || !dataHome) throw toolFailure('缺少工具存储上下文。');
     this.conversations = conversationStore;
+    this.memory = memoryService;
     this.root = resolve(conversationStore.root);
     this.webFetcher = webFetcher ?? new WebFetchTool();
     this.dataHome = resolve(dataHome);
@@ -155,6 +141,7 @@ export class ToolService {
     this.approvals = new ToolApprovalRegistry({ ...(approvalTimeoutMs ? { timeoutMs: approvalTimeoutMs } : {}) });
     this.contexts = new WeakSet();
     this.taskVerifications = new WeakMap();
+    this.codeVersions = new WeakMap();
     this.evidenceBudgets = new WeakMap();
     this.catalogs = new WeakMap();
     this.stages = new WeakMap();
@@ -304,6 +291,19 @@ export class ToolService {
 
   taskVerificationFor(context) { this._assertContext(context); return this.taskVerifications.get(context)?.(); }
 
+  async captureTaskCodeVersion(context, { signal } = {}) {
+    signal?.throwIfAborted();
+    this._assertContext(context);
+    await this._assertOwnership(context);
+    await this.storageBoundary.refresh();
+    const versions = this.codeVersions.get(context) ?? new ToolCodeVersions();
+    return versions.capture({ signal, assertReadable: path => {
+      const managed = context.managedWorkspace && within(context.workspaceRoot, path);
+      if (this.storageBoundary.isCredential(path) || this.storageBoundary.isPrivateResult(path) ||
+          !managed && this.storageBoundary.isOwned(path)) throw toolFailure('验证目标已受保护。', 'PROTECTED_APP_DATA', 403);
+    } });
+  }
+
   setEvidenceBudget(context, maximumTokens) {
     this._assertContext(context);
     this.evidenceBudgets.set(context, Math.max(0, Math.min(32768, Math.floor(maximumTokens))));
@@ -343,6 +343,7 @@ export class ToolService {
     const servers = new Map(effectiveConfig.mcpServers.map(server => [server.id, server]));
     const descriptors = all.filter(tool => tool.enabled !== false && tool.available !== false && canUseBrowserServer(context, servers.get(tool.serverId)) &&
       (!tool.name.startsWith('knowledge.') || this.retrieval && retrievalSettings?.local.enabled !== false) &&
+      (!tool.name.startsWith('memory.') || this.memory) &&
       (retrievalSettings?.web.browserRead !== 'off' || !isAutomaticBrowserRead(context, tool)) &&
       (retrievalSettings?.web.mode !== 'off' || !(tool.name.startsWith('web.') || isPublicSearchTool(tool) || isPublicFetchTool(tool))));
     const mcpDiscovery = this.mcp.discovery({ ...effectiveConfig,
@@ -454,8 +455,15 @@ export class ToolService {
   async systemPrompt(context, { maximumTokens = Infinity } = {}) {
     this._assertContext(context);
     const skills = await this.listSkills(context);
+    const snapshot = this.catalogs.get(context);
+    const selectedCount = snapshot?.model?.selected.length;
     return buildToolSystemPrompt(context, { skills,
       deviceCapabilities: context.toolIntent?.deviceState ? this.capabilitySnapshot(context) : undefined,
+      catalogState: { availableCount: snapshot?.descriptors.size ?? 0, availableNames: [...(snapshot?.descriptors.keys() ?? [])], selectedCount,
+        deferredCount: selectedCount === undefined ? undefined : Math.max(0, snapshot.descriptors.size - selectedCount),
+        selectionState: selectedCount === undefined ? 'pending' : 'configured', tools: this.capabilitySnapshot(context).tools,
+        servers: this.mcp.discovery({ ...snapshot?.config, mcpServers: [...(snapshot?.servers.values() ?? [])] }, context)
+          .map(({ name, state }) => ({ name, state, authentication: 'unknown', loadName: name })) },
       browserPrompt: this.catalogs.get(context)?.browserPrompt,
       unavailableSkillCount: this.skills.discovery.get(skills)?.unavailableCount,
       mcpErrorIds: [...this.mcp.errors].map(([id, code]) => `${id} (${safeErrorCode({ code }, 'MCP_UNAVAILABLE')})`), maximumTokens });
@@ -474,6 +482,7 @@ export class ToolService {
         const availability = nativeToolAvailability(context, descriptor);
         const available = snapshot?.descriptors.has(name) === true;
         return { name, state: available ? 'available' : availability.available === false ? 'unavailable' : snapshot ? 'disabled' : 'not-discovered',
+          executionEnvironment: this.executionEnvironmentFor(context, name),
           schema: !snapshot?.model ? 'selection-pending' : snapshot.model.selected.some(tool => tool.name === name) ? 'loaded' : 'deferred',
           ...(availability.unavailableCode ? { code: availability.unavailableCode } : {}),
           approval: context.permissionMode === 'full' || ['web.fetch', 'computer.windows'].includes(name)
@@ -694,8 +703,13 @@ export class ToolService {
       if (webKind) webStage = await this.webSearch.take(context, webKind);
       let result;
       executionStarted = true;
+      if (call.name.startsWith('filesystem.') && !filesystemReadTools.has(call.name)) {
+        let versions = this.codeVersions.get(context);
+        if (!versions) { versions = new ToolCodeVersions(); this.codeVersions.set(context, versions); }
+        versions.observe(pathBinding);
+      }
       if (call.name.startsWith('filesystem.')) result = await executeFilesystem(call.name, context, call.arguments, path, signal,
-        { pathBinding, protectedRoots: outsideWorkspace || context.managedWorkspace ? [] :
+        { pathBinding, searchOwner: this, protectedRoots: outsideWorkspace || context.managedWorkspace ? [] :
             [this.root, this.dataHome, this.extensionRoot].flatMap(root => this.storageBoundary.aliases(root)),
           // A generic search approval never authorizes nested credential files; only explicit sensitive targets do.
           // 普通目录搜索的批准不授权读取其中的敏感文件，只有明确敏感目标的本次审批允许读取。
@@ -734,10 +748,17 @@ export class ToolService {
             { archiveId: result.evidenceArchiveId, modelProjection: id =>
               projectEvidenceSearchResult(publicToolResult({ content: [], structuredContent: result, isError: false }), id).structuredContent });
         }
-        const operation = { 'knowledge.read': 'read', 'knowledge.relations': 'relations',
+        const operation = { 'knowledge.plan': 'plan', 'knowledge.read': 'read', 'knowledge.relations': 'relations',
           'knowledge.assess': 'assess', 'knowledge.experience': 'experience' }[call.name];
         if (!operation) throw toolFailure('未知检索操作。', 'MODEL_TOOL_UNAVAILABLE', 400);
         result = await this.retrieval[operation](context, call.arguments, { signal });
+        if (call.name === 'knowledge.plan') result.programState.availableEvidenceTokens = this.evidenceBudgets.get(context) ?? null;
+      }
+      else if (call.name === 'memory.read' || call.name === 'memory.propose') {
+        if (!this.memory) throw toolFailure('记忆服务不可用。', 'MEMORY_UNAVAILABLE', 503);
+        result = await (call.name === 'memory.read'
+          ? this.memory.readForModel(context.conversationId, call.arguments, { signal })
+          : this.memory.propose(context.conversationId, call.arguments, { signal }));
       }
       else if (call.name === 'tool.search') {
         // Discovery may recover a changed/failed connection once; never replay a business operation.
@@ -801,8 +822,7 @@ export class ToolService {
             for (const tool of tools) {
               if (availableNames.includes(tool.name) || !this.webSearch.available(context, tool)) continue;
               const trial = [...availableNames, tool.name];
-              const keep = [...snapshot.descriptors.values()].filter(item => ['tool.search', 'tool.load', 'tool.result.read'].includes(item.name));
-              if (snapshot.model.fits([...keep, ...trial.map(id => snapshot.descriptors.get(id))])) availableNames.push(tool.name);
+              if (snapshot.model.canLoad(trial.map(id => snapshot.descriptors.get(id)))) availableNames.push(tool.name);
             }
             if (tools.length && availableNames.length === beforeCount)
               unavailable.push({ name, code: tools.every(tool => !this.webSearch.available(context, tool))
@@ -1010,6 +1030,19 @@ export class ToolService {
       try { content = JSON.stringify(projectRetrievalModelView(JSON.parse(content))); }
       catch { content = projectRetrievalModelView({ message: content }).message; }
     }
+    if (call.name === 'knowledge.search' && !result.isError && !storageError && resultRef && Array.isArray(result.value?.items)) {
+      let visible;
+      try { visible = JSON.parse(content); } catch { /* A textual preview proves no delivered original. 文本预览不证明已交付完整原文。 */ }
+      const visibleItems = visible?.items ?? visible?.structuredContent?.items;
+      if (Array.isArray(visibleItems)) {
+        const expected = projectEvidenceSearchResult(result.value, resultRef.id).items;
+        // Only complete records surviving the actual broker preview enter the evidence ledger.
+        // 只有真实工具预览中完整保留的条目才能进入证据账本，归档中未呈现的正文不算已读。
+        const originals = result.value.items.filter((_item, index) => visibleItems.some(item =>
+          item.sourceRef === expected[index].sourceRef && item.excerpt === expected[index].excerpt && !item.navigationOnly));
+        this.retrieval?.observeProvidedOriginals?.(context, originals);
+      }
+    }
     // Archive IDs and retry diagnostics change on every call, even when retrieved evidence is identical.
     // 每次调用的归档 ID 和重试诊断都会变化，不能把这些变化当作检索取得了新证据。
     const observedResult = call.name === 'knowledge.search' && Array.isArray(result.value?.items)
@@ -1017,7 +1050,7 @@ export class ToolService {
       : publicToolResult(canonical);
     return { content, isError: Boolean(result.isError), ...(resultRef ? { resultRef } : {}), status, executionEnvironment,
       ...(result.executed === false ? { executed: false } : {}),
-      observationHash: observationFingerprint(observedResult),
+      observationHash: observationFingerprint(observedResult), ...sourceObservation(call, result.value),
       ...(result.code || storageError ? { code: result.code ?? 'TOOL_RESULT_SAVE_FAILED' } : {}), ...(result.sandbox ? { sandbox: result.sandbox } : {}),
       ...(result.browser ? { browser: result.browser } : {}),
       outsideWorkspace: result.outsideWorkspace ?? false };
@@ -1031,7 +1064,9 @@ export class ToolService {
     this.contexts.delete(context);
     this.catalogs.delete(context);
     this.observationCaches.delete(context);
+    this.codeVersions.delete(context);
     this.discoveryRefreshes.delete(context);
+    await closeFilesystemSearches(context);
     if (this.sandboxRunner?.cleanup && stages) await Promise.allSettled([...stages].map(path => this.sandboxRunner.cleanup(path)));
   }
 
@@ -1049,6 +1084,7 @@ export class ToolService {
     // Wait for all closures before cleaning snapshots, and retain the failure for runtime retirement.
     // 一个所有者清理失败不能阻止其余进程停止；先等待全部关闭，再清理快照，并保留失败用于运行时退役判断。
     const outcomes = await Promise.allSettled([
+      () => closeFilesystemSearches(this),
       () => this.desktopRunner?.close?.(),
       () => this.hostTerminalJobs?.close?.(),
       () => this.hostTerminalRunner?.close?.(),

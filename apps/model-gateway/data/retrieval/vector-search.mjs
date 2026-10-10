@@ -282,10 +282,17 @@ export class RetrievalVectorSearch {
         backends.add('ann');
       } catch (error) {
         if (error.name === 'AbortError') throw error;
-        degradedReason ??= error.code ?? 'RETRIEVAL_ANN_FAILED';
-        // A pending large graph cannot be replaced by an equally expensive full foreground scan.
-        // 大图未就绪时不能改为同样昂贵的前台全扫描；保留词法通道和真实准备状态。
-        if (descriptor.count <= options.threshold || error.code !== 'RETRIEVAL_ANN_BUILD_PENDING') exactCandidates(descriptor, true);
+        if (error.code === 'RETRIEVAL_ANN_BUILD_PENDING') {
+          // Adaptive graph selection must preserve existing vectors within the bounded exact fallback budget.
+          // 自适应切换到建图时，在有界精确回退额度内继续使用已有向量，不因图尚未就绪丢失语义通道。
+          const scannedBefore = exactScannedChunks;
+          exactCandidates(descriptor, true);
+          if (exactScannedChunks > scannedBefore) continue;
+          degradedReason ??= error.code;
+        } else {
+          degradedReason ??= error.code ?? 'RETRIEVAL_ANN_FAILED';
+          exactCandidates(descriptor, true);
+        }
       }
     }
     checkCancelled();

@@ -86,3 +86,25 @@ Warm latency uses one query at a time after model/index warmup, including fresh 
 `metrics.mjs` 的 `createRetrievalEvaluationDataset` 固定数据集 ID、版本、development/heldout 标签、语料/查询/金标 SHA-256 和配对身份。金标可以包含多来源与多段真实字面证据；证据必须存在于原文。先保存数据集快照，再运行检索，报告附快照路径与独立校验哈希。标签为 heldout 并不证明数据从未用于调参，必须另外管理留出流程。
 
 `retrievalEvaluationReport` 同时记录 sourceRecall、evidenceRecall、evidenceHit、allEvidence、负例空结果、失败/跳过/诊断，以及包含失败尝试的延迟。失败计入计划分母，缺失或跳过使完整得分保持未知，不能仅报成功子集。无答案空结果只验证检索行为，不测生成拒答或幻觉。开发对照仍是开发回归，不与 BEIR、真实 Agent 或竞品成绩混称。
+
+## Windows 精简旧新配对入口
+
+`run-windows-paired-scifact.mjs` reuses one completed public index and verified real E5 query-vector cache. Default mode only checks identity; `--execute` copies the closed database into two owned roots and alternates old/new production index calls. It never downloads assets or computes missing vectors. It reports original twenty and additional eighty separately; search duration is not relabeled as fresh query-embedding or Agent latency.
+
+本入口复用一次已完成的公开索引及受校验的真实 E5 查询向量。默认只检查身份；显式 `--execute` 才复制到两个独立数据目录，交替调用旧新生产索引。不下载、不重嵌入，缓存缺失明确停止。原二十题与新增八十题分别评分；数据库检索耗时不能冒充真实查询嵌入或 Agent 总耗时。
+
+```powershell
+node tests/retrieval-benchmark/run-windows-paired-scifact.mjs --input <completed-public-run> --original20 <query-ids.json> --old-root <old-source-snapshot> --new-root <new-source-snapshot>
+```
+
+`query-ids.json` must contain exactly twenty unique official test IDs under `queryIds`, with `origin` recording historical provenance. Missing historical IDs are a blocker; newly frozen IDs must be explicitly labeled as a new sample. The default corpus identity is 5,183 documents / 6,559 chunks. `--expected-chunks 22858` is an explicit different-corpus comparison, requiring the report to retain that distinction; it never silently satisfies the 6,559-chunk request.
+
+二十题清单需要 `queryIds` 数组和如实说明来源的 `origin`。历史题号缺失时不能声称复现原二十题；新冻结题必须另作标记。默认核验 5,183 文档／6,559 分块。显式 `--expected-chunks 22858` 可进行另一语料身份的比较，但不能把该结果冒充 6,559 分块的旧试测。
+
+Add `--execute --stage 20` only after preflight succeeds. For `--stage 100`, `--review` must point to a JSON review with this `pairingId`, `allowExpansion: true`, `resultsPath` and `resultsSha256` identifying a successful complete twenty-query run. The eighty additional IDs are frozen by seeded SHA-256 ordering before either version retrieves; judgments are only used for scoring. Missing or failed queries remain in planned/failed/skipped counts, and successful-prefix metric means are labeled as completed pairs only.
+
+身份检查成功后才能加 `--execute --stage 20`。扩至一百题时，`--review` 指定 JSON：包含本轮 `pairingId`、`allowExpansion: true`、完整成功二十题结果的 `resultsPath` 和 `resultsSha256`。新增八十题在两版检索前按固定种子的 SHA-256 顺序冻结，不按成绩选题。缺失／失败保留在计划、失败、跳过计数中；成功子集均分明确标为完成配对指标。
+
+Stage 100 reuses the completed twenty-query rankings and closed owned index copies; only the eighty additional queries execute. `--execute --latency --completed-run <results.json> --latency-repeats 3` separately times the first three frozen IDs after one unmeasured warm request per query/version. It records actual backend transitions, so a new exact/ANN mixture must not be described as stable ANN-only warm latency. Neither path recomputes query/document vectors.
+
+扩展阶段复用二十题排行与已经关闭的自有索引，只执行新增八十题。另用 `--execute --latency --completed-run <results.json> --latency-repeats 3`，选固定前三题、每版每题先预热一次，再单独计时三次。报告实际后端变化；混合 exact／ANN 观测不能宣称纯 ANN 稳定热态。两条路径均不重算查询或文档向量。

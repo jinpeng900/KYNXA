@@ -1,10 +1,10 @@
 import { resolve } from 'node:path';
 import { chunkSource } from '../../data/retrieval/index.mjs';
 import { validateSource, sourceFileRevision } from '../../data/retrieval/retrieval-contracts.mjs';
-import { deriveSourceVersion, canonicalMetadata } from '../../data/retrieval/derivation-version.mjs';
+import { deriveSourceVersion, canonicalMetadata, sourceDerivationVersions } from '../../data/retrieval/derivation-version.mjs';
 import { CHUNKER_VERSION, TOKENIZER_VERSION, EMBEDDING_TEXT_VERSION, STRUCTURED_CHUNKER_VERSION, STRUCTURED_EMBEDDING_TEXT_VERSION,
   chunkStructuredSource, embeddingProjectionForChunk } from '../../data/retrieval/retrieval-text.mjs';
-import { applyTokenFit, embeddingInputForChunk } from '../../data/retrieval/token-chunks.mjs';
+import { applyTokenFit, embeddingInputForChunk, TOKEN_FITTED_CHUNKER_VERSION } from '../../data/retrieval/token-chunks.mjs';
 import { validateDocumentCoverage } from '../../data/retrieval/document-coverage.mjs';
 import { readSourceFile, readSourceFileWindow } from '../../tools/retrieval/source-reader.mjs';
 import { toolFailure } from '../../platform/tool-paths.mjs';
@@ -113,10 +113,10 @@ export class SourceIndexer {
     this.fingerprints.delete(`${sourceId}:semantic`);
   }
 
-  preparationVersion(profileId, devicePreference) {
+  preparationVersion(profileId, devicePreference, { semantic = true } = {}) {
     const parserVersion = preparationVersion(this.structures);
     if (!parserVersion) return null;
-    const status = typeof this.embeddings.fitDocuments === 'function' ? this.embeddings.status(profileId, { devicePreference }) : null;
+    const status = semantic && typeof this.embeddings.fitDocuments === 'function' ? this.embeddings.status(profileId, { devicePreference }) : null;
     return status?.fittingVersion ? `${parserVersion}|${status.fittingVersion}|${sourceIdentity(status.profileId,
       status.modelVersion, status.inputProjectionVersion, status.maxInputTokens, status.embeddingSpaceId)}` : parserVersion;
   }
@@ -132,6 +132,20 @@ export class SourceIndexer {
     const current = isCurrent ? await isCurrent(source, signal) : await this.backgroundSourceActive(source, settings, signal);
     signal?.throwIfAborted();
     return current ? published : null;
+  }
+
+  async unchangedFittedPublication(source, settings, signal, isCurrent) {
+    if (source.structure?.parseStatus === 'unavailable') return null;
+    const published = await this.unchangedPublication(source, settings, signal, isCurrent);
+    if (!published) return null;
+    const versions = sourceDerivationVersions(source);
+    // Lexical refreshes may retain an authorized fitted subdivision, but never a different parser or original revision.
+    // 词法刷新可保留已授权的 token 细分块，但不能沿用不同的解析器或原文版本。
+    if (published.parserVersion !== versions.parserVersion || published.tokenizerVersion !== versions.tokenizerVersion ||
+        published.chunkerVersion !== `${TOKEN_FITTED_CHUNKER_VERSION}|${versions.chunkerVersion}` ||
+        !published.embeddingInputVersion?.startsWith(`${versions.embeddingInputVersion}|`) ||
+        JSON.stringify(canonicalMetadata(published.structure)) !== JSON.stringify(canonicalMetadata(source.structure))) return null;
+    return published;
   }
 
   async fitSourceChunks(source, chunks, status, { profileId, signal, devicePreference }, recordDiagnostic) {
@@ -204,11 +218,12 @@ export class SourceIndexer {
     if (!scopes.length || !records.length) return;
     const published = new Map((await this.index.listSources({ scopeKeys: scopes, signal })).map(source => [source.sourceId, source]));
     const current = new Map(sources.map(source => [source.sourceId, sourceMetadata(source)]));
-    const serviceVersion = this.preparationVersion(settings.local.embeddingProfileId, devicePreference);
     const serviceIdentity = this.structures?.identity?.() ?? this.structures;
     const status = this.embeddings.status(settings.local.embeddingProfileId, { devicePreference });
     for (const record of records) {
       signal?.throwIfAborted();
+      const serviceVersion = this.preparationVersion(settings.local.embeddingProfileId, devicePreference,
+        { semantic: record.semantic && settings.local.semantic !== 'off' && settings.local.embeddingProfileId !== null });
       const source = current.get(record.sourceId), row = published.get(record.sourceId);
       if (!source || !row || !serviceVersion || record.preparationVersion !== serviceVersion ||
           preparationSignature(source) !== record.inputSignature || row.contentHash !== source.contentHash ||
@@ -237,6 +252,8 @@ export class SourceIndexer {
       };
       this.fingerprints.set(`${source.sourceId}:${record.semantic ? 'semantic' : 'lexical'}`, cached);
       if (record.semantic) this.fingerprints.set(`${source.sourceId}:lexical`, { ...cached,
+        preparation: { ...cached.preparation, serviceVersion: this.preparationVersion(settings.local.embeddingProfileId,
+          devicePreference, { semantic: false }) }, checkpoint: undefined,
         fingerprint: fingerprintFor(source, record, status, settings, false) });
     }
     while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
@@ -248,7 +265,8 @@ export class SourceIndexer {
     const devicePreference = settings.local.embeddingDevicePolicy === 'cpu' ? 'cpu' : 'auto';
     const previous = this.fingerprints.get(`${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`);
     const service = this.structures, serviceIdentity = service?.identity?.() ?? service;
-    const serviceVersion = this.preparationVersion(profileId, devicePreference);
+    const serviceVersion = this.preparationVersion(profileId, devicePreference,
+      { semantic: semantic && settings.local.semantic !== 'off' && profileId !== null });
     const inputSignature = preparationSignature(source);
     const status = this.embeddings.status(profileId, { devicePreference });
     if (input.unavailable || serviceVersion && previous?.preparation && previous.preparation.service === serviceIdentity &&
@@ -340,15 +358,14 @@ export class SourceIndexer {
     const currentFingerprint = (source, versions, status) => fingerprintFor(source, versions, status, settings, semantic);
     let reuseSettings = new Map();
     const reuse = async (source, count, key, entry) => {
-      if (!semanticRequested && !isCurrent) return 'reused';
       const projectId = settings.projectId ?? (source.scopeKey.startsWith('project:') ? source.scopeKey.slice('project:'.length) : null);
       if (isCurrent && !reuseSettings.has(projectId)) reuseSettings.set(projectId, await this.effectiveSettings(projectId));
       const currentSettings = isCurrent ? reuseSettings.get(projectId) : settings;
-      const isActive = isCurrent ? currentSettings.local.semantic === settings.local.semantic &&
+      const isActive = !semanticRequested && !isCurrent || (isCurrent ? currentSettings.local.semantic === settings.local.semantic &&
         currentSettings.local.embeddingProfileId === settings.local.embeddingProfileId &&
         (source.sourceType !== 'work-file' || currentSettings.projectIndexing?.mountedFolder &&
           currentSettings.projectIndexing.bindingRevision === source.bindingRevision) &&
-        await isCurrent(source, signal) : await this.backgroundSourceActive(source, settings, signal);
+        await isCurrent(source, signal) : await this.backgroundSourceActive(source, settings, signal));
       if (isActive) {
         if (this.fingerprints.get(key) !== entry) return false;
         if (semanticRequested) { cachedChunks += count; vectorChunks += count; }
@@ -379,7 +396,7 @@ export class SourceIndexer {
         // New foreground targets reorder only remaining work at a safe publication boundary.
         // 新前台目标只在安全发布边界重排剩余工作，不重做已完成批次，也不恢复取消的任务。
         if (priorities && priorityRevision !== priorities.revision) {
-          const remaining = prioritizeEvidenceSources(orderedSources.slice(offset), priorities.paths);
+          const remaining = prioritizeEvidenceSources(orderedSources.slice(offset), priorities.paths, priorities.recentPaths);
           for (let index = 0; index < remaining.length; index++) orderedSources[offset + index] = remaining[index];
           priorityRevision = priorities.revision;
         }
@@ -415,7 +432,7 @@ export class SourceIndexer {
               documentCoverage: input.documentCoverage }); continue;
           }
           const fingerprintKey = `${source.sourceId}:${semantic ? 'semantic' : 'lexical'}`;
-          const service = this.structures, serviceVersion = this.preparationVersion(profileId, devicePreference);
+          const service = this.structures, serviceVersion = this.preparationVersion(profileId, devicePreference, { semantic: semanticRequested });
           const serviceIdentity = service?.identity?.() ?? service;
           const inputSignature = preparationSignature(source);
           const previous = this.fingerprints.get(fingerprintKey);
@@ -447,8 +464,24 @@ export class SourceIndexer {
           if (source.structure?.parseStatus === 'unavailable' &&
               !source.structure.diagnosticCodes?.some(code => ['UNSUPPORTED_CODE_LANGUAGE', 'CODE_LANGUAGE_UNSUPPORTED'].includes(code)))
             this.preparationFailures++;
+          if (!semanticRequested) {
+            const published = await this.unchangedFittedPublication(source, settings, signal, isCurrent);
+            if (published) {
+              // Existing fitted text stays readable without loading a tokenizer or replacing its valid vectors.
+              // 已拟合正文直接保持可读，无需加载分词器，也不替换仍有效的向量。
+              totalChunks += published.chunkCount;
+              recordCoverage(source, source.structure?.parseStatus === 'partial' ? 'partial' : 'ready', { lexical: 'ready', semanticState: 'disabled',
+                parser: source.structure?.parseStatus === 'partial' ? 'partial' : 'ready' });
+              if (serviceVersion) this.fingerprints.set(fingerprintKey, {
+                fingerprint: currentFingerprint(source, published, status),
+                preparation: { service: serviceIdentity, serviceVersion, inputSignature, chunkCount: published.chunkCount,
+                  derivationSignature: published.derivationSignature, embeddingInputSignature: published.embeddingInputSignature }
+              });
+              continue;
+            }
+          }
           let fittingFailed = false;
-          const fittingRequired = settings.local.semantic !== 'off' && profileId !== null &&
+          const fittingRequired = semanticRequested &&
             typeof this.embeddings.fitDocuments === 'function' && Boolean(status.fittingVersion);
           if (fittingRequired) {
             try {
@@ -483,7 +516,8 @@ export class SourceIndexer {
           const versions = deriveSourceVersion(source, chunks, { checkCancelled: () => signal?.throwIfAborted() });
           status = this.embeddings.status(profileId, { devicePreference });
           const fingerprint = currentFingerprint(source, versions, status);
-          const preparation = !fittingFailed && serviceVersion && this.preparationVersion(profileId, devicePreference) === serviceVersion &&
+          const preparation = !fittingFailed && serviceVersion && this.preparationVersion(profileId, devicePreference,
+            { semantic: semanticRequested }) === serviceVersion &&
             this.structures === service && (this.structures?.identity?.() ?? this.structures) === serviceIdentity &&
             source.structure?.parseStatus !== 'unavailable'
             ? { service: serviceIdentity, serviceVersion, inputSignature, chunkCount: chunks.length,
@@ -629,8 +663,12 @@ export class SourceIndexer {
           const published = prepared.length ? await (semantic ? this.serialize(publish) : publish()) : new Set();
           if (semanticRequested) for (const source of prepared)
             if (published.has(source.sourceId)) vectorChunks += source.vectors?.filter(Boolean).length ?? 0;
-          for (const [sourceId, fingerprint] of fingerprintUpdates)
-            if (published.has(sourceId) && fingerprint.cacheEligible) this.fingerprints.set(fingerprint.key, fingerprint.value);
+          for (const [sourceId, fingerprint] of fingerprintUpdates) if (published.has(sourceId)) {
+            if (fingerprint.cacheEligible) this.fingerprints.set(fingerprint.key, fingerprint.value);
+            // Background fitting may change chunk topology; the next lexical pass must adopt its actual published count.
+            // 后台拟合可能改变分块拓扑；下次词法刷新需采用真实发布的块数，不能沿用拟合前的覆盖计数。
+            if (semantic) this.fingerprints.delete(`${sourceId}:lexical`);
+          }
           while (this.fingerprints.size > MAX_FINGERPRINTS) this.fingerprints.delete(this.fingerprints.keys().next().value);
           if (this.index.recordCoverage) {
             const entries = batch.map(source => coverageEntries.get(source.sourceId)).filter(Boolean);

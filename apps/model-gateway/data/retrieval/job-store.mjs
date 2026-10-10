@@ -123,7 +123,12 @@ export class RetrievalJobStore {
     const document = JSON.parse(await readFile(this.file, 'utf8'));
     if (document.schemaVersion !== 1 || !Array.isArray(document.jobs))
       throw toolFailure('索引任务文件版本无效。', 'UNSUPPORTED_RETRIEVAL_SCHEMA', 409);
-    for (const job of document.jobs) if (job.coverage !== undefined) validateCoverageProgress(job.coverage);
+    for (const job of document.jobs) {
+      if (job.coverage !== undefined) validateCoverageProgress(job.coverage);
+      if (job.automaticRebuildBlocked !== undefined && typeof job.automaticRebuildBlocked !== 'boolean' ||
+          job.automaticRebuildScope !== undefined && !SHA256_PATTERN.test(job.automaticRebuildScope))
+        throw toolFailure('索引取消策略记录无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
+    }
     return document;
   }
   list() { return this._run(async () => structuredClone((await this._read()).jobs)); }
@@ -134,14 +139,21 @@ export class RetrievalJobStore {
       return structuredClone(job);
     });
   }
-  create(projectId = null) {
+  create(projectId = null, { automaticRebuildScope, resumeAutomatic = false } = {}) {
     return this._run(async () => {
+      if (automaticRebuildScope !== undefined && !SHA256_PATTERN.test(automaticRebuildScope) || typeof resumeAutomatic !== 'boolean')
+        throw toolFailure('索引自动恢复范围无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
       const document = await this._read();
       const job = { jobId: randomUUID(), projectId, status: 'queued', completedSources: 0, totalSources: 0,
-        createdAt: new Date().toISOString() };
+        createdAt: new Date().toISOString(), ...(automaticRebuildScope ? { automaticRebuildScope } : {}) };
+      if (resumeAutomatic) for (const previousJob of document.jobs)
+        if (previousJob.projectId === projectId && (previousJob.automaticRebuildBlocked === true ||
+            previousJob.status === 'cancelled' && previousJob.error === 'INDEX_CANCELLED')) previousJob.automaticRebuildBlocked = false;
       const previous = document.jobs;
-      document.jobs = [...document.jobs.filter(item => ACTIVE_JOB_STATUSES.has(item.status)),
-        ...document.jobs.filter(item => !ACTIVE_JOB_STATUSES.has(item.status)).slice(-95), job];
+      // A live cancellation policy outlives ordinary job-history retention until explicit work replaces it.
+      // 仍生效的取消策略不能被普通任务历史淘汰，恢复仅由明确的新建请求解除。
+      document.jobs = [...document.jobs.filter(item => ACTIVE_JOB_STATUSES.has(item.status) || item.automaticRebuildBlocked === true),
+        ...document.jobs.filter(item => !ACTIVE_JOB_STATUSES.has(item.status) && item.automaticRebuildBlocked !== true).slice(-95), job];
       const retained = new Set(document.jobs.map(item => item.jobId));
       // Retired terminal checkpoints are rebuildable metadata, never original sources or active work.
       // 淘汰的终态检查点只是可重建元信息，不是原始资料，也不包含仍在运行的任务。
@@ -166,6 +178,8 @@ export class RetrievalJobStore {
       if (patch.semantic !== undefined) patch = { ...patch, semantic: validateSemanticProgress(patch.semantic) };
       if (patch.coverage !== undefined) patch = { ...patch, coverage: validateCoverageProgress(patch.coverage) };
       if (patch.checkpoint !== undefined) patch = { ...patch, checkpoint: validateCheckpoint(patch.checkpoint) };
+      if (patch.automaticRebuildBlocked !== undefined && typeof patch.automaticRebuildBlocked !== 'boolean')
+        throw toolFailure('索引取消策略无效。', 'INVALID_RETRIEVAL_JOB_UPDATE', 400);
       Object.assign(job, patch); await atomicJson(this.file, document); return structuredClone(job);
     });
   }
@@ -253,6 +267,10 @@ export class RetrievalJobStore {
       let changed = false;
       const pending = [];
       for (const job of document.jobs) if (ACTIVE_JOB_STATUSES.has(job.status)) {
+        if (job.automaticRebuildBlocked === true) {
+          Object.assign(job, { status: 'cancelled', error: 'INDEX_CANCELLED', finishedAt: new Date().toISOString() });
+          changed = true; continue;
+        }
         if (resumable && job.checkpoint) {
           try { validateCheckpoint(job.checkpoint); pending.push(structuredClone(job)); continue; }
           catch { /* Invalid headers never authorize an automatic restart. 无效头部不能触发自动恢复。 */ }

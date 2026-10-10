@@ -12,9 +12,10 @@ function coverageSummary(coverage) {
 /** Owns scheduled indexing and durable terminal states, without owning model/index resources.
  * 拥有索引调度与持久终态，不接管模型服务或索引资源的释放权。 */
 export class IndexJobService {
-  constructor({ jobs, validateProject, prepareSources, publishSources, restoreSources, reuseSources, finalizeSources, refreshSources }) {
+  constructor({ jobs, validateProject, scopeIdentity, prepareSources, publishSources, restoreSources, reuseSources, finalizeSources, refreshSources }) {
     this.jobs = jobs;
     this.validateProject = validateProject;
+    this.scopeIdentity = scopeIdentity;
     this.prepareSources = prepareSources;
     this.publishSources = publishSources;
     this.restoreSources = restoreSources;
@@ -27,6 +28,7 @@ export class IndexJobService {
     this.closed = false;
     this.lastFailure = undefined;
     this.taskPriorities = new Map();
+    this.automaticStops = new Map();
   }
 
   prioritiesFor(projectId) {
@@ -35,39 +37,76 @@ export class IndexJobService {
     if (running?.priorities) return running.priorities;
     let priorities = this.taskPriorities.get(key);
     if (!priorities) {
-      priorities = { revision: 0, paths: new Set() };
+      priorities = { revision: 0, paths: new Set(), recentPaths: new Set() };
       this.taskPriorities.set(key, priorities);
       while (this.taskPriorities.size > 32) this.taskPriorities.delete(this.taskPriorities.keys().next().value);
     }
     return priorities;
   }
 
-  prioritize(projectId, path) {
+  prioritize(projectId, path, { recent = false } = {}) {
     if (this.closed || !path) return;
     const priorities = this.prioritiesFor(projectId);
     const normalized = normalizeRetrievalPath(path);
-    if (!priorities.paths.has(normalized)) {
-      priorities.paths.add(normalized);
-      while (priorities.paths.size > 16) priorities.paths.delete(priorities.paths.values().next().value);
+    // File notifications have a separate bound and cannot evict the user's current explicit targets.
+    // 文件通知使用独立限额，不能挤掉用户当前明确指定的目标。
+    const paths = recent ? (priorities.recentPaths ??= new Set()) : priorities.paths;
+    if (recent || !paths.has(normalized)) {
+      paths.delete(normalized);
+      paths.add(normalized);
+      while (paths.size > 16) paths.delete(paths.values().next().value);
       priorities.revision++;
     }
   }
 
   initialize() {
-    if (!this.initialization) this.initialization = this.jobs.recover({ resumable: true }).then(jobs => {
-      for (const job of jobs ?? []) if (!this.closed) this.admit(job, undefined, { checkpoint: job.checkpoint });
+    if (!this.initialization) this.initialization = this.jobs.recover({ resumable: true }).then(async recovered => {
+      const history = (await this.jobs.list?.() ?? []).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const latest = new Map();
+      for (const job of history) {
+        latest.set(job.projectId, job);
+        if (job.automaticRebuildBlocked === true) this.automaticStops.set(job.projectId, job);
+      }
+      // Older cancellation receipts acquire the same durable policy; ordinary history trimming must not forget it.
+      // 旧版取消回执沿用同一持久策略，不能被普通任务历史清理忘掉。
+      for (const job of latest.values()) if (job.status === 'cancelled' && job.error === 'INDEX_CANCELLED' &&
+          job.automaticRebuildBlocked === undefined) {
+        this.automaticStops.set(job.projectId, job);
+        await this.jobs.update(job.jobId, { automaticRebuildBlocked: true });
+      }
+      for (const job of recovered ?? []) if (!this.closed) {
+        const stopped = this.automaticStops.get(job.projectId);
+        if (stopped && (!stopped.automaticRebuildScope || stopped.automaticRebuildScope === job.automaticRebuildScope)) {
+          await this.jobs.update(job.jobId, { status: 'cancelled', error: 'INDEX_CANCELLED',
+            automaticRebuildBlocked: true, finishedAt: new Date().toISOString() });
+          continue;
+        }
+        this.admit(job, undefined, { checkpoint: job.checkpoint });
+      }
     });
     return this.initialization;
+  }
+
+  stopAutomatic(active) {
+    if (!active.cancelMarker) {
+      this.automaticStops.set(active.projectId, { jobId: active.jobId, projectId: active.projectId,
+        automaticRebuildScope: active.automaticRebuildScope });
+      active.cancelMarker = this.jobs.update(active.jobId, { automaticRebuildBlocked: true });
+      active.cancelMarker.catch(error => { this.lastFailure ??= error; });
+    }
+    return active.cancelMarker;
   }
 
   admit(job, signal, recovered) {
     const controller = new AbortController();
     const active = { jobId: job.jobId, projectId: job.projectId, controller, acceptingRefresh: true,
+      automaticRebuildScope: job.automaticRebuildScope,
       needsRefresh: false, recovered, completedSources: job.completedSources, totalSources: job.totalSources,
       suspend: false, cancelledByUser: false, hasStarted: false, priorities: this.prioritiesFor(job.projectId) };
     const abort = () => {
       active.cancelledByUser = true;
       active.suspend = false;
+      this.stopAutomatic(active);
       controller.abort(signal?.reason);
       if (!active.hasStarted) this.cancelQueued(active).catch(error => { this.lastFailure ??= error; });
     };
@@ -98,8 +137,8 @@ export class IndexJobService {
       active.acceptingRefresh = false;
       // Queued work has admitted no reads or publications, so cancellation need not wait for another project.
       // 排队任务尚未接纳读取或发布，取消无需等待其他项目的运行任务。
-      active.queuedCancellation = this.jobs.update(active.jobId, { status: 'cancelled', error: 'INDEX_CANCELLED',
-        finishedAt: new Date().toISOString() }).then(receipt => {
+      active.queuedCancellation = Promise.resolve(active.cancelMarker).then(() => this.jobs.update(active.jobId, {
+        status: 'cancelled', error: 'INDEX_CANCELLED', finishedAt: new Date().toISOString() })).then(receipt => {
         active.detachAbort();
         if (this.active.get(active.jobId) === active) this.active.delete(active.jobId);
         return receipt;
@@ -108,7 +147,7 @@ export class IndexJobService {
     return active.queuedCancellation;
   }
 
-  rebuild({ projectId = null, signal, dirty = false } = {}) {
+  rebuild({ projectId = null, signal, dirty = false, automatic = false } = {}) {
     const pending = this.admissionQueue.catch(() => {}).then(async () => {
       signal?.throwIfAborted();
       if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
@@ -119,13 +158,26 @@ export class IndexJobService {
       }
       signal?.throwIfAborted();
       if (this.closed) throw toolFailure('检索服务已关闭。', 'RETRIEVAL_CLOSED', 409);
+      const automaticRebuildScope = await this.scopeIdentity?.(projectId, signal);
+      signal?.throwIfAborted();
+      const stopped = this.automaticStops.get(projectId);
+      if (automatic && stopped && (!stopped.automaticRebuildScope || stopped.automaticRebuildScope === automaticRebuildScope)) {
+        const receipt = await this.jobs.get(stopped.jobId);
+        return { ...receipt, automaticRebuildBlocked: true, automaticRebuildState: 'cancelled-by-user' };
+      }
       const current = [...this.active.values()].find(job => job.projectId === projectId &&
         job.acceptingRefresh && !job.controller.signal.aborted);
       if (current) {
         if (dirty) current.needsRefresh = true;
         return this.jobs.get(current.jobId);
       }
-      const job = await this.jobs.create(projectId);
+      // Explicit resumption must not clear the durable stop before the cancelled owner's work has drained.
+      // 显式恢复先等待被取消任务排空，不能提前清除持久停止标记并让重启复活旧任务。
+      if (!automatic) await Promise.all([...this.active.values()].filter(job => job.projectId === projectId &&
+        job.cancelledByUser && job.controller.signal.aborted).map(job => job.promise));
+      signal?.throwIfAborted();
+      const job = await this.jobs.create(projectId, { automaticRebuildScope, resumeAutomatic: !automatic });
+      if (!automatic) this.automaticStops.delete(projectId);
       this.admit(job, signal);
       return job;
     });
@@ -220,6 +272,7 @@ export class IndexJobService {
       const partial = active.coverage && (!active.coverage.complete || active.coverage.failed || active.coverage.skipped);
       await this.jobs.update(active.jobId, { status: partial ? 'partial' : 'completed', finishedAt: new Date().toISOString() });
     } catch (error) {
+      await active.cancelMarker;
       const suspended = signal.aborted && !active.cancelledByUser && active.suspend && (active.hasCheckpoint || active.recovered);
       await this.jobs.update(active.jobId, { status: suspended ? 'paused' : signal.aborted ? 'cancelled' : 'failed',
         error: suspended ? 'INDEX_SUSPENDED' : signal.aborted ? 'INDEX_CANCELLED' : typeof error.code === 'string' ? error.code : 'INDEX_FAILED',
@@ -232,7 +285,10 @@ export class IndexJobService {
     const admitted = this.active.get(id);
     // Abort an owned live task before waiting for disk reads that may queue behind progress writes.
     // 先取消已知的本进程任务，再等待可能排在进度写入之后的磁盘读取。
-    if (admitted) { admitted.cancelledByUser = true; admitted.suspend = false; admitted.controller.abort(); }
+    if (admitted) {
+      admitted.cancelledByUser = true; admitted.suspend = false;
+      this.stopAutomatic(admitted); admitted.controller.abort();
+    }
     const queuedCancellation = admitted && !admitted.hasStarted ? this.cancelQueued(admitted) : null;
     await this.initialize();
     if (queuedCancellation) return queuedCancellation;
@@ -241,12 +297,17 @@ export class IndexJobService {
     if (active) {
       active.suspend = false;
       active.cancelledByUser = true;
+      this.stopAutomatic(active);
       active.controller.abort();
       if (!active.hasStarted) return this.cancelQueued(active);
       // Cancellation is acknowledged only after admitted reads/publications have drained.
       // 已接纳的读取和发布排空后才确认取消，之后不会再发布此任务的批次。
       await active.promise;
-    } else if (job.status === 'paused') await this.jobs.update(job.jobId, { status: 'cancelled', error: 'INDEX_CANCELLED', finishedAt: new Date().toISOString() });
+    } else if (job.status === 'paused') {
+      this.automaticStops.set(job.projectId, job);
+      await this.jobs.update(job.jobId, { status: 'cancelled', error: 'INDEX_CANCELLED',
+        automaticRebuildBlocked: true, finishedAt: new Date().toISOString() });
+    }
     return this.jobs.get(job.jobId);
   }
 
