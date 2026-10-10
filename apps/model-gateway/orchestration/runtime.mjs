@@ -358,12 +358,15 @@ export class ModelRuntime {
             resultContext: toolContext ?? { conversationId: id, requestId }, inputBudgetTokens: context.metrics.inputBudgetTokens },
           generate: async (request, dispatched) => {
             const summaryTurn = { connection, conversationId: id, requestOptions: { system: request.system } };
+            // Summary admission shares foreground recovery; confirmed idle cleanup precedes one admission retry.
+            // 摘要准入沿用前台恢复机制：确认闲置模型清理完成后，仅重新申请一次资源，不重放摘要请求。
             return runResourceTask(this.resources, { taskId: `summary:${requestId}`, workspaceId: contextInput.projectId ?? id,
               kind: 'foreground', cpuThreads: 1, memoryBytes: 32 * 1024 * 1024 },
             () => this.consumeModelResponse(summaryTurn, input.model,
               chatRequest(connection, input.model, request.messages, { system: request.system, maxOutputTokens: request.maxOutputTokens }),
               AbortSignal.any([signal, AbortSignal.timeout(Math.min(this.timeoutMs, 120000))]), parseModelJson,
-              { refreshMemory: false, onDispatched: dispatched }), { signal: signal });
+              { refreshMemory: false, onDispatched: dispatched }), { signal: signal,
+              onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
           } });
         semanticSummaryAudit = summarized.audit;
         if (summarized.value) {
