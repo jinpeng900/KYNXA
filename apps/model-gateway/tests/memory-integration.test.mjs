@@ -142,6 +142,12 @@ async function fixture(t, { contextWindowTokens = 8192 } = {}) {
     await modelStore.save({ providerId: `fixture-${index}`, displayName: `Fixture ${index}`, protocol,
       baseUrl: `${endpoint}/v1/${protocol}`, models: ['model-a', 'model-b'], contextWindowTokens });
   let runtime = new ModelRuntime({ modelStore, dataHome });
+  // A deterministic service capability controls these budget tests, not saved legacy settings.
+  // 预算测试由确定性服务能力控制，不再依赖保存的旧窗口设置；不测模型语义能力。
+  const declareServiceWindow = () => {
+    runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: contextWindowTokens });
+  };
+  declareServiceWindow();
   let base = await listen(createModelServer({ modelStore, modelRuntime: runtime }), t);
   t.after(() => runtime.close());
   const chatA = seedChat('P / A'), chatB = seedChat('P / B');
@@ -218,6 +224,7 @@ async function fixture(t, { contextWindowTokens = 8192 } = {}) {
       await runtime.close();
       if (modelStore.dataHome !== newDataHome) modelStore = new ModelStore({ dataHome: newDataHome });
       runtime = new ModelRuntime({ modelStore, dataHome: newDataHome });
+      declareServiceWindow();
       base = await listen(createModelServer({ modelStore, modelRuntime: runtime }), t);
     } };
 }
