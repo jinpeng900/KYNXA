@@ -60,7 +60,9 @@ for (const protocol of protocols) {
         return nativeTurn(protocol, [{ id: 'call_' + requests, name: 'filesystem.read', arguments: { path: 'long.txt' } }], requests);
       } });
     assert.equal(outcome.content, 'Continued after compaction.'); assert.equal(executions, 3); assert.equal(requests, 4);
-    assert.deepEqual(saved.map(item => item.status), ['running', 'completed', 'running', 'completed', 'running', 'completed']);
+    assert.deepEqual(saved.filter(item => item.name !== 'context.compact').map(item => item.status),
+      ['running', 'completed', 'running', 'completed', 'running', 'completed']);
+    assert.ok(saved.filter(item => item.name === 'context.compact').every(item => ['running', 'completed'].includes(item.status)));
     assert.ok(metrics.some(item => item.compactedToolResultCount > 0));
     assert.ok(estimateToolMessageTokens(uncompactedMessages, 'Keep the fixed permission policy.') > 9500,
       'the fixture produces real pressure after accounting for native broker projection');
@@ -142,13 +144,89 @@ test('parallel native results keep all exact call IDs after first-round pressure
   }
 });
 
-test('hard current-message or schema budget failures happen before any model request or tool effects', async () => {
+test('current-message pressure returns an honest reply and oversized schemas allow a no-tool reply without effects', async () => {
   for (const failure of ['current', 'schema']) {
     let requests = 0, executions = 0, saves = 0;
-    await assert.rejects(runToolLoop({ protocol: 'openai-completions', messages: [{ role: 'user', content: failure === 'current' ? 'large current request '.repeat(500) : 'Read.' }],
+    const result = await runToolLoop({ protocol: 'openai-completions', messages: [{ role: 'user', content: failure === 'current' ? 'large current request '.repeat(500) : 'Read.' }],
       declarations: failure === 'schema' ? [{ description: 'large necessary schema '.repeat(500) }] : [], inputBudgetTokens: 1000,
       context: { conversationId: 'chat' }, service: { execute: async () => { executions++; } }, emit: () => {}, saveActivity: async () => { saves++; },
-      requestTurn: async () => { requests++; } }), { code: 'TOOL_CONTEXT_BUDGET_EXCEEDED' });
-    assert.equal(requests, 0); assert.equal(executions, 0); assert.equal(saves, 0);
+      requestTurn: async (_messages, declarations) => { requests++; assert.deepEqual(declarations, []);
+        return { content: 'A normal partial response.', reasoning: '', calls: [] }; } });
+    assert.equal(requests, failure === 'current' ? 0 : 1); assert.equal(executions, 0);
+    assert.ok(result.content.length > 0); assert.equal(result.completionStatus, 'interrupted');
+    assert.equal(saves, 2);
   }
+});
+
+for (const protocol of protocols) test(`${protocol} settled checkpoint archives public receipts without opaque reasoning or replay`, async () => {
+  const initial = [{ role: 'user', content: 'Continue this task; never delete anything.' }];
+  let archive;
+  const projection = new ToolContextProjection({ protocol, messages: initial, resultContext: {},
+    resultStore: { save: async (_context, _call, value) => { archive = value.content;
+      return { id: randomUUID(), bytes: value.content.length, sha256: 'a'.repeat(64) }; } } });
+  const call = { id: 'settled', name: 'synthetic', arguments: { path: 'file' } };
+  const result = { status: 'completed', content: 'Verified public result.',
+    resultRef: { id: randomUUID(), bytes: 23, sha256: 'b'.repeat(64) } };
+  const messages = appendToolResults(protocol, initial, nativeTurn(protocol, [call], 1), [{ call, result }],
+    { onResult: (message, pair) => projection.observeResult(message, pair, 1) });
+  const copy = structuredClone(messages);
+  const checkpoint = await projection.checkpoint(messages);
+  assert.deepEqual(checkpoint.messages[0], initial[0]); assert.deepEqual(messages, copy);
+  assert.ok(archive.includes('Verified public result.'));
+  for (const secret of ['private-cc', 'private-responses', 'Private native thought', 'private-claude'])
+    assert.ok(!archive.includes(secret));
+  assert.equal(JSON.parse(checkpoint.messages.at(-1).content).recentReceipts[0].id, call.id);
+  const incomplete = nativeTurn(protocol, [call], 1).continuation;
+  assert.equal(await projection.checkpoint([...initial, ...incomplete]), null);
+});
+
+test('budget pressure rebalances a complete native step and continues in the same loop', async () => {
+  const events = []; let adjustments = 0, requests = 0;
+  const messages = [{ role: 'user', content: 'Keep this original request.' },
+    { role: 'assistant', content: 'prior output '.repeat(400) }];
+  const result = await runToolLoop({ protocol: 'openai-completions', messages, declarations: [], inputBudgetTokens: 800,
+    context: { conversationId: 'chat' }, service: {}, emit: event => events.push(event), saveActivity: async () => {},
+    contextForPressure: async needed => { adjustments++; assert.ok(needed > 800); return { inputBudgetTokens: 6000 }; },
+    requestTurn: async received => { requests++; assert.deepEqual(received, messages);
+      return { content: 'Continued successfully.', reasoning: '', calls: [] }; } });
+  assert.equal(adjustments, 1); assert.equal(requests, 1); assert.equal(result.content, 'Continued successfully.');
+  assert.ok(events.some(event => event.type === 'tool_result' && event.tool.name === 'context.compact' && event.tool.status === 'completed'));
+});
+
+for (const protocol of protocols) test(`${protocol} current-step checkpoint continues and prevents replay of a completed write`, async () => {
+  let requests = 0, executions = 0, archives = 0; const events = [];
+  const ref = () => ({ id: randomUUID(), bytes: 25, sha256: 'c'.repeat(64) });
+  const result = await runToolLoop({ protocol, messages: [{ role: 'user', content: 'Complete the original task.' }],
+    declarations: [], inputBudgetTokens: 1800, context: { conversationId: 'chat', message: 'Complete the original task.' },
+    emit: event => events.push(event), saveActivity: async () => {},
+    service: { results: { save: async () => { archives++; return ref(); },
+      get: async () => ({ content: 'File saved.' }),
+      modelResult: async () => JSON.stringify({ status: 'completed', output: 'File saved.' }) },
+      execute: async () => { executions++; return { status: 'completed', content: 'File saved.', resultRef: ref() }; } },
+    requestTurn: async messages => {
+      requests++;
+      if (requests === 2) assert.ok(messages.some(message => typeof message.content === 'string' &&
+        message.content.includes('"contextCheckpoint":true')));
+      if (requests === 3) return { content: 'Continued with the saved operation.', reasoning: '', calls: [] };
+      return nativeTurn(protocol, [{ id: `write-${requests}`, name: 'filesystem.write',
+        arguments: { path: 'note.txt', content: 'a long original file body '.repeat(1500), expectedHash: null } }], requests);
+    } });
+  assert.equal(executions, 1); assert.equal(requests, 3); assert.ok(archives >= 1);
+  assert.equal(result.content, 'Continued with the saved operation.');
+  assert.ok(events.some(event => event.type === 'tool_result' && event.tool.name === 'context.compact' && event.tool.status === 'completed'));
+});
+
+test('an upstream context rejection checkpoints and continues instead of terminating the reply', async () => {
+  let requests = 0;
+  const result = await runToolLoop({ protocol: 'openai-completions',
+    messages: [{ role: 'user', content: 'Keep working on this task.' }], declarations: [], inputBudgetTokens: 1800,
+    context: { conversationId: 'chat' }, service: { results: { save: async () =>
+      ({ id: randomUUID(), bytes: 100, sha256: 'd'.repeat(64) }) } },
+    emit: () => {}, saveActivity: async () => {},
+    requestTurn: async messages => {
+      if (++requests === 1) throw Object.assign(new Error('Verified context rejection'), { code: 'MODEL_CONTEXT_LIMIT_REJECTED' });
+      assert.ok(messages.at(-1).content.includes('"contextCheckpoint":true'));
+      return { content: 'The original task continued.', reasoning: '', calls: [] };
+    } });
+  assert.equal(requests, 2); assert.equal(result.content, 'The original task continued.');
 });

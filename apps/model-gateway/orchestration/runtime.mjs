@@ -4,9 +4,9 @@ import { ensureExtensionLayout, extensionControlPaths, extensionPointerPath } fr
 import { ConversationStore } from '../data/conversations.mjs';
 import { validateId } from '../platform/conversation-id.mjs';
 import { authorization, chatRequest } from '../models/protocols.mjs';
-import { readModelStream, StreamFailure, finalParts, checkFinish } from '../models/streaming.mjs';
+import { StreamFailure, finalParts } from '../models/streaming.mjs';
 import { contextAllocation, contextAllocationAudit } from './retrieval/context-allocation.mjs';
-import { OutputBudgetError } from '../models/output-budget.mjs';
+import { OutputBudgetError, resolveOutputBudget } from '../models/output-budget.mjs';
 import { MemoryService } from '../data/memory-service.mjs';
 import { buildContext, ContextError, estimateTokens, estimateMessageTokens } from '../models/context.mjs';
 
@@ -20,10 +20,12 @@ import { toolDeclarations, decodeToolTurn, estimateToolMessageTokens, wireCatalo
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { runToolLoop, toolPolicyHash } from './tool-loop.mjs';
 import { DEFAULT_TOOL_RUN_LIMITS, toolRunLimits } from './tool-run.mjs';
-import { applyAssistantSegmentEvent, assistantSegmentText, AssistantSegments } from '../platform/assistant-segments.mjs';
+import { applyAssistantSegmentEvent, assistantSegmentText } from '../platform/assistant-segments.mjs';
+import { projectLocalToolCatalog, planLocalToolGrammarRecovery } from '../models/local-tool-compatibility.mjs';
 import { ModelHistoryProjection, MODEL_HISTORY_NOTICE } from '../models/model-history.mjs';
 import { appendModelRound, modelOrigin, modelPrefixFingerprint, nativeContinuation } from '../platform/model-transcript.mjs';
 import { resolveModelCapabilities, resolveAutomaticContext } from '../models/model-capabilities.mjs';
+import { readContextRejection, contextRecoveryLimits } from '../models/context-recovery.mjs';
 import { replyDurationMs } from '../platform/reply-timing.mjs';
 import { RetrievalCoordinator } from './retrieval/coordinator.mjs';
 import { runResourceTask } from '../platform/resources/resource-task.mjs';
@@ -43,6 +45,10 @@ const REPLY_SCOPE_NOTICE = 'Reply in the current user request\'s language unless
 
 function localModelSnapshotKey(connection, modelId) {
   return `${connection.baseUrl}:${connection.protocol}:${connection.providerId}:${modelId}`;
+}
+
+function contextLimitKey(connection, modelId) {
+  return `${localModelSnapshotKey(connection, modelId)}:${createHash('sha256').update(connection.apiKey ?? '').digest('hex')}`;
 }
 
 // Compatibility helper for older callers. ModelRuntime uses buildContext below.
@@ -76,6 +82,7 @@ export class ModelRuntime {
     this.resources = resourceService ?? new ResourceBudgetService();
     this.localModels = new LocalModelResourceObserver();
     this.localModelSnapshots = new Map();
+    this.observedContextLimits = new Map();
     this.ownsResources = !resourceService;
     this.tools = toolService ?? new ToolService({ conversationStore: this.conversations, dataHome, extensionRoot: this.extensionRoot,
       desktopRunner: new DesktopRunner(), hostTerminalRunner: new HostTerminalRunner(), sandboxRunner: new SandboxRunner({ conversationWorkspaceHome: dataHome, excludedRoots: [dataHome, this.conversations.root, this.extensionRoot,
@@ -206,6 +213,15 @@ export class ModelRuntime {
       // 为本轮冻结同一已验证连接；MCP 发现期间编辑设置，不能混用一个供应商的 schema 和另一协议。
       const connection = Object.freeze(structuredClone(await this.connection(input)));
       const capabilities = resolveModelCapabilities(connection, input.model);
+      const limitKey = contextLimitKey(connection, input.model);
+      let observedLimits = this.observedContextLimits.get(limitKey);
+      if (observedLimits && observedLimits.expiresAt <= Date.now()) {
+        this.observedContextLimits.delete(limitKey); observedLimits = undefined;
+      }
+      if (observedLimits?.providerMaxOutputTokens)
+        capabilities.maxOutputTokens = Math.min(capabilities.maxOutputTokens ?? Infinity, observedLimits.providerMaxOutputTokens);
+      if (observedLimits?.providerMaxInputTokens)
+        capabilities.maxInputTokens = Math.min(capabilities.maxInputTokens ?? Infinity, observedLimits.providerMaxInputTokens);
       const localModelKey = localModelSnapshotKey(connection, input.model);
       // A greeting reuses known limits without waiting on optional process observation APIs.
       // 问候复用已知上限，不等待可选模型进程观察接口；实际任务才刷新外部运行时信息。
@@ -219,6 +235,11 @@ export class ModelRuntime {
         while (this.localModelSnapshots.size > 32) this.localModelSnapshots.delete(this.localModelSnapshots.keys().next().value);
       }
       const contextWindowResolution = resolveAutomaticContext(connection, input.model, localModel, capabilities);
+      if (observedLimits?.contextWindowTokens < contextWindowResolution.effectiveTokens) {
+        Object.assign(contextWindowResolution, { effectiveTokens: observedLimits.contextWindowTokens,
+          source: 'provider-rejection', verified: observedLimits.verified, reason: 'previous-context-rejection' });
+        contextWindowResolution.limits.providerRejection = observedLimits.contextWindowTokens;
+      }
       const contextInput = { conversationId: id,
         projectId: memory.isFolderlessWorkspace ? null : memory.projectId,
         history, currentMessage: input.message, beforeUserId: userId,
@@ -365,12 +386,12 @@ export class ModelRuntime {
             // Summary admission shares foreground recovery; confirmed idle cleanup precedes one admission retry.
             // 摘要准入沿用前台恢复机制：确认闲置模型清理完成后，仅重新申请一次资源，不重放摘要请求。
             return runResourceTask(this.resources, { taskId: `summary:${requestId}`, workspaceId: contextInput.projectId ?? id,
-              kind: 'foreground', cpuThreads: 1, memoryBytes: 32 * 1024 * 1024 },
+              kind: 'foreground', workload: 'model-transport', cpuThreads: 1, memoryBytes: 32 * 1024 * 1024 },
             () => this.consumeModelResponse(summaryTurn, input.model,
               chatRequest(connection, input.model, request.messages, { system: request.system, maxOutputTokens: request.maxOutputTokens }),
               AbortSignal.any([signal, AbortSignal.timeout(Math.min(this.timeoutMs, 120000))]), parseModelJson,
               { refreshMemory: false, onDispatched: dispatched }), { signal: signal,
-              onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
+              onCapacityUnavailable: options => this.retrieval.releaseIdleResources(options) });
           } });
         semanticSummaryAudit = summarized.audit;
         if (summarized.value) {
@@ -397,7 +418,7 @@ export class ModelRuntime {
       if (context.summaryUpdate) await this.memory.repository.writeSummary(id, context.summaryUpdate);
       // Successful replies start timing only after the complete request is prepared; preparation failures retain their own elapsed time.
       // 成功回复只在完整请求准备完成后开始计时；准备失败仍保存该准备阶段的实际耗时。
-      return { assistant, conversationId: id, projectId: contextInput.projectId, messages: context.messages, connection, toolContext, catalog, declarations, runLimits: limits,
+      const preparedTurn = { assistant, conversationId: id, projectId: contextInput.projectId, messages: context.messages, connection, localModel, toolContext, catalog, declarations, runLimits: limits,
         memoryTaskExecution: evidencePlan.taskType === 'execution',
         modelOrigin: modelOrigin(connection, { providerId: input.provider, model: input.model }),
         memorySnapshot: this.memory.snapshotFor?.(memory, context.metrics.memoryIncludedIds, context.memoryProjection),
@@ -405,6 +426,82 @@ export class ModelRuntime {
         contextMetrics: { ...context.metrics, contextWindowResolution, historyCompaction, toolCompactions: [] },
         inputBudgetTokens: context.metrics.inputBudgetTokens,
         requestOptions: { system: context.system, maxOutputTokens: context.maxOutputTokens }, startedAtMonotonicMs: performance.now() };
+      // Reassemble the same task after an HTTP rejection; no fresh conversation or tool execution is created.
+      // HTTP 拒绝后重组同一任务，不新建对话，也不重新派发工具操作。
+      preparedTurn.rebuildContextWindow = async recoveredLimits => {
+        signal.throwIfAborted();
+        const smallerInput = { ...projectedInput, contextWindowTokens: recoveredLimits.contextWindowTokens,
+          providerMaxOutputTokens: Math.min(capabilities.maxOutputTokens ?? Infinity,
+            recoveredLimits.providerMaxOutputTokens ?? preparedTurn.contextMetrics.providerMaxOutputTokens ?? Infinity),
+          providerMaxInputTokens: Math.min(capabilities.maxInputTokens ?? Infinity,
+            recoveredLimits.providerMaxInputTokens ?? preparedTurn.contextMetrics.providerMaxInputTokens ?? Infinity),
+          semanticSummaryTrigger: 'none', additionalSystem: '', reservedInputTokens: 0 };
+        if (!Number.isFinite(smallerInput.providerMaxOutputTokens)) delete smallerInput.providerMaxOutputTokens;
+        if (!Number.isFinite(smallerInput.providerMaxInputTokens)) delete smallerInput.providerMaxInputTokens;
+        const initial = buildContext(smallerInput);
+        const smallerAllocation = contextAllocation(initial.metrics.inputBudgetTokens, evidencePlan.taskType);
+        const nextCatalog = toolContext ? this.tools.configureModelCatalog(toolContext, {
+          protocol: connection.protocol, tokenBudget: smallerAllocation.schemaCeilingTokens, message: input.message,
+          taskRelation: evidencePlan.taskRelation, previousToolNames: this.tools.modelCatalog(toolContext).map(tool => tool.name) }) : [];
+        const nextDeclarations = toolDeclarations(connection.protocol, nextCatalog);
+        const nextSchemaTokens = nextCatalog.length ? estimateTokens(JSON.stringify(nextDeclarations)) : 0;
+        const nextToolSystem = nextCatalog.length ? await this.tools.systemPrompt(toolContext, {
+          maximumTokens: Math.max(0, initial.metrics.inputBudgetTokens - nextSchemaTokens -
+            estimateToolMessageTokens([{ role: 'user', content: input.message }]) - (initial.metrics.memoryTokens ?? 0) - 512) }) : '';
+        const nextSystem = [nextToolSystem, hasToolHistory ? MODEL_HISTORY_NOTICE : '', REPLY_SCOPE_NOTICE,
+          retrievalEvidence.prompt ? 'Automatic evidence was deferred after a context rejection; use current tool observations or read sources as needed.' : '',
+          greeting ? 'Reply with a short, natural greeting in the user\'s language.' : ''].filter(Boolean).join('\n');
+        const rebuilt = buildContext({ ...smallerInput, additionalSystem: nextSystem, reservedInputTokens: nextSchemaTokens });
+        preparedTurn.messages = rebuilt.messages;
+        preparedTurn.catalog = nextCatalog; preparedTurn.declarations = nextDeclarations;
+        preparedTurn.inputBudgetTokens = rebuilt.metrics.inputBudgetTokens;
+        preparedTurn.requestOptions = { system: rebuilt.system, maxOutputTokens: rebuilt.maxOutputTokens };
+        preparedTurn.memorySnapshot = this.memory.snapshotFor?.(memory, rebuilt.metrics.memoryIncludedIds, rebuilt.memoryProjection);
+        preparedTurn.historySources = projection.historySources(rebuilt.messages, rebuilt.historySources);
+        Object.assign(preparedTurn.contextMetrics, rebuilt.metrics);
+        if (recoveredLimits.kind === 'context') {
+          Object.assign(preparedTurn.contextMetrics.contextWindowResolution, { effectiveTokens: recoveredLimits.contextWindowTokens,
+            source: 'provider-rejection', verified: recoveredLimits.verified, reason: 'context-rejection-recovery' });
+          preparedTurn.contextMetrics.contextWindowResolution.limits.providerRejection = recoveredLimits.contextWindowTokens;
+        }
+        preparedTurn.assistant.ContextAssembly = { ...preparedTurn.assistant.ContextAssembly, schemaTokens: nextSchemaTokens,
+          evidenceTokens: 0, contextRecovery: 'automatic-evidence-deferred' };
+        return { system: rebuilt.system, inputBudgetTokens: rebuilt.metrics.inputBudgetTokens,
+          catalog: nextCatalog, declarations: nextDeclarations };
+      };
+      // Lend unused output space to the next input without changing native messages or verified provider limits.
+      // 仅把下一轮输出预留让给输入，保留原生续接消息和已经核实的供应商硬上限。
+      preparedTurn.rebalanceContextBudget = async requiredInputTokens => {
+        signal.throwIfAborted();
+        const metrics = preparedTurn.contextMetrics;
+        let allocation;
+        try {
+          allocation = resolveOutputBudget({ contextWindowTokens: metrics.contextWindowTokens,
+            requestedOutputTokens: metrics.requestedOutputTokens, requiredInputTokens: Math.ceil(requiredInputTokens),
+            providerMaxInputTokens: metrics.providerMaxInputTokens,
+            providerMaxOutputTokens: Math.min(metrics.providerMaxOutputTokens ?? Infinity,
+              preparedTurn.requestOptions.maxOutputTokens) });
+        } catch (error) {
+          if (error instanceof OutputBudgetError && error.code === 'CONTEXT_INPUT_TOO_LARGE') return null;
+          throw error;
+        }
+        if (allocation.inputBudgetTokens <= preparedTurn.inputBudgetTokens) return null;
+        const adjustment = { requiredInputTokens: Math.ceil(requiredInputTokens),
+          previousInputBudgetTokens: preparedTurn.inputBudgetTokens, inputBudgetTokens: allocation.inputBudgetTokens,
+          previousOutputReserveTokens: preparedTurn.requestOptions.maxOutputTokens, outputReserveTokens: allocation.maxOutputTokens,
+          reason: 'current-round-context-pressure' };
+        preparedTurn.inputBudgetTokens = allocation.inputBudgetTokens;
+        preparedTurn.requestOptions = { ...preparedTurn.requestOptions, maxOutputTokens: allocation.maxOutputTokens };
+        Object.assign(metrics, { inputBudgetTokens: allocation.inputBudgetTokens,
+          outputReserveTokens: allocation.maxOutputTokens, outputBudgetReduced: allocation.outputBudgetReduced,
+          outputBudgetReductionReason: 'current-round-context-pressure' });
+        metrics.pressureAdjustments = [...(metrics.pressureAdjustments ?? []), adjustment].slice(-64);
+        preparedTurn.assistant.ContextAssembly = { ...preparedTurn.assistant.ContextAssembly,
+          contextPressure: { strategy: 'borrow-output-reserve', ...adjustment } };
+        return { system: preparedTurn.requestOptions.system, inputBudgetTokens: allocation.inputBudgetTokens,
+          catalog: preparedTurn.catalog, declarations: preparedTurn.declarations };
+      };
+      return preparedTurn;
     } catch (error) {
       if (error.semanticSummaryAudit) assistant.ContextAssembly = { ...assistant.ContextAssembly,
         schemaVersion: 1, semanticSummary: error.semanticSummaryAudit };
@@ -466,33 +563,82 @@ export class ModelRuntime {
     return nextSystem;
   }
 
-  async consumeModelResponse(turn, modelId, request, signal, readResponse, { streaming = false, refreshMemory = true, onDispatched } = {}) {
-    const admission = await this.externalAdmissions.acquire(turn.connection, { modelId, signal });
-    let stopLocal;
-    try {
+  async consumeModelResponse(turn, modelId, request, signal, readResponse,
+    { streaming = false, refreshMemory = true, onDispatched, recoverContext, toolCatalog } = {}) {
+    for (;;) {
+      const admission = await this.externalAdmissions.acquire(turn.connection, { modelId, signal });
+      let stopLocal, recoveredLimits;
+      try {
+        signal?.throwIfAborted();
+        // Admission can wait for local model loading; recheck revoked records after that wait, before dispatch.
+        // 准入可能等待本地模型加载；等待结束后、正式派发前再次核对撤销记录。
+        const system = refreshMemory && this.refreshMemorySystem
+          ? await this.refreshMemorySystem(turn, turn.requestOptions?.system ?? '', signal) : turn.requestOptions?.system ?? '';
+        const liveRequest = typeof request === 'function' ? request(system) : request;
+        turn.lastDispatchedSystem = system;
+        admission.dispatched();
+        onDispatched?.();
+        if (turn.contextMetrics) {
+          turn.contextMetrics.modelRequestAttempts = (turn.contextMetrics.modelRequestAttempts ?? 0) + 1;
+          if (turn.assistant) turn.assistant.ContextAssembly = { ...turn.assistant.ContextAssembly,
+            modelRequestAttempts: turn.contextMetrics.modelRequestAttempts };
+        }
+        stopLocal = this.beginLocalGeneration(turn, modelId);
+        const response = await requestModelResponse(turn.connection, liveRequest, signal, { streaming });
+        if (!response.ok) admission.settled();
+        await checkResponse(response);
+        const result = await readResponse(response);
+        admission.settled();
+        if (turn.memoryInvalidation) turn.memoryInvalidation.awaitingNoticeDelivery = false;
+        return result;
+      } catch (error) {
+        // Retry only a complete HTTP rejection, before any response text or tool call was accepted.
+        // 仅重试完整 HTTP 拒绝，不能重试已经返回正文/工具调用的流、网络断连或结果未知的操作。
+        if (error.code === 'MODEL_INVALID_JSON') admission.settled();
+        signal?.throwIfAborted();
+        if (error.code === 'MODEL_LOCAL_TOOL_GRAMMAR_REJECTED' && typeof request === 'function') {
+          const recovery = planLocalToolGrammarRecovery({ rejection: error.contextRejection,
+            connection: turn.connection, localModel: turn.localModel, catalog: toolCatalog?.() ?? turn.catalog,
+            recoveryAttempts: turn.localGrammarRecoveryAttempts ?? 0 });
+          if (!recovery) throw error;
+          turn.localGrammarRecoveryAttempts = recovery.recoveryAttempts;
+          turn.localToolDeclarationMode = recovery.mode;
+          turn.assistant.ContextAssembly = { ...turn.assistant.ContextAssembly, localToolRecovery: {
+            attempts: recovery.recoveryAttempts, mode: recovery.mode, upstreamStatus: error.upstreamStatus,
+            omittedConstraintCount: recovery.omittedConstraintCount, toolOperationsReplayed: 0 } };
+          continue;
+        }
+        if (error.code !== 'MODEL_CONTEXT_LIMIT_REJECTED' || typeof request !== 'function' ||
+            !turn.rebuildContextWindow || (turn.contextRecoveryAttempts ?? 0) >= 2) throw error;
+        recoveredLimits = contextRecoveryLimits(error.contextRejection, {
+          contextWindowTokens: turn.contextMetrics.contextWindowTokens, maxOutputTokens: turn.requestOptions.maxOutputTokens,
+          providerMaxInputTokens: turn.contextMetrics.providerMaxInputTokens });
+        if (!recoveredLimits) throw error;
+        turn.contextRecoveryAttempts = (turn.contextRecoveryAttempts ?? 0) + 1;
+        const key = contextLimitKey(turn.connection, modelId), previous = this.observedContextLimits.get(key);
+        this.observedContextLimits.delete(key);
+        this.observedContextLimits.set(key, { ...previous,
+          ...(recoveredLimits.kind === 'context' ? { contextWindowTokens: recoveredLimits.contextWindowTokens,
+            verified: recoveredLimits.verified } : recoveredLimits.kind === 'input'
+              ? { providerMaxInputTokens: recoveredLimits.providerMaxInputTokens }
+              : { providerMaxOutputTokens: recoveredLimits.providerMaxOutputTokens }),
+          expiresAt: Date.now() + 600_000 });
+        while (this.observedContextLimits.size > 32) this.observedContextLimits.delete(this.observedContextLimits.keys().next().value);
+        turn.contextMetrics.contextRecoveries ??= [];
+        turn.contextMetrics.contextRecoveries.push({ attempt: turn.contextRecoveryAttempts, kind: recoveredLimits.kind,
+          previousWindowTokens: turn.contextMetrics.contextWindowTokens, effectiveWindowTokens: recoveredLimits.contextWindowTokens,
+          previousMaxOutputTokens: turn.requestOptions.maxOutputTokens,
+          upstreamStatus: error.upstreamStatus, verified: recoveredLimits.verified, toolOperationsReplayed: 0 });
+      } finally { stopLocal?.(); await admission.release(); }
+      // Release the rejected attempt's lease before reassembly and the next admission.
+      // 重组和再次准入前释放被拒绝请求的租约，不将两个尝试叠加预约。
       signal?.throwIfAborted();
-      // Admission can wait for local model loading; recheck revoked records after that wait, before dispatch.
-      // 准入可能等待本地模型加载；等待结束后、正式派发前再次核对撤销记录。
-      const system = refreshMemory && this.refreshMemorySystem
-        ? await this.refreshMemorySystem(turn, turn.requestOptions?.system ?? '', signal) : turn.requestOptions?.system ?? '';
-      const liveRequest = typeof request === 'function' ? request(system) : request;
-      turn.lastDispatchedSystem = system;
-      admission.dispatched();
-      onDispatched?.();
-      stopLocal = this.beginLocalGeneration(turn, modelId);
-      const response = await requestModelResponse(turn.connection, liveRequest, signal, { streaming });
-      if (!response.ok) admission.settled();
-      await checkResponse(response);
-      const result = await readResponse(response);
-      admission.settled();
-      if (turn.memoryInvalidation) turn.memoryInvalidation.awaitingNoticeDelivery = false;
-      return result;
-    } catch (error) {
-      // A complete invalid JSON body is settled; cancellation or a broken stream is not execution proof.
-      // 完整但无效的 JSON 响应已经结束；取消或断流不能当成外部执行完成的证据。
-      if (error.code === 'MODEL_INVALID_JSON') admission.settled();
-      throw error;
-    } finally { stopLocal?.(); await admission.release(); }
+      if (recoverContext) await recoverContext(recoveredLimits);
+      else await turn.rebuildContextWindow(recoveredLimits);
+      const audit = turn.contextMetrics.contextRecoveries.at(-1);
+      audit.effectiveMaxOutputTokens = turn.requestOptions.maxOutputTokens;
+      turn.assistant.ContextAssembly = { ...turn.assistant.ContextAssembly, contextRecoveries: turn.contextMetrics.contextRecoveries };
+    }
   }
 
   beginLocalGeneration(turn, modelId) {
@@ -534,6 +680,28 @@ export class ModelRuntime {
     }
   }
 
+  modelLoopOptions(turn, message) {
+    if (turn.toolContext) return { context: turn.toolContext, service: this.tools,
+      catalogForRound: () => this.tools.modelCatalog(turn.toolContext) };
+    // Plain chat can continue text but cannot acquire executable tools by entering the same scheduler.
+    // 纯聊天复用调度器续接正文，但不会因此获得可执行工具或扩大原权限。
+    return { context: { conversationId: turn.conversationId, requestId: turn.assistant.Id,
+      projectId: turn.projectId, message },
+    service: { resources: this.resources, results: this.tools.results, retrieval: this.retrieval,
+      execute: async () => ({ isError: true, executed: false, status: 'error', code: 'MODEL_TOOL_UNAVAILABLE',
+        content: 'This plain-chat request has no executable tool capability.' }) }, catalogForRound: () => [] };
+  }
+
+  modelDeclarations(turn, catalog, declarations) {
+    const projected = projectLocalToolCatalog(catalog ?? [], { connection: turn.connection,
+      localModel: turn.localModel, mode: turn.localToolDeclarationMode ?? 'bounded' });
+    if (!projected.applied) return declarations;
+    turn.assistant.ContextAssembly = { ...turn.assistant.ContextAssembly, localToolDeclarations: {
+      mode: projected.mode, omittedConstraintCount: projected.omittedConstraintCount,
+      executorValidation: 'original-schema', toolCount: projected.catalog.length } };
+    return toolDeclarations(turn.connection.protocol, projected.catalog);
+  }
+
   async reply(input, { includeTiming = false } = {}) {
     return this.enqueue(input, async id => {
       const turn = await this.prepare(input, id);
@@ -541,7 +709,7 @@ export class ModelRuntime {
       try {
         const connection = turn.connection;
         const timing = this.runTimingAudit(turn);
-        if (turn.catalog.length) {
+        {
           const signal = AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(timing.effectiveDurationMs)]);
           let content = '', reasoning = '', generationStarted = false;
           const receive = event => {
@@ -563,22 +731,29 @@ export class ModelRuntime {
             historySources: turn.historySources,
             onContextCompacted: metrics => turn.contextMetrics.toolCompactions.push(metrics),
             system: turn.requestOptions.system, declarations: turn.declarations, inputBudgetTokens: turn.inputBudgetTokens,
-            context: turn.toolContext, service: this.tools, signal, interactive: false, emit: receive,
+            ...this.modelLoopOptions(turn, input.message), signal, interactive: false, emit: receive,
             onRoundComplete: result => receive({ type: 'content_snapshot', ...result }),
-            catalogForRound: () => this.tools.modelCatalog(turn.toolContext),
             saveActivity: activity => this.saveToolActivity(id, turn, activity),
             saveModelRound: step => this.saveModelRound(id, turn, step),
             validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
             systemForRound: (system, signal) => this.refreshMemorySystem(turn, system, signal),
-            requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system) => {
-              const request = currentSystem => chatRequest(connection, input.model, messages,
-                { ...turn.requestOptions, system: currentSystem, tools: roundDeclarations });
+            contextForRecovery: limits => turn.rebuildContextWindow(limits),
+            contextForPressure: requiredInputTokens => turn.rebalanceContextBudget(requiredInputTokens),
+            requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system, recoverContext) => {
+              let requestMessages = messages, requestDeclarations = roundDeclarations, requestCatalog = catalog;
+              const recover = async limits => {
+                const adapted = await recoverContext(limits);
+                requestMessages = adapted.messages; requestDeclarations = adapted.declarations; requestCatalog = adapted.catalog;
+              };
+              const request = currentSystem => chatRequest(connection, input.model, requestMessages,
+                { ...turn.requestOptions, system: currentSystem, tools: this.modelDeclarations(turn, requestCatalog, requestDeclarations) });
               const raw = await this.consumeModelResponse(turn, input.model, request,
-                AbortSignal.any([roundSignal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson);
+                AbortSignal.any([roundSignal, AbortSignal.timeout(this.timeoutMs)]), parseModelJson,
+                { recoverContext: recover, toolCatalog: () => requestCatalog });
               const parts = finalParts(connection.protocol, raw);
               receiveTurn({ type: 'reasoning_delta', delta: parts.reasoning });
               receiveTurn({ type: 'text_delta', delta: parts.content });
-              return decodeToolTurn(connection.protocol, raw, catalog);
+              return decodeToolTurn(connection.protocol, raw, requestCatalog, { allowTruncatedText: true });
             } });
           if (!result.content.trim()) throw new StreamFailure('模型没有返回文本内容。');
           turn.assistant.DurationMs = replyDurationMs(turn.startedAtMonotonicMs);
@@ -589,35 +764,6 @@ export class ModelRuntime {
           return includeTiming ? { content: result.content, durationMs: turn.assistant.DurationMs,
             ...(completionStatus === 'interrupted' ? { completionStatus, taskCompletion: result.taskCompletion } : {}) } : result.content;
         }
-        await this.refreshMemorySystem(turn, turn.requestOptions.system, this.shutdown.signal);
-        const request = system => chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, system });
-        // Admission covers dispatch and body consumption; denied resources must not start an upstream generation.
-        // 准入覆盖派发及响应读取，资源未获准时不能先启动上游生成，更不能把准入错误归为 JSON 错误。
-        const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
-          memoryBytes: 16 * 1024 * 1024 }, async () => {
-          try {
-            return await this.consumeModelResponse(turn, input.model, request,
-              AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(Math.min(this.timeoutMs, timing.effectiveDurationMs))]), parseModelJson);
-          } catch (error) {
-            if (error.name === 'TimeoutError') throw Object.assign(new StreamFailure('模型响应超时，请稍后重试。'), { code: 'MODEL_RESPONSE_TIMEOUT' });
-            if (this.shutdown.signal.aborted) throw new StreamFailure('模型服务已停止。', 'interrupted');
-            throw error;
-          }
-        }, { signal: this.shutdown.signal,
-          onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
-        const parts = finalParts(connection.protocol, result);
-        const evidenceValidation = await this.validateFinalEvidence(turn, this.shutdown.signal);
-        const content = parts.content + (evidenceValidation.current ? '' : evidenceWarning(input.message));
-        // Persist returned text even when the provider reports truncation.
-        // 供应商报告输出截断时，仍保存已返回的文本。
-        turn.assistant.Content = content;
-        turn.assistant.Reasoning = parts.reasoning;
-        checkFinish(parts.finish);
-        if (typeof content !== 'string' || !content.trim()) throw new StreamFailure('模型没有返回文本内容。');
-        turn.assistant.DurationMs = replyDurationMs(turn.startedAtMonotonicMs);
-        await this.conversations.upsertMessage(id, { ...turn.assistant, Content: content, Status: 'completed' });
-        this.scheduleCompletedMemory(turn);
-        return includeTiming ? { content, durationMs: turn.assistant.DurationMs } : content;
       } catch (error) {
         const failure = safeFailure(error);
         failure.durationMs = replyDurationMs(turn.startedAtMonotonicMs);
@@ -666,7 +812,7 @@ export class ModelRuntime {
   async sendStream(input, id, emit, clientSignal) {
     const idle = new AbortController(), lifetime = new AbortController();
     let timeout;
-    let idleTimer, turn, checkpoint, checkpointError, plainSegments;
+    let idleTimer, turn, checkpoint, checkpointError;
     let content = '', reasoning = '', thinkingStarted, thinkingDuration = 0, lastSave = Date.now(), generationStarted = false;
     const activity = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => idle.abort(), this.idleTimeoutMs); };
     const signals = [this.shutdown.signal, idle.signal, lifetime.signal];
@@ -717,7 +863,7 @@ export class ModelRuntime {
       throwIfCancelled();
       timeout = setTimeout(() => lifetime.abort(), this.runTimingAudit(turn).effectiveDurationMs);
       const connection = turn.connection;
-      if (turn.catalog.length) {
+      {
         const result = await runToolLoop({ protocol: connection.protocol, messages: turn.messages,
           limits: turn.runLimits, saveRunState: async state => {
             await checkpoint;
@@ -728,11 +874,12 @@ export class ModelRuntime {
           historySources: turn.historySources,
           onContextCompacted: metrics => turn.contextMetrics.toolCompactions.push(metrics),
           system: turn.requestOptions.system, declarations: turn.declarations, inputBudgetTokens: turn.inputBudgetTokens,
-          context: turn.toolContext, service: this.tools, signal, interactive: true, emit: receive,
+          ...this.modelLoopOptions(turn, input.message), signal, interactive: true, emit: receive,
           validateFinal: ({ signal }) => this.validateFinalEvidence(turn, signal),
           systemForRound: (system, signal) => this.refreshMemorySystem(turn, system, signal),
+          contextForRecovery: limits => turn.rebuildContextWindow(limits),
+          contextForPressure: requiredInputTokens => turn.rebalanceContextBudget(requiredInputTokens),
           onRoundComplete: result => receive({ type: 'content_snapshot', ...result }),
-          catalogForRound: () => this.tools.modelCatalog(turn.toolContext),
           saveActivity: async tool => {
             await checkpoint;
             if (checkpointError) throw new StreamFailure('当前回复未能保存，请检查存储位置。');
@@ -745,15 +892,21 @@ export class ModelRuntime {
             turn.assistant = snapshot();
             await this.saveModelRound(id, turn, step);
           },
-          requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system) => {
-            const request = currentSystem => chatRequest(connection, input.model, messages,
-              { ...turn.requestOptions, system: currentSystem, stream: true, tools: roundDeclarations });
+          requestTurn: async (messages, roundDeclarations, roundSignal, receiveTurn, catalog, system, recoverContext) => {
+            let requestMessages = messages, requestDeclarations = roundDeclarations, requestCatalog = catalog;
+            const recover = async limits => {
+              const adapted = await recoverContext(limits);
+              requestMessages = adapted.messages; requestDeclarations = adapted.declarations; requestCatalog = adapted.catalog;
+            };
+            const request = currentSystem => chatRequest(connection, input.model, requestMessages,
+              { ...turn.requestOptions, system: currentSystem, stream: true,
+                tools: this.modelDeclarations(turn, requestCatalog, requestDeclarations) });
             throwIfCancelled(); activity();
             try {
               return await this.consumeModelResponse(turn, input.model, request, roundSignal, response => {
                 activity();
-                return readToolStream(response, connection.protocol, catalog, receiveTurn, activity);
-              }, { streaming: true });
+                return readToolStream(response, connection.protocol, requestCatalog, receiveTurn, activity, { allowTruncatedText: true });
+              }, { streaming: true, recoverContext: recover, toolCatalog: () => requestCatalog });
             } finally { clearTimeout(idleTimer); }
           } });
         throwIfCancelled(); clearTimeout(timeout); await checkpoint;
@@ -765,41 +918,7 @@ export class ModelRuntime {
         this.scheduleCompletedMemory(turn, result);
         return { ...result, durationMs: completed.DurationMs, contextUsage: turn.contextMetrics };
       }
-      // A lightweight greeting still uses the ordered public stream contract; no tool loop is required.
-      // 轻量问候仍使用有序公开流合同，无需为保持界面生命周期而启动工具循环。
-      plainSegments = new AssistantSegments(receive);
-      plainSegments.start(1);
-      await this.refreshMemorySystem(turn, turn.requestOptions.system, signal);
-      const request = system => chatRequest(connection, input.model, turn.messages, { ...turn.requestOptions, system, stream: true });
-      throwIfCancelled();
-      activity();
-      const result = await runResourceTask(this.resources, { taskId: `generation:${id}`, kind: 'foreground', cpuThreads: 1,
-        memoryBytes: 16 * 1024 * 1024 }, async () => {
-        try {
-          return await this.consumeModelResponse(turn, input.model, request, signal, response => {
-            activity();
-            return readModelStream(response, connection.protocol, event => plainSegments.receive(event), activity);
-          }, { streaming: true });
-        } catch (error) {
-          throwIfCancelled();
-          throw error;
-        }
-      }, { signal, onCapacityUnavailable: options => this.retrieval.embeddings.releaseIdleResources?.(options) });
-      throwIfCancelled();
-      const evidenceValidation = await this.validateFinalEvidence(turn, signal);
-      if (!evidenceValidation.current) result.content += evidenceWarning(input.message);
-      if (!result.content.trim()) throw new StreamFailure('模型没有返回文本内容。');
-      clearTimeout(idleTimer); clearTimeout(timeout);
-      await checkpoint;
-      if (checkpointError) throw new StreamFailure('当前回复未能保存，请检查存储位置。');
-      plainSegments.finish({ ...result, calls: [] });
-      const completed = { ...snapshot(), Content: result.content, Reasoning: result.reasoning, Status: 'completed' };
-      await this.conversations.upsertMessage(id, completed);
-      this.scheduleCompletedMemory(turn);
-      return { ...result, assistantSegments: plainSegments.snapshot(), toolStreamProtocol: 3,
-        durationMs: completed.DurationMs, contextUsage: turn.contextMetrics };
     } catch (error) {
-      plainSegments?.interrupt();
       try { throwIfCancelled(); } catch (cancelled) { error = cancelled; }
       await checkpoint;
       let failure = checkpointError ? new StreamFailure('当前回复未能保存，请检查存储位置。') : safeFailure(error);
@@ -867,13 +986,18 @@ function runMetadata(turn, phase, code = null) {
 
 function safeFailure(error) {
   if (error instanceof StreamFailure) return error;
+  if (error instanceof ContextError || error instanceof OutputBudgetError)
+    return Object.assign(new StreamFailure(error.message, 'interrupted'), { code: error.code, statusCode: error.statusCode });
   if (error?.name === 'TimeoutError') return Object.assign(new StreamFailure('模型响应超时，已保留生成内容和完成的工具记录。', 'interrupted'),
     { code: 'MODEL_RESPONSE_TIMEOUT' });
   if (error?.name === 'AbortError') return Object.assign(new StreamFailure('连续执行已停止，已保留生成内容和完成的工具记录。', 'interrupted'),
     { code: 'MODEL_CANCELLED' });
   if (/^(?:RESOURCE_|INFERENCE_RESOURCE_|STRUCTURE_RESOURCE_)/u.test(error?.code ?? ''))
-    return Object.assign(new StreamFailure(error.code === 'RESOURCE_WAIT_TIMEOUT' ? '等待执行资源超时，已有结果已保留。' :
-      '当前执行资源不足或暂时不可用，已有结果已保留。'), { code: error.code, statusCode: error.statusCode ?? 503 });
+    return Object.assign(new StreamFailure(error.details?.actionStarted === false && error.details.workload === 'model-transport'
+      ? '当前这一步尚未发送模型请求：执行资源不足或等待超时。对话和已完成结果已保留，可释放内存后重试。'
+      : error.code === 'RESOURCE_WAIT_TIMEOUT' ? '等待执行资源超时，已有结果已保留。'
+        : '当前执行资源不足或暂时不可用，已有结果已保留。'),
+    { code: error.code, statusCode: error.statusCode ?? 503, details: error.details });
   return new StreamFailure('模型调用失败，请检查服务与数据存储位置。');
 }
 
@@ -907,6 +1031,12 @@ async function requestModelResponse(connection, request, signal, { streaming = f
 
 async function checkResponse(response) {
   if (response.ok) return;
+  const contextRejection = await readContextRejection(response);
+  if (contextRejection?.kind === 'tool-grammar') throw Object.assign(
+    new StreamFailure('模型服务无法解析本次工具声明，当前步骤未执行工具。', 'interrupted'),
+    { code: 'MODEL_LOCAL_TOOL_GRAMMAR_REJECTED', contextRejection, upstreamStatus: response.status });
+  if (contextRejection) throw Object.assign(new StreamFailure('模型服务拒绝了超出实际输入或输出额度的请求。'),
+    { code: 'MODEL_CONTEXT_LIMIT_REJECTED', upstreamStatus: response.status, contextRejection });
   await response.body?.cancel().catch(() => {});
   const hint = ({ 401: '请检查 API Key', 403: '当前密钥没有访问权限',
     402: '请检查账号余额', 404: '请检查服务地址与模型 ID', 429: '请求频繁或额度不足，请稍后重试' })[response.status];
