@@ -125,6 +125,78 @@ test('CPU residency is retained and a cold profile does not start a worker just 
   assert.equal(worker.messages.filter(message => message.type === 'close').length, 0);
 });
 
+test('CPU memory pressure waits for owned worker exit before releasing residency and restarting the same space', async t => {
+  const fixture = await modelFixture(t, { gpu: false, autoRetire: false }), worker = await fixture.warm();
+  const residentLeases = [...fixture.resources.leases.values()].filter(lease => lease.memoryBytes > 0);
+  assert.ok(residentLeases.length > 0);
+  const yielding = fixture.service.releaseIdleResources();
+  const next = fixture.call();
+  await new Promise(resolveResult => setImmediate(resolveResult));
+  assert.equal(fixture.workers.length, 1);
+  assert.ok(residentLeases.every(lease => fixture.resources.leases.has(lease.leaseId)), 'a close request is not an exit receipt');
+  worker.retire();
+  const result = await yielding;
+  assert.equal(result.released, true);
+  assert.equal(result.results[0].reason, 'memory-pressure');
+  assert.ok(result.results[0].residentMemoryBytes > 0);
+  assert.ok(residentLeases.every(lease => !fixture.resources.leases.has(lease.leaseId)));
+  await until(() => fixture.workers[1]?.request());
+  fixture.workers[1].complete(fixture.workers[1].request().id);
+  assert.equal((await next).profileId, fixture.profileId);
+  assert.equal(worker.request(1), undefined, 'retirement never replays the completed query');
+});
+
+test('automatic CPU idle retirement keeps query bursts warm and resets the grace period after a new query', async t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 1_000 });
+  const fixture = await modelFixture(t, { gpu: false }), worker = await fixture.warm();
+  const idleReleaseMs = fixture.service.status(fixture.profileId).idleReleaseMs;
+  t.mock.timers.tick(idleReleaseMs / 2);
+  await new Promise(resolveResult => setImmediate(resolveResult));
+  assert.equal(worker.exited, false);
+  const pending = fixture.call();
+  await until(() => worker.request(1));
+  worker.complete(worker.request(1).id); await pending;
+  t.mock.timers.tick(idleReleaseMs / 2 + 1);
+  await new Promise(resolveResult => setImmediate(resolveResult));
+  assert.equal(worker.exited, false, 'the first query deadline must not retire a recently reused worker');
+  t.mock.timers.tick(idleReleaseMs);
+  await until(() => worker.exited && fixture.resources.leases.size === 0);
+  assert.equal(fixture.workers.length, 1, 'idle maintenance must not load a replacement');
+});
+
+test('CPU cancellation keeps native work owned until matching idle, and failed retirement blocks replacement', async t => {
+  const fixture = await modelFixture(t, { gpu: false, autoRetire: false }), worker = await fixture.warm();
+  const controller = new AbortController(), pending = fixture.call(controller.signal);
+  const rejected = assert.rejects(pending, { code: 'EMBEDDING_CANCELLED' });
+  await until(() => worker.request(1));
+  controller.abort(); await rejected;
+  assert.equal((await fixture.service.releaseIdleResources()).results[0].reason, 'native-work-outstanding');
+  worker.idle(worker.request(1).id);
+  const yielding = fixture.service.releaseIdleResources();
+  const failed = assert.rejects(yielding, { code: 'EMBEDDING_CLOSE_FAILED' });
+  worker.retire(false); await failed;
+  await assert.rejects(fixture.call(), { code: 'EMBEDDING_CLOSE_FAILED' });
+  assert.equal(fixture.workers.length, 1);
+});
+
+test('CPU resource admission and queued work prevent pressure retirement, and closing drains a claimed retirement once', async t => {
+  const fixture = await modelFixture(t, { gpu: false, autoRetire: false }), worker = await fixture.warm();
+  fixture.resources.gate = deferred();
+  const pending = fixture.call();
+  await until(() => fixture.resources.requests.at(-1).cpuThreads > 0);
+  assert.equal((await fixture.service.releaseIdleResources()).results[0].reason, 'native-work-outstanding');
+  fixture.resources.gate.resolve(); fixture.resources.gate = undefined;
+  await until(() => worker.request(1));
+  assert.equal((await fixture.service.releaseIdleResources()).released, false);
+  worker.complete(worker.request(1).id); await pending;
+  const yielding = fixture.service.releaseIdleResources(), closing = fixture.service.close();
+  worker.retire();
+  await Promise.all([yielding, closing]);
+  assert.equal(worker.messages.filter(message => message.type === 'close').length, 1);
+  assert.equal(fixture.resources.leases.size, 0);
+  await assert.rejects(fixture.call(), { code: 'EMBEDDING_CLOSED' });
+});
+
 test('idle embedding yields only after acknowledged exit, then a waiting request uses a new same-space worker', windowsOnly, async t => {
   const fixture = await modelFixture(t, { autoRetire: false });
   const worker = await fixture.warm();

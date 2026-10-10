@@ -40,6 +40,66 @@ test('query plans keep natural-language domains soft and exhaustive navigation d
   assert.equal(retrievalPlan('查找函数定义').operationSupported, true);
 });
 
+test('direct source read without a search registers final dependencies and rejects a changed source at final validation', async t => {
+  const f = await foundationFixture(t);
+  const relationship = await f.conversations.describeConversation(f.conversationId);
+  const source = () => projectConversationSources(relationship, [f.entry], [])[0];
+  await f.retrieval.index.upsertSources([source()]);
+  const reference = (await f.retrieval.index.search({ query: 'CALYX', scopeKeys: ['user'] })).items[0].sourceRef;
+  assert.equal(f.retrieval.acquisitions.get(f.context), undefined);
+  const read = await f.retrieval.read(f.context, { sourceRef: reference });
+  assert.equal(read.evidenceDecision.contentRead, true);
+  assert.equal(f.retrieval.acquisitions.get(f.context).finalSourceDependencies.size, 1);
+  const current = await f.retrieval.validateFinal(f.context);
+  assert.equal(current.current, true); assert.equal(current.checked, 1);
+  f.entry.content = 'CALYX source changed after the model read its earlier version.';
+  f.entry.revision++;
+  await f.retrieval.index.upsertSources([source()]);
+  const stale = await f.retrieval.validateFinal(f.context);
+  assert.equal(stale.current, false); assert.equal(stale.checked, 1);
+  assert.equal(stale.invalidSources[0].sourceId, source().sourceId);
+  assert.equal(stale.invalidSources[0].code, 'STALE_RETRIEVAL_SOURCE');
+});
+
+test('search-only excerpts register final version dependencies without becoming read support', async t => {
+  const f = await foundationFixture(t);
+  const result = await f.retrieval.search(f.context, { query: 'CALYX architecture' });
+  assert.ok(result.items.length);
+  const acquisition = f.retrieval.acquisitions.get(f.context);
+  assert.equal(acquisition.sourceReads.size, 0);
+  assert.equal(acquisition.finalSourceDependencies.size, new Set(result.items.map(item => item.sourceId)).size);
+  const current = await f.retrieval.validateFinal(f.context);
+  assert.equal(current.current, true); assert.equal(current.checked, acquisition.finalSourceDependencies.size);
+  f.entry.content = 'CALYX changed after the search excerpt was projected.'; f.entry.revision++;
+  const relationship = await f.conversations.describeConversation(f.conversationId);
+  await f.retrieval.index.upsertSources([projectConversationSources(relationship, [f.entry], [])[0]]);
+  const stale = await f.retrieval.validateFinal(f.context);
+  assert.equal(stale.current, false);
+  assert.ok(stale.invalidSources.some(item => item.code === 'STALE_RETRIEVAL_SOURCE'));
+});
+
+test('a 128-source internal pool registers only the five returned source dependencies, including cache reuse', async t => {
+  const f = await foundationFixture(t), entries = Array.from({ length: 128 }, (_, index) => ({ ...f.entry,
+    id: randomUUID(), content: `CALYX architecture source item ${index}: distinct factual condition ${index * 17}.` }));
+  f.retrieval.memory.contextFor = async () => ({ entries });
+  const search = f.retrieval.index.search.bind(f.retrieval.index);
+  let internalCandidates = 0;
+  f.retrieval.index.search = async input => {
+    const result = await search({ ...input, limit: 128, channelCandidates: 128 });
+    internalCandidates = result.items.length;
+    return result;
+  };
+  const result = await f.retrieval.search(f.context, { query: 'CALYX architecture', limit: 5, maximumTokens: 32768 });
+  assert.equal(internalCandidates, 128); assert.equal(result.items.length, 5);
+  const acquisition = f.retrieval.acquisitions.get(f.context);
+  const expected = result.items.map(item => item.sourceId).sort();
+  assert.deepEqual([...acquisition.finalSourceDependencies.values()].map(item => item.sourceId).sort(), expected);
+  assert.equal(acquisition.sourceReads.size, 0);
+  const cached = await f.retrieval.search(f.context, { query: 'CALYX architecture', limit: 5, maximumTokens: 32768 });
+  assert.equal(cached.acquisition.reused, true);
+  assert.deepEqual([...acquisition.finalSourceDependencies.values()].map(item => item.sourceId).sort(), expected);
+});
+
 test('unsupported selected embeddings preserve lexical evidence without invoking a substituted model', async t => {
   let calls = 0;
   const f = await foundationFixture(t, { status: () => ({ state: 'ready', profileId: 'builtin-multilingual' }),

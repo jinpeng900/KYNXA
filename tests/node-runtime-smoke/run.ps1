@@ -3,10 +3,12 @@ param([Parameter(Mandatory = $true)][string]$BundleRoot)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $runtimeSource = [IO.Path]::GetFullPath($BundleRoot)
 $runtimeTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('kynxa-portable-runtime-' + [Guid]::NewGuid().ToString('N'))
 $runtimePackage = Join-Path $runtimeTestRoot 'package with spaces'
 [IO.Directory]::CreateDirectory($runtimePackage) | Out-Null
+Write-Output "Isolated copied package: $runtimeTestRoot"
 $checks = 0
 function Assert-Runtime([bool]$Condition, [string]$Description) {
     if (-not $Condition) { throw $Description }
@@ -85,17 +87,32 @@ Assert-Runtime ($hostTerminalCapabilities.protocolVersion -eq 2 -and $hostTermin
     $hostTerminalCapabilities.visibleTerminal -eq $true) 'The copied helper exposes current host terminal and real-console capability without external .NET.'
 
 $officialProbePath = Join-Path $runtimeTestRoot 'official-package-check.mjs'
+$sourceOfficialManifest = Join-Path $repositoryRoot 'apps/model-gateway/official-tools/manifest.json'
+$copiedOfficialManifest = Join-Path $runtimePackage 'model-gateway/official-tools/manifest.json'
+# Compare the complete source inventory before trusting packaged skill hashes or tool names.
+# 先对照完整源码清单，再信任随包技能哈希及工具身份，避免过期包仅靠数量通过。
+Assert-Runtime ((Get-FileHash -LiteralPath $copiedOfficialManifest -Algorithm SHA256).Hash -eq
+    (Get-FileHash -LiteralPath $sourceOfficialManifest -Algorithm SHA256).Hash) 'The copied official manifest exactly matches the complete current source inventory and package identity.'
 $officialProbe = @'
+import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { WebFetchTool } from './package with spaces/model-gateway/tools/web-fetch.mjs';
+import { builtinDescriptors } from './package with spaces/model-gateway/official-tools/Tools/catalog.mjs';
 const root = new URL('./package with spaces/model-gateway/official-tools/', import.meta.url);
 const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
+const toolNames = builtinDescriptors.map(tool => tool.name);
+assert.equal(new Set(toolNames).size, toolNames.length, 'Packaged tool identities must be unique.');
+assert.deepEqual([...toolNames].sort(), [...manifest.coreTools].sort(), 'Packaged descriptors must match every official tool identity.');
+assert.equal(new Set(manifest.skills.map(skill => skill.path)).size, manifest.skills.length, 'Packaged skill identities must be unique.');
+let verifiedSkillFiles = 0;
 for (const skill of manifest.skills) {
+  assert.ok(skill.files.length > 0, 'Each packaged skill must declare resource hashes.');
   const directory = skill.path.slice(0, skill.path.lastIndexOf('/'));
   for (const file of skill.files) {
     const bytes = await readFile(new URL('Skills/' + directory + '/' + file.path, root));
     if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error('Packaged skill hash mismatch: ' + skill.name);
+    verifiedSkillFiles++;
   }
 }
 const reader = new WebFetchTool({ fetchPage: async () => ({ url: 'https://fixture.example.invalid/', status: 200,
@@ -105,15 +122,134 @@ try {
   const { value } = await reader.run({ url: 'https://fixture.example.invalid/', reason: 'Isolated package verification.' });
   const license = await readFile(new URL('./package with spaces/model-gateway/node_modules/html-to-text/LICENSE', import.meta.url), 'utf8');
   console.log(JSON.stringify({ tools: manifest.coreTools.length, skills: manifest.skills.length,
+    descriptorTools: toolNames.length, verifiedSkillFiles,
     text: value.content, title: value.title, licensePresent: license.includes('MIT') }));
 } finally { reader.close(); }
 '@
 [IO.File]::WriteAllText($officialProbePath, $officialProbe, [Text.UTF8Encoding]::new($false))
 $officialPackage = Invoke-IsolatedRuntime $runtimeNode ('"' + $officialProbePath + '"') | ConvertFrom-Json
-Assert-Runtime ($officialPackage.tools -eq 35 -and $officialPackage.skills -eq 7) 'The copied official package retains all 35 tools and seven skills with matching resource hashes.'
+Assert-Runtime ($officialPackage.tools -eq 44 -and $officialPackage.descriptorTools -eq 44 -and
+    $officialPackage.skills -eq 7 -and $officialPackage.verifiedSkillFiles -eq 13) 'The copied official package retains all 44 current tool identities and seven skills with all 13 resource hashes verified.'
 Assert-Runtime ($officialPackage.title -eq 'Package fixture' -and $officialPackage.text.Contains(([char]0x4E2D).ToString() + [char]0x6587 + ' English')) 'Bundled public-page conversion reads Chinese and English without Python or external Node.'
 Assert-Runtime ($officialPackage.text.Contains('https://fixture.example.invalid/source') -and -not $officialPackage.text.Contains('HiddenFixture')) 'Copied page conversion retains source URLs without executing or displaying scripts.'
 Assert-Runtime $officialPackage.licensePresent 'The new HTML parser license is included in the package.'
+
+$retrievalProbePath = Join-Path $runtimeTestRoot 'retrieval-package-check.mjs'
+$sourceGatewayPackage = Get-Content -LiteralPath (Join-Path $repositoryRoot 'apps/model-gateway/package.json') -Raw | ConvertFrom-Json
+[IO.File]::WriteAllText((Join-Path $runtimeTestRoot 'gateway-dependency-pins.json'),
+    ($sourceGatewayPackage.dependencies | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+$retrievalProbe = @'
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
+const gatewayRoot = new URL('./package with spaces/model-gateway/', import.meta.url);
+// Resolve native addons exclusively from the copied package; all retrieval data stays in memory.
+// 原生扩展仅从复制后的随包依赖解析；所有检索数据留在内存，不访问正式索引。
+const require = createRequire(new URL('server.mjs', gatewayRoot));
+const sqliteVec = require('sqlite-vec');
+const { Index } = require('usearch');
+const dependencies = JSON.parse(await readFile(new URL('./gateway-dependency-pins.json', import.meta.url), 'utf8'));
+const sqliteVecPackage = JSON.parse(await readFile(new URL('node_modules/sqlite-vec/package.json', gatewayRoot), 'utf8'));
+const annPackage = JSON.parse(await readFile(new URL('node_modules/usearch/package.json', gatewayRoot), 'utf8'));
+assert.equal(sqliteVecPackage.version, dependencies['sqlite-vec']);
+assert.equal(annPackage.version, dependencies.usearch);
+const database = new DatabaseSync(':memory:', { allowExtension: true });
+try {
+  sqliteVec.load(database);
+  database.enableLoadExtension(false);
+  const vectorVersion = database.prepare('SELECT vec_version() AS version').get().version;
+  assert.equal(vectorVersion, 'v' + sqliteVecPackage.version);
+  database.exec("CREATE VIRTUAL TABLE fixture_fts USING fts5(content, tokenize='unicode61')");
+  const insertText = database.prepare('INSERT INTO fixture_fts(rowid,content) VALUES (?,?)');
+  insertText.run(101, '\u4e2d\u6587 English package retrieval evidence');
+  insertText.run(202, 'Different unrelated document');
+  const lexicalMatches = database.prepare('SELECT rowid,content FROM fixture_fts WHERE fixture_fts MATCH ? ORDER BY bm25(fixture_fts)').all('retrieval AND evidence');
+  assert.equal(lexicalMatches.length, 1);
+  assert.equal(lexicalMatches[0].rowid, 101);
+  assert.ok(lexicalMatches[0].content.includes('\u4e2d\u6587 English'));
+  database.exec('CREATE VIRTUAL TABLE fixture_vectors USING vec0(embedding float[3] distance_metric=cosine)');
+  const keys = new BigUint64Array([101n, 202n, 303n]);
+  const vectors = [new Float32Array([1, 0, 0]), new Float32Array([0, 1, 0]), new Float32Array([-1, 0, 0])];
+  const vectorBytes = vector => Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
+  const insertVector = database.prepare('INSERT INTO fixture_vectors(rowid,embedding) VALUES (?,?)');
+  vectors.forEach((vector, index) => insertVector.run(keys[index], vectorBytes(vector)));
+  const exactMatches = database.prepare('SELECT rowid,distance FROM fixture_vectors WHERE embedding MATCH ? AND k=3 ORDER BY distance').all(vectorBytes(vectors[0]));
+  assert.deepEqual(exactMatches.map(match => match.rowid), [101, 202, 303]);
+  assert.ok(Math.abs(exactMatches[0].distance) < 0.00001 && exactMatches[2].distance > 1.99);
+  const annIndex = new Index({ dimensions: 3, metric: 'cos', quantization: 'f32',
+    connectivity: 16, expansion_add: 32, expansion_search: 32 });
+  annIndex.add(keys, vectors, 1);
+  assert.equal(annIndex.size(), 3);
+  const annMatches = annIndex.search(vectors[0], 3, 1);
+  assert.deepEqual(Array.from(annMatches.keys, Number), [101, 202, 303]);
+  assert.ok(Math.abs(annMatches.distances[0]) < 0.00001 && annMatches.distances[2] > 1.99);
+  assert.equal(annIndex.remove(keys).reduce((total, count) => total + count, 0), 3);
+  assert.equal(annIndex.size(), 0);
+  console.log(JSON.stringify({ storage: ':memory:', fts5Matches: lexicalMatches.length, vectorVersion,
+    exactMatches: exactMatches.length, annMatches: annMatches.keys.length, annVersion: annPackage.version }));
+} finally { database.close(); }
+'@
+[IO.File]::WriteAllText($retrievalProbePath, $retrievalProbe, [Text.UTF8Encoding]::new($false))
+$retrievalPackage = Invoke-IsolatedRuntime $runtimeNode ('"' + $retrievalProbePath + '"') | ConvertFrom-Json
+Assert-Runtime ($retrievalPackage.storage -eq ':memory:' -and $retrievalPackage.fts5Matches -eq 1) 'Copied bundled Node performs FTS5 retrieval using only an in-memory fixture.'
+Assert-Runtime ($retrievalPackage.vectorVersion -eq 'v0.1.9' -and $retrievalPackage.exactMatches -eq 3) 'Copied sqlite-vec loads its packaged native DLL and returns the expected exact cosine ranking.'
+Assert-Runtime ($retrievalPackage.annVersion -eq '2.26.4' -and $retrievalPackage.annMatches -eq 3) 'Copied USearch loads its packaged native addon and returns the expected in-memory ANN ranking.'
+
+foreach ($profileModule in @('embedding-profile.mjs', 'reranker-profile.mjs')) {
+    $relativeProfile = 'model-gateway/models/retrieval/' + $profileModule
+    Assert-Runtime ((Get-FileHash -LiteralPath (Join-Path $runtimePackage $relativeProfile) -Algorithm SHA256).Hash -eq
+        (Get-FileHash -LiteralPath (Join-Path $repositoryRoot ('apps/' + $relativeProfile)) -Algorithm SHA256).Hash) "Copied $profileModule exactly matches the source asset pins."
+}
+$assetProbePath = Join-Path $runtimeTestRoot 'model-assets-check.mjs'
+$assetProbe = @'
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { lstat } from 'node:fs/promises';
+import { BUILTIN_EMBEDDING_PROFILE } from './package with spaces/model-gateway/models/retrieval/embedding-profile.mjs';
+import { BUILTIN_RERANKER_PROFILE } from './package with spaces/model-gateway/models/retrieval/reranker-profile.mjs';
+const profiles = [['embedding', BUILTIN_EMBEDDING_PROFILE], ['rerank', BUILTIN_RERANKER_PROFILE]];
+const verifiedProfiles = [];
+// Verify shipped bytes and licenses without loading a model or invoking inference.
+// 校验随包权重、分词器及许可的真实字节；不加载模型，也不请求推理。
+for (const [directory, profile] of profiles) {
+  const root = new URL(`./package with spaces/runtime/${directory}/${profile.id}/`, import.meta.url);
+  let totalBytes = 0;
+  for (const asset of profile.files) {
+    const assetUrl = new URL(asset.path, root);
+    const file = await lstat(assetUrl);
+    assert.ok(file.isFile() && !file.isSymbolicLink(), 'Missing or linked packaged asset: ' + asset.path);
+    assert.equal(file.size, asset.bytes, 'Packaged asset size mismatch: ' + asset.path);
+    const digest = createHash('sha256');
+    for await (const part of createReadStream(assetUrl)) digest.update(part);
+    assert.equal(digest.digest('hex'), asset.sha256, 'Packaged asset hash mismatch: ' + asset.path);
+    totalBytes += file.size;
+  }
+  verifiedProfiles.push({ id: profile.id, modelId: profile.modelId, files: profile.files.length, totalBytes });
+}
+console.log(JSON.stringify({ profiles: verifiedProfiles }));
+'@
+[IO.File]::WriteAllText($assetProbePath, $assetProbe, [Text.UTF8Encoding]::new($false))
+$assetPackage = Invoke-IsolatedRuntime $runtimeNode ('"' + $assetProbePath + '"') | ConvertFrom-Json
+Assert-Runtime ($assetPackage.profiles.Count -eq 2 -and
+    $assetPackage.profiles[0].id -eq 'builtin-multilingual' -and $assetPackage.profiles[0].files -eq 11 -and
+    $assetPackage.profiles[1].id -eq 'builtin-multilingual-reranker' -and $assetPackage.profiles[1].files -eq 8) 'All 11 E5 and eight reranker assets, including weights, tokenizers and licenses, match their source-pinned sizes and SHA256 hashes.'
+
+$resourceRoot = Join-Path $runtimePackage 'runtime/resource'
+$resourceExecutable = Join-Path $resourceRoot 'kynxa-resource-service.exe'
+Assert-Runtime (Test-Path -LiteralPath $resourceExecutable -PathType Leaf) 'The copied Rust resource runtime executable is present.'
+$resourceNotices = Join-Path $resourceRoot 'licenses/THIRD-PARTY-NOTICES.txt'
+Assert-Runtime ((Get-Item -LiteralPath $resourceNotices).Length -gt 0 -and
+    @(Get-ChildItem -LiteralPath (Join-Path $resourceRoot 'licenses') -Recurse -File | Where-Object { $_.Name -match '^(?:LICEN[CS]E(?:[-_.].*)?|COPYING)$' }).Count -gt 0) 'The copied Rust resource runtime includes dependency notices and original licenses.'
+$resourceInput = '{"id":1,"method":"health"}' + [Environment]::NewLine + '{"id":2,"method":"close"}'
+$resourceOutput = Invoke-IsolatedRuntime $resourceExecutable '' $resourceInput
+$resourceFrames = @($resourceOutput -split '\r?\n' | ForEach-Object { $_ | ConvertFrom-Json })
+Assert-Runtime ($resourceFrames.Count -eq 2 -and $resourceFrames[0].id -eq 1 -and
+    $resourceFrames[0].result.mode -eq 'rust' -and $resourceFrames[0].result.cpu.logicalCores -gt 0 -and
+    $resourceFrames[0].result.memory.totalBytes -gt 0 -and $resourceFrames[0].result.activeLeases -eq 0 -and
+    $resourceFrames[0].result.quarantinedLeases -eq 0 -and $resourceFrames[0].result.queuedRequests -eq 0) 'The copied Rust resource service starts and answers its current health protocol with no leases or external toolchain.'
+Assert-Runtime ($resourceFrames[1].id -eq 2 -and $resourceFrames[1].result.status -eq 'closed') 'The copied Rust resource service acknowledges close and exits its owned process.'
 
 $runtimeListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $runtimeListener.Start(); $runtimePort = $runtimeListener.LocalEndpoint.Port; $runtimeListener.Stop()
@@ -145,5 +281,17 @@ finally {
     [IO.File]::WriteAllText((Join-Path $runtimeTestRoot 'gateway.stderr.txt'), $errorOutput.Result)
     $gateway.Dispose()
 }
-Write-Output "PASS: $checks portable Node/npm/npx, isolated gateway and self-contained ToolHost checks."
-Write-Output "Isolated copied package: $runtimeTestRoot"
+$runtimeEvidence = @{
+    bundleRoot = $runtimeSource; verifiedUtc = [DateTime]::UtcNow.ToString('o'); checks = $checks
+    node = $nodeInfo
+    official = @{ tools = $officialPackage.tools; descriptorTools = $officialPackage.descriptorTools
+        skills = $officialPackage.skills; verifiedSkillFiles = $officialPackage.verifiedSkillFiles }
+    retrieval = $retrievalPackage; modelAssets = $assetPackage
+    resourceService = @{ health = $resourceFrames[0].result; close = $resourceFrames[1].result }
+    gateway = @{ status = $health.status; officialToolsProtocol = $health.officialToolsProtocol
+        agentProtocol = $health.agentProtocol; hostTerminalProtocol = $health.hostTerminalProtocol }
+}
+$runtimeEvidencePath = Join-Path $runtimeTestRoot 'portable-results.json'
+[IO.File]::WriteAllText($runtimeEvidencePath, ($runtimeEvidence | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+Write-Output "PASS: $checks portable Node/npm/npx, official tools, native retrieval, model asset, Rust resource service, isolated gateway and self-contained ToolHost checks."
+Write-Output "Verification evidence: $runtimeEvidencePath"

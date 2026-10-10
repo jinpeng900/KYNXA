@@ -48,9 +48,19 @@ export class SourceIndexService {
     this.corpusSyncCache = new Map();
     this.closed = false;
     this.sync = new SourceSyncService({ library, getProject, excludedRoots, readTree, resourceService,
-      onFolderChanged: projectId => this.rebuild({ projectId, dirty: true }) });
+      onFolderChanged: (projectId, { changedPaths = [] } = {}) => {
+        for (const path of changedPaths) this.lifecycle.prioritize(projectId, path, { recent: true });
+        return this.rebuild({ projectId, dirty: true, automatic: true });
+      } });
     this.indexer = new SourceIndexer({ library, index, embeddings, structures, serialize, effectiveSettings, getProject, excludedRoots, readFile, resourceService });
     this.lifecycle = new IndexJobService({ jobs, validateProject,
+      scopeIdentity: async (projectId, signal) => {
+        const project = projectId ? await getProject(projectId) : null;
+        signal?.throwIfAborted();
+        // Disabling the same root must not release cancellation; only a different actual binding is a new scope.
+        // 关闭同一目录不能解除取消，只有实际目录绑定改变才属于新范围。
+        return sourceIdentity(projectId, project?.FolderPath ? resolve(project.FolderPath) : null);
+      },
       prepareSources: async (projectId, signal) => {
         const settings = await effectiveSettings(projectId);
         signal.throwIfAborted();
@@ -94,6 +104,14 @@ export class SourceIndexService {
         const completeScan = snapshot.sourceScan?.coverage?.complete !== false && !snapshot.sourceScan?.incomplete && !snapshot.sourceScan?.backgroundPending;
         if (completeScan) await this.indexer.prune({ scopes: snapshot.scopes,
           identities: new Set(snapshot.sources.map(source => source.sourceId)) }, signal, { sourceTypes: ['knowledge', 'work-file'] });
+        // Failed file content does not make its directory inventory incomplete; failed IDs must survive reconciliation.
+        // 文件正文失败不表示目录清单未完成；清理覆盖时须保留本轮仍存在的失败文件身份。
+        const scan = snapshot.sourceScan;
+        if (!scan?.incomplete && !scan?.backgroundPending && !scan?.failureReportTruncated &&
+            !scan?.failures?.some(failure => failure.directory))
+          await this.index.reconcileCoverage?.({ scopeKeys: snapshot.scopes, sourceTypes: ['knowledge', 'work-file'],
+            sourceIds: [...new Set([...snapshot.sources.map(source => source.sourceId),
+              ...(scan?.failures ?? []).map(failure => failure.sourceId).filter(Boolean)])], signal });
         if (snapshot.preparationFailures === this.indexer.preparationFailures)
           await this.cacheCorpus(snapshot.sources, snapshot.scopes, snapshot.settings, signal, { complete: completeScan });
         // Warm stable generations only after derivation ends, not after every embedding batch.
@@ -113,6 +131,16 @@ export class SourceIndexService {
   foregroundMountedSnapshot(...args) { return this.sync.foregroundMountedSnapshot(...args); }
   upsert(...args) { return this.indexer.upsert(...args); }
   invalidateMounted(projectId) { this.sync.mountedCache.delete(projectId?.toLowerCase() ?? null); }
+
+  forgetMounted(projectId) {
+    const key = projectId?.toLowerCase() ?? null;
+    this.lifecycle.supersede(key);
+    this.sync.watchers.get(key)?.close();
+    this.sync.watchers.delete(key);
+    this.sync.mountedCache.delete(key);
+    this.sync.mountedStates.delete(key);
+    this.corpusSyncCache.clear();
+  }
 
   clearSourceCaches() {
     this.sync.libraryCache.clear();
@@ -158,9 +186,13 @@ export class SourceIndexService {
       // 大型冷语料由持久作业派生；目录发现未完成时绝不能裁掉尚未发现的来源。
       const projectId = snapshot.relationship?.isFolderlessWorkspace ? null
         : snapshot.relationship?.projectId ?? snapshot.settings.projectId ?? null;
-      await this.rebuild({ projectId });
+      const job = await this.rebuild({ projectId, automatic: true });
       canCacheCorpus = false;
-      snapshot.indexingPending = true;
+      if (job.automaticRebuildBlocked) {
+        snapshot.indexingPaused = true;
+        snapshot.indexingPartial = true;
+        snapshot.indexingDiagnostic = 'INDEX_CANCELLED';
+      } else snapshot.indexingPending = true;
     } else if (!cached) {
       // Only complete corpus metadata plus the actual database epoch can skip synchronization; chat messages remain separate.
       // 只有完整语料元信息和真实数据库代次共同一致才跳过同步，聊天消息仍独立处理。
@@ -225,6 +257,8 @@ export class SourceIndexService {
       const limits = settings.local.indexing;
       const scanStats = {}, options = { excludedRoots: this.excludedRoots, stats: scanStats, resourceService: this.resources,
         maximumFiles: limits?.maximumFiles ?? 512, maximumSourceBytes: limits?.maximumSourceBytes,
+        maximumDocumentInputBytes: limits?.maximumDocumentInputBytes, maximumDocumentOutputBytes: limits?.maximumDocumentOutputBytes,
+        maximumPdfPages: limits?.maximumPdfPages,
         maximumBytes: limits?.maximumTotalBytes, maximumEntries: limits?.maximumEntries, signal: ownedSignal };
       const files = this.readTree === readSourceTree ? readSourceImportTree(input.path, options) : await this.readTree(input.path, options);
       ownedSignal.throwIfAborted();
@@ -243,7 +277,9 @@ export class SourceIndexService {
       return { id: first.id, title: first.title, scope: first.scope, projectId: first.projectId, path: first.originalPath,
         revision: first.revision, status: 'ready', importedCount: result.sources.length,
         sourceCoverage: { discovered: scanStats.discoveredFiles ?? result.sources.length,
-          failed: scanStats.failedFiles ?? 0, importedWindows: result.sources.length, failures: scanStats.failures ?? [] },
+          failed: scanStats.failedFiles ?? 0, importedWindows: result.sources.length, failures: scanStats.failures ?? [],
+          complete: !scanStats.incomplete && !scanStats.failedFiles,
+          ...(scanStats.documentWindows ? { documentWindows: scanStats.documentWindows } : {}) },
         ...(job ? { jobId: job.jobId } : { indexingStatus: 'pending' }) };
     }, signal);
   }

@@ -23,7 +23,7 @@ export class EmbeddingSpacePolicy {
     const policy = local.embeddingDevicePolicy ?? 'auto';
     if (policy === 'cpu') return CPU_PROFILE;
     if (policy === 'gpu' || configured === GPU_PROFILE) return GPU_PROFILE;
-    const status = this.embeddings.status(GPU_PROFILE);
+    const status = this.embeddings.status(GPU_PROFILE, { devicePreference: 'auto' });
     // Hardware presence cannot turn a legacy CPU adapter into a declared GPU vector space.
     // 有 GPU 不代表旧 CPU 适配器支持 GPU 空间；自动选择必须先核对后端声明的配置与空间身份。
     if (status.profileId !== GPU_PROFILE || status.embeddingSpaceId !== resolveRetrievalModelProfile('embedding', GPU_PROFILE).embeddingSpaceId ||
@@ -35,12 +35,15 @@ export class EmbeddingSpacePolicy {
     return { ...settings, local: { ...settings.local, embeddingProfileId: profileId } };
   }
   async select(settings, scopes, signal) {
+    // GPU profiles keep their strict backend contract; CPU-only preference also constrains the actual execution session.
+    // GPU 配置保持严格后端合同；CPU 偏好同时约束实际执行会话，不能只修改向量配置名称。
+    const devicePreference = (settings.local.embeddingDevicePolicy ?? 'auto') === 'cpu' ? 'cpu' : 'auto';
     if (settings.local.semantic === 'off' || settings.local.enabled === false)
       return { profileId: settings.local.embeddingProfileId, targetProfileId: settings.local.embeddingProfileId,
-        state: 'disabled', fallbackProfileId: null, canMigrate: false };
+        devicePreference, state: 'disabled', fallbackProfileId: null, canMigrate: false };
     const targetProfileId = await this.target(settings, signal);
     if (!supported.has(targetProfileId) || !this.index.vectorSpaceStatus)
-      return { profileId: targetProfileId, targetProfileId, state: 'configured', fallbackProfileId: null };
+      return { profileId: targetProfileId, targetProfileId, devicePreference, state: 'configured', fallbackProfileId: null };
     const status = await this.index.vectorSpaceStatus({ scopeKeys: scopes, signal });
     const corpora = status.scopes.filter(scope => scope.chunks > 0);
     const matches = (space, id) => space.profileId === id &&
@@ -52,8 +55,8 @@ export class EmbeddingSpacePolicy {
     const profileId = targetProfileId === GPU_PROFILE && !complete(GPU_PROFILE) && cpuFallback ? CPU_PROFILE : targetProfileId;
     const state = profileId !== targetProfileId ? 'migrating-with-compatible-cpu' :
       complete(targetProfileId) ? 'ready' : present(targetProfileId) ? 'partial' : 'awaiting-index';
-    const targetStatus = this.embeddings.status(targetProfileId);
-    return { profileId, targetProfileId, state, fallbackProfileId: cpuFallback && profileId === GPU_PROFILE ? CPU_PROFILE : null,
+    const targetStatus = this.embeddings.status(targetProfileId, { devicePreference });
+    return { profileId, targetProfileId, devicePreference, state, fallbackProfileId: cpuFallback && profileId === GPU_PROFILE ? CPU_PROFILE : null,
       coverage: status, canMigrate: corpora.length > 0 && !complete(targetProfileId) &&
         !['unavailable', 'closed'].includes(targetStatus.state),
       correctnessCertified: false };

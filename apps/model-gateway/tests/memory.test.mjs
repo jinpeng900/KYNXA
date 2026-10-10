@@ -62,6 +62,25 @@ test('explicit chat memory overrides project default; global memory requires its
   assert.equal(view.scopes.find(scope => scope.scope === 'chat').entries[0].content, '此聊天的临时约定');
 });
 
+test('projected memory snapshots detect edits and removal but ignore unrelated changes', async t => {
+  const f = await fixture(t);
+  const document = await f.memory.create('a1', { scope: 'project', content: 'Confirmed release requirement' });
+  const id = document.entries[0].id;
+  const context = await f.memory.contextFor('a2'), snapshot = f.memory.snapshotFor(context, [id]);
+  assert.equal((await f.memory.validateSnapshot('a2', snapshot)).current, true);
+  await f.memory.create('a1', { scope: 'chat', content: 'Private sibling note' });
+  await f.memory.create('a2', { scope: 'project', content: 'Unrelated new record' });
+  assert.equal((await f.memory.validateSnapshot('a2', snapshot)).current, true);
+  await f.memory.update('a1', id, { scope: 'project', expectedRevision: 2, content: 'Updated release requirement' });
+  const changed = await f.memory.validateSnapshot('a2', snapshot);
+  assert.equal(changed.current, false);
+  assert.equal(changed.invalidSources[0].code, 'MEMORY_SOURCE_CHANGED');
+  assert.doesNotMatch(JSON.stringify(changed), /Confirmed release requirement|Updated release requirement|Private sibling note/);
+  const refreshed = f.memory.snapshotFor(await f.memory.contextFor('a2'), [id]);
+  await f.memory.delete('a1', id, { scope: 'project', expectedRevision: 3 });
+  assert.equal((await f.memory.validateSnapshot('a2', refreshed)).invalidSources[0].code, 'MEMORY_SOURCE_UNAVAILABLE');
+});
+
 test('only saved user messages create automatic memory; exact replay is idempotent', async t => {
   const f = await fixture(t), message = '记住：保留来源';
   const first = await f.capture('a1', 'explicit-user', message);

@@ -270,6 +270,27 @@ test('managed data notifications cannot reindex their own manifests or hide neig
     'Changed adjacent ordinary source.');
 });
 
+test('watch notifications coalesce bounded recent paths without inventing targets during reconciliation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const changes = [];
+  const f = await fixture(t, { onFolderChanged: (projectId, hints) => changes.push({ projectId, hints }) });
+  const service = f.create();
+  service.watchFolder('project-a', f.workspace);
+  for (let index = 0; index < 24; index++) f.emitChange(`file-${index}.md`);
+  f.emitChange('file-8.md');
+  t.mock.timers.tick(799); await Promise.resolve();
+  assert.equal(changes.length, 0);
+  t.mock.timers.tick(1); await Promise.resolve();
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].projectId, 'project-a');
+  assert.equal(changes[0].hints.changedPaths.length, 16);
+  assert.equal(changes[0].hints.changedPaths.at(-1), 'file-8.md');
+  assert.equal(changes[0].hints.changedPaths.includes('file-0.md'), false);
+  f.emitChange(undefined);
+  t.mock.timers.tick(800); await Promise.resolve();
+  assert.deepEqual(changes[1].hints.changedPaths, []);
+});
+
 test('native recursive watching ignores nested managed manifest writes but observes ordinary file changes', async t => {
   const f = await fixture(t, { dataInsideWorkspace: true });
   const path = join(f.workspace, 'source.md');

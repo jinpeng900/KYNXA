@@ -18,9 +18,11 @@ export class RerankerService {
   #resources; #preparingRequests = 0; #inferenceBackend; #resourceDiagnostic; #workerRestarts = 0;
   #admission; #nativeTickets = new Map();
   #resourceOptions; #yielding; #permanentClose = false;
+  #devicePreference; #retiring = false; #retirement; #retirementCompletion;
   constructor({ modelRoot = defaultRerankerModelRoot(), cpuThreads, resourceService, devicePreference = 'auto', requestLimits, timeoutMs = 60000, closeTimeoutMs = 30000,
     profileId = BUILTIN_RERANKER_PROFILE.id, workerFactory = createNativeInferenceProcess } = {}) {
     this.#profile = resolveRetrievalModelProfile('reranker', profileId);
+    this.#devicePreference = devicePreference;
     this.#admission = new InferenceAdmission(requestLimits);
     if (this.#profile.requiredDevice && devicePreference === 'cpu') throw failure('Selected GPU reranker requires DirectML.', 'RERANK_GPU_REQUIRED');
     this.#workerFactory = workerFactory;
@@ -35,20 +37,26 @@ export class RerankerService {
   }
   status(profileId = this.#profile.id) {
     if (profileId !== this.#profile.id) return unavailableProfileStatus('reranker', profileId);
+    const resourceReservation = this.#resources.status();
     return { ...this.#metadata(), state: this.#state, loaded: this.#loaded, supported: true,
       local: true, network: false, workerPhase: this.#phase, assetVerification: this.#assetVerification,
+      devicePreference: this.#devicePreference, retiring: this.#retiring,
       maxInputTokens: this.#profile.maxInputTokens, pendingRequests: this.#pending.size,
-      cpuThreads: this.cpuThreads, resourceReservation: this.#resources.status(),
+      cpuThreads: this.cpuThreads, resourceReservation, batchSuggestions: resourceReservation.batchSuggestions,
+      ...(resourceReservation.lastGrant ? { batchSize: resourceReservation.lastGrant.batchSize,
+        batchTokenBudget: resourceReservation.lastGrant.batchTokenBudget } : {}),
       inputAdmission: this.#admission.status(), requestLimits: this.#admission.limits,
       ...(this.#inferenceBackend ? { inferenceBackend: this.#inferenceBackend } : {}),
       ...(this.#resourceDiagnostic ? { resourceDiagnostic: this.#resourceDiagnostic } : {}),
       ...(this.#errorCode ? { errorCode: this.#errorCode } : {}) };
   }
-  async rerank({ query, candidates, signal, limit = 20, profileId = this.#profile.id }) {
+  async rerank({ query, candidates, signal, limit = 20, profileId = this.#profile.id, devicePreference = this.#devicePreference }) {
+    if (devicePreference !== this.#devicePreference)
+      throw failure('Device preference requires a separately configured session. / 设备偏好变化需要重新配置会话。', 'RERANK_DEVICE_PREFERENCE_CHANGED');
     resolveRetrievalModelProfile('reranker', profileId);
     if (profileId !== this.#profile.id) throw new RetrievalModelProfileError('reranker', profileId);
     if (this.#yielding) await this.#waitForYield(signal);
-    if (this.#closed) throw failure('Reranker is closed.', 'RERANK_CLOSED');
+    if (this.#closed || this.#retiring) throw failure('Reranker is closed or retiring.', 'RERANK_CLOSED');
     if (signal?.aborted) throw aborted();
     if (typeof query !== 'string' || !query.trim() || query.length > 2048 || !Array.isArray(candidates) ||
         candidates.length > this.#admission.limits.maxBatchDocuments || !Number.isInteger(limit) || limit < 1 || limit > this.#profile.maxCandidates)
@@ -78,7 +86,12 @@ export class RerankerService {
       if (this.#closed) throw failure('Reranker is closed.', 'RERANK_CLOSED');
       if (signal?.aborted || error.name === 'AbortError') throw aborted();
       throw failure('Local reranker resources are temporarily unavailable.', 'RERANK_BUSY');
-    } finally { this.#preparingRequests--; }
+    } finally {
+      this.#preparingRequests--;
+      // Accepted preparation must become a native ticket before retirement can claim the idle boundary.
+      // 已接纳的准备请求须先转为原生票据，退役才能认领排空边界。
+      queueMicrotask(() => this.#retireWhenIdle());
+    }
     if (this.#closed) { this.#admission.release(ticket); throw failure('Reranker is closed.', 'RERANK_CLOSED'); }
     if (signal?.aborted) {
       if (!this.#pending.size && !this.#preparingRequests) this.#resources.idle().catch(() => {});
@@ -139,7 +152,7 @@ export class RerankerService {
     try {
       worker = this.#workerFactory(new URL('./reranker-worker.mjs', import.meta.url), { execArgv: [],
         workerData: { modelRoot: this.modelRoot, cpuThreads: resourceBudget.cpuThreads, profileId: this.#profile.id,
-          requestLimits: this.#admission.limits } });
+          requestLimits: this.#admission.limits, devicePreference: this.#devicePreference } });
     } catch {
       const error = failure('The local reranker worker could not start.', 'RERANK_WORKER_FAILED');
       this.#fail(error); throw error;
@@ -153,7 +166,8 @@ export class RerankerService {
       if (this.#worker !== worker || !message || typeof message !== 'object') return;
       if (message.type === 'phase') { if (!this.#closed) this.#phase = message.phase; return; }
       if (message.type === 'settled') {
-        this.#admission.release(this.#nativeTickets.get(message.id)); this.#nativeTickets.delete(message.id); return;
+        this.#admission.release(this.#nativeTickets.get(message.id)); this.#nativeTickets.delete(message.id);
+        this.#retireWhenIdle(); return;
       }
       if (message.type === 'ready') {
         if (!this.#closed && this.#state !== 'error' && this.#state !== 'unavailable') {
@@ -186,6 +200,7 @@ export class RerankerService {
           if (!this.#loaded && this.#state === 'loading') this.#state = 'ready';
           worker.unref();
           this.#resources.idle().catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
+          this.#retireWhenIdle();
         }
         return;
       }
@@ -210,6 +225,7 @@ export class RerankerService {
       this.#resources.idle().catch(() => { this.#resourceDiagnostic = { code: 'INFERENCE_RESOURCE_RELEASE_FAILED' }; });
       if (!this.#closed && (this.#pending.size || (this.#state !== 'error' && this.#state !== 'unavailable')))
         this.#fail(failure(`Reranker process exited (${signal ?? exitCode}).`, 'RERANK_WORKER_FAILED'));
+      this.#retireWhenIdle();
     });
   }
   #waitForYield(signal) {
@@ -256,13 +272,45 @@ export class RerankerService {
     return this.#closeOwned();
   }
 
+  // A preference switch waits for accepted requests and native settlement instead of cancelling another caller.
+  // 设备偏好切换等待已接纳请求及原生排空，不能为了新偏好取消其他调用方的工作。
+  retire() {
+    if (this.#retirement) return this.#retirement;
+    if (this.#permanentClose) return this.close();
+    this.#retiring = true;
+    this.#retirement = new Promise((resolveRetirement, rejectRetirement) => {
+      this.#retirementCompletion = { resolve: resolveRetirement, reject: rejectRetirement };
+    });
+    this.#yielding?.then(() => this.#retireWhenIdle(), error => this.#retirementCompletion?.reject(error));
+    this.#retireWhenIdle();
+    return this.#retirement;
+  }
+
+  #retireWhenIdle() {
+    if (!this.#retiring || this.#yielding || this.#closed || this.#pending.size || this.#preparingRequests || this.#nativeTickets.size ||
+        this.#admission.status().activeRequests || this.#worker && !['idle', 'stopped'].includes(this.#phase)) return;
+    this.close();
+  }
+
   #closeOwned() {
-    if (this.#closing) return this.#closing;
+    if (this.#closing) {
+      if (this.#retirementCompletion) {
+        const completion = this.#retirementCompletion;
+        this.#retirementCompletion = undefined;
+        this.#closing.then(completion.resolve, completion.reject);
+      }
+      return this.#closing;
+    }
     this.#closed = true; this.#loaded = false;
     this.#errorCode = 'RERANK_CLOSED';
     for (const pending of this.#pending.values()) { pending.cleanup(); pending.rejectResult(failure('Reranker closing.', 'RERANK_CLOSED')); }
     this.#pending.clear();
     this.#closing = this.#drain().finally(async () => { if (!this.#worker) await this.#resources.close(); });
+    if (this.#retirementCompletion) {
+      const completion = this.#retirementCompletion;
+      this.#retirementCompletion = undefined;
+      this.#closing.then(completion.resolve, completion.reject);
+    }
     return this.#closing;
   }
   async #drain() {

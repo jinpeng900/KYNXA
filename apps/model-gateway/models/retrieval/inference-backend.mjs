@@ -61,7 +61,7 @@ export function auditGpuPartition(events, device = 'dml') {
   return result;
 }
 
-export function qualifiedGpuOutputCompatibility(reference, actual, dimensions) {
+function normalizedOutputDrift(reference, actual, dimensions) {
   if (!Array.isArray(reference) || !Array.isArray(actual) || reference.length !== actual.length || !dimensions ||
       reference.length < dimensions * 2 || reference.length % dimensions || [...reference, ...actual].some(value => !Number.isFinite(value))) return undefined;
   let minCosine = 1, maxDifference = 0;
@@ -75,7 +75,45 @@ export function qualifiedGpuOutputCompatibility(reference, actual, dimensions) {
     if (Math.abs(referenceNorm - 1) > 1e-4 || Math.abs(actualNorm - 1) > 1e-4) return undefined;
     minCosine = Math.min(minCosine, dot / Math.sqrt(referenceNorm * actualNorm));
   }
-  return minCosine >= 0.995 && maxDifference <= 0.03 ? { minCosine, maxDifference, embeddingSpaceQualified: true } : undefined;
+  return { minCosine, maxDifference };
+}
+
+export function qualifiedGpuOutputCompatibility(reference, actual, dimensions) {
+  const drift = normalizedOutputDrift(reference, actual, dimensions);
+  return drift && drift.minCosine >= 0.995 && drift.maxDifference <= 0.03
+    ? { ...drift, embeddingSpaceQualified: true } : undefined;
+}
+
+/** Reuse the existing normalized-space qualification; report q8 batch drift instead of claiming equality.
+ * 复用已有归一化空间资格规则；如实报告 q8 批次漂移，不能把资格通过宣称为严格数值相等。 */
+export async function auditEmbeddingBatchCompatibility({ texts, tokenLengths, dimensions, budget, reference,
+  infer, checkCancelled = () => {}, yieldToMessages = () => Promise.resolve() }) {
+  const canonical = reference ?? [];
+  if (!reference) {
+    const values = await executeInferenceBatches(texts, { ...budget, batchSize: 1, tokenLengths, infer,
+      checkCancelled, yieldToMessages });
+    canonical.push(...values);
+  }
+  const probeBatchSize = Math.max(texts.length, Math.min(128, budget.batchSize));
+  const probeIndexes = Array.from({ length: probeBatchSize }, (_, index) => index % texts.length);
+  const shortestIndex = tokenLengths.indexOf(Math.min(...tokenLengths));
+  // Include a full homogeneous bucket so the advertised tier is actually exercised when its grant permits.
+  // 增加完整同长度桶，在额度允许时实际执行所宣称的批次档位。
+  probeIndexes.push(...Array(probeBatchSize).fill(shortestIndex));
+  const probeTexts = probeIndexes.map(index => texts[index]);
+  const probeLengths = probeIndexes.map(index => tokenLengths[index]);
+  let measuredMaximumBatchSize = 1;
+  const actual = await executeInferenceBatches(probeTexts, { ...budget, tokenLengths: probeLengths, infer,
+    checkCancelled, yieldToMessages,
+    onMeasurement: sample => { measuredMaximumBatchSize = Math.max(measuredMaximumBatchSize, sample.batchSize); } });
+  const expected = probeIndexes.map(index => canonical[index]);
+  const qualification = qualifiedGpuOutputCompatibility(expected.flat(), actual.flat(), dimensions);
+  return { reference: canonical, status: { version: 'normalized-batch-qualification-v1',
+    qualified: Boolean(qualification), requestedBatchSize: budget.batchSize, measuredMaximumBatchSize,
+    strictlyEquivalent: compatibleInferenceOutputs(expected.flat(), actual.flat()),
+    ...(normalizedOutputDrift(expected.flat(), actual.flat(), dimensions) ?? {}),
+    ...(qualification ?? {}), compatibilityRule: 'existing-normalized-space-qualification',
+    source: 'owned-worker-model-probes', retrievalQualityValidated: false } };
 }
 
 /** Audit a separate GPU vector space; no CPU result can be returned under its metadata.
@@ -172,11 +210,11 @@ export async function loadVerifiedInferenceBackend({ device = 'cpu', deviceId = 
 // Bucketing reduces padding without changing the caller's output order; retries stay within the grant.
 // 按 token 长度分桶减少 padding，输出仍按原输入顺序排列；减批重试始终受已批准额度约束。
 export async function executeInferenceBatches(items, { batchSize = 1, batchTokenBudget = 512, tokenLengths,
-  activationMemoryBytes, hiddenSize, attentionHeads,
+  activationMemoryBytes, hiddenSize, attentionHeads, cpuThreads,
   infer, checkCancelled = () => {}, yieldToMessages = () => Promise.resolve(), onPressure = () => {}, onMeasurement = () => {} }) {
   if (!Array.isArray(items) || !Array.isArray(tokenLengths) || tokenLengths.length !== items.length ||
       tokenLengths.some(length => !Number.isSafeInteger(length) || length < 1) ||
-      !Number.isSafeInteger(batchTokenBudget) || batchTokenBudget < 1)
+      !Number.isSafeInteger(batchTokenBudget) || batchTokenBudget < 1 || !Number.isSafeInteger(batchSize) || batchSize < 1)
     throw Object.assign(new Error('Invalid token lengths or approved batch token budget.'), { code: 'INFERENCE_INVALID_BATCH' });
   const order = items.map((_, index) => index).sort((left, right) => (tokenLengths[left] - tokenLengths[right]) || left - right);
   const results = new Array(items.length);
@@ -212,12 +250,18 @@ export async function executeInferenceBatches(items, { batchSize = 1, batchToken
       const inputTokens = indexes.reduce((sum, index) => sum + tokenLengths[index], 0);
       onMeasurement({ latencyMs, throughputPerSecond: inputTokens * 1000 / latencyMs,
         phase: 'hot-inference', unit: 'tokens', sequenceTokens, inputTokens, paddedTokens: sequenceTokens * count, batchSize: count,
+        ...(Number.isSafeInteger(cpuThreads) ? { cpuThreads } : {}),
         bucketMinimumTokens: tokenLengths[indexes[0]], paddingTokens: sequenceTokens * count - inputTokens,
         paddingRatio: (sequenceTokens * count - inputTokens) / (sequenceTokens * count), retries,
         queueDepth: Math.max(0, order.length - offset), progress: offset / Math.max(1, order.length) });
     } catch (error) {
       checkCancelled();
-      if (!isInferenceMemoryPressure(error) || count <= 1 || retries >= 5) throw error;
+      if (!isInferenceMemoryPressure(error)) throw error;
+      if (count <= 1 || retries >= 5) {
+        onPressure({ batchSize: 1, retries, code: 'INFERENCE_ALLOCATION_FAILED', terminal: true });
+        if (error && typeof error === 'object' && Object.isExtensible(error)) error.inferencePressureReported = true;
+        throw error;
+      }
       activeBatchSize = Math.max(1, Math.floor(count / 2)); retries++;
       onPressure({ batchSize: activeBatchSize, retries, code: 'INFERENCE_BATCH_REDUCED' });
     }
