@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { resolveModelCapabilities, resolveAutomaticContext } from '../models/model-capabilities.mjs';
+import { contextRejection, contextRecoveryLimits, readContextRejection } from '../models/context-recovery.mjs';
 
 test('official model ceilings distinguish context, independent input and output budgets', () => {
   const deepseek = resolveModelCapabilities({ baseUrl: 'https://api.deepseek.com' }, 'deepseek-flash');
@@ -62,10 +63,83 @@ test('automatic local metadata is bounded, honors runtime over configuration and
   for (const invalid of [3_000_000, '1000000', NaN, Infinity, -1]) {
     const result = resolveAutomaticContext(connection, 'local', { backend: 'ollama',
       runtimeContextTokens: invalid, modelMaximumContextTokens: 1_000_000 });
-    assert.equal(result.effectiveTokens, 8192);
+    assert.equal(result.effectiveTokens, 32_768);
     assert.equal(result.reason, 'invalid-local-capability-metadata');
+    assert.equal(result.verified, false);
   }
   assert.equal(resolveAutomaticContext(connection, 'local', { backend: 'ollama',
     runtimeContextTokens: 1024, modelMaximumContextTokens: 65536 }).effectiveTokens, 1024,
     'a service window below the supported minimum must be rejected downstream, never rounded up');
+});
+
+test('unknown services honor valid saved windows as unverified declarations without inheriting official limits', () => {
+  for (const baseUrl of ['https://proxy.example/v1', 'http://localhost:1234/v1']) {
+    const connection = Object.freeze({ baseUrl, contextWindowTokens: 131_072 });
+    const result = resolveAutomaticContext(connection, 'gpt-6-astra');
+    assert.equal(result.effectiveTokens, 131_072);
+    assert.equal(result.source, 'configured-unverified');
+    assert.equal(result.verified, false);
+    assert.equal(result.reason, 'unverified-configured-context');
+    assert.equal(result.legacyFieldIgnored, false);
+    assert.equal(result.capabilitySource, undefined);
+  }
+  const local = resolveAutomaticContext({ baseUrl: 'http://localhost:11434/v1', contextWindowTokens: 65_536 },
+    'local', { backend: 'ollama' });
+  assert.equal(local.effectiveTokens, 65_536);
+  assert.equal(local.verified, false);
+});
+
+test('missing or invalid declarations use a 32K unverified fallback and verified smaller limits still win', () => {
+  for (const contextWindowTokens of [undefined, null, 0, 1024, 2047, 32768.5, '32768', NaN, Infinity, 2_000_001]) {
+    const result = resolveAutomaticContext({ baseUrl: 'https://proxy.example/v1', contextWindowTokens }, 'unknown');
+    assert.equal(result.effectiveTokens, 32_768);
+    assert.equal(result.source, 'conservative-fallback');
+    assert.equal(result.verified, false);
+  }
+  assert.equal(resolveAutomaticContext({ baseUrl: 'invalid', contextWindowTokens: 131_072 }, 'unknown').effectiveTokens, 32_768);
+  const local = resolveAutomaticContext({ baseUrl: 'http://localhost:11434/v1', contextWindowTokens: 131_072 },
+    'local', { backend: 'ollama', runtimeContextTokens: 4096 });
+  assert.equal(local.effectiveTokens, 4096);
+  assert.equal(local.verified, true);
+  const official = resolveAutomaticContext({ baseUrl: 'https://api.openai.com/v1', contextWindowTokens: 8192 }, 'gpt-4o');
+  assert.equal(official.effectiveTokens, 128_000);
+  assert.equal(official.verified, true);
+  assert.equal(official.legacyFieldIgnored, true);
+});
+
+test('context recovery recognizes explicit service limits without confusing unrelated numbers or output caps', () => {
+  const rejection = contextRejection({ error: { code: 'context_length_exceeded', message:
+    'Maximum context length is 8,192 tokens. The request uses 20000 tokens.' } });
+  assert.deepEqual(rejection, { kind: 'context', contextWindowTokens: 8192, verified: true });
+  assert.equal(contextRejection({ error: { code: 'invalid_api_key', message: 'Request 8192 failed' } }), null);
+  assert.equal(contextRejection({ error: { code: 'invalid_request_error', message: 'Model error 8192' } }), null);
+  const output = contextRejection({ error: { message: 'max_tokens must be less than or equal to 4096' } });
+  assert.deepEqual(output, { kind: 'output', providerMaxOutputTokens: 4096, verified: true });
+  assert.deepEqual(contextRecoveryLimits(output, { contextWindowTokens: 32768, maxOutputTokens: 8192 }),
+    { kind: 'output', contextWindowTokens: 32768, providerMaxOutputTokens: 4096, verified: true });
+  const input = contextRejection({ error: { message: 'prompt is too long: 12000 tokens > 8192 maximum' } });
+  assert.deepEqual(input, { kind: 'input', providerMaxInputTokens: 8192, verified: true });
+  assert.equal(contextRecoveryLimits(input, { contextWindowTokens: 32768 }).contextWindowTokens, 32768,
+    'an input-only ceiling is not evidence that the total window or output ceiling is 8K');
+  assert.equal(contextRecoveryLimits(rejection, { contextWindowTokens: 8192, maxOutputTokens: 1024 }), null);
+  assert.equal(contextRecoveryLimits(null, { contextWindowTokens: 32768 }), null);
+});
+
+test('rejections without a reported limit use a decreasing, explicitly unverified recovery estimate', () => {
+  const rejection = contextRejection({ error: { code: 'context_length_exceeded', message: 'Context is too long.' } });
+  const first = contextRecoveryLimits(rejection, { contextWindowTokens: 32768 });
+  const second = contextRecoveryLimits(rejection, first);
+  assert.equal(first.contextWindowTokens, 16384);
+  assert.equal(second.contextWindowTokens, 8192);
+  assert.equal(first.verified, false);
+  assert.equal(contextRecoveryLimits(rejection, { contextWindowTokens: 2048 }), null);
+});
+
+test('HTTP rejection reading is bounded and never classifies authentication, success or oversized bodies as recoverable', async () => {
+  const diagnostic = JSON.stringify({ error: { code: 'context_length_exceeded', maximum_context_length: 8192 } });
+  assert.equal((await readContextRejection(new Response(diagnostic, { status: 400 }))).contextWindowTokens, 8192);
+  for (const status of [200, 401, 403, 500])
+    assert.equal(await readContextRejection(new Response(diagnostic, { status })), null);
+  assert.equal(await readContextRejection(new Response(JSON.stringify({ error: { code: 'context_length_exceeded',
+    message: 'x'.repeat(65_536) } }), { status: 400 })), null);
 });

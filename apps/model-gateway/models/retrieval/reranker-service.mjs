@@ -242,14 +242,26 @@ export class RerankerService {
   // Lock before the first await; callers cancelled before native settlement still prevent retirement.
   // 首次 await 前锁定退役；调用方取消但原生工作尚未确认完成时，仍禁止释放驻留。
   releaseIdleGpu({ signal } = {}) {
+    return this.#releaseIdle({ signal, gpuOnly: true });
+  }
+
+  releaseIdleResources({ signal } = {}) {
+    return this.#releaseIdle({ signal });
+  }
+
+  #releaseIdle({ signal, gpuOnly = false } = {}) {
     if (signal?.aborted) return Promise.reject(aborted());
     if (this.#yielding) return this.#yielding;
     if (this.#closed) return Promise.resolve({ released: false, reason: 'closed' });
     if (this.#pending.size || this.#preparingRequests || this.#nativeTickets.size || this.#admission.status().activeRequests)
       return Promise.resolve({ released: false, reason: 'native-work-outstanding' });
-    const gpuMemoryBytes = this.#resources.status().gpuMemoryBytes;
-    if (!gpuMemoryBytes) return Promise.resolve({ released: false, reason: 'no-gpu-residency' });
-    if (!this.#worker || this.#phase !== 'idle') return Promise.resolve({ released: false, reason: 'worker-not-idle' });
+    const { gpuMemoryBytes, residentMemoryBytes } = this.#resources.status();
+    if (gpuOnly && !gpuMemoryBytes) return Promise.resolve({ released: false, reason: 'no-gpu-residency' });
+    if (this.#worker && this.#phase !== 'idle') return Promise.resolve({ released: false, reason: 'worker-not-idle' });
+    if (!this.#worker && (!this.#exit || this.#phase !== 'stopped' || !residentMemoryBytes && !gpuMemoryBytes))
+      return Promise.resolve({ released: false, reason: 'worker-not-idle' });
+    // CPU and GPU reservations are returned only after the owned process has confirmed exit.
+    // CPU 与 GPU 预约都只在自有进程确认退出后归还；执行中和取消未结算的任务继续受保护。
     const retirement = this.#closeOwned();
     const yielding = retirement.then(() => {
       if (!this.#permanentClose) {
@@ -261,7 +273,7 @@ export class RerankerService {
         this.#state = this.#profile.files.every(asset => existsSync(join(this.modelRoot, asset.path))) ? 'ready' : 'unavailable';
         if (this.#state === 'unavailable') this.#errorCode = 'RERANK_ASSET_MISSING';
       }
-      return { released: true, gpuMemoryBytes };
+      return { released: true, gpuMemoryBytes, residentMemoryBytes };
     }).finally(() => { if (this.#yielding === yielding) this.#yielding = undefined; });
     this.#yielding = yielding;
     return yielding;

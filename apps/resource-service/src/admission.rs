@@ -123,6 +123,7 @@ mod tests {
             task_id: kind.into(),
             workspace_id: "fixture".into(),
             kind: kind.into(),
+            workload: "compute".into(),
             cpu_threads: 2,
             memory_bytes: 0,
             gpu_memory_bytes: 0,

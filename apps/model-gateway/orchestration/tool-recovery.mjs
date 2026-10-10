@@ -39,10 +39,13 @@ export class ToolRecoveryLedger {
     else if (!result.isError && (!result.status || result.status === 'completed')) this.completed.set(key, { call, result });
   }
 
-  protectCompletedEffects() {
+  protectCompletedEffects({ includeCurrent = false } = {}) {
     // Freeze only pre-failure effects. Later observations cannot expire protection or deduplicate new user work.
     // 只冻结故障前的成功副作用；后续读取不能解除保护，也不把新工作扩大成自动去重范围。
     this.protectedEffects ??= new Map(this.completed);
+    // A later context rejection must also protect effects completed since the first decoder repair.
+    // 后续上下文拒绝还须保护首次解码修复之后完成的副作用。
+    if (includeCurrent) for (const [key, receipt] of this.completed) this.protectedEffects.set(key, receipt);
   }
 
   previous(call) { return isRecoveryObservation(call) ? null : this.protectedEffects?.get(effectKey(call)); }

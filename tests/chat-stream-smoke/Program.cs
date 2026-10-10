@@ -125,6 +125,28 @@ await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(f
     Frame(finalSegmentEvent with { AssistantSegments = [firstCompleted, finalSegment with { Status = "interrupted" }] })),
     "An interrupted final answer was accepted as completed");
 string publicTimelineWire = "";
+// The gateway can compact before generation, then stream text in the same still-open segment.
+// 网关可以在生成前整理上下文，随后在同一个尚未完成的消息段中输出正文。
+var contextActivity = new ToolActivity("compact-before-model", "context.compact", JsonSerializer.SerializeToElement(new { }),
+    "running", "整理上下文", Round: 1, Order: 1);
+var compactFinalSegment = firstSegment with { Phase = "final_answer", Status = "completed", Content = "你好！" };
+var compactTerminal = Event("completed", content: compactFinalSegment.Content) with
+{ AssistantSegments = [compactFinalSegment], ToolStreamProtocol = 3 };
+string compactStart = prefix + Frame(SegmentEvent(firstSegment));
+var compactEvents = await Read(compactStart + Frame(Event("tool_call") with { Tool = contextActivity }) +
+    Frame(Event("tool_result") with { Tool = contextActivity with { Status = "completed", Result = "继续原任务。" } }) +
+    Frame(Event("text_delta", "你好！") with { SegmentId = firstSegment.Id }) +
+    Frame(SegmentEvent(compactFinalSegment)) + Frame(compactTerminal));
+Check(compactEvents[^1].Content == "你好！" && compactEvents.Count(value => value.Type == "tool_result") == 1,
+    "Preparation compaction closed the client stream before the model could answer");
+await ExpectAsync<InvalidDataException>(() => Read(compactStart + Frame(Event("tool_call") with
+{ Tool = contextActivity with { Arguments = JsonSerializer.SerializeToElement(new { path = "unexpected" }) } })),
+    "A named context activity bypassed ordinary tool ordering with executable arguments");
+await ExpectAsync<InvalidDataException>(() => Read(compactStart + Frame(Event("approval_required") with
+{ Tool = contextActivity with { Status = "approval-required", ApprovalId = Guid.NewGuid() } })),
+    "Display-only context maintenance requested execution approval");
+await ExpectAsync<InvalidDataException>(() => Read(compactStart + Frame(Event("tool_call") with { Tool = contextActivity }) +
+    Frame(compactTerminal)), "An unfinished context activity was accepted as a completed request");
 using (var timelineArguments = JsonDocument.Parse("{\"url\":\"https://example.invalid\"}"))
 {
     var timelineTool = new ToolActivity("timeline-call", "mcp.fixture.navigate", timelineArguments.RootElement.Clone(), "running", "Navigate", Round: 1, Order: 1);
