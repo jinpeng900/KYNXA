@@ -64,6 +64,7 @@ export function buildToolSystemPrompt(context, { skills = [], browserPrompt = []
     compact ? 'External paths need reason; formal data protected except managed workspace; no connection files. Read/stat and exact SHA-256 before writes; expectedHash:null creation. No hardlink writes/recursive deletion.' :
       'Prefer work folder; external paths need reason. Formal data protected except managed workspace; no connection files/backups. Read/stat before mutation; exact SHA-256, expectedHash:null creation. Hardlinks read-only; no recursive deletion.',
     'Work until verified/blocked. Edit current hashes; validate changed code with relevant checks. Exit/logs and code versions, not tool success, support completion. Observe interrupted/unknown effects before retry.',
+    'User supplies sources/scope. Choose needed evidence; parsing/indexing/vectorization of registered sources is automatic, not per-document LLM approval or a daily user toggle. Work before semantic readiness; respect explicit pause/off and scope.',
     ...(context.projectId ? ['For ongoing work in a user-selected directory, use work.folder.bind to persist the association and schedule background preparation. A temporary read does not bind; replace an existing folder only when requested. This turn keeps its original permissions; continue with absolute paths and reason. Do not wait for vectors.'] : []),
     context.workspaceDiagnostic
       ? `Work folder unavailable (${context.workspaceDiagnostic}); independent authorized paths remain usable.`
