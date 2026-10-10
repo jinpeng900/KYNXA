@@ -1,6 +1,7 @@
 import { estimateTokens } from './context.mjs';
 import { estimateToolMessageTokens } from './tool-protocols.mjs';
 import { StreamFailure } from './streaming.mjs';
+import { randomUUID } from 'node:crypto';
 import { validateId } from '../platform/conversation-id.mjs';
 import { toolOutputExcerpt } from '../platform/tool-excerpts.mjs';
 import { TOOL_RESULT_METADATA_BYTES } from '../data/tool-result-store.mjs';
@@ -327,5 +328,40 @@ export class ToolContextProjection {
       throw error;
     }
     return { messages: projected, ...(changed || this.archiveReadBytes > 0 ? { metrics: metrics(afterTokens) } : {}) };
+  }
+
+  /** Start a fresh inference window only at a settled tool boundary; archive public receipts, never opaque reasoning.
+   * 仅在工具回执完整配对后建立新的推理窗口；归档公开回执，不把不透明思考状态变成公开内容。 */
+  async checkpoint(messages, { signal } = {}) {
+    signal?.throwIfAborted();
+    if (!this.resultStore?.save || !completeToolPairs(messages)) return null;
+    const publicMessages = messages.flatMap(message => {
+      if (message.type === 'reasoning') return [];
+      if (message.type === 'function_call') return [{ type: message.type, call_id: message.call_id,
+        name: message.name, arguments: message.arguments }];
+      if (message.type === 'function_call_output') return [{ type: message.type,
+        call_id: message.call_id, output: message.output }];
+      const content = Array.isArray(message.content) ? message.content.filter(block =>
+        ['text', 'tool_use', 'tool_result'].includes(block.type)) : message.content;
+      return [{ role: message.role, content, ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}) }];
+    });
+    const resultRef = await this.resultStore.save(this.resultContext,
+      { id: `context-checkpoint-${randomUUID()}`, name: 'context.public-checkpoint' },
+      { content: JSON.stringify(publicMessages) });
+    signal?.throwIfAborted();
+    const receipts = this._resultLocations(messages).map(({ source }) => ({ id: source.callId,
+      tool: source.name, status: source.status, resultRef: source.resultRef }));
+    const retained = messages.filter(message => !this.history.has(message) && message.role === 'user' &&
+      !nativeToolMessage(message));
+    const checkpoint = { role: 'assistant', content: JSON.stringify({ contextCheckpoint: true,
+      settledToolBoundary: true, completedRecordCount: receipts.length, recentReceipts: receipts.slice(-8), resultRef,
+      navigation: { tool: 'tool.result.read', arguments: { id: resultRef.id, offset: 0, limit: 4096 } },
+      recentPublicText: toolOutputExcerpt(publicMessages.filter(message => message.role === 'assistant' &&
+        typeof message.content === 'string').at(-1)?.content ?? '', 512),
+      notice: 'A fresh inference window follows a settled tool boundary. Continue the original task. Before further effects or conclusions relying on omitted history, read the saved public records to recover the relevant original goal, user constraints and evidence; do not guess them. Do not replay completed or unconfirmed operations. A receipt is not proof of task correctness; verify current source versions before relying on it.' }) };
+    return { messages: [...retained, checkpoint], metrics: { currentStepCheckpoint: true,
+      archivedMessageCount: publicMessages.length, receiptCount: receipts.length, resultRef,
+      opaqueReasoningExposed: false, toolOperationsReplayed: 0 } };
   }
 }

@@ -199,6 +199,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 toolRunCommand = UiText.Get("运行命令"), toolUseSkill = UiText.Get("使用技能"), toolReadSkill = UiText.Get("读取技能"),
                 toolFindSkill = UiText.Get("查找技能"), toolInspectSkill = UiText.Get("检查技能"), toolFindTools = UiText.Get("查找工具"),
                 toolReadResult = UiText.Get("读取工具记录"), toolFindHistory = UiText.Get("查找聊天记录"), toolReadHistory = UiText.Get("读取聊天记录"),
+                toolCompactContext = UiText.Get("整理上下文"),
                 toolFindSources = UiText.Get("查找资料"), toolReadSource = UiText.Get("读取资料"),
                 toolExecute = UiText.Get("执行操作"), toolOutcomeUncertain = UiText.Get("操作已中断，执行结果尚未确定。"),
                 toolTimedOut = UiText.Get("操作超时。"), toolSandboxUnavailable = UiText.Get("沙箱暂不可用。"),

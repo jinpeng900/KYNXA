@@ -213,8 +213,11 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     });
     assert.equal(await f.runtime.reply(f.input), 'Continued from the complete archived public result.');
     const saved = (await f.conversations.readMessages(f.input.conversationId)).at(-1);
-    assert.equal(saved.ToolActivities.length, 1); assert.equal(saved.ToolActivities[0].resultRef.id, reference.id);
-    assert.equal(saved.ToolActivities[0].status, 'completed'); assert.ok(!JSON.stringify(saved).includes('private-fixture'));
+    const readReceipts = saved.ToolActivities.filter(activity => activity.name === 'filesystem.read');
+    assert.equal(readReceipts.length, 1); assert.equal(readReceipts[0].resultRef.id, reference.id);
+    assert.equal(readReceipts[0].status, 'completed'); assert.ok(!JSON.stringify(saved).includes('private-fixture'));
+    assert.ok(saved.ToolActivities.some(activity => activity.name === 'context.compact' && activity.status === 'completed'));
+    assert.equal(saved.ToolRun.diagnostics.executedToolCalls, 1, 'display-only maintenance is not an executed tool');
     assert.equal(await f.runtime.reply(f.input), saved.Content); assert.equal(f.seen.length, 2);
   });
 }
@@ -571,6 +574,34 @@ for (const action of ['run', 'start', 'stop']) test(`unknown terminal.host.${act
   assert.equal(result.completionStatus, 'interrupted');
   assert.equal(rounds, 2); assert.equal(executions, 1);
   assert.equal(saved.at(-1).status, 'unknown'); assert.equal(saved.at(-1).name, call.name);
+});
+
+test('context recovery protects both earlier and subsequently completed writes without replaying effects', async () => {
+  let round = 0, executions = 0;
+  const saved = [];
+  const catalog = wireCatalog([{ name: 'filesystem.write', description: 'Fixture write',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }]);
+  const result = await runToolLoop({ protocol: 'openai-completions', context: { conversationId: randomUUID() },
+    messages: [{ role: 'user', content: 'Write two fixture files.' }], system: '', inputBudgetTokens: 16000,
+    declarations: [], catalogForRound: () => catalog, emit: () => {}, saveActivity: async activity => saved.push(activity),
+    service: { execute: async () => { executions++; return { content: 'Saved fixture write.', status: 'completed' }; } },
+    contextForRecovery: async () => ({ system: '', inputBudgetTokens: round === 2 ? 8192 : 4096, catalog }),
+    requestTurn: async (messages, _declarations, _signal, _receive, _catalog, _system, recoverContext) => {
+      round++;
+      if (round === 4) return { content: 'Both writes retained.', reasoning: '', calls: [], continuation: [] };
+      if (round >= 2) {
+        const adapted = await recoverContext({ contextWindowTokens: round === 2 ? 8192 : 4096 });
+        assert.ok(adapted.messages.some(item => item.role === 'tool'), 'completed call/results remain in the smaller request');
+      }
+      const call = { id: `context-write-${round}`, name: 'filesystem.write', arguments: { path: round === 1 ? 'a.txt' : 'b.txt' } };
+      return { content: '', reasoning: '', calls: [call], continuation: [{ role: 'assistant', content: '',
+        tool_calls: [{ id: call.id, type: 'function', function: { name: catalog[0].wireName, arguments: JSON.stringify(call.arguments) } }] }] };
+    }
+  });
+  assert.equal(result.content, 'Both writes retained.');
+  assert.equal(executions, 2);
+  assert.equal(saved.at(-1).reused, true);
+  assert.equal(saved.at(-1).recoveryOfToolCallId, 'context-write-2');
 });
 
 test('a round decodes its exact declared catalog when availability changes while the response is generated', async t => {

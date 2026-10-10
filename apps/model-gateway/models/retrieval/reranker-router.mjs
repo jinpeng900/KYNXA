@@ -109,4 +109,14 @@ export class RerankerRouter {
       .concat([...this.retiring.values()].map(retirement => Promise.all([retirement.instance.close(), retirement.completion]))));
     await this.configuration.catch(() => {});
   }
+  async releaseIdleResources({ signal } = {}) {
+    signal?.throwIfAborted();
+    const instances = [...this.instances];
+    const settled = await Promise.allSettled(instances.map(async ([, instance]) => instance.releaseIdleResources({ signal })));
+    signal?.throwIfAborted();
+    const results = settled.map((result, index) => result.status === 'fulfilled'
+      ? { profileId: instances[index][0], ...result.value }
+      : { profileId: instances[index][0], released: false, code: result.reason?.code ?? 'RERANK_CLOSE_FAILED' });
+    return { released: results.some(result => result.released), results };
+  }
 }

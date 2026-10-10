@@ -14,23 +14,27 @@ async function admissionObservation(service, signal) {
 async function acquireTaskLease(service, request, signal, onCapacityUnavailable) {
   const releasePriority = request.kind === 'foreground' ? service.beginForegroundAdmission?.({ signal }) : undefined;
   try {
-    let lease = await service.acquire(request, { signal });
+    // Reclaim idle inference on a cheap transport probe before spending the bounded queue wait.
+    // 轻量通信先立即探测容量，必要时回收闲置推理，再进入有界等待，避免先空等十秒才回收。
+    const probeFirst = request.workload === 'model-transport' && Boolean(onCapacityUnavailable);
+    let lease = await service.acquire(probeFirst ? { ...request, waitMs: 0 } : request, { signal });
     if (lease?.leaseId || !RECOVERABLE_CAPACITY_REASONS.has(lease?.reason) || !onCapacityUnavailable) return lease;
     signal?.throwIfAborted();
     const before = await admissionObservation(service, signal);
-    // Only a rejected admission may retry. Hold foreground priority across owned cleanup and renewed admission.
-    // 仅被拒绝的准入可以重试；自有进程清理到重新准入之间保留前台优先，尚未派发任何实际操作。
+    // Only a rejected admission may retry; hold foreground priority through cleanup and the remaining bounded wait.
+    // 仅被拒绝的准入可以重试；清理及剩余有界等待期间保留前台优先，尚未派发任何实际操作。
     const recovery = await onCapacityUnavailable({ signal, reason: 'memory-pressure', minimumIdleMs: 0 });
     signal?.throwIfAborted();
     // Returned bytes describe released reservations; OS samples independently describe actual availability.
     // 回收字节描述已释放预约，操作系统采样独立描述实际可用量，不能将两者相加宣称真实释放量。
     const audit = { attempted: true, initialReason: lease.reason, releasedIdleInference: recovery?.released === true,
-      requested: { cpuThreads: request.cpuThreads, memoryBytes: request.memoryBytes, gpuMemoryBytes: request.gpuMemoryBytes ?? 0 },
+      requested: { workload: request.workload ?? 'compute', cpuThreads: request.cpuThreads,
+        memoryBytes: request.memoryBytes, gpuMemoryBytes: request.gpuMemoryBytes ?? 0, waitMs: request.waitMs },
       before, after: await admissionObservation(service, signal), releases: (recovery?.results ?? []).slice(0, 16) };
-    if (recovery?.released !== true) return { ...lease, admissionRecovery: { ...audit, granted: false } };
+    if (recovery?.released !== true && !probeFirst) return { ...lease, admissionRecovery: { ...audit, granted: false } };
     const initialReason = lease.reason;
     lease = await service.acquire(request, { signal });
-    return { ...lease, admissionRecovery: { ...audit, initialReason, releasedIdleInference: true,
+    return { ...lease, admissionRecovery: { ...audit, initialReason,
       granted: Boolean(lease?.leaseId) } };
   } finally { releasePriority?.(); }
 }
@@ -45,7 +49,8 @@ export async function runResourceTask(service, options, operation, { signal, onL
     memoryBytes: 16 * 1024 * 1024, waitMs: 10000, ...options, ttlMs }, signal, onCapacityUnavailable);
   if (!lease?.leaseId) throw Object.assign(new Error('Resource capacity unavailable. / 当前资源容量不足，请稍后重试。'), {
     code: lease?.reason ?? 'RESOURCE_CAPACITY_UNAVAILABLE', statusCode: 503,
-    details: { reason: lease?.reason ?? 'RESOURCE_CAPACITY_UNAVAILABLE', mode: lease?.mode ?? 'unknown',
+    details: { reason: lease?.reason ?? 'RESOURCE_CAPACITY_UNAVAILABLE', mode: lease?.mode ?? 'unknown', actionStarted: false,
+      workload: options.workload ?? 'compute',
       ...(lease?.admissionRecovery ? { admissionRecovery: lease.admissionRecovery } : {}) } });
   let renewing = false;
   const timer = setInterval(() => {

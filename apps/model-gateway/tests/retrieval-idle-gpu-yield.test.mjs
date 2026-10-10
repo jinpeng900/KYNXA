@@ -329,6 +329,22 @@ test('reranker CPU residency is kept and a pre-cancelled yield never retires the
   assert.equal(worker.messages.filter(message => message.type === 'close').length, 0);
 });
 
+test('memory pressure retires an idle CPU reranker only after native exit and preserves restartability', async t => {
+  const fixture = await modelFixture(t, { kind: 'reranker', gpu: false, autoRetire: false });
+  const worker = await fixture.warm();
+  const yielding = fixture.service.releaseIdleResources();
+  await until(() => worker.messages.some(message => message.type === 'close'));
+  assert.ok(fixture.resources.leases.size > 0, 'resident debt remains held before native exit');
+  const next = fixture.call();
+  worker.retire();
+  const released = await yielding;
+  assert.equal(released.released, true); assert.equal(released.gpuMemoryBytes, 0);
+  assert.ok(released.residentMemoryBytes > 0);
+  await until(() => fixture.workers.length === 2 && fixture.workers[1].request());
+  fixture.workers[1].complete(fixture.workers[1].request().id);
+  assert.equal((await next).profileId, fixture.profileId);
+});
+
 test('reranker preparing admission and unacknowledged result settlement remain protected', windowsOnly, async t => {
   const fixture = await modelFixture(t, { kind: 'reranker' }), worker = await fixture.warm();
   fixture.resources.gate = deferred();

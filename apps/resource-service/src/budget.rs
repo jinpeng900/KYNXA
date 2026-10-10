@@ -15,6 +15,8 @@ pub struct AllocationRequest {
     pub workspace_id: String,
     #[serde(default = "background")]
     pub kind: String,
+    #[serde(default = "compute")]
+    pub workload: String,
     #[serde(default)]
     pub cpu_threads: usize,
     #[serde(default)]
@@ -29,6 +31,9 @@ pub struct AllocationRequest {
 
 fn background() -> String {
     "background".into()
+}
+fn compute() -> String {
+    "compute".into()
 }
 fn default_ttl() -> u64 {
     30_000
@@ -101,6 +106,7 @@ impl ResourceBudget {
             .filter(|lease| lease.expires_at > now_ms)
             .count();
         json!({ "mode": "rust", "cpu": hardware.cpu, "memory": hardware.memory, "gpu": hardware.gpu,
+            "capabilities": { "modelTransportAdmission": true },
             "budget": { "cpuThreads": cpu_capacity(hardware), "memoryBytes": memory_capacity(hardware),
                 "gpuMemoryBytes": gpu_capacity(hardware),
                 "reservedCpuThreads": cpu, "reservedMemoryBytes": memory, "reservedGpuMemoryBytes": gpu_memory },
@@ -108,6 +114,7 @@ impl ResourceBudget {
                 "unmaterializedMemoryBytes": memory.saturating_sub(materialized_bytes),
                 "capacityMemoryBytes":memory_capacity(hardware),"maximumResidentReservationBytes":hardware.memory.total_bytes/2,
                 "availableMemoryBytes": self.available_memory(hardware),
+                "availableTransportMemoryBytes": self.available_memory_for(hardware, "model-transport"),
                 "gpuMemoryState": if materialized_gpu_bytes > 0 { "observed-process-increments" } else { "unverified-reservation" },
                 "observedMaterializedGpuMemoryBytes":materialized_gpu_bytes,
                 "availableGpuMemoryBytes":self.available_gpu_memory(hardware),
@@ -209,9 +216,18 @@ impl ResourceBudget {
     }
 
     fn available_memory(&self, hardware: &HardwareSnapshot) -> u64 {
+        self.available_memory_for(hardware, "compute")
+    }
+
+    fn available_memory_for(&self, hardware: &HardwareSnapshot, workload: &str) -> u64 {
         let (_, reserved, _) = self.reserved();
         let materialized = self.materialized_memory().values().sum::<u64>();
-        memory_capacity(hardware).saturating_sub(reserved.saturating_sub(materialized))
+        let capacity = if workload == "model-transport" {
+            // Transport may use the foreground headroom, but keeps the system floor and all unresolved debt.
+            // 轻量模型通信可使用为前台保留的比例余量，仍保留系统底线并扣除全部未兑现预约。
+            hardware.memory.available_bytes.saturating_sub(512 * 1024 * 1024)
+        } else { memory_capacity(hardware) };
+        capacity.saturating_sub(reserved.saturating_sub(materialized))
             .min((hardware.memory.total_bytes / 2).saturating_sub(reserved))
     }
 
@@ -244,6 +260,10 @@ impl ResourceBudget {
             || request.task_id.len() > 128
             || request.workspace_id.len() > 128
             || !["foreground", "background"].contains(&request.kind.as_str())
+            || !["compute", "model-transport"].contains(&request.workload.as_str())
+            || (request.workload == "model-transport" && (request.kind != "foreground"
+                || request.cpu_threads > 1 || request.memory_bytes == 0
+                || request.memory_bytes > 32 * 1024 * 1024 || request.gpu_memory_bytes != 0))
             || request.cpu_threads > 4096
             || request.ttl_ms < 1000
             || request.ttl_ms > MAX_TTL_MS
@@ -262,7 +282,7 @@ impl ResourceBudget {
         }
         let (reserved_cpu, _, _) = self.reserved();
         let available_cpu = cpu_capacity(hardware).saturating_sub(reserved_cpu);
-        let available_memory = self.available_memory(hardware);
+        let available_memory = self.available_memory_for(hardware, &request.workload);
         let available_gpu = self.available_gpu_memory(hardware).unwrap_or(0);
         if request.memory_bytes > available_memory
             || request.gpu_memory_bytes > available_gpu
@@ -431,6 +451,7 @@ mod tests {
             task_id: "test".into(),
             workspace_id: "temporary".into(),
             kind: "background".into(),
+            workload: "compute".into(),
             cpu_threads: cpu,
             memory_bytes: memory,
             gpu_memory_bytes: 0,
@@ -450,6 +471,26 @@ mod tests {
         assert_eq!(other["status"], "granted");
         let pressured = budget.acquire(request(1, 8 << 20), &hardware(), 0);
         assert_eq!(pressured["suggestions"]["rerankCandidateLimit"], 20);
+    }
+    #[test]
+    fn transport_uses_foreground_headroom_without_discarding_unresolved_reservations() {
+        let mut budget = ResourceBudget::new();
+        let mut machine = hardware();
+        assert_eq!(budget.acquire(request(0, 256 << 20), &machine, 0)["status"], "granted");
+        machine.memory.available_bytes = 900 << 20;
+        let mut transport = request(1, 16 << 20);
+        transport.kind = "foreground".into();
+        transport.workload = "model-transport".into();
+        assert_eq!(budget.acquire(request(1, 16 << 20), &machine, 0)["reason"], "RESOURCE_PRESSURE");
+        assert_eq!(budget.acquire(transport.clone(), &machine, 0)["status"], "granted");
+        assert_eq!(budget.snapshot(&machine, 2000)["budget"]["reservedMemoryBytes"], 272 << 20);
+        machine.memory.available_bytes = 780 << 20;
+        assert_eq!(budget.acquire(transport.clone(), &machine, 2000)["reason"], "RESOURCE_PRESSURE");
+        transport.memory_bytes = 33 << 20;
+        assert_eq!(budget.acquire(transport.clone(), &machine, 2000)["reason"], "RESOURCE_INVALID_REQUEST");
+        transport.memory_bytes = 16 << 20;
+        transport.gpu_memory_bytes = 1;
+        assert_eq!(budget.acquire(transport, &machine, 2000)["reason"], "RESOURCE_INVALID_REQUEST");
     }
     #[test]
     fn allocation_is_atomic_and_expiry_does_not_free_unconfirmed_work() {

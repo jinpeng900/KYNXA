@@ -12,6 +12,7 @@ import { runResourceTask } from '../platform/resources/resource-task.mjs';
 import { ToolRecoveryLedger, isRecoveryObservation } from './tool-recovery.mjs';
 import { ToolCallDecodeFailure } from '../models/tool-call-validation.mjs';
 import { previewToolResult } from '../data/tool-result-store.mjs';
+import { OutputContinuation, runContextActivity } from './output-continuation.mjs';
 
 export function toolPolicyHash(context) {
   return createHash('sha256').update(JSON.stringify([context.permissionMode, context.workspaceRoot,
@@ -24,7 +25,8 @@ export function toolPolicyHash(context) {
  */
 export async function runToolLoop({ protocol, messages, system, declarations, inputBudgetTokens,
   context, service, requestTurn, emit, saveActivity, onRoundComplete = () => {}, declarationsForRound, catalogForRound, signal, interactive = false,
-  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal, systemForRound }) {
+  historySources, onContextCompacted = () => {}, limits, saveRunState, saveModelRound = async () => {}, validateFinal,
+  systemForRound, contextForRecovery, contextForPressure }) {
   const seenIds = new Set();
   const projection = new ToolContextProjection({ protocol, messages, historySources, conversationId: context.conversationId,
     resultStore: service.results, resultContext: context });
@@ -43,11 +45,14 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
     }
   };
   const observations = new ToolProgressGuard();
+  const output = new OutputContinuation({ context, resultStore: service.results });
   const readFailures = new ToolReadFailureGuard();
   const recovery = new ToolRecoveryLedger();
   let repairRequests = 0, recoveryFinal = false, unknownObservationRounds = 0;
+  let contextRepairRequests = 0, contextDiscoveryOnly = false;
   const recoveredResult = async (content, { code = 'TOOL_RECOVERY_EXHAUSTED' } = {}) => {
     signal?.throwIfAborted();
+    if (output.content && !content.startsWith(output.content)) content = output.content + '\n\n' + content;
     if (progress.validationReceipts.length) progress.observeFinalCodeVersion(await captureCodeVersion());
     let evidenceValidation;
     try { evidenceValidation = await validateFinal?.({ signal }); }
@@ -90,18 +95,87 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       // The schemas and decoder share one snapshot, even if a stage expires during generation.
       // 声明与解码共用同一快照，即使生成期间阶段预算到期，也不重新解释本轮名称。
       const availableCatalog = catalogForRound?.();
-      const roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects && availableCatalog
+      let roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects && availableCatalog
         ? availableCatalog.filter(tool => isRecoveryObservation(tool)) : availableCatalog;
-      const roundDeclarations = summarizeOnly ? [] : roundCatalog
+      if (contextDiscoveryOnly && roundCatalog) roundCatalog = roundCatalog.filter(tool =>
+        ['tool.search', 'tool.load', 'tool.result.read', 'conversation.history.read'].includes(tool.name));
+      let roundDeclarations = summarizeOnly ? [] : roundCatalog
         ? toolDeclarations(protocol, roundCatalog) : declarationsForRound?.() ?? declarations;
       // Validate potential redundant observations before projecting them; formal receipts remain intact.
       // 收缩潜在重复观察前校验归档，正式执行回执保持完整。
       await projection.prepareObservations(messages, { inputBudgetTokens, signal });
-      const compacted = projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
+      const compact = async () => {
+        const project = () => projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
+        try { return project(); }
+        catch (error) {
+          if (error.code !== 'TOOL_CONTEXT_BUDGET_EXCEEDED') throw error;
+          signal?.throwIfAborted();
+          // Borrow unused output reservation first, preserving native continuation and the actual model window.
+          // 优先回收输出预约，保留原生续传状态与模型实际窗口；不能靠虚增上下文绕过硬上限。
+          const requiredInputTokens = estimateToolMessageTokens(messages, system) + estimateTokens(JSON.stringify(roundDeclarations));
+          const adapted = await contextForPressure?.(requiredInputTokens);
+          if (adapted) {
+            inputBudgetTokens = adapted.inputBudgetTokens;
+            try { return project(); }
+            catch (pressureError) { if (pressureError.code !== error.code) throw pressureError; }
+          }
+          // Journal public state before replacing a complete native exchange; opaque provider state is never spliced.
+          // 完整原生交换替换前先保存公开状态；不单独裁剪供应商的不透明状态或重放操作。
+          let checkpoint;
+          try { checkpoint = await projection.checkpoint(messages, { signal }); }
+          catch (archiveError) {
+            signal?.throwIfAborted();
+            recovery.record(archiveError.code ?? 'CONTEXT_CHECKPOINT_ARCHIVE_UNAVAILABLE', 'retain-original-records', round + 1);
+          }
+          if (checkpoint) {
+            recovery.protectCompletedEffects({ includeCurrent: true });
+            messages = checkpoint.messages;
+            recovery.record(error.code, 'checkpoint-and-continue', round + 1);
+            await onContextCompacted(checkpoint.metrics);
+            const discoveryNames = new Set(['tool.search', 'tool.load', 'tool.result.read', 'conversation.history.read']);
+            if (roundCatalog) {
+              roundCatalog = roundCatalog.filter(tool => discoveryNames.has(tool.name));
+              roundDeclarations = toolDeclarations(protocol, roundCatalog);
+            }
+            try { return project(); }
+            catch (checkpointError) { if (checkpointError.code !== error.code) throw checkpointError; }
+          }
+          // One no-tool inference can still explain or continue prose; it must never dispatch hidden operations.
+          // 最后提供一次无工具推理，仍可解释或续写正文，绝不派发隐藏操作。
+          summarizeOnly = recoveryFinal = true;
+          roundCatalog = []; roundDeclarations = [];
+          recovery.record(error.code, 'summarize-without-tools', round + 1);
+          try { return project(); }
+          catch (finalError) { if (finalError.code !== error.code) throw finalError; }
+          return null;
+        }
+      };
+      // Match the projection's pressure boundary so a budget check alone does not publish compaction activity.
+      // 与请求投影的压力边界一致，不能仅因检查预算就发布压缩活动。
+      const compactionNeeded = estimateToolMessageTokens(messages, system) + estimateTokens(JSON.stringify(roundDeclarations)) > inputBudgetTokens * 0.9;
+      const compacted = compactionNeeded ? await runContextActivity({ round: round + 1, order: segments.order++,
+        emit, saveActivity, signal }, compact) : await compact();
+      if (!compacted) return await recoveredResult(recovery.fallback(context.message), { code: 'TOOL_CONTEXT_BUDGET_EXCEEDED' });
       messages = compacted.messages;
       service.setEvidenceBudget?.(context, Math.max(0, inputBudgetTokens -
         estimateToolMessageTokens(messages, system) - estimateTokens(JSON.stringify(roundDeclarations)) - 512));
       if (compacted.metrics) await onContextCompacted(compacted.metrics);
+      const recoverContext = contextForRecovery ? async recoveredLimits => {
+        const adapted = await contextForRecovery(recoveredLimits);
+        signal?.throwIfAborted();
+        recovery.protectCompletedEffects({ includeCurrent: true });
+        inputBudgetTokens = adapted.inputBudgetTokens; system = adapted.system;
+        roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects
+          ? adapted.catalog.filter(tool => isRecoveryObservation(tool)) : adapted.catalog;
+        roundDeclarations = toolDeclarations(protocol, roundCatalog);
+        await projection.prepareObservations(messages, { inputBudgetTokens, signal });
+        const smaller = projection.compact(messages, { system, declarations: roundDeclarations, inputBudgetTokens });
+        messages = smaller.messages;
+        service.setEvidenceBudget?.(context, Math.max(0, inputBudgetTokens - estimateToolMessageTokens(messages, system) -
+          estimateTokens(JSON.stringify(roundDeclarations)) - 512));
+        if (smaller.metrics) await onContextCompacted(smaller.metrics);
+        return { messages, declarations: roundDeclarations, catalog: roundCatalog };
+      } : undefined;
       let modelElapsed;
       let modelTimingRecorded = false;
       const recordModelTiming = () => {
@@ -111,13 +185,14 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       };
       let turn;
       try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
-        workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', cpuThreads: 1,
+        workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', workload: 'model-transport', cpuThreads: 1,
         memoryBytes: 16 * 1024 * 1024 },
         async () => {
           modelElapsed = startRunTimer();
-          try { return await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog, system); }
+          try { return await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog, system, recoverContext); }
           finally { recordModelTiming(); }
-        }, { signal, onCapacityUnavailable: options => service.retrieval?.embeddings.releaseIdleResources?.(options) });
+        }, { signal, onCapacityUnavailable: options => service.retrieval?.releaseIdleResources
+          ? service.retrieval.releaseIdleResources(options) : service.retrieval?.embeddings.releaseIdleResources?.(options) });
         signal?.throwIfAborted();
         if (turn.calls.some(call => seenIds.has(call.id)))
           throw new ToolCallDecodeFailure('工具调用 ID 重复，未再次执行。', 'MODEL_TOOL_IDENTITY_INVALID');
@@ -130,6 +205,34 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           { estimatedGeneratedTokens: error.estimatedGeneratedTokens });
         signal?.throwIfAborted();
         if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(error.code)) throw error;
+        if (['MODEL_CONTEXT_LIMIT_REJECTED', 'CONTEXT_INPUT_TOO_LARGE', 'TOOL_CONTEXT_BUDGET_EXCEEDED'].includes(error.code)) {
+          // An upstream rejection also gets a fresh settled window, not just local estimate failures.
+          // 上游拒绝同样进入完整回执检查点恢复，不仅处理本地估算超限；每次恢复都不重放操作。
+          if (contextRepairRequests < 2 && round + 1 < progress.limits.maxRounds) {
+            let checkpoint;
+            try {
+              checkpoint = await runContextActivity({ round: round + 1, order: segments.order++, emit, saveActivity, signal },
+                () => projection.checkpoint(messages, { signal }));
+            } catch { signal?.throwIfAborted(); }
+            if (checkpoint) {
+              contextRepairRequests++;
+              recovery.protectCompletedEffects({ includeCurrent: true });
+              messages = checkpoint.messages;
+              contextDiscoveryOnly = true;
+              if (contextRepairRequests === 2) summarizeOnly = recoveryFinal = true;
+              recovery.record(error.code, summarizeOnly ? 'summarize-without-tools' : 'checkpoint-and-continue', round + 1);
+              await onContextCompacted(checkpoint.metrics);
+              segments.interrupt();
+              await progress.save('continuing', { code: error.code });
+              continue;
+            }
+          }
+          recovery.record(error.code, 'report-context-limitation', round + 1);
+          const limitation = /\p{Script=Han}/u.test(context.message ?? '')
+            ? '模型实际上下文或输出额度不足，自动缩减后仍无法继续本步骤。'
+            : 'The model\'s actual context or output limit still prevents this step after automatic reduction.';
+          return await recoveredResult(`${limitation}\n\n${recovery.fallback(context.message)}`, { code: error.code });
+        }
         if (recovery.classify(error) !== 'repair-unexecuted-model-step' && !recoveryFinal) throw error;
         // Failed output consumed generation too; decoder accounting includes buffered arguments without logging them.
         // 失败输出也消耗生成预算；解码器只提供缓冲参数的计量，不把参数内容写入诊断。
@@ -157,6 +260,19 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       try { progress.observeTurn(turn); }
       finally { await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations }); }
       signal?.throwIfAborted();
+      if (turn.outputTruncated) {
+        // A complete text-only length receipt is an invocation boundary, not the end of the user task.
+        // 完整纯文本的长度回执只是调用边界，不是用户任务终点；残缺工具参数仍走原拒绝路径。
+        segments.finish(turn, { final: false });
+        await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
+        const resumed = await runContextActivity({ round: round + 1, order: segments.order++, emit, saveActivity, signal },
+          () => output.resume(messages, turn, { round: round + 1, inputBudgetTokens, signal }));
+        messages = resumed.messages;
+        await onContextCompacted({ outputContinuation: resumed.audit });
+        await progress.save('continuing', { code: 'MODEL_OUTPUT_CONTINUING' });
+        continue;
+      }
+      turn = { ...turn, content: output.finalText(turn) };
       if (recoveryFinal) return await recoveredResult(turn.calls.length ? recovery.fallback(context.message) : turn.content || recovery.fallback(context.message));
       if (summarizeOnly && turn.calls.length && !finalizingUnavailable && !turn.calls.some(call => call.unavailable)) {
         // Ignoring a no-tools request cannot dispatch effects or turn an honest partial answer into a stream error.

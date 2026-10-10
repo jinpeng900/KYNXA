@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { StreamFailure, finalParts, checkFinish } from './streaming.mjs';
+import { StreamFailure, finalParts, checkFinish, isOutputLimit } from './streaming.mjs';
 import { estimateMessageTokens, estimateTokens } from './context.mjs';
 import { normalizeToolExecutionEnvironment } from '../platform/tool-execution-environment.mjs';
 import { ToolCallDecodeFailure, validateTurnCallCount, validateArgumentBuffer } from './tool-call-validation.mjs';
@@ -77,7 +77,7 @@ function decodeCall(rawCall, catalog) {
     ...(!descriptor ? { unavailable: true } : {}) };
 }
 
-export function decodeToolTurn(protocol, result, catalog) {
+export function decodeToolTurn(protocol, result, catalog, { allowTruncatedText = false } = {}) {
   const parts = finalParts(protocol, result);
   if (protocol === 'anthropic-messages') {
     parts.content = (result.content ?? []).filter(providerItem => providerItem.type === 'text').map(providerItem => providerItem.text ?? '').join('');
@@ -101,8 +101,9 @@ export function decodeToolTurn(protocol, result, catalog) {
   // Check the stop status before parsing or dispatching any business arguments.
   // A syntactically valid prefix is still unsafe when its generation was cut off.
   // 解析或派发业务参数前先检查停止状态；生成被截断时，即使前缀语法有效也不能执行。
+  const outputTruncated = allowTruncatedText && rawCalls.length === 0 && isOutputLimit(parts.finish);
   try {
-    if (!['tool_calls', 'tool_use'].includes(parts.finish)) {
+    if (!outputTruncated && !['tool_calls', 'tool_use'].includes(parts.finish)) {
       try { checkFinish(parts.finish); }
       catch (error) {
         if (rawCalls.length) throw new ToolCallDecodeFailure(error.message, 'MODEL_TOOL_OUTPUT_TRUNCATED', error.type);
@@ -121,8 +122,8 @@ export function decodeToolTurn(protocol, result, catalog) {
       throw new ToolCallDecodeFailure('模型重复了工具调用 ID。', 'MODEL_TOOL_IDENTITY_INVALID');
     if (parts.finish && ['tool_calls', 'tool_use'].includes(parts.finish)) {
       if (!calls.length) throw new ToolCallDecodeFailure('模型结束了工具调用，但未返回完整参数。', 'MODEL_TOOL_ARGUMENT_INVALID');
-    } else checkFinish(parts.finish);
-    if (protocol === 'openai-responses' && result.status && result.status !== 'completed')
+    } else if (!outputTruncated) checkFinish(parts.finish);
+    if (!outputTruncated && protocol === 'openai-responses' && result.status && result.status !== 'completed')
       throw new StreamFailure('模型未完整结束本次工具回复。', 'interrupted');
     const explicitRefusal = protocol === 'openai-completions'
       ? Boolean(result.choices?.[0]?.message?.refusal)
@@ -130,9 +131,9 @@ export function decodeToolTurn(protocol, result, catalog) {
         item.content?.some?.(part => part.type === 'refusal'));
     // A blank provider response dispatches no tool; recover this step before treating it as a final answer.
     // 供应商空回复没有派发工具；在当作最终回答之前恢复当前步骤，已有执行回执仍然有效。
-    if (!calls.length && !parts.content?.trim() && !explicitRefusal)
+    if (!calls.length && !parts.content?.trim() && !explicitRefusal && !(outputTruncated && parts.reasoning?.trim()))
       throw new ToolCallDecodeFailure('模型返回空回复，当前步骤未执行工具。', 'MODEL_RESPONSE_EMPTY');
-    return { ...parts, calls, continuation };
+    return { ...parts, calls, continuation, ...(outputTruncated ? { outputTruncated: true } : {}) };
   } catch (error) {
     // Truncated and transport-shaped decoder failures consumed output too; the estimate never contains raw parameters.
     // 截断等解码故障同样消耗输出；计量字段只保留估算量，不包含原始参数。

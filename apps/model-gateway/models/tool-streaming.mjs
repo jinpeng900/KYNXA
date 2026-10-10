@@ -1,4 +1,4 @@
-import { StreamFailure, readSse, textParts, finalParts, checkFinish } from './streaming.mjs';
+import { StreamFailure, readSse, textParts, finalParts, checkFinish, isOutputLimit } from './streaming.mjs';
 import { decodeToolTurn } from './tool-protocols.mjs';
 import { ToolCallDecodeFailure, validateTurnCallCount, validateArgumentBuffer } from './tool-call-validation.mjs';
 import { estimateTokens } from './context-tokens.mjs';
@@ -7,9 +7,9 @@ import { estimateTokens } from './context-tokens.mjs';
  * Decode complete tool arguments before dispatch. A dropped stream never executes a call.
  * 参数完整解码后才能派发工具调用，中断流不能执行半份调用。
  */
-export async function readToolStream(response, protocol, catalog, emit = () => {}, activity = () => {}) {
+export async function readToolStream(response, protocol, catalog, emit = () => {}, activity = () => {}, options = {}) {
   const usage = { content: '', reasoning: '', argumentParts: [] };
-  try { return await decodeToolStream(response, protocol, catalog, emit, activity, usage); }
+  try { return await decodeToolStream(response, protocol, catalog, emit, activity, usage, options); }
   catch (error) {
     // Transport failures also consume partial output; retain only its estimate, never raw arguments in diagnostics.
     // 网络/取消故障同样消耗部分输出；诊断仅保留估算量，不记录原始工具参数。
@@ -19,7 +19,7 @@ export async function readToolStream(response, protocol, catalog, emit = () => {
   }
 }
 
-async function decodeToolStream(response, protocol, catalog, emit, activity, usage) {
+async function decodeToolStream(response, protocol, catalog, emit, activity, usage, options) {
   let content = '', reasoning = '';
   const send = (type, delta) => {
     delta = textParts(delta);
@@ -31,7 +31,7 @@ async function decodeToolStream(response, protocol, catalog, emit, activity, usa
   };
   const finish = result => {
     let turn;
-    try { turn = decodeToolTurn(protocol, result, catalog); }
+    try { turn = decodeToolTurn(protocol, result, catalog, options); }
     catch (error) {
       // Local servers may ignore stream:true. Keep their returned draft without
       // treating incomplete tool arguments as an executable call.
@@ -142,7 +142,9 @@ async function decodeToolStream(response, protocol, catalog, emit, activity, usa
       if (type === 'message_delta') stopReason = item.delta?.stop_reason;
       if (type === 'message_stop') {
         if (!stopReason) throw new StreamFailure('模型工具流缺少结束状态。');
-        if (stopReason !== 'tool_use') {
+        const textOnlyLimit = options.allowTruncatedText && isOutputLimit(stopReason) &&
+          ![...blocks.values()].some(block => block.type === 'tool_use');
+        if (stopReason !== 'tool_use' && !textOnlyLimit) {
           try { checkFinish(stopReason); }
           catch (error) {
             if ([...blocks.values()].some(block => block.type === 'tool_use'))

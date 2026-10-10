@@ -40,6 +40,9 @@ function resourceExecutablePath() {
 function validRequest(request) {
   return request && typeof request.taskId === 'string' && request.taskId.length > 0 && request.taskId.length <= 128 &&
     typeof request.workspaceId === 'string' && request.workspaceId.length <= 128 && ['foreground', 'background'].includes(request.kind) &&
+    ['compute', 'model-transport'].includes(request.workload) &&
+    (request.workload !== 'model-transport' || request.kind === 'foreground' && request.cpuThreads <= 1 &&
+      request.memoryBytes > 0 && request.memoryBytes <= 32 * 1024 ** 2 && request.gpuMemoryBytes === 0) &&
     Number.isSafeInteger(request.cpuThreads) && request.cpuThreads >= 0 && request.cpuThreads <= 4096 &&
     Number.isSafeInteger(request.memoryBytes) && request.memoryBytes >= 0 &&
     Number.isSafeInteger(request.gpuMemoryBytes) && request.gpuMemoryBytes >= 0 &&
@@ -129,6 +132,7 @@ export class ResourceBudgetService {
       accounting: { observedMaterializedMemoryBytes: 0, unmaterializedMemoryBytes: memoryBytes,
         capacityMemoryBytes: this.#memoryCapacity(hardware), maximumResidentReservationBytes: Math.floor(hardware.memory.totalBytes * 0.4),
         availableMemoryBytes: Math.max(0, this.#memoryCapacity(hardware) - memoryBytes),
+        availableTransportMemoryBytes: Math.max(0, this.#memoryCapacity(hardware, 'model-transport') - memoryBytes),
         gpuMemoryState: 'unverified-reservation', gpuUnverifiedReservationBytes: gpuMemoryBytes,
         observedMaterializedGpuMemoryBytes: 0, availableGpuMemoryBytes: null, gpuAttributionExact: false,
         state: 'monitor-unavailable-reservations-quarantined' },
@@ -143,7 +147,7 @@ export class ResourceBudgetService {
 
   async acquire(options, { signal } = {}) {
     this.#assertOpen(signal);
-    const request = { workspaceId: '', kind: 'background', cpuThreads: 0, memoryBytes: 0,
+    const request = { workspaceId: '', kind: 'background', workload: 'compute', cpuThreads: 0, memoryBytes: 0,
       gpuMemoryBytes: 0, ttlMs: DEFAULT_TTL_MS, waitMs: 0, ...options };
     if (!validRequest(request)) throw new ResourceBudgetError('RESOURCE_INVALID_REQUEST', 'Invalid resource allocation request.');
     const releasePriority = request.kind === 'foreground'
@@ -224,7 +228,11 @@ export class ResourceBudgetService {
     await this.#maybeRecover(signal); await this.#start(); this.#assertOpen(signal);
     let result;
     if (this.#mode === 'rust') {
-      try { result = await this.#request('acquire', request, { signal, timeoutMs: this.#timeoutMs + request.waitMs }); }
+      // Older bundled monitors retain conservative admission instead of rejecting a new optional field.
+      // 旧随包监控继续采用保守准入，不因新增可选字段而拒绝整个请求；新能力以真实握手为准。
+      const { workload, ...legacyRequest } = request;
+      const nativeRequest = this.#nativeSnapshot?.capabilities?.modelTransportAdmission === true ? request : legacyRequest;
+      try { result = await this.#request('acquire', nativeRequest, { signal, timeoutMs: this.#timeoutMs + request.waitMs }); }
       catch (error) { if (signal?.aborted || error.name === 'AbortError') throw cancellationError();
         return { status: 'denied', reason: 'RESOURCE_SERVICE_LOST', mode: 'fallback' }; }
     } else {
@@ -548,17 +556,18 @@ export class ResourceBudgetService {
   }
 
   #cpuCapacity(hardware) { return Math.max(1, Math.min(8, Math.floor(hardware.cpu.logicalCores / 2))); }
-  #memoryCapacity(hardware) {
+  #memoryCapacity(hardware, workload = 'compute') {
     // Without a live native monitor, materialized ownership is unknown and all unresolved debt stays fenced.
     // 没有原生实时监控时无法确认已兑现内存的归属，未结清预约继续全额隔离保留。
-    return Math.max(0, Math.floor(Math.min(hardware.memory.availableBytes * 0.6 - 512 * 1024 * 1024,
+    const fraction = workload === 'model-transport' ? 1 : 0.6;
+    return Math.max(0, Math.floor(Math.min(hardware.memory.availableBytes * fraction - 512 * 1024 * 1024,
       hardware.memory.totalBytes * 0.4)));
   }
 
   #acquireFallback(request) {
     const hardware = this.#sample(), reserved = this.#reserved();
     const cpuThreads = Math.max(0, this.#cpuCapacity(hardware) - reserved.cpuThreads);
-    const memoryBytes = Math.max(0, this.#memoryCapacity(hardware) - reserved.memoryBytes);
+    const memoryBytes = Math.max(0, this.#memoryCapacity(hardware, request.workload) - reserved.memoryBytes);
     if (request.gpuMemoryBytes) return { status: 'denied', reason: 'RESOURCE_GPU_UNKNOWN', mode: 'fallback' };
     if (this.#leases.size >= MAX_LEASES) return { status: 'denied', reason: 'RESOURCE_LEASE_LIMIT', mode: 'fallback' };
     if (request.memoryBytes > memoryBytes || request.cpuThreads > 0 && cpuThreads === 0 ||

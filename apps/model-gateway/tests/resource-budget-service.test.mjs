@@ -10,6 +10,28 @@ const hardware = () => ({ cpu: { logicalCores: 8, usagePercent: 10 },
   gpu: { state: 'unknown', availableMemoryBytes: null } });
 const allocation = (taskId, cpuThreads, memoryBytes = 0) => ({ taskId, cpuThreads, memoryBytes, ttlMs: 1000 });
 
+test('model transport uses reserved foreground headroom while heavy work and unresolved debt remain fenced', async () => {
+  let availableBytes = 8 * 2 ** 30;
+  const service = new ResourceBudgetService({ executablePath: null, sampler: () => ({ ...hardware(),
+    memory: { totalBytes: 16 * 2 ** 30, availableBytes } }) });
+  const transport = { ...allocation('model-transport', 1, 16 * 2 ** 20), kind: 'foreground', workload: 'model-transport' };
+  try {
+    await service.acquire(allocation('resident-worker', 0, 256 * 2 ** 20));
+    availableBytes = 900 * 2 ** 20;
+    assert.equal((await service.acquire({ ...transport, workload: 'compute' })).reason, 'RESOURCE_PRESSURE');
+    const lease = await service.acquire(transport);
+    assert.equal(lease.status, 'granted');
+    const snapshot = await service.snapshot();
+    assert.equal(snapshot.accounting.availableMemoryBytes, 0);
+    assert.ok(snapshot.accounting.availableTransportMemoryBytes >= 16 * 2 ** 20);
+    availableBytes = 780 * 2 ** 20;
+    assert.equal((await service.acquire(transport)).reason, 'RESOURCE_PRESSURE');
+    for (const invalid of [{ memoryBytes: 33 * 2 ** 20 }, { memoryBytes: 0 }, { gpuMemoryBytes: 1 },
+      { cpuThreads: 2 }, { kind: 'background' }, { workload: 'unknown' }])
+      await assert.rejects(service.acquire({ ...transport, ...invalid }), { code: 'RESOURCE_INVALID_REQUEST' });
+  } finally { await service.close(); }
+});
+
 test('fallback reservations are atomic across clients and expiry remains quarantined until release', async () => {
   let now = 1000;
   const service = new ResourceBudgetService({ executablePath: null, sampler: hardware, clock: () => now });

@@ -12,7 +12,9 @@ const turn = (index, content = `问题 ${index}`, answer = `答案 ${index}`) =>
   { Id: `user-${index}`, Role: 'user', Content: content, Status: 'completed' },
   { Id: `assistant-${index}`, Role: 'assistant', Content: answer, Status: 'completed', ReplyTo: `user-${index}`, Reasoning: 'do not send private reasoning' }
 ];
-const build = options => buildContext({ conversationId, currentMessage: '继续工作', ...options });
+// Compression fixtures use an explicit small window; the default is checked independently below.
+// 压缩夹具显式使用小窗口；下方独立核对产品默认窗口。
+const build = options => buildContext({ conversationId, currentMessage: '继续工作', contextWindowTokens: 8192, ...options });
 const entry = (id, scope, scopeId, content, extra = {}) => ({
   id, scope, scopeId, content, status: 'confirmed', kind: 'fact',
   source: { type: 'manual' }, ...extra
@@ -24,12 +26,12 @@ const longHistory = () => Array.from({ length: 24 }, (_, index) => turn(index,
 test('short history stays complete, current input is exact, default budget reserves output and safety', () => {
   const history = turn(1);
   const initial = structuredClone(history);
-  const result = build({ history, currentMessage: '  preserve spaces \n and source code  ' });
+  const result = buildContext({ conversationId, history, currentMessage: '  preserve spaces \n and source code  ' });
   assert.deepEqual(result.messages.map(item => item.content), ['问题 1', '答案 1', '  preserve spaces \n and source code  ']);
   assert.equal(result.system, '');
-  assert.equal(result.maxOutputTokens, resolveOutputBudget({ contextWindowTokens: 8192 }).maxOutputTokens);
+  assert.equal(result.maxOutputTokens, resolveOutputBudget({ contextWindowTokens: 32_768 }).maxOutputTokens);
   assert.equal(result.metrics.requestedOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
-  assert.equal(result.metrics.contextWindowTokens, 8192);
+  assert.equal(result.metrics.contextWindowTokens, 32_768);
   assert.equal(result.metrics.includedTurnCount, 1);
   assert.equal(result.metrics.omittedTurnCount, 0);
   assert.equal(result.summaryUpdate, undefined);
@@ -146,7 +148,8 @@ test('summary persists without regenerating and loses validity on content change
     assert.equal(result.metrics.summaryReused, false);
     assert.notEqual(result.summaryUpdate.sourceHash, first.summaryUpdate.sourceHash);
   }
-  const wrongChat = buildContext({ conversationId: otherChat, history, currentMessage: 'continue', summary: first.summaryUpdate });
+  const wrongChat = buildContext({ conversationId: otherChat, history, currentMessage: 'continue',
+    contextWindowTokens: 8192, summary: first.summaryUpdate });
   assert.equal(wrongChat.metrics.summaryReused, false);
   assert.equal(wrongChat.summaryUpdate.conversationId, otherChat);
 });

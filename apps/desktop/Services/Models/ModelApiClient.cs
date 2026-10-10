@@ -17,7 +17,7 @@ public sealed record ModelConnection(string ProviderId, string DisplayName, stri
 
 public sealed class ModelApiClient : IDisposable
 {
-    public const int DefaultContextWindowTokens = 8192;
+    public const int DefaultContextWindowTokens = 32768;
     public const int MinimumContextWindowTokens = 2048;
     public const int MaximumContextWindowTokens = 2000000;
     public const int DefaultMaxOutputTokens = 262144;

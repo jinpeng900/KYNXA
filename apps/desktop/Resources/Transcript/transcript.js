@@ -19,7 +19,7 @@
     toolCreateFolder: '创建文件夹', toolRunCommand: '运行命令', toolUseSkill: '使用技能', toolReadSkill: '读取技能',
     toolFindSkill: '查找技能', toolInspectSkill: '检查技能', toolFindTools: '查找工具', toolReadResult: '读取工具记录',
     toolFindHistory: '查找聊天记录', toolReadHistory: '读取聊天记录', toolExecute: '执行操作',
-    toolFindSources: '查找资料', toolReadSource: '读取资料',
+    toolFindSources: '查找资料', toolReadSource: '读取资料', toolCompactContext: '整理上下文',
     toolOutcomeUncertain: '操作已中断，执行结果尚未确定。', toolTimedOut: '操作超时。',
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',

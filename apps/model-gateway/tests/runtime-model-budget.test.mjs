@@ -9,12 +9,20 @@ import { ModelRuntime } from '../orchestration/runtime.mjs';
 import { chatRequest } from '../models/protocols.mjs';
 import { createServer } from 'node:http';
 
-async function upstreamFixture(t) {
+async function upstreamFixture(t, { rejectContextCount = 0 } = {}) {
   const requests = [];
   const upstream = createServer(async (request, response) => {
     let text = '';
     for await (const chunk of request) text += chunk;
-    if (request.method === 'POST') requests.push(JSON.parse(text));
+    if (request.method === 'POST') {
+      requests.push(JSON.parse(text));
+      if (requests.length <= rejectContextCount) {
+        response.writeHead(400, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ error: { code: 'context_length_exceeded',
+          message: 'Maximum context length is 8192 tokens.' } }));
+        return;
+      }
+    }
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Fixture answer.' } }] }));
   });
@@ -69,7 +77,7 @@ test('cold local metadata caps the request before loading without rewriting the 
   assert.equal(runtime.retrieval.embeddings.status().loaded, false);
 });
 
-test('runtime uses conservative automatic fallback and never infers cloud limits for local aliases', async t => {
+test('runtime honors saved local windows without inferring cloud limits for local aliases', async t => {
   const { runtime } = await fixture(t, { baseUrl: 'http://127.0.0.1:1234/v1', protocol: 'openai-completions',
     models: ['gpt-6-astra'], contextWindowTokens: 8192, maxOutputTokens: 2048 });
   const input = { conversationId: 'local-budget-chat', message: 'Continue work', provider: 'budget-test', model: 'gpt-6-astra' };
@@ -78,7 +86,9 @@ test('runtime uses conservative automatic fallback and never infers cloud limits
   assert.equal(prepared.requestOptions.maxOutputTokens, 2048);
   assert.equal(prepared.contextMetrics.providerMaxInputTokens, undefined);
   assert.equal(prepared.contextMetrics.providerMaxOutputTokens, undefined);
-  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unknown-model-capability');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.source, 'configured-unverified');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unverified-configured-context');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.verified, false);
 });
 
 test('legacy 8192 no longer caps an identified official model; model switches update the effective window', async t => {
@@ -113,15 +123,63 @@ test('trusted local runtime caps automatic context even when the legacy UI field
   assert.equal(prepared.requestOptions.maxOutputTokens, 1024);
 });
 
-test('unknown or proxy models ignore legacy million-token settings and untrusted model metadata', async t => {
+test('proxy models honor saved declarations while rejecting untrusted local and official model metadata', async t => {
   const { runtime } = await fixture(t, { baseUrl: 'https://proxy.example/v1', models: ['gpt-6-astra'],
     contextWindowTokens: 2_000_000, maxOutputTokens: 1024 });
   runtime.localModels.observe = async () => ({ backend: 'ollama', runtimeContextTokens: 1_000_000 });
   const prepared = await runtime.prepare({ conversationId: 'auto-unknown', message: 'Review code',
     provider: 'budget-test', model: 'gpt-6-astra' }, 'auto-unknown');
-  assert.equal(prepared.contextMetrics.contextWindowTokens, 8192);
+  assert.equal(prepared.contextMetrics.contextWindowTokens, 2_000_000);
+  assert.equal(prepared.contextMetrics.contextWindowResolution.source, 'configured-unverified');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unverified-configured-context');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.verified, false);
+});
+
+test('an unknown service without a saved window prepares a 32K unverified context', async t => {
+  const { runtime } = await fixture(t, { baseUrl: 'https://proxy.example/v1', models: ['unknown'], maxOutputTokens: 1024 });
+  const input = { conversationId: 'default-window-chat', message: 'Review code', provider: 'budget-test', model: 'unknown' };
+  const prepared = await runtime.prepare(input, input.conversationId);
+  assert.equal(prepared.contextMetrics.contextWindowTokens, 32_768);
   assert.equal(prepared.contextMetrics.contextWindowResolution.source, 'conservative-fallback');
-  assert.equal(prepared.contextMetrics.contextWindowResolution.reason, 'unknown-model-capability');
+  assert.equal(prepared.contextMetrics.contextWindowResolution.verified, false);
+});
+
+for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+  test(`${protocol}: an explicit 8K rejection recovers the same prepared turn and caches only this connection's limit`, async t => {
+    const upstream = await upstreamFixture(t, { rejectContextCount: 1 });
+    const { runtime, store } = await fixture(t, { baseUrl: upstream.baseUrl, protocol, models: ['unknown'] });
+    let released = 0;
+    runtime.externalAdmissions.acquire = async () => ({ dispatched() {}, settled() {}, async release() { released++; } });
+    const input = { conversationId: 'recover-window-chat', message: '你好', provider: 'budget-test', model: 'unknown' };
+    const turn = await runtime.prepare(input, input.conversationId);
+    const originalId = turn.assistant.Id;
+    const result = await runtime.consumeModelResponse(turn, 'unknown', system => chatRequest(turn.connection, 'unknown',
+      turn.messages, { ...turn.requestOptions, system }), undefined, response => response.json());
+    assert.ok(result.choices);
+    assert.equal(upstream.requests.length, 2);
+    assert.equal(released, 2);
+    assert.equal(turn.assistant.Id, originalId);
+    assert.equal(turn.contextMetrics.contextWindowTokens, 8192);
+    assert.equal(turn.contextMetrics.contextWindowResolution.verified, true);
+    assert.equal(turn.contextMetrics.contextRecoveries[0].toolOperationsReplayed, 0);
+    assert.equal(turn.contextMetrics.modelRequestAttempts, 2);
+    assert.ok((upstream.requests[1].max_tokens ?? upstream.requests[1].max_output_tokens) < 8192);
+    assert.equal((await runtime.prepare({ ...input, conversationId: 'cached-window-chat' }, 'cached-window-chat')).contextMetrics.contextWindowTokens, 8192);
+    await store.save({ ...(await store.connectionFor('budget-test')), apiKey: 'changed-fixture-key' });
+    assert.equal((await runtime.prepare({ ...input, conversationId: 'changed-key-chat' }, 'changed-key-chat')).contextMetrics.contextWindowTokens, 32768);
+  });
+}
+
+test('repeated context rejection is bounded and does not replay the whole user request', async t => {
+  const upstream = await upstreamFixture(t, { rejectContextCount: 10 });
+  const { runtime } = await fixture(t, { baseUrl: upstream.baseUrl, models: ['unknown'] });
+  runtime.externalAdmissions.acquire = async () => ({ dispatched() {}, settled() {}, async release() {} });
+  const input = { conversationId: 'repeated-window-chat', message: '你好', provider: 'budget-test', model: 'unknown' };
+  const turn = await runtime.prepare(input, input.conversationId);
+  await assert.rejects(runtime.consumeModelResponse(turn, 'unknown', system => chatRequest(turn.connection, 'unknown',
+    turn.messages, { ...turn.requestOptions, system }), undefined, response => response.json()), { code: 'MODEL_CONTEXT_LIMIT_REJECTED' });
+  assert.equal(upstream.requests.length, 2, 'the repeated same limit cannot make progress, so it must not trigger more attempts');
+  assert.equal(turn.contextMetrics.contextRecoveries.length, 1);
 });
 
 test('a greeting cannot reuse local context metadata after the same provider changes its endpoint', async t => {
@@ -135,7 +193,8 @@ test('a greeting cannot reuse local context metadata after the same provider cha
   await store.save({ ...(await store.connectionFor('budget-test')), baseUrl: 'http://127.0.0.1:11435/v1' });
   const changed = await runtime.prepare({ ...input, message: 'Hello' }, 'changed-endpoint-greeting');
   assert.equal(changed.contextMetrics.contextWindowTokens, 8192);
-  assert.equal(changed.contextMetrics.contextWindowResolution.source, 'conservative-fallback');
+  assert.equal(changed.contextMetrics.contextWindowResolution.source, 'configured-unverified');
+  assert.equal(changed.contextMetrics.contextWindowResolution.verified, false);
   assert.equal(observations, 1, 'greetings remain observation free');
 });
 

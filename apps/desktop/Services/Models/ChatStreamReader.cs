@@ -85,7 +85,15 @@ public static class ChatStreamReader
                         case "tool_result":
                         case "approval_required":
                             ValidateToolEvent(streamEvent);
-                            if (assistantSegments.Count > 0 && (streamEvent.Tool!.Round is null || !assistantSegments.Values.Any(value => value.Round == streamEvent.Tool.Round && value.Status == "completed" && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order)))
+                            // Context maintenance is display-only and may precede this round's model output.
+                            // 上下文维护只是展示活动，可以发生在本轮模型输出前；真实工具仍须等待该轮输出完成。
+                            bool isContextActivity = streamEvent.Tool!.Name == "context.compact";
+                            if (isContextActivity && (streamEvent.Type == "approval_required" ||
+                                streamEvent.Tool.Arguments!.Value.EnumerateObject().Any()))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            if (assistantSegments.Count > 0 && (streamEvent.Tool.Round is null || !assistantSegments.Values.Any(value =>
+                                value.Round == streamEvent.Tool.Round && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order &&
+                                (value.Status == "completed" || isContextActivity && value.Status == "streaming"))))
                                 throw InvalidSegment();
                             string toolCallId = streamEvent.Tool!.ToolCallId;
                             string toolName = streamEvent.Tool.Name;

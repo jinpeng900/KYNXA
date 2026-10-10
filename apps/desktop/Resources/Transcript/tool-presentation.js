@@ -3,6 +3,7 @@
 (() => {
   'use strict';
   const toolTitleKeys = {
+    'context.compact': 'toolCompactContext',
     'filesystem.read': 'toolReadFile', 'file.read': 'toolReadFile', 'filesystem.stat': 'toolInspectFile',
     'filesystem.list': 'toolListFiles', 'filesystem.search': 'toolSearchFiles',
     'filesystem.write': 'toolEditFile', 'filesystem.edit': 'toolEditFile',

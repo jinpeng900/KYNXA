@@ -5,6 +5,7 @@ const MIB = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CACHE_ENTRIES = 32;
 const MAX_ESTIMATED_BYTES = 8 * 1024 ** 4;
+const MAX_CONTEXT_TOKENS = 2_000_000;
 
 function cancelledError() {
   return Object.assign(new Error('Local model observation cancelled.'), { name: 'AbortError', code: 'LOCAL_MODEL_OBSERVATION_CANCELLED' });
@@ -30,6 +31,17 @@ function identity(url, model) {
 
 function positiveInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function llamaPropsMetadata(props) {
+  const settings = props?.default_generation_settings;
+  const contextTokens = positiveInteger(settings?.n_ctx), slots = positiveInteger(props?.total_slots);
+  // The documented props field family identifies this API; model names and port numbers are not backend evidence.
+  // 以官方 props 字段族识别该 API；模型名称和端口号不能证明推理后端。
+  if (!contextTokens || contextTokens > MAX_CONTEXT_TOKENS || !slots || slots > 256 ||
+    !settings?.params || typeof settings.params !== 'object' || Array.isArray(settings.params) ||
+    typeof props.chat_template !== 'string') return null;
+  return { contextTokens, slots, loaded: typeof props.is_sleeping === 'boolean' ? !props.is_sleeping : null };
 }
 
 function architectureInfo(show) {
@@ -173,12 +185,34 @@ export class LocalModelResourceObserver {
     const activity = () => ({ generationState: this.#active.has(key) ? 'generating' : 'unknown',
       applicationGenerationState: this.#active.has(key) ? 'generating' : 'idle', globalGenerationState: 'unknown' });
     const isOllama = /ollama/iu.test(connection.providerId ?? '') || url.port === '11434';
-    if (!isOllama || !model) return { ...unknown, ...activity(), diagnostic: {
-      code: !model ? 'LOCAL_MODEL_OBSERVATION_MODEL_UNSPECIFIED' : 'LOCAL_MODEL_RESOURCE_API_UNAVAILABLE' } };
+    if (!model) return { ...unknown, ...activity(), diagnostic: { code: 'LOCAL_MODEL_OBSERVATION_MODEL_UNSPECIFIED' } };
     const requestedContext = positiveInteger(contextTokens);
     const cacheKey = `${key}:${requestedContext ?? 'unknown'}`;
     const cached = this.#cache.get(cacheKey);
     if (!refresh && cached && Date.now() - cached.observedAt <= this.#cacheTtlMs) return { ...cached, ...activity(), cached: true };
+    if (!isOllama) {
+      const propsUrl = new URL('/props', url);
+      // Router observations must never autoload a selected model merely to detect its backend.
+      // 路由服务的观察请求禁止为了识别后端而自动加载所选模型。
+      propsUrl.searchParams.set('model', model);
+      propsUrl.searchParams.set('autoload', 'false');
+      let metadata;
+      try { metadata = llamaPropsMetadata(await this.#read(propsUrl, connection, { signal })); } catch {
+        if (signal?.aborted) throw cancelledError();
+      }
+      if (signal?.aborted) throw cancelledError();
+      if (!metadata) return { ...unknown, ...activity(), diagnostic: { code: 'LOCAL_MODEL_RESOURCE_API_UNAVAILABLE' } };
+      const snapshot = { ...unknown, backend: 'llama.cpp', loaded: metadata.loaded,
+        contextTokens: metadata.contextTokens,
+        runtimeContextTokens: metadata.loaded === false ? null : metadata.contextTokens,
+        configuredContextTokens: null, modelMaximumContextTokens: null, parallelSlots: metadata.slots,
+        source: 'llama-cpp-props', endpointOrigin: url.origin, observedAt: Date.now(),
+        activityScope: 'this-application', ...activity(),
+        uncertaintyComponents: ['memory-residency-not-reported', 'execution-device-not-reported', 'kv-shape-not-reported'] };
+      this.#cache.delete(cacheKey); this.#cache.set(cacheKey, snapshot);
+      while (this.#cache.size > MAX_CACHE_ENTRIES) this.#cache.delete(this.#cache.keys().next().value);
+      return { ...snapshot, cached: false };
+    }
     const [runningResult, detailsResult] = await Promise.allSettled([
       this.#read(new URL('/api/ps', url), connection, { signal }),
       this.#read(new URL('/api/show', url), connection, { signal, method: 'POST', body: JSON.stringify({ model, verbose: false }) }),
