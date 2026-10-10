@@ -196,7 +196,7 @@ public sealed partial class ShellPage
         catch (OperationCanceledException) when (pending.Cancellation.IsCancellationRequested || _chatClosing)
         { pending.Message.Status = "interrupted"; pending.Message.Error = string.Empty; }
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException or
-            System.Text.Json.JsonException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            System.Text.Json.JsonException or InvalidDataException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             pending.Message.Status = "error";
             pending.Message.Error = error is InvalidOperationException or InvalidDataException ? error.Message :
@@ -205,6 +205,13 @@ public sealed partial class ShellPage
         finally
         {
             pending.ThinkingTime.Stop();
+            // Never leave a departed stream looking live, even if an unexpected exception escapes the handler.
+            // 即使意外异常未被上面的处理器接住，已退出的流也不能继续显示为生成中。
+            if (pending.Message.Status == "streaming")
+            {
+                pending.Message.Status = "interrupted";
+                pending.Message.Error = UiText.Get("连接已结束，回复尚未完成。");
+            }
             if (pending.Message.Status != "completed")
             {
                 var segments = pending.Message.AssistantSegments;

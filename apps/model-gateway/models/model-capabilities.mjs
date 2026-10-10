@@ -3,6 +3,7 @@
 // Exact IDs only: do not infer limits for fine-tunes, proxies or future aliases.
 // 此能力快照核对于 2026-10-04，只表示能力上限，不是连接默认值，也不保证任意密钥都有使用权限。
 import { isLocalEndpoint } from './store.mjs';
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from './context.mjs';
 
 const providers = new Map();
 
@@ -88,12 +89,20 @@ export function resolveModelCapabilities(connection, model) {
   return capability ? { ...capability } : {};
 }
 
-/** Select from verified endpoint/model limits, never the legacy UI field or arbitrary /models attributes.
- * 依据已核验端点/模型能力选择窗口，不使用旧 UI 字段或任意 /models 属性。 */
+/** Prefer verified limits; otherwise use a valid saved declaration or the unverified default.
+ * 优先采用已核验上限；缺少能力信息时使用有效的已保存声明或未核验默认值。 */
 export function resolveAutomaticContext(connection, model, localModel = {}, capabilities = resolveModelCapabilities(connection, model)) {
-  let local = false;
-  try { local = isLocalEndpoint(new URL(connection.baseUrl)); } catch { /* Invalid endpoints have no metadata authority. / 无效端点没有元数据授权。 */ }
-  const trustedLocal = local && localModel.backend === 'ollama';
+  let local = false, validEndpoint = false;
+  try {
+    const endpoint = new URL(connection?.baseUrl);
+    local = isLocalEndpoint(endpoint);
+    validEndpoint = ['http:', 'https:'].includes(endpoint.protocol) && !endpoint.username && !endpoint.password &&
+      !endpoint.search && !endpoint.hash && (endpoint.protocol === 'https:' || local);
+  } catch { /* Invalid endpoints have no metadata authority. / 无效端点没有元数据授权。 */ }
+  const trustedLlama = validEndpoint && local && localModel.backend === 'llama.cpp' &&
+    localModel.source === 'llama-cpp-props' && localModel.observationOnly === true &&
+    localModel.endpointOrigin === new URL(connection.baseUrl).origin;
+  const trustedLocal = validEndpoint && local && (localModel.backend === 'ollama' || trustedLlama);
   const validLimit = value => Number.isSafeInteger(value) && value > 0 && value <= 2_000_000;
   const localLimits = [localModel.runtimeContextTokens, localModel.configuredContextTokens, localModel.modelMaximumContextTokens];
   const invalidMetadata = trustedLocal && localLimits.some(value => value != null && !validLimit(value));
@@ -104,13 +113,21 @@ export function resolveAutomaticContext(connection, model, localModel = {}, capa
   ].filter(([, value]) => validLimit(value)) : [];
   const official = validLimit(capabilities.contextWindowTokens) ? capabilities.contextWindowTokens : null;
   const candidates = [...observed, ...(official ? [['official-capability', official]] : []),
-    ...(invalidMetadata ? [['conservative-fallback', 8192]] : [])];
+    ...(invalidMetadata ? [['conservative-fallback', DEFAULT_CONTEXT_WINDOW_TOKENS]] : [])];
+  // A saved declaration fills missing capabilities, but cannot override verified or malformed local limits.
+  // 已保存声明仅补充缺失能力，不能覆盖已核验上限或绕过异常本地元数据的保护。
+  const configuredTokens = connection?.contextWindowTokens;
+  if (!candidates.length && validEndpoint && validLimit(configuredTokens) && configuredTokens >= 2048)
+    candidates.push(['configured-unverified', configuredTokens]);
   const selected = candidates.reduce((current, candidate) => !current || candidate[1] < current[1] ? candidate : current, null);
-  const effectiveTokens = selected?.[1] ?? 8192;
-  return { mode: 'automatic', effectiveTokens, source: selected?.[0] ?? 'conservative-fallback',
-    reason: invalidMetadata ? 'invalid-local-capability-metadata' : selected ? null
+  const source = selected?.[0] ?? 'conservative-fallback';
+  const effectiveTokens = selected?.[1] ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  return { mode: 'automatic', effectiveTokens, source,
+    verified: !invalidMetadata && source !== 'configured-unverified' && source !== 'conservative-fallback',
+    reason: invalidMetadata ? 'invalid-local-capability-metadata' : source === 'configured-unverified'
+      ? 'unverified-configured-context' : selected ? null
       : trustedLocal ? 'local-window-unavailable' : 'unknown-model-capability',
     ...(official ? { capabilitySource: capabilities.source } : {}),
-    legacyConfiguredTokens: connection.contextWindowTokens ?? null, legacyFieldIgnored: true,
+    legacyConfiguredTokens: configuredTokens ?? null, legacyFieldIgnored: source !== 'configured-unverified',
     limits: Object.fromEntries(candidates) };
 }

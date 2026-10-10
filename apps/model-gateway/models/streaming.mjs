@@ -5,6 +5,8 @@ export class StreamFailure extends Error {
   constructor(message, type = 'error') { super(message); this.type = type; }
 }
 
+export const isOutputLimit = reason => ['length', 'max_tokens', 'max_output_tokens', 'model_context_window_exceeded'].includes(reason);
+
 export function checkFinish(reason) {
   if (!reason || ['stop', 'end_turn', 'stop_sequence'].includes(reason)) return;
   throw new StreamFailure(['length', 'max_tokens', 'max_output_tokens', 'model_context_window_exceeded'].includes(reason)

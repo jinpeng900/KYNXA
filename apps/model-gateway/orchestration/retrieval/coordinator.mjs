@@ -114,6 +114,19 @@ export class RetrievalCoordinator {
 
   async effective(projectId) { return this.settings.getEffective(projectId); }
 
+  async releaseIdleResources(options = {}) {
+    options.signal?.throwIfAborted();
+    // A failed retirement keeps its debt; other owned idle services may still safely release theirs.
+    // 单项退役失败保留其预约，其他自有闲置服务仍可独立归还额度，不处理用户启动的外部模型。
+    const services = [['embedding', this.embeddings], ['reranker', this.reranker]];
+    const settled = await Promise.allSettled(services.map(async ([, service]) => service?.releaseIdleResources?.(options)));
+    options.signal?.throwIfAborted();
+    const results = settled.map((result, index) => result.status === 'fulfilled'
+      ? { service: services[index][0], released: false, ...result.value }
+      : { service: services[index][0], released: false, code: result.reason?.code ?? 'INFERENCE_RESOURCE_RELEASE_FAILED' });
+    return { released: results.some(result => result.released === true), results };
+  }
+
   /** Coalesce committed catalog snapshots; admission is background work, never part of saving a mount.
    * 合并已提交的目录快照；后台只接纳资料任务，挂载保存不等待扫描或向量化。 */
   scheduleMountedProjects(catalog) {
@@ -786,7 +799,7 @@ export class RetrievalCoordinator {
         acquisition.applyProgressDecision(nextDecision, result.acquisition);
       result.acquisition.next = result.acquisition.decision.next;
       return result;
-    }, { signal, onCapacityUnavailable: options => this.embeddings.releaseIdleResources?.(options) }));
+    }, { signal, onCapacityUnavailable: options => this.releaseIdleResources(options) }));
   }
 
   observeProvidedOriginals(context, items) {

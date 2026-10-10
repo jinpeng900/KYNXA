@@ -169,6 +169,7 @@ public static partial class UiText
         ["读取工具记录"] = "Read tool record",
         ["查找聊天记录"] = "Find chat history",
         ["读取聊天记录"] = "Read chat history",
+        ["整理上下文"] = "Compact context",
         ["执行操作"] = "Perform action",
         ["操作已中断，执行结果尚未确定。"] = "The operation was interrupted; its outcome is not yet confirmed.",
         ["操作超时。"] = "The operation timed out.",

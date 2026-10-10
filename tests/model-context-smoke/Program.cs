@@ -95,13 +95,13 @@ try
 {
     using var client = new ModelApiClient();
     var providers = await client.ListAsync();
-    Check(providers[0].ContextWindowTokens == 8192 && providers[0].MaxOutputTokens == 262144,
+    Check(providers[0].ContextWindowTokens == 32768 && providers[0].MaxOutputTokens == 262144,
         "legacy response did not use independent context and output defaults");
     Check(providers[1].ContextWindowTokens == 1_000_000 && providers[1].MaxOutputTokens == 2048 && providers[1].Models.Length == 2,
         "existing low output limit or multiple models were changed while loading");
     var connection = new ModelConnection("fixture-local", "Synthetic model", "http://127.0.0.1:8080/v1", ["fixture-model"]);
     var saved = await client.SaveAsync(connection);
-    Check(saved.ContextWindowTokens == 8192 && saved.MaxOutputTokens == 262144 && requests[^1].ContextTokens == 8192 && requests[^1].OutputTokens == 262144,
+    Check(saved.ContextWindowTokens == 32768 && saved.MaxOutputTokens == 262144 && requests[^1].ContextTokens == 32768 && requests[^1].OutputTokens == 262144,
         "new connection defaults were not sent and preserved independently");
     var oneMillion = connection with { ContextWindowTokens = 1_000_000 };
     saved = await client.SaveAsync(oneMillion);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runResourceTask } from '../platform/resources/resource-task.mjs';
 import { runToolLoop } from '../orchestration/tool-loop.mjs';
+import { RetrievalCoordinator } from '../orchestration/retrieval/coordinator.mjs';
 
 function resourceFixture(responses) {
   const requests = [], released = [];
@@ -19,6 +20,48 @@ function resourceFixture(responses) {
 }
 const denied = () => ({ status: 'denied', reason: 'RESOURCE_WAIT_TIMEOUT', mode: 'fixture' });
 const granted = () => ({ status: 'granted', leaseId: 'owned-foreground' });
+
+test('transport probes before cleanup, waits once, and never dispatches an unadmitted operation', async () => {
+  for (const released of [true, false]) {
+    const resources = resourceFixture([{ status: 'denied', reason: 'RESOURCE_PRESSURE' }, granted()]);
+    let effects = 0, cleanups = 0;
+    await runResourceTask(resources, { workload: 'model-transport', waitMs: 10000 }, () => { effects++; }, {
+      onCapacityUnavailable: async () => { cleanups++; assert.equal(resources.requests[0].waitMs, 0); return { released }; }
+    });
+    assert.equal(resources.requests.length, 2);
+    assert.equal(resources.requests[1].waitMs, 10000);
+    assert.equal(resources.requests[1].memoryBytes, resources.requests[0].memoryBytes);
+    assert.equal(effects, 1); assert.equal(cleanups, 1);
+  }
+  const resources = resourceFixture([{ status: 'denied', reason: 'RESOURCE_PRESSURE' }, denied()]);
+  await assert.rejects(runResourceTask(resources, { workload: 'model-transport' }, () => assert.fail('not admitted'), {
+    onCapacityUnavailable: async () => ({ released: false, results: [{ service: 'embedding', reason: 'busy' }] })
+  }), error => {
+    assert.equal(error.code, 'RESOURCE_WAIT_TIMEOUT');
+    assert.equal(error.details.actionStarted, false);
+    assert.equal(error.details.admissionRecovery.releasedIdleInference, false);
+    assert.equal(error.details.admissionRecovery.granted, false);
+    return true;
+  });
+  assert.equal(resources.requests.length, 2);
+});
+
+test('retrieval recovery includes CPU rerankers, preserves failed cleanup debt, and respects cancellation', async () => {
+  const controller = new AbortController(), called = [];
+  const owner = {
+    embeddings: { releaseIdleResources: async () => {
+      called.push('embedding'); throw Object.assign(new Error('exit unknown'), { code: 'EMBEDDING_CLOSE_TIMEOUT' });
+    } },
+    reranker: { releaseIdleResources: async () => { called.push('reranker'); return { released: true, residentMemoryBytes: 512 }; } }
+  };
+  const result = await RetrievalCoordinator.prototype.releaseIdleResources.call(owner, { signal: controller.signal });
+  assert.equal(result.released, true); assert.deepEqual(called, ['embedding', 'reranker']);
+  assert.equal(result.results[0].released, false); assert.equal(result.results[0].code, 'EMBEDDING_CLOSE_TIMEOUT');
+  assert.equal(result.results[1].residentMemoryBytes, 512);
+  controller.abort();
+  await assert.rejects(RetrievalCoordinator.prototype.releaseIdleResources.call(owner, { signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(called.length, 2);
+});
 
 test('confirmed idle release retries only admission and preserves the requested resource budget', async () => {
   const resources = resourceFixture([denied(), granted()]);
