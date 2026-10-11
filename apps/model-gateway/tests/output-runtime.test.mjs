@@ -24,6 +24,7 @@ async function fixture(t, protocol, { grammarRejection = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kynxa-output-runtime-'));
   const seen = [];
   let truncatedRounds = 0;
+  let customPlan;
   const upstream = createServer(async (request, response) => {
     let source = '';
     for await (const chunk of request) source += chunk;
@@ -36,7 +37,11 @@ async function fixture(t, protocol, { grammarRejection = false } = {}) {
     }
     const truncated = truncatedRounds > 0;
     if (truncated) truncatedRounds--;
-    response.end(JSON.stringify(nativeReply(protocol, truncated ? 'partial-code' : 'complete-answer', truncated)));
+    const isReview = JSON.stringify(seen.at(-1)).includes('[KYNXA_TASK_COMPLETION_REVIEW]');
+    response.end(JSON.stringify(isReview ? nativeReply(protocol,
+      '<kynxa_task>{"state":"complete","reason":"The original fixture task is satisfied by the complete saved output."}</kynxa_task>', false)
+      : customPlan ? await customPlan(protocol, seen.length)
+      : nativeReply(protocol, truncated ? 'partial-code' : 'complete-answer', truncated)));
   });
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
   const store = new ModelStore({ dataHome: root });
@@ -52,8 +57,27 @@ async function fixture(t, protocol, { grammarRejection = false } = {}) {
   isolateFixtureMcpCatalog(runtime.tools);
   t.after(async () => { await runtime.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const input = { conversationId: randomUUID(), requestId: randomUUID(), userMessageId: randomUUID(), provider: 'output-model', model: 'model', message: '现在写代码' };
-  return { runtime, seen, input, setTruncated: rounds => { truncatedRounds = rounds; } };
+  return { runtime, seen, input, setTruncated: rounds => { truncatedRounds = rounds; }, setPlan: plan => { customPlan = plan; } };
 }
+
+for (const streaming of [false, true]) test(`normal-stop unfinished task resumes through ${streaming ? 'stream' : 'JSON'} runtime and persists one final answer`, async t => {
+  const f = await fixture(t, 'openai-completions');
+  f.setPlan((protocol, round) => nativeReply(protocol, round === 1
+    ? '已完成第一部分。\n<kynxa_task>{"state":"continue","next":"完成第二部分"}</kynxa_task>'
+    : '第二部分也已完成。\n<kynxa_task>{"state":"complete"}</kynxa_task>', false));
+  const events = [];
+  const input = { ...f.input, permissionMode: 'ask' };
+  const result = streaming ? await f.runtime.replyStream(input, event => events.push(event)) : await f.runtime.reply(input);
+  assert.equal(typeof result === 'string' ? result : result.content, '已完成第一部分。\n\n第二部分也已完成。');
+  assert.equal(f.seen.length, 3);
+  assert.ok(f.seen[0].messages.some(message => message.role === 'system' && message.content.includes('kynxa_task')));
+  const assistant = (await f.runtime.conversations.readMessages(input.conversationId)).at(-1);
+  assert.equal(assistant.Status, 'completed'); assert.ok(!assistant.Content.includes('kynxa_task'));
+  assert.equal(assistant.ToolRun.taskState.state, 'complete');
+  assert.equal(assistant.ToolRun.taskState.resumes, 1);
+  assert.equal(assistant.ToolRun.diagnostics.executedToolCalls, 0);
+  assert.ok(events.filter(event => event.type === 'text_delta').every(event => !event.delta.includes('kynxa_task')));
+});
 
 for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
   test(`${protocol}: larger independent output is sent upstream and visible reasoning persists`, async t => {
@@ -71,14 +95,14 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     f.setTruncated(1);
     const input = { ...f.input, ...(tools ? { permissionMode: 'ask' } : {}) };
     assert.equal(await f.runtime.reply(input), 'partial-codecomplete-answer');
-    assert.equal(f.seen.length, 2);
+    assert.equal(f.seen.length, 3);
     assert.match(JSON.stringify(f.seen[1]), /KYNXA_OUTPUT_CONTINUATION/);
     const history = await f.runtime.conversations.readMessages(input.conversationId);
     const assistant = history.at(-1);
     assert.equal(assistant.Content, 'partial-codecomplete-answer');
     assert.equal(assistant.Status, 'completed');
     const modelHistory = await f.runtime.conversations.readModelMessages(input.conversationId);
-    assert.equal(modelHistory.at(-1).ModelTranscript.rounds.length, 2);
+    assert.equal(modelHistory.at(-1).ModelTranscript.rounds.length, 3);
     assert.ok(assistant.ToolActivities.some(activity => activity.name === 'context.compact' && activity.status === 'completed'));
     assert.equal(assistant.ToolRun.diagnostics.executedToolCalls, 0);
   });
@@ -89,7 +113,7 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
     const events = [];
     const result = await f.runtime.replyStream({ ...f.input, permissionMode: 'ask' }, event => events.push(event));
     assert.equal(result.content, 'partial-codecomplete-answer');
-    assert.equal(f.seen.length, 2);
+    assert.equal(f.seen.length, 3);
     assert.equal((await f.runtime.conversations.readMessages(f.input.conversationId)).at(-1).Status, 'completed');
     assert.ok(events.some(event => event.delta === 'partial-code' || event.content === 'partial-code'));
     assert.ok(events.some(event => event.type === 'tool_result' && event.tool.name === 'context.compact'));
