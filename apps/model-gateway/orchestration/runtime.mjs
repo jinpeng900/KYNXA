@@ -19,6 +19,7 @@ import { HostTerminalRunner } from '../tools/host-terminal-runner.mjs';
 import { toolDeclarations, decodeToolTurn, estimateToolMessageTokens, wireCatalog } from '../models/tool-protocols.mjs';
 import { readToolStream } from '../models/tool-streaming.mjs';
 import { runToolLoop, toolPolicyHash } from './tool-loop.mjs';
+import { TASK_CONTINUATION_NOTICE } from './task-continuation.mjs';
 import { DEFAULT_TOOL_RUN_LIMITS, toolRunLimits } from './tool-run.mjs';
 import { applyAssistantSegmentEvent, assistantSegmentText } from '../platform/assistant-segments.mjs';
 import { projectLocalToolCatalog, planLocalToolGrammarRecovery } from '../models/local-tool-compatibility.mjs';
@@ -325,6 +326,7 @@ export class ModelRuntime {
       const hasToolHistory = [...projection.records.values()].some(record => record.rounds.some(round => round.calls.length));
       const webSettings = toolContext ? (await this.retrieval.effective(toolContext.projectId)).web : null;
       const composeAdditionalSystem = evidencePrompt => [catalog.length ? toolSystem : '', hasToolHistory ? MODEL_HISTORY_NOTICE : '',
+        greeting || smallTalk ? '' : TASK_CONTINUATION_NOTICE,
         toolContext || evidencePrompt ? REPLY_SCOPE_NOTICE : '', interpretationPrompt,
         assistant.RetrievalOutcome ? `Automatic evidence outcome: ${JSON.stringify(assistant.RetrievalOutcome)}.` : '', evidencePrompt,
         webSettings?.language && webSettings.language !== 'auto' ? `Prefer ${webSettings.language} web sources when relevant; never rewrite evidence or fabricate translated URLs.` : '',
@@ -449,6 +451,7 @@ export class ModelRuntime {
           maximumTokens: Math.max(0, initial.metrics.inputBudgetTokens - nextSchemaTokens -
             estimateToolMessageTokens([{ role: 'user', content: input.message }]) - (initial.metrics.memoryTokens ?? 0) - 512) }) : '';
         const nextSystem = [nextToolSystem, hasToolHistory ? MODEL_HISTORY_NOTICE : '', REPLY_SCOPE_NOTICE,
+          greeting || smallTalk ? '' : TASK_CONTINUATION_NOTICE,
           retrievalEvidence.prompt ? 'Automatic evidence was deferred after a context rejection; use current tool observations or read sources as needed.' : '',
           greeting ? 'Reply with a short, natural greeting in the user\'s language.' : ''].filter(Boolean).join('\n');
         const rebuilt = buildContext({ ...smallerInput, additionalSystem: nextSystem, reservedInputTokens: nextSchemaTokens });
