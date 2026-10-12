@@ -1,11 +1,13 @@
 ---
 name: kynxa-development
-description: "开发、修改、重构和审查 KYNXA 仓库代码时使用，涵盖 Windows 原生 Rust 网关与资源服务、C#/WinUI/XAML 桌面、WebView2、聊天与工作记忆、接口、测试和构建脚本。要求模块职责清晰并保持已有交互与数据一致性。不是 KYNXA 应用内的模型技能，不用于无关项目或纯聊天。"
+description: "开发、修改、重构和审查 KYNXA Windows x64 项目时使用，按当前 Rust 原生网关与资源服务、C#/WinUI/ToolHost、WebView2 和 PowerShell 的职责维护代码、接口、测试与打包。保持模块边界、交互和数据兼容；不是应用内模型 Skill，不用于无关项目或纯聊天。"
 ---
 
 # KYNXA 项目开发
 
 本技能供开发 KYNXA 的编码代理使用。用户当前指令和已有授权优先；按现有项目实现推进，不把设计计划当成已经存在的能力。
+
+本技能与代码规范技能随仓库版本共同维护，由根目录 `AGENTS.md` 引用；成员拉取项目即可取得完整技能和参考文件，无需复制到个人全局技能目录。本文相对路径均从所在文件解析；应用内 MCP/Skill 的安装与执行属于 `apps/official-tools/` 和 Rust tools 领域，不能把开发技能当作产品运行时配置。
 
 当前正式后端是 `apps/agent-core/src/bin/kynxa-gateway.rs` 启动的 Windows 原生 Rust 网关，公开 HTTP/SSE 与桌面合同保持兼容。WebView 界面 JavaScript 保留；核心不依赖 Node，也不能回退为 JS 网关。安装包携带私有 Node 兼容运行时与固定的内置 MCP 依赖，Node 仅供扩展及已核验的沙箱 JS Skill 使用，不要求用户安装或配置系统 PATH。Rust 统一管理外部 MCP；已信任服务在核心就绪后按实际资源有界后台预热，其余按需加载，启动路径不自动下载依赖。
 
@@ -16,11 +18,13 @@ description: "开发、修改、重构和审查 KYNXA 仓库代码时使用，�
 1. 明确用户要改变的行为、触发条件和可观察结果。信息足够就直接实施，常规实现选择自行解决。用户只要求审查或方案时交付对应结果，不据此修改产品代码。
 2. 检查工作区已有改动，使用 `rg` 找到入口、调用方、数据所有者和相关测试。只读取与本次任务有关的代码和文档。
    多人开发或架构调整同时读取 [五人职责](../../../docs/team/README.md) 与 [依赖边界](../../../docs/architecture/team-boundaries.md)，按 `module-ownership.json` 定位主责，不把所有服务重新放回扁平目录。
+   架构现状以 [原生网关](../../../docs/architecture/native-gateway.md)、实际源码及工程清单为准；迁移历史、旧评测记录和目录名称不能替代当前入口。Windows x64 是本轮发布范围，不因工程声明其他平台或条件分支而扩展支持承诺。
 3. 根据下表读取需要的参考；先确认职责和必须保留的行为，再修改代码。不要为小改动遍读全部参考或运行全部测试。
 
 | 任务 | 读取内容 |
 |---|---|
 | 编写、修改或审查代码 | [代码与模块规范](references/coding-standards.md) 的相关部分；下列规则按任务叠加 |
+| 语言选择、跨模块调用、启动与随包路径 | [当前语言与入口](references/coding-standards.md#当前语言与入口)；详细调用关系由原生架构文档维护 |
 | 侧栏、语言、聊天展示、流式回复 | [交互和数据约定](references/invariants.md) 的对应部分 |
 | 聊天保存、工作关系、记忆、上下文或迁移 | [交互和数据约定](references/invariants.md) 的数据部分，以及所链接的架构文档 |
 | 测试、构建、验收或多人协作 | [验证与协作](references/validation.md) |
