@@ -1,11 +1,20 @@
 # 当前代码组织与维护边界
 
-更新：2026-10-05；已提交基线 `5637dc3`，本次重组在工作区。本文件描述已经运行的 C#/WinUI → Node.js 网关 → 模型接口及原生工具链。根 README 中的 Rust Authority、持久任务图和跨崩溃精确续跑仍是后续设计，不能用它们解释当前代码。
+当前入口（2026-10-12）为 WinUI/WebView2 → Windows 原生 Rust HTTP/SSE 网关，后端不启动或发货 Node/NAPI；WebView 前端及开发守卫保留。当前六领域、逐文件 I/O 接线名单、纯规则依赖限制与构建见 [原生网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [主责清单](../team/module-ownership.json)。
+
+下文为 2026-10-11 及更早的目录/混合版迁移历史，旧 Node 路径、SDK 分工与当时验证命令不作为当前入口；原有说明保留供追溯。历史基线中 C#/WinUI → Node.js SDK/传输适配器保留实际第三方模型、MCP、文档/代码解析和向量 SDK；任务控制、模型状态、工具业务、索引调度及正式日志/SQLite/资料事务迁入 [Rust Agent 核心历史说明](rust-agent-control.md)。根 README 中的独立 Rust 权限 Authority、持久任务图和跨崩溃精确续跑仍是后续设计，不等同于此迁移。
 
 ## 目录与职责
 
 ```text
 apps/
+├─ agent-core/src/
+│  ├─ orchestration/         A：任务、预算、进度与恢复控制
+│  ├─ models/                C：协议流状态、历史/上下文选择与恢复计算
+│  ├─ tools/                 D：发现、策略、配置合同与浏览器目标规则
+│  ├─ retrieval/             E：分块、候选、查询与有状态证据账本
+│  ├─ storage/               E：数据/配置/记忆合同；不拥有正式磁盘写入
+│  └─ resources/             A：资源建议与推理需求；硬件准入归资源服务
 ├─ desktop/
 │  ├─ Views/                 主窗口布局、事件接线、聊天与侧栏可见状态
 │  ├─ Controls/              可复用控件、WebView2 聊天与图片预览

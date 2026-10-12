@@ -30,36 +30,14 @@
     <Content Include="Resources\Math\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Diagrams\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Transcript\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="Build\node-runtime.json" Link="node-runtime.json" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
-    <Content Include="..\model-gateway\**\*.mjs" Exclude="..\model-gateway\node_modules\**;..\model-gateway\tests\**;..\model-gateway\official-tools\**;..\model-gateway\migrate-storage.mjs" Link="model-gateway\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\data\retrieval\parser-licenses.txt"
-             Link="model-gateway\data\retrieval\parser-licenses.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\manifest.json;..\model-gateway\official-tools\LICENSE.txt"
-             Link="model-gateway\official-tools\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\MCP\catalog.mjs"
-             Link="model-gateway\official-tools\MCP\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Tools\catalog.mjs;..\model-gateway\official-tools\Tools\computer.mjs;..\model-gateway\official-tools\Tools\terminal.mjs"
-             Link="model-gateway\official-tools\Tools\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\workspace-inspect\SKILL.md"
-             Link="model-gateway\official-tools\Skills\workspace-inspect\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\safe-file-edit\SKILL.md"
-             Link="model-gateway\official-tools\Skills\safe-file-edit\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\browser-workflow\SKILL.md"
-             Link="model-gateway\official-tools\Skills\browser-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\desktop-workflow\SKILL.md"
-             Link="model-gateway\official-tools\Skills\desktop-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\terminal-workflow\SKILL.md"
-             Link="model-gateway\official-tools\Skills\terminal-workflow\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\web-research\SKILL.md"
-             Link="model-gateway\official-tools\Skills\web-research\SKILL.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\internal-comms\SKILL.md;..\model-gateway\official-tools\Skills\internal-comms\UPSTREAM.md;..\model-gateway\official-tools\Skills\internal-comms\LICENSE.txt"
-             Link="model-gateway\official-tools\Skills\internal-comms\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\model-gateway\official-tools\Skills\internal-comms\examples\3p-updates.md;..\model-gateway\official-tools\Skills\internal-comms\examples\company-newsletter.md;..\model-gateway\official-tools\Skills\internal-comms\examples\faq-answers.md;..\model-gateway\official-tools\Skills\internal-comms\examples\general-comms.md"
-             Link="model-gateway\official-tools\Skills\internal-comms\examples\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Official resources are static data; runtime tool execution is provided by Rust.
+         官方资源仅为静态资料；工具实际执行由 Rust 提供，不再分发后端 JavaScript。 -->
+    <Content Include="..\official-tools\**\*" Exclude="..\official-tools\**\*.js;..\official-tools\**\*.mjs;..\official-tools\**\*.cjs"
+             Link="official-tools\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Compile Include="..\shared\Tools\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
     <Compile Include="..\shared\Chat\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
     <Compile Include="..\shared\Memory\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
@@ -113,7 +91,12 @@
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- Reflection-based JSON contracts need their members retained until trim-safe serializers are introduced.
+         反射 JSON 合同在改为可裁剪序列化之前必须保留成员，避免 Release 首次使用时丢失协议字段。 -->
+    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">False</PublishTrimmed>
+    <!-- Carry the Windows App SDK with Release packages; .NET self-containment alone does not include WinUI.
+         Release 随包提供 Windows App SDK；仅启用 .NET 自包含并不会包含 WinUI 运行库。 -->
+    <WindowsAppSDKSelfContained Condition="'$(Configuration)' == 'Release'">True</WindowsAppSDKSelfContained>
   </PropertyGroup>
   <Import Project="Build\RuntimePackaging.targets" />
 </Project>

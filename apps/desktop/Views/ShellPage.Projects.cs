@@ -23,45 +23,8 @@ public sealed partial class ShellPage
     private Func<Task>? _undoSidebarChange;
     private bool _projectsReady;
     private bool _projectActionPending;
-    private bool _savingOnClose;
-    private bool _closeApproved;
     private bool _projectViewClosed;
     private bool _projectLifetimeAttached;
-
-    private async void SaveBeforeClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
-    {
-        if (_closeApproved) return;
-        e.Cancel = true;
-        if (_savingOnClose || StoragePaths.IsMigrating) return;
-        if (_projectActionPending || _sendingPrompt || _retryingReplies.Count > 0)
-        {
-            ProjectNotice.Message = UiText.Get("正在保存聊天，请稍后再关闭。");
-            ProjectNotice.IsOpen = true;
-            return;
-        }
-        _savingOnClose = true;
-        IsEnabled = false;
-        try
-        {
-            CaptureProjectDraft();
-            CaptureStandaloneDraft();
-            await _projectStore.SaveAsync(_projects);
-            await _projectStore.SaveChatsAsync(_standaloneChats);
-            await MessageTimePresentation.FlushAsync();
-            _closeApproved = true;
-            App.Window.Close();
-        }
-        catch (Exception error)
-        {
-            var choice = await new ContentDialog
-            {
-                XamlRoot = XamlRoot, Title = UiText.Get("草稿保存未完成"), Content = error.Message + UiText.Get(" 已提交的聊天由会话服务保存，尚未保存的草稿或排序可能丢失。"),
-                PrimaryButtonText = UiText.Get("仍然关闭"), CloseButtonText = UiText.Get("返回"), DefaultButton = ContentDialogButton.Close
-            }.ShowAsync();
-            if (choice == ContentDialogResult.Primary) { _closeApproved = true; App.Window.Close(); }
-        }
-        finally { _savingOnClose = false; if (!_closeApproved) IsEnabled = true; }
-    }
 
     private async Task InitializeProjectsAsync()
     {
@@ -79,12 +42,13 @@ public sealed partial class ShellPage
                 _orderRows.Clear();
                 _projectMenuRow = null;
                 StopReplies();
+                StopHistoryLoads();
                 _projectStore.Dispose();
             };
         }
         try
         {
-            var catalog = await _projectStore.LoadAsync();
+            var catalog = await _projectStore.LoadMetadataAsync();
             if (_projectViewClosed) return;
             _projects = catalog.Projects;
             _standaloneChats = catalog.Chats;
@@ -402,7 +366,7 @@ public sealed partial class ShellPage
 
     private async Task RunProjectActionAsync(Func<Task> action)
     {
-        if (!_projectsReady || _projectActionPending) return;
+        if (!_projectsReady || _projectActionPending || _savingOnClose || _chatClosing) return;
         _projectActionPending = true;
         UpdateSendButtonState();
         try { await action(); }
@@ -414,7 +378,7 @@ public sealed partial class ShellPage
             // 将可见元数据回退到最近一次成功保存的正式目录。
             try
             {
-                var catalog = await _projectStore.LoadAsync();
+                var catalog = await _projectStore.LoadMetadataAsync();
                 PreservePendingPresentations(catalog);
                 _projects = catalog.Projects;
                 _standaloneChats = catalog.Chats;
@@ -433,10 +397,14 @@ public sealed partial class ShellPage
         }
     }
 
-    private async Task ShowProjectErrorAsync(string title, string message) => await new ContentDialog
+    private async Task ShowProjectErrorAsync(string title, string message)
     {
-        XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = UiText.Get("知道了")
-    }.ShowAsync();
+        if (_savingOnClose) { _closeError = message; return; }
+        await new ContentDialog
+        {
+            XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = UiText.Get("知道了")
+        }.ShowAsync();
+    }
 
     private void PreservePendingPresentations(ConversationCatalog catalog)
     {

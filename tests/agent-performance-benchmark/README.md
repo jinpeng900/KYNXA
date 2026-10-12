@@ -1,6 +1,20 @@
-# KYNXA Agent 系统评测入口
+# KYNXA Agent 系统评测历史入口
+
+2026-10-12 原生迁移说明：下文的执行入口、命令与成绩均属于迁移前 Node 网关。`run-agent.mjs`、`run-comparative.mjs`、`run-windows-six.mjs`、Pi 适配器及其源码指纹依赖旧 `apps/model-gateway`，不能作为当前原生网关入口运行；尚未完成原生评测适配或重测。以下说明按当时版本理解，保留原题集、金标、评分、依赖锁与原始报告，不将历史成绩改称本轮 Rust 成绩。
+
+独立的 `evaluation.mjs`、`rescore.mjs`、`system-suite.mjs` 和 `windows-six-suite.mjs` 保留；它们可用于历史数据评分或生成固定题集，不能单独证明当前网关完成这些任务。当前运行时/桌面合同验证见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
 
 这里测固定模型如何通过 KYNXA 的上下文、记忆、检索、工具循环和正式存储完成任务。`tests/retrieval-benchmark` 中的 SciFact Recall/nDCG 只回答检索组件的问题；它不能替代最终事实正确性、引用支持、跨语言回答、续问或工具任务的成功率。原有 40 道英文 SciFact 也不应重新标成中文或续问题。
+
+## Windows 六任务入口：2026-10-10 适配
+
+`run-windows-six.mjs` 沿用原六题、固定 fixture/gold、30 分钟任务预算及独立数据目录。适配版本为 `windows-six-action-readiness-v2`，评分版本为 `windows-six-received-evidence-v2`；历史结果不能不注明口径就混入新版得分。
+
+- 开始任务只检查当前动作所需的工作区文件、目标词法来源或确认记忆，不等待整个索引作业完成、也不要求已有向量。目标词法准备给出两秒机会，仍未就绪时使用真实文件工具并记录覆盖状态，不能把退路写成索引完成。
+- 已有兼容缓存继续复用；允许真实新增文档嵌入。默认每任务最多准入 1,024 个文档块，可用 `--document-embedding-limit` 在 1～100,000 内显式配置。记录实际请求、完成与预算拒绝，不重新全量准备仓库，也不再为维持缓存模式永久禁止新推理。
+- 自动证据须同时对应正式归档、当前引用版本和实际模型请求中的完整原文，才可以满足已读条件。仅检索标题、未发送的归档、源文件已变化或者模型自报已读不计分；资料缺失题仍需要同版本完整来源覆盖。代码测试与人工语义审查不因取消重复读取计数而放宽。
+
+这次只修改入口与评分适配。用户要求不再运行测试后，没有执行六题、模型或新增嵌入；此前的 1/6 结果属于旧入口，不能作为 v2 的实测得分。
 
 ## 第二版：实际 Pi SDK 同模型对照
 
@@ -34,7 +48,7 @@ node --test --test-concurrency=1 tests/agent-performance-benchmark/system-suite.
 
 回归采用 localhost 脚本上游，驱动真实 SDK 与生产工具/存储；没有真实模型调用，也不算 Agent 分数。可选 SDK 缺失时集成项明确跳过，缺失检测仍运行。实际同模型结果、独立核验、失败分类与公开同尺度参照见 [完整基准报告](../../docs/architecture/system-benchmark-20261006.md)。本组不覆盖 200 条消息恢复、长任务、真实仓库修复、UI、浏览器或桌面；公开检索基准单独报告。
 
-## 可运行的第一版
+## 历史第一版：Node 网关
 
 `run-agent.mjs` 直接复用生产 `ModelRuntime.reply`、`ToolService`、`ConversationStore`、`MemoryService` 与 `RetrievalCoordinator`。固定 fixture、标准答案、usage 与成本验收集中在纯评测模块 `evaluation.mjs`，入口负责临时环境、执行与 CLI。它不启动已有网关，每个任务/配置建立新的临时 Data、扩展目录和挂载工作目录，执行后关闭运行时并清理。所有资料均为合成 fixture，版本为 `agent-synthetic-v1`；没有调用正式聊天、记忆、资料库或桌面。模型资产只读复用仓库/安装包的固定 E5 清单。
 

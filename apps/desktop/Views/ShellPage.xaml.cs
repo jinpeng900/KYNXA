@@ -41,6 +41,8 @@ public sealed partial class ShellPage : Page
         Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;
         ConversationMessages.ToolResultRequested += ToolResultRequested;
+        ConversationMessages.HistoryRequested += Transcript_HistoryRequested;
+        ConversationMessages.HistoryNavigationRequested += Transcript_HistoryNavigationRequested;
         ScreenshotPanel.ConfigureApi(_agentApiClient);
         ScreenshotPanel.ScreenshotOpenRequested += ToolResultRequested;
         ScreenshotPanel.ScreenshotsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
@@ -497,6 +499,7 @@ public sealed partial class ShellPage : Page
 
     private void OpenModelManagement(bool customModels = false)
     {
+        if (_chatClosing || _savingOnClose || _projectViewClosed) return;
         if (_modelManagementWindow is not null)
         {
             if (customModels) _modelManagementWindow.ShowCustomModels();
@@ -504,16 +507,20 @@ public sealed partial class ShellPage : Page
             return;
         }
 
-        _modelManagementWindow = new ModelManagementWindow();
-        _modelManagementWindow.Closed += ModelManagementWindow_Closed;
-        if (customModels) _modelManagementWindow.ShowCustomModels();
-        _modelManagementWindow.Activate();
+        var window = new ModelManagementWindow();
+        _modelManagementWindow = window;
+        void CloseModels(object sender, WindowEventArgs args) => window.CloseForOwner();
+        App.Window.Closed += CloseModels;
+        window.Closed += (_, _) => App.Window.Closed -= CloseModels;
+        window.Closed += ModelManagementWindow_Closed;
+        if (customModels) window.ShowCustomModels();
+        window.Activate();
     }
 
     private void ModelManagementWindow_Closed(object sender, WindowEventArgs args)
     {
         _modelManagementWindow = null;
-        _ = RefreshModelPickerAsync();
+        if (!_chatClosing && !_projectViewClosed && !_closeApproved) _ = RefreshModelPickerAsync();
     }
 
     private void PromptTextBox_TextChanged(object sender, TextChangedEventArgs e)

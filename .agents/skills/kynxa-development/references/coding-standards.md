@@ -4,9 +4,11 @@
 
 ## 模块职责与依赖
 
-当前正式链路：WinUI/C# 桌面 → 本机 Node.js 网关 → 已配置的云端或本地模型接口，以及网关 → C# ToolHost。桌面使用 WebView2 展示聊天，网关拥有正式会话、记忆和上下文组装。读取 [仓库说明](../../../../README.zh.md) 与相关代码，区分现有工具执行和后续持久任务恢复等计划。
+当前正式链路：WinUI/C# 桌面 → Windows 原生 `kynxa-gateway.exe` → 已配置模型接口、Rust 推理/工具/存储服务及 C# ToolHost。入口在 `apps/agent-core/src/bin/kynxa-gateway.rs`，HTTP/SSE 在 `src/gateway.rs`；任务、恢复、资源准入、真实模型 HTTP/ORT 推理与正式日志/SQLite/资料事务均由 Rust 执行。正式写入仍经单网关的串行事务，桌面不新增写入者。读取 [Rust 接线](../../../../docs/architecture/native-gateway.md)，按实际函数区分业务规则与 I/O 生命周期，不再新增 Node/NAPI 接线或后端 JavaScript 回退。
 
-五人职责及实际目录见 [模块边界](../../../../docs/architecture/team-boundaries.md)。网关分为 A 的 Orchestration/Platform、C 的 Models、D 的 Tools 与 E 的 Data；桌面 Services 对应 Integration/Presentation/Models/Tools/Data。Shared 按 Chat/Tools/Memory 合同分目录；ToolHost 按 Desktop/Terminal/Sandbox/Native 分目录。B 维护全部 ShellPage partial。目录、静态依赖及稳定入口由 `node tools/development/check-architecture.mjs` 校验，`--details` 查看回归套件归属。
+五人职责及实际目录见 [模块边界](../../../../docs/architecture/team-boundaries.md)。Rust 的 orchestration/resources 与组合根归 A、models 归 C、tools 归 D、retrieval/storage 归 E；静态官方工具资源位于 `apps/official-tools/`。桌面 Services 对应 Integration/Presentation/Models/Tools/Data；Shared 按 Chat/Tools/Memory 合同分目录；ToolHost 按 Desktop/Terminal/Sandbox/Native 分目录。B 维护全部 ShellPage partial。`node tools/development/check-architecture.mjs` 仅是开发期检查，`--details` 查看回归套件归属，不构成产品 Node 依赖。
+
+新增后端计算、状态、协议和实际执行使用 Rust，放入已有领域模块。纯规则只能使用 `module-ownership.json` 的 `rustApps[].allowedDomainDependencies`，保持禁止循环与禁止反向依赖 I/O 层；跨域执行接线须逐文件登记 `integrationModules` 的 `allowedDomains`，真实网络、文件、线程和推理执行须列入 `executionModules`。名称叫 `gateway_*` 不会自动获得跨域权限，不通过宽泛前缀放行。UI 继续使用 C#/XAML/WebView2，启动与构建接线使用 PowerShell；开发工具可使用 Node；安装包的私有 Node 仅用于 MCP 和已核验的 JS Skill，不承担正式后端职责。迁移以行为兼容、单一规则来源和真实调用接线验收，不以行数或文件数量替代工程结果。
 
 | 位置或角色 | 应承担的职责 | 应避免的职责 |
 |---|---|---|
@@ -43,9 +45,9 @@
 ## 异步、并发与资源
 
 - 除框架事件外返回 `Task`，不要使用 `async void`。UI 线程不调用 `.Wait()`/`.Result` 等阻塞等待。
-- 将 `CancellationToken`/`AbortSignal` 传到网络、读取与生成操作；明确原子写入的提交边界，避免取消后留下半份正式数据。
+- 将 C# `CancellationToken` 和 Rust 请求取消信号传到网络、读取、扫描与推理操作；明确原子写入的提交边界，取消后已发生的副作用仍须保存真实回执。
 - 从可变 UI 集合取得所需快照后再跨越首个 `await`。回写前检查会话 ID、请求 ID、实例或代次，晚到结果只能影响其所属对象。
-- 有意后台运行的任务必须观察异常并有生命周期约束；不能丢弃 Promise/Task 后让错误或旧状态污染下一聊天。
+- 有意后台运行的任务必须观察异常并有生命周期约束；Rust 异步任务、阻塞线程及 C# Task 均不能成为污染下一聊天的无主作业。
 - 所有者负责释放订阅、计时器、指针捕获、流和进程。切换会话、卸载和关闭窗口均应考虑过期操作。
 - 明确区分取消、超时、冲突、数据损坏和其他故障；不把 I/O 错误当成空数据或成功吞掉。
 - 维持队列和锁的现有顺序。队列可恢复以继续后续操作，但本次失败必须返回调用方；受保护的并行操作全部结束后才释放保护范围。
@@ -59,3 +61,4 @@
 - 保留 HTTP 状态码与机器错误码，UI 再转换为可读提示。模型服务的认证字段进入对应请求，不进入模型提示词。
 - C# 文件被多个 smoke 项目通过 `Compile Include` 链接时，移动或增加依赖同时检查这些项目。
 - 使用现有技术和包；增加依赖先确认必要性、发布资源与生命周期，不因参考项目采用某库就照搬其架构。
+- 模型调用计量依据真实 HTTP attempt 回执，`requestDispatched` 不等于供应商收费证明；本地参数拒绝或发送前取消不能记为已调用。消息传输 `Status=completed` 不等于任务核验成功，必须保留 `taskCompletion` 的完成、部分、核验失败或执行未知状态。

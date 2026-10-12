@@ -1,0 +1,2609 @@
+{
+  "tools": [
+    {
+      "name": "filesystem.list",
+      "description": "List one directory without following links. Returns bounded entries.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.read",
+      "description": "Read UTF-8 text (file <=1 MiB) with full-file SHA-256. Optional startLine/endLine select inclusive 1-based lines. Continue nextOffset while hasMore, retaining the same line range; restart if hash changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "maxBytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "maxChars": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64000
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1048576,
+            "description": "Absolute UTF-16 position; use nextOffset to avoid splitting characters."
+          },
+          "startLine": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048577
+          },
+          "endLine": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048577
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.stat",
+      "description": "Inspect a file/directory. Small regular files include a SHA-256 for conflict-safe changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.search",
+      "description": "Find literal UTF-8 content or paths without an index; path mode reads names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Ignore files apply by default. Changed sources require a fresh search.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "maxMatches": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "path"
+            ],
+            "description": "Default content; path matches a literal relative-path/name substring (case-insensitive on Windows)."
+          },
+          "respectIgnoreFiles": {
+            "type": "boolean",
+            "description": "Default true: honor .gitignore and .ignore. False includes ignored files; protected paths and generated-directory exclusions remain."
+          },
+          "recursive": {
+            "type": "boolean"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "description": "Opaque nextCursor from the preceding page in this request; omit to start over."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.write",
+      "description": "Atomically write UTF-8 text. Existing files require their exact expectedHash; new files require null. Parent must exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "content": {
+            "type": "string"
+          },
+          "expectedHash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 returned by read/stat; null only when creating a new file or deleting an empty directory."
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "expectedHash"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.edit",
+      "description": "Replace exactly one literal occurrence in a UTF-8 file. Requires its exact expectedHash and preserves all other text.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "oldText": {
+            "type": "string",
+            "minLength": 1
+          },
+          "newText": {
+            "type": "string"
+          },
+          "expectedHash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "oldText",
+          "newText",
+          "expectedHash"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.delete",
+      "description": "Delete one regular file with expectedHash, or one empty directory with null. Never deletes recursively or the work root.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "expectedHash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 returned by read/stat; null only when creating a new file or deleting an empty directory."
+          }
+        },
+        "required": [
+          "path",
+          "expectedHash"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "filesystem.mkdir",
+      "description": "Create one directory. Its parent must exist; existing directories are kept.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "work.folder.bind",
+      "source": "builtin",
+      "description": "Associate an existing directory with this chat's current work for ongoing work and automatic incremental indexing. Use when the user asks to keep working in a folder, not for a one-time read. This persists the work binding; never creates or moves files, never changes chat ownership. Existing bindings are replaced only when the user requests that change. The current turn retains its original file permissions; use absolute paths with reason until the next turn.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "web.fetch",
+      "source": "builtin",
+      "description": "Read a public HTTP(S) page as text, preserving its final URL and links. No Python, cookies or JavaScript. Private/local, signed-in and interactive pages need browser MCP. Full bounded extracted text is archived; use tool.result.read for stable paging. Each fetch is live.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16000
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 60000
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "url",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "knowledge.plan",
+      "source": "builtin",
+      "modelExposure": "on-demand",
+      "description": "Optional revisable request/candidate plan; {} reads it. sourceRefs require current authorization/version; expectedRevision guards updates. No permission, truth or execution; search/read separately.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "meaning": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "taskRelation": {
+            "type": "string",
+            "enum": [
+              "new",
+              "continue",
+              "supplement",
+              "correction"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "none",
+              "local",
+              "source-read",
+              "relations",
+              "web",
+              "tools"
+            ]
+          },
+          "gaps": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          },
+          "stop": {
+            "type": "string",
+            "enum": [
+              "continue",
+              "answer-supported",
+              "insufficient"
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sourceRef",
+                "decision",
+                "reason"
+              ],
+              "properties": {
+                "sourceRef": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "investigate",
+                    "defer",
+                    "reject"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                }
+              }
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        }
+      }
+    },
+    {
+      "name": "knowledge.search",
+      "source": "builtin",
+      "description": "Search authorized local documents and code. domain is an explicit scope; choose it from the user or verified source, not words like method/function or brand capitalization. Keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing mean only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 48
+          },
+          "taskType": {
+            "type": "string",
+            "enum": [
+              "lookup",
+              "file",
+              "recall",
+              "complex",
+              "research"
+            ]
+          },
+          "maximumTokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32768,
+            "description": "Evidence tokens only, bounded separately from the candidate pool and model context."
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "knowledge",
+              "code",
+              "mixed"
+            ],
+            "description": "Explicit scope only; leave mixed when domain is uncertain. Lexical hints must not exclude other authorized evidence."
+          },
+          "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Explicit exact declaration or qualified name, for example SourceIndexer.upsert; capitalization of a brand is insufficient."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Relative file or directory path; this is an indexed locator, not filesystem permission."
+          },
+          "gap": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Specific unanswered fact or omitted condition, not a restatement of the entire task."
+          }
+        }
+      }
+    },
+    {
+      "name": "knowledge.read",
+      "source": "builtin",
+      "description": "Read current authorized evidence using a sourceRef returned by retrieval; never invent a reference or reuse a stale version. Use section for its chapter, unit for an indexed function/method or document block, or window for nearby text. Bounded reads report omitted parts and fall back when structure is unavailable. Name the missing fact in gap. Changed/revoked sources require a new search; incomplete coverage is not source absence.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceRef"
+        ],
+        "properties": {
+          "sourceRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2097152
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16000,
+            "description": "Maximum characters. Page mode accepts 1 or more; window, section and unit require at least 2 to preserve complete UTF-16 characters."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "page",
+              "window",
+              "section",
+              "unit"
+            ]
+          },
+          "anchorOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2097152
+          },
+          "beforeCharacters": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4000
+          },
+          "gap": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      }
+    },
+    {
+      "name": "knowledge.relations",
+      "source": "builtin",
+      "description": "Navigate current authorized definitions, syntax ownership, document sections or textual symbol mentions using an existing sourceRef or explicit symbol. A brand name or a word like method alone does not prove a symbol. Lexical references are uncertain and non-exhaustive, not a language-service call graph. Read each related source before drawing conclusions.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sourceRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "definition",
+              "contains",
+              "section",
+              "lexical-reference"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      }
+    },
+    {
+      "name": "knowledge.assess",
+      "source": "builtin",
+      "description": "Record explicit claims, exact supporting quotations from evidence already read, unresolved gaps and conflicting sources. Revalidates all source versions and invalidates stale dependencies. Optional test checks require real current tool receipts; a model claim cannot certify tests. Stop searching when cited support is sufficient. Keeps a version-bound navigation experience only in this chat.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claims"
+        ],
+        "properties": {
+          "conclusionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "claims": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "statement",
+                "support"
+              ],
+              "properties": {
+                "statement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "semanticSupport": {
+                  "type": "string",
+                  "enum": [
+                    "supports",
+                    "partial",
+                    "contradicts",
+                    "uncertain"
+                  ],
+                  "description": "Your revisable judgement of entailment, separate from program checks that a quote exists. Partial, uncertain or contradictory support cannot mark a claim ready."
+                },
+                "support": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "sourceRef",
+                      "quote"
+                    ],
+                    "properties": {
+                      "sourceRef": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "quote": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8000
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "unresolved": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          },
+          "contradictions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          },
+          "verification": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "toolCallId"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "toolCallId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "knowledge.experience",
+      "source": "builtin",
+      "description": "Recall current-chat navigation experience with live citation version checks. Historical answers are not current facts. Re-read and validate sources before reusing an experience; stale dependencies require repair.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        }
+      }
+    },
+    {
+      "name": "web.search",
+      "source": "builtin",
+      "description": "Search public websites using an already enabled Exa or Brave MCP provider. Preserve the requested entities, dates and scope; add disambiguating terms only from current evidence, never an assumed year. Returns concise sources, URLs and archived original-result reference. Honors per-project search mode and stage budget. Stop when evidence answers the question; use web.fetch for public page text before browser automation.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query",
+          "reason"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "gap": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Concrete missing evidence that warrants another search. Do not search again when the requested facts already have sources."
+          }
+        }
+      }
+    },
+    {
+      "name": "memory.read",
+      "source": "builtin",
+      "modelExposure": "on-demand",
+      "description": "Page current-chat drafts and confirmed visible memory. query is lexical; empty pages all. Shared entries omit private quotes. Use exact target/revisions for update/delete.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "project",
+                "user"
+              ]
+            }
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      }
+    },
+    {
+      "name": "memory.propose",
+      "source": "builtin",
+      "modelExposure": "on-demand",
+      "description": "Drafts need user confirmation and exact chat quotes. update/delete: unchanged memory.read target. noop: no writes.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "reason",
+          "isInference"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "update",
+              "delete",
+              "noop"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "project",
+              "user"
+            ]
+          },
+          "scopeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "fact",
+              "preference",
+              "decision"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "isInference": {
+            "type": "boolean"
+          },
+          "conflicts": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "quotes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "messageId",
+                "text"
+              ],
+              "properties": {
+                "messageId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              }
+            }
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "scope",
+              "scopeId",
+              "expectedRevision",
+              "entryRevision",
+              "identity"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "chat",
+                  "project",
+                  "user"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "expectedRevision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "entryRevision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "identity": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "skill.list",
+      "description": "Page application skill metadata from official-tools/Skills, user extension Skills, configured directories and this work's .kynxa/skills. Discovery is limited to 128 skills and 512 candidates per source directory. Does not execute scripts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
+          }
+        },
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "skill.read",
+      "description": "Read one discovered application SKILL.md on demand. Skill instructions and scripts never grant extra permissions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "skill.resource.read",
+      "description": "Read a bounded text page or binary metadata from a discovered skill package. Paths are relative to the skill root, never the work folder; cannot escape the package.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2097152
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16000
+          }
+        },
+        "required": [
+          "id",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "skill.inspect",
+      "description": "Inspect a discovered skill package, its resource manifest and compatibility diagnostics without executing code.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "skill.check",
+      "description": "Check skill script runtimes and declared requirements against the verified sandbox. Does not install dependencies or run host commands.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "skill.run",
+      "description": "Run a selected JS/MJS/CJS skill script with the bundled private Node inside the verified Windows AppContainer. Requires a checked read-only skill manifest; uses a writable isolated workspace copy, no network or runtime downloads, bounded output/time, cancellation and process-tree cleanup. Markdown guides use skill.read without starting Node. Missing runtimes fail only this step and never fall back to unapproved host execution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "terminal.run",
+      "description": "Run restricted CMD inside a verified Windows AppContainer over a temporary work snapshot, without network or automatic write-back. Accepts cmd or cmd.exe only; Node is not installed or started. Host commands use terminal.host.run with approval.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "cmd",
+              "cmd.exe"
+            ]
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000
+          }
+        },
+        "required": [
+          "command",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "terminal.host.run",
+      "source": "builtin",
+      "description": "Run host CMD/PowerShell with app PATH outside sandbox; Ask/Smart approval required. Verify current shell/cwd/target. Diagnostics inspect adapters/proxy/ports, not social networks. No profiles: resolve/init Conda in the same script. Captured output; maximum 120 seconds. Use terminal.host.start/read/stop for background jobs, visible:true for a requested window. Verify interrupted effects; never replay.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "shell": {
+            "type": "string",
+            "enum": [
+              "cmd",
+              "powershell"
+            ]
+          },
+          "script": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "Open a real terminal window. Default false (captured background command)."
+          },
+          "keepOpenMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "description": "Visible only: hold the window after the command. Default 5000 ms, within timeoutMs."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "shell",
+          "script",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "terminal.host.start",
+      "source": "builtin",
+      "description": "Start a controlled hidden host CMD/PowerShell job in this chat. Returns a verified process start, not task completion. Default 30 minutes, maximum 6 hours; continues after this model response. Use terminal.host.read for status/output and terminal.host.stop to terminate its process tree. Gateway shutdown cancels jobs; restart never replays commands. Reason and Ask/Smart approval required.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "shell": {
+            "type": "string",
+            "enum": [
+              "cmd",
+              "powershell"
+            ]
+          },
+          "script": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 21600000
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "shell",
+          "script",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "terminal.host.read",
+      "source": "builtin",
+      "description": "Read status, final execution receipt and a bounded output page of a host job started in this chat. Does not run or restart commands. Retained output has explicit truncation and paging offsets.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64000
+          }
+        },
+        "required": [
+          "jobId"
+        ]
+      }
+    },
+    {
+      "name": "terminal.host.stop",
+      "source": "builtin",
+      "description": "Cancel a host job belonging to this chat and wait for its process tree cleanup and actual receipt. Does not replay the command; Ask/Smart approval required.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "jobId",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "tool.search",
+      "description": "Find enabled tools/MCP headers; empty query pages all.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "tool.load",
+      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32
+          }
+        },
+        "required": [
+          "names"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "tool.result.read",
+      "description": "Page this chat's saved result by opaque id. Typed media references; no private MCP metadata.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9000000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16000
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "conversation.history.search",
+      "description": "Search formal public messages: scope=chat by default, or work for an explicit request about this work's unarchived chats. Use role=user to verify past user questions; work files, assistant text and empty memory do not prove a user asked. Matches include conversationId, messageId and sourceVersion for reading. Continue with nextCursor; incomplete coverage or a failed search proves no absence. includeTools adds saved model steps/untrusted observations, never private thinking/settings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "work"
+            ],
+            "default": "chat"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "all"
+            ],
+            "default": "all"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "includeTools": {
+            "type": "boolean"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Use nextCursor from this query's previous result to continue the same checked scope. Keep offset absent or zero."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000,
+            "description": "Legacy result offset; must be zero or absent when cursor is provided."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "conversation.history.read",
+      "description": "Read a formal public message by stable ID in UTF-16 text pages. Defaults to the current chat; pass a search match's conversationId as sourceConversationId to read an unarchived chat in this same work. Pass sourceVersion to reject a changed source message or ownership. No other-work, deleted or archived chat access. includeTools adds recorded model steps/untrusted observations and result references, never private thinking/settings. Verify past user questions from role=user messages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string"
+          },
+          "sourceConversationId": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Source conversationId from a history search match; omitted means the current chat."
+          },
+          "sourceVersion": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Source message version from the search match; reject if its public contents, state or ownership changed. Unrelated appended messages do not invalidate it."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16000000
+          },
+          "includeTools": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16000
+          }
+        },
+        "required": [
+          "messageId"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "computer.windows",
+      "source": "builtin",
+      "description": "List visible local windows with their windowId, processId, executable, client dimensions and isResponding; never invent target IDs. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.apps",
+      "source": "builtin",
+      "description": "List known local executable applications from Windows App Paths and system application entries. No disk scan. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.screenshot",
+      "source": "builtin",
+      "description": "Capture the identified client area, optionally crop original physical pixels without resizing. PNG is archived locally; the text projection does not provide image vision. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "crop": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32767
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32767
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8192
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8192
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.read",
+      "source": "builtin",
+      "description": "Bounded visible UIA text/element coordinates. Not browser DOM or background tabs. Password name/value/text are excluded. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "maxCharacters": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64000
+          },
+          "maxElements": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 500,
+            "maximum": 5000
+          },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32767
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32767
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8192
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8192
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          },
+          "elementId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.launch",
+      "source": "builtin",
+      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "appPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32
+          },
+          "background": {
+            "type": "boolean",
+            "default": true,
+            "description": "Default true: best-effort launch behind the current foreground window without minimizing the target, so window screenshots remain available. Applications can override it; the receipt reports observed foreground state."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "appPath",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.window",
+      "source": "builtin",
+      "description": "Resize, maximize, minimize or restore the identified window without requesting foreground activation. Resize uses client physical pixels; observe actual returned dimensions/state. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "resize",
+              "maximize",
+              "minimize",
+              "restore"
+            ]
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 64,
+            "maximum": 8192
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 64,
+            "maximum": 8192
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "mode",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.activate",
+      "source": "builtin",
+      "description": "Bring the identified visible window to the foreground. Returns failure if Windows refuses activation. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.move",
+      "source": "builtin",
+      "description": "Move the mouse within the identified foreground window. Coordinates are physical pixels relative to its client origin. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "x",
+          "y",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.click",
+      "source": "builtin",
+      "description": "Click within the identified foreground window at client pixel coordinates. Observe/read again after an action. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "x",
+          "y",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.scroll",
+      "source": "builtin",
+      "description": "Scroll at a point in the identified foreground window. delta is bounded wheel units: positive upwards, negative downwards. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "delta": {
+            "type": "integer",
+            "minimum": -1200,
+            "maximum": 1200
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "x",
+          "y",
+          "delta",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.drag",
+      "source": "builtin",
+      "description": "Drag the left mouse button between client pixel coordinates inside the identified foreground window. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "endX": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "endY": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32767
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "x",
+          "y",
+          "endX",
+          "endY",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.type",
+      "source": "builtin",
+      "description": "Type bounded Unicode text into the focused control of the identified foreground window. Does not use the clipboard. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "text",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "computer.key",
+      "source": "builtin",
+      "description": "Send one supported key or key combination to the identified foreground window, such as ENTER, TAB, CTRL+A or SHIFT+TAB. No Windows/system shortcut automation. Host desktop; broker permissions and target checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20
+          },
+          "processId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "key": {
+            "type": "string",
+            "enum": [
+              "ENTER",
+              "TAB",
+              "ESC",
+              "BACKSPACE",
+              "DELETE",
+              "UP",
+              "DOWN",
+              "LEFT",
+              "RIGHT",
+              "HOME",
+              "END",
+              "PAGEUP",
+              "PAGEDOWN",
+              "CTRL+A",
+              "CTRL+C",
+              "CTRL+V",
+              "CTRL+S",
+              "CTRL+F",
+              "CTRL+L",
+              "CTRL+Z",
+              "CTRL+Y",
+              "SHIFT+TAB",
+              "CTRL+ENTER",
+              "CTRL+PLUS",
+              "CTRL+MINUS",
+              "CTRL+0"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "windowId",
+          "processId",
+          "key",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "mcpPresets": [
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "description": "Official Microsoft browser automation in an isolated headless profile.",
+      "sourceUrl": "https://github.com/microsoft/playwright-mcp",
+      "capabilities": [
+        "browser"
+      ],
+      "package": {
+        "registry": "npm",
+        "name": "@playwright/mcp",
+        "version": "0.0.83",
+        "entryPoint": "playwright-mcp"
+      },
+      "license": "Apache-2.0",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "Node.js and npm/npx",
+          "type": "runtime",
+          "required": true,
+          "description": "Use the Node.js runtime available to the gateway. First launch downloads the pinned package."
+        },
+        {
+          "name": "Playwright browser",
+          "type": "runtime",
+          "required": true,
+          "description": "A compatible browser must be installed before browser tools can run."
+        }
+      ],
+      "notes": [
+        "A separate isolated profile does not reuse your signed-in browser.",
+        "Browser settings can select msedge on Windows when Chrome is not installed; the Node/npm runtime is bundled with KYNXA."
+      ],
+      "server": {
+        "id": "playwright",
+        "name": "Playwright",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@playwright/mcp@0.0.83",
+          "--headless",
+          "--isolated"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 60000
+      }
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "Official hosted GitHub service. Requires a user-provided Bearer authorization environment variable.",
+      "sourceUrl": "https://github.com/github/github-mcp-server",
+      "capabilities": [
+        "github"
+      ],
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "remote",
+      "requirements": [
+        {
+          "name": "KYNXA_GITHUB_AUTHORIZATION",
+          "type": "environment",
+          "required": true,
+          "description": "The complete Authorization header value: Bearer followed by a GitHub token."
+        }
+      ],
+      "notes": [
+        "Hosted version is managed by GitHub. No account access is available until credentials are configured."
+      ],
+      "server": {
+        "id": "github",
+        "name": "GitHub",
+        "transport": "streamable-http",
+        "command": "",
+        "args": [],
+        "url": "https://api.githubcopilot.com/mcp/",
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 30000,
+        "headerEnv": {
+          "Authorization": "KYNXA_GITHUB_AUTHORIZATION"
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "name": "Fetch",
+      "description": "Official MCP reference server for fetching public webpages as text or Markdown with paging.",
+      "sourceUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+      "capabilities": [
+        "web-fetch"
+      ],
+      "package": {
+        "registry": "pypi",
+        "name": "mcp-server-fetch",
+        "version": "2026.8.18",
+        "entryPoint": "mcp-server-fetch"
+      },
+      "license": "MIT",
+      "publisher": "reference",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "uv/uvx",
+          "type": "runtime",
+          "required": true,
+          "description": "Install Astral uv so uvx is available to the gateway."
+        },
+        {
+          "name": "Python",
+          "type": "runtime",
+          "required": true,
+          "description": "Python 3.10 or newer; uvx resolves an isolated package environment."
+        }
+      ],
+      "notes": [
+        "Optional: built-in web.fetch already reads public webpages without Python.",
+        "Downloads and webpage access use the network. The external process is not the terminal sandbox."
+      ],
+      "server": {
+        "id": "fetch",
+        "name": "Fetch",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch==2026.8.18"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 120000,
+        "env": {
+          "PYTHONIOENCODING": "utf-8"
+        }
+      }
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "description": "Official MCP reference server for repository status, diffs and history; mutation tools start disabled.",
+      "sourceUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+      "capabilities": [
+        "git-history"
+      ],
+      "package": {
+        "registry": "pypi",
+        "name": "mcp-server-git",
+        "version": "2026.8.18",
+        "entryPoint": "mcp-server-git"
+      },
+      "license": "MIT",
+      "publisher": "reference",
+      "network": "local",
+      "requirements": [
+        {
+          "name": "uv/uvx",
+          "type": "runtime",
+          "required": true,
+          "description": "Install Astral uv so uvx is available to the gateway."
+        },
+        {
+          "name": "Python",
+          "type": "runtime",
+          "required": true,
+          "description": "Python 3.10 or newer; uvx resolves an isolated package environment."
+        },
+        {
+          "name": "Git",
+          "type": "runtime",
+          "required": true,
+          "description": "Git must be available to the gateway."
+        }
+      ],
+      "notes": [
+        "Set --repository to the intended repository to restrict access. This preset does not provide another filesystem tool set."
+      ],
+      "server": {
+        "id": "git",
+        "name": "Git",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-git==2026.8.18"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [
+          "git_add",
+          "git_commit",
+          "git_reset",
+          "git_create_branch",
+          "git_checkout"
+        ],
+        "startupTimeoutMs": 120000,
+        "env": {
+          "PYTHONIOENCODING": "utf-8"
+        }
+      }
+    },
+    {
+      "id": "context7",
+      "name": "Context7",
+      "description": "Upstash library documentation and code examples. Anonymous usage is limited; an API key is optional.",
+      "sourceUrl": "https://github.com/upstash/context7",
+      "capabilities": [
+        "library-documentation"
+      ],
+      "package": {
+        "registry": "npm",
+        "name": "@upstash/context7-mcp",
+        "version": "4.1.1",
+        "entryPoint": "context7-mcp"
+      },
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "Node.js and npm/npx",
+          "type": "runtime",
+          "required": true,
+          "description": "Use the Node.js runtime available to the gateway. First launch downloads the pinned package."
+        },
+        {
+          "name": "KYNXA_CONTEXT7_API_KEY",
+          "type": "environment",
+          "required": false,
+          "description": "Optional key: map CONTEXT7_API_KEY to this host environment variable in the service editor."
+        }
+      ],
+      "notes": [
+        "Anonymous limits are controlled by Upstash. Optional credentials are not added to the default process environment."
+      ],
+      "server": {
+        "id": "context7",
+        "name": "Context7",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@upstash/context7-mcp@4.1.1"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 60000
+      }
+    },
+    {
+      "id": "chrome-devtools",
+      "name": "Chrome DevTools",
+      "description": "Official Google browser debugging, performance and network diagnostics in an isolated headless profile.",
+      "sourceUrl": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "capabilities": [
+        "browser-debugging"
+      ],
+      "package": {
+        "registry": "npm",
+        "name": "chrome-devtools-mcp",
+        "version": "1.10.1",
+        "entryPoint": "chrome-devtools-mcp"
+      },
+      "license": "Apache-2.0",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "Node.js and npm/npx",
+          "type": "runtime",
+          "required": true,
+          "description": "Use the Node.js runtime available to the gateway. First launch downloads the pinned package."
+        },
+        {
+          "name": "Google Chrome",
+          "type": "runtime",
+          "required": true,
+          "description": "Install a current stable Chrome; no signed-in profile is connected automatically."
+        }
+      ],
+      "notes": [
+        "Usage statistics, update checks and remote CrUX lookups are disabled. Complements Playwright with diagnostics."
+      ],
+      "server": {
+        "id": "chrome-devtools",
+        "name": "Chrome DevTools",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "chrome-devtools-mcp@1.10.1",
+          "--headless",
+          "--isolated",
+          "--no-usage-statistics",
+          "--no-performance-crux"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 60000,
+        "env": {
+          "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"
+        }
+      }
+    },
+    {
+      "id": "exa",
+      "name": "Exa Search",
+      "description": "Official hosted public web search. Anonymous usage is rate-limited and requires no account key.",
+      "sourceUrl": "https://github.com/exa-labs/exa-mcp-server",
+      "capabilities": [
+        "web-search"
+      ],
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "remote",
+      "requirements": [],
+      "notes": [
+        "Hosted version and anonymous rate limits are managed by Exa. Authenticated agent research is not enabled by this preset."
+      ],
+      "server": {
+        "id": "exa",
+        "name": "Exa Search",
+        "transport": "streamable-http",
+        "command": "",
+        "args": [],
+        "url": "https://mcp.exa.ai/mcp",
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [
+          "web_fetch_exa"
+        ],
+        "startupTimeoutMs": 30000
+      }
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "description": "Official Brave search for web, news, images and local places. Requires a Brave Search API key.",
+      "sourceUrl": "https://github.com/brave/brave-search-mcp-server",
+      "capabilities": [
+        "news-and-place-search"
+      ],
+      "package": {
+        "registry": "npm",
+        "name": "@brave/brave-search-mcp-server",
+        "version": "2.1.4",
+        "entryPoint": "brave-search-mcp-server"
+      },
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "Node.js and npm/npx",
+          "type": "runtime",
+          "required": true,
+          "description": "Use the Node.js runtime available to the gateway. First launch downloads the pinned package."
+        },
+        {
+          "name": "KYNXA_BRAVE_API_KEY",
+          "type": "environment",
+          "required": true,
+          "description": "A Brave Search API subscription key; saved only as an environment-variable reference."
+        }
+      ],
+      "notes": [
+        "Account subscription limits apply. No authenticated search has been verified."
+      ],
+      "server": {
+        "id": "brave-search",
+        "name": "Brave Search",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@brave/brave-search-mcp-server@2.1.4",
+          "--transport",
+          "stdio"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 60000,
+        "envRefs": {
+          "BRAVE_API_KEY": "KYNXA_BRAVE_API_KEY"
+        }
+      }
+    },
+    {
+      "id": "dbhub",
+      "name": "DBHub Read-only",
+      "description": "Bytebase database schema and read-only SQL for PostgreSQL, MySQL, SQL Server and SQLite. Requires a read-only TOML configuration and DSN.",
+      "sourceUrl": "https://github.com/bytebase/dbhub",
+      "capabilities": [
+        "database-readonly"
+      ],
+      "package": {
+        "registry": "npm",
+        "name": "@bytebase/dbhub",
+        "version": "1.4.0",
+        "entryPoint": "dbhub"
+      },
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "Node.js and npm/npx",
+          "type": "runtime",
+          "required": true,
+          "description": "Use the Node.js runtime available to the gateway. First launch downloads the pinned package."
+        },
+        {
+          "name": "KYNXA_DBHUB_DSN",
+          "type": "environment",
+          "required": true,
+          "description": "A database connection string for a least-privilege read-only database account."
+        },
+        {
+          "name": "dbhub-readonly.toml",
+          "type": "configuration",
+          "required": true,
+          "description": "Save the supplied template and replace the absolute-path placeholder in arguments. Keep readonly=true."
+        }
+      ],
+      "notes": [
+        "DBHub 1.4.0 removed --readonly; this preset requires the explicit read-only tool configuration.",
+        "Use a read-only database account. A privileged database role can perform effects through database functions."
+      ],
+      "configurationTemplate": "[[sources]]\nid = \"readonly\"\ndsn = \"${DSN}\"\n\n[[tools]]\nname = \"search_objects\"\nsource = \"readonly\"\n\n[[tools]]\nname = \"execute_sql\"\nsource = \"readonly\"\nreadonly = true\nmax_rows = 100\n",
+      "server": {
+        "id": "dbhub",
+        "name": "DBHub Read-only",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@bytebase/dbhub@1.4.0",
+          "--transport",
+          "stdio",
+          "--config",
+          "<absolute-path-to-dbhub-readonly.toml>"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 60000,
+        "envRefs": {
+          "DSN": "KYNXA_DBHUB_DSN"
+        }
+      }
+    },
+    {
+      "id": "markitdown",
+      "name": "MarkItDown",
+      "description": "Official Microsoft conversion of PDF, Office documents and other formats to Markdown. The MCP package is a preview release.",
+      "sourceUrl": "https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp",
+      "capabilities": [
+        "document-conversion"
+      ],
+      "package": {
+        "registry": "pypi",
+        "name": "markitdown-mcp",
+        "version": "0.0.1a7",
+        "entryPoint": "markitdown-mcp"
+      },
+      "license": "MIT",
+      "publisher": "vendor",
+      "network": "local-and-remote",
+      "requirements": [
+        {
+          "name": "uv/uvx",
+          "type": "runtime",
+          "required": true,
+          "description": "Install Astral uv so uvx is available to the gateway."
+        },
+        {
+          "name": "Python",
+          "type": "runtime",
+          "required": true,
+          "description": "Python 3.10 or newer; uvx resolves an isolated package environment."
+        }
+      ],
+      "notes": [
+        "Preview package; conversion runs as an external process with host access. No additional LLM/OCR account is configured."
+      ],
+      "server": {
+        "id": "markitdown",
+        "name": "MarkItDown",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "markitdown-mcp==0.0.1a7"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 120000,
+        "env": {
+          "PYTHONIOENCODING": "utf-8"
+        }
+      }
+    },
+    {
+      "id": "windows-screenshot",
+      "name": "Windows Screenshot",
+      "description": "Community CursorTouch Windows-MCP limited to Screenshot and Snapshot. Requires Windows and Python 3.14.",
+      "sourceUrl": "https://github.com/CursorTouch/Windows-MCP",
+      "capabilities": [
+        "desktop-screenshot"
+      ],
+      "package": {
+        "registry": "pypi",
+        "name": "windows-mcp",
+        "version": "0.8.7",
+        "entryPoint": "windows-mcp"
+      },
+      "license": "MIT",
+      "publisher": "community",
+      "network": "local",
+      "requirements": [
+        {
+          "name": "Windows desktop",
+          "type": "runtime",
+          "required": true,
+          "description": "Requires an interactive Windows session."
+        },
+        {
+          "name": "uv/uvx",
+          "type": "runtime",
+          "required": true,
+          "description": "Install Astral uv so uvx is available to the gateway."
+        },
+        {
+          "name": "Python",
+          "type": "runtime",
+          "required": true,
+          "description": "Python 3.14 or newer; uvx resolves an isolated package environment."
+        }
+      ],
+      "notes": [
+        "Optional: built-in computer tools already provide native screenshot and desktop interaction without Python.",
+        "This is a community project, not a Microsoft server. Only screenshot and UI snapshot tools are exposed.",
+        "Host screenshots may contain private information; use only after explicit approval. Anonymous telemetry is disabled."
+      ],
+      "server": {
+        "id": "windows-screenshot",
+        "name": "Windows Screenshot",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "windows-mcp==0.8.7",
+          "serve",
+          "--tools",
+          "Screenshot,Snapshot"
+        ],
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [],
+        "startupTimeoutMs": 120000,
+        "env": {
+          "ANONYMIZED_TELEMETRY": "false",
+          "WINDOWS_MCP_SCREENSHOT_SCALE": "0.5",
+          "PYTHONIOENCODING": "utf-8"
+        }
+      }
+    }
+  ]
+}

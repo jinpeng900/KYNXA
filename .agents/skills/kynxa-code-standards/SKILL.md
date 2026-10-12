@@ -1,6 +1,6 @@
 ---
 name: kynxa-code-standards
-description: "编写、审查或规范化 KYNXA 的 C#、JavaScript/ESM 和 PowerShell 代码时使用，统一语义命名、双语说明注释和格式，检查公开契约与行为兼容。不用于修改第三方原文、模型回复或无关仓库。"
+description: "编写、审查或规范化 KYNXA 的 Rust、C#、JavaScript/ESM 和 PowerShell 代码时使用，统一语义命名、双语说明注释和格式，检查公开契约与行为兼容。不用于修改第三方原文、模型回复或无关仓库。"
 ---
 
 # KYNXA 代码规范
@@ -19,6 +19,7 @@ description: "编写、审查或规范化 KYNXA 的 C#、JavaScript/ESM 和 Powe
 
 - 名称说明对象、动作或状态；数量注明单位，例如 `usedTokens`、`timeoutMs`、`stdoutBytes`。布尔值优先 `is` / `has` / `can` / `should`，避免需要猜测的 `flag`、`data2`。
 - C# 用 PascalCase 类型/方法/属性、camelCase 参数/局部变量、`_camelCase` 私有实例字段。JavaScript 用 lowerCamelCase 函数/变量、PascalCase 类；真正固定的模块上限用 UPPER_SNAKE_CASE。PowerShell 函数使用批准动词加有意义名词。
+- Rust 类型和 trait 使用 UpperCamelCase，模块/函数/字段使用 snake_case，常量使用 SCREAMING_SNAKE_CASE；公开 JSON 字段通过 serde 映射保留原合同，使用 rustfmt 和 Result 明确失败边界。
 - `i`、`index`、`x/y`、通用集合 `T`、弃用参数 `_`、标准 Win32 名称等含义明确时保留，不为了字符数扩写。
 - JSON/schema 字段、记录属性、工具名、错误码、事件类型、稳定 ID、环境变量、导出和 XAML/WebView 绑定都是兼容边界。需要更清晰的局部名称时使用别名，例如 `{ id: conversationId }`；返回对象必须保留原键。
 

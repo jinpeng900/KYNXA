@@ -20,12 +20,15 @@ public partial class App : Application
     private Exception? _unhandled;
     private bool _windowClosed;
     private readonly bool _closeDuringInitialization = Environment.GetCommandLineArgs().Contains("--close-during-initialization", StringComparer.Ordinal);
+    private readonly bool _ownerCloseOnly = Environment.GetCommandLineArgs().Contains("--owner-close-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
     {
         Directory.CreateDirectory(_directory);
         Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", Path.Combine(_directory, "Data"));
+        Environment.SetEnvironmentVariable("KYNXA_MODEL_HOME", Path.Combine(_directory, "Models"));
+        Environment.SetEnvironmentVariable("KYNXA_EXTENSION_HOME", Path.Combine(_directory, "Extensions"));
         _gateway = new FakeModelGateway();
         if (_closeDuringInitialization) _gateway.ListDelayMs = 750;
         Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", _gateway.Address);
@@ -245,7 +248,7 @@ public partial class App : Application
         ResizeInDips(1120, 860);
         await SettleAsync();
         await SelectProviderAsync("Legacy / 旧连接", expectDiscard: true);
-        Check(key.Password.Length == 0 && ChoiceValue(ContextChoice) == "8192" && ChoiceValue(OutputChoice) == "262144" &&
+        Check(key.Password.Length == 0 && ChoiceValue(ContextChoice) == "32768" && ChoiceValue(OutputChoice) == "262144" &&
             _gateway.Saves == writes, "explicit discard clears the key draft and loads saved limits without writing configuration");
         await SelectProviderAsync("Small / 两个模型");
     }
@@ -375,10 +378,52 @@ public partial class App : Application
             $"save payload contains output {outputTokens}");
     }
 
+    private async Task CheckOwnerCloseAsync()
+    {
+        int readsBeforeOpen = _gateway.ListReads;
+        int savesBeforeClose = _gateway.Saves;
+        int probesBeforeClose = _gateway.Probes;
+        _windowClosed = false;
+        _window = new ModelManagementWindow();
+        _window.Closed += (_, _) => _windowClosed = true;
+        _root = (FrameworkElement)_window.Content;
+        _window.Activate();
+        await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == readsBeforeOpen + 1 && Button("SaveButton").IsEnabled,
+            "owner-close fixture opens an isolated native model editor");
+        NativeUi.SetText(Element<TextBox>("NameBox"), "Unsaved owner-close fixture / 退出草稿");
+        await SettleAsync();
+        NativeUi.RequestClose(_window);
+        await WaitAsync(() => NativeUi.OpenDialog(_root) is not null,
+            "a native close request preserves the unsaved model editor with a discard confirmation");
+        Check(!_windowClosed && _gateway.Saves == savesBeforeClose,
+            "opening the discard confirmation neither closes nor automatically saves the editor");
+        var discardDialog = NativeUi.OpenDialog(_root)!;
+        bool discardClosed = false;
+        discardDialog.Closed += (_, _) => discardClosed = true;
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        _window.CloseForOwner();
+        await WaitAsync(() => _windowClosed && discardClosed,
+            "application exit closes the native model editor and dismisses its pending discard confirmation");
+        Check(elapsed.Elapsed < TimeSpan.FromSeconds(1), "owner close completes within one second with an open confirmation");
+        _window.CloseForOwner();
+        await SettleAsync();
+        Check(_gateway.Saves == savesBeforeClose && _gateway.Probes == probesBeforeClose && _unhandled is null,
+            "owner close is safe to repeat and leaves unsaved synthetic configuration unchanged");
+    }
+
     private async Task RunAsync()
     {
         try
         {
+            if (_ownerCloseOnly)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && Button("SaveButton").IsEnabled,
+                    "the initial synthetic editor is ready before the focused exit check");
+                _window!.CloseForOwner();
+                await CheckOwnerCloseAsync();
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native model UI checks.");
+                return;
+            }
             if (_closeDuringInitialization)
             {
                 await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && !Button("SaveButton").IsEnabled,
@@ -420,13 +465,13 @@ public partial class App : Application
             Check(ChoiceValue(ContextChoice) == "1048576" && _gateway.Saves == 0,
                 "changing automatic context to a manual equivalent value remains a protected unsaved choice");
             await SelectProviderAsync("Legacy / 旧连接", expectDiscard: true);
-            Check(ChoiceValue(OutputChoice) == "262144" && ChoiceValue(ContextChoice) == "8192" && _gateway.Saves == 0,
+            Check(ChoiceValue(OutputChoice) == "262144" && ChoiceValue(ContextChoice) == "32768" && _gateway.Saves == 0,
                 "legacy connections missing both fields display independent defaults without rewriting them");
             NativeUi.SetText(Element<TextBox>("BaseUrlBox"), "https://api.deepseek.com");
             NativeUi.SetText(Element<TextBox>("ModelsBox"), "deepseek-flash");
             await SettleAsync();
-            Check(ChoiceValue(ContextChoice) == "8192" && _gateway.Saves == 0,
-                "editing an existing compatible 8K connection does not silently upgrade its context or save it");
+            Check(ChoiceValue(ContextChoice) == "32768" && _gateway.Saves == 0,
+                "editing an existing compatible 32K connection does not silently upgrade its context or save it");
             await SelectProviderAsync("Small / 两个模型", expectDiscard: true);
             Check(ChoiceValue(ContextChoice) == "1000000" && ChoiceValue(OutputChoice) == "custom" && CustomOutput.Text == "2048" &&
                 CustomOutput.Visibility == Visibility.Visible, "existing explicit 2K output remains custom and preserves the saved one-million context");
@@ -559,9 +604,9 @@ public partial class App : Application
             Check(ChoiceValue(ContextChoice) == "1050000", "a verified OpenAI model selection uses its real total context window");
             NativeUi.SetText(Element<TextBox>("BaseUrlBox"), "https://proxy.example.invalid/v1");
             await SettleAsync();
-            Check(ChoiceValue(ContextChoice) == "8192", "an unverified proxy does not inherit an official model capability");
+            Check(ChoiceValue(ContextChoice) == "32768", "an unverified proxy does not inherit an official model capability");
             await SelectPresetAsync("local-api", expectDiscard: true);
-            Check(ChoiceValue(ContextChoice) == "8192" && ChoiceValue(OutputChoice) == "262144",
+            Check(ChoiceValue(ContextChoice) == "32768" && ChoiceValue(OutputChoice) == "262144",
                 "new local connections retain compatibility context defaults and independent output configuration");
             NativeUi.SetText(Element<TextBox>("NameBox"), "Local UI fixture / 临时");
             NativeUi.SetText(Element<TextBox>("ModelsBox"), "fixture-model\nfixture-model-two");
@@ -585,6 +630,7 @@ public partial class App : Application
             await Task.Delay(1700);
             Check(Element<TextBlock>("StatusText").Text == closingStatus && _unhandled is null,
                 "a late model probe cannot update the closed window or raise an unhandled UI error");
+            await CheckOwnerCloseAsync();
             Check(_gateway.Failure is null && _unhandled is null, "the isolated gateway and native model window complete without unhandled failures");
             File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native model UI checks.\nPreviews: {_directory}");
         }
@@ -595,7 +641,7 @@ public partial class App : Application
         }
         finally
         {
-            if (!_windowClosed) _window?.Close();
+            if (!_windowClosed) _window?.CloseForOwner();
             await _gateway.DisposeAsync();
             _anchor?.Close();
         }
