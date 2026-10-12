@@ -15,9 +15,11 @@
 | 原生网关启动、随包文件与桌面 SSE 合同 | `native-runtime-smoke` 和 `native-gateway-contract-smoke`；后者读取本轮原生 HTTP 测试实际生成的 SSE，不使用旧 Node 夹具 |
 | 模型预设、上下文配置 | `model-presets-smoke` 或 `model-context-smoke`，与 Rust models 连接/发现/能力/预算测试 |
 | 会话/记忆/归属/迁移/初始化 | 受影响 Rust storage/retrieval 测试及对应 C# 客户端 smoke，包含分页、失败、恢复与并发边界 |
+| 资源准入、观测与扩展进程 | agent-core resources/tools 对应用例及独立 `resource-service` crate 测试；验证实际租约、前后台优先级和进程退出后释放 |
+| C# ToolHost、原生 ABI 与 Windows 操作 | ToolHost 独立编译及受影响原生/沙箱夹具，保留真实输出、权限、取消与进程树清理 |
 | ORT/向量空间/模型资产/设备 | 固定少量 tokenizer/向量/分数对照、实际 DLL/资产哈希与设备资格检查；CPU 通过不替代 DirectML 验收 |
 | 共享接口、构建文件、多模块核心改动 | 原生编译、桌面/ToolHost 编译、相关 HTTP/SSE/客户端和架构检查；影响面广时扩大 Rust 套件 |
-| 开发 Skill/代理规则 | Skill 格式、YAML、引用路径、独立任务试用；无需为此启动产品或改真实数据 |
+| 开发 Skill/代理规则 | 两份 Skill 的 frontmatter、`agents/openai.yaml`、相对链接与当前入口；必要时用只读独立任务验证选路，不启动产品或修改真实数据 |
 
 ## 常用命令
 
@@ -25,6 +27,7 @@
 
 ```powershell
 dotnet build apps/desktop/KYNXA.Desktop.csproj -p:Platform=x64
+dotnet build apps/tool-host/KYNXA.ToolHost.csproj
 dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 dotnet run --project tests/work-sidebar-smoke/WorkSidebarSmoke.csproj
 dotnet run --project tests/project-tree-smoke/ProjectTreeSmoke.csproj
@@ -39,8 +42,13 @@ dotnet run --project tests/model-presets-smoke/KYNXA.ModelPresetsSmoke.csproj
 dotnet run --project tests/conversation-store-smoke/ConversationStoreSmoke.csproj
 dotnet run --project tests/storage-migration-smoke/StorageMigrationSmoke.csproj
 node tools/development/check-architecture.mjs
+cargo check --manifest-path apps/agent-core/Cargo.toml --locked --all-targets
+cargo check --manifest-path apps/resource-service/Cargo.toml --locked --all-targets
 cargo test --manifest-path apps/agent-core/Cargo.toml --locked
+cargo test --manifest-path apps/resource-service/Cargo.toml --locked
 ```
+
+上述是独立命令示例，不是每次依次执行的清单。开发机可用其已配置的 Node 执行架构守卫，也可使用本轮载荷中已校验的私有 Node 绝对路径；不能为此恢复旧网关依赖。Transcript 原生检查按当前 [夹具说明](../../../../tests/transcript-ui-smoke/README.md) 选择 `run-checks.ps1 -Scenario`，该入口要求 PowerShell 7，不能交给 Windows PowerShell 5.1；独立 Skill 文档更新只做格式、引用和只读选路验证。
 
 原生随包验证先构建 Windows x64 桌面，再指定本轮真实输出目录，不把历史构建路径当作当前产物：
 
@@ -48,6 +56,8 @@ cargo test --manifest-path apps/agent-core/Cargo.toml --locked
 powershell.exe -NoProfile -File tests/native-runtime-smoke/check-pri.ps1
 powershell.exe -NoProfile -File tests/native-runtime-smoke/check-payload-cleanup.ps1
 powershell.exe -NoProfile -File tests/native-runtime-smoke/run.ps1 -BundleRoot '<本轮桌面 Windows x64 输出目录>' -ResultPath artifacts/development/native-package-check.json
+powershell.exe -NoProfile -File tests/native-runtime-smoke/check-mcp-runtime.ps1 -BundleRoot '<本轮桌面 Windows x64 输出目录>' -ResultPath artifacts/development/private-mcp-check.json
+powershell.exe -NoProfile -File tests/native-runtime-smoke/check-skill-runtime.ps1 -BundleRoot '<本轮桌面 Windows x64 输出目录>' -ToolHostDirectory '<本轮 ToolHost 输出目录>'
 ```
 
 桌面 SSE 合同先由独立临时存储、本机模拟供应商和真实文件读取生成实际消息流，再交给未修改的桌面解析器：
@@ -76,6 +86,8 @@ Rust 控制改动运行对应 crate 测试与实际本机 HTTP/SSE/ToolHost 定�
 旧 Agent/SciFact/统一智能体评测适配器仍依赖迁移前网关，尚未适配当前 Rust。参考保留的 [Agent 历史说明](../../../../tests/agent-performance-benchmark/README.md)、[检索历史说明](../../../../tests/retrieval-benchmark/README.md) 与 [统一智能体历史说明](../../../../tools/development/fixtures/unified-agent/README.md)。保留固定题集、评分和原始报告；不能直接运行旧入口或把原生 smoke 当作完整基准替代。归档旧入口时同时检查静态导入、动态启动、源码指纹和文档调用者，保留可核验的原路径/字节哈希，不移动独立 C# 客户端或 WebView 检查。
 
 桌面默认启动随包原生网关。必要的手动集成测试可调用 `tools/development/start-native-gateway.ps1`，明确指定准备好的 BundleRoot、独立 DataHome/ModelHome/ExtensionHome 和端口。该启动命令会实际启动进程，只在任务需要时执行；不能为文档检查启动、停止或替换用户日常网关。
+
+正式 WinUI 桌面需要有效包身份，按工程/WinApp 或已注册包入口启动；直接运行裸 EXE 的 COM 身份错误不代表网关失效。分支预览使用独立包身份、数据、模型/扩展目录及端口；不能覆盖主包注册或与日常网关共写 Data。纯 WebView 夹具按自身工程规定启动，不套用正式桌面的包身份要求。
 
 主 Transcript UI 使用独立测试窗口和会话，结果在 `%TEMP%` 的测试文件中。旧 `markdown-ui-smoke`、`scroll-follow-smoke`、原生公式测试只验证兼容路径；它们通过不能代替当前 WebView2 聊天的复制和排版检查。
 

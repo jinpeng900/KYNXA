@@ -10,6 +10,23 @@
 
 新增后端计算、状态、协议和实际执行使用 Rust，放入已有领域模块。纯规则只能使用 `module-ownership.json` 的 `rustApps[].allowedDomainDependencies`，保持禁止循环与禁止反向依赖 I/O 层；跨域执行接线须逐文件登记 `integrationModules` 的 `allowedDomains`，真实网络、文件、线程和推理执行须列入 `executionModules`。名称叫 `gateway_*` 不会自动获得跨域权限，不通过宽泛前缀放行。UI 继续使用 C#/XAML/WebView2，启动与构建接线使用 PowerShell；开发工具可使用 Node；安装包的私有 Node 仅用于 MCP 和已核验的 JS Skill，不承担正式后端职责。迁移以行为兼容、单一规则来源和真实调用接线验收，不以行数或文件数量替代工程结果。
 
+## 当前语言与入口
+
+先按下表确定改动归属，再查实际调用方。详细 Rust 操作关系复用 [原生网关调用图](../../../../docs/architecture/native-gateway.md#代码入口与调用关系)，不在技能中另维护一份业务账本或完整文件清单。
+
+| 语言与载荷 | 代码位置 | 维护边界 |
+|---|---|---|
+| Rust 网关与核心 | `apps/agent-core/src/bin/kynxa-gateway.rs`、`src/gateway.rs` 及六个领域目录 | HTTP/SSE、模型协议与推理、任务/上下文、工具、资源接线、正式存储和检索；源文件的跨域许可由机器清单核验 |
+| Rust 资源服务 | `apps/resource-service/src/main.rs` | 实际硬件观测、准入和租约；不由界面或扩展自报可用容量 |
+| C#/XAML 桌面 | `apps/desktop/`，启动接线为 `Services/Integration/ModelGatewayService.cs` | WinUI 控件、视图状态、API 客户端与原生网关生命周期；不直接改写正式聊天和索引 |
+| C# 共享合同与 ToolHost | `apps/shared/`、`apps/tool-host/Program.cs` 及功能目录 | 两端 DTO 和 Windows 操作；ToolHost 执行已获准动作，Rust 统一持有 MCP 生命周期 |
+| WebView JavaScript/HTML/CSS | `apps/desktop/Resources/Transcript/` | 流式 DOM、Markdown/KaTeX/Mermaid 展示、选择与复制；脚本运行于 WebView，不需要 Node 后端 |
+| PowerShell | `apps/desktop/Build/`、`tools/development/` 和现有测试启动脚本 | 准备、校验、构建及启动已有载荷；不承接任务循环或正式持久化业务 |
+| 开发用 JavaScript/ESM | `tools/development/`、开发预览和测试目录 | 架构守卫、开发工具和隔离夹具；不能把开发依赖加入正式网关运行链路 |
+| 扩展兼容运行时与静态资料 | 随包 `runtime/mcp/`，声明与原文位于 `apps/official-tools/` | 固定私有 Node/MCP 依赖供 Rust 管理的扩展使用；第三方 Skill、库和许可证保持原文 |
+
+Rust edition、最低编译器和依赖读取各 crate 的 `Cargo.toml`/`Cargo.lock`；.NET/Windows SDK 和随包目标读取当前 `.csproj`/Build 目标。不把某台机器的工具链路径、下载目录或系统 PATH 写成团队前置条件。用户安装后的运行时由随包资产满足，开发机的编译工具是另一层要求。
+
 | 位置或角色 | 应承担的职责 | 应避免的职责 |
 |---|---|---|
 | `Views/` | 布局、事件接线、窗口和可见状态 | 将新的复杂业务、协议解析及正式日志写入塞进事件回调 |
