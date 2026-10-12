@@ -13,6 +13,7 @@ import { ToolRecoveryLedger, isRecoveryObservation } from './tool-recovery.mjs';
 import { ToolCallDecodeFailure } from '../models/tool-call-validation.mjs';
 import { previewToolResult } from '../data/tool-result-store.mjs';
 import { OutputContinuation, runContextActivity } from './output-continuation.mjs';
+import { TaskContinuation, TaskTextProjection, completionReviewPrompt } from './task-continuation.mjs';
 
 export function toolPolicyHash(context) {
   return createHash('sha256').update(JSON.stringify([context.permissionMode, context.workspaceRoot,
@@ -32,7 +33,11 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
     resultStore: service.results, resultContext: context });
   let callsRun = 0;
   const segments = new AssistantSegments(emit);
-  const progress = new ToolRunProgress(limits, state => saveRunState?.({ ...state, recovery: recovery.audit() }));
+  const tasks = new TaskContinuation();
+  let taskStateAudit;
+  let completionReview = null;
+  const progress = new ToolRunProgress(limits, state => saveRunState?.({ ...state, recovery: recovery.audit(),
+    ...(taskStateAudit ? { taskState: taskStateAudit } : {}) }));
   service.registerTaskVerification?.(context, () => progress.verification());
   const captureCodeVersion = async ({ preserveReceipt = false } = {}) => {
     const unavailable = code => ({ complete: false, files: [], code, coverage: 'observed-filesystem-targets', exhaustive: false });
@@ -68,7 +73,8 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
     await progress.save('interrupted', { code });
     return { content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
       completionStatus: 'interrupted', recovery: recovery.audit(), taskCompletion: { ...progress.verification(),
-        state: recovery.hasUnknownEffects ? 'execution-unconfirmed' : 'incomplete', conclusion: 'task-correctness-not-certified' } };
+        state: recovery.hasUnknownEffects ? 'execution-unconfirmed' : 'incomplete', conclusion: 'task-correctness-not-certified',
+        ...(taskStateAudit ? { modelTaskState: taskStateAudit } : {}) } };
   };
   let summarizeOnly = false;
   let consecutiveUnavailableRounds = 0;
@@ -95,11 +101,11 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       // The schemas and decoder share one snapshot, even if a stage expires during generation.
       // 声明与解码共用同一快照，即使生成期间阶段预算到期，也不重新解释本轮名称。
       const availableCatalog = catalogForRound?.();
-      let roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects && availableCatalog
+      let roundCatalog = summarizeOnly || completionReview ? [] : recovery.hasUnknownEffects && availableCatalog
         ? availableCatalog.filter(tool => isRecoveryObservation(tool)) : availableCatalog;
       if (contextDiscoveryOnly && roundCatalog) roundCatalog = roundCatalog.filter(tool =>
         ['tool.search', 'tool.load', 'tool.result.read', 'conversation.history.read'].includes(tool.name));
-      let roundDeclarations = summarizeOnly ? [] : roundCatalog
+      let roundDeclarations = summarizeOnly || completionReview ? [] : roundCatalog
         ? toolDeclarations(protocol, roundCatalog) : declarationsForRound?.() ?? declarations;
       // Validate potential redundant observations before projecting them; formal receipts remain intact.
       // 收缩潜在重复观察前校验归档，正式执行回执保持完整。
@@ -165,7 +171,7 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         signal?.throwIfAborted();
         recovery.protectCompletedEffects({ includeCurrent: true });
         inputBudgetTokens = adapted.inputBudgetTokens; system = adapted.system;
-        roundCatalog = summarizeOnly ? [] : recovery.hasUnknownEffects
+        roundCatalog = summarizeOnly || completionReview ? [] : recovery.hasUnknownEffects
           ? adapted.catalog.filter(tool => isRecoveryObservation(tool)) : adapted.catalog;
         roundDeclarations = toolDeclarations(protocol, roundCatalog);
         await projection.prepareObservations(messages, { inputBudgetTokens, signal });
@@ -184,12 +190,14 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         modelTimingRecorded = true;
       };
       let turn;
+      const textProjection = new TaskTextProjection(event => { if (!completionReview) segments.receive(event); });
       try { turn = await runResourceTask(service.resources, { taskId: `generation:${context.requestId ?? context.conversationId}:${round}`,
         workspaceId: context.projectId ?? context.conversationId, kind: 'foreground', workload: 'model-transport', cpuThreads: 1,
         memoryBytes: 16 * 1024 * 1024 },
         async () => {
           modelElapsed = startRunTimer();
-          try { return await requestTurn(messages, roundDeclarations, signal, event => segments.receive(event), roundCatalog, system, recoverContext); }
+          if (completionReview) { completionReview.attempts++; tasks.reviewRequests++; }
+          try { return await requestTurn(messages, roundDeclarations, signal, event => textProjection.push(event), roundCatalog, system, recoverContext); }
           finally { recordModelTiming(); }
         }, { signal, onCapacityUnavailable: options => service.retrieval?.releaseIdleResources
           ? service.retrieval.releaseIdleResources(options) : service.retrieval?.embeddings.releaseIdleResources?.(options) });
@@ -205,6 +213,16 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
           { estimatedGeneratedTokens: error.estimatedGeneratedTokens });
         signal?.throwIfAborted();
         if (['AGENT_CONFIG_CHANGED', 'MCP_CATALOG_CHANGED'].includes(error.code)) throw error;
+        if (completionReview && recovery.classify(error) === 'repair-unexecuted-model-step') {
+          taskStateAudit = { ...tasks.audit({ state: 'unknown', source: 'invalid-completion-review', next: '', reason: error.code }),
+            finishReason: turn?.finish ?? null };
+          if (completionReview.attempts >= 2 || round + 1 >= progress.limits.maxRounds)
+            return await recoveredResult('完成核对未取得有效状态，已有正文与执行记录已保留；任务尚未确认完成。', { code: 'TASK_COMPLETION_REVIEW_INVALID' });
+          segments.finish({ content: '', reasoning: '', calls: [] }, { final: false });
+          messages.at(-1).content = completionReviewPrompt(progress.verification()) + ' Prior review was invalid; return the required valid footer only.';
+          await progress.save('continuing', { code: 'TASK_COMPLETION_REVIEW_REPAIR' });
+          continue;
+        }
         if (['MODEL_CONTEXT_LIMIT_REJECTED', 'CONTEXT_INPUT_TOO_LARGE', 'TOOL_CONTEXT_BUDGET_EXCEEDED'].includes(error.code)) {
           // An upstream rejection also gets a fresh settled window, not just local estimate failures.
           // 上游拒绝同样进入完整回执检查点恢复，不仅处理本地估算超限；每次恢复都不重放操作。
@@ -260,16 +278,111 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
       try { progress.observeTurn(turn); }
       finally { await saveModelRound({ round: round + 1, turn, messages, system, declarations: roundDeclarations }); }
       signal?.throwIfAborted();
-      if (turn.outputTruncated) {
+      let taskReply = turn.calls.length ? { content: turn.content, state: 'unknown', next: '', reason: '', source: 'tool-step' }
+        : tasks.inspect(turn.content);
+      let completionReviewed = false;
+      if (completionReview) {
+        // This stage is metadata only: even an injected adapter's calls cannot dispatch effects or alter the draft.
+        // 本阶段只处理状态；即使自定义适配器返回调用，也不能执行副作用或改写已保存正文。
+        const valid = !turn.calls.length && !turn.outputTruncated && taskReply.source === 'model-task-state' &&
+          (taskReply.state !== 'complete' || taskReply.reason.trim());
+        turn = { ...turn, content: '', reasoning: '', calls: [] };
+        if (!valid) {
+          taskStateAudit = { ...tasks.audit({ state: 'unknown', source: 'invalid-completion-review', next: '', reason: '' }),
+            finishReason: turn.finish ?? null };
+          if (completionReview.attempts >= 2 || round + 1 >= progress.limits.maxRounds)
+            return await recoveredResult('完成核对未取得有效状态，已有正文与执行记录已保留；任务尚未确认完成。', { code: 'TASK_COMPLETION_REVIEW_INVALID' });
+          segments.finish(turn, { final: false });
+          messages.at(-1).content = completionReviewPrompt(progress.verification()) + ' Prior review was missing or invalid; return the required valid footer only. No tools are available.';
+          await progress.save('continuing', { code: 'TASK_COMPLETION_REVIEW_REPAIR' });
+          continue;
+        }
+        tasks.lastReview = { state: taskReply.state, reason: taskReply.reason, next: taskReply.next,
+          source: 'model-completion-review', correctnessCertified: false,
+          outputMetrics: completionReview.outputMetrics, resultRef: completionReview.resultRef };
+        taskReply = { ...taskReply, content: '', source: 'model-completion-review' };
+        taskStateAudit = { ...tasks.audit(taskReply), finishReason: turn.finish ?? null };
+        completionReview = null;
+        if (taskReply.state === 'continue') {
+          if (tasks.noProgressRounds >= 2)
+            return await recoveredResult('模型连续续接未产生新内容，已保留已有正文与执行记录；任务尚未全部完成。', { code: 'TASK_CONTINUATION_NO_PROGRESS' });
+          segments.finish(turn, { final: false });
+          recovery.protectCompletedEffects({ includeCurrent: true });
+          const resumed = output.continueReviewed(messages, tasks.audit(taskReply));
+          messages = resumed.messages;
+          tasks.resumes++;
+          taskStateAudit = { ...tasks.audit(taskReply), finishReason: turn.finish ?? null };
+          await onContextCompacted({ outputContinuation: resumed.audit });
+          await progress.save('continuing', { code: 'TASK_CONTINUING' });
+          if (round + 1 >= progress.limits.maxRounds)
+            return await recoveredResult('本次任务达到连续执行预算，已有内容已保留，任务尚未全部完成。', { code: 'TOOL_RUN_ROUND_LIMIT' });
+          continue;
+        }
+        completionReviewed = true;
+      }
+      let publicContent = taskReply.content;
+      if (!turn.calls.length && !completionReviewed) {
+        const useful = tasks.observe(publicContent);
+        if (tasks.resumes && !useful) publicContent = '';
+        taskStateAudit = { ...tasks.audit(taskReply), finishReason: turn.finish ?? null };
+      }
+      turn = { ...turn, content: publicContent };
+      textProjection.finish(turn.content, turn.reasoning);
+      const continueTask = ['continue', 'review'].includes(taskReply.state) && !turn.calls.length &&
+        !summarizeOnly && !recoveryFinal && !recovery.hasUnknownEffects;
+      if (taskReply.state === 'blocked' && !turn.calls.length)
+        return await recoveredResult([output.finalText(turn), taskReply.reason].filter(Boolean).join('\n\n'), { code: 'TASK_BLOCKED' });
+      if (tasks.resumes && tasks.noProgressRounds >= 2 && continueTask)
+        return await recoveredResult('模型连续续接未产生新内容，已保留已有正文与执行记录；任务尚未全部完成。', { code: 'TASK_CONTINUATION_NO_PROGRESS' });
+      if (turn.outputTruncated || continueTask) {
         // A complete text-only length receipt is an invocation boundary, not the end of the user task.
         // 完整纯文本的长度回执只是调用边界，不是用户任务终点；残缺工具参数仍走原拒绝路径。
         segments.finish(turn, { final: false });
         await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
-        const resumed = await runContextActivity({ round: round + 1, order: segments.order++, emit, saveActivity, signal },
-          () => output.resume(messages, turn, { round: round + 1, inputBudgetTokens, signal }));
+        recovery.protectCompletedEffects({ includeCurrent: true });
+        let resumed;
+        try {
+          resumed = await runContextActivity({ round: round + 1, order: segments.order++, emit, saveActivity, signal },
+            () => output.resume(messages, turn, { round: round + 1, inputBudgetTokens, signal,
+              ...(continueTask ? { taskState: tasks.audit(taskReply) } : {}) }));
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!continueTask || !['OUTPUT_CONTINUATION_NO_PROGRESS', 'OUTPUT_CONTINUATION_SIZE_LIMIT',
+            'OUTPUT_CONTINUATION_ARCHIVE_UNAVAILABLE'].includes(error.code)) throw error;
+          return await recoveredResult('任务续接暂时受阻，已有正文与执行记录已保留。', { code: error.code });
+        }
         messages = resumed.messages;
+        if (continueTask) { tasks.resumes++; taskStateAudit = { ...tasks.audit(taskReply), finishReason: turn.finish ?? null }; }
         await onContextCompacted({ outputContinuation: resumed.audit });
-        await progress.save('continuing', { code: 'MODEL_OUTPUT_CONTINUING' });
+        await progress.save('continuing', { code: continueTask ? 'TASK_CONTINUING' : 'MODEL_OUTPUT_CONTINUING' });
+        if (continueTask && round + 1 >= progress.limits.maxRounds)
+          return await recoveredResult('本次任务达到连续执行预算，已有内容已保留，任务尚未全部完成。', { code: 'TOOL_RUN_ROUND_LIMIT' });
+        continue;
+      }
+      if (!completionReviewed && !turn.calls.length && output.continuations > 0 &&
+          ['unknown', 'complete'].includes(taskReply.state) && !summarizeOnly && !recoveryFinal && !recovery.hasUnknownEffects) {
+        segments.finish(turn, { final: false });
+        await onRoundComplete({ content: segments.text(), reasoning: segments.reasoning() });
+        recovery.protectCompletedEffects({ includeCurrent: true });
+        if (progress.validationReceipts.length) progress.observeFinalCodeVersion(await captureCodeVersion());
+        let checkpoint;
+        try {
+          checkpoint = await runContextActivity({ round: round + 1, order: segments.order++, emit, saveActivity, signal },
+            () => output.reviewCompletion(messages, turn, { round: round + 1, inputBudgetTokens, signal,
+              taskState: tasks.audit(taskReply), directive: completionReviewPrompt(progress.verification()) }));
+        } catch (error) {
+          signal?.throwIfAborted();
+          return await recoveredResult('完成核对暂时无法继续，已有正文与执行记录已保留；任务尚未确认完成。',
+            { code: error.code ?? 'TASK_COMPLETION_REVIEW_UNAVAILABLE' });
+        }
+        messages = checkpoint.messages;
+        tasks.completionReviews++;
+        taskStateAudit = { ...tasks.audit(taskReply), finishReason: turn.finish ?? null };
+        completionReview = { attempts: 0, outputMetrics: checkpoint.audit.outputMetrics, resultRef: checkpoint.audit.resultRef };
+        await onContextCompacted({ outputContinuation: checkpoint.audit });
+        await progress.save('continuing', { code: 'TASK_COMPLETION_REVIEW' });
+        if (round + 1 >= progress.limits.maxRounds)
+          return await recoveredResult('本次任务达到连续执行预算，已有内容已保留，尚未完成最后的要求核对。', { code: 'TOOL_RUN_ROUND_LIMIT' });
         continue;
       }
       turn = { ...turn, content: output.finalText(turn) };
@@ -321,7 +434,8 @@ export async function runToolLoop({ protocol, messages, system, declarations, in
         signal?.throwIfAborted();
         return { content: turn.content, reasoning: segments.reasoning(), assistantSegments: segments.snapshot(), toolStreamProtocol: 3,
           recovery: recovery.audit(), ...(recovery.hasUnknownEffects ? { completionStatus: 'interrupted' } : {}),
-          taskCompletion: recovery.hasUnknownEffects ? { ...progress.verification(), state: 'execution-unconfirmed' } : progress.verification() };
+          taskCompletion: { ...progress.verification(), ...(recovery.hasUnknownEffects ? { state: 'execution-unconfirmed' } : {}),
+            ...(taskStateAudit ? { modelTaskState: taskStateAudit } : {}) } };
       }
       const results = [];
       let starts = Promise.resolve();
