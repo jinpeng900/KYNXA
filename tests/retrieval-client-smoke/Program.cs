@@ -6,7 +6,7 @@ using KYNXA_Desktop.Services;
 
 if (args.Contains("--live", StringComparer.Ordinal))
 {
-    await LiveGatewayChecks.RunAsync();
+    await LiveGatewayChecks.RunAsync(args);
     return;
 }
 

@@ -1,7 +1,9 @@
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using static KYNXA.ToolHost.NativeMethods;
 
 namespace KYNXA.ToolHost;
@@ -17,7 +19,6 @@ internal static class AppContainerRunner
     {
         Validate(request);
         string workspaceRoot = Path.GetFullPath(request.WorkspaceRoot!);
-        string trustedRuntimePath = Path.GetFullPath(request.NodeExecutable!);
         string profileName = "kynxa.run." + Guid.NewGuid().ToString("N");
         string runDirectory = Path.Combine(Path.GetTempPath(), "kynxa-tool-sandbox", Guid.NewGuid().ToString("N"));
         string stagingDirectory = Path.Combine(runDirectory, "workspace");
@@ -35,18 +36,13 @@ internal static class AppContainerRunner
             string temporaryDirectory = Path.Combine(stagingDirectory, ".sandbox-temp");
             Directory.CreateDirectory(runtimeDirectory);
             Directory.CreateDirectory(temporaryDirectory);
-            string nodeExecutable = Path.Combine(runtimeDirectory, "node.exe");
-            File.Copy(trustedRuntimePath, nodeExecutable);
             bool isCmd = request.Command is "cmd" or "cmd.exe";
-            string executable = nodeExecutable;
-            if (isCmd)
-            {
-                string systemCmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-                if (!File.Exists(systemCmd) || (File.GetAttributes(systemCmd) & FileAttributes.ReparsePoint) != 0)
-                    throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "The pinned Windows command processor is unavailable.");
-                executable = Path.Combine(runtimeDirectory, "cmd.exe");
-                File.Copy(systemCmd, executable);
-            }
+            string trustedExecutable = isCmd ? Path.Combine(Environment.SystemDirectory, "cmd.exe") : PrivateNodeExecutable();
+            if (!File.Exists(trustedExecutable) || (File.GetAttributes(trustedExecutable) & FileAttributes.ReparsePoint) != 0)
+                throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "The verified isolated runtime is unavailable.");
+            string executable = Path.Combine(runtimeDirectory, isCmd ? "cmd.exe" : "node.exe");
+            File.Copy(trustedExecutable, executable);
+            if (!isCmd) VerifyNodeHash(executable);
             cancellationToken.ThrowIfCancellationRequested();
 
             int profileResult = CreateAppContainerProfile(profileName, "KYNXA terminal", "Isolated per-run terminal", IntPtr.Zero, 0, out appContainerSid);
@@ -71,10 +67,9 @@ internal static class AppContainerRunner
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "SetInformationJobObject");
 
             var output = new BoundedOutput(jobHandle, isCmd);
-            // Node resolves module paths by probing every host ancestor unless symlink preservation is enabled.
-            // Preserve paths inside the already link-free snapshot instead of granting access to host ancestors.
-            // 未保留符号链接路径时，Node 会探测宿主的各级祖先目录；在已验证无链接的快照内保留路径，避免授权宿主祖先。
             string[] commandArguments = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
+            // Resolve modules only within the link-free snapshot; no access to host ancestor directories is added.
+            // 模块解析限定在已核验无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
             string[] effectiveArguments = isCmd ? commandArguments : ["--preserve-symlinks", "--preserve-symlinks-main", .. commandArguments];
             var (stdout, stderr) = StartSandboxProcess(executable, effectiveArguments, stagingDirectory, temporaryDirectory, appContainerSid, jobHandle, ref processInformation, output, isCmd);
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
@@ -143,31 +138,61 @@ internal static class AppContainerRunner
     {
         if (!OperatingSystem.IsWindowsVersionAtLeast(6, 2)) throw new SandboxException("SANDBOX_UNAVAILABLE", "AppContainer requires Windows 8 or later.");
         if (request.Command is not ("node" or "node.exe" or "cmd" or "cmd.exe"))
-            throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Only isolated Node and cmd commands are supported.");
+            throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Only private Node and the isolated Windows command processor are supported.");
         if (request.Skill is not null && request.Command is not ("node" or "node.exe"))
-            throw new SandboxException("APP_SKILL_SCRIPT_UNSUPPORTED", "Skill scripts use the verified Node.js runtime.");
-        if (string.IsNullOrWhiteSpace(request.WorkspaceRoot) || string.IsNullOrWhiteSpace(request.NodeExecutable))
-            throw new SandboxException("SANDBOX_INVALID_REQUEST", "Workspace and trusted Node runtime are required.");
-        if (!Path.IsPathFullyQualified(request.WorkspaceRoot) || request.WorkspaceRoot.StartsWith("\\\\", StringComparison.Ordinal) ||
-            !Path.IsPathFullyQualified(request.NodeExecutable) || request.NodeExecutable.StartsWith("\\\\", StringComparison.Ordinal))
-            throw new SandboxException("SANDBOX_INVALID_REQUEST", "Only local absolute workspace and runtime paths are accepted.");
-        if (!File.Exists(request.NodeExecutable) || !Path.GetFileName(request.NodeExecutable).Equals("node.exe", StringComparison.OrdinalIgnoreCase))
-            throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Trusted Node executable is missing.");
-        if (new FileInfo(request.NodeExecutable).Length > 160 * 1024 * 1024 ||
-            (File.GetAttributes(request.NodeExecutable) & FileAttributes.ReparsePoint) != 0)
-            throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Trusted Node executable cannot be linked or exceed the runtime copy limit.");
+            throw new SandboxException("APP_SKILL_SCRIPT_UNSUPPORTED", "JavaScript skill scripts require the verified private Node runtime.");
+        if (request.Command is "node" or "node.exe")
+        {
+            string expectedRuntime = PrivateNodeExecutable();
+            if (request.NodeExecutable is null || !Path.GetFullPath(request.NodeExecutable).Equals(expectedRuntime, StringComparison.OrdinalIgnoreCase))
+                throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "The runtime must be the application-managed private Node executable.");
+            VerifyNodeHash(expectedRuntime);
+            if (request.Args.Any(argument => argument.StartsWith("--inspect", StringComparison.Ordinal) || argument.StartsWith("--debug", StringComparison.Ordinal)))
+                throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Debugger ports are not enabled in the sandbox.");
+        }
+        if (string.IsNullOrWhiteSpace(request.WorkspaceRoot))
+            throw new SandboxException("SANDBOX_INVALID_REQUEST", "A workspace is required.");
+        if (!Path.IsPathFullyQualified(request.WorkspaceRoot) || request.WorkspaceRoot.StartsWith("\\\\", StringComparison.Ordinal))
+            throw new SandboxException("SANDBOX_INVALID_REQUEST", "Only local absolute workspace paths are accepted.");
         if (request.TimeoutMs is < 100 or > 120000) throw new SandboxException("SANDBOX_INVALID_REQUEST", "Timeout must be between 100 and 120000 milliseconds.");
         if (request.Args.Length > 128 || request.Args.Any(argument => argument is null || argument.Contains('\0')) ||
             request.Args.Sum(argument => argument.Length) > 24000)
             throw new SandboxException("SANDBOX_INVALID_REQUEST", "Command arguments exceed their bounds or contain a NUL character.");
-        if (request.Args.Any(argument => argument.StartsWith("--inspect", StringComparison.Ordinal) || argument.StartsWith("--debug", StringComparison.Ordinal)))
-            throw new SandboxException("SANDBOX_COMMAND_UNSUPPORTED", "Node debugger endpoints are not enabled in the sandbox.");
         if (request.Command is "cmd" or "cmd.exe")
         {
             if (request.Args.Length != 3 || !request.Args[0].Equals("/d", StringComparison.OrdinalIgnoreCase) ||
                 !request.Args[1].Equals("/c", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(request.Args[2]))
                 throw new SandboxException("SANDBOX_INVALID_REQUEST", "cmd accepts exactly ['/d', '/c', 'command text']; interactive input and AutoRun are disabled.");
         }
+    }
+
+    /// <summary>The helper resolves its own application runtime; model input cannot select another executable.</summary>
+    /// <remarks>宿主按随包位置确定私有运行时，模型参数不能选择其他可执行文件。</remarks>
+    internal static string PrivateNodeExecutable() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "runtime", "mcp", "node", "node.exe"));
+
+    internal static bool HasPrivateNode()
+    {
+        try { VerifyNodeHash(PrivateNodeExecutable()); return true; }
+        catch (SandboxException) { return false; }
+    }
+
+    private static void VerifyNodeHash(string executable)
+    {
+        string runtime = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "runtime", "mcp"));
+        string manifest = Path.Combine(runtime, "manifest.json");
+        try
+        {
+            WorkspaceSnapshot.EnsureNoReparseAncestors(manifest);
+            WorkspaceSnapshot.EnsureNoReparseAncestors(executable);
+            using var document = JsonDocument.Parse(File.ReadAllText(manifest));
+            string expected = document.RootElement.GetProperty("node").GetProperty("sha256").GetString() ?? "";
+            using var input = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (input.Length > 160L * 1024 * 1024 || expected.Length != 64 || !expected.All(Uri.IsHexDigit) ||
+                !Convert.ToHexString(SHA256.HashData(input)).Equals(expected, StringComparison.OrdinalIgnoreCase))
+                throw new SandboxException("NODE_RUNTIME_INTEGRITY_FAILED", "Private Node integrity verification failed.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException or InvalidOperationException)
+        { throw new SandboxException("NODE_RUNTIME_UNAVAILABLE", "The private Node runtime or its pinned manifest is unavailable."); }
     }
 
     private static void SetWorkspaceSecurity(string stagingDirectory, IntPtr appContainerSid)

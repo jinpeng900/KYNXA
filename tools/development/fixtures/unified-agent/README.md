@@ -1,5 +1,9 @@
 # Unified Agent evaluation fixture / 统一智能体评测样本
 
+2026-10-12 原生迁移说明：以下执行命令及原验证结果属于迁移前 Node 网关。`unified-agent-evaluation-adapter.mjs`、`evaluation-version-adapter.mjs` 及其两项测试依赖旧 `apps/model-gateway`，尚未适配当前 Rust 网关。原题集、manifest、评分与历史报告保留；`evaluate-unified-retrieval.mjs` 的独立评分/CLI 保留，但传入上述旧适配器不能运行当前后端，不把旧成绩当作本轮验收。
+
+The commands and results below describe the historical Node gateway adapter. Neither legacy adapter has been ported to the current Rust gateway. Frozen fixtures and scoring remain preserved; a new native execution adapter requires separate implementation and validation. Current runtime checks are described in the [validation reference](../../../../.agents/skills/kynxa-development/references/validation.md).
+
 The opt-in adapter runs the real `ModelRuntime`, formal conversation/result stores, local retrieval index and resource authority. It never connects to the running desktop gateway. API credentials are read from environment variables into memory; no model connection file is created.
 
 此适配器显式运行实际 `ModelRuntime`、正式聊天与工具归档、本地检索索引和资源服务，不连接正在运行的桌面网关。API 凭据从环境进入内存，不创建模型连接配置文件。

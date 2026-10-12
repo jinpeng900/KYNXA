@@ -73,13 +73,14 @@ internal static class Program
                 ?? throw new SandboxException("SANDBOX_INVALID_REQUEST", "Missing sandbox request.");
             if (request.Operation == "capabilities")
             {
+                bool nodeAvailable = AppContainerRunner.HasPrivateNode();
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
                     protocolVersion = 1, available = OperatingSystem.IsWindowsVersionAtLeast(6, 2),
-                    sandbox = "appcontainer", commands = new[] { "node", "cmd" }, network = false,
+                    sandbox = "appcontainer", commands = nodeAvailable ? new[] { "cmd", "node" } : new[] { "cmd" }, network = false,
                     workspaceCopy = true, failClosed = true, checksChildToken = true,
-                    skillExecution = new { manifestVersion = 1, readOnlyPackage = true, hashChecked = true },
-                    limitations = new[] { "cmd is restricted compatibility: echo/type/redirection; DIR may be denied; use filesystem.list/search.", "node --test requires --test-isolation=none." }
+                    skillExecution = nodeAvailable ? new { manifestVersion = 1, readOnlyPackage = true, hashChecked = true } : (object?)null,
+                    limitations = new[] { "cmd is restricted compatibility: echo/type/redirection; DIR may be denied; use filesystem.list/search.", "JavaScript skills use only the pinned private Node in an offline AppContainer; npm/npx downloads and unconfigured language runtimes are unavailable." }
                 }, JsonOptions));
                 return 0;
             }

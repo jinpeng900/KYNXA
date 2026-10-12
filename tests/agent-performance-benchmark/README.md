@@ -1,4 +1,8 @@
-# KYNXA Agent 系统评测入口
+# KYNXA Agent 系统评测历史入口
+
+2026-10-12 原生迁移说明：下文的执行入口、命令与成绩均属于迁移前 Node 网关。`run-agent.mjs`、`run-comparative.mjs`、`run-windows-six.mjs`、Pi 适配器及其源码指纹依赖旧 `apps/model-gateway`，不能作为当前原生网关入口运行；尚未完成原生评测适配或重测。以下说明按当时版本理解，保留原题集、金标、评分、依赖锁与原始报告，不将历史成绩改称本轮 Rust 成绩。
+
+独立的 `evaluation.mjs`、`rescore.mjs`、`system-suite.mjs` 和 `windows-six-suite.mjs` 保留；它们可用于历史数据评分或生成固定题集，不能单独证明当前网关完成这些任务。当前运行时/桌面合同验证见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
 
 这里测固定模型如何通过 KYNXA 的上下文、记忆、检索、工具循环和正式存储完成任务。`tests/retrieval-benchmark` 中的 SciFact Recall/nDCG 只回答检索组件的问题；它不能替代最终事实正确性、引用支持、跨语言回答、续问或工具任务的成功率。原有 40 道英文 SciFact 也不应重新标成中文或续问题。
 
@@ -44,7 +48,7 @@ node --test --test-concurrency=1 tests/agent-performance-benchmark/system-suite.
 
 回归采用 localhost 脚本上游，驱动真实 SDK 与生产工具/存储；没有真实模型调用，也不算 Agent 分数。可选 SDK 缺失时集成项明确跳过，缺失检测仍运行。实际同模型结果、独立核验、失败分类与公开同尺度参照见 [完整基准报告](../../docs/architecture/system-benchmark-20261006.md)。本组不覆盖 200 条消息恢复、长任务、真实仓库修复、UI、浏览器或桌面；公开检索基准单独报告。
 
-## 可运行的第一版
+## 历史第一版：Node 网关
 
 `run-agent.mjs` 直接复用生产 `ModelRuntime.reply`、`ToolService`、`ConversationStore`、`MemoryService` 与 `RetrievalCoordinator`。固定 fixture、标准答案、usage 与成本验收集中在纯评测模块 `evaluation.mjs`，入口负责临时环境、执行与 CLI。它不启动已有网关，每个任务/配置建立新的临时 Data、扩展目录和挂载工作目录，执行后关闭运行时并清理。所有资料均为合成 fixture，版本为 `agent-synthetic-v1`；没有调用正式聊天、记忆、资料库或桌面。模型资产只读复用仓库/安装包的固定 E5 清单。
 

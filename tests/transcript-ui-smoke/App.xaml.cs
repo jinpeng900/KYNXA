@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Models.UI;
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
 
@@ -29,7 +30,7 @@ public partial class App : Application
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
-        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only"))
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--render-performance-only"))
             _window.AppWindow.Show(activateWindow: false);
         else _window.Activate();
         _ = RunChecksAsync(cold);
@@ -46,6 +47,16 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--render-performance-only", StringComparer.Ordinal))
+            {
+                await CheckRenderPerformanceAsync();
+                _metrics["checks"] = _checks;
+                _metrics["mode"] = "render-performance-only";
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-performance.json"),
+                    JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native transcript performance checks; changed-row transport, selected patch convergence, preserved DOM and user-driven history admission.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--reply-timing-only", StringComparer.Ordinal))
             {
                 await CheckReplyTimingAsync();
@@ -143,6 +154,136 @@ public partial class App : Application
             if (_pointerWindowPosition is { } position) _window?.AppWindow.Move(position);
             if (!Environment.GetCommandLineArgs().Contains("--keep-open")) _window?.Close();
         }
+    }
+
+    private async Task CheckRenderPerformanceAsync()
+    {
+        var chat = Guid.NewGuid();
+        var rows = Enumerable.Range(0, 200).Select(index => Message(chat, index % 2 == 0 ? "user" : "assistant",
+            $"ROW_{index} 原文 " + new string('文', 300))).ToList();
+        int requestedHistory = 0;
+        EventHandler<Guid> history = (_, id) => { if (id == chat) requestedHistory++; };
+        _transcript.HistoryRequested += history;
+        try
+        {
+            await EvalAsync<bool>("(() => { window.__renderCommands = []; window.chrome.webview.addEventListener('message', event => { const value = event.data; if (value.type === 'render' || value.type === 'renderPatch') __renderCommands.push({type:value.type,count:value.messages.length}); }); return true; })()");
+            _transcript.ShowConversation(chat, rows);
+            await WaitAsync("window.transcriptState().messageCount === 200 && __transcriptSmoke.bottomDistance() < 4", "paged long transcript opens at the latest messages");
+            await WaitAsync("window.transcriptState().mountedMessageCount < 80 && document.querySelectorAll('article[data-virtualized]').length > 100", "offscreen messages release their body DOM into measured placeholders");
+            _metrics["loaded200Mounted"] = await EvalAsync<int>("window.transcriptState().mountedMessageCount");
+            Check(requestedHistory == 0, "initial bottom navigation does not request earlier pages");
+            await EvalAsync<bool>("(() => { window.__unchangedArticle = document.querySelector('article.message'); return true; })()");
+            rows[^1].Message.Content += " PATCH_VISIBLE";
+            rows[^1].Refresh();
+            await WaitAsync("__transcriptSmoke.bodyText().includes('PATCH_VISIBLE')", "changed message is rendered");
+            Check(await EvalAsync<bool>("__renderCommands.at(-1).type === 'renderPatch' && __renderCommands.at(-1).count === 1"), "one changed row is transported instead of all 200 loaded messages");
+            Check(await EvalAsync<bool>("window.__unchangedArticle === document.querySelector('article.message')"), "unchanged article retains its DOM identity");
+
+            await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true})); window.scrollTo({top:0,behavior:'instant'}); return true; })()");
+            await WaitAsync("__transcriptSmoke.bodyText().includes('ROW_0')", "scrolling mounts the original earlier message");
+            var firstHistoryDeadline = DateTime.UtcNow.AddSeconds(5);
+            while (requestedHistory == 0 && DateTime.UtcNow < firstHistoryDeadline) await Task.Delay(25);
+            Check(requestedHistory == 1, "user upward navigation loads one earlier page");
+            string selected = await EvalAsync<string>("(() => { const node = __transcriptSmoke.textNode(document.querySelector('article.message'), 'ROW_0'); getSelection().setBaseAndExtent(node,0,node,20); return window.transcriptSelectionText(); })()");
+            rows[^1].Message.Content += " PATCH_SELECTED_A";
+            rows[^1].Refresh();
+            await WaitAsync("window.transcriptState().pending", "first selected patch is deferred");
+            rows[^3].Message.Content += " PATCH_SELECTED_B";
+            rows[^3].Refresh();
+            await WaitAsync("__renderCommands.at(-1).type === 'renderPatch'", "subsequent selected row uses a patch");
+            await Task.Delay(120);
+            Check(await EvalAsync<string>("window.transcriptSelectionText()") == selected, "selected original content remains stable across patches");
+            _transcript.ClearSelection();
+            await EvalAsync<bool>("(() => { window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'}); return true; })()");
+            await WaitAsync("__transcriptSmoke.bodyText().includes('PATCH_SELECTED_A') && __transcriptSmoke.bodyText().includes('PATCH_SELECTED_B') && !window.transcriptState().pending", "clearing selection merges both deferred row updates");
+
+            await EvalAsync<bool>("(() => { window.scrollTo({top:0,behavior:'instant'}); return true; })()");
+            await Task.Delay(120);
+            Check(requestedHistory == 1, "programmatic scroll does not load the entire history");
+            await EvalAsync<bool>("(() => { window.chrome.webview.postMessage({type:'history',conversationId:'00000000-0000-0000-0000-000000000000'}); return true; })()");
+            await Task.Delay(80);
+            Check(requestedHistory == 1, "history request from another conversation is ignored");
+            await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true})); return true; })()");
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (requestedHistory == 1 && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Check(requestedHistory == 2, "user upward input at the top requests one history page");
+            await Task.Delay(120);
+            Check(requestedHistory == 2, "no further page is requested without another user action");
+
+            var cacheChat = Guid.NewGuid();
+            var cacheRows = Enumerable.Range(0, 1100).Select(index => Message(cacheChat, "assistant", $"CACHE_{index} 原文")).ToList();
+            _transcript.ShowConversation(cacheChat, cacheRows);
+            await WaitAsync("window.transcriptState().messageCount === 1100 && __transcriptSmoke.bottomDistance() < 4", "history exceeding the HTML cache opens with a bounded DOM window");
+            long parsedBefore = TranscriptMarkdown.ParseCount;
+            cacheRows[^1].Message.Content += " CACHE_CHANGE"; cacheRows[^1].Refresh();
+            await WaitAsync("__transcriptSmoke.bodyText().includes('CACHE_CHANGE')", "a changed row is visible after historical HTML eviction");
+            Check(TranscriptMarkdown.ParseCount - parsedBefore == 1, "evicted unchanged history is not reparsed on a stream refresh");
+            _metrics["oneChangedRowMarkdownParses"] = TranscriptMarkdown.ParseCount - parsedBefore;
+            Check(await EvalAsync<bool>("window.transcriptState().mountedMessageCount < 100"), "1100 historical bodies do not remain mounted");
+            _metrics["loaded1100Mounted"] = await EvalAsync<int>("window.transcriptState().mountedMessageCount");
+
+            await EvalAsync<bool>("(() => { const range=document.createRange(); range.selectNodeContents(document.getElementById('messages')); getSelection().removeAllRanges();getSelection().addRange(range);return true; })()");
+            string allCopied = await EvalAsync<string>("window.transcriptSelectionText()");
+            Check(allCopied.Contains("CACHE_0 原文") && allCopied.Contains("CACHE_1099 原文 CACHE_CHANGE"), "copying across unloaded placeholders includes both history endpoints");
+            _transcript.ClearSelection();
+
+            var historyDirections = new List<string>();
+            EventHandler<ConversationHistoryRequest> historyNavigation = (_, request) =>
+            { if (request.ConversationId == cacheChat) historyDirections.Add(request.Direction); };
+            _transcript.HistoryNavigationRequested += historyNavigation;
+            try
+            {
+                _transcript.SetHistoryAvailability(cacheChat, hasOlder: true, hasNewer: true);
+                await WaitAsync("!document.getElementById('jump-to-latest').hidden", "an older page window offers navigation to durable latest messages");
+                await EvalAsync<bool>("(() => { document.getElementById('jump-to-latest').click();return true; })()");
+                var navigationDeadline = DateTime.UtcNow.AddSeconds(5);
+                while (historyDirections.Count == 0 && DateTime.UtcNow < navigationDeadline) await Task.Delay(25);
+                Check(historyDirections.SequenceEqual(["latest"]), "jump to latest requests a latest page instead of the end of an old window");
+                await Task.Delay(150);
+                await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:120,bubbles:true}));return true; })()");
+                while (historyDirections.Count < 2 && DateTime.UtcNow < navigationDeadline) await Task.Delay(25);
+                Check(historyDirections.SequenceEqual(["latest", "newer"]), "user downward navigation requests one newer page");
+                await Task.Delay(150);
+                Check(historyDirections.Count == 2, "newer navigation does not automatically walk through all durable pages");
+            }
+            finally { _transcript.HistoryNavigationRequested -= historyNavigation; }
+
+            var streamChat = Guid.NewGuid();
+            var streamed = Message(streamChat, "assistant", string.Join("\n\n", Enumerable.Range(0, 300)
+                .Select(index => $"STABLE_{index} completed paragraph")) + "\n\nSTREAM_TAIL", "streaming");
+            _transcript.ShowConversation(streamChat, [streamed]);
+            await WaitAsync("__transcriptSmoke.bodyText().includes('STREAM_TAIL')", "a long streamed response initially renders its stable blocks");
+            await EvalAsync<bool>("(() => { window.__stablePrefixNode=document.querySelector('.message-body p');return true; })()");
+            long streamingCharactersBefore = TranscriptMarkdown.ParsedCharacters;
+            streamed.Message.Content += " APPEND_TAIL"; streamed.Refresh();
+            await WaitAsync("__transcriptSmoke.bodyText().includes('APPEND_TAIL')", "an appended streaming tail reaches the page");
+            Check(TranscriptMarkdown.ParsedCharacters - streamingCharactersBefore < 100,
+                "stream refresh parses its short tail without reparsing the 300 completed paragraphs");
+            _metrics["streamTotalCharacters"] = streamed.Message.Content.Length;
+            _metrics["streamRefreshParsedCharacters"] = TranscriptMarkdown.ParsedCharacters - streamingCharactersBefore;
+            Check(await EvalAsync<bool>("window.__stablePrefixNode===document.querySelector('.message-body p')"),
+                "streaming retains the existing first paragraph DOM node");
+            streamed.Message.Content += "\n\n```python\nprint('STREAM_CODE')\n```\n\n$x=1$"; streamed.Refresh();
+            await WaitAsync("__transcriptSmoke.bodyText().includes('STREAM_CODE') && document.querySelector('.katex') !== null", "new stable code and math blocks are appended without dropping the preserved prefix");
+            streamed.Message.Status = "completed"; streamed.Refresh();
+            await WaitAsync("!window.transcriptState().liveElapsedCount && document.querySelector('pre[data-code-complete=true]') !== null", "final response renders authoritative Markdown and complete code state");
+
+            var taskChat = Guid.NewGuid();
+            var taskRow = Message(taskChat, "assistant", "FINAL_WITH_FAILED_CHECKS");
+            taskRow.Message.AssistantSegments =
+            [
+                new("task-progress", 1, 0, "commentary", "completed", "CHECK_PROGRESS_RETAINED", ""),
+                new("task-final", 2, 2, "final_answer", "completed", "FINAL_WITH_FAILED_CHECKS", "")
+            ];
+            taskRow.Message.TaskCompletionState = "verification-failed";
+            _transcript.ShowConversation(taskChat, [taskRow]);
+            await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('核验失败') && __transcriptSmoke.bodyText().includes('CHECK_PROGRESS_RETAINED') && __transcriptSmoke.bodyText().includes('FINAL_WITH_FAILED_CHECKS')", "failed task verification is visible and does not hide its received progress");
+            string originalLanguage = UiText.Language;
+            UiText.Initialize("en");
+            await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('Verification failed')", "task outcome controls translate without rewriting the answer");
+            UiText.Initialize(originalLanguage);
+        }
+        finally { _transcript.HistoryRequested -= history; }
     }
 
     private async Task CheckSelectionAndCopyAsync()

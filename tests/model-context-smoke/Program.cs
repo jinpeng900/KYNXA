@@ -4,6 +4,17 @@ using System.Text;
 using System.Text.Json;
 using KYNXA_Desktop.Services;
 
+if (args.Length == 2 && args[0] == "--native-models-fixture")
+{
+    await NativeModelsContractChecks.RunAsync(args[1]);
+    return;
+}
+if (args.Length == 2 && args[0] == "--native-models-live")
+{
+    await NativeModelsContractChecks.RunLiveAsync(args[1]);
+    return;
+}
+
 static void Check(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -41,8 +52,8 @@ var server = Task.Run(async () =>
             {
                 string path = context.Request.Url!.AbsolutePath;
                 if (path == "/health")
-                    result = new { service = "kynxa-model-gateway", status = "ok", storageProtocol = 1,
-                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1 };
+                    result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", storageProtocol = 1,
+                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1, retrievalProtocol = 1 };
                 else if (path == "/api/models" && context.Request.HttpMethod == "GET")
                 {
                     // Missing limits use their independent defaults. Explicit limits
@@ -136,7 +147,7 @@ try
     }
     Check(Volatile.Read(ref requestCount) == before, "invalid windows reached the gateway");
     Check(serverFailure is null, $"fake gateway failed: {serverFailure}");
-    Console.WriteLine("PASS: independent legacy 8K context/256K output defaults, explicit 2K output preservation, 1M context, Save/Test output preset/custom/boundary round trips, and invalid limits rejected before network access.");
+    Console.WriteLine("PASS: independent legacy 32K context/256K output defaults, explicit 2K output preservation, 1M context, Save/Test output preset/custom/boundary round trips, and invalid limits rejected before network access.");
 }
 finally
 {

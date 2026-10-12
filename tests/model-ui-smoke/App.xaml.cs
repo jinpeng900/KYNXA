@@ -20,6 +20,7 @@ public partial class App : Application
     private Exception? _unhandled;
     private bool _windowClosed;
     private readonly bool _closeDuringInitialization = Environment.GetCommandLineArgs().Contains("--close-during-initialization", StringComparer.Ordinal);
+    private readonly bool _ownerCloseOnly = Environment.GetCommandLineArgs().Contains("--owner-close-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -99,6 +100,44 @@ public partial class App : Application
         var button = panel.Children.OfType<Button>().Single(item => item.Content is StackPanel content &&
             content.Children.OfType<TextBlock>().First().Text == name);
         NativeUi.Invoke(button);
+        await WaitAsync(() => Element<TextBox>("NameBox").Text == name || NativeUi.OpenDialog(_root) is not null,
+            "connection selection loads the target form or asks to discard its existing draft");
+        if (NativeUi.OpenDialog(_root) is { } dialog)
+        {
+            // Confirm only the known connection-switch prompt; an unrelated modal must fail this fixture.
+            // 仅确认已知的连接切换提示；出现无关弹窗时让测试明确失败。
+            Check(dialog.Title?.ToString() == UiText.Get("还有未保存的修改") &&
+                dialog.Content?.ToString()?.Contains(UiText.Get("切换连接"), StringComparison.Ordinal) == true,
+                "switching an edited connection presents its real unsaved-change confirmation");
+            await SettleAsync();
+            NativeUi.InvokeDialogButton(dialog, primary: true);
+        }
+        await WaitAsync(() => Element<TextBox>("NameBox").Text == name && Element<TextBox>("ProviderIdBox").IsReadOnly,
+            "the explicitly selected saved connection becomes the editable form");
+        await SettleAsync();
+    }
+
+    private async Task SelectPresetAsync(string presetId)
+    {
+        var choice = Element<ComboBox>("PresetBox");
+        var preset = ModelPresets.All.Single(item => item.Id == presetId);
+        choice.SelectedItem = preset;
+        await WaitAsync(() => (choice.SelectedItem as ModelPreset)?.Id == presetId || NativeUi.OpenDialog(_root) is not null,
+            "provider preset selection applies the preset or asks to discard its existing draft");
+        if (NativeUi.OpenDialog(_root) is { } dialog)
+        {
+            // Switching provider presets has its own explicit discard action; verify it before confirming.
+            // 切换服务商有独立的丢弃动作，先验证提示对应此动作再确认。
+            Check(dialog.Title?.ToString() == UiText.Get("还有未保存的修改") &&
+                dialog.Content?.ToString()?.Contains(UiText.Get("切换服务商"), StringComparison.Ordinal) == true,
+                "switching an edited provider preset presents its real unsaved-change confirmation");
+            await SettleAsync();
+            NativeUi.InvokeDialogButton(dialog, primary: true);
+        }
+        await WaitAsync(() => (choice.SelectedItem as ModelPreset)?.Id == presetId &&
+            Element<TextBox>("BaseUrlBox").Text == preset.BaseUrl && !Element<TextBox>("ProviderIdBox").IsReadOnly &&
+            ChoiceValue(Element<ComboBox>("ProtocolBox")) == preset.Protocol,
+            "the explicitly selected provider preset becomes the new connection form");
         await SettleAsync();
     }
 
@@ -140,10 +179,52 @@ public partial class App : Application
             $"save payload contains output {outputTokens}");
     }
 
+    private async Task CheckOwnerCloseAsync()
+    {
+        int readsBeforeOpen = _gateway.ListReads;
+        int savesBeforeClose = _gateway.Saves;
+        int probesBeforeClose = _gateway.Probes;
+        _windowClosed = false;
+        _window = new ModelManagementWindow();
+        _window.Closed += (_, _) => _windowClosed = true;
+        _root = (FrameworkElement)_window.Content;
+        _window.Activate();
+        await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == readsBeforeOpen + 1 && Button("SaveButton").IsEnabled,
+            "owner-close fixture opens an isolated native model editor");
+        NativeUi.SetText(Element<TextBox>("NameBox"), "Unsaved owner-close fixture / 退出草稿");
+        await SettleAsync();
+        NativeUi.RequestClose(_window);
+        await WaitAsync(() => NativeUi.OpenDialog(_root) is not null,
+            "a native close request preserves the unsaved model editor with a discard confirmation");
+        Check(!_windowClosed && _gateway.Saves == savesBeforeClose,
+            "opening the discard confirmation neither closes nor automatically saves the editor");
+        var discardDialog = NativeUi.OpenDialog(_root)!;
+        bool discardClosed = false;
+        discardDialog.Closed += (_, _) => discardClosed = true;
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        _window.CloseForOwner();
+        await WaitAsync(() => _windowClosed && discardClosed,
+            "application exit closes the native model editor and dismisses its pending discard confirmation");
+        Check(elapsed.Elapsed < TimeSpan.FromSeconds(1), "owner close completes within one second with an open confirmation");
+        _window.CloseForOwner();
+        await SettleAsync();
+        Check(_gateway.Saves == savesBeforeClose && _gateway.Probes == probesBeforeClose && _unhandled is null,
+            "owner close is safe to repeat and leaves unsaved synthetic configuration unchanged");
+    }
+
     private async Task RunAsync()
     {
         try
         {
+            if (_ownerCloseOnly)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && Button("SaveButton").IsEnabled,
+                    "the initial synthetic editor is ready before the focused exit check");
+                _window!.CloseForOwner();
+                await CheckOwnerCloseAsync();
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native model UI checks.");
+                return;
+            }
             if (_closeDuringInitialization)
             {
                 await WaitAsync(() => _root.XamlRoot is not null && _gateway.ListReads == 1 && !Button("SaveButton").IsEnabled,
@@ -178,13 +259,13 @@ public partial class App : Application
             await NativeWindowCapture.CaptureAsync(_window, Path.Combine(_directory, "default-output-zh.png"));
 
             await SelectProviderAsync("Legacy / 旧连接");
-            Check(ChoiceValue(OutputChoice) == "262144" && ChoiceValue(ContextChoice) == "8192" && _gateway.Saves == 0,
+            Check(ChoiceValue(OutputChoice) == "262144" && ChoiceValue(ContextChoice) == "32768" && _gateway.Saves == 0,
                 "legacy connections missing both fields display independent defaults without rewriting them");
             NativeUi.SetText(Element<TextBox>("BaseUrlBox"), "https://api.deepseek.com");
             NativeUi.SetText(Element<TextBox>("ModelsBox"), "deepseek-flash");
             await SettleAsync();
-            Check(ChoiceValue(ContextChoice) == "8192" && _gateway.Saves == 0,
-                "editing an existing compatible 8K connection does not silently upgrade its context or save it");
+            Check(ChoiceValue(ContextChoice) == "32768" && _gateway.Saves == 0,
+                "editing an existing compatible 32K connection does not silently upgrade its context or save it");
             await SelectProviderAsync("Small / 两个模型");
             Check(ChoiceValue(ContextChoice) == "1000000" && ChoiceValue(OutputChoice) == "custom" && CustomOutput.Text == "2048" &&
                 CustomOutput.Visibility == Visibility.Visible, "existing explicit 2K output remains custom and preserves the saved one-million context");
@@ -271,9 +352,7 @@ public partial class App : Application
             await BringOutputIntoViewAsync();
             await NativeWindowCapture.CaptureAsync(_window, Path.Combine(_directory, "output-64k-zh.png"));
 
-            var presets = Element<ComboBox>("PresetBox");
-            presets.SelectedItem = ModelPresets.All.Single(preset => preset.Id == "anthropic");
-            await SettleAsync();
+            await SelectPresetAsync("anthropic");
             Check(ChoiceValue(OutputChoice) == "262144" && ChoiceValue(ContextChoice) == "200000" &&
                 ChoiceValue(Element<ComboBox>("ProtocolBox")) == "anthropic-messages", "a new mixed Claude connection uses its smallest selected model window and retains its protocol");
             var modelOptions = Element<StackPanel>("ModelOptions").Children.OfType<CheckBox>().ToArray();
@@ -283,8 +362,7 @@ public partial class App : Application
             await SettleAsync();
             Check(ChoiceValue(ContextChoice) == "1000000" && Element<TextBox>("ModelsBox").Text == "claude-opus-5-5",
                 "model checkboxes expand a new Claude draft's window while its manual editor stays collapsed");
-            presets.SelectedItem = ModelPresets.All.Single(preset => preset.Id == "kimi");
-            await SettleAsync();
+            await SelectPresetAsync("kimi");
             Check(ChoiceValue(ContextChoice) == "262144", "a new mixed Kimi draft uses the 256K models' verified window");
             UiText.Initialize("en");
             await SettleAsync();
@@ -295,17 +373,15 @@ public partial class App : Application
             Check(ChoiceValue(ContextChoice) == "32768", "a manual context choice survives subsequent new-draft model changes");
             UiText.Initialize("zh-CN");
             await SettleAsync();
-            presets.SelectedItem = ModelPresets.All.Single(preset => preset.Id == "openai");
-            await SettleAsync();
+            await SelectPresetAsync("openai");
             Check(ChoiceValue(ContextChoice) == "128000", "a mixed OpenAI preset does not claim one-million support for all models");
             await SetModelIdsAsync("gpt-6-astra");
             Check(ChoiceValue(ContextChoice) == "1050000", "a verified OpenAI model selection uses its real total context window");
             NativeUi.SetText(Element<TextBox>("BaseUrlBox"), "https://proxy.example.invalid/v1");
             await SettleAsync();
-            Check(ChoiceValue(ContextChoice) == "8192", "an unverified proxy does not inherit an official model capability");
-            presets.SelectedItem = ModelPresets.All.Single(preset => preset.Id == "local-api");
-            await SettleAsync();
-            Check(ChoiceValue(ContextChoice) == "8192" && ChoiceValue(OutputChoice) == "262144",
+            Check(ChoiceValue(ContextChoice) == "32768", "an unverified proxy does not inherit an official model capability");
+            await SelectPresetAsync("local-api");
+            Check(ChoiceValue(ContextChoice) == "32768" && ChoiceValue(OutputChoice) == "262144",
                 "new local connections retain compatibility context defaults and independent output configuration");
             NativeUi.SetText(Element<TextBox>("NameBox"), "Local UI fixture / 临时");
             NativeUi.SetText(Element<TextBox>("ModelsBox"), "fixture-model\nfixture-model-two");
@@ -328,6 +404,7 @@ public partial class App : Application
             await Task.Delay(1700);
             Check(Element<TextBlock>("StatusText").Text == closingStatus && _unhandled is null,
                 "a late model probe cannot update the closed window or raise an unhandled UI error");
+            await CheckOwnerCloseAsync();
             Check(_gateway.Failure is null && _unhandled is null, "the isolated gateway and native model window complete without unhandled failures");
             File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native model UI checks.\nPreviews: {_directory}");
         }
@@ -338,7 +415,7 @@ public partial class App : Application
         }
         finally
         {
-            if (!_windowClosed) _window?.Close();
+            if (!_windowClosed) _window?.CloseForOwner();
             await _gateway.DisposeAsync();
             _anchor?.Close();
         }

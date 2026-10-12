@@ -43,7 +43,8 @@ internal static partial class Program
         var window = new Window { Title = "Synthetic KYNXA desktop fixture", Width = 540, Height = 540,
             Left = 80, Top = 80, Background = Brushes.White, Content = panel };
         if (args is ["--delayed-activation-fixture", _]) window.Background = Brushes.LightYellow;
-        if (args is ["--background-fixture" or "--slow-provider-fixture" or "--hung-fixture", _]) window.ShowActivated = false;
+        if (args is ["--background-fixture" or "--slow-provider-fixture" or "--hung-fixture", _]
+            || args is ["--launch-lifetime-only"]) window.ShowActivated = false;
         window.PreviewMouseMove += (_, _) => _moveEvents++;
         window.Loaded += async (_, _) =>
         {
@@ -61,6 +62,7 @@ internal static partial class Program
                 if (args is ["--capability-extensions-only" or "--capability-readonly-only"]) await CheckCapabilityExtensionsAsync(window, args[0] != "--capability-readonly-only");
                 else if (args is ["--background-placement-only"]) await CheckBackgroundPlacementAsync(window);
                 else if (args is ["--input-extensions-only"]) await CheckInputExtensionsAsync(window);
+                else if (args is ["--launch-lifetime-only"]) await CheckLaunchLifetimeAsync();
                 else await CheckAsync(window);
                 File.WriteAllText(Path.Combine(ArtifactFolder, "result.json"), JsonSerializer.Serialize(new { passed = true, checks = _checks }, JsonOptions));
                 Console.WriteLine($"PASS native desktop: {_checks} checks; artifacts: {ArtifactFolder}");

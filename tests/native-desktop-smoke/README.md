@@ -1,5 +1,7 @@
 # Native desktop verification
 
+2026-10-12 native migration: the independent C# ToolHost/UI checks remain. The Node `browser-smoke.mjs` adapter below imports the retired gateway and is historical, with no native port claimed. Earlier recorded counts are not this migration's acceptance results.
+
 These checks use only windows, child processes and browser profiles created by the fixture. They must run serially with other foreground UI tests. They do not inspect a user's windows, profile, credentials, chat data or model API. Screenshots/read results are written into unique `%TEMP%/kynxa-native-*` artifact folders; they are never committed.
 
 Build the self-contained helper first:
@@ -33,7 +35,7 @@ dotnet run --project tests/native-desktop-smoke/NativeDesktopSmoke.csproj -c Deb
 
 The base run initially passed 26 actual checks: window/PID scope, visible UIA text and URL, password exclusion, PNG bytes/dimensions, invalid target/key/coordinate and host-shell rejection, foreground refusal, actual bilingual typing, mouse move/click, scrolling/dragging and launching an owned GUI child. The extension run checks registry application discovery, overlong input refusal without mutation, bounded read validation, minimized-window activation and actual middle click. Both shut down only their own windows/processes.
 
-The real-browser check uses installed Edge/Chrome executables, a fresh user-data directory and a locally served synthetic page:
+Historical Node real-browser adapter (not a current native command) used installed Edge/Chrome executables, a fresh user-data directory and a locally served synthetic page:
 
 ```powershell
 node tests/native-desktop-smoke/browser-smoke.mjs
@@ -42,6 +44,14 @@ node tests/native-desktop-smoke/browser-smoke.mjs
 It invokes the production DesktopRunner and real ToolHost GUI launch/windows/read/screenshot channels. It verifies best-effort background startup receipts, bilingual visible document text, the exact loopback address, password locator metadata without Name/Value/text and completed host-desktop receipts. The owned fresh-profile page launch explicitly enables `--disable-backgrounding-occluded-windows` to keep its completely covered renderer/accessibility provider running; without that option this update reproduced blank page screenshots and missing document UIA. Chromium initialization is polled briefly rather than assumed synchronous. The current actual Edge + Chrome run passed 42 checks, and both rendered page PNGs were inspected. The count varies with initialization retries; all functional assertions remain. Cleanup terminates only the browser PID returned for the new temporary profile and its own descendants.
 
 For a helper at another build path set `KYNXA_DESKTOP_SMOKE_TOOL_HOST` to the absolute executable path. Native tests require an unlocked interactive Windows session. Missing installed browsers is a failed prerequisite, not a claimed browser pass. No screenshot or read of an existing user's browser is permitted in these fixtures.
+
+The launch lifetime check places only its own helper in a kill-on-close job with explicit breakaway permission. It launches an independent WPF fixture, waits for the helper to exit, closes the job, then verifies the GUI is still running and discoverable. It does not launch a user's browser or depend on a pre-existing application accepting the request.
+
+启动生命周期检查只把自有助手放入允许显式脱离的退出清理作业，启动独立 WPF 夹具后等待助手退出并关闭作业，再确认 GUI 仍存活且可发现。不会启动用户浏览器，也不依赖已有应用接管启动请求。
+
+```powershell
+dotnet run --project tests/native-desktop-smoke/NativeDesktopSmoke.csproj -c Debug -- --launch-lifetime-only
+```
 
 The capability extension fixture verifies bounded element/region reads, password locator metadata without Name/Value/text, original-pixel screenshot crop, non-activating window resize/maximize/minimize/restore, a best-effort background GUI launch, an unresponsive UI thread and a synthetic stalled UIA provider:
 
