@@ -1,9 +1,13 @@
+param([switch]$OwnerCloseOnly)
+
 $ErrorActionPreference = 'Stop'
 $fixtureProject = Join-Path $PSScriptRoot 'ModelUiSmoke.csproj'
 dotnet build $fixtureProject
 if ($LASTEXITCODE -ne 0) { throw 'Model native UI fixture build failed.' }
 $fixtureExecutable = Join-Path $PSScriptRoot 'bin/Debug/net10.0-windows10.0.26100.0/win-x64/ModelUiSmoke.exe'
-$fixtureProcess = Start-Process -FilePath $fixtureExecutable -WindowStyle Hidden -PassThru
+$launchOptions = @{ FilePath = $fixtureExecutable; WindowStyle = 'Hidden'; PassThru = $true }
+if ($OwnerCloseOnly) { $launchOptions.ArgumentList = '--owner-close-only' }
+$fixtureProcess = Start-Process @launchOptions
 if (-not $fixtureProcess.WaitForExit(45000)) {
     $fixtureProcess.Kill()
     throw "Model UI fixture timed out (owned process $($fixtureProcess.Id))."

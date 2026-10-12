@@ -8,92 +8,641 @@
     "E": "会话、记忆、路径与迁移 / conversations, memory, paths and migration"
   },
   "sourceScopes": [
-    "apps/model-gateway",
     "apps/desktop",
     "apps/desktop-preview",
     "apps/mock-backend",
     "apps/shared",
     "apps/tool-host",
-    "apps/resource-service"
+    "apps/resource-service",
+    "apps/agent-core",
+    "apps/official-tools"
   ],
-  "sourceExtensions": [".mjs", ".js", ".cs", ".rs", ".ps1", ".csproj", ".xaml", ".html", ".css"],
-  "excludedDirectoryNames": ["node_modules", "bin", "obj", "target", "tests", ".git"],
+  "sourceExtensions": [
+    ".mjs",
+    ".js",
+    ".cs",
+    ".rs",
+    ".ps1",
+    ".csproj",
+    ".xaml",
+    ".html",
+    ".css"
+  ],
+  "excludedDirectoryNames": [
+    "node_modules",
+    "bin",
+    "obj",
+    "target",
+    "tests",
+    ".git"
+  ],
   "ownershipRules": [
-    { "prefix": "apps/model-gateway/orchestration/", "role": "A" },
-    { "prefix": "apps/model-gateway/platform/", "role": "A" },
-    { "prefix": "apps/resource-service/", "role": "A" },
-    { "prefix": "apps/model-gateway/models/", "role": "C" },
-    { "prefix": "apps/model-gateway/tools/", "role": "D" },
-    { "prefix": "apps/model-gateway/official-tools/", "role": "D" },
-    { "prefix": "apps/model-gateway/data/", "role": "E" },
-    { "files": ["apps/model-gateway/server.mjs", "apps/model-gateway/initialize-storage.mjs", "apps/model-gateway/migrate-storage.mjs"], "role": "A" },
-    { "files": ["apps/model-gateway/start-local-model.ps1"], "role": "C" },
-    { "prefix": "apps/desktop-preview/", "role": "A" },
-    { "prefix": "apps/mock-backend/", "role": "A" },
-    { "prefix": "apps/desktop/Build/", "role": "A" },
-    { "files": ["apps/desktop/KYNXA.Desktop.csproj", "apps/tool-host/KYNXA.ToolHost.csproj"], "role": "A" },
-    { "directory": "apps/desktop", "extensions": [".cs", ".xaml"], "role": "B" },
-    { "prefix": "apps/desktop/Views/", "role": "B" },
-    { "prefix": "apps/desktop/Controls/", "role": "B" },
-    { "prefix": "apps/desktop/ViewModels/", "role": "B" },
-    { "prefix": "apps/desktop/Models/", "role": "B" },
-    { "prefix": "apps/desktop/Layout/", "role": "B" },
-    { "prefix": "apps/desktop/Resources/", "role": "B" },
-    { "prefix": "apps/desktop/UI/", "role": "B" },
-    { "prefix": "apps/desktop/Styles/", "role": "B" },
-    { "prefix": "apps/desktop/Services/Integration/", "role": "A" },
-    { "prefix": "apps/desktop/Services/Presentation/", "role": "B" },
-    { "prefix": "apps/desktop/Services/Models/", "role": "C" },
-    { "prefix": "apps/desktop/Services/Tools/", "role": "D" },
-    { "prefix": "apps/desktop/Services/Data/", "role": "E" },
-    { "prefix": "apps/shared/Chat/", "extensions": [".cs"], "role": "C" },
-    { "prefix": "apps/shared/Tools/", "extensions": [".cs"], "role": "D" },
-    { "prefix": "apps/shared/Memory/", "extensions": [".cs"], "role": "E" },
-    { "prefix": "apps/shared/", "extensions": [".csproj"], "role": "A" },
-    { "prefix": "apps/tool-host/Desktop/", "role": "D" },
-    { "prefix": "apps/tool-host/Terminal/", "role": "D" },
-    { "prefix": "apps/tool-host/Sandbox/", "role": "D" },
-    { "prefix": "apps/tool-host/Native/", "role": "D" },
-    { "files": ["apps/tool-host/Program.cs"], "role": "A" }
+    {
+      "prefix": "apps/agent-core/src/resources/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/agent-core/src/storage/",
+      "role": "E"
+    },
+    {
+      "prefix": "apps/agent-core/src/models/",
+      "role": "C"
+    },
+    {
+      "prefix": "apps/agent-core/src/orchestration/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/agent-core/src/tools/",
+      "role": "D"
+    },
+    {
+      "prefix": "apps/agent-core/src/retrieval/",
+      "role": "E"
+    },
+    {
+      "files": [
+        "apps/agent-core/src/lib.rs",
+        "apps/agent-core/src/main.rs",
+        "apps/agent-core/src/text_metrics.rs",
+        "apps/agent-core/src/file_identity.rs",
+        "apps/agent-core/src/transport.rs",
+        "apps/agent-core/src/service_cancellation.rs",
+        "apps/agent-core/src/gateway.rs",
+        "apps/agent-core/src/gateway_contract.rs"
+      ],
+      "role": "A"
+    },
+    {
+      "prefix": "apps/resource-service/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/desktop-preview/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/mock-backend/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/desktop/Build/",
+      "role": "A"
+    },
+    {
+      "files": [
+        "apps/desktop/KYNXA.Desktop.csproj",
+        "apps/tool-host/KYNXA.ToolHost.csproj"
+      ],
+      "role": "A"
+    },
+    {
+      "directory": "apps/desktop",
+      "extensions": [
+        ".cs",
+        ".xaml"
+      ],
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Views/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Controls/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/ViewModels/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Models/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Layout/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Resources/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/UI/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Styles/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Services/Integration/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/desktop/Services/Presentation/",
+      "role": "B"
+    },
+    {
+      "prefix": "apps/desktop/Services/Models/",
+      "role": "C"
+    },
+    {
+      "prefix": "apps/desktop/Services/Tools/",
+      "role": "D"
+    },
+    {
+      "prefix": "apps/desktop/Services/Data/",
+      "role": "E"
+    },
+    {
+      "prefix": "apps/shared/Chat/",
+      "extensions": [
+        ".cs"
+      ],
+      "role": "C"
+    },
+    {
+      "prefix": "apps/shared/Tools/",
+      "extensions": [
+        ".cs"
+      ],
+      "role": "D"
+    },
+    {
+      "prefix": "apps/shared/Memory/",
+      "extensions": [
+        ".cs"
+      ],
+      "role": "E"
+    },
+    {
+      "prefix": "apps/shared/",
+      "extensions": [
+        ".csproj"
+      ],
+      "role": "A"
+    },
+    {
+      "prefix": "apps/tool-host/Desktop/",
+      "role": "D"
+    },
+    {
+      "prefix": "apps/tool-host/Terminal/",
+      "role": "D"
+    },
+    {
+      "prefix": "apps/tool-host/Sandbox/",
+      "role": "D"
+    },
+    {
+      "prefix": "apps/tool-host/Native/",
+      "role": "D"
+    },
+    {
+      "files": [
+        "apps/tool-host/Program.cs"
+      ],
+      "role": "A"
+    },
+    {
+      "prefix": "apps/agent-core/src/bin/",
+      "role": "A"
+    },
+    {
+      "prefix": "apps/official-tools/",
+      "role": "D"
+    }
   ],
   "developmentEntrypoints": [
-    { "files": ["Directory.Build.props", "Directory.Build.targets"], "role": "A", "inventory": "shared build configuration outside apps / apps 范围外的共享构建配置" },
-    { "prefix": "tools/development/", "role": "A", "inventory": "outside apps production inventory / 不计入 apps 生产源码统计" }
-  ],
-  "gatewayDomains": ["orchestration", "models", "tools", "data", "platform"],
-  "additionalGatewayModules": ["apps/model-gateway/official-tools/Tools/catalog.mjs"],
-  "allowedDomainDependencies": {
-    "orchestration": ["models", "tools", "data", "platform"],
-    "models": ["data", "platform"],
-    "tools": ["models", "data", "platform"],
-    "data": ["platform"],
-    "platform": []
-  },
-  "stableEntrypoints": {
-    "apps/model-gateway/server.mjs": "./orchestration/server.mjs",
-    "apps/model-gateway/initialize-storage.mjs": "./data/initialize-storage.mjs",
-    "apps/model-gateway/migrate-storage.mjs": "./data/migrate-storage.mjs"
-  },
-  "optionalRelativeResources": [
     {
-      "source": "apps/model-gateway/tools/official-tools.mjs",
-      "specifier": "../skills/",
-      "reason": "Absent legacy bundled skill location is retained only for identity compatibility / 旧内置技能位置可不存在，仅用于身份兼容"
+      "files": [
+        "Directory.Build.props",
+        "Directory.Build.targets"
+      ],
+      "role": "A",
+      "inventory": "shared build configuration outside apps / apps 范围外的共享构建配置"
+    },
+    {
+      "prefix": "tools/development/",
+      "role": "A",
+      "inventory": "outside apps production inventory / 不计入 apps 生产源码统计"
     }
   ],
   "testAttribution": {
-    "strategy": "Direct static production imports and linked Compile Include resolve to implementation owners; multiple owners mean shared review / 直接静态生产导入和链接源码引用映射到实现负责人，多角色表示共同审查",
-    "gatewayRoot": "apps/model-gateway/tests",
-    "smokeRoot": "tests",
+    "strategy": "Direct test source/Compile Include resolve to implementation owners; native unit tests remain with the owning Rust modules / 直接测试源码或 Compile Include 映射实现负责人；原生单元测试归所属 Rust 模块",
     "fallbackRole": "A",
     "fallbackMeaning": "Fixtures or integration checks without direct owned sources are coordinated by A, not automatically assigned to data / 无直接主责源码的夹具或集成检查由 A 协调，不统一归数据负责人",
-    "limitation": "Indirect runtime calls and nested fixture ownership require suite README review / 间接运行调用及嵌套夹具归属仍需查阅套件 README"
+    "limitation": "Indirect runtime calls and nested fixture ownership require suite README review / 间接运行调用及嵌套夹具归属仍需查阅套件 README",
+    "roots": [
+      "tests"
+    ]
   },
+  "rustApps": [
+    {
+      "root": "apps/agent-core",
+      "domains": [
+        "orchestration",
+        "tools",
+        "retrieval",
+        "models",
+        "storage",
+        "resources"
+      ],
+      "allowedDomainDependencies": {
+        "orchestration": [
+          "models"
+        ],
+        "tools": [
+          "models"
+        ],
+        "retrieval": [],
+        "models": [],
+        "storage": [
+          "retrieval"
+        ],
+        "resources": []
+      },
+      "allowedDependencies": [
+        "serde",
+        "serde_json",
+        "sha2",
+        "regex",
+        "unicode-normalization",
+        "rusqlite",
+        "chrono",
+        "url",
+        "ignore",
+        "base64",
+        "tokio",
+        "axum",
+        "reqwest",
+        "futures-util",
+        "tokio-stream",
+        "tokio-tungstenite",
+        "uuid",
+        "serde_yaml",
+        "scraper",
+        "usearch",
+        "ort",
+        "ort-sys",
+        "tokenizers",
+        "ndarray",
+        "encoding_rs",
+        "zip",
+        "quick-xml",
+        "lopdf",
+        "tree-sitter",
+        "tree-sitter-c-sharp",
+        "tree-sitter-javascript",
+        "tree-sitter-typescript",
+        "tree-sitter-rust",
+        "tree-sitter-python",
+        "tree-sitter-java",
+        "tree-sitter-cpp",
+        "tree-sitter-go"
+      ],
+      "pureDomains": [
+        "orchestration",
+        "retrieval",
+        "models",
+        "resources"
+      ],
+      "executionModules": [
+        "bin/kynxa-gateway.rs",
+        "file_identity.rs",
+        "gateway.rs",
+        "main.rs",
+        "models/gateway.rs",
+        "models/gateway_config.rs",
+        "models/gateway_preparation.rs",
+        "models/gateway_context.rs",
+        "models/gateway_inference.rs",
+        "models/gateway_protocol.rs",
+        "orchestration/gateway_loop.rs",
+        "orchestration/gateway_runtime.rs",
+        "resources/gateway.rs",
+        "retrieval/gateway.rs",
+        "retrieval/gateway_documents.rs",
+        "retrieval/gateway_embedding.rs",
+        "retrieval/gateway_index.rs",
+        "retrieval/gateway_structure.rs",
+        "retrieval/gateway_tools.rs",
+        "retrieval/gateway_history.rs",
+        "storage/administration.rs",
+        "storage/ann_cache.rs",
+        "storage/catalog_transactions.rs",
+        "storage/checkpoints.rs",
+        "storage/conversation_history.rs",
+        "storage/conversation_index.rs",
+        "storage/conversation_logs.rs",
+        "storage/experiences.rs",
+        "storage/extensions.rs",
+        "storage/gateway.rs",
+        "storage/gateway_memory.rs",
+        "storage/layout.rs",
+        "storage/library.rs",
+        "storage/managed_files.rs",
+        "storage/source_coverage.rs",
+        "storage/source_manifest.rs",
+        "storage/sqlite_bootstrap.rs",
+        "storage/sqlite_channels.rs",
+        "storage/sqlite_connections.rs",
+        "storage/sqlite_index.rs",
+        "storage/sqlite_lexical.rs",
+        "storage/sqlite_queries.rs",
+        "storage/sqlite_search.rs",
+        "storage/sqlite_store.rs",
+        "storage/sqlite_vector_reads.rs",
+        "storage/tool_results.rs",
+        "tools/gateway.rs",
+        "tools/gateway_browser.rs",
+        "tools/gateway_mcp.rs",
+        "tools/gateway_mcp_budget.rs",
+        "tools/gateway_process.rs",
+        "tools/gateway_web.rs",
+        "tools/gateway_web_proxy.rs",
+        "tools/local_files.rs",
+        "tools/service_artifacts.rs",
+        "tools/service_boundary.rs",
+        "tools/service_code_versions.rs",
+        "tools/service_config.rs",
+        "tools/service_filesystem.rs",
+        "tools/service_runner.rs",
+        "tools/service_search.rs",
+        "tools/service_skill_discovery.rs",
+        "tools/service_skill_import.rs",
+        "tools/service_skill_metadata.rs",
+        "tools/service_skills.rs",
+        "tools/service_source_reading.rs"
+      ],
+      "dependencyVersions": {
+        "serde": "=1.0.228",
+        "serde_json": "=1.0.145",
+        "sha2": "=0.10.9",
+        "regex": "=1.12.2",
+        "unicode-normalization": "=0.1.24",
+        "rusqlite": "=0.37.0",
+        "chrono": "=0.4.42",
+        "url": "=2.5.8",
+        "ignore": "=0.4.24",
+        "base64": "=0.22.1",
+        "tokio": "=1.48.0",
+        "axum": "=0.8.6",
+        "reqwest": "=0.12.24",
+        "futures-util": "=0.3.31",
+        "tokio-stream": "=0.1.17",
+        "tokio-tungstenite": "=0.28.0",
+        "uuid": "=1.18.1",
+        "serde_yaml": "=0.9.34",
+        "scraper": "=0.24.0",
+        "usearch": "=2.26.4",
+        "ort": "=2.0.0-rc.9",
+        "ort-sys": "=2.0.0-rc.9",
+        "tokenizers": "=0.21.4",
+        "ndarray": "=0.16.1",
+        "encoding_rs": "=0.8.35",
+        "zip": "=4.6.1",
+        "quick-xml": "=0.38.3",
+        "lopdf": "=0.38.0",
+        "tree-sitter": "=0.25.10",
+        "tree-sitter-c-sharp": "=0.23.1",
+        "tree-sitter-javascript": "=0.23.1",
+        "tree-sitter-typescript": "=0.23.2",
+        "tree-sitter-rust": "=0.24.0",
+        "tree-sitter-python": "=0.23.6",
+        "tree-sitter-java": "=0.23.5",
+        "tree-sitter-cpp": "=0.23.4",
+        "tree-sitter-go": "=0.23.4"
+      },
+      "integrationModules": [
+        {
+          "path": "gateway.rs",
+          "allowedDomains": [
+            "orchestration",
+            "models",
+            "tools",
+            "storage",
+            "retrieval",
+            "resources"
+          ],
+          "purpose": "Loopback HTTP/SSE, lifecycle composition / 回环 HTTP/SSE 与生命周期组合"
+        },
+        {
+          "path": "gateway_contract.rs",
+          "allowedDomains": [
+            "models",
+            "storage"
+          ],
+          "purpose": "Configured paths and public integration errors / 配置路径与公开集成错误"
+        },
+        {
+          "path": "bin/kynxa-gateway.rs",
+          "allowedDomains": [],
+          "purpose": "Native production CLI startup / 原生正式 CLI 启动"
+        },
+        {
+          "path": "orchestration/gateway_runtime.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval",
+            "resources"
+          ],
+          "purpose": "Request ownership, actual events and durable publication / 请求拥有权、真实事件与持久提交"
+        },
+        {
+          "path": "orchestration/gateway_loop.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "storage",
+            "retrieval",
+            "resources"
+          ],
+          "purpose": "Actual model/tool loop composing existing native policies / 真实模型工具循环组合现有原生策略"
+        },
+        {
+          "path": "models/gateway.rs",
+          "allowedDomains": [],
+          "purpose": "Provider HTTP and cancellation / 供应商 HTTP 与取消"
+        },
+        {
+          "path": "models/gateway_config.rs",
+          "allowedDomains": [
+            "storage",
+            "resources"
+          ],
+          "purpose": "Formal connection config and actual local observations / 正式连接配置与真实本地模型观察"
+        },
+        {
+          "path": "models/gateway_preparation.rs",
+          "allowedDomains": [
+            "resources",
+            "retrieval"
+          ],
+          "purpose": "Prioritized model connection and admitted local preparation / 优先模型连接与经过资源准入的本地准备"
+        },
+        {
+          "path": "models/gateway_context.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Actual summary requests and durable checkpoints / 真实摘要请求与持久检查点"
+        },
+        {
+          "path": "models/gateway_protocol.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Provider wire encoding and verified private history attachments / 供应商编码与核验私有历史附件"
+        },
+        {
+          "path": "models/gateway_stream.rs",
+          "allowedDomains": [],
+          "purpose": "Incremental provider wire framing / 供应商增量协议分帧"
+        },
+        {
+          "path": "models/gateway_inference.rs",
+          "allowedDomains": [
+            "resources"
+          ],
+          "purpose": "Admitted ORT/tokenizer execution and real backend qualification / 准入后的 ORT 分词执行与真实后端资格"
+        },
+        {
+          "path": "tools/gateway.rs",
+          "allowedDomains": [],
+          "purpose": "Native tool service and capability I/O composition / 原生工具服务与能力 I/O 组合"
+        },
+        {
+          "path": "tools/gateway_process.rs",
+          "allowedDomains": [
+            "resources"
+          ],
+          "purpose": "Owned ToolHost and subprocess effects / 拥有的 ToolHost 与子进程效果"
+        },
+        {
+          "path": "tools/gateway_mcp.rs",
+          "allowedDomains": ["resources"],
+          "purpose": "Actual MCP transports and callback lifetime / 真实 MCP 传输与回调生命周期"
+        },
+        {
+          "path": "tools/gateway_browser.rs",
+          "allowedDomains": [],
+          "purpose": "Owned CDP browser transport / 拥有的 CDP 浏览器传输"
+        },
+        {
+          "path": "tools/gateway_web.rs",
+          "allowedDomains": [],
+          "purpose": "Bounded actual web transport / 有界真实网页传输"
+        },
+        {
+          "path": "tools/gateway_web_proxy.rs",
+          "allowedDomains": [],
+          "purpose": "Configured proxy transport with verified public destinations / 使用配置代理并核验公共目的地的传输"
+        },
+        {
+          "path": "storage/gateway.rs",
+          "allowedDomains": [
+            "models",
+            "tools",
+            "orchestration"
+          ],
+          "purpose": "Formal HTTP-facing storage, paired transcript/segment contract validation and verified summary publication / HTTP 正式存储、配对续传与分段合同校验及核验摘要提交"
+        },
+        {
+          "path": "storage/gateway_memory.rs",
+          "allowedDomains": [
+            "retrieval"
+          ],
+          "purpose": "Formal memory storage and scope adaptation / 正式记忆存储与范围接线"
+        },
+        {
+          "path": "retrieval/gateway.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Native source registration and owned indexing jobs / 原生来源登记与拥有的索引任务"
+        },
+        {
+          "path": "retrieval/gateway_index.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools",
+            "resources"
+          ],
+          "purpose": "Actual SQLite/vector/source indexing under native resource leases / 原生资源租约内的真实 SQLite 向量来源索引执行"
+        },
+        {
+          "path": "retrieval/gateway_embedding.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "resources"
+          ],
+          "purpose": "Real resource leases and inference lifetime / 真实资源租约与推理生命周期"
+        },
+        {
+          "path": "retrieval/gateway_documents.rs",
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "resources"
+          ],
+          "purpose": "Resource-admitted bounded document extraction with stable source reads / 资源准入内的有界文档解析与稳定来源读取"
+        },
+        {
+          "path": "retrieval/gateway_structure.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Actual native syntax parsers and persistent rows / 真实原生语法解析与持久条目"
+        },
+        {
+          "path": "retrieval/gateway_tools.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools"
+          ],
+          "purpose": "Evidence/tool integration over formal retrieval services / 正式检索服务上的证据工具集成"
+        },
+        {
+          "path": "retrieval/gateway_history.rs",
+          "allowedDomains": ["storage", "models", "tools"],
+          "purpose": "Explicit authorized history evidence over bounded native pages / 有界原生分页上的授权历史显式取证"
+        },
+        {
+          "path": "resources/gateway.rs",
+          "allowedDomains": [],
+          "purpose": "Actual resource-service transport and lease ownership / 真实资源服务传输与租约拥有权"
+        }
+      ]
+    }
+  ],
   "coverageNotes": [
-    "Production inventory is limited to listed apps source scopes; generated outputs, dependencies and tests are excluded / 生产清单仅覆盖列出的 apps 源码范围，排除生成产物、依赖和测试",
-    "All seven implemented apps are inventoried, including the Rust resource service, desktop UI/resources/build projects and preview/mock code / 覆盖七个现有 apps，包括 Rust 资源服务、桌面 UI/资源/构建工程及预览/模拟代码",
-    "Bundled vendor UI assets are counted under B stewardship without authorizing edits to third-party source / 内置第三方 UI 资源统计为 B 的维护范围，不授权修改第三方原文",
-    "Gateway checks cover static import, export-from and literal new URL(relative, import.meta.url); dynamic import, require, computed paths, template interpolation and regex ambiguity are outside this lexical scanner / 网关检查覆盖静态导入、重导出与字面量相对资源；动态导入、require、计算路径、模板插值及正则歧义不在词法扫描范围",
+    "Production source and official static resources are inventoried; src/bin is explicitly included while generated bin/obj, dependencies and tests are excluded / 统计生产源码和官方静态资源；显式包含 src/bin，排除生成的 bin/obj、依赖和测试",
+    "Windows native Rust gateway owns HTTP/SSE, provider, MCP, inference and formal data execution; WebView interface JavaScript remains unchanged / Windows 原生 Rust 网关负责 HTTP/SSE、供应商、MCP、推理和正式数据执行；WebView 界面 JavaScript 保持不变",
+    "Integration modules are declared individually with their permitted domains; pure rules cannot depend on integration and their domain cycles remain prohibited / 集成模块逐文件声明准许调用的领域；纯规则不得反向依赖集成层，纯域循环继续禁止",
+    "JavaScript static reference checking remains a development-only bounded lexical check for interface assets, not a runtime dependency or native functionality test / JavaScript 静态引用检查仍为仅开发使用的界面资源限定词法检查，不是运行依赖或原生功能测试",
     "Role labels are local responsibility identifiers, not Git account names / 角色标记是本地职责标识，不是 Git 账号"
+  ],
+  "includedSourceDirectories": [
+    "apps/agent-core/src/bin"
+  ],
+  "resourceScopes": [
+    {
+      "root": "apps/official-tools",
+      "extensions": [
+        ".json",
+        ".md",
+        ".txt"
+      ]
+    }
   ]
 }

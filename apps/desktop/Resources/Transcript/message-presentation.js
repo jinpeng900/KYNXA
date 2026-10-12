@@ -21,13 +21,15 @@
     if (source.role === 'user') return { mode: 'user', segments: [], tools: [], content };
     const segments = orderTimelineRecords(source.assistantSegments), tools = orderTimelineRecords(source.toolActivities);
     const status = source.status || (source.streaming ? 'streaming' : 'completed');
-    if (status === 'completed') {
+    const outcome = source.taskCompletionState || source.taskCompletion?.completionState;
+    const taskIncomplete = ['partial','verification-failed','execution-unknown'].includes(outcome);
+    if (status === 'completed' && !taskIncomplete) {
       const finalAnswerSegment = segments.filter(segment => segment.phase === 'final_answer'
         && segment.status === 'completed' && hasText(segment.content)).at(-1);
       if (finalAnswerSegment) return { mode: 'final', segments: [finalAnswerSegment], tools: [], content: finalAnswerSegment.content };
       if (!segments.length && hasText(content)) return { mode: 'final', segments: [], tools: [], content };
     }
-    const mode = status === 'streaming' ? 'active' : status === 'completed' ? 'incomplete' : 'partial';
+    const mode = status === 'streaming' ? 'active' : taskIncomplete ? 'partial' : status === 'completed' ? 'incomplete' : 'partial';
     const visibleTools = selectTools(tools);
     if (!segments.length) return { mode, segments: [], tools: visibleTools, content };
     const lastSegment = segments.at(-1), lastStreamingSegment = mode === 'active' && lastSegment?.status === 'streaming' ? lastSegment : null;

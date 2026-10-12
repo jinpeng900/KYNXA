@@ -61,8 +61,8 @@ public static class ModelPresets
     }
 
     // Context-only UI defaults mirror the verified gateway capability snapshot.
-    // Enforcement and independent input/output ceilings belong to model-capabilities.mjs.
-    // 界面上下文默认值对应已核实的网关能力快照；输入和输出上限的实际约束由 model-capabilities.mjs 负责。
+    // Enforcement and independent input/output ceilings belong to the native Rust model capability layer.
+    // 界面上下文默认值对应已核实的网关能力快照；输入和输出上限的实际约束由原生 Rust 模型能力层负责。
     private static readonly IReadOnlyDictionary<string, Dictionary<string, int>> OfficialContextWindows = BuildContextWindows();
 
     private static IReadOnlyDictionary<string, Dictionary<string, int>> BuildContextWindows()

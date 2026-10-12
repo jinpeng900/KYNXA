@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using System.Text.Json;
 
 namespace KYNXA_Desktop;
 
@@ -52,7 +53,20 @@ public partial class App : Application
 
     private static async Task WarmUpModelGatewayAsync()
     {
-        try { await Services.ModelGatewayService.EnsureReadyAsync(); }
+        Services.ModelChoice? choice = null;
+        try
+        {
+            choice = await Task.Run(() => new Services.ModelSelectionStore(Services.StoragePaths.DesktopDirectory).Load());
+            if (choice is not null && (string.IsNullOrWhiteSpace(choice.ProviderId) || string.IsNullOrWhiteSpace(choice.ModelId)))
+                choice = null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // UI preferences belong to application startup; API services receive only stable model identities.
+            // UI 偏好由应用启动读取；API 服务仅接收稳定模型身份，偏好失败不能阻止连接或聊天。
+            System.Diagnostics.Debug.WriteLine("模型选择偏好不可读，继续缺省准备 / Model selection preference is unreadable; continue default preparation.");
+        }
+        try { await Services.ModelGatewayService.WarmUpModelsAsync(choice?.ProviderId, choice?.ModelId); }
         catch (Exception error)
         {
             // The API client retries and shows the actionable error when a model is used.

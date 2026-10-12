@@ -16,9 +16,13 @@ public static class ConversationScreenshotSources
 {
     public const long MaximumResultBytes = 8 * 1024 * 1024;
 
-    public static bool IsScreenshotTool(string? name) => name == "computer.screenshot" ||
+    // Recognize canonical capture names; loading still validates the archived image and conversation.
+    // 识别正式截图能力名称；加载阶段仍核验归档图像和聊天范围，不凭模型描述显示图片。
+    public static bool IsScreenshotTool(string? name) => name is "computer.screenshot" or "browser.screenshot" ||
         (name is not null && name.StartsWith("mcp.", StringComparison.Ordinal) &&
-         (name.EndsWith(".browser_take_screenshot", StringComparison.Ordinal) || name.EndsWith(".take_screenshot", StringComparison.Ordinal)));
+         (name.EndsWith(".browser_take_screenshot", StringComparison.Ordinal) ||
+          name.EndsWith(".take_screenshot", StringComparison.Ordinal) ||
+          name.EndsWith(".screenshot", StringComparison.OrdinalIgnoreCase)));
 
     public static bool IsValidReference(ToolResultReference? reference) => reference is not null && reference.Id != Guid.Empty &&
         reference.Bytes is > 0 and <= MaximumResultBytes && reference.Sha256 is { Length: 64 } && reference.Sha256.All(Uri.IsHexDigit);

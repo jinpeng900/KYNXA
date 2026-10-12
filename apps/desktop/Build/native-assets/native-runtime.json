@@ -1,0 +1,87 @@
+{
+  "onnxRuntimeVersion": "1.21.0",
+  "packages": [
+    {
+      "files": [
+        {
+          "sha256": "cf96b2b7de5328adafe79f9b1d818abdc04931cbcb39c6a6c9ae2ddc872ef63b",
+          "path": "runtime/native/onnxruntime.dll",
+          "bytes": 16021504,
+          "entry": "package/bin/napi-v3/win32/x64/onnxruntime.dll"
+        },
+        {
+          "sha256": "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1",
+          "path": "runtime/native/DirectML.dll",
+          "bytes": 18527776,
+          "entry": "package/bin/napi-v3/win32/x64/DirectML.dll"
+        }
+      ],
+      "name": "onnxruntime-node-1.21.0.tgz",
+      "bytes": 80019455,
+      "format": "tar",
+      "url": "https://registry.npmjs.org/onnxruntime-node/-/onnxruntime-node-1.21.0.tgz",
+      "sha256": "c711a4048a8b460a70de25a5008b1628e3773878ef9deec1dd4a4ccab46de01a"
+    },
+    {
+      "files": [
+        {
+          "sha256": "fcf98662a7ad9dce394b96a88f91032047823831b951c76636787c312a6476e6",
+          "path": "runtime/native/vec0.dll",
+          "bytes": 289280,
+          "entry": "package/vec0.dll"
+        }
+      ],
+      "name": "sqlite-vec-windows-x64-0.1.9.tgz",
+      "bytes": 143554,
+      "format": "tar",
+      "url": "https://registry.npmjs.org/sqlite-vec-windows-x64/-/sqlite-vec-windows-x64-0.1.9.tgz",
+      "sha256": "d1ecef6e86cb0a7db8718800a667802e54069cf8db71ce23f6f8867fc42511e3"
+    },
+    {
+      "files": [
+        {
+          "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674",
+          "path": "runtime/native/licenses/onnxruntime-LICENSE.txt",
+          "bytes": 1094,
+          "entry": "LICENSE"
+        },
+        {
+          "sha256": "34103169a6338d341a8560f6e680ce36093408d83a662c994c6a5d8154b5e0e8",
+          "path": "runtime/native/licenses/onnxruntime-ThirdPartyNotices.txt",
+          "bytes": 322196,
+          "entry": "ThirdPartyNotices.txt"
+        }
+      ],
+      "name": "microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "bytes": 17410861,
+      "format": "zip",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.21.0/microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "sha256": "12bed6e1e870f30e0150e039ebb6853da32eba381eda1c373faeeb17168785e6"
+    },
+    {
+      "files": [
+        {
+          "sha256": "a05138e3a085ff60a44881eedfa58dccb03ecc1d7b1f6ae888418e8c2fec4b8d",
+          "path": "runtime/native/licenses/DirectML-LICENSE.txt",
+          "bytes": 10439,
+          "entry": "LICENSE.txt"
+        },
+        {
+          "sha256": "903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c",
+          "path": "runtime/native/licenses/DirectML-LICENSE-CODE.txt",
+          "bytes": 1093,
+          "entry": "LICENSE-CODE.txt"
+        }
+      ],
+      "name": "microsoft.ai.directml.1.15.4.nupkg",
+      "bytes": 202292617,
+      "format": "zip",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+      "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9"
+    }
+  ],
+  "schemaVersion": 1,
+  "runtimeIdentifier": "win-x64",
+  "directMlVersion": "1.15.4",
+  "sqliteVecVersion": "0.1.9"
+}

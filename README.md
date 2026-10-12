@@ -15,19 +15,20 @@ KYNXA is currently under active development. Many features described in the desi
 
 ## Current Implementation
 
-Updated 2026-10-05. This section describes implemented behavior; the larger runtime design remains a plan.
+Updated 2026-10-12. The native backend migration is in the workspace; its build and verification records are separate from earlier releases. The larger runtime design remains a plan.
 
 * Windows desktop: C# / WinUI 3 / XAML, with WebView2 for selectable Markdown, code highlighting and KaTeX math.
-* A bundled Node.js gateway connects cloud and local HTTP model services using Chat Completions, Responses or Claude Messages. Streaming, cancellation and visible reasoning are supported.
+* A native Rust gateway connects cloud and local HTTP model services using Chat Completions, Responses, Claude Messages and Ollama. The core has no Node dependency or JS gateway; a separate pinned private Node runtime and installed MCP packages are bundled for external tools. WebView rendering scripts remain frontend assets.
+* Rust owns HTTP/SSE, model and MCP I/O, task/recovery state, context compaction, tools, retrieval, original JSONL and SQLite transactions. The independent Rust resource service coordinates real hardware admission. The desktop `dotnet run` command remains; `node server.mjs` is retired. See [the native gateway boundary and verification scope](docs/architecture/native-gateway.md).
 * Complete conversations use stable chat IDs and append-only JSONL events. Switching providers or models retains the same history.
 * The work sidebar has Recent, Projects and Tasks. Both project and task add buttons show a temporary new chat. Reselecting its project preserves input; switching projects discards an unsent draft. Sending commits the chat and updates recent activity.
 * Confirmed memory has chat, project/work and user scopes. Sibling chats share confirmed work memory while their original histories remain separate. Archive, delete, undo and moving chats preserve the intended scope rules.
 * A configurable Data root contains records, memory, attachments and settings. Initialization and verified migration preserve stable IDs; separate SQLite indexes cover sidebar metadata and scoped local retrieval.
-* Settings now include local RAG and web search globally and per work: explicit text imports, opt-in mounted-folder indexing, keyword/vector retrieval and background jobs. A bundled, offline multilingual CPU embedding model needs no Python or database server. Greetings skip retrieval/tool preparation. See the [implemented retrieval architecture](docs/architecture/retrieval.md) for limits and remaining work.
-* Context and output limits are independent connection settings. Output defaults to a 256K (262144) ceiling, with 4K/8K/16K/32K/64K/128K/256K and custom choices; context offers 8K/32K/128K/256K/1M and custom budgets. Both must match the model service. Small context windows reduce the effective output reserve.
+* Settings include local RAG and web search globally and per work: explicit imports, automatic preparation of mounted work folders, keyword/vector retrieval and background jobs. Bundled offline multilingual embedding needs no database server. Search and original-file reads remain available before semantic indexing finishes. Greetings skip retrieval; detailed limits are in the [retrieval architecture](docs/architecture/retrieval.md).
+* Context limits are resolved at runtime from verified model capabilities and actual local-service observations. Legacy context settings remain saved for compatibility; they do not grant model capacity. Output defaults to a 256K (262144) ceiling, with 4K/8K/16K/32K/64K/128K/256K and custom choices; known provider limits and available input space can reduce it. Unknown API deployments cannot have every limit predicted in advance; recognized HTTP 400 context rejections use bounded recovery within the current request.
 * Chats retain all original messages; restart and retrieval are tested beyond 200 messages. Bounded requests preserve recent complete turns and relevant older constraints/code excerpts. Models can page through the current chat's original messages; tool loops compact saved-result previews without deleting records.
 
-Settings includes memory management for chat, work and user scopes. Gateway regressions use temporary data and simulated upstreams; desktop tests cover transport, actual DOM and isolated native windows. Earlier validation records are in the [gateway guide](apps/model-gateway/README.md#当前验证与后续接口). They do not certify every provider or a real 1M model.
+Settings includes memory management for chat, work and user scopes. Native regressions use isolated data and local simulated upstreams; current commands are in the [core guide](apps/agent-core/README.md). Historical checks do not certify the new gateway, every provider or a real 1M model.
 
 Model-controlled file tools, per-request approvals, stdio / Streamable HTTP MCP, application skills and a Windows AppContainer terminal are implemented. Tools and skills settings support official service presets, environment-variable authentication references, skill import and enable switches; enabled MCP programs are trusted external processes, separate from the terminal sandbox. Full Host orchestration, crash-resumable checkpoints and automatic semantic memory remain planned. Scoped FTS/vector retrieval is now implemented. See the [agent tools guide](docs/architecture/agent-tools.md) for permissions and supported commands.
 
@@ -35,19 +36,19 @@ Folderless chats have persistent isolated work directories. Bundled native tools
 
 Large MCP catalogs are discovered separately from the bounded model tool declarations. Individual tools can be disabled or loaded on demand. Typed and structured results are saved with chat-scoped references and paged previews; private MCP metadata stays out of model and viewer projections. Approval reasons are separate from third-party arguments, skill headers use bounded YAML 1.2 parsing, and cancellation records returned execution outcomes before stopping.
 
-Skill resources resolve from their package root, with standard validation, dependency diagnostics and read-only package snapshots for isolated Node scripts. Official Playwright and GitHub MCP presets and an Apache-2.0 communication-writing skill are reused without adding duplicate filesystem or memory services. Official MCP presets are enabled by default; existing explicit user disables are preserved and repeated additions reuse existing configurations. Reading settings does not start services. Missing start commands, referenced credentials or required configuration paths leave a service not ready rather than available. Python/Bash skill scripts and interactive browser OAuth login are not supported; unverified runtime dependencies block execution.
+Skill resources resolve from their package root with validation and dependency diagnostics. Markdown skills, remote MCP and native executable MCP remain available. Pinned built-in Node MCP services use the private runtime and installed entry scripts without system PATH or startup npm/npx downloads; JS skills use the verified private runtime through the existing sandbox. External accounts, keys, database settings and unbundled third-party dependencies remain explicit requirements. Native CDP provides browser automation. Existing user disables remain authoritative, and configuration reads do not start services. Enabled never means ready.
 
-Settings provide separate Data and User tools storage rows. MCP configuration, imported skills and managed npm/browser caches can move to an independent folder through a verified copy and atomic pointer switch. Old files remain available; changing Data keeps an explicitly configured extension folder in place. The read-only official package remains bundled under `model-gateway/official-tools/`, with 38 core tool definitions, seven skills and eleven enabled-by-default MCP presets. Users can disable or customize these services; enabling a preset does not mean it is connected or its dependencies are installed. Built-in public webpage reading and paged file reads need no Python; desktop, browser and terminal workflows use the existing execution boundaries. User extensions and overrides are stored separately.
+Settings provide separate Data and User tools locations. Extension migration verifies copies before switching its pointer and preserves existing files. The static official package is sourced from `apps/official-tools/` and shipped under `official-tools/`; it contains no executable backend JS. Public web reading, file tools and native browser/terminal operations use the existing authorization boundaries. User extensions remain separate.
 
-Start with [code organization and responsibilities](docs/architecture/code-organization.md), the [gateway guide](apps/model-gateway/README.md), [chat/work memory architecture](docs/architecture/chat-work-memory.md), [UI component guide](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
+Start with the [native gateway](docs/architecture/native-gateway.md), [core guide](apps/agent-core/README.md), [chat/work memory](docs/architecture/chat-work-memory.md), [UI components](apps/desktop/UI-COMPONENTS.md) and [five-person plan](docs/team/README.md).
 
 ## Five-Person Code Boundaries
 
-As of 2026-10-05, the committed baseline is `5637dc3`; this reorganization is in the workspace. A owns gateway `orchestration/` and coordinates `platform/`; C owns `models/`; D owns `tools/` and `official-tools/`; E owns `data/`. B owns all ShellPage partials, WinUI and transcript presentation.
+A owns the Rust gateway composition, `orchestration/` and `resources/`; C owns `models/`; D owns `tools/`, ToolHost and `apps/official-tools/`; E owns `storage/` and `retrieval/`. These native modules are under `apps/agent-core/src/`. B owns all ShellPage partials, WinUI and transcript presentation.
 
-Desktop services use `Integration/Presentation/Models/Tools/Data`, and shared contracts use `Chat/Tools/Memory`. ToolHost uses `Desktop/Terminal/Sandbox/Native`. The root gateway CLI entries remain stable. These are directory boundaries within the existing applications, not a completed MVVM or assembly split.
+Desktop services use `Integration/Presentation/Models/Tools/Data`, and shared contracts use `Chat/Tools/Memory`. ToolHost uses `Desktop/Terminal/Sandbox/Native`. The production CLI is `kynxa-gateway.exe`; the desktop launch command remains unchanged. These directory boundaries do not imply a complete MVVM or assembly split.
 
-Data and Platform do not depend on higher layers. Existing model-history reads the public result preview from Data, and Tools uses pure model helpers; the domains are not entirely independent. The project-owned official Tools catalog import changed; third-party skill text and licenses were preserved. See [actual dependencies and primary source references](docs/architecture/team-boundaries.md) and [developer handoff](docs/team/README.md). Current reorganization validation is recorded separately from earlier results.
+Pure domain rules retain dependency and cycle restrictions. Explicit I/O integration modules declare their allowed domain imports in the ownership manifest; they reuse authoritative ledgers and transactions. Third-party skill text and licenses are preserved. See [boundaries](docs/architecture/team-boundaries.md) and [handoff](docs/team/README.md). Current validation is recorded separately from earlier results.
 
 ## Next Steps
 
@@ -148,7 +149,7 @@ The running implementation is:
 WinUI Desktop + WebView2
           │ local HTTP / SSE
           ▼
-Node.js model gateway ───► cloud API / local HTTP model server
+Rust model gateway ─────► cloud API / local HTTP model server
           ├─────────────► C# ToolHost: desktop / terminal / sandbox / native
           │
           ▼
@@ -156,7 +157,7 @@ Data: catalog + JSONL records + scoped memory
       derived context excerpts + SQLite metadata index
 ```
 
-The following diagram is a historical future-runtime design, separate from the current Node.js gateway and implemented C# ToolHost. It does not prescribe a new Host, language migration or independent Authority for the current five-person work.
+The following diagram is a historical future-runtime design, separate from the current Rust gateway and C# ToolHost. It does not establish an independent Authority in the running application.
 
 ```text
                  KYNXA Desktop
@@ -270,12 +271,12 @@ Initial platform scope:
 Current technologies:
 
 * **Desktop UI:** C# + WinUI 3 + XAML; WebView2 / KaTeX for transcripts.
-* **Model gateway:** Node.js built-in HTTP, fetch and file APIs; no Python service is required.
+* **Model gateway:** Rust HTTP/SSE, native protocol decoding, MCP/CDP, ONNX inference and parsing. Private Node is bundled only for extensions and verified sandbox scripts; the core does not depend on it. No Python runtime is shipped.
 * **Local model connection:** HTTP services such as llama.cpp, Ollama and LM Studio; model inference remains a separate process.
 * **Persistence:** versioned JSON metadata, JSONL conversation events and scoped memory files; SQLite metadata index.
 * **Desktop communication:** local HTTP / SSE to the gateway.
 
-The C# ToolHost already provides native execution. A separate Host/Authority, durable execution storage and Named Pipes remain design references requiring separate decisions; the current team works on the existing WinUI/Node.js/C# chain. Python is not a current dependency.
+The C# ToolHost provides native Windows execution. A separate Host/Authority and Named Pipes remain design references; the current implementation uses WinUI, Rust and C#.
 
 macOS, Linux, and iOS are not part of the initial product scope.
 
@@ -285,7 +286,9 @@ macOS, Linux, and iOS are not part of the initial product scope.
 KYNXA/
 ├── apps/
 │   ├── desktop/              # Production Windows WinUI 3 frontend
-│   ├── model-gateway/        # Current Node.js model, conversation and memory service
+│   ├── agent-core/           # Rust HTTP/SSE, agent, models, tools, retrieval and storage
+│   ├── resource-service/     # Native hardware admission and owned resource leases
+│   ├── official-tools/       # Static skills, configuration presets and licenses
 │   ├── shared/               # Current C# chat, memory and tool contracts
 │   ├── tool-host/            # Native Windows desktop, terminal, sandbox and skill execution
 │   ├── desktop-preview/      # Earlier visual and interaction preview
@@ -297,7 +300,7 @@ KYNXA/
 └── tests/                    # Desktop, storage, protocol and interaction smoke projects
 ```
 
-Gateway unit/integration tests are in `apps/model-gateway/tests/`. Future `apps/host/`, `crates/` and other design directories are not part of the current repository.
+Native unit/integration tests are in `apps/agent-core/src/` and `apps/agent-core/tests/`; bundle checks are in `tests/native-runtime-smoke/`. Future `apps/host/` and `crates/` design directories are not part of the current repository.
 
 ## Security Model
 
@@ -361,7 +364,7 @@ The project maintains two levels of documentation:
 
 Concise Markdown documentation for contributors and users.
 
-* [Model gateway and local startup](apps/model-gateway/README.md)
+* [Native gateway and local startup](docs/architecture/native-gateway.md)
 * [Chat/work memory and Data folders](docs/architecture/chat-work-memory.md)
 * [UI components](apps/desktop/UI-COMPONENTS.md)
 * [Team plan and next steps](docs/team/README.md)

@@ -1,0 +1,104 @@
+# 独立 Rust 网关
+
+发布后端使用独立 Rust 网关，核心不依赖 Node.js。C#/WinUI 与 WebView2 保留；WebView 中的渲染脚本不属于 Node 后端。安装包独立随附固定私有 Node、内置 MCP 依赖和对应浏览器，Node 仅作为外部工具及核验沙箱脚本的运行时；生命周期由 Rust 管理，这不恢复 JS 网关。这里描述源码接线，实际构建与短测记录单独列出，不能将源码存在当作验收通过。
+
+```mermaid
+flowchart LR
+  Desktop["C# / WinUI + WebView2"] --> Gateway["Rust HTTP / SSE 网关"]
+  Gateway --> Loop["任务 / 上下文 / 恢复"]
+  Loop --> Models["Rust 模型协议与流解码"]
+  Models --> Endpoint["云端 API / Ollama / llama.cpp"]
+  Loop --> Tools["Rust 工具 / MCP / CDP"]
+  Tools --> Host["C# ToolHost / Windows"]
+  Gateway --> Data["Rust 正式 JSONL / CAS / SQLite"]
+  Data --> Retrieval["FTS / 原生 USearch / Tree-sitter"]
+  Retrieval --> Inference["原生 ONNX Runtime / Tokenizer"]
+  Loop --> Resources["Rust 硬件资源服务"]
+  Inference --> Resources
+```
+
+## 职责
+
+| 负责人 | 生产目录 | 新接线职责 |
+|---|---|---|
+| A | `apps/agent-core/src/orchestration/`、`resources/`、网关入口及打包 | 请求身份、队列、SSE、任务循环、审批、取消、资源 IPC、集成 |
+| B | `apps/desktop/` 中展示与交互文件 | WinUI/WebView 渲染；此次不迁移展示语言 |
+| C | `apps/agent-core/src/models/` | 请求、供应商协议、流、历史配对、压缩、模型配置与原生推理 |
+| D | `apps/agent-core/src/tools/`、`apps/tool-host/`、`apps/official-tools/` | 文件、终端、浏览器、MCP、Skill、权限与执行回执 |
+| E | `apps/agent-core/src/storage/`、`retrieval/` | 正式数据、分页、记忆、资料、索引、来源版本与后台维护 |
+
+既有纯规则继续复用。新增 `gateway*` 文件是明确列入机器清单的 I/O 接线层；它们负责组合规则和真实执行，不在适配入口重建任务、来源、证据或权限账本。每个接线文件分别声明可调用的领域。纯规则的依赖限制和循环检查继续保留。
+
+## 代码入口与调用关系
+
+同一职责内保留现有文件，执行接线调用纯规则，正式存储通过自己的事务入口更新。以下是当前代码的定位入口；公开 HTTP、SSE、工具名称、JSON 字段和数据版本不因内部命名或排版调整而变化。
+
+| 层次 | 主要入口 | 调用与所有权 |
+|---|---|---|
+| 启动与传输 | `src/bin/kynxa-gateway.rs`、`src/gateway.rs` | 启动配置、HTTP/SSE 和取消；将业务请求交给运行时与所属领域 |
+| 请求生命周期 | `src/orchestration/gateway_runtime.rs` | 请求身份、排队、审批和当前工作快照；持有请求运行状态 |
+| 模型与工具循环 | `src/orchestration/gateway_loop.rs` | 组装当前上下文，调用模型和工具；保存真实回执后推进任务与证据状态 |
+| 任务状态与验证 | `src/orchestration/task.rs`、`progress.rs` | 任务续接、公开正文投影和版本关联的执行核验；不自行发起模型、文件或终端操作 |
+| 模型接入 | `src/models/gateway*.rs` | 配置、供应商协议、流解析、上下文压缩和推理；复用同领域的确定性规则 |
+| 工具发现与策略 | `src/tools/gateway.rs`、`policy.rs`、`system_prompt.rs` | 发现、加载、权限和能力说明；把获准的动作交给对应执行适配器 |
+| 本机工具执行 | `src/tools/gateway_process.rs` → `apps/tool-host/` | Rust 拥有进程与 IPC 生命周期，C# 执行 Windows 操作；回执保留真实输出与身份 |
+| MCP、浏览器与网页 | `src/tools/gateway_mcp.rs`、`gateway_browser.rs`、`gateway_web.rs`、`gateway_web_proxy.rs` | 各自拥有协议连接、调用、取消和清理；MCP 额度由 `gateway_mcp_budget.rs` 提供 |
+| 历史和资料取证 | `src/retrieval/gateway*.rs` | 解析授权范围、检索与回源；`gateway_history.rs` 区分当前聊天和显式工作历史 |
+| 索引发布与查询 | `src/retrieval/gateway_index.rs` → `src/storage/sqlite_*.rs` | 派生签名、索引版本、向量与 ANN；复用存储事务和连接所有者 |
+| 正式存储 | `src/storage/gateway.rs`、`conversation_*.rs`、`catalog*.rs` | 消息、目录、原文和工具归档的版本、锁与事务；上下文缓存和界面投影不是独立写入者 |
+| 硬件准入 | `src/resources/gateway.rs` → `apps/resource-service/` | 实际资源观测、租约和准入；工具、模型与后台索引共用资源边界 |
+
+表内 `src/` 相对 `apps/agent-core/`；具体跨域许可与执行模块登记仍以 `docs/team/module-ownership.json` 为准。`src/lib.rs` 提供共享原生操作合同和范围状态会话，HTTP 入口继续复用这些合同，不另建一套业务规则。
+
+修改时先定位调用入口和状态所有者，再调整所属模块内部。新增私有辅助函数应表达可复用的实际步骤；原文哈希、JSON 字段顺序、取消后的已执行回执和作用域核验仍需按既有合同处理。注释说明职责、原因和生命周期，保持简明中英两层，不逐行复述代码。
+
+## 请求与数据
+
+- 桌面默认连接 `127.0.0.1:5218` 的 Rust 网关，可通过配置指定其他地址或端口；沿用模型、聊天、记忆、工具和检索 HTTP 合同。健康检查要求真实 `runtime: rust`，不能接到旧 Node 服务后仍称新网关已启动。
+- 模型列表对旧连接缺省或 `null` 的上下文字段投影整数默认值，兼容桌面的非空整数合同；原始连接文件、密钥和已保存的有效额度不改写。此公共兼容值不作为模型实际能力证明，运行窗口仍经过自动能力与本机观察核验。
+- 请求 ID 与用户消息 ID 不同；相同请求身份不得用于不同内容。每个聊天串行推进，其他聊天可以并行。发送、模型就绪、生成和结束分别发事件。
+- SSE 增量正文原位追加，重连缓存按条数和字节有界。正式消息、模型步骤及工具归档仍是恢复依据，缓存不能替代正式日志。
+- 正式目录、消息日志及迁移继续使用原始 JSON、稳定 ID、CAS 和已有事务协议。公共历史分页保持原始 UTF-16 转义，私有供应商续接不会进入公共正文。
+- 目录锁保护身份快照和正式提交；历史正文、偏移建索引和记忆来源读取在锁外进行。记忆校验按来源聊天合并引用消息，只解码所需的最新用户记录；返回或发布前重新核验归属、记忆文档版本及日志快照。已有长日志不会因逐条记忆校验而反复解码所有旧助手快照。
+- 私有续接复用必须核对供应商、模型、连接身份、原始前缀、轮次、归档所属请求和内容摘要。核对失败保留公开的调用/结果配对，不能由模型文字批准续接身份。
+- 参数、工具流或供应商调用失败采取有限步骤恢复；成功写入不重做。派发结果未知先读取实际状态，自有终端注册表可证明派发，但不能证明任务或测试成功。
+- 压缩采用现有原生计划、语义摘要与归档检查点。语义摘要失败仍保留原文入口；它不删除正式历史，也不释放副作用保护。
+
+## 检索与模型资源
+
+- 路径查找、受限文本搜索和回源读取独立于全量语义索引。挂载工作和正式资料由后台维护；前台不等待全部向量生成。
+- 词法、向量、ANN、候选复核及版本检查使用现有 Rust 存储合同。原生 USearch 接管图索引，不经 Node 搬运整批向量。
+- E5 与重排使用固定模型资产、真实 tokenizer、ONNX Runtime、批量与取消合同。CPU/DML 的模型空间按兼容资格区分；不能通过放宽空间校验实现假回退。
+- Windows 运行库复用旧推理链实际使用的 ONNX Runtime 1.21 字节。桌面其他依赖中的 1.24 文件不能替代这项固定资产。真实向量对照是单独的短测。
+- 前台资源等待可请求回收本程序闲置 CPU/GPU 推理会话。只有会话实际卸载和硬件服务确认释放后才撤销预约；正在执行的会话不能提前释放。
+- 外部 Ollama 仅观察并协调待增长资源，不停止或卸载用户自行启动的模型。未知占用保持不确定性，不以整份已驻留权重再次预留。
+- 上下文依据已核验官方能力和实际本地观察决定，旧连接字段仅兼容保存。未知 API 部署不能预知全部输入/输出限制；已识别 HTTP 400 拒绝按当前请求的有界恢复处理，不由模型名称或配置值擅自授额。
+- 图构建、文件解析、索引事务和推理放在后台/工作线程；HTTP 和 UI 不承载同步全仓扫描。
+
+## 发布与启动
+
+本地预载已经派发后，取消或准备截止不能证明外部 Ollama 已停止装载。未知结果保留预约并进行最多一分钟的独立驻留核验；确认装载完成或新鲜观测表明目标模型已驻留后才核销。仍无法确认时沿现有资源服务进入过期隔离，后续新鲜驻留观测可以核销，不重复派发同一未确认预载。llama.cpp 的服务健康不能证明权重已加载，必须同时匹配配置模型与明确的驻留观测。
+
+开发启动保留：
+
+```powershell
+dotnet run --project apps/desktop/KYNXA.Desktop.csproj -p:Platform=x64
+```
+
+构建机使用 `apps/desktop/Build/prepare-native-runtime.ps1` 准备原生 EXE、固定 DLL、模型资产、私有 MCP 运行时和许可证；用户不需要自行安装 Cargo、Rust 或 Node。生产网关为 `runtime/agent/kynxa-gateway.exe`，硬件服务为 `runtime/resource/kynxa-resource-service.exe`。模型、SQLite 向量及 VC/DML 运行库位于随包清单中。
+
+`node server.mjs` 与 `npm start` 不再是运行入口；保留这两个命令会重新引入 Node。[start-native-gateway.ps1](../../tools/development/start-native-gateway.ps1) 直接调用已准备的随包原生网关；手动测试须指定独立 DataHome、ModelHome、ExtensionHome 和端口。已经运行的旧 Node 服务应在任务结束后关闭，再使用新版本；新服务不会默认接管其他进程的任务或数据所有权。
+
+外部 Node MCP 使用私有 `runtime/mcp/node/node.exe` 或用户明确指定的已安装运行时，与已安装入口脚本的绝对路径；运行路径不通过 `npm`/`npx` 下载或更新包，缺依赖只影响对应服务。固定官方预设经随包清单转为私有路径，并为固定受信默认项填写 `trusted: true`，用户覆盖和禁用选择继续保留；陌生仓库命令不因此获得信任。后台预热要求正式信任、明确的已存在 `cwd` 和脚本。`backgroundTask` 声明需持续运行的服务，`prewarmPriority` 为 0～1000 的预热排序值；共享配置合同保留这些字段。
+
+私有运行时由 `prepare-mcp-runtime.ps1` 在构建机准备：Node 24.14.0 官方归档和 EXE 固定 SHA-256，五个 MCP 包固定 package-lock，Chromium 与 Playwright 版本及 EXE SHA 对齐，完整原始许可证和安装后文件校验随包。`runtime/mcp/manifest.json` 只包含小型入口元信息，软件启动不读整个 node_modules、不安装依赖。Playwright/Chrome DevTools 使用独立随包 Chromium；Context7 默认使用官方 HTTP，保留本地入口。Brave 需要 API Key、DBHub 需要明确数据库配置，其他未随附 MCP 仍需自己的运行时和依赖；不能宣传所有扩展离线免配置。
+
+窗口激活后，既有后台启动任务把保存的 `providerId` / `modelId` 提交到 `POST /api/models/preparation`；后端从正式连接读取凭据，立即返回 202，模型完成状态通过 `GET /api/models/preparation` 查询。准备不加入窗口、项目加载或发送消息的就绪等待。当前选择优先准备，其他 API 连接最多两路检查并复用已有 HTTP/TLS 池，不发送收费的测试生成；API 可连接、模型已加载与推理已验证分别记录。未提供模型列表的 API 返回未知能力，不能因 404 就宣称生成不可用。本地优先准备当前选择；Ollama 仅对已经安装的模型经资源准入后使用空请求预加载，再刷新运行状态，接口依据 [Ollama 官方说明](https://github.com/ollama/ollama/blob/main/docs/api.md)。其他本地连接检查实际接口与驻留，不同时加载全部权重。没有外部运行器配置时明确报告服务未运行，不下载模型、不启动猜测出的程序、不停止用户管理的进程。
+
+发送消息先显示用户正文与等待占位，再由正式目录事务保存工作归属和新用户消息。已在当前目录登记、位置不变且没有提交用户消息的聊天只更新元信息，不为它们读取历史消息身份；新聊天、提交用户消息、移动或从回收区恢复仍读取对应日志并核对角色、身份和版本。空 `Messages` 表示本次没有提交正文，不清空已有历史。无关历史损坏不会阻断另一聊天的元信息或消息提交，显式读取损坏历史仍报告错误。窗口“用时”保持模型阶段口径；正式 `ToolRun.diagnostics.requestTiming` 分开记录网关接受请求到模型阶段、模型循环、接受到最终保存前的耗时，明确不含桌面目录保存与最终持久化，不能把它当作点击发送到界面完成的总耗时。
+
+核心健康响应先返回，模型加载优先，随后受控预热已安装、受信任的 MCP。启动、跨服务调用和空闲驻留按真实资源快照约每五秒更新；16 GiB／8 逻辑核参考为 4 路启动、16 路跨服务调用、512 MiB 空闲缓存，32 GiB 为 6／32／1 GiB，实际仍受当前余量与 32 连接上限约束。单服务管道保持串行；前台优先，同一服务启动单飞，后台拿不到服务锁立即让出启动额度。收缩等待运行中调用归还额度，不强取消有效协议。Windows Job 自有进程树通过已核验 PID 和句柄采集私有内存、工作集，未知单独报告；活跃调用、订阅和后台任务不按空闲回收。常驻占用已反映在系统可用量中，准入只预约待执行缓冲和 CPU，不能重复扣进程驻留。缺依赖仅使该服务失败，启动不下载包；主动停止、信任撤销和配置代次检查继续生效。当前策略基于资源，尚无吞吐学习；先启动后登记 Job 的极早派生窗口仍存在，不将隔离或清理夸大为绝对保证。
+
+纯 Markdown Skill、资源读取、配置及原生工具继续保留；JS/MJS/CJS 执行型 Skill 使用随包私有 Node 和 C# ToolHost 的 AppContainer，按只读文件清单及 SHA 核验后执行，工作输出仅写隔离副本；不启动宿主脚本或临时下载语言运行时，其他语言不在本轮支持范围内。MCP 状态通知是已定义的非终态 SSE 事件；桌面继续接收正文。未加载工具返回发现/加载入口，不冒充没有实现。工具、Skill、MCP、上下文整理的内部失败保留回执并有限恢复，仍受阻时完成正常进展答复，任务结果保持部分完成或未核验；用户取消、模型配置、额度和外部网络错误仍如实报告。
+
+旧后端源码在删除前保存于本次开发备份中。历史 Node 测试成绩和此前小样本性能不等于新完整 Rust 网关的验证结果。本次只报告实际重新执行的编译、聚焦回归、真实小批量嵌入和消息短测，不宣称大型仓库质量、整套模型任务或界面操作已重新验收。

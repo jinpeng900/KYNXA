@@ -16,6 +16,16 @@ public static class ModelGatewayService
     public static Uri Address => new(Environment.GetEnvironmentVariable("KYNXA_MODEL_API_URL")
         ?? "http://127.0.0.1:5218");
 
+    /// <summary>Send the saved selection to the background preparation service after gateway readiness.</summary>
+    /// <remarks>网关就绪后只提交已存选择到后台准备服务；不等待权重就绪，不加入消息发送前置。</remarks>
+    public static async Task WarmUpModelsAsync(string? providerId = null, string? modelId = null,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureReadyAsync(cancellationToken);
+        using var client = new ModelApiClient();
+        await client.SchedulePreparationAsync(providerId, modelId, cancellationToken);
+    }
+
     /// <summary>
     /// Validate and prepare a migration copy before its pointer becomes active.
     /// 启用迁移后的路径指针之前，验证并准备迁移副本。
@@ -24,17 +34,17 @@ public static class ModelGatewayService
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Path.IsPathFullyQualified(target)) throw new InvalidOperationException(UiText.Get("数据目录必须使用绝对路径。"));
-        string script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "initialize-storage.mjs");
-        if (!File.Exists(script)) throw new InvalidOperationException(UiText.Get("缺少存储初始化文件，请重新构建或安装 KYNXA。"));
-        var start = new ProcessStartInfo(FindNode())
+        string executable = FindNativeGateway();
+        var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false, CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(script)!,
+            WorkingDirectory = AppContext.BaseDirectory,
             RedirectStandardOutput = true, RedirectStandardError = true
         };
-        start.ArgumentList.Add(script);
+        start.ArgumentList.Add("--initialize-storage");
         start.ArgumentList.Add(Path.GetFullPath(target));
-        AddBundledRuntimePath(start);
+        start.Environment["KYNXA_APPLICATION_ROOT"] = AppContext.BaseDirectory;
+        ConfigureNativeRuntime(start);
         try
         {
             using var process = Process.Start(start) ?? throw new InvalidOperationException(UiText.Get("无法启动存储初始化程序。"));
@@ -78,17 +88,14 @@ public static class ModelGatewayService
         try
         {
             if (await IsReadyAsync(address, cancellationToken)) return;
-            var script = Path.Combine(AppContext.BaseDirectory, "model-gateway", "server.mjs");
-            if (!File.Exists(script))
-                throw new InvalidOperationException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"));
-            var start = new ProcessStartInfo(FindNode())
+            var start = new ProcessStartInfo(FindNativeGateway())
             {
                 UseShellExecute = false, CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(script)!
+                WorkingDirectory = AppContext.BaseDirectory
             };
-            start.ArgumentList.Add(script);
-            AddBundledRuntimePath(start);
+            start.Environment["KYNXA_APPLICATION_ROOT"] = AppContext.BaseDirectory;
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
+            ConfigureNativeRuntime(start);
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
                 start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;
             using var process = Process.Start(start)
@@ -121,6 +128,8 @@ public static class ModelGatewayService
             bool ready = body?.RootElement.TryGetProperty("service", out var service) == true
                 && service.GetString() == "kynxa-model-gateway"
                 && body.RootElement.TryGetProperty("status", out var status) && status.GetString() == "ok";
+            if (ready && (!body!.RootElement.TryGetProperty("runtime", out var runtime) || runtime.GetString() != "rust"))
+                throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
             if (ready && (!body!.RootElement.TryGetProperty("conversationProtocol", out var protocol) ||
                 !protocol.TryGetInt32(out int version) || version < 1 ||
                 !body.RootElement.TryGetProperty("dataLayoutVersion", out var layout) ||
@@ -153,27 +162,21 @@ public static class ModelGatewayService
         }
     }
 
-    private static string FindNode()
+    // Resolve bundled native dependencies without modifying the user's global PATH.
+    // 只给本次子进程加入随包原生依赖目录，不修改用户全局 PATH。
+    private static void ConfigureNativeRuntime(ProcessStartInfo start)
     {
-        var bundled = Path.Combine(AppContext.BaseDirectory, "runtime", "node.exe");
-        if (File.Exists(bundled)) return bundled;
-        if (File.Exists(Path.Combine(AppContext.BaseDirectory, "node-runtime.json")) || Directory.Exists(Path.GetDirectoryName(bundled)))
-            throw new FileNotFoundException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"), bundled);
-        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
-        {
-            if (string.IsNullOrWhiteSpace(directory)) continue;
-            var candidate = Path.Combine(directory.Trim('"'), "node.exe");
-            if (File.Exists(candidate)) return candidate;
-        }
-        var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe");
-        return File.Exists(installed) ? installed : "node.exe";
+        string nativeDirectory = Path.Combine(AppContext.BaseDirectory, "runtime", "native");
+        start.Environment["PATH"] = nativeDirectory + Path.PathSeparator
+            + (start.Environment.TryGetValue("PATH", out string? currentPath) ? currentPath : "");
     }
 
-    private static void AddBundledRuntimePath(ProcessStartInfo start)
+    /// <summary>Launch the packaged native gateway; never search for or fall back to Node.</summary>
+    /// <remarks>只启动随包原生网关；缺失时明确报错，不查找或回退 Node。</remarks>
+    private static string FindNativeGateway()
     {
-        string runtime = Path.Combine(AppContext.BaseDirectory, "runtime");
-        if (!string.Equals(start.FileName, Path.Combine(runtime, "node.exe"), StringComparison.OrdinalIgnoreCase)) return;
-        start.Environment.TryGetValue("PATH", out string? existing);
-        start.Environment["PATH"] = runtime + (string.IsNullOrEmpty(existing) ? string.Empty : Path.PathSeparator + existing);
+        var bundled = Path.Combine(AppContext.BaseDirectory, "runtime", "agent", "kynxa-gateway.exe");
+        if (File.Exists(bundled)) return bundled;
+        throw new FileNotFoundException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"), bundled);
     }
 }

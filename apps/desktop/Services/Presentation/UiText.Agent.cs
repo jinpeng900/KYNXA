@@ -4,6 +4,9 @@ public static partial class UiText
 {
     private static IReadOnlyDictionary<string, string> AgentTranslations { get; } = new Dictionary<string, string>
     {
+        ["部分完成"] = "Partially completed",
+        ["核验失败"] = "Verification failed",
+        ["执行结果未知"] = "Execution outcome unknown",
         ["读取可能含密钥的文件，批准后内容可能进入工具记录并发送给当前模型。"] = "Read a file that may contain credentials. If approved, its contents may be saved in tool records and sent to the current model.",
         ["上一条命令"] = "Previous command",
         ["下一条命令"] = "Next command",
