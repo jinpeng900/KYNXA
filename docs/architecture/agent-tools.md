@@ -1,6 +1,54 @@
 # 基础工具、MCP 与应用技能
 
+## 当前入口：2026-10-12 Windows 原生网关
+
+当前正式后端是 `apps/agent-core/src/bin/kynxa-gateway.rs`，工具 I/O 位于 Rust `src/tools/gateway*` / `service_*`，官方工具目录为 `apps/official-tools` 静态资源，原生交互仍由 C# ToolHost 执行。公开 HTTP/SSE、审批、正式回执和桌面/WebView 交互继续兼容；产品后端不发货或启动 Node/NAPI。具体接线、职责及限制见 [独立 Rust 网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [当前验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
+
+下文 2026-10-10、2026-10-09 等日期条目及旧模块路径、Node 打包/测试命令、SDK 接口和当时成绩均为历史记录，不是当前启动或验证入口。其中 8192 tokens 是旧未知能力回退说明，不能作为当前默认窗口或实际授额；当前有效值以 Rust 能力/本地观察、预算和运行诊断为准。固定题集/原报告保留，尚未适配的旧评测不能声称已验证原生链路。当前运行时/桌面合同分别使用 `tests/native-runtime-smoke` 与 `tests/native-gateway-contract-smoke`。
+
+## 2026-10-10：后端自动上下文窗口
+
+连接的旧 `contextWindowTokens` 仍接受、保存和回传以兼容桌面客户端，运行时不再用它封顶；连接元信息新增 `contextWindowMode:automatic`。后端从已有已核验的官方端点及精确模型 ID 能力表、可信本地模型观察选择窗口，不调用模型猜测。代理、未知模型和同名本地模型不能继承官方能力；无法确认时明确回退 8192 tokens。该回退是未知能力的保守值，已知模型可使用更大窗口。
+
+本地观察使用已有 loopback Ollama 服务的运行窗口、冷模型配置和模型最大窗口：当前运行窗口优先于冷配置，再受模型最大能力限制。异常元数据加入保守回退限制；不把低于当前协议支持范围的真实窗口向上取整。问候复用的能力缓存绑定端点、协议、连接和模型，连接编辑后不复用旧端点限制。任意 `/models` 属性、模型名称猜测及外部代理元数据不授予能力。
+
+输出预留、供应商独立输入限制、安全余量和历史压缩继续由现有预算组件执行；`maxOutputTokens` 的存储与实际供应商上限语义保持。已有 `contextUsage` 诊断增加 `contextWindowResolution`，记录 `effectiveTokens`、`source`、`reason`、能力来源、候选限制以及 `legacyFieldIgnored`。这些估算不是供应商实际 token 消耗。本轮只改后端，旧界面字段可能仍显示历史保存值；有效窗口以运行诊断为准。
+
 本页描述当前工具闭环。设置中的“工具与技能”打开独立窗口，管理 MCP 服务、单个工具启停、应用技能与参数；扩展文件可单独选择存储目录。聊天输入区的三种权限参与真实执行判定。运行中聊天只展示简洁动作和来源链接；窗口截图在右侧小模块查看，完整工具记录保留在正式日志。
+
+## 2026-10-10：大型仓库的直接文件入口
+
+`filesystem.search` 沿用授权工作区与路径保护，新增 `mode:content|path`（默认内容）、`respectIgnoreFiles`（默认 true）和 `cursor`。路径模式按相对路径/名称作字面匹配，不读取文件正文；Windows 路径匹配不区分大小写，可以发现大文件和非文本文件。内容模式仍有单文件 1 MiB UTF-8 限制，超出情况进入覆盖报告。
+
+搜索一页最多处理 1,000 文件/2,000 条目、读取 16 MiB、约一秒软时间、最多 200 条匹配及 48K 字符匹配载荷。返回 `hasMore/nextCursor` 后可继续同一遍历，而不是重新扫前一千个文件；空结果页也可能需要续扫。游标绑定请求、路径、查询、模式、权限和忽略配置，单次消费，空闲十分钟过期。最多 16 个扫描会话，取消、聊天请求或服务关闭均释放句柄。目录深度上限为 256 个打开句柄，超出明确要求缩小目标范围，不静默跳过。
+
+默认跳过依赖/构建目录，复用 `ignore` 处理工作区及子目录的 `.gitignore`、`.ignore`。忽略文件单份 128 KiB、当前分支合计 1 MiB；读取失败或超额报告 `incompleteIgnoreFiles`。关闭忽略文件解释不关闭权限、敏感文件或应用数据保护。目录事件、当前分支版本与续读文件哈希共同检测变化；监控不可用时仍可搜索，明确标记 `live-unverified`。这是实时、有界遍历，不是整个仓库的原子快照，未遍历或被跳过内容不能被描述为不存在。
+
+`filesystem.read` 可用 `startLine/endLine`（1 起、包含末行）。原有 `offset/maxChars` 合同不变；长行或大范围仍按绝对 UTF-16 `nextOffset` 续读并保留原行范围。行模式返回 `lineRange`、`nextLine`、`lineRangeHasMore` 与 `hasMoreInFile`，每页保留完整文件 SHA-256。
+
+验证版本记录只跟踪已经批准派发的文件修改目标，不自行增加读取范围或扫描全仓。文件目标签名、实际命令退出、失败输出摘要、结果归档和是否覆盖当前观察版本分开保存。局部验证不冒充全部依赖、全部语言调用图或任务正确性认证；后台任务读取仍可合法轮询。
+
+本段为源码合同更新。按用户要求，新增路径模式、行范围、最终恢复与验证接线未执行运行验收；本次不修改 B 界面、不重启现有桌面/网关。
+
+## 2026-10-09：按需能力与步骤恢复
+
+工具存在、适合任务、已加载和获准执行是四种不同状态。MCP 配置服务头、已发现工具元信息与活动连接分离：默认聊天使用 `connectMcp: 'relevant'`，只启动相关服务；显式全目录刷新仍兼容。`tool.search` 可以发现尚未连接的真实服务头和缓存工具，明确标记不可直接执行；`tool.load` 接受返回的 `mcp.<serverId>` 或真实工具名，只连接指定服务，再核对实时目录、启停和模型预算。它不能利用过期缓存绕过撤销，也不等待无关服务的冷启动。
+
+Skill 元信息采用最多 256 项的有界缓存，身份变化或 60 秒到期重新解析；每次命中仍核对路径与当前读取权限，正文加载重新校验哈希。小窗口减少无关提示，保留真实权限及发现/加载入口，不要求用户提高旧模型上下文才具备桌面能力。曾启用后撤销的已知工具返回 `AGENT_CONFIG_CHANGED`；从未存在的工具仍为 `TOOL_NOT_FOUND`。未派发的能力撤销可被模型理解并选择仍允许的能力，整个请求权限快照失效仍停止执行。
+
+协议适配器把流片段序号、调用 ID 和并发预算分开。安全稀疏序号可使用；单步独立调用统一最多 32 个，单条参数最多 65,536 字符、累计最多 1 MiB。只有映射唯一时兼容字符串或缺失序号，残缺参数、身份冲突和超量不能执行。
+
+解码器证明“当前模型步骤尚未派发”时，循环保留此前有效调用/结果配对，最多修复一次当前步骤；仍失败最多再请求一次禁工具说明，全部计入原轮次、时长与生成预算。恢复不重新提交用户请求，用户取消、权限失效、存储失败不进入这种自动修复。恢复步骤请求再次执行相同成功副作用时复用真实回执，新调用拥有重新绑定的结果引用，历史重开不会把旧归档误绑至新 ID。
+
+结果未知的副作用不重放，后续仅允许观察当前状态；未证实的完成不能变为成功。无法继续时保存部分正文、阶段、回执和 `interrupted` 终态，用户仍能发送下一条消息。成功恢复的最终段可以保留此前 `interrupted` 的进展段；只有实际最终段完整才能终结成功。以上只改协议、服务与模型客户端，不修改 B 的 WinUI/WebView2 页面。验收和边界见 [收敛修复记录](agent-hardening-20261009.md) 与 [恢复实施说明](tool-stream-recovery-plan-20261009.md)。
+
+### 2026-10-12：文件状态回执的因果失效
+
+Rust 副作用账本区分历史派发与可复用文件状态。`filesystem.write/edit/delete/mkdir` 的状态回执绑定按可信工作目录归一化的目标路径；同目标后续真实操作撤销旧状态的复用资格，终端、Skill、MCP 等目标不可解析的副作用也会撤销旧文件状态。恢复“写 A → 写 B → 恢复 A”必须重新经过工具执行层，不能拿第一次 A 的回执证明当前文件仍是 A。未派发、只读和复用回执不会制造新的变更，检查点合并也不会复活已失效的状态；同键恢复成功后，后续重试绑定本次恢复的真实回执。
+
+发送、提交、进程启动及任意终端脚本仍保留历史派发保护。终端同脚本重复执行是否属于恢复状态，不能凭模型的理由文字判断；需要通过当前状态读取和具备明确目标的文件操作完成恢复。本规则不推断外部未观察到的修改，也不把任意 MCP 操作当成可重放写入。结果未知时先核验，旧成功回执不能绕过此门槛。授权、当前文件哈希、路径安全与调用归档仍由正式工具执行层检查；Node 仅传递可信工作目录，不另建业务账本。
+
+本轮验证：修复前的已准备原生产物复现最后一次 A 未派发；修复后 `tool-effect-freshness.test.mjs` 的 18 项通过，包含三协议真实临时文件、原生任务会话、Windows 8.3 路径别名、恢复后重试、未声明工具与未知结果门槛。另有 106 项现有相关回归、3 项 Rust 回执测试及架构检查通过。短名用例首次因测试命令引号转义失败，改为保留 `cmd` 参数原文后通过；未因此放宽产品路径校验。文件执行使用隔离模拟适配器实际读写临时文件，终端变更为模拟，不代表真实模型或任意终端脚本三步恢复验收。正式文件哈希前置条件继续生效。
 
 ## 浏览器连接与启动回执
 
@@ -440,3 +488,8 @@ MCP 目录提供 Playwright、GitHub、Fetch、Git、Context7、Chrome DevTools�
 最终完整网关回归 **899 通过、0 失败、1 跳过**；跳过项仅为真实弹出可见终端的用例，模拟可见模式仍在回归范围内。覆盖三协议本机模拟 HTTP、MCP 生命周期与恢复、220 条操作衔接、三协议 8K 预算以及真实 AppContainer 的写入/执行/读回。原生 ToolHost 构建 **0 警告、0 错误**；另用该构建实测隐藏后台进程及子进程清理 **2/2**，应用入口策略检查 **20 项**通过。模块边界检查无违规。
 
 测试使用独立临时数据、合成进程和模拟上游；未调用付费模型，未操作日常浏览器或登录真实账号。源码修复未部署到既有运行实例，未关闭或重启当前网关。上述验证不代表已完成真实站点登录、第三方应用焦点行为或跨崩溃后台任务恢复验收。
+
+
+2026-10-10 Linux 基线维护：官方清单按实际注册顺序补齐 `knowledge.plan`、`memory.read`、`memory.propose`，与 48 项目录逐项一致；桌面打包仍使用同一清单。压缩 `tool.search`、`tool.load` 与 `memory.propose` 的重复描述，使可选语义操作继续装入既有 8K schema 预算；输入 schema、权限执行、用户确认与上下文上限不变。协议夹具按稳定 wire 名匹配工具，显式提供已验证的上下文能力，解开当前与历史观测封装；重启配对测试显式重连自有 MCP 夹具，未声明工具的历史降级契约继续由 model-history 测试覆盖。HTTP 失败会结束响应并关闭自有连接；worker 事件等候监听器和实际请求 ID。Linux 进程测试区分仍运行的进程与已退出、待容器 PID 1 回收的僵尸进程。这些确定性协议测试不代表真实模型语义准确率，Windows 原生和 GPU 路径须在对应环境另行验证。
+
+Linux baseline maintenance (2026-10-10): the installed manifest matches all 48 registered tools in order. Shorter duplicate descriptor text preserves the 8K schema budget, schemas and permission enforcement. Fixture transports use stable wire identities, explicit context capability observations, owned connection cleanup and dispatch handshakes. Historical outputs are unwrapped only in tests; restart pairing explicitly reconnects owned MCP fixtures. Linux lifecycle checks distinguish running processes from exited orphans awaiting container reaping. Protocol fixtures do not measure model semantics; Windows and GPU acceptance remains environment-specific.

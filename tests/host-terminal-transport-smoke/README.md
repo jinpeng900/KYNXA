@@ -1,3 +1,7 @@
+# Historical Node transport check / 旧 Node 传输检查
+
+2026-10-12：下文 `transport.test.mjs` 命令调用迁移前 `apps/model-gateway` 传输适配器，属于历史验证，不能用于当前 Rust 网关；尚未完成对应原生夹具迁移。原说明和成绩保留，原生运行时/桌面合同见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
+
 # Host terminal transport smoke
 
 Run from the repository root:

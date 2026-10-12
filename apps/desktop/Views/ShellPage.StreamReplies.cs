@@ -115,6 +115,9 @@ public sealed partial class ShellPage
     {
         try
         {
+            // Storage and connection preparation follow the already visible user and waiting rows.
+            // 用户消息与等待占位已显示后再保存与连接；失败仍走本轮错误收尾，不派发未保存的请求。
+            await SavePendingUserMessageAsync(pending);
             await foreach (var update in _modelApiClient.StreamReplyAsync(
                 new ChatRequest(pending.ConversationId, pending.Question, pending.Model, pending.PermissionMode, pending.Provider, pending.Message.Id, pending.UserMessageId), pending.Cancellation.Token))
             {
@@ -180,6 +183,7 @@ public sealed partial class ShellPage
                         pending.Message.Status = update.Type == "completed" ? "completed" : update.Type;
                         pending.Message.Error = update.Error ?? string.Empty;
                         pending.Message.DurationMs = update.DurationMs;
+                        pending.Message.TaskCompletionState = ChatMessageState.ReadTaskCompletion(update.TaskCompletion);
                         MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                         FlushReply(pending, final: true);
                         await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
@@ -196,35 +200,78 @@ public sealed partial class ShellPage
         catch (OperationCanceledException) when (pending.Cancellation.IsCancellationRequested || _chatClosing)
         { pending.Message.Status = "interrupted"; pending.Message.Error = string.Empty; }
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException or
-            System.Text.Json.JsonException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            System.Text.Json.JsonException or InvalidDataException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             pending.Message.Status = "error";
-            pending.Message.Error = error is InvalidOperationException or InvalidDataException ? error.Message :
+            pending.Message.Error = error is InvalidOperationException or InvalidDataException or GatewayApiException ? error.Message :
                 UiText.Get("连接中断，已保留收到的内容。请检查模型服务后重试。");
         }
         finally
         {
-            pending.ThinkingTime.Stop();
-            if (pending.Message.Status != "completed")
+            try
             {
-                var segments = pending.Message.AssistantSegments;
-                for (int index = 0; index < segments.Count; index++)
-                    if (segments[index].Status == "streaming") segments[index] = segments[index] with { Status = "interrupted" };
+                pending.ThinkingTime.Stop();
+                // Never leave a departed stream looking live, even if an unexpected exception escapes the handler.
+                // 即使意外异常未被上面的处理器接住，已退出的流也不能继续显示为生成中。
+                if (pending.Message.Status == "streaming")
+                {
+                    pending.Message.Status = "interrupted";
+                    pending.Message.Error = UiText.Get("连接已结束，回复尚未完成。");
+                }
+                if (pending.Message.Status != "completed")
+                {
+                    var segments = pending.Message.AssistantSegments;
+                    for (int index = 0; index < segments.Count; index++)
+                        if (segments[index].Status == "streaming") segments[index] = segments[index] with { Status = "interrupted" };
+                }
+                if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
+                {
+                    MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
+                    FlushReply(pending, final: true);
+                    _pendingReplies.Remove(pending.ConversationId);
+                    await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
+                    await MaintainHistoryAfterReplyAsync(pending.ConversationId);
+                }
             }
-            if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
+            finally
             {
-                MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
-                FlushReply(pending, final: true);
-                _pendingReplies.Remove(pending.ConversationId);
-                await SaveReplyTimeAsync(pending.ConversationId, pending.Message);
+                // Presentation-cache failure must not retain the running marker or cancellation resources.
+                // 展示缓存失败也必须释放运行占位与取消资源，避免发送按钮永久停留在停止状态。
+                if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
+                    _pendingReplies.Remove(pending.ConversationId);
+                pending.Cancellation.Dispose();
+                if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
+                if (!_chatClosing)
+                {
+                    UpdateSendButtonState();
+                    RenderProjects();
+                }
             }
-            pending.Cancellation.Dispose();
-            if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
-            if (!_chatClosing)
-            {
-                UpdateSendButtonState();
-                RenderProjects();
-            }
+        }
+    }
+
+    private async Task SavePendingUserMessageAsync(PendingChatReply pending)
+    {
+        pending.Cancellation.Token.ThrowIfCancellationRequested();
+        var (chat, project) = FindChat(pending.ConversationId);
+        if (_chatClosing || chat is null || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending ||
+            !chat.Messages.Any(message => message.Id == pending.UserMessageId && message.Role == "user" && message.Content == pending.Question))
+        {
+            pending.Cancellation.Cancel();
+            throw new OperationCanceledException(pending.Cancellation.Token);
+        }
+
+        // The gateway owns the commit; retries keep the same user/request IDs and original work scope.
+        // 正式提交仍由网关负责；重试沿用用户与请求 ID，并先保存原工作归属，避免未保存的新工作聊天变成普通聊天。
+        await SaveChatChangesAsync(project);
+        pending.Cancellation.Token.ThrowIfCancellationRequested();
+        var owner = FindChat(pending.ConversationId);
+        if (_chatClosing || owner.Chat != chat || owner.Project?.Id != project?.Id ||
+            !_pendingReplies.TryGetValue(pending.ConversationId, out current) || current != pending ||
+            !chat.Messages.Any(message => message.Id == pending.UserMessageId && message.Role == "user" && message.Content == pending.Question))
+        {
+            pending.Cancellation.Cancel();
+            throw new OperationCanceledException(pending.Cancellation.Token);
         }
     }
 
@@ -308,7 +355,7 @@ public sealed partial class ShellPage
         RenderProjects();
     }
 
-    private void StopReplies()
+    private void PauseRepliesForClose()
     {
         _chatClosing = true;
         CancelModelPickerRefresh();
@@ -317,11 +364,16 @@ public sealed partial class ShellPage
         {
             pending.Cancellation.Cancel();
             pending.ThinkingTime.Stop();
-            pending.Message.Status = "interrupted";
+            if (pending.Message.Status == "streaming") pending.Message.Status = "interrupted";
             FlushReply(pending, final: true);
         }
-        _modelApiClient.Dispose();
         _toolResultCancellation?.Cancel();
+    }
+
+    private void StopReplies()
+    {
+        PauseRepliesForClose();
+        _modelApiClient.Dispose();
         ScreenshotPanel.Dispose();
         WorkTabs.Dispose();
         MountedWorkspace.Dispose();

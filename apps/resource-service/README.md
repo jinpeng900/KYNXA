@@ -1,5 +1,7 @@
 # KYNXA resource service
 
+当前所有者是 Windows 原生网关，实际 IPC 接线位于 `apps/agent-core/src/resources/gateway.rs` 的 `ResourceService` / `ResourceLease`，独立服务随包为 `runtime/resource/kynxa-resource-service.exe`。下文出现的旧 JavaScript 接口名称属于迁移前接线记录；历史验收不代替本轮原生测试。当前架构见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
+
 该 Rust 子进程由网关拥有，不是系统级服务。通过私有 stdin/stdout JSONL 接收
 `health`、`snapshot`、`acquire`、`cancelAcquire`、`renew`、`release`、`registerExecutor`、`report`；单帧最多 64 KiB，有限排队，拥有者
 关闭输入流时退出。不读取其他应用的命令行、文件或私有内容。
@@ -27,6 +29,14 @@ CPU/内存预算；不会因监控失联增加资源或批准 GPU。
 等待两秒后获得优先机会，每四次准入也为后台保留机会。取消从队列移除，绝不自动恢复；
 超过期限返回可恢复的等待超时。排队期限与 IPC 故障超时分开，不把正常等待误判成监控崩溃。
 
+网关在同一 `ResourceBudgetService` 内记录前台准入期；`runResourceTask` 把首次申请、
+空闲推理回收与唯一一次重新申请放在同一优先范围，成功或失败后立即恢复后台准入。
+这期间新后台嵌入/ANN 申请最多让路两秒，计入原 `waitMs`，之后仍交给上述原生或降级
+队列公平调度；不暂停已有执行，不阻断续租和释放，也不调低机器的 CPU/GPU 总预算。
+取消、关闭与 finally 都清理优先范围，六十秒看门狗防止遗漏清理。`status`/`snapshot` 的
+`admissionPriority` 区分前台申请、受保护任务、后台让路数及有界等待上限；两者可能嵌套，
+不能相加当作独立前台任务数。本次入口衔接仅做静态检查，尚未运行新的并发验收。
+
 `report(leaseId, feedback)` 接收吞吐、延迟、队列长度、分配失败、前台延迟和进度。
 不同 taskId、backend、phase 与 unit 的吞吐各自建立有限历史，不混比 CPU/GPU、文档/秒与 token/秒。
 只有 hot-inference 样本可驱动吞吐增长；冷加载、排队和一般操作分别记录。内存或前台压力立即减半
@@ -50,8 +60,8 @@ Data worker 使用 `resource-worker-client.mjs` 委托到拥有者的同一服�
 准入并确认旧服务退役，再向新服务恢复完整未释放账本、核对登记 PID 启动身份与实际退出。
 未知所有者继续隔离；恢复失败不能把债务清零。worker 只能请求已有服务，不能擅自重启全局权威。
 
-Node API 位于 `apps/model-gateway/platform/resources/resource-client.mjs`，同一个网关使用
-`sharedResourceBudget()` 的单实例。检索协调层决定工作价值；资源服务只决定可批准的
+当前 Rust API 位于 `apps/agent-core/src/resources/gateway.rs`，由拥有者安装并通过
+`global()` 复用同一服务；`ResourceLease` 负责续租与实际回收后的释放。检索协调层决定工作价值；资源服务只决定可批准的
 CPU/内存/显存，实际模型后端、设备序号映射、批量和 token 限制仍由推理层管理。
 CUDA_VISIBLE_DEVICES 与 DirectML/DXGI 序号不一定等于 NVML physical device 0。Windows
 DirectML 映射通过 NVML UUID、系统 CUDA 驱动 UUID/LUID 与 DXGI AdapterLuid 逐项核对，
@@ -61,13 +71,12 @@ DirectML 映射通过 NVML UUID、系统 CUDA 驱动 UUID/LUID 与 DXGI AdapterL
 开发构建：
 
 ```powershell
-cargo test --manifest-path apps/resource-service/Cargo.toml
-node tools/development/prepare-resource-runtime.mjs --runtime win-x64 --required
+cargo test --manifest-path apps/resource-service/Cargo.toml --locked
+powershell.exe -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -RuntimeIdentifier win-x64 -Configuration Debug
 ```
 
-产物与第三方许可证位于 `artifacts/runtime/resources/win-x64/`，随包放在
-`runtime/resource/`。最终用户无需 Rust、Cargo 或 Python。没有 Rust 开发工具链的
-开发机可以使用明确标识的保守降级；发布流水线应使用 `--required`。
+产物与第三方许可证位于 `artifacts/runtime/native-desktop/win-x64/runtime/resource/`，随包放在
+`runtime/resource/`。最终用户无需 Rust、Cargo、Node 或 Python。原生随包准备缺少工具链、资产或原生服务时明确失败，不能用旧 Node 包装器或空账本代替正式资源权威。
 构建使用编码 Rust flags 和 `--remap-path-prefix` 去掉仓库绝对路径；源码、脚本和锁定依赖的
 指纹改变后重建缓存，白名单文件逐项 SHA-256 核对。当前发布验收范围仅 Windows x64。
 

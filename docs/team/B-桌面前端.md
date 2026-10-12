@@ -1,10 +1,14 @@
 # B：桌面前端
 
-更新日期：2026-10-06。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/b-ui`。
+更新日期：2026-10-12。[团队边界](../architecture/team-boundaries.md)。交接分支：`kynxa_team/b-ui`。
+
+已记录的负责人账号为 `hui33844`。协作约定为直接推送原仓库的界面分支，由队长验收并决定是否合并进 `main`；权限历史与核验方法见 [规则集](rulesets/README.md)，本次文档更新不代表重新核验远端状态。跨领域修改仍需协调，分支权限不等于文件夹权限。
 
 ## 代码范围
 
 apps/desktop 的 Views、Controls、ViewModels、UI 模型/布局/资源与 Services/Presentation。B 是全部 ShellPage partial 的唯一主负责人。Presentation 包含本地化、侧栏、Markdown/公式、审批与结果、终端和截图展示。
+
+正式后端通过既有 HTTP/SSE 连接 Windows 原生 Rust 网关；启动由 A 的 Integration 管理。WebView2 界面 JavaScript 与现有交互保留，B 不维护后端 JavaScript 或第二份正式会话存储。
 
 检索界面 `Views/RetrievalSettingsWindow.cs`、`RetrievalSettingsWindow.Layout.cs`、`ShellPage.Retrieval.cs` 也归 B；检索 API 客户端与共享数据合同归 E。聊天 WebView2 入口是 `Resources/Transcript/transcript.js` / `transcript.css`，截图和附件沿现有右侧面板展示，不把终端重新渲染为右侧卡片。
 

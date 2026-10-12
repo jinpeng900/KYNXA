@@ -114,7 +114,11 @@ internal sealed class WorkspaceSnapshot
         // 自定义模型目录名仅在确为已配置根目录时被接受，不能放行所有被排除的扩展或数据目录。
         bool conversationBelowConfiguredHome = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
             parts.Length == 2 && parts[0].Equals("Workspaces", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
-        return project || conversationBelowData || conversationBelowModels || conversationBelowConfiguredHome;
+        // The native broker passes the exact configured Data root for its current chat sandbox.
+        // 原生程序为当前聊天沙箱传入准确的已配置 Data 根；不能放行其他 Data 子目录或扩展根。
+        bool conversationBelowNativeData = _conversationWorkspaceHome is not null && PathEquals(root, _conversationWorkspaceHome) &&
+            parts.Length == 2 && parts[0].Equals("Sandboxes", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(parts[1], out _);
+        return project || conversationBelowData || conversationBelowModels || conversationBelowConfiguredHome || conversationBelowNativeData;
     }
 
     private static bool PathEquals(string first, string second) =>
@@ -137,7 +141,7 @@ internal sealed class WorkspaceSnapshot
             extension is ".pem" or ".key" or ".pfx" or ".p12" or ".keystore" or ".jks" or ".kdbx";
     }
 
-    private static void EnsureNoReparseAncestors(string path)
+    internal static void EnsureNoReparseAncestors(string path)
     {
         for (DirectoryInfo? directory = new(Path.GetFullPath(path)); directory is not null; directory = directory.Parent)
             if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)

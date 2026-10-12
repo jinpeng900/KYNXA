@@ -24,7 +24,9 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
 
     public FakeRetrievalApi()
     {
-        Project = new(1, ProjectId, 2, new(), new(new(false), []), new(Global.Local, Global.Web, Global.Cache, new(false, 0, [])));
+        Project = new(1, ProjectId, 2, new(), new(new(true), []), new(Global.Local, Global.Web, Global.Cache, new(true, 0, [])));
+        Job = Job with { ProjectId = ProjectId };
+        StatusJobs = [Job];
     }
 
     public Task<RetrievalSettingsDocument> GetSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(Global);
@@ -48,7 +50,7 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     {
         ProjectWrites++;
         if (request.ExpectedRevision != Project.Revision) throw new GatewayApiException("Synthetic conflict", HttpStatusCode.Conflict);
-        var mounted = new RetrievalMountedFolderSettings(request.Patch.IndexingSources.MountedFolder.Enabled, Project.IndexingSources.MountedFolder.BindingRevision + 1);
+        var mounted = Project.IndexingSources.MountedFolder;
         Project = Project with { Revision = Project.Revision + 1, Overrides = request.Patch.Overrides,
             IndexingSources = Project.IndexingSources with { MountedFolder = mounted },
             Effective = new(request.Patch.Overrides.Local ?? Global.Local, request.Patch.Overrides.Web ?? Global.Web, Global.Cache,

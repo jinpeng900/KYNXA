@@ -1,6 +1,6 @@
 # 命名与双语注释
 
-适用于 KYNXA 自有 C#、JavaScript/ESM、PowerShell 及其测试。规则参考公开团队指南，再按当前语言与契约调整；不是对某家风格全文的一比一实施，也不要求切换技术栈。
+适用于 KYNXA 自有 Rust、C#、JavaScript/ESM、PowerShell 及其测试。规则参考公开团队指南，再按当前语言与契约调整；不是对某家风格全文的一比一实施，也不要求切换技术栈。
 
 ## 语义和兼容性
 
@@ -16,6 +16,14 @@ return { budget: inputBudgetTokens };
 ```
 
 导出方法、DTO/record 属性、JSON/schema 键、工具 ID、SSE 事件、错误码、命令参数、环境变量和 Win32 ABI 保持现有合同。确实需要改变时走独立的两端兼容修改，不当作纯变量重命名。数据日志、聊天、记忆和来源 ID 不做大小写迁移。
+
+## Rust
+
+- 类型、枚举和 trait 使用 UpperCamelCase；模块、函数、局部变量和字段使用 snake_case；常量使用 SCREAMING_SNAKE_CASE。单位写进名称，例如 `generated_tokens`、`duration_ms`。
+- JSON 与 IPC 的 camelCase 字段继续保持，通过 `serde` 映射或明确的 JSON 投影衔接，不因内部命名修改 wire 合同。
+- 纯状态模块只处理确定性状态；正式文件和 SQLite 事务由主责清单明确列出的 Rust 执行模块拥有，网络、第三方 SDK 和 ToolHost 接线保留在适配器。跨模块通过明确操作与回执通信，不在多个进程同时写正式数据库。
+- 可预期错误返回 `Result` 与稳定错误码；`expect` 只用于静态、已验证的不变量。取消后已经返回的执行事实不能丢弃；IPC 故障不能重置副作用账本再继续派发。
+- 使用 rustfmt，4 空格、UTF-8/CRLF。新说明性注释保留中英文两层；锁定依赖与 Cargo.lock，随包提供许可证原文。
 
 ## C#
 

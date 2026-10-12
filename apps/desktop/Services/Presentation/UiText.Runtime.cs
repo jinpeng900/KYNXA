@@ -4,6 +4,8 @@ public static partial class UiText
 {
     internal static IReadOnlyDictionary<string, string> RuntimeTranslations { get; } = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["退出保存超时，当前草稿仍保留在窗口中。请稍后重试。"] = "Exit saving timed out. Drafts remain in the window. Please try again shortly.",
+        ["数据正在迁移，请完成迁移后再退出。"] = "Data migration is in progress. Finish migration before exiting.",
         ["KYNXA · 检索与网页搜索"] = "KYNXA · Retrieval and web search",
         ["KYNXA  /  检索与网页搜索"] = "KYNXA  /  Retrieval and web search",
         ["检索与网页搜索"] = "Retrieval and web search",
@@ -18,6 +20,10 @@ public static partial class UiText
         ["索引挂载文件夹"] = "Index the mounted folder",
         ["设置范围"] = "Settings scope",
         ["工作文件"] = "Project files",
+        ["挂载后自动准备资料，可立即搜索和读取"] = "Mounted files are prepared automatically; search and read immediately",
+        ["资料准备"] = "Source preparation",
+        ["继续准备资料"] = "Resume source preparation",
+        ["工作目录已变更，旧资料任务已停止"] = "The work folder changed; the previous preparation task stopped",
         ["本地检索"] = "Local retrieval",
         ["语义检索"] = "Semantic retrieval",
         ["复杂查询重排"] = "Complex-query reranking",

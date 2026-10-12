@@ -17,6 +17,12 @@ namespace KYNXA_Desktop.Services;
 /// </summary>
 internal static class TranscriptMarkdown
 {
+    internal sealed record StreamingState(string Source, int StableLength, string StableHtml, int ParsedCharacters, int StableBlocks = 0);
+    internal sealed record StreamingResult(string Html, StreamingState State);
+    private const int MaximumStreamingTailCharacters = 32768;
+    private static long _parseCount, _parsedCharacters;
+    internal static long ParseCount => Interlocked.Read(ref _parseCount);
+    internal static long ParsedCharacters => Interlocked.Read(ref _parsedCharacters);
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UsePipeTables().UseEmphasisExtras().UseTaskLists().UseAutoLinks().UseMathematics()
         // Preserve reply line breaks in both streaming and final HTML without rewriting source.
@@ -27,7 +33,53 @@ internal static class TranscriptMarkdown
     public static string Render(string markdown, bool streaming = false)
     {
         if (string.IsNullOrEmpty(markdown)) return string.Empty;
+        Interlocked.Increment(ref _parseCount); Interlocked.Add(ref _parsedCharacters, markdown.Length);
         var document = Markdown.Parse(MathMarkdown.Normalize(markdown), Pipeline);
+        return RenderBlocks(document, streaming);
+    }
+
+    /// <summary>
+    /// Completed top-level blocks are reused; the unfinished tail is parsed independently.
+    /// Cross-block references remain provisional until the final authoritative full render.
+    /// 复用已完成顶层块，仅独立解析活动尾部；跨块引用在结束时进行正式全量渲染校正。
+    /// </summary>
+    internal static StreamingResult RenderStreaming(string markdown, StreamingState? previous)
+    {
+        string source = MathMarkdown.Normalize(markdown);
+        bool append = previous is not null && source.StartsWith(previous.Source, StringComparison.Ordinal);
+        bool references = source.Contains("][", StringComparison.Ordinal) || source.Contains("]:", StringComparison.Ordinal);
+        int stableLength = append && !references ? previous!.StableLength : 0;
+        string stableHtml = append && !references ? previous!.StableHtml : string.Empty;
+        int stableBlocks = append && !references ? previous!.StableBlocks : 0;
+        string tail = source[stableLength..];
+        // A single huge unfinished block must not repeatedly build a growing Markdown AST.
+        // Its literal source remains selectable; final rendering restores all Markdown semantics.
+        // 单个超长未完成块不能反复构建增长的 Markdown AST；先保留可选原文，结束后恢复完整语义。
+        if (tail.Length > MaximumStreamingTailCharacters)
+            return new(stableHtml + "<div class=\"streaming-raw\" style=\"white-space:pre-wrap\">" + WebUtility.HtmlEncode(tail) + "</div>",
+                new(source, stableLength, stableHtml, 0, stableBlocks));
+        var document = Markdown.Parse(tail, Pipeline);
+        Interlocked.Increment(ref _parseCount); Interlocked.Add(ref _parsedCharacters, tail.Length);
+        // Reference definitions may alter earlier blocks. Retain their common document context
+        // and do not freeze prefixes containing reference syntax.
+        // 引用定义可能改变前面的块；含引用语法时保留共同文档上下文，不冻结前缀。
+        if (!references && document.Count > 1)
+        {
+            int lastStart = document[^1].Span.Start;
+            if (lastStart > 0 && lastStart <= tail.Length)
+            {
+                stableHtml += RenderBlocks(document.Take(document.Count - 1), streaming: true);
+                stableLength += lastStart;
+                return new(stableHtml + RenderBlocks(document.TakeLast(1), streaming: true),
+                    new(source, stableLength, stableHtml, tail.Length, stableBlocks + document.Count - 1));
+            }
+        }
+        return new(stableHtml + RenderBlocks(document, streaming: true),
+            new(source, stableLength, stableHtml, tail.Length, stableBlocks));
+    }
+
+    private static string RenderBlocks(IEnumerable<Block> blocks, bool streaming)
+    {
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         var renderer = new HtmlRenderer(writer);
         Pipeline.Setup(renderer);
@@ -38,7 +90,8 @@ internal static class TranscriptMarkdown
         renderer.ObjectRenderers.ReplaceOrAdd<LinkInlineRenderer>(new SafeLinkRenderer());
         renderer.ObjectRenderers.ReplaceOrAdd<AutolinkInlineRenderer>(new SafeAutolinkRenderer());
         renderer.ObjectRenderers.ReplaceOrAdd<HtmlTableRenderer>(new ScrollTableRenderer());
-        renderer.Render(document);
+        if (blocks is MarkdownDocument document) renderer.Render(document);
+        else foreach (var block in blocks) renderer.Render(block);
         return writer.ToString();
     }
 

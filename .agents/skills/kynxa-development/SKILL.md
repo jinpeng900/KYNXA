@@ -1,11 +1,13 @@
 ---
 name: kynxa-development
-description: "开发、修改、重构和审查 KYNXA 仓库代码时使用，涵盖 C#/WinUI/XAML 桌面、WebView2 聊天展示、Node.js 网关、聊天与工作记忆、接口、测试和构建脚本。要求模块职责清晰并保持已有交互与数据一致性。不是 KYNXA 应用内的模型技能，不用于无关项目或纯聊天。"
+description: "开发、修改、重构和审查 KYNXA 仓库代码时使用，涵盖 Windows 原生 Rust 网关与资源服务、C#/WinUI/XAML 桌面、WebView2、聊天与工作记忆、接口、测试和构建脚本。要求模块职责清晰并保持已有交互与数据一致性。不是 KYNXA 应用内的模型技能，不用于无关项目或纯聊天。"
 ---
 
 # KYNXA 项目开发
 
 本技能供开发 KYNXA 的编码代理使用。用户当前指令和已有授权优先；按现有项目实现推进，不把设计计划当成已经存在的能力。
+
+当前正式后端是 `apps/agent-core/src/bin/kynxa-gateway.rs` 启动的 Windows 原生 Rust 网关，公开 HTTP/SSE 与桌面合同保持兼容。WebView 界面 JavaScript 保留；核心不依赖 Node，也不能回退为 JS 网关。安装包携带私有 Node 兼容运行时与固定的内置 MCP 依赖，Node 仅供扩展及已核验的沙箱 JS Skill 使用，不要求用户安装或配置系统 PATH。Rust 统一管理外部 MCP；已信任服务在核心就绪后按实际资源有界后台预热，其余按需加载，启动路径不自动下载依赖。
 
 代码书写同时使用 [kynxa-code-standards](../kynxa-code-standards/SKILL.md)：语义命名与中英双层注释由该技能维护，本技能继续负责模块、交互和验证边界。
 

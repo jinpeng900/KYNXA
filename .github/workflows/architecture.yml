@@ -25,7 +25,8 @@ jobs:
           package-manager-cache: false
       # This checks source boundaries, not native Windows functionality.
       # 此检查验证源码边界，不代替 Windows 原生功能回归。
-      # Resolve declared package resources without compiling native Windows tools.
-      # 安装锁定依赖以核对随包资源，不在此执行 Windows 原生工具构建。
-      - run: npm ci --prefix apps/model-gateway --ignore-scripts --no-audit --no-fund
+      # CI Node runs this dependency-free guard; the Rust core does not require Node or the old gateway SDK.
+      # CI Node 仅运行无第三方依赖的开发守卫；Rust 核心不依赖 Node，此处不安装旧网关 SDK。
+      # The private packaged Node runtime is reserved for MCP extensions and verified sandbox skills.
+      # 随包私有 Node 仅供 MCP 扩展和已核验的沙箱技能使用。
       - run: node tools/development/check-architecture.mjs

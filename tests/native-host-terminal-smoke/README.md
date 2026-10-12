@@ -1,5 +1,7 @@
 # Native host terminal smoke
 
+2026-10-12 native migration: the independent `host-terminal.test.mjs` / `visible-terminal.test.mjs` checks invoke C# ToolHost directly and remain development-only Node fixtures; they are not a packaged Node backend. The background-job adapter command below depends on the retired Node gateway and is historical, with no native port claimed. Recorded earlier results are not this migration's acceptance results.
+
 The host terminal uses an explicit `host-terminal` boundary. It runs the pinned Windows CMD or Windows PowerShell in the supplied host working directory. It does not use AppContainer or replace the existing sandbox terminal.
 
 ```powershell
@@ -13,7 +15,7 @@ dotnet run --project tests/native-host-terminal-smoke/HostTerminalDecoderSmoke.c
 
 Controlled hidden background jobs use `host_terminal_job` with `backgroundJob:true` after negotiating `backgroundJobs:true`. Their deadline is at most six hours (`maximumJobTimeoutMs`), while ordinary captured/visible runs retain the 120-second limit. The gateway provides chat-owned start/read/stop tools, keeps bounded output with explicit paging cursors, and awaits native process-tree cleanup on stop or gateway shutdown. Closing a single model request does not stop the job. Restart does not replay jobs; interactive stdin and crash-resumable process sessions are not implemented.
 
-The independent background fixture verifies a completed task with a deadline above 120 seconds, streamed output, exact cwd, and cancellation of an owned child process tree without opening a console:
+Historical Node gateway background fixture (not a current native command): it verified a completed task with a deadline above 120 seconds, streamed output, exact cwd, and cancellation of an owned child process tree without opening a console:
 
 ```powershell
 node --test tests/native-host-terminal-smoke/background-jobs.test.mjs
@@ -21,7 +23,7 @@ node --test tests/native-host-terminal-smoke/background-jobs.test.mjs
 
 The native protocol accepts `host_terminal_capabilities`, or `host_terminal` with `shell`, `script`, `cwd`, and `timeoutMs`. Scripts are limited to 16,384 characters; timeouts are 100–120,000 milliseconds. CMD disables AutoRun with `/d /s /c`. PowerShell uses `-NoProfile -NonInteractive -Command`; the original script is parsed as a separate script block after UTF-8 output initialization. The source variable exists only in the child environment and is removed before executing the script.
 
-Execution emits a `host_terminal_started` JSON line and one terminal JSON line. A normal exit, including a nonzero exit code, is `completed:true`. Cancellation, timeout and output-limit interruption after startup are `completed:false,outcome:"unknown"`; successful Job cleanup does not imply that host side effects were rolled back. The sole Job handle is not inherited, and kill-on-close covers helper termination. The Node broker must bound simultaneous helper invocations; the native Job separately limits each process tree to 32 processes.
+Execution emits a `host_terminal_started` JSON line and one terminal JSON line. A normal exit, including a nonzero exit code, is `completed:true`. Cancellation, timeout and output-limit interruption after startup are `completed:false,outcome:"unknown"`; successful Job cleanup does not imply that host side effects were rolled back. The sole Job handle is not inherited, and kill-on-close covers helper termination. The gateway broker must bound simultaneous helper invocations; the native Job separately limits each process tree to 32 processes.
 
 Between startup and the final receipt, captured execution emits `host_terminal_output` with `stream:"stdout"|"stderr"`, `delta`, and an increasing shared `sequence`. Accepted complete lines use the same UTF-8/OEM decoding as the final streams; a final incomplete line is sent before the receipt. Small bursts are coalesced to bound framing overhead. The ordered frames describe observed batched output, not an exact physical ordering between concurrently written stdout/stderr. Visible mode instead emits `stream:"console",text,replace:true` screen snapshots. Execution events and final output remain available to the gateway, but the application does not render a terminal in the right sidebar. The default captured command still has no external window or interactive TTY.
 

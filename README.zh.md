@@ -15,41 +15,42 @@ KYNXA 当前仍处于积极开发阶段。完整设计文档中描述的很多�
 
 ## 当前实现
 
-更新日期：2026-10-05。以下描述已实现的行为，完整运行时设计中尚未落地的能力仍属计划。
+更新日期：2026-10-12。原生后端迁移位于当前工作区，构建与验收记录和旧版结果分开；完整运行时设计中尚未落地的能力仍属计划。
 
 * Windows 桌面使用 C# / WinUI 3 / XAML，WebView2 展示可选择复制的 Markdown、代码高亮与 KaTeX 公式。
-* 自有 Node.js 网关连接云端或本地 HTTP 模型服务，支持 Chat Completions、Responses、Claude Messages，以及流式、取消和接口实际返回的可见思考。
+* Rust 原生网关连接云端或本地 HTTP 模型服务，支持 Chat Completions、Responses、Claude Messages、Ollama，以及流式和取消。核心不依赖 Node，不恢复 JS 网关；安装包独立随附固定私有 Node 和已安装的内置 MCP 依赖。WebView 渲染脚本保留为前端资源。
+* Rust 管理 HTTP/SSE、模型与 MCP I/O、任务恢复、上下文压缩、工具、检索及原始 JSONL/SQLite 事务；独立 Rust 资源服务负责真实硬件准入。桌面 `dotnet run` 命令保留，`node server.mjs` 淘汰，详见 [原生网关与验收边界](docs/architecture/native-gateway.md)。
 * 正式聊天按稳定聊天 ID 保存完整 JSONL 事件；切换服务商或模型继续使用同一历史。
 * 工作侧栏包含最近、项目和任务。项目旁及任务旁的新增按钮会显示临时“新聊天”；重选同一项目保留输入，切换其他项目丢弃未发送草稿，发送后才正式保存并更新最近顺序。
 * 已确认记忆分为聊天、工作、用户三层。同一工作共享确认约定，各聊天原始历史独立；归档、删除、撤销与移动聊天有对应来源和范围规则。
 * 用户可以选择 Data 根目录，自动初始化及校验迁移保留稳定 ID、记录、记忆、附件和设置；独立 SQLite 索引覆盖侧栏元数据和有范围隔离的本地检索。
-* 设置已增加全局/工作检索与网页搜索：显式资料导入、默认关闭的挂载索引、词法/向量检索及后台任务。离线多语言 CPU 嵌入模型随包，不要求 Python 或数据库服务；简单问候跳过检索和工具准备。实际范围、资源限制与后续工作见 [当前检索架构](docs/architecture/retrieval.md)。
-* 每个模型连接独立配置上下文与最大输出。输出默认上限 256K（262144），提供 4K、8K、16K、32K、64K、128K、256K 和自定义；上下文提供 8K、32K、128K、256K、1M 和自定义，两项须匹配服务端实际能力。小窗口会降低实际输出预算。
+* 设置已增加全局/工作检索与网页搜索：显式资料导入、挂载工作资料自动准备、词法/向量检索及后台任务。离线多语言嵌入模型随包，不要求 Python 或数据库服务；简单问候跳过检索和工具准备。实际范围、资源限制与后续工作见 [当前检索架构](docs/architecture/retrieval.md)。
+* 上下文由运行时依据已核验模型能力和实际本地服务观察决定；旧上下文配置仍兼容保存，不能授权模型容量。输出默认上限 256K（262144），提供 4K、8K、16K、32K、64K、128K、256K 和自定义，已知供应商上限与实际输入空间可降低它。未知 API 部署的所有限制无法预先得知；已识别的 HTTP 400 上下文拒绝在当前请求内作有界恢复。
 * 同一聊天保存全部消息，已验证超过 200 条的重启和回源；输入超预算时选取近期完整问答、相关旧约束与代码摘录。模型可分页查回当前聊天原文，工具循环压缩已保存结果的请求预览，不删除正式记录。
 
-设置已包含聊天、工作和全局记忆管理。网关回归使用临时数据与模拟上游，桌面检查包含实际 DOM、独立原生窗口和传输接口；此前验证记录见 [模型网关](apps/model-gateway/README.md#当前验证与后续接口)，不代表所有服务商或真实 1M 模型已验收。
+设置包含聊天、工作和全局记忆管理。原生回归使用隔离数据和本机模拟上游，当前命令见 [核心说明](apps/agent-core/README.md)。历史检查不代表新网关、所有服务商或真实 1M 模型已验收。
 
 已接入模型文件工具、按请求固定的权限与单次审批、stdio / Streamable HTTP MCP、应用技能和 Windows AppContainer 终端。设置中的“工具与技能”支持官方服务预设、环境变量认证引用、技能导入与启停；已启用 MCP 程序是用户信任的外部进程，不属于终端沙箱。完整 Host 编排、崩溃后精确续跑和自动语义记忆仍属计划；有范围隔离的本地全文/向量检索已落地，权限及命令范围见 [基础工具指南](docs/architecture/agent-tools.md)。
 
-没有关联文件夹的聊天也有独立、可持久化的工具目录和 AppContainer 终端快照。原生本机工具支持窗口截屏、发现/打开 GUI 软件、读取浏览器或窗口的可访问文字，以及有目标校验的鼠标/键盘输入；助手与运行依赖随包发布，不要求用户安装 Python。本机桌面操作在终端沙箱外，仍经过权限与审批；当前模型输入仅文本，截图用于本机预览，完整浏览器 DOM 使用配置的浏览器 MCP。
+没有关联文件夹的聊天也有独立、可持久化的工具目录和 AppContainer 终端快照。原生工具支持窗口截屏、发现/打开 GUI 软件、读取可访问文字和有目标校验的输入；运行依赖随包发布。本机操作仍经过权限与审批，截图可按所选模型协议投影为图像输入，是否理解图像取决于模型实际能力。浏览器 DOM 由原生 CDP 和已配置的兼容 MCP 提供。
 
 右侧栏使用可横向滚动的截图标签，宽度随侧栏调整；用户正在查看某张图片时，新截图进入后台标签。标签可以关闭和重新打开，图片支持原像素全屏查看。隐藏侧栏暂停图片读取，切换聊天清除旧图，重新打开从正式记录恢复。终端不在右侧渲染；本机 CMD/PowerShell 的输出与退出状态继续保存于正式工具回执，明确要求时仍可打开独立可见终端。
 
 MCP 发现目录与模型声明预算分离，支持单工具禁用、搜索和按需加载。带类型与结构化的完整结果按聊天保存，通过引用和分页预览读取；私有 MCP 元信息不进入模型或详情投影。第三方参数与审批理由分开，技能头部支持受限 YAML 1.2，取消先保存已返回的执行结果。
 
-技能资源按技能目录解析，支持标准校验、依赖诊断及选定 Node 脚本的只读包沙箱执行。复用 Playwright 与 GitHub 官方 MCP 服务、Apache-2.0 文档沟通技能；官方 MCP 预设默认启用，保留用户已有的明确关闭选择，重复添加复用现有配置。打开设置不会启动服务，缺少启动程序、认证变量或必填路径时显示未就绪，不当作可用能力。Python/Bash 技能脚本和浏览器交互式 OAuth 登录尚不支持，缺少环境依赖会明确阻止执行。
+技能资源按技能目录解析，保留标准校验和依赖诊断。Markdown 技能、远程 MCP 和原生可执行 MCP 继续可用；固定内置 Node MCP 使用私有运行时及已安装入口，不要求系统 PATH，启动不调用 npm/npx 下载；JS 技能通过已有沙箱使用核验过的私有 Node。账号、API Key、数据库配置和未随附的第三方依赖仍明确报告。原生 CDP 提供浏览器自动化；保留用户明确关闭选择，读取设置不启动服务，启用不等于就绪。
 
-设置中的数据存储、用户工具使用相同的简洁行。MCP 配置、导入技能及 npm/浏览器缓存可独立选择目录，复制校验后切换并保留原文件；单独配置后，更改 Data 不移动这一套扩展。官方工具包位于应用本体的 `model-gateway/official-tools/`，包含 38 个核心工具定义、7 个技能与 11 个默认启用的 MCP 预设；用户可以关闭或自定义，启用不等于已连接或已安装所需环境。内置公共网页读取和长文件分页无需 Python，桌面、浏览器及终端工作流复用现有执行边界。用户路径只管理自定义扩展和个人覆盖，升级保留用户选择。
+设置保留独立 Data 与用户工具位置。扩展迁移先校验复制再切换指针，保留原文件；更改 Data 不移动单独配置的扩展。官方静态工具包源码在 `apps/official-tools/`，随包位于 `official-tools/`，不含可执行后端 JS。公共网页读取、文件与原生浏览器/终端继续经过已有授权边界，用户扩展独立保存。
 
-使用与开发入口：[代码组织与职责](docs/architecture/code-organization.md)、[模型网关](apps/model-gateway/README.md)、[聊天与工作记忆](docs/architecture/chat-work-memory.md)、[UI 组件](apps/desktop/UI-COMPONENTS.md)、[五人计划](docs/team/README.md)。
+使用与开发入口：[原生网关](docs/architecture/native-gateway.md)、[核心说明](apps/agent-core/README.md)、[聊天与工作记忆](docs/architecture/chat-work-memory.md)、[UI 组件](apps/desktop/UI-COMPONENTS.md)、[五人分工](docs/team/README.md)。
 
 ## 五人代码边界
 
-2026-10-05 已提交基线为 `5637dc3`，本次重组在工作区。A 主责网关 `orchestration/` 并协调 `platform/`；C 主责 `models/`；D 主责 `tools/` 与 `official-tools/`；E 主责 `data/`。B 唯一负责全部 ShellPage partial、WinUI 与聊天展示。
+A 主责 Rust 网关组合、`orchestration/` 与 `resources/`；C 主责 `models/`；D 主责 `tools/`、ToolHost 与 `apps/official-tools/`；E 主责 `storage/`、`retrieval/`。原生模块位于 `apps/agent-core/src/`。B 唯一负责全部 ShellPage partial、WinUI 与聊天展示。
 
-桌面服务分为 `Integration/Presentation/Models/Tools/Data`，共享契约分为 `Chat/Tools/Memory`，ToolHost 分为 `Desktop/Terminal/Sandbox/Native`。网关根 CLI 入口保持兼容；这些是现有应用内的目录职责，不代表完整 MVVM 或跨程序集隔离。
+桌面服务分为 `Integration/Presentation/Models/Tools/Data`，共享契约分为 `Chat/Tools/Memory`，ToolHost 分为 `Desktop/Terminal/Sandbox/Native`。生产 CLI 为 `kynxa-gateway.exe`，桌面启动命令保留；目录职责不代表完整 MVVM 或跨程序集隔离。
 
-Data 与 Platform 不依赖高层；模型历史仍读取 Data 的公开工具结果预览，Tools 仍使用 Models 的纯辅助，因此不宣称全部业务域互相独立。官方包的自有 Tools catalog 导入已调整，第三方技能原文和许可证保留。实际依赖与一手参考见 [团队边界](docs/architecture/team-boundaries.md)，交接见 [五人分工](docs/team/README.md)。本轮验证另记，不沿用此前结果冒充本轮验收。
+纯领域规则继续检查依赖与循环；明确的 I/O 组合模块逐文件列出允许调用的领域，复用正式账本与事务。第三方技能原文和许可证保留，实际边界见 [团队边界](docs/architecture/team-boundaries.md)，交接见 [五人分工](docs/team/README.md)。本轮验证另记，不沿用历史结果冒充验收。
 
 ## 下一步建议
 
@@ -150,7 +151,7 @@ KYNXA 的长期目标是根据任务状态和本地硬件情况动态协调：
 WinUI 桌面 + WebView2
           │ 本机 HTTP / SSE
           ▼
-Node.js 模型网关 ───► 云端 API / 本地 HTTP 模型服务
+Rust 模型网关 ─────► 云端 API / 本地 HTTP 模型服务
           ├────────► C# ToolHost：桌面 / 终端 / 沙箱 / 原生执行
           │
           ▼
@@ -158,7 +159,7 @@ Data：目录元信息 + JSONL 正式记录 + 分层确认记忆
       可重建的历史摘录 + SQLite 元数据索引
 ```
 
-下图保留为历史后续运行时设计，与当前 Node.js 网关及已实现的 C# ToolHost 分开理解；本轮五人工作不据此新增 Host、迁移语言或建立独立 Authority。
+下图保留为历史后续运行时设计，与当前 Rust 网关及 C# ToolHost 分开理解；它不代表实际运行中存在独立 Authority。
 
 ```text
                  KYNXA Desktop
@@ -272,12 +273,12 @@ Resume Work
 当前技术栈：
 
 * **桌面 UI：** C# + WinUI 3 + XAML；WebView2 / KaTeX 展示会话。
-* **模型网关：** Node.js 内置 HTTP、fetch 与文件接口，目前不依赖 Python 服务。
+* **模型网关：** Rust HTTP/SSE、协议解码、MCP/CDP、ONNX 推理与文档解析；私有 Node 仅供扩展及已核验的沙箱脚本使用，核心不依赖它。不携带 Python 运行时。
 * **本地模型连接：** llama.cpp、Ollama、LM Studio 等 HTTP 服务；推理进程独立运行。
 * **持久化：** 带版本的 JSON 元信息、JSONL 会话事件、分层记忆文件；SQLite 元数据索引。
 * **桌面通信：** 与网关通过本机 HTTP / SSE 通信。
 
-C# ToolHost 已承担原生执行。独立 Host/Authority、持久执行存储和 Named Pipe 保留为需单独决策的设计参考；五人团队沿已有 WinUI/Node.js/C# 链路开发，目前不依赖 Python。
+C# ToolHost 承担 Windows 原生执行；独立 Host/Authority 与 Named Pipe 保留为设计参考，当前实现使用 WinUI、Rust 与 C#。
 
 macOS、Linux 和 iOS 暂不属于首版目标范围。
 
@@ -287,7 +288,9 @@ macOS、Linux 和 iOS 暂不属于首版目标范围。
 KYNXA/
 ├── apps/
 │   ├── desktop/              # Windows WinUI 3 正式前端
-│   ├── model-gateway/        # 当前 Node 模型、会话与记忆服务
+│   ├── agent-core/           # Rust HTTP/SSE、Agent、模型、工具、检索与存储
+│   ├── resource-service/     # 原生硬件准入与资源租约
+│   ├── official-tools/       # 静态技能、配置预设与许可证
 │   ├── shared/               # 当前 C# 聊天、记忆与工具契约
 │   ├── tool-host/            # Windows 桌面、终端、沙箱与技能原生执行
 │   ├── desktop-preview/      # 早期视觉与交互预览
@@ -299,7 +302,7 @@ KYNXA/
 └── tests/                   # 桌面、存储、协议与交互 smoke 项目
 ```
 
-网关单元/集成测试位于 `apps/model-gateway/tests/`。设计中的 `apps/host/`、`crates/` 等目录当前尚未建立。
+原生单元/集成测试位于 `apps/agent-core/src/`、`apps/agent-core/tests/`；随包检查在 `tests/native-runtime-smoke/`。设计中的 `apps/host/`、`crates/` 等目录当前尚未建立。
 
 ## 安全模型
 
@@ -364,7 +367,7 @@ KYNXA 维护两个层级的文档。
 
 面向用户和 Contributor 的精简 Markdown 文档。
 
-* [模型网关与本地启动](apps/model-gateway/README.md)
+* [原生网关与本地启动](docs/architecture/native-gateway.md)
 * [聊天/工作记忆与 Data 目录](docs/architecture/chat-work-memory.md)
 * [UI 组件](apps/desktop/UI-COMPONENTS.md)
 * [五人分工与下一步](docs/team/README.md)

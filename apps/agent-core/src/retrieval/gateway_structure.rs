@@ -1,0 +1,224 @@
+//! Native syntax adapters feed the existing bounded structural selection and relationship rules.
+//! 原生语法适配器接入既有有界结构选择与关系规则，不把词法候选升级为已解析调用。
+
+use crate::storage::{ContractError, gateway};
+use serde_json::{Value, json};
+pub fn parser_version(path: &str) -> &'static str {
+    if grammar(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or(""),
+    )
+    .is_some()
+    {
+        "rust-tree-sitter-v1"
+    } else {
+        "rust-document-blocks-v1"
+    }
+}
+use std::path::Path;
+
+fn grammar(extension: &str) -> Option<(tree_sitter::Language, &'static str)> {
+    Some(match extension {
+        "cs" => (tree_sitter_c_sharp::LANGUAGE.into(), "csharp"),
+        "js" | "mjs" | "cjs" | "jsx" => (tree_sitter_javascript::LANGUAGE.into(), "javascript"),
+        "ts" | "mts" | "cts" => (
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+        ),
+        "tsx" => (tree_sitter_typescript::LANGUAGE_TSX.into(), "tsx"),
+        "rs" => (tree_sitter_rust::LANGUAGE.into(), "rust"),
+        "py" | "pyi" => (tree_sitter_python::LANGUAGE.into(), "python"),
+        "java" => (tree_sitter_java::LANGUAGE.into(), "java"),
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hxx" => {
+            (tree_sitter_cpp::LANGUAGE.into(), "cpp")
+        }
+        "go" => (tree_sitter_go::LANGUAGE.into(), "go"),
+        _ => return None,
+    })
+}
+fn declaration(kind: &str) -> Option<&'static str> {
+    match kind {
+        "class_declaration" | "class_definition" | "class_specifier" | "struct_item"
+        | "struct_specifier" | "struct_declaration" => Some("class"),
+        "interface_declaration" | "trait_item" => Some("interface"),
+        "enum_declaration" | "enum_item" | "enum_specifier" => Some("enum"),
+        "namespace_declaration" | "module" | "mod_item" => Some("namespace"),
+        "method_declaration"
+        | "method_definition"
+        | "function_definition"
+        | "function_declaration"
+        | "function_item"
+        | "constructor_declaration" => Some("function"),
+        "impl_item" => Some("class"),
+        "property_declaration" | "field_declaration" => Some("property"),
+        _ => None,
+    }
+}
+fn name<'a>(node: tree_sitter::Node<'a>, text: &'a str) -> Option<&'a str> {
+    let target = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("type"))
+        .or_else(|| node.child_by_field_name("declarator"))?;
+    let mut node = target;
+    for _ in 0..8 {
+        if [
+            "identifier",
+            "field_identifier",
+            "type_identifier",
+            "namespace_identifier",
+            "qualified_identifier",
+        ]
+        .contains(&node.kind())
+        {
+            break;
+        }
+        let next = node
+            .child_by_field_name("declarator")
+            .or_else(|| node.child_by_field_name("name"));
+        match next {
+            Some(next) => node = next,
+            None => break,
+        }
+    }
+    node.utf8_text(text.as_bytes())
+        .ok()
+        .filter(|name| !name.is_empty() && name.len() <= 1024)
+}
+fn utf16_index(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0; text.len() + 1];
+    let mut count = 0;
+    for (start, character) in text.char_indices() {
+        for offset in &mut offsets[start..start + character.len_utf8()] {
+            *offset = count;
+        }
+        count += character.len_utf16();
+        offsets[start + character.len_utf8()] = count;
+    }
+    offsets
+}
+fn line_entries(text: &str) -> Vec<Value> {
+    let mut offset = 0;
+    let mut lines = Vec::new();
+    for (number, line) in text.split_inclusive('\n').enumerate() {
+        let length = line.encode_utf16().count();
+        lines.push(json!({"text":line.trim_end_matches(['\r','\n']),"startOffset":offset,"endOffset":offset+length,"startLine":number+1,"endLine":number+1}));
+        offset += length;
+    }
+    lines
+}
+pub fn parse(text: &str, path: &str) -> Result<Value, ContractError> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let Some((language, language_name)) = grammar(&extension) else {
+        let document=super::document::parse(&json!({"extension":format!(".{extension}"),"lines":line_entries(text),"complete":true}))
+            .map_err(|_|gateway::error("文档结构解析失败。","INVALID_RETRIEVAL_STRUCTURE",422))?;
+        return Ok(
+            json!({"domain":"knowledge","language":"text","parserVersion":"rust-document-blocks-v1","parseStatus":document["parseStatus"],
+            "units":document["units"],"diagnostics":document["diagnostics"],"offsetUnit":"utf16-code-units"}),
+        );
+    };
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|_| gateway::error("代码语法库无法加载。", "CODE_PARSER_UNAVAILABLE", 503))?;
+    let tree = parser
+        .parse(text, None)
+        .ok_or_else(|| gateway::error("代码解析已取消。", "ABORT_ERR", 499))?;
+    let offsets = utf16_index(text);
+    let mut declarations = Vec::new();
+    let mut pending = vec![(tree.root_node(), 0usize, None::<String>)];
+    let mut limited = false;
+    while let Some((node, depth, parent)) = pending.pop() {
+        crate::storage::sqlite_store::cancelled()?;
+        if declarations.len() >= 10000 {
+            limited = true;
+            break;
+        }
+        let mut next_parent = parent.clone();
+        if let Some(kind) =
+            declaration(node.kind()).filter(|_| !node.is_error() && !node.is_missing())
+        {
+            if let Some(symbol) = name(node, text) {
+                let qualified = parent
+                    .as_ref()
+                    .map(|parent| format!("{parent}.{symbol}"))
+                    .unwrap_or(symbol.to_string());
+                declarations.push(json!({"depth":depth,"unit":{"kind":kind,"symbolName":symbol,"qualifiedName":qualified,"parentSymbol":parent,
+                    "startOffset":offsets[node.start_byte()],"endOffset":offsets[node.end_byte()],"startLine":node.start_position().row+1,"endLine":node.end_position().row+1}}));
+                next_parent = Some(qualified);
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            pending.push((child, depth + 1, next_parent.clone()));
+        }
+    }
+    let selected = super::code_units::select(&json!({"text":text,"declarations":declarations}))
+        .map_err(|_| gateway::error("代码结构选择失败。", "INVALID_RETRIEVAL_STRUCTURE", 422))?;
+    let partial = limited || selected["limited"] == true || tree.root_node().has_error();
+    Ok(
+        json!({"domain":"code","language":language_name,"parserVersion":"rust-tree-sitter-v1","parseStatus":if partial{"partial"}else{"parsed"},
+        "units":selected["units"],"diagnostics":if partial{json!(["CODE_STRUCTURE_PARTIAL"])}else{json!([])},"offsetUnit":"utf16-code-units"}),
+    )
+}
+pub fn chunks(text: &str, structure: &Value, maximum: usize) -> Result<Vec<Value>, ContractError> {
+    let total = text.encode_utf16().count();
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut spans = structure["units"].as_array().cloned().unwrap_or_default();
+    spans.sort_by_key(|span| span["startOffset"].as_u64().unwrap_or(0));
+    // Retain uncovered text as explicit context instead of silently dropping imports, comments or parse gaps.
+    // 未覆盖文本作为明确上下文保留，不能静默遗漏导入、注释或解析缺口。
+    let mut ranges = Vec::new();
+    let mut position = 0;
+    for span in spans {
+        let start = span["startOffset"].as_u64().unwrap_or(0) as usize;
+        let end = span["endOffset"].as_u64().unwrap_or(0) as usize;
+        if start < position || end <= start || end > total {
+            continue;
+        }
+        if start > position {
+            ranges.push((position, start, None));
+        }
+        ranges.push((start, end, Some(span)));
+        position = end;
+    }
+    if position < total {
+        ranges.push((position, total, None));
+    }
+    let mut output = Vec::new();
+    for (start, end, span) in ranges {
+        let body = String::from_utf16_lossy(&units[start..end]);
+        let chunks = super::chunking::apply(&json!({"text":body,"maxChars":maximum}))
+            .map_err(|_| gateway::error("资料分块失败。", "INVALID_RETRIEVAL_STRUCTURE", 422))?;
+        let first_line = units[..start].iter().filter(|unit| **unit == 10).count();
+        for chunk in chunks.as_array().unwrap() {
+            let mut chunk = chunk.clone();
+            chunk["startOffset"] = json!(start + chunk["startOffset"].as_u64().unwrap() as usize);
+            chunk["endOffset"] = json!(start + chunk["endOffset"].as_u64().unwrap() as usize);
+            chunk["startLine"] = json!(first_line + chunk["startLine"].as_u64().unwrap() as usize);
+            chunk["endLine"] = json!(first_line + chunk["endLine"].as_u64().unwrap() as usize);
+            let mut metadata = span.clone().unwrap_or(json!({"kind":"context"}));
+            if let Some(span) = &span {
+                metadata["unitStartOffset"] = span["unitStartOffset"].clone();
+                metadata["unitEndOffset"] = span["unitEndOffset"].clone();
+                if metadata["unitStartOffset"].is_null() {
+                    metadata["unitStartOffset"] = span["startOffset"].clone();
+                    metadata["unitEndOffset"] = span["endOffset"].clone();
+                }
+            }
+            metadata["domain"] = structure["domain"].clone();
+            metadata["language"] = structure["language"].clone();
+            metadata["parseStatus"] = structure["parseStatus"].clone();
+            metadata["offsetUnit"] = json!("utf16-code-units");
+            chunk["structure"] = metadata;
+            output.push(chunk);
+        }
+    }
+    Ok(output)
+}

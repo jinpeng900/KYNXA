@@ -4,6 +4,17 @@ using System.Text;
 using System.Text.Json;
 using KYNXA_Desktop.Services;
 
+if (args.Length == 2 && args[0] == "--native-models-fixture")
+{
+    await NativeModelsContractChecks.RunAsync(args[1]);
+    return;
+}
+if (args.Length == 2 && args[0] == "--native-models-live")
+{
+    await NativeModelsContractChecks.RunLiveAsync(args[1]);
+    return;
+}
+
 static void Check(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -41,8 +52,8 @@ var server = Task.Run(async () =>
             {
                 string path = context.Request.Url!.AbsolutePath;
                 if (path == "/health")
-                    result = new { service = "kynxa-model-gateway", status = "ok", storageProtocol = 1,
-                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1 };
+                    result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", storageProtocol = 1,
+                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1, retrievalProtocol = 1 };
                 else if (path == "/api/models" && context.Request.HttpMethod == "GET")
                 {
                     // Missing limits use their independent defaults. Explicit limits
@@ -95,13 +106,13 @@ try
 {
     using var client = new ModelApiClient();
     var providers = await client.ListAsync();
-    Check(providers[0].ContextWindowTokens == 8192 && providers[0].MaxOutputTokens == 262144,
+    Check(providers[0].ContextWindowTokens == 32768 && providers[0].MaxOutputTokens == 262144,
         "legacy response did not use independent context and output defaults");
     Check(providers[1].ContextWindowTokens == 1_000_000 && providers[1].MaxOutputTokens == 2048 && providers[1].Models.Length == 2,
         "existing low output limit or multiple models were changed while loading");
     var connection = new ModelConnection("fixture-local", "Synthetic model", "http://127.0.0.1:8080/v1", ["fixture-model"]);
     var saved = await client.SaveAsync(connection);
-    Check(saved.ContextWindowTokens == 8192 && saved.MaxOutputTokens == 262144 && requests[^1].ContextTokens == 8192 && requests[^1].OutputTokens == 262144,
+    Check(saved.ContextWindowTokens == 32768 && saved.MaxOutputTokens == 262144 && requests[^1].ContextTokens == 32768 && requests[^1].OutputTokens == 262144,
         "new connection defaults were not sent and preserved independently");
     var oneMillion = connection with { ContextWindowTokens = 1_000_000 };
     saved = await client.SaveAsync(oneMillion);
@@ -136,7 +147,7 @@ try
     }
     Check(Volatile.Read(ref requestCount) == before, "invalid windows reached the gateway");
     Check(serverFailure is null, $"fake gateway failed: {serverFailure}");
-    Console.WriteLine("PASS: independent legacy 8K context/256K output defaults, explicit 2K output preservation, 1M context, Save/Test output preset/custom/boundary round trips, and invalid limits rejected before network access.");
+    Console.WriteLine("PASS: independent legacy 32K context/256K output defaults, explicit 2K output preservation, 1M context, Save/Test output preset/custom/boundary round trips, and invalid limits rejected before network access.");
 }
 finally
 {

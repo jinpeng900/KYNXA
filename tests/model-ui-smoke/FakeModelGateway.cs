@@ -84,7 +84,7 @@ internal sealed class FakeModelGateway : IAsyncDisposable
             string path = context.Request.Url!.AbsolutePath;
             if (path == "/health")
             {
-                result = new { service = "kynxa-model-gateway", status = "ok", storageProtocol = 1,
+                result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", nodeRuntime = false, storageProtocol = 1,
                     conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2,
                     extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1, dataLayoutVersion = 1 };
             }

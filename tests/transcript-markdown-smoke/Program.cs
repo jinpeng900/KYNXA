@@ -56,7 +56,8 @@ Check(inlineDisplay.Contains("<span class=\"math\"") && inlineDisplay.Contains("
     && inlineDisplay.Contains("$$x^2$$") && !inlineDisplay.Contains("<div"), "Inline double-dollar source and display mode survive without invalid nested block HTML.");
 
 string fence = "```math\n\\begin{matrix}a&b\\\\c&d\\end{matrix}\n```";
-Check(TranscriptMarkdown.Render(fence, true).Contains("<pre data-code-complete=\"true\"><code"), "Streaming math fence remains code.");
+Check(Regex.IsMatch(TranscriptMarkdown.Render(fence, true), "<pre\\b[^>]*><code\\b"), "Streaming math fence remains code, including completion metadata.");
+Check(TranscriptMarkdown.Render(fence, true).Contains("data-code-complete=\"true\""), "A closed streaming math fence keeps its completion metadata.");
 Check(TranscriptMarkdown.Render(fence).Contains("class=\"math\""), "Settled math fence becomes display math.");
 Check(!TranscriptMarkdown.Render("```tex\n$\\theta$\n```").Contains("class=\"math\""), "Ordinary TeX code is not interpreted as math.");
 
@@ -144,4 +145,19 @@ Check(unsafeHtml.Contains("class=\"image-link\"") && unsafeHtml.Contains(">pictu
 Check(!Regex.IsMatch(unsafeHtml, "<a[^>]*>\\s*<a"), "Linked images do not create nested anchors.");
 Check(Text(unsafeHtml).Contains("bad image") && Text(unsafeHtml).Contains("<script>alert('x')</script>"), "Unsafe content remains readable text.");
 
+var longText = string.Join("\n\n", Enumerable.Range(0, 300).Select(index => $"段落{index} **完整语义** $x_{index}$。"));
+var firstStream = TranscriptMarkdown.RenderStreaming(longText + "\n\n活动尾部", null);
+Check(firstStream.State.StableLength > longText.Length - 100, "Complete top-level blocks become a reusable stable prefix.");
+var nextStream = TranscriptMarkdown.RenderStreaming(longText + "\n\n活动尾部继续", firstStream.State);
+Check(nextStream.State.ParsedCharacters < 64 && nextStream.Html.Contains("活动尾部继续"), "Appending to a long reply parses only its active tail.");
+Check(nextStream.Html.StartsWith(firstStream.State.StableHtml, StringComparison.Ordinal), "Stable rendered blocks retain their original HTML.");
+var changedStream = TranscriptMarkdown.RenderStreaming("纠正了前文\n\n新的尾部", nextStream.State);
+Check(!changedStream.Html.Contains("段落299") && changedStream.Html.Contains("纠正了前文"), "A rewritten prefix discards stale streaming state.");
+var referenceStream = TranscriptMarkdown.RenderStreaming("[label]\n\n后文", null);
+referenceStream = TranscriptMarkdown.RenderStreaming("[label]\n\n后文\n\n[label]: https://example.com", referenceStream.State);
+Check(referenceStream.State.StableLength == 0 && referenceStream.Html.Contains("href=\"https://example.com\""), "A late reference definition reparses its document context.");
+var rawTail = TranscriptMarkdown.RenderStreaming(new string('长', 40000) + "<script>literal</script>", null);
+Check(rawTail.State.ParsedCharacters == 0 && !rawTail.Html.Contains("<script>"), "An oversized unfinished block remains escaped selectable text without a growing AST.");
+Check(Text(rawTail.Html) == new string('长', 40000) + "<script>literal</script>", "Deferred long-block rendering preserves every original character.");
+Check(TranscriptMarkdown.Render(longText + "\n\n活动尾部继续").Contains("<strong>完整语义</strong>"), "Final full rendering retains authoritative Markdown semantics.");
 Console.WriteLine($"Transcript Markdown smoke: {checks} checks passed.");

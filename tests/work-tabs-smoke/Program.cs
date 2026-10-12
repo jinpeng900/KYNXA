@@ -1,4 +1,5 @@
 using KYNXA_Desktop.Services;
+using KYNXA.Contracts;
 
 int checks = 0;
 void Check(bool condition, string label)
@@ -136,4 +137,22 @@ bounded.ShowConversation(oldest, [shot, terminal]);
 Check(bounded.SelectedTab?.Key == shot.Key && bounded.OpenItems.Count == 2,
     "LRU eviction bounds old display state and rehydrates evicted chats from current resources.");
 
-Console.WriteLine($"PASS: {checks} work tab state checks.");
+var screenshotReference = new ToolResultReference(Guid.NewGuid(), 8192, new string('a', 64));
+var screenshotNames = new[] { "computer.screenshot", "browser.screenshot", "mcp.windows-screenshot.Screenshot",
+    "mcp.custom-browser.browser_take_screenshot", "mcp.browser-debug.take_screenshot" };
+var screenshotTools = screenshotNames.Select((name, index) => new ToolActivity("capture-" + index, name, null,
+    "completed", "Owned screenshot fixture", ResultRef: screenshotReference with { Id = Guid.NewGuid() })).ToArray();
+var discoveredScreenshots = ConversationScreenshotSources.Collect(chatA,
+    [new(chatA, Guid.NewGuid(), "assistant", screenshotTools)]);
+Check(discoveredScreenshots.Length == screenshotNames.Length,
+    "Native browser and Windows MCP screenshot receipts reach the existing sidebar source projection.");
+Check(!ConversationScreenshotSources.IsScreenshotTool("mcp.windows-screenshot.windows") &&
+    !ConversationScreenshotSources.IsScreenshotTool("user.Screenshot"),
+    "Window inventories and model labels are not screenshot capabilities.");
+Check(ConversationScreenshotSources.Collect(chatA,
+    [new(chatB, Guid.NewGuid(), "assistant", screenshotTools)]).Length == 0 &&
+    ConversationScreenshotSources.Collect(chatA,
+    [new(chatA, Guid.NewGuid(), "assistant", [screenshotTools[0] with { Status = "unknown" }])]).Length == 0,
+    "Foreign conversations and unknown execution outcomes cannot add sidebar screenshots.");
+
+Console.WriteLine($"PASS: {checks} work tab state and screenshot receipt checks.");

@@ -85,7 +85,15 @@ public static class ChatStreamReader
                         case "tool_result":
                         case "approval_required":
                             ValidateToolEvent(streamEvent);
-                            if (assistantSegments.Count > 0 && (streamEvent.Tool!.Round is null || !assistantSegments.Values.Any(value => value.Round == streamEvent.Tool.Round && value.Status == "completed" && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order)))
+                            // Context maintenance is display-only and may precede this round's model output.
+                            // 上下文维护只是展示活动，可以发生在本轮模型输出前；真实工具仍须等待该轮输出完成。
+                            bool isContextActivity = streamEvent.Tool!.Name == "context.compact";
+                            if (isContextActivity && (streamEvent.Type == "approval_required" ||
+                                streamEvent.Tool.Arguments!.Value.EnumerateObject().Any()))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            if (assistantSegments.Count > 0 && (streamEvent.Tool.Round is null || !assistantSegments.Values.Any(value =>
+                                value.Round == streamEvent.Tool.Round && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order &&
+                                (value.Status == "completed" || isContextActivity && value.Status == "streaming"))))
                                 throw InvalidSegment();
                             string toolCallId = streamEvent.Tool!.ToolCallId;
                             string toolName = streamEvent.Tool.Name;
@@ -108,6 +116,14 @@ public static class ChatStreamReader
                                 streamEvent.Terminal.Sequence <= terminalOutputSequences.GetValueOrDefault(streamEvent.Terminal.ToolCallId))
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             terminalOutputSequences[streamEvent.Terminal.ToolCallId] = streamEvent.Terminal.Sequence;
+                            break;
+                        case "mcp_status":
+                            // A service discovery diagnostic does not settle the model reply or its active tools.
+                            // 服务发现诊断不结束模型回复，也不改变当前工具状态；会话身份仍经过上面的统一校验。
+                            if (string.IsNullOrWhiteSpace(streamEvent.ServerId) || streamEvent.ServerId.Length > 80 ||
+                                streamEvent.Ready is null || string.IsNullOrWhiteSpace(streamEvent.Code) || streamEvent.Code.Length > 200 ||
+                                string.IsNullOrWhiteSpace(streamEvent.Message) || streamEvent.Message.Length > 65536)
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
                         case "completed":
                             if (streamEvent.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
@@ -180,7 +196,11 @@ public static class ChatStreamReader
             throw InvalidSegment();
         if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment => !knownSegments.TryGetValue(segment.Id, out var prior) || prior.Round != segment.Round || prior.Order != segment.Order)))
             throw InvalidSegment();
-        if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment => segment.Status != "completed") || assistantSegments[^1].Phase != "final_answer"))
+        // An interrupted model step may recover into a complete final answer; it remains a truthful commentary trace.
+        // 中断的模型步骤可以恢复并得到完整最终回答；先前中断段仍保留为真实的过程轨迹。
+        if (streamEvent.Type == "completed" && (assistantSegments.Length == 0 || assistantSegments.Any(segment =>
+            segment.Status != "completed" && !(segment.Phase == "commentary" && segment.Status == "interrupted")) ||
+            assistantSegments[^1].Phase != "final_answer" || assistantSegments[^1].Status != "completed"))
             throw InvalidSegment();
     }
 

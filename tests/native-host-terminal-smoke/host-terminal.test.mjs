@@ -7,7 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const toolHost = process.env.KYNXA_HOST_TERMINAL_SMOKE_TOOL_HOST ?? resolve(dirname(fileURLToPath(import.meta.url)),
-  '../../apps/tool-host/bin/Debug/net10.0-windows/win-x64/KYNXA.ToolHost.exe');
+  '../../apps/tool-host/bin/Debug/net10.0-windows10.0.19041.0/win-x64/KYNXA.ToolHost.exe');
 const windowsOnly = { skip: process.platform !== 'win32', timeout: 60000 };
 
 async function fixture(t) {

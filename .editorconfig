@@ -18,6 +18,9 @@ indent_size = 2
 [*.{js,mjs}]
 indent_size = 2
 
+[*.rs]
+indent_size = 4
+
 [*.cs]
 # Naming hints follow KYNXA's maintained conventions; compatibility remains a review responsibility.
 # 命名提示采用 KYNXA 维护的约定，兼容边界仍需人工审查。
