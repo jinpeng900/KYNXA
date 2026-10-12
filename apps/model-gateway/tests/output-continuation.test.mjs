@@ -40,9 +40,12 @@ for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-mes
           assert.ok(messages.some(message => message.content?.includes('[KYNXA_OUTPUT_CONTINUATION]')));
           assert.ok(!messages.some(message => message.content === first), 'raw output replaced only after archival');
         }
+        if (messages.at(-1)?.content?.includes('[KYNXA_TASK_COMPLETION_REVIEW]'))
+          return decodeToolTurn(protocol, native(protocol,
+            '<kynxa_task>{"state":"complete","reason":"The requested three lines are present in the saved output."}</kynxa_task>', false), [], { allowTruncatedText: true });
         return decodeToolTurn(protocol, native(protocol, requests === 1 ? first : '3 第三行', requests === 1), [], { allowTruncatedText: true });
       } });
-    assert.equal(requests, 2); assert.equal(result.content, first + '3 第三行');
+    assert.equal(requests, 3); assert.equal(result.content, first + '3 第三行');
     assert.equal(result.assistantSegments.at(-1).phase, 'final_answer');
     assert.equal(result.assistantSegments.at(-1).content, result.content);
     assert.equal(results.records[0].canonical.content, first);
@@ -105,4 +108,17 @@ test('a lookup between chunks preserves the draft and the complete existing call
   assert.ok(resumed.messages.includes(callMessage)); assert.ok(resumed.messages.includes(resultMessage));
   assert.equal(continuation.finalText({ content: 'Read evidence.', calls: [{ name: 'read' }] }), 'Read evidence.');
   assert.equal(continuation.finalText({ content: 'Conclusion.', calls: [] }), 'Beginning.Conclusion.');
+});
+
+test('completion review metrics count Unicode and Han characters without counting control metadata', async () => {
+  const original = { role: 'user', content: 'Keep the original goal.' };
+  const output = new OutputContinuation({ resultStore: archiveFixture() });
+  const prepared = await output.reviewCompletion([original], { content: '甲𠮷😀\n乙', calls: [], finish: 'stop' },
+    { round: 1, inputBudgetTokens: 4000, directive: '[KYNXA_TASK_COMPLETION_REVIEW]' });
+  assert.deepEqual(prepared.audit.outputMetrics, { unicodeCharacters: 5, hanCharacters: 3, lineBreaks: 1 });
+  assert.equal(prepared.messages[0], original);
+  assert.equal(output.continuations, 0, 'review does not invent another writing continuation');
+  const continued = output.continueReviewed(prepared.messages, { state: 'continue', next: 'Finish the remaining requirement.' });
+  assert.equal(continued.messages.length, 3);
+  assert.equal(output.finalText({ content: '末尾', calls: [] }), '甲𠮷😀\n乙\n\n末尾');
 });
