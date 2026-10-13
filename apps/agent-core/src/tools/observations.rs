@@ -48,7 +48,9 @@ impl ObservationGuard {
 
     fn observe_success(&mut self, arguments: &Value) -> Result<Value, String> {
         let pairs = required_results(arguments)?;
-        let mut repeated = !pairs.is_empty();
+        let mut repeated = true;
+        let mut observed = false;
+        let mut changed_state = false;
         let mut incoming = Vec::new();
         for pair in pairs {
             let call = required_object(pair, "call")?;
@@ -58,10 +60,18 @@ impl ObservationGuard {
                 || is_truthy(&result["code"])
                 || (is_truthy(&result["status"]) && result["status"] != "completed")
             {
-                self.observations.clear();
-                self.stagnant_rounds = 0;
-                return Ok(progress_result(false, 0));
+                // Discovery and failed reads do not erase prior source observations.
+                // 发现工具和失败读取不会抹掉已读来源；真实写入重置无进展轮次，仍保留版本指纹。
+                changed_state |= !pair["observation"].as_bool().unwrap_or(false)
+                    && !is_truthy(&result["isError"])
+                    && !is_truthy(&result["code"])
+                    && !matches!(call["name"].as_str(), Some("tool.search" | "tool.load"));
+                continue;
             }
+            if matches!(call["name"].as_str(), Some("tool.search" | "tool.load")) {
+                continue;
+            }
+            observed = true;
             // Broker-created source identity takes precedence over call explanations and changing archive IDs.
             // 优先使用代理生成的来源身份；调用理由和每次变化的归档 ID 不构成新信息。
             let source = source_observation(call, result);
@@ -109,10 +119,16 @@ impl ObservationGuard {
                 self.observations.remove(0);
             }
         }
+        if !observed && !changed_state {
+            return Ok(progress_result(false, 0));
+        }
+        repeated &= observed && !changed_state;
         self.stagnant_rounds = if repeated {
             self.stagnant_rounds.saturating_add(1)
-        } else {
+        } else if observed || changed_state {
             0
+        } else {
+            self.stagnant_rounds
         };
         Ok(progress_result(repeated, self.stagnant_rounds))
     }
@@ -291,6 +307,8 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
     let parsed;
     let value = if let Some(value) = result.get("value").filter(|value| value.is_object()) {
         value
+    } else if result["content"].is_object() {
+        &result["content"]
     } else if let Some(content) = result["content"].as_str() {
         parsed = serde_json::from_str::<Value>(content).ok()?;
         if !parsed.is_object() {
@@ -335,6 +353,22 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 value["offset"],
                 value["nextOffset"],
                 value["content"]
+            ])
+        }
+        "tool.result.read"
+            if is_truthy(&value["resultRef"]["id"])
+                && is_truthy(&value["resultRef"]["sha256"])
+                && value["text"].is_string() =>
+        {
+            // Page identity belongs to the original immutable archive, never the new read receipt.
+            // 页身份使用原始不可变归档与实际范围，新回执 ID 或调用说明不能伪装成新证据。
+            json!([
+                value["resultRef"]["id"],
+                value["resultRef"]["sha256"],
+                value["sourceTool"],
+                value["offset"],
+                value["nextOffset"],
+                value["text"]
             ])
         }
         _ => return None,
@@ -414,6 +448,56 @@ mod tests {
                 "observation": true
             }]})).unwrap();
             assert_eq!(result["repeated"], false);
+        }
+    }
+
+    #[test]
+    fn archived_pages_use_original_identity_across_discovery_and_new_receipts() {
+        let mut guard = ObservationGuard::default();
+        for round in 0..4 {
+            let discovery = json!({"results": [{"call": {"name": "tool.load"},
+                "result": {"content": {"tools": []}, "status": "completed"}, "observation": true}]});
+            assert_eq!(
+                guard.apply("observations.success", &discovery).unwrap()["warning"],
+                false
+            );
+            let results = ["first", "second", "third", "fourth"].map(|id| json!({
+                "call": {"name": "tool.result.read", "arguments": {"id": id,
+                    "limit": 20000 + round, "gap": format!("recover {round}")}},
+                "result": {"status": "completed", "resultRef": {"id": format!("new-{round}-{id}"),
+                    "sha256": format!("receipt-{round}")}, "content": {"sourceTool": "filesystem.read",
+                    "resultRef": {"id": id, "sha256": "original-version"},
+                    "offset": 0, "nextOffset": 84, "text": "same completed page"}}, "observation": true
+            }));
+            let result = guard
+                .apply("observations.success", &json!({"results": results}))
+                .unwrap();
+            assert_eq!(result["repeated"], round > 0);
+            assert_eq!(result["warning"], round == 2);
+            assert_eq!(result["finalize"], round == 3);
+        }
+        let next = json!({"results": [{"call": {"name": "tool.result.read"},
+            "result": {"content": {"sourceTool": "filesystem.read", "resultRef": {
+                "id": "first", "sha256": "original-version"}, "offset": 84,
+                "nextOffset": 168, "text": "new page"}}, "observation": true}]});
+        assert_eq!(
+            guard.apply("observations.success", &next).unwrap()["repeated"],
+            false
+        );
+    }
+
+    #[test]
+    fn structured_file_receipts_ignore_outer_archive_rotation() {
+        let mut guard = ObservationGuard::default();
+        for round in 0..4 {
+            let result = guard.apply("observations.success", &json!({"results": [{
+                "call": {"name": "filesystem.read", "arguments": {"path": "fixture",
+                    "reason": format!("explanation {round}")}}, "observation": true,
+                "result": {"content": {"path": "fixture", "sha256": "same-version",
+                    "offset": 0, "nextOffset": 84, "content": "same source"},
+                    "resultRef": {"id": format!("new-{round}"), "sha256": format!("new-hash-{round}")}}
+            }]})).unwrap();
+            assert_eq!(result["warning"], round == 2);
         }
     }
 
