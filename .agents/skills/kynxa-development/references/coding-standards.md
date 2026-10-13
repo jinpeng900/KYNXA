@@ -2,6 +2,8 @@
 
 本文件是开发约束，不要求按目录模板重建项目。以当前调用链为准，相关改动逐步改善职责。
 
+验证范围和交付节奏统一按[最低必要验证与推进节奏](validation.md#最低必要验证与推进节奏)执行；以主流程可用为先，不为形式规范、假设性边界或局部修改扩成整仓整理与完整验收。
+
 ## 模块职责与依赖
 
 当前正式链路：WinUI/C# 桌面 → Windows 原生 `kynxa-gateway.exe` → 已配置模型接口、Rust 推理/工具/存储服务及 C# ToolHost。入口在 `apps/agent-core/src/bin/kynxa-gateway.rs`，HTTP/SSE 在 `src/gateway.rs`；任务、恢复、资源准入、真实模型 HTTP/ORT 推理与正式日志/SQLite/资料事务均由 Rust 执行。正式写入仍经单网关的串行事务，桌面不新增写入者。读取 [Rust 接线](../../../../docs/architecture/native-gateway.md)，按实际函数区分业务规则与 I/O 生命周期，不再新增 Node/NAPI 接线或后端 JavaScript 回退。
