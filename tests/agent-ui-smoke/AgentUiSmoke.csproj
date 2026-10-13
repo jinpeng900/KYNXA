@@ -32,7 +32,9 @@
     <Compile Include="../../apps/desktop/Controls/StorageLocationRow.cs" Link="StorageLocationRow.cs" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
-    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="ModelGatewayService.cs" />
+    <!-- The injected fake API must not start the production gateway or load model connections.
+         注入的模拟 API 不得启动生产网关或读取模型连接，复用既有隔离启动夹具。 -->
+    <Compile Include="../screenshot-panel-ui-smoke/ModelGatewayFixture.cs" Link="ModelGatewayFixture.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />

@@ -24,6 +24,7 @@
     toolSandboxUnavailable: '沙箱暂不可用。', toolSkillUnavailable: '技能运行环境尚未满足。', toolApprovalExpired: '批准已过期。',
     toolCommandUnavailable: '此命令暂不支持。', toolConnectionUnavailable: '工具连接不可用。', toolAuthRequired: '工具需要认证。',
     toolMoreWebLinks: '另{0}个链接',
+    taskPartial: '部分完成', taskVerificationFailed: '核验失败', taskExecutionUnknown: '执行结果未知',
     toolInspectWindows: '查看窗口', toolFindApps: '查找软件', toolScreenshot: '截图', toolReadWindow: '读取窗口', toolOpenApp: '打开软件',
     toolActivateWindow: '切换窗口', toolClick: '点击', toolMovePointer: '移动鼠标', toolScroll: '滚动', toolDrag: '拖动',
     toolTypeText: '输入文字', toolPressKey: '按下按键', toolCharacterCount: '{0}字符', toolScrollDelta: '滚动量 {0}',
@@ -41,6 +42,17 @@
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
+  let viewportFrame = 0, viewportDirty = false;
+  const mountedEntries = new Set();
+  const visibleEntries = new Set();
+  const viewportObserver = new IntersectionObserver(changes => {
+    for (const change of changes) {
+      const entry = entries.get(change.target.dataset.messageId);
+      if (!entry || entry.article !== change.target) continue;
+      if (change.isIntersecting) visibleEntries.add(entry); else visibleEntries.delete(entry);
+    }
+    scheduleViewport();
+  }, { rootMargin: '1200px 0px' });
   const conversations = new Map();
   let cachedCharacters = 0, cachedNodes = 0;
   const maxCachedCharacters = 2 * 1024 * 1024, maxCachedNodes = 40000;
@@ -50,6 +62,8 @@
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   let anchoringScroll = false, anchorFrame = 0;
   let bottomNavigationPending = false, navigationGeneration = 0;
+  let historyIntent = false, historyRequestTimer = 0;
+  let historyHasOlder = false, historyHasNewer = false;
   let nextCopyRequest = 0, copyFeedbackTimer = 0, copyFeedbackEntry = null;
   const pendingCopies = new Map();
   const messageTimeFormatters = new Map();
@@ -79,7 +93,8 @@
   }
   function updateElapsedState(entry, message) {
     const presentation = presentationFor(message);
-    if (presentation.mode === 'final') {
+    if (presentation.mode === 'final' || message.status === 'completed' && !message.streaming
+        && Number.isSafeInteger(message.durationMs) && message.durationMs > 0) {
       entry.elapsedMode = 'final'; entry.finalDurationMs = message.durationMs;
       liveElapsedEntries.delete(entry);
     } else if (message.role === 'assistant' && message.streaming && Number.isSafeInteger(message.generationElapsedMs)
@@ -94,6 +109,8 @@
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
+    const taskStatus = {partial:uiStrings.taskPartial,'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
+    if (taskStatus) return taskStatus + (message.error ? ' · ' + message.error : '');
     if (presentation.mode === 'incomplete') return uiStrings.interrupted;
     if (message.status === 'interrupted')
       return uiStrings.stopped + (typeof message.error === 'string' && message.error ? ' · ' + message.error : '');
@@ -146,6 +163,7 @@
     } else if (entry.time.hasAttribute('datetime')) entry.time.removeAttribute('datetime');
   }
   function localizeEntry(entry) {
+    if (!entry.mounted) return;
     localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
     if (entry.message) {
@@ -188,7 +206,7 @@
     const request = pendingCopies.get(command.requestId);
     pendingCopies.delete(command.requestId);
     if (!request || command.conversationId !== conversationId || request.conversationId !== conversationId
-      || request.entry.copyRequestId !== command.requestId || !request.entry.article.isConnected) return;
+      || request.entry.copyRequestId !== command.requestId || !request.entry.mounted || !request.entry.article.isConnected) return;
     // Show success only after the native host has written the clipboard, and ignore old operations.
     // 只有原生宿主写入剪贴板后才显示成功，忽略已经过期的操作回执。
     clearCopyFeedback();
@@ -249,7 +267,7 @@
     });
   }
   const atBottom = () => document.documentElement.scrollHeight - innerHeight - scrollY <= 36;
-  const updateJumpButton = () => { jumpButton.hidden = entries.size === 0 || atBottom(); };
+  const updateJumpButton = () => { jumpButton.hidden = entries.size === 0 || atBottom() && !historyHasNewer; };
   const activeSelection = () => {
     const selection = getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
@@ -263,12 +281,19 @@
   function followBottom() {
     if (localizingUi || !following || activeSelection() || pointerSelecting) return;
     const expectedConversation = conversationId, expectedGeneration = navigationGeneration;
+    bottomNavigationPending = true;
     cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
       if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi) return;
       if (following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
-      bottomNavigationPending = false;
-      updateJumpButton();
+      // Offscreen layout may settle on the next frame; user upward input still revokes this generation immediately.
+      // 屏幕外布局可能在下一帧稳定；用户真实上滚仍立即撤销本代跟随，不被布局回调覆盖。
+      scrollFrame = requestAnimationFrame(() => {
+        if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi) return;
+        if (following && !activeSelection() && !pointerSelecting && !atBottom()) { followBottom(); return; }
+        bottomNavigationPending = false;
+        updateJumpButton();
+      });
     });
   }
   function beginBottomNavigation() {
@@ -282,6 +307,10 @@
     navigationGeneration++;
   }
   function jumpToLatest() {
+    if (historyHasNewer && !activeSelection()) {
+      send({ type: 'history', direction: 'latest', conversationId });
+      return;
+    }
     // Explicit navigation preserves the selection; selected text continues to freeze transcript updates.
     // 显式跳转保留选区；已选文字仍继续冻结聊天更新。
     following = !activeSelection();
@@ -345,24 +374,41 @@
         if (attribute.name.toLowerCase().startsWith('on')) node.removeAttribute(attribute.name);
     return [...template.content.childNodes].filter(node => node.nodeType !== Node.TEXT_NODE || node.textContent.trim());
   }
-  function patchBlocks(container, html) {
+  function patchBlocks(container, html, stableLength = 0, stableBlocks = 0) {
     if (container._sourceHtml === html) return;
-    const nodes = parseBlocks(html);
-    const keys = nodes.map(node => node.nodeType === Node.ELEMENT_NODE ? node.outerHTML : node.textContent);
     const previous = container._blockKeys || [];
-    let keep = 0;
+    // Stable prefix HTML is already real DOM; parse only the replacement tail during streaming.
+    // 稳定前缀已有真实 DOM；流式阶段只解析替换尾部，不重复创建长回复的全部临时节点。
+    const prefix = container._stableSource || '';
+    const retained = prefix && html.startsWith(prefix) ? Math.min(container._stableKeyCount || 0, previous.length) : 0;
+    const nodes = parseBlocks(retained ? html.slice(prefix.length) : html);
+    const keys = previous.slice(0, retained).concat(nodes.map(node => node.nodeType === Node.ELEMENT_NODE ? node.outerHTML : node.textContent));
+    let keep = retained;
     while (keep < keys.length && keep < previous.length && keys[keep] === previous[keep]) keep++;
     while (container.childNodes.length > keep) container.lastChild.remove();
-    for (let i = keep; i < nodes.length; i++) {
-      const fragment = document.createDocumentFragment(); fragment.append(nodes[i]);
+    for (let i = keep; i < keys.length; i++) {
+      const fragment = document.createDocumentFragment(); fragment.append(nodes[i - retained]);
       renderMath(fragment); container.append(fragment);
     }
     container._sourceHtml = html;
     container._blockKeys = keys;
+    container._stableSource = Number.isSafeInteger(stableLength) && stableLength > 0 && stableLength <= html.length ? html.slice(0, stableLength) : '';
+    container._stableKeyCount = container._stableSource && Number.isSafeInteger(stableBlocks) ? Math.min(stableBlocks, keys.length) : 0;
   }
   function createMessage(message) {
     const article = document.createElement('article');
-    article.className = 'message'; article.dataset.messageId = String(message.id);
+    article.className = 'message ' + (message.role === 'user' ? 'user' : 'assistant');
+    article.dataset.messageId = String(message.id);
+    const height = Math.max(80, Math.min(2000000, Math.ceil((message.content?.length || 0) / 75) * 27 + 56));
+    article.style.height = height + 'px'; article.dataset.virtualized = 'true';
+    const entry = { article, message, height, mounted: false };
+    viewportObserver.observe(article);
+    return entry;
+  }
+  function mountMessage(entry) {
+    if (entry.mounted) return;
+    const article = entry.article, message = entry.message;
+    article.style.height = ''; delete article.dataset.virtualized;
     const content = document.createElement('div'); content.className = 'message-content';
     const elapsed = document.createElement('div'); elapsed.className = 'message-elapsed'; elapsed.dataset.copyIgnore = ''; elapsed.hidden = true;
     const body = document.createElement('div'); body.className = 'message-body';
@@ -377,18 +423,55 @@
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = uiStrings.retry;
     const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
     const timeline = document.createElement('div'); timeline.className = 'assistant-timeline'; timeline.hidden = true;
-    const entry = { article, content, elapsed, body, status, actions, copy, copyStatus, time, retry,
-      tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null };
+    Object.assign(entry, { content, elapsed, body, status, actions, copy, copyStatus, time, retry,
+      tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null, mounted: true });
     copy.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
     copy.addEventListener('click', () => requestCopy(entry));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
     actions.append(copy, time, retry, copyStatus); content.append(elapsed, timeline, body, status); article.append(content, actions);
-    return entry;
+    mountedEntries.add(entry);
+    updateMessage(entry, message);
+    window.kynxaContentBlocks?.hydrate(article); window.kynxaDiagrams?.hydrate(article);
+  }
+  function unmountMessage(entry) {
+    if (!entry.mounted) return;
+    entry.height = Math.max(1, entry.article.getBoundingClientRect().height);
+    if (copyFeedbackEntry === entry) clearCopyFeedback();
+    for (const [id, request] of pendingCopies) if (request.entry === entry) pendingCopies.delete(id);
+    liveElapsedEntries.delete(entry); mountedEntries.delete(entry);
+    entry.article.replaceChildren(); entry.article.style.height = entry.height + 'px';
+    entry.article.dataset.virtualized = 'true';
+    for (const key of ['content','elapsed','body','status','actions','copy','copyStatus','time','retry','tools','toolRows','timeline','segmentRows','avatar','presentation']) delete entry[key];
+    entry.mounted = false;
+  }
+  function scheduleViewport() {
+    viewportDirty = true;
+    if (viewportFrame) return;
+    viewportFrame = requestAnimationFrame(() => { viewportFrame = 0; reconcileViewport(); });
+  }
+  function reconcileViewport() {
+    if (!viewportDirty || applying || localizingUi) return;
+    viewportDirty = false;
+    const anchors = following ? [] : scrollAnchors();
+    const required = new Set(visibleEntries);
+    if (entries.size <= 48) for (const entry of entries.values()) required.add(entry);
+    for (const entry of entries.values()) if (entry.message?.streaming) required.add(entry);
+    if (following) {
+      const last = [...entries.values()].at(-1); if (last) required.add(last);
+    }
+    for (const entry of required) if (entries.get(entry.article.dataset.messageId) === entry) mountMessage(entry);
+    // Selected nodes are never recycled; dragging may bring additional messages into the window.
+    // 已选节点不回收；拖动选区滚动时允许把新消息加入窗口，清除选区后恢复回收。
+    if (!activeSelection() && !pointerSelecting)
+      for (const entry of [...mountedEntries]) if (!required.has(entry)) unmountMessage(entry);
+    window.kynxaContentBlocks?.disposeDetached(); window.kynxaDiagrams?.disposeDetached();
+    restoreScrollAnchor(anchors); synchronizeElapsedTimer(); followBottom();
   }
   function updateMessage(entry, message) {
+    if (!entry.mounted) { entry.message = message; return; }
     const old = entry.message;
     updateElapsedState(entry, message);
-    if (old && ['role', 'content', 'html', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode', 'createdAtMs', 'endRecordedAtMs']
+    if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length) return;
     entry.message = message;
@@ -414,14 +497,14 @@
         entry.body.textContent = text;
         entry.body.dataset.copyPlain = '';
         entry.body._plainContent = text;
-        delete entry.body._sourceHtml; delete entry.body._blockKeys;
+        delete entry.body._sourceHtml; delete entry.body._blockKeys; delete entry.body._stableSource; delete entry.body._stableKeyCount;
       }
     } else if (!segmented) {
       if (entry.body.hasAttribute('data-copy-plain')) {
         entry.body.removeAttribute('data-copy-plain'); entry.body.replaceChildren();
-        delete entry.body._sourceHtml; delete entry.body._blockKeys;
+        delete entry.body._sourceHtml; delete entry.body._blockKeys; delete entry.body._stableSource; delete entry.body._stableKeyCount;
       }
-      patchBlocks(entry.body, message.html || '');
+      patchBlocks(entry.body, message.html || '', message.htmlStableLength, message.htmlStableBlocks);
     }
     setStatusText(entry, statusText(message, presentation));
     const existingDot = entry.status.querySelector('.streaming-dot');
@@ -458,7 +541,7 @@
       if (row.root.dataset.phase !== segment.phase) row.root.dataset.phase = segment.phase;
       if (row.root.dataset.status !== segment.status) row.root.dataset.status = segment.status;
       if (row.root.dataset.round !== String(segment.round)) row.root.dataset.round = String(segment.round);
-      patchBlocks(row.body, segment.html || '');
+      patchBlocks(row.body, segment.html || '', segment.htmlStableLength, segment.htmlStableBlocks);
       const activities = presentation.tools.filter(tool => tool.round === segment.round)
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       updateTools(row, activities);
@@ -581,8 +664,30 @@
     conversations.delete(id); cachedCharacters -= saved.characters; cachedNodes -= saved.nodes;
     return saved;
   }
+  function cacheCharactersWithin(value, remaining) {
+    const pendingValues = [value];
+    let characters = 0, visited = 0;
+    // Cache admission estimates plain transport data without serializing a second large JSON copy.
+    // Complex payloads that exceed traversal or size bounds remain rereadable rather than blocking navigation.
+    // 缓存准入直接估算传输对象，不再次编码大型 JSON；超出遍历或容量边界时不缓存，保持可回读。
+    while (pendingValues.length) {
+      if (++visited > 8192 || characters > remaining) return Infinity;
+      const item = pendingValues.pop();
+      if (typeof item === 'string') characters += item.length;
+      else if (item && typeof item === 'object') {
+        for (const key in item) {
+          characters += key.length + 4;
+          pendingValues.push(item[key]);
+          if (pendingValues.length > 8192 || characters > remaining) return Infinity;
+        }
+      } else characters += 8;
+    }
+    return characters;
+  }
   function openConversation(id) {
     if (conversationId === id) return;
+    historyIntent = false; clearTimeout(historyRequestTimer); historyRequestTimer = 0;
+    historyHasOlder = historyHasNewer = false;
     window.kynxaDiagrams?.closeViewer();
     window.kynxaContentBlocks?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
@@ -591,15 +696,14 @@
     // and expanded reasoning instead of rebuilding every element.
     // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
     const restored = removeCached(id);
-    if (conversationId && entries.size) {
+    if (conversationId && entries.size && entries.size <= 400) {
       let characters = 0;
       for (const entry of entries.values()) {
-        for (const key of ['content', 'html', 'reasoningHtml']) characters += entry.message?.[key]?.length || 0;
-        characters += JSON.stringify(entry.message?.toolActivities || []).length;
-        characters += JSON.stringify(entry.message?.assistantSegments || []).length;
+        characters += cacheCharactersWithin(entry.message, maxCachedCharacters - characters);
+        if (characters > maxCachedCharacters) break;
       }
-      const nodes = messages.querySelectorAll('*').length;
-      if (entries.size <= 400 && characters <= maxCachedCharacters && nodes <= maxCachedNodes) {
+      const nodes = characters <= maxCachedCharacters ? messages.querySelectorAll('*').length : Infinity;
+      if (characters <= maxCachedCharacters && nodes <= maxCachedNodes) {
         const fragment = document.createDocumentFragment();
         while (messages.firstChild) fragment.append(messages.firstChild);
         removeCached(conversationId);
@@ -609,6 +713,7 @@
           removeCached(conversations.keys().next().value);
       }
     }
+    viewportObserver.disconnect(); visibleEntries.clear(); mountedEntries.clear();
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
@@ -618,16 +723,21 @@
     window.kynxaDiagrams?.hydrate(messages);
     updateJumpButton();
     liveElapsedEntries.clear();
-    for (const entry of entries.values()) if (entry.elapsedMode === 'live') {
+    for (const entry of entries.values()) {
+      viewportObserver.observe(entry.article);
+      if (entry.mounted) mountedEntries.add(entry);
+      if (entry.elapsedMode !== 'live') continue;
       liveElapsedEntries.add(entry); refreshElapsedText(entry);
     }
     synchronizeElapsedTimer();
+    scheduleViewport();
     followBottom();
   }
   function applyTranscript(snapshot) {
     if (!snapshot || !Array.isArray(snapshot.messages)) return;
     const changedConversation = conversationId !== snapshot.conversationId;
     if (changedConversation) openConversation(snapshot.conversationId);
+    historyHasOlder = snapshot.historyHasOlder === true; historyHasNewer = snapshot.historyHasNewer === true;
     if (changedConversation || snapshot.openAtBottom) {
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
@@ -638,20 +748,24 @@
       for (const entry of liveElapsedEntries) if (!timingIds.has(String(entry.message?.id))) liveElapsedEntries.delete(entry);
       for (const message of snapshot.messages) {
         const entry = entries.get(String(message.id));
-        if (entry) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
+        if (entry?.mounted) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
       }
       synchronizeElapsedTimer(); return;
     }
     const anchors = following ? [] : scrollAnchors();
     applying = true;
+    const changedArticles = [];
     const ids = new Set(snapshot.messages.map(message => String(message.id)));
-    for (const [id, entry] of entries) if (!ids.has(id)) { liveElapsedEntries.delete(entry); entry.article.remove(); entries.delete(id); }
+    for (const [id, entry] of entries) if (!ids.has(id)) {
+      liveElapsedEntries.delete(entry); mountedEntries.delete(entry); visibleEntries.delete(entry);
+      viewportObserver.unobserve(entry.article); entry.article.remove(); entries.delete(id);
+    }
     let previous = null;
     for (const message of snapshot.messages) {
       const id = String(message.id);
       let entry = entries.get(id);
       if (!entry) { entry = createMessage(message); entries.set(id, entry); }
-      updateMessage(entry, message);
+      if (entry.message !== message) { updateMessage(entry, message); if (entry.mounted) changedArticles.push(entry.article); }
       const expected = previous ? previous.nextSibling : messages.firstChild;
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
       previous = entry.article;
@@ -659,21 +773,49 @@
     // Account for block headers before restoring the reader's visible anchor.
     // 内容框工具栏先参与布局，再恢复阅读位置，避免追加内容时把正文挤离视口。
     window.kynxaContentBlocks?.disposeDetached();
-    window.kynxaContentBlocks?.hydrate(messages);
+    for (const article of changedArticles) window.kynxaContentBlocks?.hydrate(article);
     restoreScrollAnchor(anchors);
     applying = false;
+    scheduleViewport();
     window.kynxaDiagrams?.disposeDetached();
-    window.kynxaDiagrams?.hydrate(messages);
+    for (const article of changedArticles) window.kynxaDiagrams?.hydrate(article);
     updateJumpButton();
     synchronizeElapsedTimer();
     followBottom();
     document.fonts.ready.then(followBottom);
   }
+  function applyTranscriptPatch(snapshot) {
+    if (!snapshot || snapshot.conversationId !== conversationId || !Array.isArray(snapshot.messages)) return;
+    const replacements = new Map(snapshot.messages.map(message => [String(message.id), message]));
+    const latest = pending?.conversationId === conversationId ? pending.messages
+      : [...entries.values()].map(entry => entry.message);
+    // Merge into a deferred selected snapshot, so multiple stream patches cannot erase earlier changes.
+    // 多次流式增量合入被冻结的选区快照，后续刷新不能抹掉前一次更新。
+    const merged = new Map(latest.map(message => [String(message.id), message]));
+    for (const [id, message] of replacements) merged.set(id, message);
+    const ordered = Array.isArray(snapshot.messageOrder) ? snapshot.messageOrder.map(id => merged.get(String(id))).filter(Boolean)
+      : [...merged.values()];
+    applyTranscript({ ...snapshot, messages: ordered });
+  }
+
+  function requestEarlierHistory() {
+    const newer = historyIntent === 'newer';
+    if (!historyIntent || historyRequestTimer || (newer ? !atBottom() || !historyHasNewer : scrollY > 80)
+      || bottomNavigationPending || activeSelection() || pointerSelecting) return;
+    historyRequestTimer = setTimeout(() => {
+      historyRequestTimer = 0;
+      if (!historyIntent || (newer ? !atBottom() || !historyHasNewer : scrollY > 80)
+        || bottomNavigationPending || activeSelection() || pointerSelecting) return;
+      historyIntent = false;
+      if (newer) stopFollowing();
+      send({ type: 'history', direction: newer ? 'newer' : 'older', conversationId });
+    }, 50);
+  }
   function scrollAnchors() {
     const anchors = [], fallbacks = [];
     // Prefer a surviving paragraph in view; keep message-level fallbacks when transient steps disappear.
     // 优先使用视口内仍存在的段落作滚动锚点；中间阶段消失时仍保留消息级回退。
-    for (const entry of entries.values()) {
+    for (const entry of mountedEntries) {
       const bounds = entry.article.getBoundingClientRect();
       if (bounds.bottom <= 0 || bounds.top >= innerHeight) continue;
       for (const node of entry.article.querySelectorAll('.message-body > *, .tool-activity')) {
@@ -745,6 +887,15 @@
     if (!selection || !selection.rangeCount || selection.isCollapsed || !activeSelection()) return null;
     const range = selection.getRangeAt(0);
     const fragment = range.cloneContents();
+    // Selected ranges may span unloaded messages. Reconstruct their literal bodies for copying,
+    // instead of silently returning only the currently mounted viewport.
+    // 选区可能跨越已卸载消息；复制时补回这些消息的原始正文，不能静默只复制可见窗口。
+    for (const node of fragment.querySelectorAll('article[data-virtualized]')) {
+      const entry = entries.get(node.dataset.messageId);
+      if (!entry) continue;
+      const body = document.createElement('pre'); body.dataset.copyPlain = '';
+      body.textContent = copiedMessage(entry.message); node.replaceChildren(body);
+    }
     // Project selected diagrams back to literal source, omitting duplicate SVG labels and controls.
     // 图表选区还原为原始源码，避免复制重复 SVG 标签和操作控件。
     for (const block of messages.querySelectorAll('.mermaid-block[data-diagram-id]')) {
@@ -834,23 +985,37 @@
     if (!applying && !localizingUi && !anchoringScroll && !bottomNavigationPending)
       following = !activeSelection() && !pointerSelecting && atBottom();
     updateJumpButton();
+    scheduleViewport();
+    requestEarlierHistory();
   }, { passive: true });
-  window.addEventListener('wheel', event => { if (event.deltaY < 0) stopFollowing(); }, { passive: true });
-  window.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) stopFollowing(); });
+  window.addEventListener('wheel', event => {
+    if (event.deltaY < 0) { stopFollowing(); historyIntent = true; requestEarlierHistory(); }
+    else if (event.deltaY > 0) { historyIntent = 'newer'; requestEarlierHistory(); }
+  }, { passive: true });
+  window.addEventListener('keydown', event => {
+    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) { stopFollowing(); historyIntent = true; requestEarlierHistory(); }
+    else if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) { historyIntent = 'newer'; requestEarlierHistory(); }
+  });
   messages.addEventListener('click', event => {
     const link = event.target.closest('a[href]');
     if (!link) return;
     event.preventDefault();
     try { const url = new URL(link.getAttribute('href')); if (['http:', 'https:', 'mailto:'].includes(url.protocol)) send({ type: 'link', conversationId, url: url.href }); } catch { }
   });
-  new ResizeObserver(() => { updateJumpButton(); followBottom(); }).observe(messages);
-  window.addEventListener('resize', () => { updateJumpButton(); followBottom(); });
+  new ResizeObserver(() => { updateJumpButton(); scheduleViewport(); followBottom(); }).observe(messages);
+  window.addEventListener('resize', () => { updateJumpButton(); scheduleViewport(); followBottom(); });
   window.chrome?.webview?.addEventListener('message', event => {
     const command = event.data;
     if (command?.type === 'initializeUi') initializeUi(command);
     else if (command?.type === 'setAppearance') setAppearance(command);
     else if (command?.type === 'render') applyTranscript(command);
+    else if (command?.type === 'renderPatch') applyTranscriptPatch(command);
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
+    else if (command?.type === 'historyAvailability' && command.conversationId === conversationId) {
+      historyHasOlder = command.hasOlder === true; historyHasNewer = command.hasNewer === true;
+      updateJumpButton();
+    }
+    else if (command?.type === 'forgetConversation' && command.conversationId !== conversationId) removeCached(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
     else if (command?.type === 'copyResult') {
       acknowledgeCopy(command);
@@ -866,8 +1031,9 @@
     }
   });
   window.applyTranscript = applyTranscript;
+  window.applyTranscriptPatch = applyTranscriptPatch;
   window.transcriptSelectionText = selectionText;
-  window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size,
+  window.transcriptState = () => ({ conversationId, pending: !!pending, following, selection: activeSelection(), messageCount: entries.size, mountedMessageCount: mountedEntries.size,
     cachedConversations: conversations.size, cachedCharacters, cachedNodes,
     liveElapsedCount: liveElapsedEntries.size, elapsedTimerActive: elapsedTimer !== null });
   const diagramAnchors = new WeakMap();

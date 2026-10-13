@@ -59,9 +59,28 @@ public sealed partial class ShellPage
 
     private void RebuildStandaloneRows()
     {
-        ViewModel.RecentConversations.Clear();
-        foreach (var chat in _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned))
-            ViewModel.RecentConversations.Add(new RecentConversation(chat.Title, chat.IsSample ? UiText.Get("示例对话") : UiText.Get("刚刚")) { Id = chat.Id });
+        // Preserve stable row identities and let ListView virtualize containers instead of rebuilding every chat.
+        // 保留稳定行身份，让 ListView 虚拟化容器，避免每次刷新重建全部聊天行。
+        var rows = ViewModel.RecentConversations;
+        var desired = _standaloneChats.Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned).ToList();
+        var activeIds = desired.Select(chat => chat.Id).ToHashSet();
+        for (int index = rows.Count - 1; index >= 0; index--)
+            if (!activeIds.Contains(rows[index].Id)) rows.RemoveAt(index);
+        var positions = rows.ToDictionary(row => row.Id);
+        for (int index = 0; index < desired.Count; index++)
+        {
+            var chat = desired[index];
+            string detail = chat.IsSample ? UiText.Get("示例对话") : UiText.Get("刚刚");
+            if (!positions.TryGetValue(chat.Id, out var row))
+            {
+                rows.Insert(index, new RecentConversation(chat.Title, detail) { Id = chat.Id });
+                continue;
+            }
+            int currentIndex = rows[index].Id == chat.Id ? index : rows.IndexOf(row);
+            if (currentIndex != index) rows.Move(currentIndex, index);
+            if (row.Title != chat.Title || row.RelativeTime != detail)
+                rows[index] = new RecentConversation(chat.Title, detail) { Id = chat.Id };
+        }
         ChatHistoryList.SelectedItem = ViewModel.RecentConversations.FirstOrDefault(chat => chat.Id == _activeStandaloneChat?.Id);
     }
 
@@ -151,6 +170,7 @@ public sealed partial class ShellPage
         ApplyLayout();
         UpdateSendButtonState();
         ConversationMessages.ShowConversation(chat?.Id, ActiveMessages.ToArray(), openAtBottom);
+        if (chat is not null) _ = EnsureRecentHistoryAsync(chat);
     }
 
     private async void SendButton_Click(object sender, RoutedEventArgs e)
@@ -165,7 +185,7 @@ public sealed partial class ShellPage
 
     private async Task SendPromptAsync()
     {
-        if (_sendingPrompt || IsReplyInProgress(ActiveChatId)) return;
+        if (_sendingPrompt || _savingOnClose || _chatClosing || IsReplyInProgress(ActiveChatId)) return;
         string originalDraft = PromptTextBox.Text;
         string text = originalDraft.Trim();
         bool chatMode = ViewModel.IsChatMode;
@@ -177,7 +197,7 @@ public sealed partial class ShellPage
         PendingChatReply? preparedReply = null;
         try
         {
-            await RunProjectActionAsync(async () =>
+            await RunProjectActionAsync(() =>
             {
                 ProjectChatState chat;
                 if (chatMode)
@@ -194,7 +214,7 @@ public sealed partial class ShellPage
                         if (selectedProject is null && !_workWithoutFolder)
                         {
                             ShowWorkspacePicker();
-                            return;
+                            return Task.CompletedTask;
                         }
                         var project = selectedProject ?? GetFolderlessWorkspace();
                         _activeProjectChat = new ProjectChatState();
@@ -209,11 +229,10 @@ public sealed partial class ShellPage
                 }
                 chat.Messages.Add(new ChatMessageState { Role = "user", Content = text });
                 chat.Draft = string.Empty;
-                // First submitted message is the commit boundary; draft-only chats are filtered by the store.
-                // 首次提交用户消息才正式保存聊天；存储层过滤只有草稿的聊天。
+                // Present the accepted input before storage, gateway startup or model admission can wait.
+                // 点击发送即展示用户消息与回复占位；保存、网关启动和模型准入的等待不阻塞展示。
                 if (chatMode)
                 {
-                    await _projectStore.SaveChatsAsync(_standaloneChats);
                     if (_activeStandaloneChat == chat)
                     {
                         _chatConversationTitle = chat.Title;
@@ -228,7 +247,6 @@ public sealed partial class ShellPage
                     _workChatToReveal = chat.Id;
                     KYNXA_Desktop.Services.ProjectOrdering.Activate(_projects, project);
                     KYNXA_Desktop.Services.WorkSidebarState.ActivateChat(project, chat);
-                    await _projectStore.SaveAsync(_projects);
                     RecordWorkChatActivity(chat);
                     if (_activeProjectChat == chat)
                     {
@@ -242,6 +260,7 @@ public sealed partial class ShellPage
                 preparedReply = BeginPendingReply(chat.Id, text, selectedProvider, selectedModel);
                 UpdateConversationTitle();
                 UpdateConversationPresentation(openAtBottom: false);
+                return Task.CompletedTask;
             });
         }
         finally

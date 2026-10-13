@@ -1,0 +1,17 @@
+{
+  "name": "kynxa-bundled-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned external MCP services for the Rust gateway; this is not the application backend.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24.14.0 <25"
+  },
+  "dependencies": {
+    "@brave/brave-search-mcp-server": "2.1.4",
+    "@bytebase/dbhub": "1.4.0",
+    "@playwright/mcp": "0.0.83",
+    "@upstash/context7-mcp": "4.1.1",
+    "chrome-devtools-mcp": "1.10.1"
+  }
+}

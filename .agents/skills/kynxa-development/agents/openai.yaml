@@ -1,6 +1,6 @@
 interface:
   display_name: "KYNXA 项目开发"
-  short_description: "编写和修改 KYNXA 代码，遵守模块职责、交互约定与验证要求"
-  default_prompt: "使用 $kynxa-development 完成当前 KYNXA 开发任务，按职责组织改动并验证相关行为。"
+  short_description: "维护 KYNXA 的 Rust 原生核心、C# 桌面与 WebView，遵守模块及数据边界"
+  default_prompt: "使用 $kynxa-development 按 KYNXA 当前 Windows 原生架构完成任务，核对语言职责、接口与数据所有权，并验证受影响行为。"
 policy:
   allow_implicit_invocation: true

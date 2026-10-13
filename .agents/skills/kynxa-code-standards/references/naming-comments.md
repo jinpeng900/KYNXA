@@ -1,6 +1,6 @@
 # 命名与双语注释
 
-适用于 KYNXA 自有 C#、JavaScript/ESM、PowerShell 及其测试。规则参考公开团队指南，再按当前语言与契约调整；不是对某家风格全文的一比一实施，也不要求切换技术栈。
+适用于 KYNXA 自有 Rust 网关与资源服务、C#/WinUI 与 ToolHost、WebView JavaScript、PowerShell 构建及对应测试。当前入口和职责见[原生网关架构](../../../../docs/architecture/native-gateway.md)；规则参考公开团队指南，再按当前语言与契约调整，不要求切换技术栈。
 
 ## 语义和兼容性
 
@@ -16,6 +16,18 @@ return { budget: inputBudgetTokens };
 ```
 
 导出方法、DTO/record 属性、JSON/schema 键、工具 ID、SSE 事件、错误码、命令参数、环境变量和 Win32 ABI 保持现有合同。确实需要改变时走独立的两端兼容修改，不当作纯变量重命名。数据日志、聊天、记忆和来源 ID 不做大小写迁移。
+
+偏移名称要区分 `offset_bytes`、UTF-16 单元、行号与 token；公开字段已经叫 `offset` 时保留字段并在说明或局部别名中注明实际单位。原始 JSON 转义、内容哈希输入和日志字节不能为了美观重新编码；常量只改内部名称，不顺手调整预算、TTL 或重试额度。
+
+## Rust
+
+- 类型、枚举和 trait 使用 UpperCamelCase；模块、函数、局部变量和字段使用 snake_case；常量使用 SCREAMING_SNAKE_CASE。单位写进名称，例如 `generated_tokens`、`duration_ms`。
+- JSON 与 IPC 的 camelCase 字段继续保持，通过 `serde` 映射或明确的 JSON 投影衔接，不因内部命名修改 wire 合同。
+- Rust 同时拥有确定性规则和已登记的原生 I/O 接线；按 `docs/team/module-ownership.json` 的 `allowedDomainDependencies`、`integrationModules`、`executionModules` 区分职责。模型 HTTP/流、MCP、进程和资源 IPC 留在所属 Rust 接线层，正式文件和 SQLite 留在事务所有者；不重新引入 Node/NAPI 适配或重复账本。
+- 可预期错误返回 `Result` 与稳定错误码；`expect` 只用于静态、已验证的不变量。取消后已经返回的执行事实不能丢弃；IPC 故障不能重置副作用账本再继续派发。
+- 私有 helper 可以表达实际可复用步骤；抽取时保留 `await`/`select!` 分支、锁范围、等待者登记、通知与 `Drop` 顺序。`Mutex` 内状态改成具名字段时仍保持同一锁和计数语义，不凭命名整理增加并发或改变关闭通道的含义。
+- FFI 的 `repr(C)`、`extern` ABI、原生字段顺序和函数入口名保持原样；自有封装可用语义名称。涉及 `unsafe` 时说明谁拥有缓冲区/句柄、有效期及匹配的释放函数，不能仅替换名称后更换释放方式。
+- 使用 rustfmt，4 空格、UTF-8/CRLF。新说明性注释保留中英文两层；锁定依赖与 Cargo.lock，随包提供许可证原文。
 
 ## C#
 
@@ -35,15 +47,19 @@ return { budget: inputBudgetTokens };
 
 控制流沿用 Allman 大括号、4 空格，保留已清楚的局部类型推断。异步改名不改变 await 顺序、取消传递、UI 线程回写或 Dispose 所有权。
 
+WinUI 视图和控件负责展示，API 客户端负责 HTTP/SSE，ToolHost 负责 Windows 执行；`apps/shared/` DTO 保持传输合同。整理不得把正式聊天/索引写入搬到 UI 缓存，也不更改 WebView 消息类型、会话身份、原生句柄布局或跨 UI 线程的调用方式。
+
 ## JavaScript / ESM
 
 - 函数/变量/参数 lowerCamelCase，类 PascalCase；文件沿用小写连字符和 `.mjs`/`.js`。
 - 上限、协议版本等固定模块常量用 UPPER_SNAKE_CASE；并非每个 `const` 都是这种常量。
 - 私有 helper 用动词和对象，例如 `archiveBrowserScreenshot`；布尔判断优先 `is/has/can/should`。
 - 使用 `const` 表达不重新赋值的绑定，确实重赋值才用 `let`。纯规范化不借机改变可变性、export 或回调执行时机。
-- 2 空格、现有单引号及分号风格；保持 ESM 显式扩展名和现有导出合同。无强制 80 字符裁切，长语句按实际可读性拆分。
+- 2 空格、现有单引号及分号风格；开发 `.mjs` 保持 ESM 显式扩展名，WebView `.js` 保持现有加载方式，不为统一格式把普通脚本改成模块。无强制 80 字符裁切，长语句按实际可读性拆分。
 
 对象简写和解构需要特别核对：`{ output }` 改局部名称后应显式保留 `{ output: stdoutBuffer }`。嵌入浏览器脚本中的参数与函数名也可能是调用合同，不机械替换模板字符串。
+
+WebView 的 DOM、`window` 导出、C#↔WebView 消息字段、流式合并刷新和选择/滚动状态属于既有界面合同。开发检查可以使用 Node，发布核心不因此依赖 Node；私有 Node 的第三方 MCP/Skill 包与许可证不做自有代码批量改写。
 
 ## PowerShell
 
@@ -51,6 +67,7 @@ return { budget: inputBudgetTokens };
 - 局部变量用明确的 camelCase 或 PascalCase 现有风格；`$processStartInfo` 比 `$info` 更清楚，涉及范围时用任务前缀。
 - 不复用 `$HOME`、`$PID`、`$Error` 等自动或系统变量；变量改名不改变参数绑定与环境变量名。
 - 保留 LiteralPath、确定的路径边界、隐藏后台启动和现有退出码。规范化不能引入额外 shell 或更改命令语义。
+- 入口继续使用 `tools/development/start-native-gateway.ps1` 和 `apps/desktop/Build/prepare-native-runtime.ps1` 的既有参数；Node 扩展准备位于 `prepare-mcp-runtime.ps1`。启动路径、随包路径、校验哈希与下载来源是发布合同，不能为缩短脚本绕过校验或恢复 `node server.mjs`。
 - 需兼容 Windows PowerShell 5.1 且含中文等非 ASCII 执行字符串的历史脚本，保留原 UTF-8 BOM。例如设计文档构建脚本由 `.editorconfig` 单独声明；不能为格式统一移除 BOM，导致旧宿主按 ANSI 解码。
 
 ## 注释写法
@@ -81,7 +98,7 @@ public static class ChatStreamReader { }
 
 ## 工具与验收
 
-`.editorconfig` 给出格式与 C# 命名提示。提示帮助编辑，不代替作用域判断、构建或业务验证。JavaScript 用 Node 语法检查和现有测试，不为本轮命名调整引入运行时依赖。
+`.editorconfig` 给出格式与 C# 命名提示。提示帮助编辑，不代替作用域判断、构建或业务验证；只格式化本轮相关文件。Rust 使用 `cargo fmt`/`rustfmt` 及受影响回归，C# 使用对应桌面/ToolHost/smoke 构建，WebView/开发 JavaScript 使用现有检查；开发期 Node 检查不构成产品后端依赖。文件移动或跨域调用变化运行 `node tools/development/check-architecture.mjs`，同时核对调用端与随包路径。
 
 纯注释修改应只有注释差异；命名修改应核对符号引用以及未变化的键、字面量、分支、调用顺序和参数。运行编译、对应网关/客户端/原生工具与真实展示测试；只使用临时数据、模拟凭据及自有窗口，不调用用户真实模型。
 

@@ -1,5 +1,7 @@
 # KYNXA resource service
 
+当前所有者是 Windows 原生网关，实际 IPC 接线位于 `apps/agent-core/src/resources/gateway.rs` 的 `ResourceService` / `ResourceLease`，独立服务随包为 `runtime/resource/kynxa-resource-service.exe`。下文出现的旧 JavaScript 接口名称属于迁移前接线记录；历史验收不代替本轮原生测试。当前架构见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
+
 该 Rust 子进程由网关拥有，不是系统级服务。通过私有 stdin/stdout JSONL 接收
 `health`、`snapshot`、`acquire`、`cancelAcquire`、`renew`、`release`、`registerExecutor`、`report`；单帧最多 64 KiB，有限排队，拥有者
 关闭输入流时退出。不读取其他应用的命令行、文件或私有内容。
@@ -58,8 +60,8 @@ Data worker 使用 `resource-worker-client.mjs` 委托到拥有者的同一服�
 准入并确认旧服务退役，再向新服务恢复完整未释放账本、核对登记 PID 启动身份与实际退出。
 未知所有者继续隔离；恢复失败不能把债务清零。worker 只能请求已有服务，不能擅自重启全局权威。
 
-Node API 位于 `apps/model-gateway/platform/resources/resource-client.mjs`，同一个网关使用
-`sharedResourceBudget()` 的单实例。检索协调层决定工作价值；资源服务只决定可批准的
+当前 Rust API 位于 `apps/agent-core/src/resources/gateway.rs`，由拥有者安装并通过
+`global()` 复用同一服务；`ResourceLease` 负责续租与实际回收后的释放。检索协调层决定工作价值；资源服务只决定可批准的
 CPU/内存/显存，实际模型后端、设备序号映射、批量和 token 限制仍由推理层管理。
 CUDA_VISIBLE_DEVICES 与 DirectML/DXGI 序号不一定等于 NVML physical device 0。Windows
 DirectML 映射通过 NVML UUID、系统 CUDA 驱动 UUID/LUID 与 DXGI AdapterLuid 逐项核对，
@@ -69,13 +71,12 @@ DirectML 映射通过 NVML UUID、系统 CUDA 驱动 UUID/LUID 与 DXGI AdapterL
 开发构建：
 
 ```powershell
-cargo test --manifest-path apps/resource-service/Cargo.toml
-node tools/development/prepare-resource-runtime.mjs --runtime win-x64 --required
+cargo test --manifest-path apps/resource-service/Cargo.toml --locked
+powershell.exe -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -RuntimeIdentifier win-x64 -Configuration Debug
 ```
 
-产物与第三方许可证位于 `artifacts/runtime/resources/win-x64/`，随包放在
-`runtime/resource/`。最终用户无需 Rust、Cargo 或 Python。没有 Rust 开发工具链的
-开发机可以使用明确标识的保守降级；发布流水线应使用 `--required`。
+产物与第三方许可证位于 `artifacts/runtime/native-desktop/win-x64/runtime/resource/`，随包放在
+`runtime/resource/`。最终用户无需 Rust、Cargo、Node 或 Python。原生随包准备缺少工具链、资产或原生服务时明确失败，不能用旧 Node 包装器或空账本代替正式资源权威。
 构建使用编码 Rust flags 和 `--remap-path-prefix` 去掉仓库绝对路径；源码、脚本和锁定依赖的
 指纹改变后重建缓存，白名单文件逐项 SHA-256 核对。当前发布验收范围仅 Windows x64。
 

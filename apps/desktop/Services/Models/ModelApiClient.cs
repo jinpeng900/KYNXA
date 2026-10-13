@@ -51,6 +51,16 @@ public sealed class ModelApiClient : IDisposable
         return (await ReadAsync<ModelListResponse>(response, cancellationToken)).Providers;
     }
 
+    /// <summary>Schedule startup preparation; acceptance does not certify that inference is ready.</summary>
+    /// <remarks>仅调度启动准备；接受请求不代表推理已就绪，不读取或传递模型凭据。</remarks>
+    public async Task SchedulePreparationAsync(string? providerId, string? modelId, CancellationToken cancellationToken = default)
+    {
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        using var response = await _httpClient.PostAsJsonAsync("/api/models/preparation",
+            new { providerId, modelId }, cancellationToken);
+        await ReadAsync<System.Text.Json.JsonElement>(response, cancellationToken);
+    }
+
     public async Task<ModelProvider> SaveAsync(ModelConnection connection, CancellationToken cancellationToken = default)
     {
         ValidateContextWindowTokens(connection.ContextWindowTokens);

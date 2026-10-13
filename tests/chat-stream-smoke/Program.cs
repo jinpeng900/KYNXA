@@ -36,6 +36,13 @@ var result = await Read(prefix + Frame(Event("reasoning_delta", "先核对 $1+1=
 Check(result.Count == 5 && result[1].Delta!.Contains("$1+1=2$") && result[2].Delta == "你好😀\n", "Unicode fragmentation or multiline SSE failed");
 Check(result[^1].Content == complete.Content, "Final canonical content was lost");
 Check(result[^1].DurationMs == 6789, "Gateway generation duration was lost");
+foreach (string state in new[] { "completed", "partial", "verification-failed", "execution-unknown" })
+{
+    var completion = JsonSerializer.SerializeToElement(new { completionState = state, state = "needs-validation", correctnessCertified = false });
+    var received = (await Read(prefix + Frame(complete with { TaskCompletion = completion })))[^1];
+    Check(received.Type == "completed" && ChatMessageState.ReadTaskCompletion(received.TaskCompletion) == state,
+        "SSE transport and task outcome dimensions were not retained independently.");
+}
 Check((await Read(prefix + Frame(Event("completed", content: "legacy"))))[^1].DurationMs == 0, "Old duration default changed");
 foreach (long invalidDuration in new[] { -1L, ChatDurationRules.MaximumDurationMs + 1 })
     await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(complete with { DurationMs = invalidDuration })), "Invalid stream duration accepted");
@@ -48,6 +55,21 @@ await ExpectAsync<InvalidDataException>(async () => { await Read(prefix + Frame(
 await ExpectAsync<InvalidDataException>(async () => { await Read(prefix + Frame(Event("text_delta", "其他请求") with { RequestId = Guid.NewGuid() })); }, "Wrong request accepted");
 await ExpectAsync<InvalidDataException>(async () => { await Read(prefix + Frame(Event("completed"))); }, "Missing final content accepted");
 await ExpectAsync<InvalidDataException>(async () => { await Read(prefix + "data: {broken}\n\n"); }, "Malformed JSON accepted");
+var unavailableMcp = Event("mcp_status") with
+{
+    ServerId = "offline-fixture", Ready = false, Code = "MCP_CONNECT_FAILED", Message = "本机隔离 MCP 不可用，继续现有任务。"
+};
+var mcpContinued = await Read(prefix + Frame(unavailableMcp) + Frame(Event("text_delta", "仍能继续回答。"))
+    + Frame(Event("completed", content: "仍能继续回答。")));
+Check(mcpContinued.Count == 4 && mcpContinued[1].ServerId == "offline-fixture" && mcpContinued[1].Ready == false
+    && mcpContinued[^1].Content == "仍能继续回答。", "A nonterminal MCP status interrupted the reply or lost its diagnostic.");
+foreach (var malformed in new[] { unavailableMcp with { ServerId = null }, unavailableMcp with { Ready = null },
+    unavailableMcp with { Code = null }, unavailableMcp with { Message = null }, unavailableMcp with { ServerId = new string('x', 81) },
+    unavailableMcp with { Code = new string('x', 201) }, unavailableMcp with { Message = new string('x', 65537) } })
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(malformed)), "Invalid MCP diagnostic accepted.");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(unavailableMcp with { ConversationId = Guid.NewGuid() })),
+    "MCP status bypassed conversation identity.");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("unregistered_status"))), "Unregistered event accepted.");
 using (var cancellation = new CancellationTokenSource(30))
 using (var stream = new WaitingStream())
 {
@@ -250,7 +272,7 @@ async Task Handle(HttpListenerContext context)
         if (context.Request.Url!.AbsolutePath == "/health")
         {
             context.Response.ContentType = "application/json";
-            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3,\"retrievalProtocol\":1}"));
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"runtime\":\"rust\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3,\"retrievalProtocol\":1}"));
             return;
         }
         var incoming = await JsonSerializer.DeserializeAsync<ChatRequest>(context.Request.InputStream, json)

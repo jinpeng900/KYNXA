@@ -4,6 +4,8 @@ public static partial class UiText
 {
     internal static IReadOnlyDictionary<string, string> RuntimeTranslations { get; } = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["退出保存超时，当前草稿仍保留在窗口中。请稍后重试。"] = "Exit saving timed out. Drafts remain in the window. Please try again shortly.",
+        ["数据正在迁移，请完成迁移后再退出。"] = "Data migration is in progress. Finish migration before exiting.",
         ["KYNXA · 检索与网页搜索"] = "KYNXA · Retrieval and web search",
         ["KYNXA  /  检索与网页搜索"] = "KYNXA  /  Retrieval and web search",
         ["检索与网页搜索"] = "Retrieval and web search",
