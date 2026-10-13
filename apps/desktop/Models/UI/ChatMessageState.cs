@@ -13,6 +13,17 @@ public sealed class ChatMessageState
     public string Reasoning { get; set; } = string.Empty;
     public string Status { get; set; } = "completed";
     public string Error { get; set; } = string.Empty;
+    // Display the gateway's task outcome separately from the reply transport status.
+    // 网关任务结果与回复传输状态分别展示；此投影不能反向认证正式任务结果。
+    [JsonIgnore]
+    public string TaskCompletionState { get; set; } = string.Empty;
+
+    public static string ReadTaskCompletion(JsonElement? value)
+    {
+        if (value is not { ValueKind: JsonValueKind.Object } completion
+            || !completion.TryGetProperty("completionState", out var state) || state.ValueKind != JsonValueKind.String) return "";
+        return state.GetString() is "completed" or "partial" or "verification-failed" or "execution-unknown" ? state.GetString()! : "";
+    }
     public string Provider { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public long ReasoningDurationMs { get; set; }
@@ -49,6 +60,7 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             // 生成期间进程退出后，无法恢复旧 HTTP 流。
             Status = status == "streaming" ? "interrupted" : status,
             Error = ReadString(value, "Error"),
+            TaskCompletionState = ReadStoredTaskCompletion(value),
             Provider = ReadString(value, "Provider"),
             Model = ReadString(value, "Model"),
             ToolActivities = value.TryGetProperty("ToolActivities", out var tools) || value.TryGetProperty("toolActivities", out tools)
@@ -86,6 +98,13 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
 
     private static string ReadString(JsonElement value, string name, string fallback = "") =>
         value.TryGetProperty(name, out var field) ? field.GetString() ?? fallback : fallback;
+
+    private static string ReadStoredTaskCompletion(JsonElement value)
+    {
+        if (!(value.TryGetProperty("ToolRun", out var run) || value.TryGetProperty("toolRun", out run))
+            || run.ValueKind != JsonValueKind.Object || !run.TryGetProperty("taskCompletion", out var completion)) return "";
+        return ChatMessageState.ReadTaskCompletion(completion);
+    }
 
     private static long ReadDuration(JsonElement value)
     {

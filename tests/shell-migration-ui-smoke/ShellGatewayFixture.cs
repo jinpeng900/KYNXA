@@ -135,7 +135,9 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 Interlocked.Increment(ref _writes);
                 throw new InvalidOperationException("UI-only Shell checks unexpectedly wrote to the mock gateway: " + path);
             }
-            if (path == "/health") result = new { service = "kynxa-model-gateway", status = "ok", dataLayoutVersion = 1,
+            // Match the native health contract so readiness never attempts to start a real gateway.
+            // 对齐原生健康合同，避免就绪探测将模拟服务误判为旧网关或启动真实网关。
+            if (path == "/health") result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1,
                 conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2,
                 hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3,
                 retrievalProtocol = 1 };

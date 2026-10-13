@@ -117,6 +117,14 @@ public static class ChatStreamReader
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             terminalOutputSequences[streamEvent.Terminal.ToolCallId] = streamEvent.Terminal.Sequence;
                             break;
+                        case "mcp_status":
+                            // A service discovery diagnostic does not settle the model reply or its active tools.
+                            // 服务发现诊断不结束模型回复，也不改变当前工具状态；会话身份仍经过上面的统一校验。
+                            if (string.IsNullOrWhiteSpace(streamEvent.ServerId) || streamEvent.ServerId.Length > 80 ||
+                                streamEvent.Ready is null || string.IsNullOrWhiteSpace(streamEvent.Code) || streamEvent.Code.Length > 200 ||
+                                string.IsNullOrWhiteSpace(streamEvent.Message) || streamEvent.Message.Length > 65536)
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            break;
                         case "completed":
                             if (streamEvent.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             if (activeToolCalls.Count > 0) throw new InvalidDataException(UiText.Get("工具事件无效。"));

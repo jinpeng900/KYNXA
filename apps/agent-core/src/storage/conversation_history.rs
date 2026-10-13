@@ -1,0 +1,660 @@
+use super::{ContractError, ContractResult, conversation_logs, managed_files};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json, value::RawValue};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+const MIB: usize = 1024 * 1024;
+const MAX_RECORD_BYTES: usize = 128 * MIB;
+const MAX_INDEX_BYTES: usize = 64 * MIB;
+const MAX_CACHE_BYTES: usize = 96 * MIB;
+static HISTORY_CACHE: Mutex<Vec<(String, Arc<HistoryIndex>)>> = Mutex::new(Vec::new());
+
+#[derive(Clone)]
+struct RecordRange {
+    offset: u64,
+    length: usize,
+    streaming: bool,
+}
+struct HistoryIndex {
+    snapshot: String,
+    version_token: Option<String>,
+    records: Vec<RecordRange>,
+    identities: HashMap<String, (usize, String)>,
+    bytes: usize,
+    has_streaming: bool,
+}
+#[derive(Serialize, Deserialize)]
+struct Cursor {
+    version: u8,
+    owner: String,
+    snapshot: String,
+    before: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direction: Option<String>,
+}
+#[derive(Deserialize)]
+struct Event<'a> {
+    #[serde(borrow)]
+    message: &'a RawValue,
+}
+#[derive(Deserialize)]
+struct MessageStatus<'a> {
+    #[serde(rename = "Status", borrow)]
+    status: Option<&'a str>,
+}
+
+fn invalid(message: &str) -> ContractError {
+    conversation_logs::error(message, "INVALID_CONVERSATION_HISTORY", 400)
+}
+fn changed() -> ContractError {
+    conversation_logs::error(
+        "历史已更新，请从最新页重新读取。 / History changed; restart from the latest page.",
+        "CONVERSATION_HISTORY_CHANGED",
+        409,
+    )
+}
+fn bounded(
+    arguments: &Value,
+    field: &str,
+    default: usize,
+    maximum: usize,
+) -> Result<usize, ContractError> {
+    if arguments[field].is_null() {
+        return Ok(default);
+    }
+    arguments[field]
+        .as_u64()
+        .filter(|value| (1..=maximum as u64).contains(value))
+        .map(|value| value as usize)
+        .ok_or_else(|| invalid("分页数量或字节额度无效。"))
+}
+
+fn source_hash(reader: &mut managed_files::StableReader) -> Result<String, ContractError> {
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        conversation_logs::check_cancelled()?;
+        let count = reader
+            .file
+            .read(&mut buffer)
+            .map_err(conversation_logs::io_error)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    reader.verify()?;
+    reader
+        .file
+        .seek(SeekFrom::Start(0))
+        .map_err(conversation_logs::io_error)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn build_index(
+    reader: &mut managed_files::StableReader,
+    version_token: Option<String>,
+) -> Result<HistoryIndex, ContractError> {
+    let mut positions: HashMap<String, (usize, String)> = HashMap::new();
+    let mut records = Vec::new();
+    let mut offset = 0u64;
+    let mut line = Vec::new();
+    let mut hash = Sha256::new();
+    let mut buffered = BufReader::with_capacity(64 * 1024, &mut reader.file);
+    loop {
+        conversation_logs::check_cancelled()?;
+        line.clear();
+        let count = Read::by_ref(&mut buffered)
+            .take((MAX_RECORD_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
+            .map_err(conversation_logs::io_error)?;
+        if count == 0 {
+            break;
+        }
+        if count > MAX_RECORD_BYTES {
+            return Err(conversation_logs::error(
+                "单条历史事件超过分页读取容量，原文已保留。",
+                "CONVERSATION_HISTORY_RECORD_TOO_LARGE",
+                413,
+            ));
+        }
+        hash.update(&line);
+        let raw = std::str::from_utf8(&line).map_err(|_| invalid("历史包含无效 UTF-8 编码。"))?;
+        let (id, role) = conversation_logs::event_identity(raw).map_err(|error| {
+            if !line.ends_with(b"\n") {
+                conversation_logs::error(
+                    "历史末尾尚未完整写入，请使用正式日志恢复入口。",
+                    "CONVERSATION_HISTORY_TAIL_INCOMPLETE",
+                    409,
+                )
+            } else {
+                error
+            }
+        })?;
+        let event: Event<'_> = serde_json::from_str(raw).map_err(|_| invalid("历史事件无效。"))?;
+        let status: MessageStatus<'_> =
+            serde_json::from_str(event.message.get()).map_err(|_| invalid("历史状态无效。"))?;
+        let range = RecordRange {
+            offset,
+            length: count,
+            streaming: status.status == Some("streaming"),
+        };
+        if let Some((position, saved_role)) = positions.get(&id) {
+            if *saved_role != role {
+                return Err(invalid("消息 ID 被用于不同角色。"));
+            }
+            records[*position] = range;
+        } else {
+            let bytes = (records.len() + 1).saturating_mul(160);
+            if bytes > MAX_INDEX_BYTES {
+                return Err(conversation_logs::error(
+                    "历史位置索引超过当前进程额度，原文已保留。",
+                    "CONVERSATION_HISTORY_INDEX_LIMIT",
+                    413,
+                ));
+            }
+            positions.insert(id, (records.len(), role));
+            records.push(range);
+        }
+        offset += count as u64;
+    }
+    drop(buffered);
+    reader.verify()?;
+    if version_token.is_some() && reader.version_token()? != version_token {
+        return Err(changed());
+    }
+    let has_streaming = records.iter().any(|record: &RecordRange| record.streaming);
+    let identity_bytes = positions.capacity()
+        * (std::mem::size_of::<String>() * 2 + std::mem::size_of::<usize>() + 16)
+        + positions
+            .iter()
+            .map(|(id, (_, role))| id.capacity() + role.capacity())
+            .sum::<usize>();
+    Ok(HistoryIndex {
+        snapshot: format!("{:x}", hash.finalize()),
+        version_token,
+        bytes: records.capacity() * std::mem::size_of::<RecordRange>() + identity_bytes,
+        records,
+        identities: positions,
+        has_streaming,
+    })
+}
+
+/// A read owns a checked file object and only the requested latest records, never a second history ledger.
+/// 读取持有已核验文件对象与指定的最新记录，不建立第二套聊天账本；提交前仍复核来源版本。
+pub(crate) struct HistoryRead {
+    pub messages: Vec<String>,
+    reader: Option<managed_files::StableReader>,
+    index: Option<Arc<HistoryIndex>>,
+    root: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+impl HistoryRead {
+    pub fn message_ids(&self) -> Vec<String> {
+        let Some(index) = &self.index else {
+            return Vec::new();
+        };
+        let mut identities = index.identities.iter().collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|(_, (position, _))| *position);
+        identities.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+    pub fn verify(&mut self) -> Result<(), ContractError> {
+        let Some(reader) = self.reader.as_mut() else {
+            if managed_files::inspect(&self.root, &self.path, false, true, u64::MAX)? {
+                return Err(changed());
+            }
+            return Ok(());
+        };
+        reader.verify()?;
+        let index = self.index.as_ref().unwrap();
+        if let Some(token) = &index.version_token {
+            if reader.version_token()?.as_ref() != Some(token) {
+                return Err(changed());
+            }
+        } else {
+            reader
+                .file
+                .seek(SeekFrom::Start(0))
+                .map_err(conversation_logs::io_error)?;
+            if source_hash(reader)? != index.snapshot {
+                return Err(changed());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn read_latest(
+    root: &Path,
+    location: &Value,
+    message_ids: Option<&HashSet<String>>,
+    user_only: bool,
+) -> Result<HistoryRead, ContractError> {
+    read_snapshot(root, location, message_ids, user_only, true)
+}
+
+/// Catalog updates need stable message identities, not every assistant body or model transcript.
+/// 目录更新只需稳定消息身份，复用同一日志版本索引，不解码所有助手正文或模型续接记录。
+pub(crate) fn read_metadata(root: &Path, location: &Value) -> Result<HistoryRead, ContractError> {
+    read_snapshot(root, location, None, false, false)
+}
+
+fn read_snapshot(
+    root: &Path,
+    location: &Value,
+    message_ids: Option<&HashSet<String>>,
+    user_only: bool,
+    include_messages: bool,
+) -> Result<HistoryRead, ContractError> {
+    conversation_logs::check_cancelled()?;
+    let path = conversation_logs::directory(root, location)?.join("events.jsonl");
+    // Hold the writer boundary only while opening. Later appends/moves invalidate the checked version.
+    // 仅安全打开时借用写入边界，长扫描不占全局锁；后续追加或移动会使版本复核失败。
+    let reader = {
+        let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
+            .lock()
+            .map_err(|_| invalid("会话存储锁失效。"))?;
+        managed_files::open_reader(root, &path, u64::MAX)?
+    };
+    let mut result = HistoryRead {
+        messages: Vec::new(),
+        reader,
+        index: None,
+        root: root.to_path_buf(),
+        path: path.clone(),
+    };
+    let Some(reader) = result.reader.as_mut() else {
+        return Ok(result);
+    };
+    let owner = managed_files::digest(path.to_string_lossy().as_bytes());
+    let index = indexed(reader, &owner)?;
+    if !include_messages {
+        result.index = Some(index);
+        result.verify()?;
+        return Ok(result);
+    }
+    let mut selected: Vec<usize> = if let Some(ids) = message_ids {
+        ids.iter()
+            .filter_map(|id| index.identities.get(&id.to_ascii_lowercase()))
+            .filter(|(_, role)| !user_only || role == "user")
+            .map(|(position, _)| *position)
+            .collect()
+    } else if user_only {
+        index
+            .identities
+            .values()
+            .filter(|(_, role)| role == "user")
+            .map(|(position, _)| *position)
+            .collect()
+    } else {
+        (0..index.records.len()).collect()
+    };
+    selected.sort_unstable();
+    selected.dedup();
+    for position in selected {
+        conversation_logs::check_cancelled()?;
+        let range = &index.records[position];
+        reader
+            .file
+            .seek(SeekFrom::Start(range.offset))
+            .map_err(conversation_logs::io_error)?;
+        let mut bytes = vec![0; range.length];
+        reader
+            .file
+            .read_exact(&mut bytes)
+            .map_err(conversation_logs::io_error)?;
+        let raw = std::str::from_utf8(&bytes).map_err(|_| invalid("历史编码无效。"))?;
+        let event: Event<'_> = serde_json::from_str(raw).map_err(|_| invalid("历史事件无效。"))?;
+        result.messages.push(event.message.get().to_string());
+    }
+    result.index = Some(index);
+    result.verify()?;
+    Ok(result)
+}
+
+pub(crate) fn verify_snapshot(
+    root: &Path,
+    location: &Value,
+    snapshot: &Value,
+) -> Result<(), ContractError> {
+    let path = conversation_logs::directory(root, location)?.join("events.jsonl");
+    let Some(mut reader) = managed_files::open_reader(root, &path, u64::MAX)? else {
+        return if snapshot.is_null() {
+            Ok(())
+        } else {
+            Err(changed())
+        };
+    };
+    let owner = managed_files::digest(path.to_string_lossy().as_bytes());
+    let index = HISTORY_CACHE
+        .lock()
+        .map_err(|_| invalid("历史缓存锁失效。"))?
+        .iter()
+        .find(|(key, index)| key == &owner && snapshot.as_str() == Some(index.snapshot.as_str()))
+        .map(|(_, index)| Arc::clone(index))
+        .ok_or_else(changed)?;
+    if let Some(token) = &index.version_token {
+        if reader.version_token()?.as_ref() != Some(token) {
+            return Err(changed());
+        }
+    } else if source_hash(&mut reader)? != index.snapshot {
+        return Err(changed());
+    }
+    reader.verify()
+}
+
+fn indexed(
+    reader: &mut managed_files::StableReader,
+    owner: &str,
+) -> Result<Arc<HistoryIndex>, ContractError> {
+    let version_token = reader.version_token()?;
+    // Unchanged Windows files reuse offsets after checked-open/change-stamp verification; unknown stamps still hash bytes.
+    // Windows 文件经安全打开及变更时间复验后复用未变偏移；无法获取变更时间时仍对完整字节做哈希。
+    let byte_snapshot = if version_token.is_none() {
+        Some(source_hash(reader)?)
+    } else {
+        None
+    };
+    {
+        let mut cache = HISTORY_CACHE
+            .lock()
+            .map_err(|_| invalid("历史缓存锁失效。"))?;
+        if let Some(position) = cache.iter().position(|(key, index)| {
+            key == owner
+                && if let Some(token) = &version_token {
+                    index.version_token.as_ref() == Some(token)
+                } else {
+                    byte_snapshot.as_ref() == Some(&index.snapshot)
+                }
+        }) {
+            let entry = cache.remove(position);
+            let result = Arc::clone(&entry.1);
+            cache.push(entry);
+            return Ok(result);
+        }
+    }
+    let index = Arc::new(build_index(reader, version_token)?);
+    if byte_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot != &index.snapshot)
+    {
+        return Err(changed());
+    }
+    let mut cache = HISTORY_CACHE
+        .lock()
+        .map_err(|_| invalid("历史缓存锁失效。"))?;
+    cache.retain(|(key, _)| key != owner);
+    while !cache.is_empty()
+        && (cache.len() >= 128
+            || cache.iter().map(|(_, index)| index.bytes).sum::<usize>() + index.bytes
+                > MAX_CACHE_BYTES)
+    {
+        cache.remove(0);
+    }
+    cache.push((owner.to_owned(), Arc::clone(&index)));
+    Ok(index)
+}
+
+pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
+    if matches!(
+        operation,
+        "storage.history.cacheBudget" | "storage.history.cachePlan"
+    ) {
+        let max_bytes = bounded(arguments, "maxBytes", 128 * MIB, 512 * MIB)?;
+        let max_entries = bounded(arguments, "maxEntries", 32, 256)?;
+        if operation == "storage.history.cacheBudget" {
+            return Ok(json!({ "maxBytes": max_bytes, "maxEntries": max_entries }));
+        }
+        let entries = arguments["entries"]
+            .as_array()
+            .filter(|entries| entries.len() <= 257)
+            .ok_or_else(|| invalid("历史缓存条目无效。"))?;
+        let mut retained_bytes = 0u64;
+        let mut retained_entries = 0usize;
+        let mut evict = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let bytes = entry
+                .as_u64()
+                .filter(|bytes| *bytes <= 9_007_199_254_740_991)
+                .ok_or_else(|| invalid("历史缓存容量无效。"))?;
+            if bytes > max_bytes as u64 {
+                evict.push(index);
+            } else {
+                retained_bytes = retained_bytes.saturating_add(bytes);
+                retained_entries += 1;
+            }
+        }
+        // SDK objects remain at the codec boundary; Rust chooses eviction from oldest-to-newest size facts.
+        // SDK 原始对象留在编码边界；Rust 根据由旧到新的容量事实决定淘汰，不复制正文。
+        for (index, entry) in entries.iter().enumerate() {
+            if retained_bytes <= max_bytes as u64 && retained_entries <= max_entries {
+                break;
+            }
+            let bytes = entry.as_u64().unwrap();
+            if bytes <= max_bytes as u64 {
+                evict.push(index);
+                retained_bytes -= bytes;
+                retained_entries -= 1;
+            }
+        }
+        return Ok(
+            json!({"evict":evict,"retainedBytes":retained_bytes,"retainedEntries":retained_entries}),
+        );
+    }
+    if operation != "storage.history.page" {
+        return Err(invalid("未知历史分页操作。"));
+    }
+    conversation_logs::check_cancelled()?;
+    let root = Path::new(arguments["root"].as_str().unwrap_or(""));
+    let path = conversation_logs::directory(root, &arguments["location"])?.join("events.jsonl");
+    let owner = managed_files::digest(path.to_string_lossy().as_bytes());
+    let limit = bounded(arguments, "limit", 200, 2000)?;
+    let maximum_bytes = bounded(arguments, "maxBytes", 16 * MIB, 64 * MIB)?;
+    let cursor = if let Some(value) = arguments["cursor"].as_str() {
+        if value.len() > 2048 {
+            return Err(invalid("历史游标过长。"));
+        }
+        let cursor: Cursor = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| invalid("历史游标无效。"))?,
+        )
+        .map_err(|_| invalid("历史游标无效。"))?;
+        let valid_direction = cursor.version == 1 && cursor.direction.is_none()
+            || cursor.version == 2 && cursor.direction.as_deref() == Some("newer");
+        if !valid_direction || cursor.owner != owner {
+            return Err(invalid("历史游标不属于当前聊天。"));
+        }
+        Some(cursor)
+    } else if arguments["cursor"].is_null() {
+        None
+    } else {
+        return Err(invalid("历史游标必须为字符串。"));
+    };
+    let opened = {
+        let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
+            .lock()
+            .map_err(|_| invalid("会话存储锁失效。"))?;
+        managed_files::open_reader(root, &path, u64::MAX)?
+    };
+    let Some(mut reader) = opened else {
+        if cursor.is_some() {
+            return Err(changed());
+        }
+        return Ok(
+            json!({"rawMessages":[],"totalMessages":0,"hasMore":false,"nextCursor":null,
+            "hasNewer":false,"newerCursor":null,"startIndex":0,"endIndex":0,
+            "snapshot":null,"returnedBytes":0,"byteBudgetExceeded":false,"hasStreamingMessages":false}),
+        );
+    };
+    let index = indexed(&mut reader, &owner)?;
+    let snapshot = &index.snapshot;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.snapshot != *snapshot)
+    {
+        return Err(changed());
+    }
+    let boundary = cursor
+        .as_ref()
+        .map_or(index.records.len(), |cursor| cursor.before);
+    if boundary > index.records.len() {
+        return Err(invalid("历史游标范围无效。"));
+    }
+    let newer = cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.direction.is_some());
+    let mut start = boundary;
+    let mut end = boundary;
+    let mut bytes = 0;
+    let mut messages = Vec::new();
+    // Both directions use the same owner/version contract; the desktop can bound bodies without losing navigation.
+    // 双向分页共用归属与版本合同，桌面可限制驻留正文而不丢失前后翻页能力。
+    let positions: Box<dyn Iterator<Item = usize>> = if newer {
+        Box::new(boundary..boundary.saturating_add(limit).min(index.records.len()))
+    } else {
+        Box::new((boundary.saturating_sub(limit)..boundary).rev())
+    };
+    for position in positions {
+        conversation_logs::check_cancelled()?;
+        let range = &index.records[position];
+        // A complete first message may exceed the requested page budget, but never the record cap.
+        // 首条完整消息可超过本页请求额度，但不能超过单记录硬限，不能静默截断正文。
+        if !messages.is_empty() && bytes + range.length > maximum_bytes {
+            break;
+        }
+        reader
+            .file
+            .seek(SeekFrom::Start(range.offset))
+            .map_err(conversation_logs::io_error)?;
+        let mut buffer = vec![0u8; range.length];
+        reader
+            .file
+            .read_exact(&mut buffer)
+            .map_err(conversation_logs::io_error)?;
+        let raw = std::str::from_utf8(&buffer).map_err(|_| invalid("历史编码无效。"))?;
+        let event: Event<'_> = serde_json::from_str(raw).map_err(|_| invalid("历史事件无效。"))?;
+        messages.push(event.message.get().to_owned());
+        bytes += range.length;
+        if newer {
+            end = position + 1;
+        } else {
+            start = position;
+        }
+    }
+    reader.verify()?;
+    if index.version_token.is_some() && reader.version_token()? != index.version_token {
+        return Err(changed());
+    }
+    if !newer {
+        messages.reverse();
+    }
+    let next = if start > 0 {
+        Some(
+            URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&Cursor {
+                    version: 1,
+                    owner: owner.clone(),
+                    snapshot: snapshot.clone(),
+                    before: start,
+                    direction: None,
+                })
+                .map_err(|_| invalid("无法编码历史游标。"))?,
+            ),
+        )
+    } else {
+        None
+    };
+    let newer_cursor = if end < index.records.len() {
+        Some(
+            URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&Cursor {
+                    version: 2,
+                    owner,
+                    snapshot: snapshot.clone(),
+                    before: end,
+                    direction: Some("newer".to_owned()),
+                })
+                .map_err(|_| invalid("无法编码历史游标。"))?,
+            ),
+        )
+    } else {
+        None
+    };
+    Ok(
+        json!({"rawMessages":messages,"totalMessages":index.records.len(),"hasMore":start>0,
+        "nextCursor":next,"hasNewer":newer_cursor.is_some(),"newerCursor":newer_cursor,
+        "startIndex":start,"endIndex":end,
+        "snapshot":snapshot,"returnedBytes":bytes,"byteBudgetExceeded":bytes>maximum_bytes,
+        "hasStreamingMessages":index.has_streaming}),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, FileTimes, OpenOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_HISTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn offsets_reuse_unchanged_bytes_and_detect_edits_with_restored_write_time() {
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-version-{}-{}",
+            std::process::id(),
+            NEXT_HISTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("events.jsonl");
+        let raw = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"cached-history\",\"Role\":\"user\",\"Content\":\"before\",\"Status\":\"completed\"}}\n";
+        fs::write(&path, raw).unwrap();
+        let owner = root.to_string_lossy();
+        let mut reader = managed_files::open_reader(&root, &path, u64::MAX)
+            .unwrap()
+            .unwrap();
+        let first = indexed(&mut reader, &owner).unwrap();
+        assert_eq!(first.snapshot, managed_files::digest(raw.as_bytes()));
+        drop(reader);
+        let mut reader = managed_files::open_reader(&root, &path, u64::MAX)
+            .unwrap()
+            .unwrap();
+        let second = indexed(&mut reader, &owner).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        drop(reader);
+        let previous = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, raw.replace("before", "after!")).unwrap();
+        let writer = OpenOptions::new().write(true).open(&path).unwrap();
+        writer
+            .set_times(FileTimes::new().set_modified(previous))
+            .unwrap();
+        drop(writer);
+        let mut reader = managed_files::open_reader(&root, &path, u64::MAX)
+            .unwrap()
+            .unwrap();
+        let third = indexed(&mut reader, &owner).unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_ne!(first.snapshot, third.snapshot);
+        drop(reader);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cache_eviction_preserves_smaller_recent_entries_when_one_history_exceeds_budget() {
+        let plan = apply(
+            "storage.history.cachePlan",
+            &json!({
+                "maxBytes": 1000, "maxEntries": 2, "entries": [300, 300, 4000, 350]
+            }),
+        )
+        .unwrap();
+        assert_eq!(plan["evict"], json!([2, 0]));
+        assert_eq!(plan["retainedEntries"], 2);
+        assert_eq!(plan["retainedBytes"], 650);
+    }
+}

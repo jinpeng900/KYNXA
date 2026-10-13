@@ -3,17 +3,21 @@
 # A domain owner OR the lead can approve; this does not require both approvals.
 # 领域负责人或队长其中一人的批准即可，不表示 GitHub 强制两人同时批准。
 * @jinpeng900
-/apps/model-gateway/orchestration/ @jinpeng900
-/apps/model-gateway/platform/ @jinpeng900
+/apps/agent-core/src/resources/ @jinpeng900
+/apps/agent-core/src/storage/ @jinpeng900
+/apps/agent-core/src/models/ @jinpeng900
+/apps/agent-core/src/orchestration/ @jinpeng900
+/apps/agent-core/src/tools/ @jinpeng900
+/apps/agent-core/src/retrieval/ @jinpeng900
+/apps/agent-core/src/lib.rs @jinpeng900
+/apps/agent-core/src/main.rs @jinpeng900
+/apps/agent-core/src/text_metrics.rs @jinpeng900
+/apps/agent-core/src/file_identity.rs @jinpeng900
+/apps/agent-core/src/transport.rs @jinpeng900
+/apps/agent-core/src/service_cancellation.rs @jinpeng900
+/apps/agent-core/src/gateway.rs @jinpeng900
+/apps/agent-core/src/gateway_contract.rs @jinpeng900
 /apps/resource-service/ @jinpeng900
-/apps/model-gateway/models/ @jinpeng900
-/apps/model-gateway/tools/ @jinpeng900
-/apps/model-gateway/official-tools/ @jinpeng900
-/apps/model-gateway/data/ @jinpeng900
-/apps/model-gateway/server.mjs @jinpeng900
-/apps/model-gateway/initialize-storage.mjs @jinpeng900
-/apps/model-gateway/migrate-storage.mjs @jinpeng900
-/apps/model-gateway/start-local-model.ps1 @jinpeng900
 /apps/desktop-preview/ @jinpeng900
 /apps/mock-backend/ @jinpeng900
 /apps/desktop/Build/ @jinpeng900
@@ -43,6 +47,8 @@
 /apps/tool-host/Sandbox/ @jinpeng900
 /apps/tool-host/Native/ @jinpeng900
 /apps/tool-host/Program.cs @jinpeng900
+/apps/agent-core/src/bin/ @jinpeng900
+/apps/official-tools/ @jinpeng900
 /Directory.Build.props @jinpeng900
 /Directory.Build.targets @jinpeng900
 /tools/development/ @jinpeng900

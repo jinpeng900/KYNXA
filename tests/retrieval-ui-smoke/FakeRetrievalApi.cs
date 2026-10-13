@@ -29,6 +29,7 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     {
         Project = new(1, ProjectId, 2, new(), new(new(true), []), new(Global.Local, Global.Web, Global.Cache, new(true, 0, [])));
         Job = Job with { ProjectId = ProjectId };
+        StatusJobs = [Job];
     }
 
     public Task<RetrievalSettingsDocument> GetSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(Global);

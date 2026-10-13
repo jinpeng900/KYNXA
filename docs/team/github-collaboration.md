@@ -1,16 +1,16 @@
 # 五人 GitHub 协作
 
-更新日期：2026-10-06。功能交接基线 `0b3b23a`；具体文件和 RAG 分工见 [团队入口](README.md)。
+更新日期：2026-10-12。历史功能交接基线为 `0b3b23a`；当前原生文件和 RAG 分工见 [团队入口](README.md)。下列远端邀请/保护状态保留 2026-10-06 的核验记录，本次本地文档更新不代表重新核验或执行远端操作。
 
 采用现有功能模块分工和单仓库 PR 流程。每人有一个主要目录，桌面客户端与共享契约按同一领域归属，实际位置由 [主责清单](module-ownership.json) 维护。
 
 | 人员 | 主要目录 | 配套范围 |
 |---|---|---|
-| A 队长 | apps/model-gateway/orchestration | platform、Integration、共享边界、构建和集成 |
+| A 队长 | apps/agent-core 的组合/gateway/orchestration/resources | desktop Integration、共享边界、构建和集成 |
 | B 界面 | apps/desktop | 界面与 Presentation；Models/Tools/Data 客户端分别归 C/D/E |
-| C 模型 | apps/model-gateway/models | desktop Services/Models、shared Chat |
-| D 工具 | apps/model-gateway/tools | official-tools、ToolHost 功能、desktop Services/Tools、shared Tools |
-| E 数据 | apps/model-gateway/data | desktop Services/Data、shared Memory |
+| C 模型 | apps/agent-core/src/models | desktop Services/Models、shared Chat |
+| D 工具 | apps/agent-core/src/tools | apps/official-tools 静态资源、ToolHost 功能、desktop Services/Tools、shared Tools |
+| E 数据 | apps/agent-core/src/storage 和 retrieval | desktop Services/Data、shared Memory |
 
 不把跨端代码搬入个人姓名目录，也不拆成五个仓库。该选择与 [开源 Agent 的职责边界](../architecture/team-boundaries.md#一手源码证据) 一致；队长组合专业服务，各模块独立维护实现和测试。
 
@@ -108,7 +108,7 @@ git switch -c kynxa_team/models/context-budget origin/main
 
 # Stage the files actually changed, including coordinated client/contract changes.
 # 暂存实际修改的文件，含已协调的客户端和契约改动。
-git add apps/model-gateway/models/实际文件.mjs
+git add apps/agent-core/src/models/实际文件.rs
 git commit -m "feat(models): 具体改动"
 git push -u origin HEAD
 gh pr create --base main --fill
@@ -120,4 +120,4 @@ gh pr create --base main --fill
 
 ## 验证入口
 
-从仓库根运行 `node tools/development/check-architecture.mjs --details` 核对当前源码归属、相对引用与测试负责人，再执行 `git diff --check` 检查交接差异。新增或移动文件需验证两端引用和随包路径；文档更新不替代产品回归，历史验证数字不代表当前源码清单。邀请状态、GitHub Actions 和远端保护需分别核对，不能以本机模板或分支建立成功替代。
+从仓库根运行 `node tools/development/check-architecture.mjs --details` 核对当前源码/静态资源归属、纯域依赖、逐文件 I/O 许可与测试负责人，再执行 `git -c core.whitespace=cr-at-eol diff --check` 检查交接差异。Node 仅用于开发期守卫，不是正式后端或随包依赖。新增/移动文件需验证两端引用和原生随包路径；文档更新不替代 Rust/HTTP/SSE/桌面回归，历史 Node 成绩不代表当前验证。邀请状态、GitHub Actions 和远端保护需分别核对，不能以本机模板或分支建立成功替代。

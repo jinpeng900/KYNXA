@@ -78,8 +78,8 @@ public partial class App
         NativeUi.Invoke(Button("RetrievalRefresh"));
         await WaitAsync(() => HasIndexText("2 sources · 8 indexed chunks") && !_window!.HasPendingChanges,
             "Refreshing an empty job list restores source counts without a stale task status.");
-        Check(Button("RetrievalRebuildIndex").IsEnabled && Button("RetrievalCancelIndex").Visibility == Visibility.Collapsed,
-            "An empty job list leaves no cancellable phantom checkpoint.");
+        Check(Button("RetrievalRebuildIndex").Visibility == Visibility.Collapsed && Button("RetrievalCancelIndex").Visibility == Visibility.Collapsed,
+            "An empty job list leaves no cancellable checkpoint or unnecessary manual preparation action.");
         UiText.Initialize("zh-CN");
     }
 }

@@ -65,6 +65,16 @@ public sealed partial class ModelManagementWindow : Window
         _ = InitializeAsync();
     }
 
+    // Application exit closes this editor without leaving its discard prompt or requests alive.
+    // 应用退出时关闭编辑器，同时结束丢弃确认和仍在进行的请求。
+    public void CloseForOwner()
+    {
+        if (_closed) return;
+        _allowClose = true;
+        _discardDialog?.Hide();
+        Close();
+    }
+
     private void UiText_LanguageChanged(object? sender, EventArgs e)
     {
         if (_closed) return;

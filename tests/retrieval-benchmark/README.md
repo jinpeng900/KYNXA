@@ -1,5 +1,11 @@
 # Public retrieval evaluation / 公开检索评测
 
+2026-10-12 原生迁移说明：下文的生产索引执行命令属于迁移前 Node 网关。`run-scifact.mjs`、`run-peer-scifact.mjs`、`run-rerank-existing.mjs`、`run-latency-existing.mjs`、`run-windows-paired-scifact.mjs` 及旧证据投影/审核依赖 `apps/model-gateway`，尚未适配当前原生网关。保留原说明与成绩作为历史证据，不能在原生迁移后直接运行或声称已重测。
+
+After the native migration, the execution commands below are historical Node gateway commands. The old production-index and evidence adapters have not been ported to the current Rust gateway. Frozen datasets, scoring definitions, vector caches and original reports remain valid historical evidence; they are not current native acceptance results.
+
+独立 `metrics.mjs`、`metrics.test.mjs` 与 `vector-cache.mjs` 保留，用于固定数据身份、指标和公开向量缓存。它们不运行当前生产索引。当前原生运行时验证见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
+
 ## 同尺度完整对照（2026-10-06）
 
 `run-peer-scifact.mjs` 接受已完成的完整 300 查询／5,183 文档公开评测，复制关闭后的索引并核验每个原文、块哈希和偏移；不重算全文向量、不触碰原评测或用户 Data。实际运行文档 SQLite FTS5 BM25、生产 chunk lexical、同索引 40 块 vector-only 和 RRF hybrid，按官方 document@10 去重与同 ID 排除规则计算 nDCG／Recall／MRR／MAP／Precision／Hit。文档 BM25 有独立原文 FTS，不能改称官方 Anserini 同实现复现。

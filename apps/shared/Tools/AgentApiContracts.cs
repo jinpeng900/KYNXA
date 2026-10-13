@@ -58,7 +58,8 @@ public sealed record McpServerConfig(string Id, string Name, string Command, str
     string? ProtocolVersion = null, string[]? DisabledTools = null, string Transport = "stdio", string? Cwd = null,
     Dictionary<string, string>? Env = null, Dictionary<string, string>? EnvRefs = null, string? Url = null,
     Dictionary<string, string>? HeaderEnv = null, McpAuthentication? Auth = null, int? StartupTimeoutMs = null,
-    string? Origin = null, string? PresetId = null, bool? Overridden = null);
+    string? Origin = null, string? PresetId = null, bool? Overridden = null,
+    bool Trusted = false, bool BackgroundTask = false, int PrewarmPriority = 0);
 public sealed record McpAuthentication(string Type, string? TokenEnv = null, string? ClientId = null,
     string? ClientSecretEnv = null, string? Issuer = null, string? Scope = null);
 public sealed record AgentConfig(int Version, long Revision, McpServerConfig[] McpServers, string[] SkillDirectories,

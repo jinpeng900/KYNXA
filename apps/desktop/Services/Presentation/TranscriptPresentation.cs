@@ -13,13 +13,15 @@ internal static class TranscriptPresentation
     internal sealed record VisibleMessage(string Mode, string Content, AssistantSegment[] Segments, ToolActivity[] Tools);
 
     internal static VisibleMessage Select(string role, string status, string content,
-        IReadOnlyList<AssistantSegment> segments, IReadOnlyList<ToolActivity> tools)
+        IReadOnlyList<AssistantSegment> segments, IReadOnlyList<ToolActivity> tools, string taskCompletionState = "")
     {
         if (role == "user") return new("user", content, [], []);
 
         var ordered = segments.OrderBy(segment => segment.Order).ToArray();
         var orderedTools = tools.Select((tool, index) => (Tool: tool, Order: tool.Order ?? index))
             .OrderBy(item => item.Order).Select(item => item.Tool).ToArray();
+        if (status == "completed" && taskCompletionState is "partial" or "verification-failed" or "execution-unknown")
+            return Process("partial", ordered, orderedTools, ordered.Length == 0 ? content : "");
         if (status == "completed")
         {
             if (ordered.Length == 0 && !string.IsNullOrWhiteSpace(content))
