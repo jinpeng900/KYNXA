@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $bundleRootPath = [IO.Path]::GetFullPath($BundleRoot)
@@ -89,7 +90,9 @@ while (-not $cacheLock) {
 try {
     if ([IO.File]::Exists($outputManifest) -and [IO.File]::Exists($integrityPath)) {
         $previous = Read-McpJson $outputManifest
-        $isCurrent = $previous.sourceHash -eq $sourceHash -and $previous.lockSha256 -eq $lockHash -and $previous.packageSha256 -eq $packageHash
+        $isCurrent = (Test-KynxaConfigHash -Path $manifestPath -ExpectedHash $previous.sourceHash) -and
+            (Test-KynxaConfigHash -Path (Join-Path $sourceRoot 'package-lock.json') -ExpectedHash $previous.lockSha256) -and
+            (Test-KynxaConfigHash -Path (Join-Path $sourceRoot 'package.json') -ExpectedHash $previous.packageSha256)
         $verified = [Collections.Generic.List[string]]::new()
         if ($isCurrent) {
             foreach ($directory in Get-ChildItem -LiteralPath $payloadRoot -Directory -Recurse -Force) {

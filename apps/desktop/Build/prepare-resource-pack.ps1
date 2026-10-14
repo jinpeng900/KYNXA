@@ -10,6 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $ArchivePath = [IO.Path]::GetFullPath($ArchivePath)
@@ -124,7 +125,9 @@ else {
         if (@($manifest.versions).Count -ne $currentVersions.Count) { throw 'Resource pack version list differs from this checkout.' }
         foreach ($current in $currentVersions) {
             $version = @($manifest.versions | Where-Object { $_.path -eq $current.path })
-            if ($version.Count -ne 1 -or $version[0].sha256 -ne $current.sha256) { throw "Resource pack version differs: $($current.path)." }
+            if ($version.Count -ne 1 -or -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256)) {
+                throw "Resource pack version differs: $($current.path)."
+            }
         }
         # Extract only listed files and commit each file after its size and digest pass.
         # 只提取白名单文件；每份文件完成大小与摘要校验后才替换目标，既有有效文件保持可用。
