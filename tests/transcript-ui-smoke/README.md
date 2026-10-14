@@ -68,6 +68,14 @@ Validation update (2026-10-09): the complete C# fixture now builds with Visual S
 
 The earlier failure occurred inside the WinUI XAML compiler while reading assembly metadata (`WMC9999`, `Module(0x0)`); one compiler process exited with `0xC0000005`. The later missing `App.xbf` was a consequence of that failed compilation. The saved assemblies and all 206 references could subsequently be read by the same-version metadata reader, and the unchanged source rebuilt successfully. A later repeated build also exposed a separate `0x80131506` failure in the SDK .NET 10 C# compiler's incremental source-generator execution, even with isolated files and Full MSBuild. The Visual Studio C# compiler bypassed that distinct SDK compiler path, but XAML failure recurred on an unrestricted rebuild; diagnostic JIT/NGEN overrides also failed to establish stability and are not retained. Windows events confirm native access violations across the relevant compiler processes. The documented single-processor entry is the currently tested local compatibility option; it verifies fresh results without retrying or suppressing errors. These observations do not prove a unique cache corruption cause or a permanent system-wide CLR repair. See the UI validation record for the evidence paths.
 
+## Real API final-answer rendering
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -Scenario api-final -ApiReportPath '<absolute acceptance report path>' -TimeoutSeconds 240
+```
+
+This entry reads a previously saved real API report; it does not call a model or modify that report. It requires an actually received `completed` event with a completed `final_answer`, then opens its original segments in the production native WebView. Checks compare the visible Markdown, marked answer continuations, native clipboard, production export, stopped timer and reopened conversation. Screenshots and DOM evidence are saved in isolated test directories. A replayed partial outcome checks that the same answer remains visible, without changing the API task's result. An interrupted response cannot pass this entry simply because it contains progress text.
+
 ## Local end-time cache
 
 Run the focused production cache and native WebView2 restoration checks:

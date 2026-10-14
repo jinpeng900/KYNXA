@@ -576,16 +576,8 @@ pub(super) fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> 
             Ok(array(&arguments["servers"])
                 .iter()
                 .position(|server| {
-                    (matches(
-                        r"(?i)exa|brave",
-                        &format!(
-                            "{} {}",
-                            string(&server["id"]),
-                            string(&server["description"])
-                        ),
-                    ) || array(&server["tools"])
-                        .iter()
-                        .any(|tool| provider_kind(tool).is_some()))
+                    super::service_web::search_server(server)
+                        && server["enabled"] != false
                         && (!truthy(provider) || provider == "auto" || *provider == server["id"])
                 })
                 .map(|index| json!(index))

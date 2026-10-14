@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    context_control,
+    capabilities, context_control,
     gateway::ModelError,
     history,
     history_service::{self, HistoryProjectionState},
@@ -35,6 +35,51 @@ pub fn request_path(connection: &Value) -> &'static str {
         "ollama" => "/api/chat",
         _ => "/chat/completions",
     }
+}
+
+/// Purpose-specific controls come from one pure capability rule; credentials and inferred quotas are excluded.
+/// 目的控制复用同一纯能力规则；不携带凭据、不推断代理额度，可用于辅助摘要缓存身份与审计。
+pub fn summary_controls(connection: &Value, model: &str) -> Result<Value, ModelError> {
+    let endpoint = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
+        .map(|url| {
+            json!({"protocol":format!("{}:",url.scheme()),"hostname":url.host_str().unwrap_or(""),
+            "port":url.port().map(|port|port.to_string()).unwrap_or_default(),"pathname":url.path(),
+            "username":url.username(),"password":url.password().unwrap_or(""),
+            "search":url.query().unwrap_or(""),"hash":url.fragment().unwrap_or("")})
+        })
+        .unwrap_or(Value::Null);
+    capabilities::calculate(
+        "models.capabilities.summaryControls",
+        &json!({"endpoint":endpoint,
+        "protocol":protocol(connection),"providerId":connection["providerId"],"model":model}),
+    )
+    .map_err(ModelError::native)
+}
+
+/// Build an auxiliary summary request without changing the normal request builder or saved user settings.
+/// 辅助摘要复用正式协议构建器，只附加本次目的控制；普通请求和用户保存的思考配置保持不变。
+pub fn build_summary_request(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    max_output_tokens: Option<u64>,
+    stream: bool,
+) -> Result<(Value, Value), ModelError> {
+    let mut body = build_request(
+        connection,
+        model,
+        messages,
+        system,
+        max_output_tokens,
+        &[],
+        stream,
+    )?;
+    let controls = summary_controls(connection, model)?;
+    for (field, value) in controls["parameters"].as_object().into_iter().flatten() {
+        body[field] = value.clone();
+    }
+    Ok((body, controls["audit"].clone()))
 }
 
 fn content_block(protocol: &str, role: &str, value: &Value) -> Value {
@@ -174,6 +219,10 @@ pub fn build_request(
     if !tools.is_empty() {
         body["tools"] = json!(tools);
         body["tool_choice"] = plan["toolChoice"].clone();
+    } else if matches!(name, "openai-completions" | "openai-responses") {
+        // Make text-only turns explicit even when retained history contains tool calls.
+        // 即使保留历史工具调用，也明确本轮只生成正文。
+        body["tool_choice"] = json!("none");
     }
     if let Some(limit) = max_output_tokens.or_else(|| plan["defaultOutput"].as_u64()) {
         body[plan["outputField"].as_str().unwrap_or("max_tokens")] = json!(limit);
@@ -1132,6 +1181,175 @@ fn apply_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_summary_controls_only_change_declared_deepseek_summary_requests() {
+        for model in ["deepseek-flash", "deepseek-v4-pro"] {
+            for (base, provider, basis) in [
+                (
+                    "https://api.deepseek.com/v1",
+                    "official-fixture",
+                    "official-endpoint",
+                ),
+                (
+                    "http://127.0.0.1:8765/v1",
+                    "deepseek",
+                    "configured-compatible-provider",
+                ),
+            ] {
+                let connection = json!({"baseUrl":base,"providerId":provider,"protocol":"openai-completions","contextWindowTokens":16384,"thinking":{"type":"enabled"}});
+                let original = connection.clone();
+                let messages =
+                    [json!({"role":"user","content":"Summarize the supplied public facts."})];
+                let main = build_request(
+                    &connection,
+                    model,
+                    &messages,
+                    "fixture guidance",
+                    Some(1024),
+                    &[],
+                    true,
+                )
+                .unwrap();
+                assert!(
+                    main.get("thinking").is_none(),
+                    "A main request must retain its existing behavior."
+                );
+                let (summary, audit) = build_summary_request(
+                    &connection,
+                    model,
+                    &messages,
+                    "fixture guidance",
+                    Some(1024),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(summary["thinking"], json!({"type":"disabled"}));
+                assert_eq!(summary["max_tokens"], 1024);
+                assert_eq!(audit["applied"], true);
+                assert_eq!(audit["purpose"], "context-summary");
+                assert_eq!(audit["basis"], basis);
+                assert_eq!(audit["quotaInferred"], false);
+                assert_eq!(
+                    summary_controls(&connection, model).unwrap()["audit"],
+                    audit
+                );
+                assert_eq!(
+                    connection, original,
+                    "An auxiliary request must not change saved settings."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auxiliary_summary_controls_do_not_guess_models_protocols_or_unknown_providers() {
+        for (base, provider, kind, model) in [
+            (
+                "https://proxy.invalid/v1",
+                "custom",
+                "openai-completions",
+                "deepseek-flash",
+            ),
+            (
+                "https://api.deepseek.com.attacker.invalid/v1",
+                "custom",
+                "openai-completions",
+                "deepseek-v4-pro",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "openai-completions",
+                "deepseek-flash-alias",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "openai-completions",
+                "DeepSeek-Flash",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "openai-completions",
+                "deepseek-chat",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "openai-completions",
+                "other-model",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "anthropic-messages",
+                "deepseek-flash",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                "openai-responses",
+                "deepseek-flash",
+            ),
+            (
+                "http://127.0.0.1:8765/v1",
+                "DeepSeek",
+                "openai-completions",
+                "deepseek-flash",
+            ),
+            (
+                "https://user:fixture@api.deepseek.com/v1",
+                "deepseek",
+                "openai-completions",
+                "deepseek-flash",
+            ),
+            (
+                "https://api.deepseek.com/v1?mode=fixture",
+                "deepseek",
+                "openai-completions",
+                "deepseek-flash",
+            ),
+            (
+                "not-a-valid-endpoint",
+                "deepseek",
+                "openai-completions",
+                "deepseek-flash",
+            ),
+        ] {
+            let connection = json!({"baseUrl":base,"providerId":provider,"protocol":kind});
+            let (body, audit) =
+                build_summary_request(&connection, model, &[], "", Some(1024), false).unwrap();
+            assert!(body.get("thinking").is_none(), "{connection}");
+            assert_eq!(audit["applied"], false, "{connection}");
+            assert_eq!(audit["quotaInferred"], false);
+        }
+    }
+
+    #[test]
+    fn auxiliary_summary_controls_do_not_establish_proxy_context_capabilities() {
+        let connection = json!({"baseUrl":"http://127.0.0.1:8765/v1","providerId":"deepseek","protocol":"openai-completions","contextWindowTokens":16384});
+        assert_eq!(
+            summary_controls(&connection, "deepseek-flash").unwrap()["audit"]["basis"],
+            "configured-compatible-provider"
+        );
+        let endpoint = json!({"protocol":"http:","hostname":"127.0.0.1","port":"8765","pathname":"/v1","username":"","password":"","search":"","hash":""});
+        let looked_up = capabilities::calculate(
+            "models.capabilities.lookup",
+            &json!({"endpoint":endpoint,"model":"deepseek-flash","providerId":"deepseek"}),
+        )
+        .unwrap();
+        assert_eq!(
+            looked_up,
+            json!({}),
+            "A declared summary mode cannot establish proxy quotas."
+        );
+        let actual=capabilities::calculate("models.capabilities.automaticContext",&json!({"endpoint":endpoint,"connection":connection,"model":"deepseek-flash","capabilities":looked_up})).unwrap();
+        assert_eq!(actual["effectiveTokens"], 16384);
+        assert_eq!(actual["source"], "configured-unverified");
+        assert_eq!(actual["verified"], false);
+    }
     fn catalog() -> Vec<Value> {
         vec![json!({"name":"filesystem.read","wireName":"filesystem_read"})]
     }
@@ -1335,6 +1553,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(body["model"], "fixture");
+            if matches!(name, "openai-completions" | "openai-responses") {
+                assert_eq!(body["tool_choice"], "none");
+            } else {
+                assert!(body.get("tool_choice").is_none());
+            }
             let encoded = body.to_string();
             assert!(encoded.contains("aGVsbG8="));
             assert!(encoded.contains("describe"));

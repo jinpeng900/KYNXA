@@ -2,12 +2,15 @@
 param(
     [string]$RuntimeIdentifier = 'win-x64',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
+    [ValidateSet('Full', 'Core')][string]$Profile = 'Full',
+    [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
+    [string]$ResourcePackRoot = $env:KYNXA_RESOURCE_PACK_ROOT,
     [switch]$AssetsOnly,
     [switch]$Offline
 )
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $runtimeRoot = Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64'
 $utf8 = [Text.UTF8Encoding]::new($false)
@@ -44,15 +47,7 @@ function Test-NativeFile([string]$Path, $Specification) {
 }
 function Save-NativePinnedFile([string]$Url, [string]$Destination, $Specification) {
     if (Test-NativeFile $Destination $Specification) { return }
-    if ($Offline) { throw "Pinned native asset unavailable offline: $Destination" }
-    $pending = $Destination + '.download-' + [Guid]::NewGuid().ToString('N')
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $Url -UseBasicParsing -OutFile $pending -TimeoutSec 600
-        if (-not (Test-NativeFile $pending $Specification)) { throw "Pinned native asset failed SHA-256 verification: $Url" }
-        Move-Item -LiteralPath $pending -Destination $Destination -Force
-    }
-    finally { if ([IO.File]::Exists($pending)) { Remove-Item -LiteralPath $pending } }
+    Save-KynxaPinnedDownload -Url $Url -Destination $Destination -Sha256 $Specification.sha256 -ExpectedBytes $Specification.bytes -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
 }
 function Copy-NativeFile([string]$Source, [string]$RelativePath) {
     $destination = Get-NativeOutputPath $RelativePath
@@ -67,7 +62,19 @@ function Copy-NativeFile([string]$Source, [string]$RelativePath) {
 $bundle = [Collections.Generic.List[string]]::new()
 $nativeManifestPath = Join-Path $PSScriptRoot 'native-assets/native-runtime.json'
 $nativeManifest = Get-Content -LiteralPath $nativeManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($ResourcePackRoot) {
+    # Import a versioned local pack first; partial downloads and compiler caches are not runtime resources.
+    # 优先导入版本匹配的本地资源包；下载断点与编译器缓存不属于随包运行资源。
+    & (Join-Path $PSScriptRoot 'prepare-resource-pack.ps1') -Action Import -ArchivePath $ResourcePackRoot -DestinationRoot $runtimeRoot
+}
+Write-Host "[Runtime] Preparing $Profile resources (offline: $([bool]$Offline))."
 foreach ($package in $nativeManifest.packages) {
+    if ($Profile -eq 'Core' -and -not @($package.files | Where-Object { $_.path -eq 'runtime/native/vec0.dll' }).Count) { continue }
+    $missingAssets = @($package.files | Where-Object { -not (Test-NativeFile (Get-NativeOutputPath $_.path) $_) })
+    if ($missingAssets.Count -eq 0) {
+        foreach ($asset in $package.files) { [void]$bundle.Add($asset.path) }
+        continue
+    }
     $archivePath = Get-NativeOutputPath ('downloads/' + $package.name)
     $sharedArchive = Join-Path $repositoryRoot ('artifacts/runtime/native/win-x64/downloads/' + $package.name)
     if (Test-NativeFile $sharedArchive $package) { $archivePath = $sharedArchive }
@@ -106,32 +113,43 @@ foreach ($package in $nativeManifest.packages) {
     }
     finally { if ($zip) { $zip.Dispose() } }
 }
+foreach ($asset in $nativeManifest.localFiles) {
+    $source = Join-Path (Split-Path -Parent $nativeManifestPath) $asset.source
+    if (-not (Test-NativeFile $source $asset)) { throw "Bundled upstream license failed integrity verification: $($asset.source)" }
+    Copy-NativeFile $source $asset.path
+}
 Copy-NativeFile $nativeManifestPath 'runtime/native/licenses/native-runtime-manifest.json'
+Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/licenses/sources.json') 'runtime/native/licenses/upstream-license-sources.json'
 
 # A private fixed Node serves optional MCP/skill execution only; npm runs on the build machine, never startup.
 # 私有固定 Node 仅供 MCP/技能执行；npm 只在构建机运行，软件启动不下载依赖。
-& (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline
-foreach ($mcpFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'mcp-files.txt'), $utf8)) {
-    if (-not $mcpFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'MCP bundle file escaped its selected root.' }
-    [void]$bundle.Add($mcpFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
-}
-Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json'
-
-foreach ($model in @(@{ Manifest = 'embedding.json'; Cache = 'embedding/builtin-multilingual'; Output = 'runtime/embedding/builtin-multilingual' },
-                       @{ Manifest = 'reranker.json'; Cache = 'rerank/builtin-multilingual-reranker'; Output = 'runtime/rerank/builtin-multilingual-reranker' })) {
-    $manifestPath = Join-Path $PSScriptRoot ('native-assets/' + $model.Manifest)
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    foreach ($asset in $manifest.files) {
-        $destination = Get-NativeOutputPath ($model.Output + '/' + $asset.path)
-        $cached = Join-Path $repositoryRoot ('artifacts/runtime/' + $model.Cache + '/' + $asset.path)
-        if (-not (Test-NativeFile $destination $asset) -and (Test-NativeFile $cached $asset)) {
-            Copy-Item -LiteralPath $cached -Destination $destination -Force
-        }
-        Save-NativePinnedFile $asset.url $destination $asset
-        [void]$bundle.Add($model.Output + '/' + $asset.path)
+if ($Profile -eq 'Full') {
+    # Include the current source notice before MCP records its payload integrity, avoiding a second npm preparation.
+    # 在 MCP 记录资源完整性前放入当前来源清单，避免随后修改载荷导致二次 npm 准备。
+    Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json'
+    & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+    foreach ($mcpFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'mcp-files.txt'), $utf8)) {
+        if (-not $mcpFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'MCP bundle file escaped its selected root.' }
+        [void]$bundle.Add($mcpFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
     }
-    Copy-NativeFile $manifestPath ($model.Output + '/manifest.json')
+
+    foreach ($model in @(@{ Manifest = 'embedding.json'; Cache = 'embedding/builtin-multilingual'; Output = 'runtime/embedding/builtin-multilingual' },
+                           @{ Manifest = 'reranker.json'; Cache = 'rerank/builtin-multilingual-reranker'; Output = 'runtime/rerank/builtin-multilingual-reranker' })) {
+        $manifestPath = Join-Path $PSScriptRoot ('native-assets/' + $model.Manifest)
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($asset in $manifest.files) {
+            $destination = Get-NativeOutputPath ($model.Output + '/' + $asset.path)
+            $cached = Join-Path $repositoryRoot ('artifacts/runtime/' + $model.Cache + '/' + $asset.path)
+            if (-not (Test-NativeFile $destination $asset) -and (Test-NativeFile $cached $asset)) {
+                Copy-Item -LiteralPath $cached -Destination $destination -Force
+            }
+            Save-NativePinnedFile $asset.url $destination $asset
+            [void]$bundle.Add($model.Output + '/' + $asset.path)
+        }
+        Copy-NativeFile $manifestPath ($model.Output + '/manifest.json')
+    }
 }
+else { Write-Host '[Runtime] Core development profile skips optional models and MCP/browser preparation; release packages use Full.' }
 
 function Get-NativeSourceHash([string]$Directory) {
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -158,6 +176,7 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
     $existing = if ([IO.File]::Exists($buildRecord)) { Get-Content -LiteralPath $buildRecord -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
     if (-not $existing -or $existing.sourceHash -ne $hash -or -not [IO.File]::Exists($destination) -or $existing.sha256 -ne (Get-NativeFileHash $destination)) {
         $arguments = @('build', '--locked', '--manifest-path', (Join-Path $source 'Cargo.toml'), '--bin', $ExecutableName)
+        $arguments += $script:cargoNetworkArguments
         if ($Configuration -eq 'Release') { $arguments += '--release' }
         & $script:cargoCommand @arguments
         if ($LASTEXITCODE -ne 0) { throw "Native executable compilation failed: $ExecutableName" }
@@ -173,7 +192,8 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
     # 直接按 UTF-8 读取 Cargo 输出；PowerShell 5 控制台代码页可能损坏中文源码路径。
     $metadataStart = [Diagnostics.ProcessStartInfo]::new()
     $metadataStart.FileName = $script:cargoCommand
-    $metadataStart.Arguments = 'metadata --locked --format-version 1 --manifest-path "' + (Join-Path $source 'Cargo.toml') + '"'
+    $metadataArguments = @('metadata', '--locked', '--format-version', '1', '--manifest-path', (Join-Path $source 'Cargo.toml')) + $script:cargoNetworkArguments
+    $metadataStart.Arguments = ($metadataArguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join ' '
     $metadataStart.UseShellExecute = $false
     $metadataStart.CreateNoWindow = $true
     $metadataStart.RedirectStandardOutput = $true
@@ -221,6 +241,15 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
 # Reuse Cargo's actual local target directory; do not rebuild all dependencies under another target triple.
 # 复用 Cargo 现有 target 缓存；不为了目录形式更换 target triple 而全量重编依赖。
 if (-not $AssetsOnly) {
+    $script:cargoNetworkArguments = @()
+    if ($Offline) { $script:cargoNetworkArguments += '--offline' }
+    $settings = Get-KynxaDownloadSettings -Path $DownloadSourcesPath
+    $registryIndex = $env:KYNXA_CARGO_REGISTRY_INDEX
+    if (-not $registryIndex -and $settings.Contains('cargoRegistryIndex')) { $registryIndex = [string]$settings['cargoRegistryIndex'] }
+    if ($registryIndex) {
+        if ($registryIndex -notmatch '^(sparse\+)?https://[^\s\x22\x27]+$') { throw 'Cargo mirror index must be a HTTPS registry URL.' }
+        $script:cargoNetworkArguments += @('--config', "source.crates-io.replace-with='kynxa-build-mirror'", '--config', "source.kynxa-build-mirror.registry='$registryIndex'")
+    }
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
     if ($cargo) { $script:cargoCommand = $cargo.Source }
     else {
@@ -240,4 +269,4 @@ if (-not $AssetsOnly) {
 }
 $bundleFiles = @($bundle | Sort-Object -Unique | ForEach-Object { Get-NativeOutputPath $_ })
 [IO.File]::WriteAllLines((Join-Path $runtimeRoot $(if ($AssetsOnly) {'asset-files.txt'} else {'bundle-files.txt'})), [string[]]$bundleFiles, $utf8)
-Write-Output "Native Windows payload ready: $($bundleFiles.Count) verified files; Rust core plus private pinned external MCP runtime."
+Write-Output "Native Windows payload ready ($Profile): $($bundleFiles.Count) verified files."

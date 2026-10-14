@@ -18,10 +18,15 @@ struct TaskEvidence {
     ledger: EvidenceLedger,
     readings: HashMap<String, (Value, Vec<ReadFragment>)>,
 }
+#[derive(Clone)]
 struct ReadFragment {
     reference: Value,
     source_ref: String,
     text: String,
+    start_offset: usize,
+    end_offset: usize,
+    locator: Value,
+    binding_revision: Value,
 }
 fn source_version(reference: &Value) -> String {
     gateway_index::hash(
@@ -109,12 +114,37 @@ pub fn final_validate(config: &GatewayConfig, context: &Value) -> ContractResult
         .unwrap()
         .readings
         .iter()
-        .map(|(key, (reference, _))| (key.clone(), reference.clone()))
+        .map(|(key, (reference, fragments))| (key.clone(), reference.clone(), fragments.clone()))
         .collect::<Vec<_>>();
     let scopes = authorized(config, context)?;
     let mut invalid = Vec::new();
-    for (key, reference) in &references {
+    let mut original_readings_revalidated = 0;
+    for (key, reference, fragments) in &references {
         if let Err(error) = read_current(config, reference, &scopes) {
+            // Semantic token fitting can replace chunk topology without changing the original text.
+            // 语义 token 适配可替换分块而不改变原文；仅已读且逐范围回验相同的原文可保留，旧结构引用仍失效。
+            let recovered = if error.code() == "STALE_RETRIEVAL_SOURCE" && !fragments.is_empty() {
+                read_original_current(config, reference, &scopes).is_ok_and(|(current, _)| {
+                    fragments.iter().all(|fragment| {
+                        validate_saved_read_window(
+                            &current,
+                            &fragment.reference,
+                            &json!({"text":fragment.text,"offset":fragment.start_offset,
+                                "nextOffset":fragment.end_offset,"locator":fragment.locator,
+                                "bindingRevision":fragment.binding_revision,
+                                "offsetUnit":"utf16-code-units"}),
+                            false,
+                        )
+                        .is_ok()
+                    })
+                })
+            } else {
+                false
+            };
+            if recovered {
+                original_readings_revalidated += 1;
+                continue;
+            }
             invalid.push(json!({"sourceRef":gateway_index::reference(reference,None),"sourceId":reference["sourceId"],"code":error.code(),"next":"re-read-current-source"}));
             task.lock()
                 .unwrap()
@@ -129,7 +159,9 @@ pub fn final_validate(config: &GatewayConfig, context: &Value) -> ContractResult
         }
     }
     Ok(
-        json!({"current":invalid.is_empty(),"checked":references.len(),"invalidSources":invalid,"freshnessOnly":true,"correctnessCertified":false}),
+        json!({"current":invalid.is_empty(),"checked":references.len(),"invalidSources":invalid,
+            "originalReadingsRevalidated":original_readings_revalidated,
+            "derivedReferencesRevalidated":false,"freshnessOnly":true,"correctnessCertified":false}),
     )
 }
 fn authorized(config: &GatewayConfig, context: &Value) -> Result<Value, ContractError> {
@@ -241,7 +273,15 @@ fn read_current(config: &GatewayConfig, reference: &Value, scopes: &Value) -> Co
                     404,
                 ));
             }
-            let current = if locator["fileWindow"].is_object() {
+            let current = if locator["archive"].is_object() {
+                super::gateway_archives::read_member(
+                    config,
+                    &locator,
+                    &settings["local"]["indexing"],
+                    &crate::service_cancellation::current_token()
+                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                )?
+            } else if locator["fileWindow"].is_object() {
                 crate::tools::service_source_reading::execute_io("readTextWindow",&json!({"path":path,"window":locator["fileWindow"],"maximumSourceBytes":settings["local"]["indexing"]["maximumSourceBytes"]}),&None)
                 .map_err(|_|gateway::error("文件窗口已改变。","STALE_RETRIEVAL_SOURCE",409))?
             } else {
@@ -266,6 +306,10 @@ fn read_current(config: &GatewayConfig, reference: &Value, scopes: &Value) -> Co
             } else {
                 current
             };
+            super::gateway_documents::verify_extraction(
+                &locator["extraction"],
+                &current["extraction"],
+            )?;
             text = current["text"].as_str().unwrap_or("").to_string();
             if gateway_index::hash(&text) != row["content_hash"] {
                 return Err(gateway::error(
@@ -354,6 +398,111 @@ fn read_current(config: &GatewayConfig, reference: &Value, scopes: &Value) -> Co
     }
     Ok(json!({"text":text,"row":row,"chunk":receipt["chunk"],"locator":locator}))
 }
+
+/// Revalidate only an archived original-text window; the caller must first verify its formal archive identity.
+/// 仅复核正式归档中实际读过的原文窗口；调用端必须先验证归档 ID、哈希、字节数及所属范围。
+pub(crate) fn verify_saved_read(
+    config: &GatewayConfig,
+    context: &Value,
+    source_ref: &str,
+    saved_read: &Value,
+) -> ContractResult {
+    let reference = resolve_reference(config, context, source_ref)?;
+    let scopes = authorized(config, context)?;
+    validate_saved_read_content(config, &reference, saved_read, &scopes)
+}
+
+fn validate_saved_read_content(
+    config: &GatewayConfig,
+    reference: &Value,
+    saved_read: &Value,
+    scopes: &Value,
+) -> ContractResult {
+    let (current, derived_reference_current) = read_original_current(config, reference, scopes)?;
+    validate_saved_read_window(&current, reference, saved_read, derived_reference_current)
+}
+
+fn read_original_current(
+    config: &GatewayConfig,
+    reference: &Value,
+    scopes: &Value,
+) -> Result<(Value, bool), ContractError> {
+    match read_current(config, reference, scopes) {
+        Ok(current) => Ok((current, true)),
+        Err(error) if error.code() == "STALE_RETRIEVAL_SOURCE" => {
+            // Whole-original identity is separate from replaceable chunk/relationship derivation.
+            // 完整原文身份与可替换的分块/关系身份分开；不修改通用引用校验，不将旧结构关系升级为有效。
+            let mut original = reference.clone();
+            let fields = original.as_object_mut().ok_or_else(|| {
+                gateway::error("已读原文引用无效。", "INVALID_EVIDENCE_REFERENCE", 400)
+            })?;
+            fields.remove("chunkId");
+            fields.remove("chunkHash");
+            fields.remove("derivationSignature");
+            read_current(config, &original, scopes).map(|current| (current, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_saved_read_window(
+    current: &Value,
+    reference: &Value,
+    saved_read: &Value,
+    derived_reference_current: bool,
+) -> ContractResult {
+    let invalid = || {
+        gateway::error(
+            "已读原文窗口已改变或无法核验。",
+            "STALE_RETRIEVAL_SOURCE",
+            409,
+        )
+    };
+    let saved_text = saved_read["text"]
+        .as_str()
+        .filter(|text| !text.is_empty() && text.len() <= 256 * 1024)
+        .ok_or_else(invalid)?;
+    let start = saved_read["offset"]
+        .as_u64()
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or_else(invalid)?;
+    let end = saved_read["nextOffset"]
+        .as_u64()
+        .and_then(|offset| usize::try_from(offset).ok())
+        .filter(|end| *end >= start)
+        .ok_or_else(invalid)?;
+    if !saved_read["locator"].is_object()
+        || saved_read
+            .get("offsetUnit")
+            .is_some_and(|unit| unit != "utf16-code-units")
+    {
+        return Err(invalid());
+    }
+    if current["locator"] != saved_read["locator"]
+        || saved_read.get("bindingRevision").is_some_and(|revision| {
+            revision.as_u64().unwrap_or(0)
+                != current["row"]["binding_revision"].as_u64().unwrap_or(0)
+        })
+    {
+        return Err(invalid());
+    }
+    let units = current["text"]
+        .as_str()
+        .ok_or_else(invalid)?
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    if !units
+        .get(start..end)
+        .is_some_and(|window| window == saved_text.encode_utf16().collect::<Vec<_>>().as_slice())
+    {
+        return Err(invalid());
+    }
+    Ok(json!({"current":true,"originalTextOnly":true,
+        "derivedReferenceCurrent":derived_reference_current,"scopeVerified":true,
+        "sourceId":reference["sourceId"],"offset":start,"nextOffset":end,
+        "contentHash":reference["contentHash"],"sourceRevision":reference["sourceRevision"]}))
+}
+
 fn register_read(
     config: &GatewayConfig,
     context: &Value,
@@ -362,6 +511,7 @@ fn register_read(
     text: &str,
     start: usize,
     end: usize,
+    current_source: &Value,
 ) -> ContractResult {
     let task = task(context)?;
     let mut task = task.lock().unwrap();
@@ -380,6 +530,10 @@ fn register_read(
         reference: reference.clone(),
         source_ref: source_ref.to_string(),
         text: text.to_string(),
+        start_offset: start,
+        end_offset: end,
+        locator: current_source["locator"].clone(),
+        binding_revision: current_source["row"]["binding_revision"].clone(),
     });
     while fragments.1.len() > 16
         || fragments
@@ -563,6 +717,7 @@ pub fn handle_tool(
                                 &String::from_utf16_lossy(&units[start..end]),
                                 start,
                                 end,
+                                current,
                             )?;
                         }
                     }
@@ -650,9 +805,10 @@ pub fn handle_tool(
                     &body,
                     start,
                     end,
+                    &source,
                 )?;
                 Ok(
-                    json!({"sourceRef":input["sourceRef"],"text":body,"offset":start,"nextOffset":end,"totalCharacters":units.len(),"truncated":end<units.len(),"offsetUnit":"utf16-code-units","locator":source["locator"],"decision":decision}),
+                    json!({"sourceRef":input["sourceRef"],"text":body,"offset":start,"nextOffset":end,"totalCharacters":units.len(),"truncated":end<units.len(),"offsetUnit":"utf16-code-units","locator":source["locator"],"bindingRevision":source["row"]["binding_revision"],"decision":decision}),
                 )
             }
             "knowledge.relations" => {
@@ -907,6 +1063,212 @@ fn resolve_canonical(text: &str) -> ContractResult {
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
+    struct ReadWorkspace {
+        root: std::path::PathBuf,
+        config: GatewayConfig,
+        context: Value,
+        source: Value,
+        reference: String,
+        saved_read: Value,
+    }
+    impl ReadWorkspace {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("kynxa-original-read-{}", gateway::new_id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let config = GatewayConfig {
+                data_root: root.join("Data"),
+                data_home: root.join("Models"),
+                extension_root: root.join("Extensions"),
+                application_root: root.join("App"),
+                port: 0,
+                toolhost_exe: root.join("toolhost.exe"),
+                vector_extension: root.join("vec0.dll"),
+                inference_library: root.join("onnxruntime.dll"),
+            };
+            let chat = gateway::new_id();
+            gateway::ensure_conversation(&config.data_root, &chat, "原文核验夹具").unwrap();
+            let context = json!({"conversationId":chat,"requestId":gateway::new_id()});
+            let text = (0..30)
+                .map(|index| format!("原文 🔬 第 {index} 行保持不变，只更新语义向量分块。\n"))
+                .collect::<String>();
+            let source = json!({"sourceId":"stable-original-source","scopeKey":format!("chat:{chat}"),
+                "sourceType":"document","title":"original.txt","text":text,
+                "locator":{"relativePath":"original.txt"},"sourceRevision":gateway_index::hash(&text)});
+            let prepared = gateway_index::prepare_source(&source, None).unwrap();
+            gateway_index::publish_prepared(&config, &[prepared.clone()]).unwrap();
+            let reference =
+                gateway_index::reference(&prepared["source"], Some(&prepared["chunks"][0]));
+            let saved_read = handle_tool(
+                "knowledge.read",
+                &json!({"sourceRef":reference,"limit":80}),
+                &context,
+                &config,
+            )
+            .unwrap()
+            .unwrap();
+            Self {
+                root,
+                config,
+                context,
+                source,
+                reference,
+                saved_read,
+            }
+        }
+        fn refit_chunks(&self) {
+            let text = self.source["text"].as_str().unwrap();
+            let structure = super::super::gateway_structure::parse(text, "original.txt").unwrap();
+            let mut chunks = super::super::gateway_structure::chunks(text, &structure, 64).unwrap();
+            for chunk in &mut chunks {
+                chunk["chunkerVersion"] = json!("token-fitted-regression-v1");
+            }
+            let vectors = vec![vec![1.0, 0.0]; chunks.len()];
+            let mut source = self.source.clone();
+            source["chunks"] = json!(chunks);
+            source["embeddingProfileId"] = json!("fixture-profile");
+            source["embeddingModelVersion"] = json!("fixture-model-v1");
+            source["embeddingSpaceId"] = json!("fixture-space-v1");
+            let prepared = gateway_index::prepare_source(&source, Some(&vectors)).unwrap();
+            gateway_index::publish_prepared(&self.config, &[prepared]).unwrap();
+        }
+    }
+    impl Drop for ReadWorkspace {
+        fn drop(&mut self) {
+            release_task(
+                self.context["conversationId"].as_str().unwrap(),
+                self.context["requestId"].as_str().unwrap(),
+            );
+            storage::gateway_memory::stop_candidates(&self.config.data_root);
+            let _ = storage::sqlite_queries::apply(
+                "storage.index.closeConnections",
+                &gateway_index::arguments(&self.config, json!({})),
+            );
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn semantic_refit_preserves_only_verified_original_windows() {
+        let workspace = ReadWorkspace::new();
+        workspace.refit_chunks();
+        let recovered = verify_saved_read(
+            &workspace.config,
+            &workspace.context,
+            &workspace.reference,
+            &workspace.saved_read,
+        )
+        .unwrap();
+        assert_eq!(recovered["current"], true);
+        assert_eq!(recovered["originalTextOnly"], true);
+        assert_eq!(recovered["derivedReferenceCurrent"], false);
+        let final_state = final_validate(&workspace.config, &workspace.context).unwrap();
+        assert_eq!(final_state["current"], true);
+        assert_eq!(final_state["originalReadingsRevalidated"], 1);
+        assert_eq!(final_state["derivedReferencesRevalidated"], false);
+        assert_eq!(
+            handle_tool(
+                "knowledge.read",
+                &json!({"sourceRef":workspace.reference}),
+                &workspace.context,
+                &workspace.config
+            )
+            .unwrap()
+            .unwrap_err()
+            .code(),
+            "STALE_RETRIEVAL_SOURCE"
+        );
+        assert_eq!(
+            handle_tool(
+                "knowledge.relations",
+                &json!({"sourceRef":workspace.reference}),
+                &workspace.context,
+                &workspace.config
+            )
+            .unwrap()
+            .unwrap_err()
+            .code(),
+            "STALE_RETRIEVAL_SOURCE"
+        );
+        for field in ["text", "offset", "locator", "bindingRevision"] {
+            let mut changed = workspace.saved_read.clone();
+            changed[field] = match field {
+                "text" => json!("被替换的正文"),
+                "offset" => json!(1),
+                "locator" => json!({"relativePath":"another.txt"}),
+                _ => json!(1),
+            };
+            assert_eq!(
+                verify_saved_read(
+                    &workspace.config,
+                    &workspace.context,
+                    &workspace.reference,
+                    &changed
+                )
+                .unwrap_err()
+                .code(),
+                "STALE_RETRIEVAL_SOURCE",
+                "{field}"
+            );
+        }
+        let foreign = gateway::new_id();
+        gateway::ensure_conversation(&workspace.config.data_root, &foreign, "其他聊天").unwrap();
+        assert_eq!(
+            verify_saved_read(
+                &workspace.config,
+                &json!({"conversationId":foreign,"requestId":gateway::new_id()}),
+                &workspace.reference,
+                &workspace.saved_read
+            )
+            .unwrap_err()
+            .code(),
+            "RETRIEVAL_SOURCE_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn changed_or_deleted_originals_cannot_use_saved_window_recovery() {
+        let workspace = ReadWorkspace::new();
+        workspace.refit_chunks();
+        let mut changed = workspace.source.clone();
+        changed["text"] = json!("新的原文版本，旧窗口不可继续使用。");
+        changed["sourceRevision"] = json!(gateway_index::hash(changed["text"].as_str().unwrap()));
+        gateway_index::publish(&workspace.config, &[changed]).unwrap();
+        assert_eq!(
+            verify_saved_read(
+                &workspace.config,
+                &workspace.context,
+                &workspace.reference,
+                &workspace.saved_read
+            )
+            .unwrap_err()
+            .code(),
+            "STALE_RETRIEVAL_SOURCE"
+        );
+        assert_eq!(
+            final_validate(&workspace.config, &workspace.context).unwrap()["current"],
+            false
+        );
+        gateway_index::remove(
+            &workspace.config,
+            workspace.source["sourceId"].as_str().unwrap(),
+            &json!([workspace.source["scopeKey"]]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_saved_read(
+                &workspace.config,
+                &workspace.context,
+                &workspace.reference,
+                &workspace.saved_read
+            )
+            .unwrap_err()
+            .code(),
+            "RETRIEVAL_SOURCE_NOT_FOUND"
+        );
+    }
+
     #[test]
     fn research_selection_accepts_more_than_sixty_internal_candidates() {
         let items=(0..96).map(|index|{let text=format!("Research evidence about system performance, original result {index}.");let hash=gateway_index::hash(&text);let source=json!({"sourceId":format!("source-{index}"),"scopeKey":"user","contentHash":hash,"sourceRevision":1});let chunk=json!({"chunkId":format!("chunk-{index}"),"chunkHash":hash});json!({"sourceId":source["sourceId"],"scopeKey":"user","contentHash":hash,"sourceRevision":1,"sourceRef":gateway_index::reference(&source,Some(&chunk)),"chunkId":chunk["chunkId"],"chunkHash":hash,"title":format!("Document {index}"),"excerpt":text,"locator":{"relativePath":format!("doc-{index}.md")}})}).collect::<Vec<_>>();

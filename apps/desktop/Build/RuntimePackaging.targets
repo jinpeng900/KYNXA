@@ -1,4 +1,21 @@
 <Project>
+  <PropertyGroup>
+    <KynxaOffline Condition="'$(KynxaOffline)' == ''">false</KynxaOffline>
+    <KynxaRuntimeProfile Condition="'$(KynxaRuntimeProfile)' == ''">Full</KynxaRuntimeProfile>
+    <_KynxaDownloadSourcesFullPath Condition="'$(KynxaDownloadSourcesPath)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaDownloadSourcesPath)'))</_KynxaDownloadSourcesFullPath>
+    <_KynxaResourcePackFullPath Condition="'$(KynxaResourcePackRoot)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaResourcePackRoot)'))</_KynxaResourcePackFullPath>
+    <_KynxaRuntimeOptions>-Profile &quot;$(KynxaRuntimeProfile)&quot;</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaOffline)' == 'true'">$(_KynxaRuntimeOptions) -Offline</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaRuntimeOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaRuntimeOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaRuntimeOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaVisualCppOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
+    <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
+    <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
+         离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
+    <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true'">Build</_KynxaToolHostTargets>
+  </PropertyGroup>
   <!-- Prepare pinned native files using PowerShell and Cargo on the build machine only.
        仅在构建机准备原生文件及固定 MCP 依赖；用户无需安装开发工具或系统 Node。 -->
   <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
@@ -6,7 +23,7 @@
       <_KynxaNativeCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\native-desktop\win-x64'))</_KynxaNativeCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
-          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot;" />
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; $(_KynxaRuntimeOptions)" />
     <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\bundle-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaNativeRuntimeFiles" />
     </ReadLinesFromFile>
@@ -16,12 +33,12 @@
                CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
-  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="IncludeNativeGatewayRuntime" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true'">
     <PropertyGroup>
       <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\vc\win-x64'))</_KynxaVisualCppCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
-          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot;" />
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot; $(_KynxaVisualCppOptions)" />
     <ReadLinesFromFile File="$(_KynxaVisualCppCacheDirectory)\runtime-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaVisualCppFiles" />
     </ReadLinesFromFile>
@@ -36,7 +53,7 @@
     </ItemGroup>
   </Target>
   <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths">
-    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="Restore;Build"
+    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>
       <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)'))))</_KynxaToolHostNoticesDirectory>

@@ -15,15 +15,29 @@ internal static class Program
         Console.OutputEncoding = new UTF8Encoding(false);
         bool desktopRequest = false, hostTerminalRequest = false;
         bool documentOcrRequest = args.Length == 1 && args[0] == "--document-ocr";
+        bool documentArchiveRequest = args.Length == 1 && args[0] == "--document-archive";
         try
         {
             string input = await Console.In.ReadLineAsync()
                 ?? throw new SandboxException("SANDBOX_INVALID_REQUEST", "Missing sandbox request.");
-            if (input.Length > (documentOcrRequest ? DocumentOcr.MaximumFrameCharacters : 128 * 1024))
+            int maximumInputCharacters = documentArchiveRequest ? DocumentArchive.MaximumFrameCharacters
+                : documentOcrRequest ? DocumentOcr.MaximumFrameCharacters : 128 * 1024;
+            if (input.Length > maximumInputCharacters)
                 throw new SandboxException("SANDBOX_INVALID_REQUEST", "Native request is too large.");
             using JsonDocument document = JsonDocument.Parse(input);
             string? operation = document.RootElement.TryGetProperty("operation", out JsonElement value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString() : null;
+            if (documentArchiveRequest)
+            {
+                if (operation != "document_archive")
+                    throw new JsonException("Unknown archive operation.");
+                var archive = JsonSerializer.Deserialize<DocumentArchiveRequest>(input, JsonOptions)
+                    ?? throw new JsonException("Missing archive request.");
+                using var cancelArchive = new CancellationTokenSource();
+                _ = Task.Run(() => MonitorCancellationAsync(cancelArchive));
+                await DocumentArchive.RunAsync(archive, cancelArchive.Token);
+                return 0;
+            }
             if (documentOcrRequest)
             {
                 if (operation == "document_ocr_capabilities")
@@ -95,6 +109,14 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            if (documentArchiveRequest)
+            {
+                string archiveCode = DocumentArchive.ErrorCode(exception);
+                Console.WriteLine(JsonSerializer.Serialize(new { kind = "error", protocolVersion = 1,
+                    boundary = "document-archive", code = archiveCode,
+                    error = new { code = archiveCode, message = "压缩包解码未完成，原件保留。" } }, JsonOptions));
+                return 1;
+            }
             if (documentOcrRequest)
             {
                 string ocrCode = exception switch { DocumentOcrException failure => failure.Code,

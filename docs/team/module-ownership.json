@@ -70,7 +70,8 @@
         "apps/agent-core/src/transport.rs",
         "apps/agent-core/src/service_cancellation.rs",
         "apps/agent-core/src/gateway.rs",
-        "apps/agent-core/src/gateway_contract.rs"
+        "apps/agent-core/src/gateway_contract.rs",
+        "apps/agent-core/src/document_formats.rs"
       ],
       "role": "A"
     },
@@ -302,7 +303,14 @@
         "tree-sitter-python",
         "tree-sitter-java",
         "tree-sitter-cpp",
-        "tree-sitter-go"
+        "tree-sitter-go",
+        "calamine",
+        "cfb",
+        "mail-parser",
+        "rtf-grimoire",
+        "tar",
+        "flate2",
+        "bzip2"
       ],
       "pureDomains": [
         "orchestration",
@@ -362,6 +370,7 @@
         "tools/gateway_mcp.rs",
         "tools/gateway_mcp_budget.rs",
         "tools/gateway_process.rs",
+        "tools/gateway_search.rs",
         "tools/gateway_web.rs",
         "tools/gateway_web_proxy.rs",
         "tools/local_files.rs",
@@ -376,7 +385,26 @@
         "tools/service_skill_import.rs",
         "tools/service_skill_metadata.rs",
         "tools/service_skills.rs",
-        "tools/service_source_reading.rs"
+        "tools/service_source_reading.rs",
+        "orchestration/gateway_task_input.rs",
+        "orchestration/gateway_task_journal.rs",
+        "orchestration/gateway_task_hub.rs",
+        "orchestration/gateway_task_worker.rs",
+        "orchestration/gateway_model_pool.rs",
+        "retrieval/gateway_archives.rs",
+        "retrieval/gateway_url_sources.rs",
+        "retrieval/gateway_document_mail.rs",
+        "retrieval/gateway_office_documents.rs",
+        "retrieval/gateway_legacy_office.rs",
+        "retrieval/gateway_legacy_word.rs",
+        "retrieval/gateway_legacy_powerpoint.rs",
+        "retrieval/gateway_legacy_word_tests.rs",
+        "retrieval/gateway_spreadsheets.rs",
+        "storage/task_repository.rs",
+        "orchestration/gateway_task_http.rs",
+        "orchestration/gateway_task_worker_tests.rs",
+        "orchestration/gateway_document_progress.rs",
+        "storage/task_repository_cleanup.rs"
       ],
       "dependencyVersions": {
         "serde": "=1.0.228",
@@ -415,7 +443,14 @@
         "tree-sitter-python": "=0.23.6",
         "tree-sitter-java": "=0.23.5",
         "tree-sitter-cpp": "=0.23.4",
-        "tree-sitter-go": "=0.23.4"
+        "tree-sitter-go": "=0.23.4",
+        "calamine": "=0.31.0",
+        "cfb": "=0.12.1",
+        "mail-parser": "=0.11.9",
+        "rtf-grimoire": "=0.2.1",
+        "tar": "=0.4.46",
+        "flate2": "=1.1.10",
+        "bzip2": "=0.6.1"
       },
       "integrationModules": [
         {
@@ -514,8 +549,10 @@
         },
         {
           "path": "tools/gateway.rs",
-          "allowedDomains": [],
-          "purpose": "Native tool service and capability I/O composition / 原生工具服务与能力 I/O 组合"
+          "allowedDomains": [
+            "models"
+          ],
+          "purpose": "Authoritative tool execution and exact model wire-name loading / 正式工具执行与精确模型协议名称加载"
         },
         {
           "path": "tools/gateway_process.rs",
@@ -526,7 +563,9 @@
         },
         {
           "path": "tools/gateway_mcp.rs",
-          "allowedDomains": ["resources"],
+          "allowedDomains": [
+            "resources"
+          ],
           "purpose": "Actual MCP transports and callback lifetime / 真实 MCP 传输与回调生命周期"
         },
         {
@@ -538,6 +577,11 @@
           "path": "tools/gateway_web.rs",
           "allowedDomains": [],
           "purpose": "Bounded actual web transport / 有界真实网页传输"
+        },
+        {
+          "path": "tools/gateway_search.rs",
+          "allowedDomains": [],
+          "purpose": "Configured search failover and bounded conversation-scoped request sharing / 已配置搜索故障转移与有界聊天内请求合并"
         },
         {
           "path": "tools/gateway_web_proxy.rs",
@@ -614,13 +658,155 @@
         },
         {
           "path": "retrieval/gateway_history.rs",
-          "allowedDomains": ["storage", "models", "tools"],
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools"
+          ],
           "purpose": "Explicit authorized history evidence over bounded native pages / 有界原生分页上的授权历史显式取证"
         },
         {
           "path": "resources/gateway.rs",
           "allowedDomains": [],
           "purpose": "Actual resource-service transport and lease ownership / 真实资源服务传输与租约拥有权"
+        },
+        {
+          "path": "orchestration/gateway_task_input.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Durable accepted input and scope validation / 持久接受输入及范围核验"
+        },
+        {
+          "path": "orchestration/gateway_document_progress.rs",
+          "allowedDomains": ["storage", "models"],
+          "purpose": "Document findings over existing task artifacts / 逐文档成果复用既有任务产物"
+        },
+        {
+          "path": "orchestration/gateway_task_journal.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Attempt-scoped event and checkpoint I/O / 尝试范围事件及检查点 I/O"
+        },
+        {
+          "path": "orchestration/gateway_task_hub.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools",
+            "retrieval"
+          ],
+          "purpose": "Task scheduling and existing worker composition / 任务调度与既有 Worker 组合"
+        },
+        {
+          "path": "orchestration/gateway_task_worker.rs",
+          "allowedDomains": [
+            "storage",
+            "models",
+            "tools",
+            "retrieval"
+          ],
+          "purpose": "Independent model/tool execution over shared permissions and budgets / 独立模型工具执行，共用权限与预算"
+        },
+        {
+          "path": "orchestration/gateway_model_pool.rs",
+          "allowedDomains": [
+            "models"
+          ],
+          "purpose": "Actual request concurrency, distinct from hardware leases / 真实请求并发，与硬件租约分离"
+        },
+        {
+          "path": "retrieval/gateway_archives.rs",
+          "allowedDomains": [
+            "storage",
+            "tools",
+            "resources"
+          ],
+          "purpose": "Bounded archive member parsing and process ownership / 有界压缩包成员解析与进程拥有权"
+        },
+        {
+          "path": "retrieval/gateway_url_sources.rs",
+          "allowedDomains": [
+            "storage",
+            "tools"
+          ],
+          "purpose": "Validated web downloads into formal source snapshots / 核验网页下载进入正式来源快照"
+        },
+        {
+          "path": "retrieval/gateway_document_mail.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Bounded MIME text decoding with shared errors / 有界 MIME 文本解码与共用错误"
+        },
+        {
+          "path": "retrieval/gateway_office_documents.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Bounded office format parsing over supplied bytes / 对输入字节进行有界 Office 解析"
+        },
+        {
+          "path": "retrieval/gateway_legacy_office.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Bounded compound Office dispatch and stream reads / 有界旧 Office 调度与流读取"
+        },
+        {
+          "path": "retrieval/gateway_legacy_word.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "MS-DOC active piece tables and text stories / MS-DOC 活动片段表与文本区域"
+        },
+        {
+          "path": "retrieval/gateway_legacy_powerpoint.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "MS-PPT active slides and notes across saves / MS-PPT 跨保存活动幻灯片与备注"
+        },
+        {
+          "path": "retrieval/gateway_legacy_word_tests.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Independent legacy Word fixtures and malformed-input checks / 独立旧 Word 样本与无效输入检查"
+        },
+        {
+          "path": "retrieval/gateway_spreadsheets.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Spreadsheet value and formula parsing / 表格单元格与公式解析"
+        },
+        {
+          "path": "storage/task_repository.rs",
+          "allowedDomains": [],
+          "purpose": "Authoritative task SQLite transactions and fencing / 正式任务 SQLite 事务与围栏"
+        },
+        {
+          "path": "orchestration/gateway_task_http.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Authorized task HTTP projections over Hub / 对 Hub 进行获授权的任务 HTTP 投影"
+        },
+        {
+          "path": "orchestration/gateway_task_worker_tests.rs",
+          "allowedDomains": [
+            "models",
+            "storage",
+            "tools"
+          ],
+          "purpose": "cfg(test)-only native Worker integration fixtures / 仅 cfg(test) 编译的原生 Worker 集成夹具"
+        },
+        {
+          "path": "storage/task_repository_cleanup.rs",
+          "allowedDomains": [],
+          "purpose": "Transactional task cleanup plans and owned-file recovery / 任务清理事务计划与自有文件恢复"
         }
       ]
     }

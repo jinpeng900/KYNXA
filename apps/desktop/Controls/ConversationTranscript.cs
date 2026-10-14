@@ -513,6 +513,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                     assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                         round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
+                        isAnswerContinuation = segment.Source.IsAnswerContinuation,
                         status = segment.Source.Status, content = segment.Source.Content, html = segment.Html,
                         htmlStableLength = segment.Stream?.StableHtml.Length, htmlStableBlocks = segment.Stream?.StableBlocks,
                         reasoningHtml = segment.ReasoningHtml,

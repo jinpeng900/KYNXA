@@ -22,7 +22,10 @@ use crate::models::protocol::{array, string, truthy};
 const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "mjs", "cjs", "js", "jsx", "ts", "mts", "cts", "tsx", "cs", "xaml",
     "html", "css", "json", "yaml", "yml", "xml", "toml", "csv", "py", "pyi", "rs", "go", "java",
-    "cpp", "c", "h", "sql", "ps1",
+    "cpp", "c", "h", "sql", "ps1", "log", "rst", "adoc", "asciidoc", "tex", "bib", "org",
+    "ini", "cfg", "conf", "env", "properties", "tsv", "ndjson", "jsonl", "ipynb", "srt", "vtt",
+    "scss", "sass", "less", "vue", "svelte", "kt", "kts", "swift", "rb", "php", "sh", "bat",
+    "cmd", "lua", "r", "rmd", "jl", "dart", "scala", "clj", "ex", "exs", "erl", "hrl",
 ];
 const IGNORED: &[&str] = &[
     ".git",
@@ -74,28 +77,14 @@ fn cancelled(token: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn format(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("")
-        .to_lowercase()
-        .as_str()
-    {
-        "pdf" => Some("pdf"),
-        "docx" => Some("docx"),
-        _ => None,
-    }
+pub(crate) fn document_format(path: &Path) -> Option<&'static str> {
+    crate::document_formats::detect(path).map(|format| format.name)
 }
 fn version(path: &Path) -> Value {
-    match format(path) {
-        Some("pdf") => json!("pdfjs-dist-6.4.299:text-v2"),
-        Some("docx") => json!("mammoth-1.13.0:yauzl-3.4.0:text-v1"),
-        _ => Value::Null,
-    }
+    crate::document_formats::detect(path).map_or(Value::Null, |format| json!(format.version))
 }
-fn supported(path: &Path) -> bool {
-    format(path).is_some()
+pub(crate) fn supported(path: &Path) -> bool {
+    document_format(path).is_some()
         || TEXT_EXTENSIONS.contains(
             &path
                 .extension()
@@ -473,7 +462,7 @@ impl SourceReadingState {
                     cancelled(token)?;
                     let entry = entry.map_err(ServiceError::io)?;
                     let path = entry.path();
-                    let document = format(&path).is_some()
+                    let document = document_format(&path).is_some()
                         && entry.file_type().is_ok_and(|kind| kind.is_file());
                     candidates.push((document, path));
                     if candidates.len() > capacity {
@@ -535,7 +524,7 @@ impl SourceReadingState {
                 {
                     return Err(error("PROTECTED_RETRIEVAL_SOURCE"));
                 }
-                if !supported(&path) || args["window"] == true && format(&path).is_some() {
+                if !supported(&path) || args["window"] == true && document_format(&path).is_some() {
                     return Err(error(if args["window"] == true {
                         "PROTECTED_RETRIEVAL_SOURCE"
                     } else {
@@ -543,7 +532,7 @@ impl SourceReadingState {
                     }));
                 }
                 Ok(
-                    json!({"format": format(&path), "version": version(&path), "inputBytes": number(&args["maximumSourceBytes"], 32 * 1024 * 1024).min(number(&args["maximumDocumentInputBytes"], 32 * 1024 * 1024)),
+                    json!({"format": document_format(&path), "version": version(&path), "inputBytes": number(&args["maximumSourceBytes"], 32 * 1024 * 1024).min(number(&args["maximumDocumentInputBytes"], 32 * 1024 * 1024)),
                     "outputBytes": number(&args["maximumSourceBytes"], 32 * 1024 * 1024).min(number(&args["maximumDocumentOutputBytes"], 2 * 1024 * 1024)), "maximumPages": number(&args["maximumPdfPages"], 100)}),
                 )
             }
@@ -603,9 +592,9 @@ impl SourceReadingState {
                     .map(|value| string(value).into())
                     .collect();
                 self.dirty.make_contiguous().sort_by(|left, right| {
-                    format(Path::new(left))
+                    document_format(Path::new(left))
                         .is_some()
-                        .cmp(&format(Path::new(right)).is_some())
+                        .cmp(&document_format(Path::new(right)).is_some())
                         .then_with(|| left.cmp(right))
                 });
                 if !self.single_file {
@@ -903,7 +892,7 @@ fn final_metadata(
     }
     metadata(path, after)
 }
-fn decode(bytes: &[u8], encoding: &str) -> ServiceResult<String> {
+pub(crate) fn decode(bytes: &[u8], encoding: &str) -> ServiceResult<String> {
     if encoding == "utf-16le" {
         if bytes.len() % 2 != 0 {
             return Err(error("UNSUPPORTED_RETRIEVAL_SOURCE"));
@@ -1177,7 +1166,7 @@ pub(crate) fn execute_io(
 
 #[cfg(test)]
 mod tests {
-    use super::same;
+    use super::{same, SourceReadingState};
     use serde_json::{Value, json};
 
     #[test]
@@ -1199,5 +1188,25 @@ mod tests {
         assert!(same(&observed, &restored));
         restored["mtimeMs"] = json!(1_791_721_997_237.223);
         assert!(!same(&observed, &restored));
+    }
+
+    #[test]
+    fn image_sources_are_binary_documents_and_share_the_native_parser_version() {
+        let mut state = SourceReadingState::default();
+        let root = std::env::temp_dir();
+        for extension in ["png", "JPG", "jpeg", "bmp", "gif", "tif", "tiff", "webp"] {
+            let path = root.join(format!("authorized-picture.{extension}"));
+            let policy = state.apply("filePolicy", &json!({"path":path}), &None).unwrap();
+            assert!(policy["format"].is_string());
+            assert_eq!(policy["version"], "windows-image-ocr-text-v1");
+            assert!(state.apply("filePolicy", &json!({"path":path,"window":true}), &None).is_err());
+            assert_eq!(super::super::calculate("tools.pathDomain", &json!({"path":path})).unwrap(), "knowledge");
+        }
+        assert_eq!(state.apply("version", &json!({"path":root.join("a.pdf")}), &None).unwrap(), "rust-lopdf-text-v1");
+        assert_eq!(state.apply("version", &json!({"path":root.join("a.docx")}), &None).unwrap(), "rust-docx-text-v1");
+        assert!(state.apply("filePolicy", &json!({"path":root.join("unsupported-media.avi")}), &None).is_err());
+        let references = super::super::calculate("tools.fileReferences", &json!({"message":"检索 account-guide.png 的密码说明"})).unwrap();
+        assert_eq!(references[0]["domain"], "knowledge");
+        assert!(super::super::calculate("tools.fileReferences", &json!({"message":"图片清晰度如何改善"})).unwrap().as_array().unwrap().is_empty());
     }
 }

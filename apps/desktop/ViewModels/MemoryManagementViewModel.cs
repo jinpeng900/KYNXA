@@ -25,7 +25,8 @@ public sealed record MemoryTarget(string Scope, Guid? Id, string DisplayName, bo
 public enum MemoryManagementStatus
 {
     None, Loading, Ready, Saved, Deleted, Conflict, ConflictRefreshFailed, SavedRefreshFailed,
-    DeletedRefreshFailed, Error, InvalidContent, InvalidKind, EntryMissing, WriteOutcomeUnknown, Cancelled
+    DeletedRefreshFailed, Error, InvalidContent, InvalidKind, EntryMissing, WriteOutcomeUnknown, Cancelled,
+    Confirmed, ConfirmedRefreshFailed
 }
 
 public enum MemoryOperationResult
@@ -49,6 +50,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     private string _editorKind = MemoryKinds.Fact;
     private string _baselineContent = string.Empty;
     private string _baselineKind = MemoryKinds.Fact;
+    private long? _editorEntryRevision;
     private Guid? _editingId;
     private MemoryEntry? _selectedEntry;
     private bool _createOutcomeUnknown;
@@ -79,6 +81,13 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         (IsNew || (HasChanges && Entries.Any(entry => entry.Id == _editingId)));
     public bool CanDelete => !_disposed && !IsBusy && IsLoaded && SelectedEntry is not null &&
         Entries.Any(entry => entry.Id == SelectedEntry.Id);
+    public bool IsDraft => Entries.FirstOrDefault(entry => entry.Id == _editingId)?.Status == MemoryStatuses.Draft;
+    public bool CanConfirm => !_disposed && !IsBusy && IsLoaded && !HasChanges && InputError == MemoryInputError.None &&
+        SelectedEntry is { Status: MemoryStatuses.Draft, SourceAvailable: true } entry && entry.Id == _editingId &&
+        entry.Revision == _editorEntryRevision && entry.Content == _baselineContent && entry.Kind == _baselineKind &&
+        Entries.Any(current => current.Id == entry.Id && current.Status == MemoryStatuses.Draft) &&
+        (entry.Proposal?.Target is not { } target || Entries.Any(current => current.Id == target.Id &&
+            current.Status == MemoryStatuses.Confirmed && current.Revision == target.EntryRevision));
 
     public MemoryEntry? SelectedEntry
     {
@@ -89,6 +98,7 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             _selectedEntry = value;
             Notify();
             Notify(nameof(CanDelete));
+            Notify(nameof(CanConfirm));
         }
     }
 
@@ -217,12 +227,16 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     public Task<MemoryOperationResult> DeleteAsync(CancellationToken cancellationToken = default) =>
         CanDelete ? WriteAsync(deleting: true, cancellationToken) : Task.FromResult(MemoryOperationResult.NotReady);
 
-    private async Task<MemoryOperationResult> WriteAsync(bool deleting, CancellationToken cancellationToken)
+    public Task<MemoryOperationResult> ConfirmAsync(CancellationToken cancellationToken = default) =>
+        CanConfirm ? WriteAsync(deleting: false, cancellationToken, confirming: true) : Task.FromResult(MemoryOperationResult.NotReady);
+
+    private async Task<MemoryOperationResult> WriteAsync(bool deleting, CancellationToken cancellationToken, bool confirming = false)
     {
         var target = Target!;
         long revision = ScopeRevision!.Value;
         Guid? entryId = deleting ? SelectedEntry!.Id : _editingId;
         string content = EditorContent, kind = EditorKind;
+        var proposal = confirming ? SelectedEntry?.Proposal : null;
         int editorGeneration = _editorGeneration;
         var previousIds = Entries.Select(entry => entry.Id).ToHashSet();
         var operation = StartOperation(cancellationToken);
@@ -233,13 +247,16 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             NotifyAll();
             MemoryScopeDocument written;
             if (deleting) written = await _api.DeleteAsync(target, entryId!.Value, new(target.Scope, revision), operation.Token);
+            else if (confirming) written = await _api.ConfirmAsync(target, entryId!.Value,
+                new(target.Scope, revision, ProposalAction: proposal?.Action), operation.Token);
             else if (entryId is { } id) written = await _api.UpdateAsync(target, id, new(target.Scope, content, kind, revision), operation.Token);
             else written = await _api.CreateAsync(target, new(target.Scope, content, kind, revision), operation.Token);
             committed = true;
             if (!IsCurrent(operation)) return MemoryOperationResult.Superseded;
             if (!deleting && entryId is null)
                 entryId = written.Entries.FirstOrDefault(entry => !previousIds.Contains(entry.Id))?.Id;
-            _completedWrite = new(entryId, deleting, editorGeneration);
+            Guid? resultEntryId = confirming && proposal?.Action == "update" ? proposal.Target!.Id : entryId;
+            _completedWrite = new(resultEntryId, deleting || (confirming && proposal?.Action == "delete"), editorGeneration, confirming);
             IsLoaded = false;
             operation.Token.ThrowIfCancellationRequested();
             var document = await _api.GetAsync(target, operation.Token);
@@ -249,7 +266,8 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             ApplyCompletedWrite(_completedWrite);
             return MemoryOperationResult.Success;
         }
-        catch (GatewayApiException error) when (error.StatusCode == HttpStatusCode.Conflict && error.ErrorCode == "MEMORY_CONFLICT" && !committed)
+        catch (GatewayApiException error) when (error.StatusCode == HttpStatusCode.Conflict &&
+            error.ErrorCode is "MEMORY_CONFLICT" or "MEMORY_TARGET_CHANGED" or "MEMORY_SCOPE_CHANGED" or "MEMORY_SOURCE_UNAVAILABLE" && !committed)
         {
             if (!IsCurrent(operation)) return MemoryOperationResult.Superseded;
             Error = error;
@@ -275,7 +293,8 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             if (!IsCurrent(operation)) return MemoryOperationResult.Superseded;
             IsLoaded = false;
             _createOutcomeUnknown = !deleting && entryId is null && !committed;
-            Status = committed ? (deleting ? MemoryManagementStatus.DeletedRefreshFailed : MemoryManagementStatus.SavedRefreshFailed) :
+            Status = committed ? (confirming ? MemoryManagementStatus.ConfirmedRefreshFailed :
+                deleting ? MemoryManagementStatus.DeletedRefreshFailed : MemoryManagementStatus.SavedRefreshFailed) :
                 _createOutcomeUnknown ? MemoryManagementStatus.WriteOutcomeUnknown : MemoryManagementStatus.Cancelled;
             return MemoryOperationResult.Cancelled;
         }
@@ -286,7 +305,8 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             if (committed)
             {
                 IsLoaded = false;
-                Status = deleting ? MemoryManagementStatus.DeletedRefreshFailed : MemoryManagementStatus.SavedRefreshFailed;
+                Status = confirming ? MemoryManagementStatus.ConfirmedRefreshFailed :
+                    deleting ? MemoryManagementStatus.DeletedRefreshFailed : MemoryManagementStatus.SavedRefreshFailed;
             }
             else if (error is not GatewayApiException || (!deleting && entryId is null &&
                 error is GatewayApiException { StatusCode: >= HttpStatusCode.InternalServerError }))
@@ -320,7 +340,8 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
             if (completed.Deleting && _editingId == completed.EntryId) ResetEditor(null);
             else if (!completed.Deleting) ResetEditor(Entries.FirstOrDefault(entry => entry.Id == completed.EntryId));
         }
-        Status = completed.Deleting ? MemoryManagementStatus.Deleted : MemoryManagementStatus.Saved;
+        Status = completed.Confirming ? MemoryManagementStatus.Confirmed :
+            completed.Deleting ? MemoryManagementStatus.Deleted : MemoryManagementStatus.Saved;
         _completedWrite = null;
     }
 
@@ -328,6 +349,9 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
     {
         SelectedEntry = entry;
         _editingId = entry?.Id;
+        // Confirmation belongs to the exact draft the editor displayed, not a newer row loaded after a conflict.
+        // 确认绑定编辑器已展示的草稿版本；冲突刷新出的新条目不能借用旧表单的确认。
+        _editorEntryRevision = entry?.Revision;
         _editorContent = _baselineContent = entry?.Content ?? string.Empty;
         _editorKind = _baselineKind = entry?.Kind ?? (Target?.Scope == MemoryScopes.User ? MemoryKinds.Preference : MemoryKinds.Fact);
         _createOutcomeUnknown = false;
@@ -373,6 +397,8 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         Notify(nameof(HasChanges));
         Notify(nameof(InputError));
         Notify(nameof(CanSave));
+        Notify(nameof(IsDraft));
+        Notify(nameof(CanConfirm));
     }
 
     private void NotifyAll() => Notify(string.Empty);
@@ -390,5 +416,5 @@ public sealed class MemoryManagementViewModel : INotifyPropertyChanged, IDisposa
         public CancellationToken Token => Source.Token;
     }
 
-    private sealed record CompletedWrite(Guid? EntryId, bool Deleting, int EditorGeneration);
+    private sealed record CompletedWrite(Guid? EntryId, bool Deleting, int EditorGeneration, bool Confirming);
 }

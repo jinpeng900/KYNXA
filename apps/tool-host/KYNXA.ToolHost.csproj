@@ -11,5 +11,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Using Include="System.IO" />
+    <PackageReference Include="SharpCompress" Version="[0.50.5]" />
   </ItemGroup>
 </Project>

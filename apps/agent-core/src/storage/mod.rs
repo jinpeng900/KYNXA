@@ -30,6 +30,7 @@ mod native_services_tests;
 pub mod raw_json;
 pub mod retrieval;
 pub mod settings;
+pub mod task_repository;
 pub mod source_coverage;
 pub mod source_manifest;
 pub mod sqlite_bootstrap;

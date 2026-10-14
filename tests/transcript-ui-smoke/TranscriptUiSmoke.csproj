@@ -26,6 +26,7 @@
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptMarkdown.cs" Link="TranscriptMarkdown.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/TranscriptPresentation.cs" Link="TranscriptPresentation.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationExport.cs" Link="ConversationExport.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/MessageTimePresentation.cs" Link="MessageTimePresentation.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/MessageEndTimeCache.cs" Link="MessageEndTimeCache.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/MathMarkdown.cs" Link="MathMarkdown.cs" />
@@ -48,5 +49,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="Contracts/ChatApiContracts.cs" />
   </ItemGroup>
 </Project>

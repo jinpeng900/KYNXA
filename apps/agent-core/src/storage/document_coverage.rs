@@ -40,8 +40,17 @@ pub fn validate(value: &Value) -> ContractResult {
             "effectiveLimits",
             "limit",
             "readback",
+            "encoding",
         ],
-    ) || !member(&value["format"], &["pdf", "docx"])
+    ) || !crate::document_formats::extracted_format(value["format"].as_str().unwrap_or(""))
+        || if value["format"] == "image" {
+            !member(
+                &value["encoding"],
+                &["png", "jpeg", "bmp", "gif", "tiff", "webp"],
+            )
+        } else {
+            value.get("encoding").is_some()
+        }
         || !(reason
             .strip_prefix("DOCUMENT_")
             .or_else(|| reason.strip_prefix("OCR_"))
@@ -62,7 +71,7 @@ pub fn validate(value: &Value) -> ContractResult {
     }
     if value.get("pageCount").is_some_and(|page_count| {
         !integer(page_count, 1) || value["processedPages"].as_f64() > page_count.as_f64()
-    }) || value["format"] == "docx"
+    }) || value["format"] != "pdf"
         && (value.get("pageCount").is_some() || value["processedPages"] != 0)
     {
         return Err(invalid());
@@ -134,4 +143,24 @@ pub fn validate(value: &Value) -> ContractResult {
         return Err(invalid());
     }
     Ok(value.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn failed_image_coverage_preserves_original_identity_without_claiming_pdf_pages() {
+        let mut coverage = json!({"format":"image","encoding":"png","reasonCode":"OCR_IMAGE_MULTIFRAME_UNSUPPORTED",
+            "complete":false,"processedPages":0,"publishedPages":0,"rawContentHash":"a".repeat(64),
+            "uncoveredRanges":[],"unprocessedRanges":[],"effectiveLimits":{"maximumInputBytes":33554432,"maximumOutputBytes":2097152,"maximumPages":1},
+            "readback":{"kind":"original-document"}});
+        assert!(validate(&coverage).is_ok());
+        coverage["pageCount"] = json!(1);
+        assert!(validate(&coverage).is_err());
+        coverage.as_object_mut().unwrap().remove("pageCount");
+        coverage["encoding"] = json!("exe");
+        assert!(validate(&coverage).is_err());
+    }
 }

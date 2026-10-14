@@ -7,6 +7,43 @@ fn valid_limit(value: &Value) -> Option<u64> {
         .as_u64()
         .filter(|value| *value > 0 && *value <= 2_000_000)
 }
+
+fn exact_official_endpoint(endpoint: &Value) -> bool {
+    endpoint["protocol"] == "https:"
+        && ["port", "username", "password", "search", "hash"]
+            .iter()
+            .all(|key| string(&endpoint[*key]).is_empty())
+        && ["", "/", "/v1", "/v1/"].contains(&string(&endpoint["pathname"]))
+}
+
+/// Auxiliary summaries may use a declared provider mode; this never establishes proxy quotas or changes normal replies.
+/// 辅助摘要可使用明确供应商的专用模式；不据此认定代理额度，也不改变正常回复的思考设置。
+fn summary_controls(args: &Value) -> Value {
+    let endpoint = &args["endpoint"];
+    let known_model = ["deepseek-flash", "deepseek-v4-pro"].contains(&string(&args["model"]));
+    let valid_endpoint = ["http:", "https:"].contains(&string(&endpoint["protocol"]))
+        && !string(&endpoint["hostname"]).is_empty()
+        && ["username", "password", "search", "hash"]
+            .iter()
+            .all(|key| string(&endpoint[*key]).is_empty());
+    let official = exact_official_endpoint(endpoint) && endpoint["hostname"] == "api.deepseek.com";
+    let compatible = valid_endpoint && args["providerId"] == "deepseek";
+    let applied =
+        args["protocol"] == "openai-completions" && known_model && (official || compatible);
+    let basis = if !applied {
+        Value::Null
+    } else if official {
+        json!("official-endpoint")
+    } else {
+        json!("configured-compatible-provider")
+    };
+    json!({
+        "parameters":if applied {json!({"thinking":{"type":"disabled"}})} else {json!({})},
+        "audit":{"purpose":"context-summary","applied":applied,"basis":basis,
+            "control":if applied {json!("thinking-disabled")} else {Value::Null},
+            "quotaInferred":false}
+    })
+}
 fn official(host: &str, model: &str) -> Option<Value> {
     let (window, output, input, source) = match host {
         "api.deepseek.com" if ["deepseek-flash", "deepseek-v4-pro"].contains(&model) => (
@@ -156,14 +193,11 @@ fn official(host: &str, model: &str) -> Option<Value> {
 /// 精确快照能力声明不推测代理、未知别名或凭据拥有者的可用额度；保留现有已核验表。
 pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
     let endpoint = &args["endpoint"];
+    if operation == "models.capabilities.summaryControls" {
+        return Ok(summary_controls(args));
+    }
     if operation == "models.capabilities.lookup" {
-        if endpoint["protocol"] != "https:"
-            || ["port", "username", "password", "search", "hash"]
-                .iter()
-                .any(|key| !string(&endpoint[*key]).is_empty())
-            || !["", "/", "/v1", "/v1/"].contains(&string(&endpoint["pathname"]))
-            || !args["model"].is_string()
-        {
+        if !exact_official_endpoint(endpoint) || !args["model"].is_string() {
             return Ok(json!({}));
         }
         return Ok(

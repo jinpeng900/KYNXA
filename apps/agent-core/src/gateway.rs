@@ -78,7 +78,9 @@ pub fn health() -> Value {
         "browserAutomationProtocol": 2,
         "extensionStorageProtocol": 1,
         "toolStreamProtocol": 3,
-        "retrievalProtocol": 1
+        "retrievalProtocol": 1,
+        "taskProtocol": 1,
+        "documentParsingProtocol": 2
     })
 }
 
@@ -92,7 +94,7 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
 struct StreamOwner(Arc<crate::orchestration::gateway_runtime::RequestRun>);
 impl Drop for StreamOwner {
     fn drop(&mut self) {
-        if !self.0.finished.load(Ordering::Acquire) {
+        if self.0.journal.is_none() && !self.0.finished.load(Ordering::Acquire) {
             self.0.cancel();
         }
     }
@@ -256,6 +258,60 @@ async fn handle(
     let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
+    if method == Method::GET && path.starts_with("/api/tasks/") && path.ends_with("/stream") {
+        let task_path = path.trim_end_matches("/stream");
+        let authorized = crate::orchestration::gateway_task_http::handle(
+            &runtime, "GET", task_path, &query, &body,
+        )
+        .await;
+        if let Some(Err(error)) = authorized {
+            return response(Err(error));
+        }
+        let task_id = task_path.trim_start_matches("/api/tasks/");
+        let conversation = query
+            .iter()
+            .find(|(key, _)| key == "conversationId")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("");
+        let run = match runtime.observe_task(task_id, conversation).await {
+            Ok(run) => run,
+            Err(error) => return response(Err(error)),
+        };
+        let events = match RequestEventStream::new(run.clone()).await {
+            Ok(events) => events,
+            Err(error) => return response(Err(error)),
+        };
+        let owner = StreamOwner(run);
+        let source =
+            stream::unfold((events, owner), |(mut events, owner)| async move {
+                let event = events.next().await?;
+                Some((
+                    Ok::<_, Infallible>(Event::default().data(
+                        crate::storage::gateway::normalize_transport_numbers(event).to_string(),
+                    )),
+                    (events, owner),
+                ))
+            });
+        let mut result = Sse::new(source)
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+            .into_response();
+        result.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+        return result;
+    }
+    if let Some(result) = crate::orchestration::gateway_task_http::handle(
+        &runtime,
+        method.as_str(),
+        path,
+        &query,
+        &body,
+    )
+    .await
+    {
+        return response(result);
+    }
     if path == "/health" && method == Method::GET {
         runtime.schedule_extension_prewarm();
         return response(Ok((200, health())));
@@ -374,7 +430,29 @@ async fn handle(
     })
     .await;
     match stored {
-        Ok(Some(result)) => return response(result.map_err(Into::into)),
+        Ok(Some(result)) => {
+            if method == Method::PUT
+                && path == "/api/conversations/catalog"
+                && result.as_ref().is_ok_and(|(status, _)| *status < 400)
+            {
+                let root = runtime.config.data_root.clone();
+                if let Ok(Ok(catalog)) = tokio::task::spawn_blocking(move || {
+                    crate::storage::gateway::load_catalog(&root)
+                })
+                .await
+                {
+                    if let Err(error) = runtime.tasks.reconcile_deleted_chats(&catalog).await {
+                        // The catalog commit is already authoritative; expose task retirement failure without repeating it.
+                        // 目录提交已经生效；报告任务撤销失败，不再次提交目录或重复操作。
+                        eprintln!(
+                            "{}",
+                            json!({"code":error.code,"message":error.message,"taskRetirement":"pending"})
+                        );
+                    }
+                }
+            }
+            return response(result.map_err(Into::into));
+        }
         Err(_) => {
             return response(Err(GatewayError::new(
                 "DATA_WORKER_FAILED",
@@ -541,6 +619,15 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
         "{}",
         json!({"service":"kynxa-model-gateway","runtime":"rust","port":listener.local_addr()?.port(),"nodeRuntime":false})
     );
+    let recovery = runtime.tasks.clone();
+    tokio::spawn(async move {
+        if let Err(error) = recovery.recover().await {
+            eprintln!(
+                "{}",
+                json!({"code":error.code,"message":error.message,"taskRecovery":"blocked"})
+            );
+        }
+    });
     let shutdown = runtime.clone();
     axum::serve(listener, router(runtime))
         .with_graceful_shutdown(async move {

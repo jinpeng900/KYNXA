@@ -4,11 +4,13 @@ param(
     [Parameter(Mandatory = $true)][string]$CacheDirectory,
     [string]$ManifestPath,
     [string]$RedistDirectory,
+    [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
+    [string]$ResourcePackRoot = $env:KYNXA_RESOURCE_PACK_ROOT,
     [switch]$Offline
 )
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
 # MSBuild can inherit PowerShell 7 module paths while launching Windows PS 5.1.
 # MSBuild 启动 Windows PS 5.1 时可能继承 PS 7 模块路径，显式加载当前宿主的签名校验模块。
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1')
@@ -42,6 +44,12 @@ function Test-VisualRuntimeFile([string]$Path, $Spec) {
 }
 function Find-VisualRuntimeRedist {
     if (-not [string]::IsNullOrWhiteSpace($RedistDirectory)) { return [IO.Path]::GetFullPath($RedistDirectory) }
+    if ($ResourcePackRoot) {
+        $packRoot = if ([IO.Directory]::Exists($ResourcePackRoot)) { [IO.Path]::GetFullPath($ResourcePackRoot) }
+            else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../artifacts/runtime/native-desktop/win-x64')) }
+        $packRedist = Join-Path $packRoot 'runtime/vc'
+        if ([IO.Directory]::Exists($packRedist)) { return $packRedist }
+    }
     $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not [IO.File]::Exists($locator)) { throw 'The licensed MSVC Redist build source is unavailable. Supply -RedistDirectory from the official pinned toolset.' }
     $compilerInstall = & $locator -latest -products '*' -property installationPath
@@ -88,15 +96,15 @@ try {
     $licensePath = Join-Path $licenseDirectory 'Microsoft-Visual-Cpp-Runtime-2026.docx'
     Assert-VisualRuntimePath $licensePath
     if (-not (Test-VisualRuntimeFile $licensePath $runtimeManifest.license)) {
-        if ($Offline) { throw 'The original VC runtime license is not cached. An online build is required once.' }
-        $pendingLicense = $licensePath + '.download-' + [Guid]::NewGuid().ToString('N')
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $runtimeManifest.license.url -UseBasicParsing -OutFile $pendingLicense -TimeoutSec 60
-            if (-not (Test-VisualRuntimeFile $pendingLicense $runtimeManifest.license)) { throw 'The original VC license failed integrity verification.' }
-            Move-Item -LiteralPath $pendingLicense -Destination $licensePath -Force
+        if ($ResourcePackRoot) {
+            $packRoot = if ([IO.Directory]::Exists($ResourcePackRoot)) { [IO.Path]::GetFullPath($ResourcePackRoot) }
+                else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../artifacts/runtime/native-desktop/win-x64')) }
+            $packLicense = Join-Path $packRoot 'runtime/vc/licenses/Microsoft-Visual-Cpp-Runtime-2026.docx'
+            if (Test-VisualRuntimeFile $packLicense $runtimeManifest.license) { Copy-Item -LiteralPath $packLicense -Destination $licensePath -Force }
         }
-        finally { if ([IO.File]::Exists($pendingLicense)) { Remove-Item -LiteralPath $pendingLicense } }
+        if (-not (Test-VisualRuntimeFile $licensePath $runtimeManifest.license)) {
+            Save-KynxaPinnedDownload -Url $runtimeManifest.license.url -Destination $licensePath -Sha256 $runtimeManifest.license.sha256 -ExpectedBytes $runtimeManifest.license.bytes -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+        }
     }
     Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $licenseDirectory 'vc-runtime-manifest.json') -Force
     [IO.File]::WriteAllText((Join-Path $runtimeCache 'runtime-path.txt'), $runtimeBundle, [Text.UTF8Encoding]::new($false))

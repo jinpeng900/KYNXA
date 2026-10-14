@@ -17,9 +17,37 @@ pub fn provider_kind(descriptor: &Value) -> Option<&'static str> {
         Some("exa")
     } else if matches(r"(?:^|[._])brave_web_search$", name) {
         Some("brave")
+    } else if name.ends_with("web_search")
+        && (string(&descriptor["serverId"]).contains("parallel")
+            || descriptor["originalInputSchema"]["properties"]["search_queries"].is_object())
+    {
+        Some("parallel")
     } else {
         None
     }
+}
+
+/// Recognize configured capabilities without connecting or enabling another service.
+/// 只识别已有配置能力，不为候选发现建立连接或启用其他服务。
+pub fn search_server(server: &Value) -> bool {
+    matches(
+        r"(?i)(?:^|[-_.])(?:exa|brave(?:-search)?|parallel)(?:[-_.]|$)",
+        string(&server["id"]),
+    ) || server["url"]
+        .as_str()
+        .and_then(|value| Url::parse(value).ok())
+        .is_some_and(|url| matches!(url.host_str(), Some("mcp.exa.ai" | "search.parallel.ai")))
+        || array(&server["args"])
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|argument| {
+                argument.contains("exa-mcp-server")
+                    || argument.contains("brave-search-mcp")
+                    || argument.contains("server-brave-search")
+            })
+        || array(&server["tools"])
+            .iter()
+            .any(|tool| provider_kind(tool).is_some())
 }
 pub fn public_fetch(descriptor: &Value) -> bool {
     descriptor["name"] == "web.fetch"
@@ -226,7 +254,7 @@ impl WebState {
                     .ok_or_else(|| {
                         ServiceError::new(
                             "WEB_SEARCH_PROVIDER_UNAVAILABLE",
-                            "没有就绪的搜索服务，请启用 Exa 或 Brave MCP。",
+                            "没有就绪的搜索服务，请启用 Exa、Parallel 或 Brave MCP。",
                             503,
                         )
                     })?;
@@ -239,6 +267,15 @@ impl WebState {
                     .unwrap_or(6)
                     .min(if arguments["depth"] == "deep" { 20 } else { 6 });
                 let mut input = json!({"query":arguments["query"]});
+                if provider_kind(descriptor) == Some("parallel") {
+                    // Preserve the original query and stable conversation identity; never rotate identities to evade limits.
+                    // 保留原查询与稳定聊天身份，不能通过轮换身份规避限流。
+                    input = json!({"objective":arguments["query"],"search_queries":[arguments["query"]]});
+                    if properties.get("session_id").is_some() {
+                        input["session_id"] =
+                            json!(sha256(string(&arguments["conversationId"]).as_bytes()));
+                    }
+                }
                 if properties.get("numResults").is_some() {
                     input["numResults"] = json!(count);
                 }

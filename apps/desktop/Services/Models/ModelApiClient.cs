@@ -90,6 +90,19 @@ public sealed class ModelApiClient : IDisposable
         return reply;
     }
 
+    /// <summary>Explicit user cancellation is separate from disconnecting a reply stream.</summary>
+    /// <remarks>用户明确取消与关闭回复观察连接分开；不把 HTTP 失败当作取消成功。</remarks>
+    public async Task CancelReplyAsync(Guid conversationId, Guid requestId, CancellationToken cancellationToken = default)
+    {
+        if (conversationId == Guid.Empty || requestId == Guid.Empty) throw new ArgumentException("A saved chat request is required.");
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        using var response = await _httpClient.PostAsJsonAsync("/api/chat/cancel",
+            new { conversationId, requestId }, cancellationToken);
+        var receipt = await ReadAsync<System.Text.Json.JsonElement>(response, cancellationToken);
+        if (!receipt.TryGetProperty("cancelled", out var cancelled) || cancelled.ValueKind != System.Text.Json.JsonValueKind.True)
+            throw new InvalidDataException(UiText.Get("任务取消结果尚未确认，请查看任务状态。"));
+    }
+
     public async IAsyncEnumerable<ChatStreamEvent> StreamReplyAsync(ChatRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -107,6 +120,25 @@ public sealed class ModelApiClient : IDisposable
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         await foreach (var item in ChatStreamReader.ReadAsync(stream, request.ConversationId, request.RequestId.Value, cancellationToken))
             yield return item;
+    }
+
+    /// <summary>Observe the resumed task without re-dispatching its original user request.</summary>
+    /// <remarks>恢复后仅观察现有任务，避免重发旧请求或重放已完成操作。</remarks>
+    public async IAsyncEnumerable<ChatStreamEvent> StreamTaskReplyAsync(Guid conversationId, Guid taskId, Guid requestId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (conversationId == Guid.Empty || taskId == Guid.Empty || requestId == Guid.Empty)
+            throw new ArgumentException("A saved chat task is required.");
+        await ModelGatewayService.EnsureReadyAsync(cancellationToken);
+        using var message = new HttpRequestMessage(HttpMethod.Get,
+            $"/api/tasks/{taskId:D}/stream?conversationId={conversationId:D}");
+        message.Headers.Accept.ParseAdd("text/event-stream");
+        using var response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await GatewayResponseReader.EnsureSuccessAsync(response, UiText.Get("任务接口返回 HTTP {0}。"), cancellationToken);
+        if (!string.Equals(response.Content.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(UiText.Get("模型接口没有返回流式响应，请重启本地网关后重试。"));
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await foreach (var item in ChatStreamReader.ReadAsync(stream, conversationId, requestId, cancellationToken)) yield return item;
     }
 
     private static Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken) =>

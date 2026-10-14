@@ -9,6 +9,7 @@ pub struct GatewayError {
     pub code: String,
     pub message: String,
     pub status: u16,
+    pub retry_after_ms: Option<u64>,
 }
 
 impl GatewayError {
@@ -17,11 +18,21 @@ impl GatewayError {
             code: code.into(),
             message: message.into(),
             status,
+            retry_after_ms: None,
         }
     }
 
     pub fn response(&self) -> Value {
-        json!({"error": self.message, "code": self.code})
+        let mut response = json!({"error": self.message, "code": self.code});
+        if let Some(milliseconds) = self.retry_after_ms {
+            response["retryAfterMs"] = json!(milliseconds);
+        }
+        response
+    }
+
+    pub fn with_retry_after(mut self, milliseconds: Option<u64>) -> Self {
+        self.retry_after_ms = milliseconds;
+        self
     }
 }
 

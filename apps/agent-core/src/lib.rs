@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub mod file_identity;
+pub mod document_formats;
 pub mod gateway;
 pub mod gateway_contract;
 pub mod models;

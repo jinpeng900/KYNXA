@@ -4,6 +4,7 @@
   "node": {
     "version": "24.14.0",
     "archive": "node-v24.14.0-win-x64.zip",
+    "archiveBytes": 36217529,
     "url": "https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip",
     "checksumsUrl": "https://nodejs.org/dist/v24.14.0/SHASUMS256.txt",
     "releaseUrl": "https://nodejs.org/en/blog/release/v24.14.0",

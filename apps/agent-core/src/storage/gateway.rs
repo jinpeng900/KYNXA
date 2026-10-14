@@ -1237,7 +1237,7 @@ fn upsert_message_internal(
     input: &Value,
     original_content_raw: Option<&str>,
 ) -> ContractResult {
-    let result = with_catalog(root, |document, _| {
+    let mut result = with_catalog(root, |document, _| {
         let location = locate(document, id)?;
         let messages = read_messages_at(root, &location)?;
         let snapshot = conversation_logs::apply(
@@ -1284,6 +1284,27 @@ fn upsert_message_internal(
             "expectedHash":snapshot["hash"],"rawMessage":raw_message,"unchanged":unchanged}),
         )
     })?;
+    if input["Role"] == "user" {
+        // This cheap preflight grants no scope authority; the helper rereads the saved source and actual catalog.
+        // 便宜预筛不授予范围权限；正式 helper 重新核对已保存用户原话及真实目录，普通消息无需再读取历史。
+        let instruction = super::memory::apply(
+            "storage.memory.instruction",
+            &json!({"message":input["Content"],"hasProject":true}),
+        );
+        if !matches!(instruction, Ok(Value::Null)) {
+            let receipt = super::gateway_memory::capture_explicit_instruction(
+                root,
+                id,
+                input["Id"].as_str().unwrap_or(""),
+            );
+            // The user message is already durable; a separate memory failure must not turn it into a failed send.
+            // 用户消息已正式保存；独立记忆失败不能把这次发送误报成未保存，也不能声称记忆已经生效。
+            result["memoryInstruction"] = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => json!({"created":false,"reason":"save-failed","error":{"code":error.code(),"message":error.message()}}),
+            };
+        }
+    }
     if input["Role"] == "user" || input["Role"] == "assistant" && input["Status"] == "completed" {
         let _ = super::gateway_memory::schedule_candidates(
             root,
@@ -1556,7 +1577,7 @@ pub fn read_tool_result(
         let end = page["end"].as_u64().unwrap() as usize;
         let mut value = json!({"id":document["id"],"text":String::from_utf16_lossy(&units[start..end]),"offset":start,"nextOffset":end,
             "totalCharacters":page["totalCharacters"],"truncated":page["truncated"],"resultRef":reference,
-            "projection":"public","offsetUnit":"utf16-code-units","resultRefBasis":"canonical-archive"});
+            "projection":"public","sourceTool":document["toolName"],"offsetUnit":"utf16-code-units","resultRefBasis":"canonical-archive"});
         if !document["executionEnvironment"].is_null() {
             value["executionEnvironment"] = document["executionEnvironment"].clone();
         }

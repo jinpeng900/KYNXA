@@ -93,7 +93,14 @@ public partial class App : Application
             Check(!Button("DeleteMemoryButton").IsEnabled && Button("NewMemoryButton").IsEnabled,
                 "initial editor exposes New and disables Delete");
             await CaptureAsync("01-list-zh");
+            if (Environment.GetCommandLineArgs().Contains("--confirmation-only", StringComparer.OrdinalIgnoreCase))
+            {
+                await CheckDraftConfirmationAsync();
+                passed = true;
+                return;
+            }
             await CheckEditingAndDialogsAsync();
+            await CheckDraftConfirmationAsync();
             await CheckErrorsAndConflictsAsync();
             await CheckTargetsAsync();
             await CheckWindowLifecycleAsync();

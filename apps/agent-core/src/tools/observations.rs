@@ -318,6 +318,10 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
     } else {
         result
     };
+    let value = value
+        .get("structuredContent")
+        .filter(|value| value.is_object())
+        .unwrap_or(value);
     let name = call["name"].as_str()?;
     let observation = match name {
         "knowledge.read"
@@ -345,14 +349,14 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
         "filesystem.read"
             if is_truthy(&value["path"])
                 && is_truthy(&value["sha256"])
-                && value["content"].is_string() =>
+                && (value["text"].is_string() || value["content"].is_string()) =>
         {
             json!([
                 value["path"],
                 value["sha256"],
                 value["offset"],
                 value["nextOffset"],
-                value["content"]
+                value.get("text").filter(|value| value.is_string()).unwrap_or(&value["content"])
             ])
         }
         "tool.result.read"
@@ -490,11 +494,18 @@ mod tests {
     fn structured_file_receipts_ignore_outer_archive_rotation() {
         let mut guard = ObservationGuard::default();
         for round in 0..4 {
+            let body = match round {
+                0 => json!({"path":"fixture","sha256":"same-version","offset":0,
+                    "nextOffset":84,"content":"same source"}),
+                1 => json!({"path":"fixture","sha256":"same-version","offset":0,
+                    "nextOffset":84,"text":"same source"}),
+                _ => json!({"structuredContent":{"path":"fixture","sha256":"same-version",
+                    "offset":0,"nextOffset":84,"text":"same source"}}),
+            };
             let result = guard.apply("observations.success", &json!({"results": [{
                 "call": {"name": "filesystem.read", "arguments": {"path": "fixture",
                     "reason": format!("explanation {round}")}}, "observation": true,
-                "result": {"content": {"path": "fixture", "sha256": "same-version",
-                    "offset": 0, "nextOffset": 84, "content": "same source"},
+                "result": {"content": body,
                     "resultRef": {"id": format!("new-{round}"), "sha256": format!("new-hash-{round}")}}
             }]})).unwrap();
             assert_eq!(result["warning"], round == 2);

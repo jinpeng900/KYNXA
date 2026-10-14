@@ -21,7 +21,6 @@
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/ViewModels/Memory*.cs" Link="ViewModels/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/Data/MemoryApiClient.cs" Link="Services/MemoryApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />

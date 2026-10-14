@@ -10,6 +10,7 @@ public interface IMemoryApi
     Task<MemoryScopeDocument> GetAsync(MemoryTarget target, CancellationToken cancellationToken = default);
     Task<MemoryScopeDocument> CreateAsync(MemoryTarget target, MemoryCreateRequest request, CancellationToken cancellationToken = default);
     Task<MemoryScopeDocument> UpdateAsync(MemoryTarget target, Guid entryId, MemoryUpdateRequest request, CancellationToken cancellationToken = default);
+    Task<MemoryScopeDocument> ConfirmAsync(MemoryTarget target, Guid entryId, MemoryConfirmRequest request, CancellationToken cancellationToken = default);
     Task<MemoryScopeDocument> DeleteAsync(MemoryTarget target, Guid entryId, MemoryDeleteRequest request, CancellationToken cancellationToken = default);
 }
 
@@ -65,6 +66,16 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
     public Task<MemoryScopeDocument> UpdateAsync(MemoryTarget target, Guid entryId, MemoryUpdateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateInput(target, request.Scope, request.ExpectedRevision, request.Content, request.Kind);
+        if (request.Status is not null && !MemoryStatuses.IsSupported(request.Status))
+            throw new ArgumentException("Unsupported memory status.", nameof(request));
+        return WriteAsync(target, HttpMethod.Patch, EntryPathFor(target, entryId), request, cancellationToken);
+    }
+
+    public Task<MemoryScopeDocument> ConfirmAsync(MemoryTarget target, Guid entryId, MemoryConfirmRequest request, CancellationToken cancellationToken = default)
+    {
+        ValidateScopeRevision(target, request.Scope, request.ExpectedRevision);
+        if (request.Status != MemoryStatuses.Confirmed || request.ProposalAction is not (null or "add" or "update" or "delete"))
+            throw new ArgumentException("An explicit supported confirmation is required.", nameof(request));
         return WriteAsync(target, HttpMethod.Patch, EntryPathFor(target, entryId), request, cancellationToken);
     }
 
@@ -127,14 +138,45 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
         foreach (var entry in document.Entries)
         {
             if (entry is null || entry.Id == Guid.Empty || !entryIds.Add(entry.Id) || entry.Scope != document.Scope ||
-                entry.ScopeId != document.ScopeId || entry.Status != "confirmed" || entry.Revision < 1 ||
+                entry.ScopeId != document.ScopeId || !MemoryStatuses.IsSupported(entry.Status) ||
+                entry.Revision < 1 || entry.Revision > document.Revision ||
                 MemoryInputValidation.Validate(entry.Content, entry.Kind) != MemoryInputError.None || entry.Source is null ||
                 entry.Source.Role != "user" || entry.Source.Type is not ("manual" or "user-message") ||
                 (entry.Source.Type == "user-message" && (entry.Source.ConversationId is null || entry.Source.MessageId is null)) ||
                 (requireSourceStatus && (entry.Active is null || entry.SourceAvailable is null || entry.SourceArchived is null)))
                 throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
+            ValidateProvenance(entry, document);
         }
     }
+
+    private static void ValidateProvenance(MemoryEntry entry, MemoryScopeDocument document)
+    {
+        // Transport validation preserves draft authority and bounds provenance shown by the editor.
+        // 传输校验保留草稿确认边界，并限制编辑器展示的来源信息。
+        bool invalid = entry.Status == MemoryStatuses.Draft && entry.Active == true;
+        if (entry.Candidate is { } candidate)
+            invalid |= entry.Source.Type != "user-message" || !ValidQuotes(candidate.Quotes, entry.Source.MessageId);
+        if (entry.Proposal is { } proposal)
+        {
+            invalid |= entry.Source.Type != "user-message" || proposal.Action is not ("add" or "update" or "delete") ||
+                !ValidQuotes(proposal.Quotes, entry.Source.MessageId) || string.IsNullOrWhiteSpace(proposal.Reason) ||
+                proposal.Reason.Length > 1000 || proposal.Conflicts is null || proposal.Conflicts.Length > 8 ||
+                proposal.Conflicts.Any(conflict => string.IsNullOrWhiteSpace(conflict) || conflict.Length > 500) ||
+                (proposal.Action == "add" ? proposal.Target is not null : proposal.Target is null);
+            if (proposal.Target is { } target)
+                invalid |= target.Id == Guid.Empty || target.Scope != document.Scope || target.ScopeId != document.ScopeId ||
+                    target.ExpectedRevision is < 0 or > MemoryInputValidation.MaximumRevision ||
+                    target.EntryRevision is < 1 or > MemoryInputValidation.MaximumRevision ||
+                    string.IsNullOrWhiteSpace(target.Identity);
+        }
+        if (invalid) throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
+    }
+
+    private static bool ValidQuotes(MemoryCandidateQuote[]? quotes, Guid? sourceMessageId) =>
+        quotes is { Length: > 0 and <= 12 } && quotes.All(quote => quote is not null && quote.MessageId != Guid.Empty &&
+            !string.IsNullOrWhiteSpace(quote.Text) && quote.Text.Length <= MemoryInputValidation.MaximumContentLength &&
+            !quote.Text.Contains('\0')) && quotes.Select(quote => quote.MessageId).Distinct().Count() == quotes.Length &&
+        quotes.Any(quote => quote.MessageId == sourceMessageId);
 
     private static Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken) =>
         GatewayResponseReader.ReadAsync<T>(response, UiText.Get("记忆接口返回了空响应。"),
