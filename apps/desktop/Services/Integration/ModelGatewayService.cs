@@ -38,12 +38,12 @@ public static class ModelGatewayService
         var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false, CreateNoWindow = true,
-            WorkingDirectory = AppContext.BaseDirectory,
+            WorkingDirectory = ApplicationPaths.Root,
             RedirectStandardOutput = true, RedirectStandardError = true
         };
         start.ArgumentList.Add("--initialize-storage");
         start.ArgumentList.Add(Path.GetFullPath(target));
-        start.Environment["KYNXA_APPLICATION_ROOT"] = AppContext.BaseDirectory;
+        start.Environment["KYNXA_APPLICATION_ROOT"] = ApplicationPaths.Root;
         ConfigureNativeRuntime(start);
         try
         {
@@ -91,9 +91,9 @@ public static class ModelGatewayService
             var start = new ProcessStartInfo(FindNativeGateway())
             {
                 UseShellExecute = false, CreateNoWindow = true,
-                WorkingDirectory = AppContext.BaseDirectory
+                WorkingDirectory = ApplicationPaths.Root
             };
-            start.Environment["KYNXA_APPLICATION_ROOT"] = AppContext.BaseDirectory;
+            start.Environment["KYNXA_APPLICATION_ROOT"] = ApplicationPaths.Root;
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
             ConfigureNativeRuntime(start);
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
@@ -166,7 +166,7 @@ public static class ModelGatewayService
     // 只给本次子进程加入随包原生依赖目录，不修改用户全局 PATH。
     private static void ConfigureNativeRuntime(ProcessStartInfo start)
     {
-        string nativeDirectory = Path.Combine(AppContext.BaseDirectory, "runtime", "native");
+        string nativeDirectory = Path.Combine(ApplicationPaths.Root, "runtime", "native");
         start.Environment["PATH"] = nativeDirectory + Path.PathSeparator
             + (start.Environment.TryGetValue("PATH", out string? currentPath) ? currentPath : "");
     }
@@ -175,7 +175,7 @@ public static class ModelGatewayService
     /// <remarks>只启动随包原生网关；缺失时明确报错，不查找或回退 Node。</remarks>
     private static string FindNativeGateway()
     {
-        var bundled = Path.Combine(AppContext.BaseDirectory, "runtime", "agent", "kynxa-gateway.exe");
+        var bundled = Path.Combine(ApplicationPaths.Root, "runtime", "agent", "kynxa-gateway.exe");
         if (File.Exists(bundled)) return bundled;
         throw new FileNotFoundException(UiText.Get("缺少模型网关文件，请重新构建或安装 KYNXA。"), bundled);
     }

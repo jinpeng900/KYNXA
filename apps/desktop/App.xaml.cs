@@ -39,12 +39,11 @@ public partial class App : Application
         string? configuredModelHome = Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME");
         if (!string.IsNullOrWhiteSpace(configuredModelHome))
         {
-            string modelHome = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configuredModelHome));
+            string modelHome = Services.ApplicationPaths.Resolve(configuredModelHome);
             Services.ExtensionPaths.LegacyRoot = string.Equals(Path.GetFileName(modelHome), "Models", StringComparison.OrdinalIgnoreCase)
                 ? Path.GetDirectoryName(modelHome)! : Path.Combine(modelHome, "Conversations");
         }
-        else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.DataRoot
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa");
+        else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.EnvironmentControlled ? Services.StoragePaths.DataRoot : null;
         Services.ExtensionPaths.Reload();
         Window = new MainWindow();
         Window.Activate();

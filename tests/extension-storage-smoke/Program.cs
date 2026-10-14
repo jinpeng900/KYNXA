@@ -25,6 +25,36 @@ async Task Reject(Func<Task> action, string name)
 }
 string fixture = Path.Combine(Path.GetTempPath(), "kynxa-extensions-test-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(fixture);
+string portableRoot = Path.Combine(fixture, "portable application");
+string movedPortableRoot = Path.Combine(fixture, "moved application");
+Directory.CreateDirectory(portableRoot);
+Directory.CreateDirectory(movedPortableRoot);
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == Path.Combine(portableRoot, "Data"), "portable default follows application");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == ApplicationPaths.ResolveDataRoot(portableRoot), "repeated startup uses fixed folder");
+string portablePointer = "{\"version\":1,\"dataRoot\":\"saved-data\"}";
+await File.WriteAllTextAsync(Path.Combine(portableRoot, "storage.json"), portablePointer);
+await File.WriteAllTextAsync(Path.Combine(movedPortableRoot, "storage.json"), portablePointer);
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == Path.Combine(portableRoot, "saved-data"), "relative data pointer");
+Check(ApplicationPaths.ResolveDataRoot(movedPortableRoot) == Path.Combine(movedPortableRoot, "saved-data"), "relative pointer adapts after move");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, fixture) == fixture, "explicit data environment beats pointer");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, modelHome: Path.Combine(fixture, "Models")) == fixture, "explicit model home isolation");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, portableRoot, Path.Combine(fixture, "Models")) == fixture, "explicit model home wins conflicting data override");
+Check(ApplicationPaths.Store(Path.Combine(portableRoot, "user-tools"), portableRoot) == "user-tools", "portable selections stored relative");
+Check(ApplicationPaths.Store(fixture, portableRoot) == fixture, "external selection stays absolute");
+string? previousApplicationRoot = Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT");
+try
+{
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", portableRoot);
+    Check(ExtensionPaths.DefaultRoot == Path.Combine(portableRoot, "Extensions"), "portable extension default");
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray())
+        == Path.Combine(portableRoot, "user-tools"), "relative extension pointer");
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", movedPortableRoot);
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray())
+        == Path.Combine(movedPortableRoot, "user-tools"), "extension pointer adapts after move");
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray(), portableRoot)
+        == Path.Combine(portableRoot, "user-tools"), "explicit extension pointer uses its own directory");
+}
+finally { Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", previousApplicationRoot); }
 async Task Write(string file, string contents)
 {
     Directory.CreateDirectory(Path.GetDirectoryName(file)!);
@@ -184,7 +214,7 @@ string injectedTarget = Path.Combine(fixture, "injected-destination");
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, injectedTarget, failurePointer,
     new ImmediateProgress(value => { if (value.StartsWith("正在核对")) File.WriteAllText(Path.Combine(injectedTarget, "unexpected.txt"), "injected"); })), "unexpected destination files");
 Check(File.ReadAllText(failurePointer) == untouchedPointer, "directory and destination mutation preserve active pointer");
-foreach (string invalid in new[] { "{", "null", "{\"version\":2,\"extensionRoot\":\"ignored\"}", "{\"version\":\"1\",\"extensionRoot\":\"ignored\"}", "{\"version\":1,\"extensionRoot\":\"relative\"}", "{\"version\":1,\"version\":1,\"extensionRoot\":\"ignored\"}" })
+foreach (string invalid in new[] { "{", "null", "{\"version\":2,\"extensionRoot\":\"ignored\"}", "{\"version\":\"1\",\"extensionRoot\":\"ignored\"}", "{\"version\":1,\"extensionRoot\":\"\"}", "{\"version\":1,\"version\":1,\"extensionRoot\":\"ignored\"}" })
 {
     await Write(failurePointer, invalid);
     string invalidTarget = Path.Combine(fixture, "invalid-pointer-" + Guid.NewGuid().ToString("N"));

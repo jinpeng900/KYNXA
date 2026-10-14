@@ -14,6 +14,9 @@ if (-not $BundleRoot) {
     [xml]$project = Get-Content -LiteralPath (Join-Path $repositoryRoot 'apps/desktop/KYNXA.Desktop.csproj') -Raw
     $framework = $project.SelectSingleNode('/Project/PropertyGroup/TargetFramework').InnerText
     $BundleRoot = Join-Path $repositoryRoot "apps/desktop/bin/x64/Debug/$framework/win-x64"
+    if ([IO.File]::Exists((Join-Path $BundleRoot 'AppX/runtime/agent/kynxa-gateway.exe'))) {
+        $BundleRoot = Join-Path $BundleRoot 'AppX'
+    }
 }
 $applicationRoot = [IO.Path]::GetFullPath($BundleRoot)
 $executable = Join-Path $applicationRoot 'runtime/agent/kynxa-gateway.exe'

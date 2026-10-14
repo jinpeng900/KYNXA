@@ -13,13 +13,13 @@ public static class ExtensionPaths
     internal static readonly string[] LayoutDirectories = ["Agent", "Skills", "MCP", "MCP/npm-cache", "MCP/browser-cache",
         "MCP/uv-cache", "MCP/uv-tools", "MCP/bin", "MCP/python", "MCP/python-bin", "MCP/runtimes",
         "Backups", "Backups/Extensions", "Backups/Extensions/Migrations"];
-    public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Extensions");
+    public static string DefaultRoot => Path.Combine(ApplicationPaths.Root, "Extensions");
     public static string? LegacyRoot { get; set; }
     public static string Root { get; private set; } = DefaultRoot;
     public static bool UsesLegacyRoot { get; private set; }
     public static string PointerPath => Environment.GetEnvironmentVariable("KYNXA_EXTENSION_POINTER") is string pointer && !string.IsNullOrWhiteSpace(pointer)
-        ? NormalizePointer(pointer)
-        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa", "extensions.json");
+        ? NormalizePointer(ApplicationPaths.Resolve(pointer))
+        : Path.Combine(ApplicationPaths.Root, "extensions.json");
     public static bool EnvironmentControlled => new[] { "KYNXA_EXTENSION_HOME", "KYNXA_DATA_HOME", "KYNXA_MODEL_HOME" }
         .Any(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)));
 
@@ -31,14 +31,14 @@ public static class ExtensionPaths
             .Any(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)));
         var resolved = Resolve(LegacyRoot ?? DefaultRoot, environmentRoot, PointerPath, ignorePointer: isolatedData && !explicitPointer);
         Root = resolved.Root;
-        UsesLegacyRoot = resolved.UsesLegacyRoot;
+        UsesLegacyRoot = resolved.UsesLegacyRoot && LegacyRoot is not null;
     }
 
     // All inputs are explicit so tests never initialize StoragePaths or inspect a user's pointer.
     // 所有输入均明确传入，测试不会初始化 StoragePaths 或读取用户路径指针。
     public static ExtensionPathResolution Resolve(string legacyRoot, string? environmentRoot, string pointerPath, bool ignorePointer = false)
     {
-        if (!string.IsNullOrWhiteSpace(environmentRoot)) return new(NormalizeRoot(environmentRoot), false);
+        if (!string.IsNullOrWhiteSpace(environmentRoot)) return new(NormalizeRoot(ApplicationPaths.Resolve(environmentRoot)), false);
         if (!ignorePointer)
         {
             string pointer = NormalizePointer(pointerPath);
@@ -47,13 +47,13 @@ public static class ExtensionPaths
             if (File.Exists(pointer))
             {
                 if (new FileInfo(pointer).Length > 16 * 1024) throw InvalidPointer();
-                return new(ParsePointer(File.ReadAllBytes(pointer)), false);
+                return new(ParsePointer(File.ReadAllBytes(pointer), Path.GetDirectoryName(pointer)), false);
             }
         }
         return new(NormalizeRoot(legacyRoot), true);
     }
 
-    internal static string ParsePointer(byte[] bytes)
+    internal static string ParsePointer(byte[] bytes, string? pointerDirectory = null)
     {
         if (bytes.Length > 16 * 1024) throw InvalidPointer();
         try
@@ -69,7 +69,7 @@ public static class ExtensionPaths
             if (!value.TryGetProperty("version", out var version) || version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number)) throw InvalidPointer();
             if (number != 1) throw new InvalidDataException(UiText.Get("扩展配置版本不受当前程序支持，原文件已保留。"));
             if (!value.TryGetProperty("extensionRoot", out var root) || root.ValueKind != JsonValueKind.String) throw InvalidPointer();
-            return NormalizeRoot(root.GetString()!);
+            return NormalizeRoot(ApplicationPaths.Resolve(root.GetString()!, pointerDirectory));
         }
         catch (JsonException error) { throw new InvalidDataException(UiText.Get("扩展配置格式无效，原文件已保留。"), error); }
     }

@@ -29,6 +29,10 @@ venv/
 **/connections.json
 **/connections.json.*
 **/local-server.json
+/Data/
+/Extensions/
+/storage.json
+/extensions.json
 *.gguf
 *.safetensors
 
