@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'RuntimeDownloads.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $runtimeRoot = Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64'
 $utf8 = [Text.UTF8Encoding]::new($false)
@@ -49,9 +50,13 @@ function Save-NativePinnedFile([string]$Url, [string]$Destination, $Specificatio
     if (Test-NativeFile $Destination $Specification) { return }
     Save-KynxaPinnedDownload -Url $Url -Destination $Destination -Sha256 $Specification.sha256 -ExpectedBytes $Specification.bytes -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
 }
-function Copy-NativeFile([string]$Source, [string]$RelativePath) {
+function Copy-NativeFile([string]$Source, [string]$RelativePath, [switch]$ConfigurationText) {
     $destination = Get-NativeOutputPath $RelativePath
-    if (-not [IO.File]::Exists($destination) -or (Get-NativeFileHash $Source) -ne (Get-NativeFileHash $destination)) {
+    $matches = [IO.File]::Exists($destination) -and (Get-NativeFileHash $Source) -eq (Get-NativeFileHash $destination)
+    if (-not $matches -and $ConfigurationText -and [IO.File]::Exists($destination)) {
+        $matches = Test-KynxaConfigHash -Path $Source -ExpectedHash (Get-NativeFileHash $destination)
+    }
+    if (-not $matches) {
         Copy-Item -LiteralPath $Source -Destination $destination -Force
     }
     [void]$bundle.Add($RelativePath.Replace('\', '/'))
@@ -118,7 +123,7 @@ foreach ($asset in $nativeManifest.localFiles) {
     if (-not (Test-NativeFile $source $asset)) { throw "Bundled upstream license failed integrity verification: $($asset.source)" }
     Copy-NativeFile $source $asset.path
 }
-Copy-NativeFile $nativeManifestPath 'runtime/native/licenses/native-runtime-manifest.json'
+Copy-NativeFile $nativeManifestPath 'runtime/native/licenses/native-runtime-manifest.json' -ConfigurationText
 Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/licenses/sources.json') 'runtime/native/licenses/upstream-license-sources.json'
 
 # A private fixed Node serves optional MCP/skill execution only; npm runs on the build machine, never startup.
@@ -126,7 +131,7 @@ Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/licenses/sources.json') 
 if ($Profile -eq 'Full') {
     # Include the current source notice before MCP records its payload integrity, avoiding a second npm preparation.
     # 在 MCP 记录资源完整性前放入当前来源清单，避免随后修改载荷导致二次 npm 准备。
-    Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json'
+    Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json' -ConfigurationText
     & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
     foreach ($mcpFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'mcp-files.txt'), $utf8)) {
         if (-not $mcpFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'MCP bundle file escaped its selected root.' }
@@ -146,7 +151,7 @@ if ($Profile -eq 'Full') {
             Save-NativePinnedFile $asset.url $destination $asset
             [void]$bundle.Add($model.Output + '/' + $asset.path)
         }
-        Copy-NativeFile $manifestPath ($model.Output + '/manifest.json')
+        Copy-NativeFile $manifestPath ($model.Output + '/manifest.json') -ConfigurationText
     }
 }
 else { Write-Host '[Runtime] Core development profile skips optional models and MCP/browser preparation; release packages use Full.' }
