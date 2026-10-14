@@ -67,7 +67,7 @@
 
 ## 存储、迁移与凭据
 
-- 数据位置由用户配置、环境和平台默认值解析；桌面使用 [StoragePaths](../../../../apps/desktop/Services/Data/StoragePaths.cs)，网关使用 [GatewayConfig](../../../../apps/agent-core/src/gateway_contract.rs) 和 [存储管理](../../../../apps/agent-core/src/storage/administration.rs)。不把个人盘符、用户名、下载目录或参考源码地址写进生产路径。
+- 正式数据和用户扩展默认使用软件旁固定 `Data/` 与 `Extensions/`；本软件的 `storage.json`、`extensions.json` 保存自选位置，内部路径保存为相对路径，移动软件后随位置解析，显式环境配置优先。桌面使用 [ApplicationPaths](../../../../apps/desktop/Services/Data/ApplicationPaths.cs) 和 [StoragePaths](../../../../apps/desktop/Services/Data/StoragePaths.cs)，网关使用 [GatewayConfig](../../../../apps/agent-core/src/gateway_contract.rs) 和 [存储管理](../../../../apps/agent-core/src/storage/administration.rs)。不读取其他实例的用户主目录指针，不把个人盘符、用户名或下载目录写进生产路径。
 - 外部关联工作文件夹存放项目文件，聊天和记忆继续归统一 Data。改变存储位置使用实际迁移流程，复制、验证后切换指针，并保留可恢复备份；不只改设置造成旧记录不可见。
 - 保持自动初始化、版本判断、原子写入、链接路径检查和失败恢复。迁移须能处理重复执行或中途退出。
 - 当前模型连接包含存储于 JSON 的凭据，列表接口有脱敏；不能声称已实现系统安全凭据库。开发日志、Git、文档和测试只使用虚构 Key，不输出真实连接文件内容。

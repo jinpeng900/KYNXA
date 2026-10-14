@@ -22,6 +22,12 @@ flowchart LR
 
 ## 职责
 
+正式桌面与网关默认将可写数据保存在软件目录下的固定 `Data/`，用户安装的工具、MCP、Skill 与缓存保存在固定 `Extensions/`；模型连接配置位于 `Data/Models/`，桌面及 WebView2 缓存位于 `Data/Desktop/`。重复启动复用这些目录，不创建新的时间戳数据目录。
+
+用户可在设置中迁移目录。软件旁的 `storage.json` 与 `extensions.json` 保存选择；软件内部的选择使用相对路径，外部自选目录使用绝对路径。移动完整软件文件夹后，默认目录和相对选择按新软件位置解析，不读取其他实例的用户主目录 `.kynxa` 指针。显式 `KYNXA_DATA_HOME`、`KYNXA_MODEL_HOME`、`KYNXA_EXTENSION_HOME` 等环境设置继续优先，供用户指定位置及独立测试使用。软件需放在用户可写的位置；系统保护的安装目录不能作为可写便携数据根。
+
+`tools/development/start-clean-desktop.ps1` 保留独立包身份与端口，但数据也使用该副本软件旁的固定目录；仅启动日志和结果文件放入 `artifacts/clean-run/current/`。内置 Node、MCP 依赖和 E5/BGE 权重仍是 `runtime/` 下的随包资源，与用户安装的扩展分开维护。
+
 | 负责人 | 生产目录 | 新接线职责 |
 |---|---|---|
 | A | `apps/agent-core/src/orchestration/`、`resources/`、网关入口及打包 | 请求身份、队列、SSE、任务循环、审批、取消、资源 IPC、集成 |

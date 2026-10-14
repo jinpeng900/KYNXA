@@ -184,7 +184,7 @@ public static class StorageMigrationService
         string temporary = pointer + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new { version = 1, dataRoot = target }), cancellationToken);
+            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new { version = 1, dataRoot = ApplicationPaths.Store(target) }), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, pointer, overwrite: true);
         }

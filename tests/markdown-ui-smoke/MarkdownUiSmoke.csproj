@@ -12,6 +12,7 @@
     <EnableMsixTooling>false</EnableMsixTooling>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../apps/desktop/Services/Data/ApplicationPaths.cs" Link="ApplicationPaths.cs" />
     <Content Include="../../apps/desktop/Resources/UI/Brand/kynxa-logo.png" Link="logo.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/Math/**/*" Link="Resources/Math/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />

@@ -294,8 +294,7 @@ public sealed partial class ShellPage
                 using var http = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(5) };
                 var health = await http.GetFromJsonAsync<StorageHealth>("/health");
                 if (health?.StorageProtocol != 1 || string.IsNullOrWhiteSpace(health.ModelDataHome)) throw new InvalidOperationException(UiText.Get("当前网关版本不支持存储迁移，请关闭旧网关并重新打开 KYNXA。"));
-                string expectedModels = StoragePaths.DataRoot is string dataRoot ? Path.Combine(dataRoot, "Models")
-                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa", "models");
+                string expectedModels = Path.Combine(StoragePaths.DataRoot ?? StoragePaths.DefaultRoot, "Models");
                 if (!string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(health.ModelDataHome)),
                     Path.TrimEndingDirectorySeparator(Path.GetFullPath(expectedModels)), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
@@ -316,7 +315,7 @@ public sealed partial class ShellPage
                     updates, initializeTarget: ModelGatewayService.InitializeStorageAsync, migrateExtensions: ExtensionPaths.UsesLegacyRoot));
                 StoragePaths.Reload();
                 MessageTimePresentation.ConfigureCache(StoragePaths.DesktopDirectory);
-                ExtensionPaths.LegacyRoot = result.DataRoot;
+                if (ExtensionPaths.UsesLegacyRoot) ExtensionPaths.LegacyRoot = result.DataRoot;
                 ExtensionPaths.Reload();
                 extensionRow.SetPath(ExtensionPaths.Root);
                 _projectStore.Dispose();

@@ -32,7 +32,7 @@ public static class ExtensionStorageMigrationService
         byte[]? oldPointer = File.Exists(pointer) ? await File.ReadAllBytesAsync(pointer, cancellationToken) : null;
         if (oldPointer is not null)
         {
-            string oldRoot = ExtensionPaths.ParsePointer(oldPointer);
+            string oldRoot = ExtensionPaths.ParsePointer(oldPointer, Path.GetDirectoryName(pointer));
             if (!string.Equals(oldRoot, source, StringComparison.OrdinalIgnoreCase))
                 throw new IOException(UiText.Get("扩展配置已被其他实例修改，请重新打开设置。"));
         }
@@ -131,7 +131,7 @@ public static class ExtensionStorageMigrationService
         string temporary = pointer + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new { version = 1, extensionRoot = target }), cancellationToken);
+            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new { version = 1, extensionRoot = ApplicationPaths.Store(target, Path.GetDirectoryName(pointer)) }), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             // No cancellation-sensitive operation follows this atomic activation boundary.
             // 原子启用完成之后，不再执行会因取消而失败的操作。
