@@ -1,6 +1,9 @@
+using System.ComponentModel;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 
 namespace KYNXA_Desktop.Services;
 
@@ -10,16 +13,8 @@ namespace KYNXA_Desktop.Services;
 /// </summary>
 public static class UiLocalization
 {
-    private sealed class Registration(DependencyObject target, DependencyProperty property, string key)
-    {
-        public WeakReference<DependencyObject> Target { get; } = new(target);
-        public DependencyProperty Property { get; } = property;
-        public string Key { get; } = key;
-        public volatile bool Active = true;
-    }
-
     private static readonly object Sync = new();
-    private static readonly List<Registration> Registrations = [];
+    private static readonly List<WeakReference<LocalizedTextValue>> Sources = [];
 
     static UiLocalization() => UiText.LanguageChanged += (_, _) => Refresh();
 
@@ -28,39 +23,30 @@ public static class UiLocalization
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(property);
         ArgumentNullException.ThrowIfNull(key);
-        var registration = new Registration(target, property, key);
+        var source = new LocalizedTextValue(key, target.DispatcherQueue);
+        // Native binding owns the value source for the target's lifetime, even after its managed wrapper is collected.
+        // 原生绑定按目标生命周期持有值源；托管控件包装对象被回收后，界面仍能更新文字。
+        BindingOperations.SetBinding(target, property, new Binding
+        {
+            Source = source, Path = new PropertyPath(nameof(LocalizedTextValue.Value)), Mode = BindingMode.OneWay
+        });
         lock (Sync)
         {
-            Registrations.RemoveAll(existing =>
-            {
-                bool remove = !existing.Target.TryGetTarget(out var owner)
-                    || (ReferenceEquals(owner, target) && existing.Property == property);
-                if (remove) existing.Active = false;
-                return remove;
-            });
-            Registrations.Add(registration);
+            Sources.RemoveAll(reference => !reference.TryGetTarget(out _));
+            Sources.Add(new(source));
         }
-        Apply(registration);
     }
 
     private static void Refresh()
     {
-        Registration[] snapshot;
+        LocalizedTextValue[] snapshot;
         lock (Sync)
         {
-            Registrations.RemoveAll(registration => !registration.Target.TryGetTarget(out _));
-            snapshot = Registrations.ToArray();
+            Sources.RemoveAll(reference => !reference.TryGetTarget(out _));
+            snapshot = Sources.Select(reference => reference.TryGetTarget(out var source) ? source : null)
+                .OfType<LocalizedTextValue>().ToArray();
         }
-        foreach (var registration in snapshot) Apply(registration);
-    }
-
-    private static void Apply(Registration registration)
-    {
-        if (!registration.Active || !registration.Target.TryGetTarget(out var target)) return;
-        if (target.DispatcherQueue.HasThreadAccess)
-            target.SetValue(registration.Property, UiText.Get(registration.Key));
-        else
-            target.DispatcherQueue.TryEnqueue(() => Apply(registration));
+        foreach (var source in snapshot) source.Refresh();
     }
 
     public static readonly DependencyProperty TextProperty = DependencyProperty.RegisterAttached(
@@ -137,4 +123,30 @@ public static class UiLocalization
             (target, args) => Bind(target, AutomationProperties.HelpTextProperty, (string?)args.NewValue ?? string.Empty)));
     public static string GetAutomationHelp(DependencyObject target) => (string)target.GetValue(AutomationHelpProperty);
     public static void SetAutomationHelp(DependencyObject target, string value) => target.SetValue(AutomationHelpProperty, value);
+}
+
+/// <summary>
+/// Native binding value with no reference to a control or window; the global registry holds only weak sources.
+/// 原生绑定值不引用控件或窗口，全局注册仅弱持有值源，关闭窗口后可随绑定释放。
+/// </summary>
+[Microsoft.UI.Xaml.Data.Bindable]
+public sealed class LocalizedTextValue : INotifyPropertyChanged
+{
+    private readonly string _key;
+    private readonly DispatcherQueue _dispatcher;
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public string Value => UiText.Get(_key);
+
+    internal LocalizedTextValue(string key, DispatcherQueue dispatcher)
+    { _key = key; _dispatcher = dispatcher; }
+
+    internal void Refresh()
+    {
+        if (!_dispatcher.HasThreadAccess)
+        {
+            _dispatcher.TryEnqueue(Refresh);
+            return;
+        }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Value)));
+    }
 }

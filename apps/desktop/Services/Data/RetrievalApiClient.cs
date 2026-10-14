@@ -30,12 +30,19 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     private readonly HttpClient _httpClient;
     private readonly Func<CancellationToken, Task> _ensureGatewayReady;
     private readonly bool _ownsHttpClient;
+    private readonly HttpClient? _urlImportHttpClient;
 
     public RetrievalApiClient() : this(new HttpClient
     {
         BaseAddress = ModelGatewayService.Address,
         Timeout = TimeSpan.FromSeconds(60)
-    }, ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true) { }
+    }, ModelGatewayService.EnsureReadyAsync, ownsHttpClient: true)
+    {
+        // URL parsing has its own bounded transport; ordinary status reads keep their existing deadline.
+        // 链接解析使用独立有界传输；普通状态读取继续使用原有截止时间。
+        _urlImportHttpClient = new HttpClient { BaseAddress = ModelGatewayService.Address,
+            Timeout = TimeSpan.FromMinutes(5) };
+    }
 
     public RetrievalApiClient(HttpClient httpClient, Func<CancellationToken, Task>? ensureReady = null, bool ownsHttpClient = false)
     {
@@ -83,7 +90,8 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
         SendAsync<RetrievalSourcesResponse>(HttpMethod.Get, "/api/retrieval/sources" +
             (projectId is { } id ? $"?projectId={ValidProjectId(id):D}" : string.Empty), null, cancellationToken);
     public Task<RetrievalSource> ImportSourceAsync(RetrievalSourceImportRequest request, CancellationToken cancellationToken = default) =>
-        SendAsync<RetrievalSource>(HttpMethod.Post, "/api/retrieval/sources", request, cancellationToken);
+        SendAsync<RetrievalSource>(HttpMethod.Post, "/api/retrieval/sources", request, cancellationToken,
+            request.Url is not null || request.Urls is not null ? _urlImportHttpClient : null);
 
     public async Task DeleteSourceAsync(string sourceId, long? expectedRevision = null, CancellationToken cancellationToken = default)
     {
@@ -103,12 +111,13 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     public Task<RetrievalIndexJob> CancelIndexJobAsync(string jobId, CancellationToken cancellationToken = default) =>
         SendAsync<RetrievalIndexJob>(HttpMethod.Post, $"/api/retrieval/index/jobs/{PathId(jobId)}/cancel", null, cancellationToken);
 
-    private async Task<T> SendAsync<T>(HttpMethod method, string path, object? payload, CancellationToken cancellationToken)
+    private async Task<T> SendAsync<T>(HttpMethod method, string path, object? payload, CancellationToken cancellationToken,
+        HttpClient? transport = null)
     {
         await _ensureGatewayReady(cancellationToken);
         using var request = new HttpRequestMessage(method, path);
         if (payload is not null) request.Content = JsonContent.Create(payload, options: JsonOptions);
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var response = await (transport ?? _httpClient).SendAsync(request, cancellationToken);
         return await GatewayResponseReader.ReadAsync<T>(response, UiText.Get("检索接口返回了无效响应。"),
             UiText.Get("检索接口返回 HTTP {0}。"), cancellationToken, JsonOptions);
     }
@@ -138,5 +147,6 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
     public void Dispose()
     {
         if (_ownsHttpClient) _httpClient.Dispose();
+        _urlImportHttpClient?.Dispose();
     }
 }

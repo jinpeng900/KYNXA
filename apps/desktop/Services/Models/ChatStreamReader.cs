@@ -13,6 +13,9 @@ public static class ChatStreamReader
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaximumEventCharacters = 8 * 1024 * 1024;
+    // Large document writes keep their complete approval parameters within the separately bounded SSE frame.
+    // 长文写入保留完整审批参数；整体 SSE 帧仍有独立的有界保护。
+    private const int MaximumToolArgumentCharacters = 1024 * 1024;
 
     public static async IAsyncEnumerable<ChatStreamEvent> ReadAsync(Stream stream,
         Guid conversationId, Guid requestId, [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -21,6 +24,7 @@ public static class ChatStreamReader
             detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
         var eventData = new StringBuilder();
         bool hasStarted = false;
+        Guid? rootTaskId = null;
         var activeToolCalls = new Dictionary<string, ToolActivity>(StringComparer.Ordinal);
         var terminalOutputSequences = new Dictionary<string, int>(StringComparer.Ordinal);
         var assistantSegments = new Dictionary<string, AssistantSegment>(StringComparer.Ordinal);
@@ -56,6 +60,9 @@ public static class ChatStreamReader
                         case "started":
                             if (hasStarted) throw new InvalidDataException(UiText.Get("模型流重复开始了同一条回复。"));
                             hasStarted = true;
+                            if (streamEvent.TaskId == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty)
+                                throw new InvalidDataException(UiText.Get("任务事件无效。"));
+                            rootTaskId = streamEvent.RootRequestTaskId ?? streamEvent.TaskId;
                             break;
                         case "text_delta":
                         case "reasoning_delta":
@@ -125,6 +132,33 @@ public static class ChatStreamReader
                                 string.IsNullOrWhiteSpace(streamEvent.Message) || streamEvent.Message.Length > 65536)
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
+                        case "task_progress":
+                            if (string.IsNullOrWhiteSpace(streamEvent.Phase) || streamEvent.Phase.Length > 80 || streamEvent.Round is < 1)
+                                throw new InvalidDataException(UiText.Get("任务事件无效。"));
+                            goto case "task_tool_call";
+                        case "task_tool_call":
+                        case "task_tool_result":
+                        case "task_finished":
+                        case "task_approval_closed":
+                            // Child diagnostics are not main-agent tools or terminal reply events.
+                            // 子任务诊断不加入主代理工具账本，也不结束主回复；正式回执通过任务 API 读取。
+                            if (streamEvent.TaskId is not Guid task || task == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty
+                                || (rootTaskId is Guid root && streamEvent.RootRequestTaskId is Guid actual && root != actual))
+                                throw new InvalidDataException(UiText.Get("任务事件无效。"));
+                            if (streamEvent.Type == "task_approval_closed" && (streamEvent.ApprovalId is not Guid closedApproval || closedApproval == Guid.Empty))
+                                throw new InvalidDataException(UiText.Get("任务事件无效。"));
+                            break;
+                        case "task_approval_required":
+                            if (streamEvent.TaskId is not Guid approvalTask || approvalTask == Guid.Empty
+                                || streamEvent.RootRequestTaskId == Guid.Empty
+                                || (rootTaskId is Guid approvalRoot && streamEvent.RootRequestTaskId is Guid actualRoot && approvalRoot != actualRoot))
+                                throw new InvalidDataException(UiText.Get("任务事件无效。"));
+                            if (streamEvent.Tool is { } childTool && (childTool.Round is < 1 || childTool.Order is < 0
+                                || (childTool.Round is null) != (childTool.Order is null)))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            ValidateToolEvent(streamEvent with { Type = "approval_required",
+                                Tool = streamEvent.Tool is { } approvalTool ? approvalTool with { Round = null, Order = null } : null });
+                            break;
                         case "completed":
                             if (streamEvent.Content is null) throw new InvalidDataException(UiText.Get("模型流缺少最终回复。"));
                             if (activeToolCalls.Count > 0) throw new InvalidDataException(UiText.Get("工具事件无效。"));
@@ -166,7 +200,7 @@ public static class ChatStreamReader
         ToolActivity? tool = streamEvent.Tool;
         if (tool is null || string.IsNullOrWhiteSpace(tool.ToolCallId) || tool.ToolCallId.Length > 200
             || string.IsNullOrWhiteSpace(tool.Name) || tool.Name.Length > 200 || tool.Arguments is not { ValueKind: JsonValueKind.Object }
-            || tool.Arguments.Value.GetRawText().Length > 65536
+            || tool.Arguments.Value.GetRawText().Length > MaximumToolArgumentCharacters
             || string.IsNullOrWhiteSpace(tool.Summary) || tool.Summary.Length > 4096
             || tool.Result?.Length > 65536)
             throw new InvalidDataException(UiText.Get("工具事件无效。"));

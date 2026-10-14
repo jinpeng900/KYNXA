@@ -23,10 +23,21 @@
     const status = source.status || (source.streaming ? 'streaming' : 'completed');
     const outcome = source.taskCompletionState || source.taskCompletion?.completionState;
     const taskIncomplete = ['partial','verification-failed','execution-unknown'].includes(outcome);
-    if (status === 'completed' && !taskIncomplete) {
-      const finalAnswerSegment = segments.filter(segment => segment.phase === 'final_answer'
-        && segment.status === 'completed' && hasText(segment.content)).at(-1);
-      if (finalAnswerSegment) return { mode: 'final', segments: [finalAnswerSegment], tools: [], content: finalAnswerSegment.content };
+    if (status === 'completed') {
+      // A task outcome never replaces the settled answer with its execution trace.
+      // 任务验收状态不把已经完成的回答替换为执行过程。
+      const finalIndex = segments.findLastIndex(segment => segment.phase === 'final_answer'
+        && segment.status === 'completed' && hasText(segment.content));
+      if (finalIndex >= 0) {
+        let first = finalIndex;
+        while (first > 0 && segments[first - 1].isAnswerContinuation === true
+          && segments[first - 1].phase === 'commentary' && segments[first - 1].status === 'completed') first--;
+        // Only broker-marked output continuations belong to the settled answer; older unmarked stages remain history.
+        // 只有程序明确标记的输出续写属于最终正文；旧记录中未标记的执行进展仍只是历史。
+        const answerSegments = segments.slice(first, finalIndex + 1);
+        return { mode: 'final', segments: answerSegments, tools: [],
+          content: answerSegments.map(segment => segment.content || '').filter(hasText).join('\n\n') };
+      }
       if (!segments.length && hasText(content)) return { mode: 'final', segments: [], tools: [], content };
     }
     const mode = status === 'streaming' ? 'active' : taskIncomplete ? 'partial' : status === 'completed' ? 'incomplete' : 'partial';

@@ -40,7 +40,7 @@ public sealed partial class ShellPage
             _emptyWorkPanelRequested = false;
         }
         bool isWorkConversation = !ViewModel.IsChatMode && _activeProjectChat is not null && ActiveMessages.Count > 0;
-        bool canOpen = (isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder) && hasSpace;
+        bool canOpen = (ActiveChatId is not null || isWorkConversation || WorkTabs.HasItems || MountedWorkspace.HasMountedFolder) && hasSpace;
         // A folder header alone does not need a preview column. Empty opening belongs to the mode/project/chat scope.
         // 仅有目录标题时不占用预览列；空面板请求属于当前模式、项目与会话，未创建聊天时也不会跨项目泄漏。
         bool visible = canOpen && _layout.PreviewVisible && (WorkTabs.HasOpenTabs || _emptyWorkPanelRequested);
@@ -52,6 +52,7 @@ public sealed partial class ShellPage
         WorkContextPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         SuspendUnselectedWorkViewers(visible);
         PresentSelectedWorkTab(visible);
+        SynchronizeTaskPanel(visible);
         WorkPanelGrip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         OpenWorkPanelButton.Visibility = canOpen && !visible ? Visibility.Visible : Visibility.Collapsed;
         ConversationActionsButton.Margin = new Thickness(0, 8, canOpen && !visible ? 48 : 12, 0);

@@ -17,6 +17,8 @@ const SOURCE_FIELDS: &[&str] = &[
     "content",
     "highlights",
     "summary",
+    "excerpt",
+    "excerpts",
 ];
 
 struct Sources<'a> {
@@ -260,6 +262,8 @@ impl<'a> Sources<'a> {
                 "content",
                 "highlights",
                 "summary",
+                "excerpt",
+                "excerpts",
             ] {
                 let value = self.source_text(self.field(value, field), 0);
                 if !js_trim(&value).is_empty() {
@@ -279,6 +283,90 @@ impl<'a> Sources<'a> {
             self.visit(&field[1], depth + 1);
         }
     }
+    fn visit_json(&mut self, value: &Value, depth: usize, remaining: &mut usize) {
+        if depth > 12 || *remaining == 0 || self.sources.len() >= self.maximum {
+            return;
+        }
+        *remaining -= 1;
+        if let Some(text) = value.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                self.visit_json(&parsed, depth + 1, remaining);
+            } else {
+                self.text(text);
+            }
+            return;
+        }
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if *remaining == 0 || self.sources.len() >= self.maximum {
+                    break;
+                }
+                self.visit_json(item, depth + 1, remaining);
+            }
+            return;
+        }
+        let Some(fields) = value.as_object() else {
+            return;
+        };
+        let is_source = value["url"].is_string();
+        if is_source {
+            let title = value["title"]
+                .as_str()
+                .or_else(|| value["name"].as_str())
+                .unwrap_or("");
+            let excerpt = [
+                "text",
+                "description",
+                "snippet",
+                "content",
+                "highlights",
+                "summary",
+                "excerpt",
+                "excerpts",
+            ]
+            .into_iter()
+            .find_map(|field| {
+                if let Some(text) = value[field].as_str().filter(|text| !text.trim().is_empty()) {
+                    return Some(slice(text, 0, 2500));
+                }
+                let items = value[field].as_array()?;
+                let text = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(20)
+                    .map(|text| slice(text, 0, 2500))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.trim().is_empty()).then_some(text)
+            })
+            .unwrap_or_default();
+            self.add(&value["url"], title, &excerpt);
+        }
+        for (field, item) in fields {
+            if *remaining == 0 || self.sources.len() >= self.maximum {
+                break;
+            }
+            if ["_meta", "data", "blob"].contains(&field.as_str())
+                || is_source && SOURCE_FIELDS.contains(&field.as_str())
+            {
+                continue;
+            }
+            self.visit_json(item, depth + 1, remaining);
+        }
+    }
+}
+
+/// Native JSON results use the same URL, excerpt and deduplication rules without a second graph projection.
+/// 原生 JSON 回执复用 URL、摘录与去重规则，不再建立另一份图投影。
+pub(crate) fn normalize_result(value: &Value, maximum: usize) -> Vec<Value> {
+    let mut sources = Sources {
+        nodes: HashMap::new(),
+        visited: HashSet::new(),
+        sources: Vec::new(),
+        maximum,
+    };
+    sources.visit_json(value, 0, &mut 2048);
+    sources.sources
 }
 
 pub fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> {

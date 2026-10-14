@@ -1,27 +1,58 @@
 <Project>
+  <PropertyGroup>
+    <KynxaOffline Condition="'$(KynxaOffline)' == ''">false</KynxaOffline>
+    <KynxaRuntimeProfile Condition="'$(KynxaRuntimeProfile)' == ''">Full</KynxaRuntimeProfile>
+    <_KynxaDownloadSourcesFullPath Condition="'$(KynxaDownloadSourcesPath)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaDownloadSourcesPath)'))</_KynxaDownloadSourcesFullPath>
+    <_KynxaResourcePackFullPath Condition="'$(KynxaResourcePackRoot)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaResourcePackRoot)'))</_KynxaResourcePackFullPath>
+    <_KynxaRuntimeOptions>-Profile &quot;$(KynxaRuntimeProfile)&quot;</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaOffline)' == 'true'">$(_KynxaRuntimeOptions) -Offline</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaRuntimeOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaRuntimeOptions>
+    <_KynxaRuntimeOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaRuntimeOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaRuntimeOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaVisualCppOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
+    <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
+    <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
+    <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
+         离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
+    <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true'">Build</_KynxaToolHostTargets>
+  </PropertyGroup>
+  <!-- VS deployment uses LayoutDir from the recipe; keep nested MCP paths below MAX_PATH.
+       VS 按部署清单中的 LayoutDir 复制文件；缩短根目录，避免嵌套 MCP 路径超出限制。 -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <_KynxaDefaultDeploymentDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\development\appx\$(Platform)\$(Configuration)'))</_KynxaDefaultDeploymentDirectory>
+    <_KynxaDefaultLayoutDirectory>$([MSBuild]::EnsureTrailingSlash('$(_KynxaDefaultDeploymentDirectory)'))</_KynxaDefaultLayoutDirectory>
+    <!-- Match the SDK deployment path form; the CLI copy path separately needs a trailing separator.
+         保持 SDK 部署目录形式；CLI 复制目录单独补齐末尾分隔符。 -->
+    <LayoutDir Condition="'$(LayoutDir)' == ''">$(_KynxaDefaultDeploymentDirectory)</LayoutDir>
+    <WinAppLooseLayoutPath Condition="'$(WinAppLooseLayoutPath)' == ''">$([MSBuild]::EnsureTrailingSlash('$(LayoutDir)'))</WinAppLooseLayoutPath>
+  </PropertyGroup>
   <!-- Prepare pinned native files using PowerShell and Cargo on the build machine only.
        仅在构建机准备原生文件及固定 MCP 依赖；用户无需安装开发工具或系统 Node。 -->
   <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
     <PropertyGroup>
       <_KynxaNativeCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\native-desktop\win-x64'))</_KynxaNativeCacheDirectory>
     </PropertyGroup>
+    <!-- VS may send a BOM on redirected stdin; preparation scripts accept no pipeline input.
+         VS 可能在重定向标准输入中发送 BOM；准备脚本不接收管道输入。 -->
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
-          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot;" />
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; $(_KynxaRuntimeOptions) &lt; NUL" />
     <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\bundle-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaNativeRuntimeFiles" />
     </ReadLinesFromFile>
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.." Condition="'$(LayoutDir)' != ''"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\check-deployment-paths.ps1&quot; -LayoutDirectory &quot;$(LayoutDir)\.&quot; -PayloadRoot &quot;$(_KynxaNativeCacheDirectory)\.&quot; -FileList &quot;$(_KynxaNativeCacheDirectory)\bundle-files.txt&quot;" />
     <ItemGroup>
       <Content Include="@(_KynxaNativeRuntimeFiles)"
                Link="$([MSBuild]::MakeRelative('$(_KynxaNativeCacheDirectory)', '%(_KynxaNativeRuntimeFiles.Identity)'))"
                CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
-  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeGatewayVisualCppRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="IncludeNativeGatewayRuntime" Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(DesignTimeBuild)' != 'true'">
     <PropertyGroup>
       <_KynxaVisualCppCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\vc\win-x64'))</_KynxaVisualCppCacheDirectory>
     </PropertyGroup>
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
-          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot;" />
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-vc-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -CacheDirectory &quot;$(_KynxaVisualCppCacheDirectory)&quot; $(_KynxaVisualCppOptions)" />
     <ReadLinesFromFile File="$(_KynxaVisualCppCacheDirectory)\runtime-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaVisualCppFiles" />
     </ReadLinesFromFile>
@@ -35,8 +66,10 @@
                CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
-  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths">
-    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="Restore;Build"
+  <!-- Design-time evaluation must not restore or build executable payloads.
+       设计时求值不能还原或构建可执行载荷，避免阻塞 IDE 的项目元数据采集。 -->
+  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>
       <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)'))))</_KynxaToolHostNoticesDirectory>
@@ -88,5 +121,19 @@
   <Target Name="RemoveObsoleteLooseLayoutBackendPayload" AfterTargets="_WinAppCopyContentToLooseLayout" Condition="'$(DesignTimeBuild)' != 'true' and Exists('$(TargetDir)KYNXA.Desktop.dll')">
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />
+  </Target>
+  <!-- Recheck only our default layout; explicit external layouts retain their ownership.
+       仅复查默认受控布局；显式指定的外部布局不进入清理范围。 -->
+  <Target Name="RemoveObsoleteDefaultDeploymentPayload" AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(_KynxaDefaultLayoutDirectory)' != '' and ('$(LayoutDir)' == '$(_KynxaDefaultDeploymentDirectory)' or '$(WinAppLooseLayoutPath)' == '$(_KynxaDefaultLayoutDirectory)') and Exists('$(_KynxaDefaultLayoutDirectory)KYNXA.Desktop.dll') and Exists('$(_KynxaDefaultLayoutDirectory)runtime\agent\kynxa-gateway.exe')">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(_KynxaDefaultLayoutDirectory).&quot;" />
+  </Target>
+  <!-- A separate target runs after CLI copying even when Build already performed cleanup.
+       CLI 复制后使用独立目标复查，避免同一次构建中目标只运行一次而漏掉后续载荷。 -->
+  <Target Name="RemoveObsoleteDefaultLooseLayoutPayload" AfterTargets="_WinAppCopyContentToLooseLayout"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(_KynxaDefaultLayoutDirectory)' != '' and ('$(LayoutDir)' == '$(_KynxaDefaultDeploymentDirectory)' or '$(WinAppLooseLayoutPath)' == '$(_KynxaDefaultLayoutDirectory)') and Exists('$(_KynxaDefaultLayoutDirectory)KYNXA.Desktop.dll') and Exists('$(_KynxaDefaultLayoutDirectory)runtime\agent\kynxa-gateway.exe')">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(_KynxaDefaultLayoutDirectory).&quot;" />
   </Target>
 </Project>

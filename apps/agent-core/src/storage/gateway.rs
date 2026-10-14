@@ -375,6 +375,17 @@ fn read_messages_recovering(root: &Path, location: &Value) -> Result<Vec<Value>,
         .map(|index| decoded[index.as_u64().unwrap() as usize].clone())
         .collect())
 }
+fn history_page_recovering(root: &Path, location: &Value, arguments: &Value) -> ContractResult {
+    match conversation_history::apply("storage.history.page", arguments) {
+        Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
+            // Reuse the formal byte-preserving recovery transaction before creating a page snapshot.
+            // 生成分页快照前复用正式日志的保字节恢复事务；旧游标仍按新快照正常拒绝。
+            read_messages_recovering(root, location)?;
+            conversation_history::apply("storage.history.page", arguments)
+        }
+        result => result,
+    }
+}
 pub fn read_messages(root: &Path, id: &str, public: bool) -> Result<Vec<Value>, ContractError> {
     let catalog = load_catalog(root)?;
     let location = locate(&catalog, id)?;
@@ -1237,7 +1248,7 @@ fn upsert_message_internal(
     input: &Value,
     original_content_raw: Option<&str>,
 ) -> ContractResult {
-    let result = with_catalog(root, |document, _| {
+    let mut result = with_catalog(root, |document, _| {
         let location = locate(document, id)?;
         let messages = read_messages_at(root, &location)?;
         let snapshot = conversation_logs::apply(
@@ -1284,6 +1295,29 @@ fn upsert_message_internal(
             "expectedHash":snapshot["hash"],"rawMessage":raw_message,"unchanged":unchanged}),
         )
     })?;
+    if input["Role"] == "user" {
+        // This cheap preflight grants no scope authority; the helper rereads the saved source and actual catalog.
+        // 便宜预筛不授予范围权限；正式 helper 重新核对已保存用户原话及真实目录，普通消息无需再读取历史。
+        let instruction = super::memory::apply(
+            "storage.memory.instruction",
+            &json!({"message":input["Content"],"hasProject":true}),
+        );
+        if !matches!(instruction, Ok(Value::Null)) {
+            let receipt = super::gateway_memory::capture_explicit_instruction(
+                root,
+                id,
+                input["Id"].as_str().unwrap_or(""),
+            );
+            // The user message is already durable; a separate memory failure must not turn it into a failed send.
+            // 用户消息已正式保存；独立记忆失败不能把这次发送误报成未保存，也不能声称记忆已经生效。
+            result["memoryInstruction"] = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    json!({"created":false,"reason":"save-failed","error":{"code":error.code(),"message":error.message()}})
+                }
+            };
+        }
+    }
     if input["Role"] == "user" || input["Role"] == "assistant" && input["Status"] == "completed" {
         let _ = super::gateway_memory::schedule_candidates(
             root,
@@ -1556,7 +1590,7 @@ pub fn read_tool_result(
         let end = page["end"].as_u64().unwrap() as usize;
         let mut value = json!({"id":document["id"],"text":String::from_utf16_lossy(&units[start..end]),"offset":start,"nextOffset":end,
             "totalCharacters":page["totalCharacters"],"truncated":page["truncated"],"resultRef":reference,
-            "projection":"public","offsetUnit":"utf16-code-units","resultRefBasis":"canonical-archive"});
+            "projection":"public","sourceTool":document["toolName"],"offsetUnit":"utf16-code-units","resultRefBasis":"canonical-archive"});
         if !document["executionEnvironment"].is_null() {
             value["executionEnvironment"] = document["executionEnvironment"].clone();
         }
@@ -1700,7 +1734,7 @@ pub fn handle_text(
             if let Some(cursor) = query_value(query, "cursor") {
                 args["cursor"] = json!(cursor);
             }
-            let mut page = conversation_history::apply("storage.history.page", &args)?;
+            let mut page = history_page_recovering(root, &location, &args)?;
             let messages = page["rawMessages"]
                 .as_array()
                 .unwrap()
@@ -2339,7 +2373,7 @@ pub fn handle(
                 if let Some(cursor) = query_value(query, "cursor") {
                     args["cursor"] = json!(cursor);
                 }
-                let mut page = conversation_history::apply("storage.history.page", &args)?;
+                let mut page = history_page_recovering(root, &location, &args)?;
                 let messages = page["rawMessages"]
                     .as_array()
                     .unwrap()

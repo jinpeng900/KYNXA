@@ -78,6 +78,21 @@ var source = new RetrievalSource("source_test", "Synthetic source", "project", p
 transport.Respond = _ => Reply(source);
 await api.ImportSourceAsync(new("project", source.Path, projectId));
 Check(transport.LastMethod == HttpMethod.Post, "Import is a gateway command.");
+await api.ImportSourceAsync(new("project", ProjectId: projectId, Url: "https://example.com/guide.pdf"));
+using (var urlImport = JsonDocument.Parse(transport.LastBody!))
+    Check(urlImport.RootElement.GetProperty("url").GetString() == "https://example.com/guide.pdf"
+        && !urlImport.RootElement.TryGetProperty("path", out _)
+        && urlImport.RootElement.GetProperty("projectId").GetGuid() == projectId,
+        "URL imports preserve the explicit project and omit a fake filesystem path.");
+await api.ImportSourceAsync(new("user", Urls: ["https://example.com/a", "https://example.com/b"]));
+using (var urlsImport = JsonDocument.Parse(transport.LastBody!))
+    Check(urlsImport.RootElement.GetProperty("urls").GetArrayLength() == 2
+        && !urlsImport.RootElement.TryGetProperty("url", out _) && !urlsImport.RootElement.TryGetProperty("path", out _),
+        "Explicit URL batches never imply a site crawl or file import.");
+transport.Respond = _ => Reply(source with { SourceCoverage = new(3, 1, false,
+    JsonSerializer.SerializeToElement(new[] { new { relativePath = "archive!/broken.png", errorCode = "OCR_INVALID_REQUEST" } })) });
+Check((await api.ImportSourceAsync(new("project", source.Path, projectId))).SourceCoverage is { Complete: false, Failed: 1 },
+    "Partial archive parsing remains visible instead of reporting full coverage.");
 await api.DeleteSourceAsync(source.Id, 9);
 using (var deletion = JsonDocument.Parse(transport.LastBody!))
     Check(deletion.RootElement.GetProperty("expectedRevision").GetInt64() == 9, "Source removal can carry a source revision.");

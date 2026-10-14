@@ -47,6 +47,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private Task? _initialization;
     private string _noticeKey = "正在加载聊天…";
     private long _revision, _generation;
+    private long _diagramExportNavigation;
+    private long _findTextRequest;
+    private bool _diagramExportPending;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
     private sealed record CachedSegmentHtml(AssistantSegment Source, string Html, string ReasoningHtml,
         TranscriptMarkdown.StreamingState? Stream = null)
@@ -68,11 +71,16 @@ public sealed class ConversationTranscript : Grid, IDisposable
 
     public Task Ready => _ready.Task;
     internal WebView2 Browser => _browser;
+    internal Func<DiagramExportDocument, Task<DiagramExportOutcome>>? DiagramExportSaveOverride { get; set; }
     public event EventHandler<Guid>? RetryRequested;
     public event EventHandler<ToolResultRequest>? ToolResultRequested;
     public event EventHandler? ConversationChanged;
     public event EventHandler<Guid>? HistoryRequested;
     public event EventHandler<ConversationHistoryRequest>? HistoryNavigationRequested;
+    public event EventHandler? ConversationSearchRequested;
+    public event EventHandler? FindTextClosed;
+    public event EventHandler? FindTextStateChanged;
+    public bool IsFindTextOpen { get; private set; }
 
     public void SetHistoryAvailability(Guid conversationId, bool hasOlder, bool hasNewer)
     {
@@ -120,6 +128,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
             _publishedOrder = [];
             _hasPublishedSnapshot = false;
             _historyHasOlder = _historyHasNewer = false;
+            _diagramExportNavigation++;
+            _findTextRequest++;
+            if (IsFindTextOpen)
+            {
+                IsFindTextOpen = false;
+                FindTextStateChanged?.Invoke(this, EventArgs.Empty);
+            }
         }
         if (changed) ConversationChanged?.Invoke(this, EventArgs.Empty);
         _generation++;
@@ -158,6 +173,40 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public void BeforeSend() => Post(new { type = "beforeSend" });
     public void ClearSelection() => Post(new { type = "clearSelection" });
     public void JumpToLatest() => Post(new { type = "jumpToLatest" });
+    public void OpenFindText()
+    {
+        if (_disposed) return;
+        _ = OpenFindTextAsync(++_findTextRequest, _conversationId);
+    }
+
+    private async Task OpenFindTextAsync(long request, Guid? conversationId)
+    {
+        try
+        {
+            await _ready.Task;
+            // Loading can finish after navigation or a close command; never move focus for an obsolete request.
+            // 加载可能晚于会话切换或关闭命令；过期请求不能移动焦点。
+            if (_disposed || request != _findTextRequest || conversationId != _conversationId || !_browser.IsLoaded) return;
+            _browser.Focus(FocusState.Programmatic);
+            // Ready can precede the first batched render. Align identity before opening; an unchanged ID preserves the cached viewport.
+            // Ready 可能早于首个合并正文快照；先对齐会话身份再打开查找，相同 ID 不改变已有缓存视口。
+            Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
+            Post(new { type = "findText", action = "open" });
+        }
+        catch (Exception error)
+        {
+            // Initialization already exposes its loading failure; keep this focus request independently observed.
+            // 初始化会展示加载失败；这里单独观察焦点请求异常，避免产生未观察的任务。
+            Debug.WriteLine($"Transcript find open: {error.GetType().Name}");
+        }
+    }
+
+    public void CloseFindText()
+    {
+        _findTextRequest++;
+        Post(new { type = "findText", action = "close" });
+    }
+
     private void AppearanceChanged(object? sender, EventArgs e)
     {
         if (_disposed) return;
@@ -170,15 +219,21 @@ public sealed class ConversationTranscript : Grid, IDisposable
         if (_disposed) return;
         var palette = AppearanceService.Current;
         _browser.DefaultBackgroundColor = AppearanceService.ParseColor(palette.Main);
-        // Appearance updates only CSS colors; message DOM, selection and scroll ownership remain intact.
-        // 外观更新只修改 CSS 颜色，保留消息 DOM、选区和滚动归属。
+        // Appearance changes reach CSS without rebuilding message content or its cached trees.
+        // 外观变化只更新 CSS，不重建消息正文或缓存树，字号变化由页面保留阅读锚点。
         Post(new
         {
             type = "setAppearance",
+            fontSize = AppearanceService.ChatFontSize,
             palette = new
             {
                 main = palette.Main, soft = palette.Soft, accent = palette.Accent, selection = palette.Selection,
-                text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar
+                text = palette.Text, secondary = palette.Secondary, border = palette.Border, sidebar = palette.Sidebar,
+                muted = palette.Muted, success = palette.Success, error = palette.Error, warning = palette.Warning, replySurface = palette.ReplySurface,
+                accentText = palette.AccentText, onAccent = palette.OnAccent,
+                codeKeyword = palette.CodeKeyword, codeString = palette.CodeString, codeComment = palette.CodeComment,
+                codeNumber = palette.CodeNumber, codeType = palette.CodeType, codeFunction = palette.CodeFunction,
+                isDark = palette.IsDark, isHighContrast = palette.IsHighContrast
             }
         });
     }
@@ -203,9 +258,19 @@ public sealed class ConversationTranscript : Grid, IDisposable
             strings = new
             {
                 conversation = UiText.Get("对话"), transcript = UiText.Get("聊天记录"),
+                findText = UiText.Get("查找会话正文"), findTextPlaceholder = UiText.Get("查找当前会话…"),
+                findTextPrevious = UiText.Get("上一处"), findTextNext = UiText.Get("下一处"), findTextClose = UiText.Get("关闭正文查找"),
+                findTextNoResults = UiText.Get("没有找到匹配内容"), findTextCount = UiText.Get("{0} / {1}"),
+                findTextHint = UiText.Get("Enter 下一处 · Shift+Enter 上一处 · Esc 关闭"),
+                findTextSelection = UiText.Get("请先取消文字选择，再跳转到匹配内容。"), findTextSearching = UiText.Get("正在查找…"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),
                 copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
+                blockWrap = UiText.Get("自动换行"), blockUnwrap = UiText.Get("原样显示"),
+                blockExpand = UiText.Get("展开"), blockCollapse = UiText.Get("收起"), blockLineCount = UiText.Get("{0} 行"),
+                blockClearSelection = UiText.Get("请先取消文字选择，再调整显示。"),
+                tableBlockLabel = UiText.Get("表格"), copyTable = UiText.Get("复制表格（可粘贴到 Excel）"),
+                copyTableMarkdown = UiText.Get("复制为 Markdown"), tableCopyOptions = UiText.Get("更多复制格式"), tableEmpty = UiText.Get("空表格"),
                 messageSentAt = UiText.Get("发送时间"), replyCompletedAt = UiText.Get("回复完成时间"),
                 replyEndedAt = UiText.Get("回复结束时间"), timeNotRecorded = UiText.Get("未记录"),
                 diagramWaiting = UiText.Get("等待图表代码完整…"), diagramRendering = UiText.Get("正在绘制图表…"),
@@ -214,6 +279,10 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 diagramTooLarge = UiText.Get("图表过于复杂，已保留源码。"),
                 diagramUnsupported = UiText.Get("暂不支持此图表类型，已保留源码。"),
                 diagramSource = UiText.Get("查看源码"), diagramHideSource = UiText.Get("收起源码"), diagramCopySource = UiText.Get("复制源码"),
+                diagramExport = UiText.Get("导出图表"), diagramExportSvg = UiText.Get("导出 SVG"), diagramExportPng = UiText.Get("导出 PNG"),
+                diagramExportPreparing = UiText.Get("正在准备图表…"), diagramExporting = UiText.Get("正在保存图表…"),
+                diagramExported = UiText.Get("图表已导出"), diagramExportCancelled = UiText.Get("已取消导出"),
+                diagramExportFailed = UiText.Get("导出失败，请重试。"), diagramExportReduced = UiText.Get("已按尺寸限制缩放导出"),
                 diagramZoomIn = UiText.Get("放大图表"), diagramZoomOut = UiText.Get("缩小图表"), diagramFit = UiText.Get("适应窗口"),
                 diagramFullscreen = UiText.Get("全屏查看图表"), diagramClose = UiText.Get("关闭图表"),
                 diagramViewport = UiText.Get("Mermaid 图表，可缩放和平移"),
@@ -365,8 +434,25 @@ public sealed class ConversationTranscript : Grid, IDisposable
                         if (tool is not null) ToolResultRequested?.Invoke(this, new(conversation, assistantId, tool));
                     }
                     break;
+                case "searchConversations":
+                    if (MatchesConversation(message)) ConversationSearchRequested?.Invoke(this, EventArgs.Empty);
+                    break;
+                case "findTextState":
+                    if (MatchesConversation(message) && message.TryGetProperty("open", out var findOpen) &&
+                        findOpen.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        IsFindTextOpen = findOpen.GetBoolean();
+                        FindTextStateChanged?.Invoke(this, EventArgs.Empty);
+                    }
+                    break;
+                case "findTextClosed":
+                    if (MatchesConversation(message)) FindTextClosed?.Invoke(this, EventArgs.Empty);
+                    break;
                 case "copy":
                     CopyMessage(message);
+                    break;
+                case "exportDiagram":
+                    await ExportDiagramAsync(message);
                     break;
             }
         }
@@ -387,6 +473,9 @@ public sealed class ConversationTranscript : Grid, IDisposable
             var clipboardContent = new DataPackage();
             clipboardContent.SetText(text.GetString() ?? "");
             Clipboard.SetContent(clipboardContent);
+            // Materialize the package before acknowledging success so closing the app does not erase the copy.
+            // 回报成功前将数据实体化到系统剪贴板，避免关闭应用后复制内容随源数据包消失。
+            Clipboard.Flush();
             succeeded = true;
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException) { }
@@ -394,6 +483,51 @@ public sealed class ConversationTranscript : Grid, IDisposable
         // A browser click is only a request; acknowledge the actual clipboard result for this chat and operation.
         // 浏览器点击仅代表请求；回执绑定当前聊天与本次操作，反映剪贴板实际结果。
         Post(new { type = "copyResult", conversationId = _conversationId?.ToString() ?? "", requestId = request.GetString(), success = succeeded });
+    }
+
+    private async Task ExportDiagramAsync(JsonElement message)
+    {
+        if (!MatchesConversation(message) || _conversationId is not Guid conversationId
+            || !message.TryGetProperty("requestId", out var request) || request.ValueKind != JsonValueKind.String
+            || string.IsNullOrEmpty(request.GetString()) || request.GetString()!.Length > 80
+            || !message.TryGetProperty("messageId", out var messageId) || messageId.ValueKind != JsonValueKind.String
+            || !Guid.TryParse(messageId.GetString(), out var parsedId) || !_messages.Any(row => row.Message.Id == parsedId)) return;
+
+        // Snapshot every request field and the owning HWND before the first await; JSON and live UI state are not the document.
+        // 首次等待前捕获全部请求字段及所属 HWND；JSON 和可变界面状态不能成为导出文档的数据源。
+        string requestId = request.GetString()!;
+        string format = message.TryGetProperty("format", out var formatField) && formatField.ValueKind == JsonValueKind.String ? formatField.GetString()! : "";
+        string content = message.TryGetProperty("content", out var contentField) && contentField.ValueKind == JsonValueKind.String ? contentField.GetString()! : "";
+        long navigation = _diagramExportNavigation;
+        bool IsCurrent() => !_disposed && _diagramExportNavigation == navigation && _conversationId == conversationId
+            && _messages.Any(row => row.Message.Id == parsedId);
+        void Reply(DiagramExportOutcome outcome)
+        {
+            if (IsCurrent()) Post(new { type = "diagramExportResult", conversationId = conversationId.ToString(), requestId,
+                status = outcome switch { DiagramExportOutcome.Success => "success", DiagramExportOutcome.Cancelled => "cancelled", _ => "error" } });
+        }
+        if (_diagramExportPending) { Reply(DiagramExportOutcome.Error); return; }
+        _diagramExportPending = true;
+        try
+        {
+            nint ownerWindow = XamlRoot is null ? 0 : Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
+            var saveOverride = DiagramExportSaveOverride;
+            var export = await DiagramExport.ValidateAsync(format, content);
+            if (!IsCurrent()) return;
+            var outcome = saveOverride is null ? await DiagramExport.SaveAsync(export, ownerWindow) : await saveOverride(export);
+            Reply(outcome);
+        }
+        catch (OperationCanceledException)
+        {
+            Reply(DiagramExportOutcome.Cancelled);
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or FormatException or ArgumentException
+            or InvalidOperationException or System.Xml.XmlException or NotSupportedException or TimeoutException
+            or System.Runtime.InteropServices.COMException)
+        {
+            Reply(DiagramExportOutcome.Error);
+        }
+        finally { _diagramExportPending = false; }
     }
 
     private bool MatchesConversation(JsonElement message) => message.TryGetProperty("conversationId", out var id)
@@ -513,6 +647,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                     assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
                         round = segment.Source.Round, order = segment.Source.Order, phase = segment.Source.Phase,
+                        isAnswerContinuation = segment.Source.IsAnswerContinuation,
                         status = segment.Source.Status, content = segment.Source.Content, html = segment.Html,
                         htmlStableLength = segment.Stream?.StableHtml.Length, htmlStableBlocks = segment.Stream?.StableBlocks,
                         reasoningHtml = segment.ReasoningHtml,

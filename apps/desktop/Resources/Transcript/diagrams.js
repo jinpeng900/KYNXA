@@ -6,6 +6,11 @@
   const MAX_SVG_CHARACTERS = 2000000;
   const MAX_SVG_NODES = 16000;
   const RENDER_TIMEOUT_MS = 12000;
+  const MAX_EXPORT_SVG_BYTES = 8 * 1024 * 1024;
+  const MAX_EXPORT_PNG_BYTES = 16 * 1024 * 1024;
+  const MAX_EXPORT_IMAGE_SIDE_PX = 8192;
+  const MAX_EXPORT_IMAGE_PIXELS = 16000000;
+  const EXPORT_PREPARATION_TIMEOUT_MS = 15000;
   const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
   const SUCCESS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
@@ -24,15 +29,20 @@
     diagramZoomIn: '放大', diagramZoomOut: '缩小', diagramFit: '适应窗口', diagramFullscreen: '全屏查看',
     diagramClose: '关闭', diagramViewport: 'Mermaid 图表，可缩放和平移',
     diagramViewerHint: '拖动平移 · Ctrl＋滚轮缩放 · ＋／－缩放 · 0 适应窗口 · Esc 关闭',
-    copied: '已复制', copyFailed: '复制失败，请重试。'
+    copied: '已复制', copyFailed: '复制失败，请重试。',
+    diagramExport: '导出图表', diagramExportSvg: '导出 SVG 图表', diagramExportPng: '导出 PNG 图表',
+    diagramExportPreparing: '正在准备图表…', diagramExporting: '正在保存图表…', diagramExported: '图表已导出',
+    diagramExportCancelled: '已取消导出', diagramExportFailed: '导出失败，请重试。',
+    diagramExportReduced: '图表较大，已按比例缩小导出。'
   };
   const states = new WeakMap();
   const records = new Set();
   const pendingCopies = new Map();
+  const pendingExports = new Map();
   const queue = [];
   const queued = new Set();
   let hooks = {}, palette = {}, paletteRevision = 0, renderer = null, rendererReady = null;
-  let activeRequest = null, isDraining = false, sequence = 0, blockSequence = 0, copySequence = 0, viewer = null;
+  let activeRequest = null, isDraining = false, sequence = 0, blockSequence = 0, copySequence = 0, exportSequence = 0, exportGeneration = 0, viewer = null;
   const nonce = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
 
   function configure(options) { hooks = { ...hooks, ...options }; }
@@ -62,6 +72,19 @@
     button.title = translated(key); button.setAttribute('aria-label', translated(key));
     return button;
   }
+  function exportControls() {
+    const group = document.createElement('div'); group.className = 'mermaid-export-controls'; group.dataset.copyIgnore = '';
+    group.setAttribute('role', 'group'); group.setAttribute('aria-label', translated('diagramExport'));
+    for (const format of ['svg', 'png']) {
+      const button = document.createElement('button'); button.type = 'button';
+      button.dataset.diagramAction = 'export-' + format; button.dataset.diagramLabel = format === 'svg' ? 'diagramExportSvg' : 'diagramExportPng';
+      button.textContent = format.toUpperCase(); button.title = translated(button.dataset.diagramLabel);
+      button.setAttribute('aria-label', button.title); group.append(button);
+    }
+    const status = document.createElement('span'); status.className = 'mermaid-export-status'; status.dataset.copyIgnore = '';
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); group.append(status);
+    return group;
+  }
   function setState(state, status, errorKey = '') {
     state.block.dataset.diagramState = status;
     if (errorKey) state.block.dataset.diagramError = errorKey;
@@ -71,6 +94,7 @@
     state.status.hidden = !state.statusKey;
     state.viewport.hidden = !state.svg;
     for (const button of state.toolbar.querySelectorAll('[data-diagram-action]')) button.disabled = !state.svg;
+    updateExportControls(state);
     if (status === 'waiting' || status === 'error') state.details.open = true;
   }
   function createState(block) {
@@ -87,7 +111,8 @@
     const zoomLabel = document.createElement('span'); zoomLabel.className = 'mermaid-zoom-label'; zoomLabel.textContent = '100%';
     toolbar.insertBefore(zoomLabel, toolbar.children[3]);
     copy.after(copyStatus);
-    header.append(label, toolbar);
+    const exports = exportControls();
+    header.append(label, toolbar, exports);
     const status = document.createElement('p'); status.className = 'mermaid-status'; status.dataset.copyIgnore = ''; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     const viewport = document.createElement('div'); viewport.className = 'mermaid-viewport'; viewport.tabIndex = 0; viewport.hidden = true;
     viewport.setAttribute('role', 'img'); viewport.setAttribute('aria-label', translated('diagramViewport'));
@@ -95,8 +120,8 @@
     const details = document.createElement('details'); details.className = 'mermaid-source-details'; details.open = true;
     const summary = document.createElement('summary'); summary.dataset.copyIgnore = ''; details.append(summary, source.parentElement);
     block.append(header, status, viewport, details);
-    const state = { block, source, header, label, toolbar, copy, copyStatus, zoomLabel, status, viewport, canvas, details, summary,
-      sourceText: null, revision: 0, renderedPaletteRevision: -1, svg: null, copyTimer: 0, sourceWasToggled: false };
+    const state = { block, source, header, label, toolbar, exports, copy, copyStatus, zoomLabel, status, viewport, canvas, details, summary,
+      sourceText: null, revision: 0, renderedPaletteRevision: -1, svg: null, copyTimer: 0, exportTimer: 0, exportStatus: '', sourceWasToggled: false };
     state.view = createView(viewport, canvas, zoomLabel);
     details.addEventListener('toggle', () => {
       summary.textContent = translated(details.open ? 'diagramHideSource' : 'diagramSource');
@@ -109,6 +134,10 @@
       if (button.dataset.diagramAction === 'fullscreen') openViewer(state, button);
       else handleViewAction(state.view, button.dataset.diagramAction);
     });
+    exports.addEventListener('click', event => {
+      const button = event.target.closest('[data-diagram-action]');
+      if (button && !button.disabled) requestExport(state, button.dataset.diagramAction.slice(7));
+    });
     states.set(block, state); records.add(state); localize(state);
     return state;
   }
@@ -118,6 +147,7 @@
     state.viewport.setAttribute('aria-label', translated('diagramViewport'));
     state.toolbar.setAttribute('aria-label', 'Mermaid');
     localizeCopy(state);
+    updateExportControls(state);
     for (const button of state.toolbar.querySelectorAll('[data-diagram-label]')) {
       button.title = translated(button.dataset.diagramLabel); button.setAttribute('aria-label', button.title);
     }
@@ -147,6 +177,7 @@
       const source = state.source.textContent;
       const ready = block.dataset.mermaidReady === 'true';
       if (source !== state.sourceText || ready !== state.ready) {
+        cancelStateExport(state);
         state.sourceText = source; state.ready = ready; state.revision++; state.pendingSvg = null;
         state.label.textContent = 'Mermaid · ' + diagramType(source);
         if (state.svg) { state.svg = null; state.canvas.replaceChildren(); state.viewport.hidden = true; }
@@ -182,7 +213,7 @@
           const svgText = await renderSource(state.sourceText);
           if (!state.block.isConnected || state.revision !== revision || !state.ready) continue;
           if (appearanceRevision !== paletteRevision) { schedule(state); continue; }
-          const svg = sanitizeSvg(svgText);
+          const svg = sanitizeSvg(svgText, diagramType(state.sourceText));
           if (!svg) throw new Error('invalid-svg');
           const result = { svg, revision, appearanceRevision };
           if (!applyResult(state, result)) state.pendingSvg = result;
@@ -293,7 +324,7 @@
     }
     return rules.join('\n');
   }
-  function sanitizeSvg(svgText) {
+  function sanitizeSvg(svgText, type = '') {
     if (typeof svgText !== 'string' || svgText.length > MAX_SVG_CHARACTERS || /<!DOCTYPE|<!ENTITY/i.test(svgText)) return null;
     const parsed = new DOMParser().parseFromString(svgText, 'image/svg+xml');
     const svg = parsed.documentElement;
@@ -335,10 +366,236 @@
     if (!clean?.querySelector('path,rect,circle,ellipse,line,polygon,polyline,text')) return null;
     const box = clean.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
     if (!box || box.length !== 4 || box.some(value => !Number.isFinite(value)) || box[2] <= 0 || box[3] <= 0 || box[2] > 100000 || box[3] > 100000) return null;
+    if (type === 'mindmap') centerMindmapCircularLabels(clean);
     clean.classList.add('mermaid-svg'); clean.setAttribute('role', 'img'); clean.setAttribute('aria-label', translated('diagramViewport'));
     clean.removeAttribute('width'); clean.removeAttribute('height');
     clean.style.width = '100%'; clean.style.height = '100%'; clean.style.maxWidth = 'none';
     return clean;
+  }
+
+  function centerMindmapCircularLabels(svg) {
+    // Mermaid's SVG mindmap circle labels can omit the class carrying their centred anchor.
+    // Repair only known circular nodes with an unshifted label; rectangular labels retain their
+    // measured negative-x positioning, and other diagram families keep their original geometry.
+    // Mermaid 的 SVG 思维导图圆形标签可能遗漏承载居中锚点的 class；仅修复已知圆形节点中
+    // 未横向移动的标签。矩形标签保留按测量宽度计算的负 x 偏移，其余图表类型不作调整。
+    for (const node of svg.querySelectorAll('g.mindmap-node')) {
+      const circle = node.querySelector(':scope > circle.basic.label-container');
+      const label = node.querySelector(':scope > g.label');
+      if (!circle || !label) continue;
+      const circleCenter = Number(circle.getAttribute('cx') || 0);
+      if (!Number.isFinite(circleCenter) || Math.abs(circleCenter) > .000001) continue;
+      const transform = label.getAttribute('transform');
+      const translation = transform?.match(/^translate\(\s*([-+.\deE]+)(?:[\s,]+[-+.\deE]+)?\s*\)$/);
+      if (transform && (!translation || !Number.isFinite(Number(translation[1])) || Math.abs(Number(translation[1])) > .000001)) continue;
+      for (const text of label.querySelectorAll('text, text tspan')) {
+        text.setAttribute('text-anchor', 'middle'); text.style.setProperty('text-anchor', 'middle');
+      }
+    }
+  }
+
+  const EXPORT_STYLE_PROPERTIES = ['fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-opacity',
+    'stroke-dasharray', 'stroke-dashoffset', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'opacity',
+    'font-family', 'font-size', 'font-weight', 'font-style', 'font-variant', 'text-anchor', 'text-decoration',
+    'dominant-baseline', 'alignment-baseline', 'paint-order', 'color', 'white-space', 'word-spacing', 'letter-spacing',
+    'line-height', 'marker-start', 'marker-mid', 'marker-end', 'clip-path', 'rx', 'ry', 'text-overflow', 'overflow',
+    'display', 'visibility', 'stop-color', 'stop-opacity'];
+  function exportImageSize(width, height, preferredScale) {
+    const scale = Math.min(preferredScale, MAX_EXPORT_IMAGE_SIDE_PX / width, MAX_EXPORT_IMAGE_SIDE_PX / height,
+      Math.sqrt(MAX_EXPORT_IMAGE_PIXELS / (width * height)));
+    return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)),
+      reduced: scale < preferredScale - .000001 };
+  }
+  function exportStyleValue(value, ids) {
+    let invalid = false;
+    const normalized = value.replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (_, quote, reference) => {
+      try {
+        const url = new URL(reference, location.href), current = new URL(location.href);
+        const id = decodeURIComponent(url.hash.slice(1)); url.hash = ''; current.hash = '';
+        if (url.href === current.href && ids.has(id)) return 'url(#' + id + ')';
+      } catch { }
+      invalid = true; return '';
+    });
+    return invalid ? null : safeReference(normalized, ids);
+  }
+  function exportSnapshot(state) {
+    const svg = state.svg, box = svg.getAttribute('viewBox').trim().split(/[\s,]+/).map(Number);
+    const clone = svg.cloneNode(true), originals = [svg, ...svg.querySelectorAll('*')], copies = [clone, ...clone.querySelectorAll('*')];
+    const ids = new Map(originals.filter(element => element.id).map(element => [element.id, element.id]));
+    const exportedIds = new Set();
+    // Freeze computed colours and fonts while the safe SVG is attached. The independent file has no
+    // page styles, scripts, links, fonts or assets to fetch, and never includes the zoom/pan container.
+    // 趁安全 SVG 仍在页面中同步固化颜色和字体；独立文件不依赖页面样式、不加载脚本或外部资源，
+    // 也不复制包含缩放和平移的父容器，保证导出整张图表。
+    for (let index = 0; index < originals.length; index++) {
+      const original = originals[index], copy = copies[index];
+      if (copy.localName === 'style') { copy.remove(); continue; }
+      // Mermaid mindmaps may reuse a node ID on its group and shape. Frozen inline styles no longer
+      // need duplicate selector identities; keep the first target, matching local fragment resolution.
+      // Mermaid 思维导图可能让节点组和形状共用 ID；固化内联样式后不再依赖重复选择器身份，
+      // 仅保留首个目标，维持本地片段引用的解析语义，同时输出唯一 ID 的独立文档。
+      if (copy.id) {
+        if (exportedIds.has(copy.id)) copy.removeAttribute('id');
+        else exportedIds.add(copy.id);
+      }
+      const computed = getComputedStyle(original); copy.removeAttribute('class'); copy.removeAttribute('style');
+      const declarations = [];
+      for (const property of EXPORT_STYLE_PROPERTIES) {
+        const value = exportStyleValue(computed.getPropertyValue(property), ids);
+        if (value !== null && value.length > 0 && value.length < 1000 && !value.includes(';')) declarations.push(property + ': ' + value + ';');
+      }
+      // Preserve the explicit property contract. CSSOM setters can collapse safe longhands into
+      // different shorthands (for example marker), which the native whitelist correctly rejects.
+      // 保留明确的属性合同；CSSOM 赋值会把安全长属性合并成另一种缩写（例如 marker），
+      // 导致原生严格白名单正确拒绝该未约定属性。
+      copy.setAttribute('style', declarations.join(' '));
+    }
+    clone.setAttribute('xmlns', SVG_NAMESPACE); clone.setAttribute('width', String(box[2])); clone.setAttribute('height', String(box[3]));
+    clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    const background = document.createElementNS(SVG_NAMESPACE, 'rect');
+    background.setAttribute('x', String(box[0])); background.setAttribute('y', String(box[1]));
+    background.setAttribute('width', String(box[2])); background.setAttribute('height', String(box[3]));
+    const backgroundColor = /^#[0-9a-f]{6}$/i.test(palette.main) ? palette.main : '#ffffff';
+    background.setAttribute('fill', backgroundColor);
+    clone.insertBefore(background, clone.firstChild);
+    const serialized = new XMLSerializer().serializeToString(clone), bytes = new TextEncoder().encode(serialized);
+    if (bytes.byteLength > MAX_EXPORT_SVG_BYTES) throw new Error('svg-export-limit');
+    return { serialized, bytes, width: box[2], height: box[3], backgroundColor, source: state.sourceText,
+      generation: exportGeneration };
+  }
+  function updateExportControls(state) {
+    const busy = pendingExports.size > 0 || !!state.exportTask;
+    const canExport = !!state.svg && state.ready && state.block.dataset.diagramState === 'ready';
+    const controls = [state.exports, ...(viewer?.state === state ? [viewer.exports] : [])];
+    for (const group of controls) {
+      group.setAttribute('aria-label', translated('diagramExport')); group.setAttribute('aria-busy', String(busy));
+      for (const button of group.querySelectorAll('[data-diagram-action]')) {
+        button.disabled = !canExport || busy;
+        button.title = translated(button.dataset.diagramLabel); button.setAttribute('aria-label', button.title);
+      }
+      const status = group.querySelector('.mermaid-export-status');
+      status.dataset.exportState = state.exportStatus;
+      const key = { preparing: 'diagramExportPreparing', saving: 'diagramExporting', success: 'diagramExported',
+        cancelled: 'diagramExportCancelled', error: 'diagramExportFailed' }[state.exportStatus];
+      status.textContent = key ? translated(key) + (state.exportStatus === 'success' && state.exportReduced ? ' · ' + translated('diagramExportReduced') : '') : '';
+      status.title = status.textContent;
+    }
+  }
+  function refreshExportControls() {
+    for (const state of records) if (state.block.isConnected) updateExportControls(state);
+  }
+  function setExportStatus(state, status) {
+    state.exportStatus = status; updateExportControls(state);
+  }
+  function releaseExportResources(task) {
+    clearTimeout(task.preparationTimer);
+    if (task.cancelPreparation) { const cancel = task.cancelPreparation; task.cancelPreparation = null; cancel(); }
+    if (task.objectUrl) { URL.revokeObjectURL(task.objectUrl); task.objectUrl = null; }
+    if (task.image) { task.image.onload = null; task.image.onerror = null; task.image.src = ''; task.image = null; }
+    if (task.canvas) { task.canvas.width = 0; task.canvas.height = 0; task.canvas = null; }
+  }
+  function cancelStateExport(state, refresh = true) {
+    clearTimeout(state.exportTimer); state.exportTimer = 0;
+    if (state.exportTask) {
+      const task = state.exportTask; task.cancelled = true; state.exportTask = null;
+      pendingExports.delete(task.requestId); releaseExportResources(task);
+    }
+    state.exportStatus = ''; state.exportReduced = false; updateExportControls(state);
+    if (refresh) refreshExportControls();
+  }
+  function resetExports() {
+    exportGeneration++;
+    for (const state of records) cancelStateExport(state, false);
+    pendingExports.clear();
+    refreshExportControls();
+  }
+  function finishExport(state, task, status) {
+    if (state.exportTask !== task) return;
+    releaseExportResources(task); pendingExports.delete(task.requestId); state.exportTask = null;
+    refreshExportControls();
+    if (!state.block.isConnected || task.snapshot.generation !== exportGeneration) { state.exportStatus = ''; return; }
+    setExportStatus(state, status);
+    clearTimeout(state.exportTimer);
+    state.exportTimer = setTimeout(() => { state.exportTimer = 0; setExportStatus(state, ''); }, 4500);
+  }
+  function isCurrentExport(state, task) {
+    return !task.cancelled && state.exportTask === task && state.block.isConnected
+      && task.snapshot.generation === exportGeneration && task.snapshot.source === state.sourceText && state.ready;
+  }
+  function pngExportBytes(task) {
+    return new Promise((resolve, reject) => {
+      const dimensions = exportImageSize(task.snapshot.width, task.snapshot.height, 2);
+      // Limit the SVG image's intrinsic raster size before decoding, not only the destination canvas.
+      // 解码前就限制 SVG 图像的固有栅格尺寸，避免先分配超大图像、再缩进较小画布。
+      const parsed = new DOMParser().parseFromString(task.snapshot.serialized, 'image/svg+xml');
+      parsed.documentElement.setAttribute('width', String(dimensions.width)); parsed.documentElement.setAttribute('height', String(dimensions.height));
+      const rasterSource = new XMLSerializer().serializeToString(parsed.documentElement);
+      let completed = false;
+      const finish = (error, bytes) => {
+        if (completed) return; completed = true; task.cancelPreparation = null;
+        if (error) reject(error); else resolve(bytes);
+      };
+      task.cancelPreparation = () => finish(new Error('export-cancelled'));
+      task.preparationTimer = setTimeout(() => finish(new Error('export-preparation-timeout')), EXPORT_PREPARATION_TIMEOUT_MS);
+      const image = new Image(); task.image = image;
+      image.onload = async () => {
+        if (task.cancelled || completed) return;
+        try {
+          const canvas = document.createElement('canvas'); task.canvas = canvas;
+          canvas.width = dimensions.width; canvas.height = dimensions.height; task.reduced = dimensions.reduced;
+          const context = canvas.getContext('2d'); if (!context) throw new Error('export-canvas-unavailable');
+          context.fillStyle = task.snapshot.backgroundColor; context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const blob = await new Promise((done, fail) => canvas.toBlob(result => result ? done(result) : fail(new Error('export-encoding-failed')), 'image/png'));
+          if (blob.size > MAX_EXPORT_PNG_BYTES) throw new Error('png-export-limit');
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          if (!task.cancelled) finish(null, bytes);
+        } catch (error) { finish(error); }
+      };
+      image.onerror = () => finish(new Error('export-image-failed'));
+      task.objectUrl = URL.createObjectURL(new Blob([rasterSource], { type: 'image/svg+xml;charset=utf-8' }));
+      image.src = task.objectUrl;
+    });
+  }
+  function base64Bytes(bytes) {
+    const parts = [];
+    for (let offset = 0; offset < bytes.length; offset += 16384) parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 16384)));
+    return btoa(parts.join(''));
+  }
+  async function requestExport(state, format) {
+    if (!['svg', 'png'].includes(format) || pendingExports.size || state.exportTask || !hooks.requestExport || !state.svg
+      || !state.ready || state.block.dataset.diagramState !== 'ready') return;
+    clearTimeout(state.exportTimer); state.exportReduced = false;
+    let task;
+    try {
+      // Capture all mutable visual data before the first await. Navigation invalidates the task;
+      // late preparation or native results can never target a reused conversation DOM node.
+      // 首次等待前获取全部视觉快照；导航会使任务失效，迟到的准备结果或原生回执不能污染复用的聊天节点。
+      const snapshot = exportSnapshot(state);
+      task = { requestId: 'diagram-export-' + nonce + '-' + (++exportSequence), snapshot, format, cancelled: false,
+        objectUrl: null, image: null, canvas: null, preparationTimer: 0, reduced: false };
+      state.exportTask = task; pendingExports.set(task.requestId, state); setExportStatus(state, 'preparing');
+      // A single transcript export bounds raster memory and matches the native picker's ownership.
+      // 一份聊天同时只准备或保存一张图，限制栅格内存峰值，并与原生保存选择器的唯一所有权一致。
+      refreshExportControls();
+      const bytes = format === 'svg' ? snapshot.bytes : await pngExportBytes(task);
+      if (!isCurrentExport(state, task)) { finishExport(state, task, 'cancelled'); return; }
+      const content = base64Bytes(bytes); state.exportReduced = task.reduced;
+      releaseExportResources(task); task.snapshot.bytes = null; task.snapshot.serialized = null;
+      setExportStatus(state, 'saving');
+      if (hooks.requestExport(format, content, state.block, task.requestId) !== true) throw new Error('export-disconnected');
+    } catch {
+      if (task) finishExport(state, task, 'error');
+      else {
+        setExportStatus(state, 'error'); state.exportTimer = setTimeout(() => setExportStatus(state, ''), 4500);
+      }
+    }
+  }
+  function acknowledgeExport(command) {
+    const state = pendingExports.get(command?.requestId), task = state?.exportTask;
+    if (!task || task.requestId !== command.requestId || task.snapshot.generation !== exportGeneration) return;
+    const status = ['success', 'cancelled', 'error'].includes(command.status) ? command.status : 'error';
+    finishExport(state, task, status);
   }
 
   function createView(viewport, canvas, zoomLabel) {
@@ -456,17 +713,22 @@
     dialog.setAttribute('aria-labelledby', title.id);
     const toolbar = document.createElement('div'); toolbar.className = 'mermaid-toolbar';
     toolbar.append(actionButton('zoom-out', 'diagramZoomOut'), actionButton('zoom-in', 'diagramZoomIn'), actionButton('fit', 'diagramFit'), actionButton('close', 'diagramClose'));
-    header.append(title, toolbar);
+    const exports = exportControls(); header.append(title, toolbar, exports);
     const viewport = document.createElement('div'); viewport.className = 'mermaid-viewer-viewport'; viewport.tabIndex = 0;
     viewport.setAttribute('aria-label', translated('diagramViewport'));
     const canvas = document.createElement('div'); canvas.className = 'mermaid-canvas'; canvas.append(cloneSvg(state.svg)); viewport.append(canvas);
     const hint = document.createElement('div'); hint.className = 'mermaid-viewer-hint'; hint.textContent = translated('diagramViewerHint');
     dialog.append(header, viewport, hint); document.body.append(dialog);
     const view = createView(viewport, canvas, null);
-    viewer = { dialog, state, trigger, canvas, view, toolbar, hint };
+    viewer = { dialog, state, trigger, canvas, view, toolbar, exports, hint };
+    updateExportControls(state);
     toolbar.addEventListener('click', event => {
       const action = event.target.closest('[data-diagram-action]')?.dataset.diagramAction;
       if (action === 'close') closeViewer(); else if (action) handleViewAction(view, action);
+    });
+    exports.addEventListener('click', event => {
+      const button = event.target.closest('[data-diagram-action]');
+      if (button && !button.disabled) requestExport(state, button.dataset.diagramAction.slice(7));
     });
     dialog.addEventListener('cancel', event => { event.preventDefault(); closeViewer(); });
     dialog.addEventListener('close', () => { if (viewer?.dialog === dialog) closeViewer(); });
@@ -502,8 +764,9 @@
     const nextPalette = next?.palette || next;
     const keys = ['main', 'soft', 'accent', 'selection', 'text', 'secondary', 'border', 'sidebar'];
     if (!nextPalette || keys.some(key => !/^#[0-9a-f]{6}$/i.test(nextPalette[key]))) return;
-    if (keys.every(key => palette[key] === nextPalette[key])) return;
-    palette = Object.fromEntries(keys.map(key => [key, nextPalette[key]])); paletteRevision++;
+    const isDark = nextPalette.isDark === true, isHighContrast = nextPalette.isHighContrast === true;
+    if (keys.every(key => palette[key] === nextPalette[key]) && palette.isDark === isDark && palette.isHighContrast === isHighContrast) return;
+    palette = { ...Object.fromEntries(keys.map(key => [key, nextPalette[key]])), isDark, isHighContrast }; paletteRevision++;
     for (const state of records) {
       if (!state.block.isConnected || !state.ready || sourceValidation(state.sourceText)) continue;
       state.revision++; state.pendingSvg = null; schedule(state);
@@ -521,10 +784,19 @@
     for (const state of records) {
       if (state.block.isConnected) continue;
       state.revision++; state.pendingSvg = null; state.view.observer.disconnect(); clearTimeout(state.copyTimer); records.delete(state);
+      cancelStateExport(state);
       delete state.copy.dataset.copyState; state.copy.innerHTML = COPY_ICON; localizeCopy(state);
       if (viewer?.state === state) closeViewer();
       for (const [id, pending] of pendingCopies) if (pending === state) pendingCopies.delete(id);
     }
   }
-  window.kynxaDiagrams = { configure, hydrate, setAppearance, setLanguage, acknowledgeCopy, closeViewer, disposeDetached };
+  window.addEventListener('pagehide', resetExports);
+  function revealSource(block) {
+    const state = states.get(block);
+    if (!state || !block.isConnected) return;
+    // Explicit source navigation has the same permanence as a reader opening the source disclosure.
+    // 主动定位源码与读者手动展开源码具有相同持久性，延迟图表绘制不再自动收起它。
+    state.sourceWasToggled = true; state.details.open = true;
+  }
+  window.kynxaDiagrams = { configure, hydrate, setAppearance, setLanguage, acknowledgeCopy, acknowledgeExport, resetExports, closeViewer, disposeDetached, revealSource };
 })();

@@ -50,15 +50,33 @@ public partial class App
                   const selection = getSelection();
                   selection.setBaseAndExtent(first, 2, last, last.nodeValue.length - 1);
                   const roots = [...document.querySelectorAll('.message-body, .reasoning-body')];
-                  const nodes = roots.flatMap(root => [root, ...root.querySelectorAll('*')]);
+                  // Only the application's block toolbar may translate inside a body; source nodes stay strict.
+                  // 正文内仅允许应用自有的内容框工具栏翻译；源码节点仍严格校验。
+                  const isToolbar = node => (node.nodeType===Node.ELEMENT_NODE ? node : node.parentElement)
+                    ?.closest('.content-block-header[data-copy-ignore]');
+                  const contentHtml = root => {
+                    const clone=root.cloneNode(true);
+                    clone.querySelectorAll('.content-block-header[data-copy-ignore]').forEach(node=>node.remove());
+                    return clone.innerHTML;
+                  };
+                  const nodes = roots.flatMap(root => {
+                    const result=[root],walker=document.createTreeWalker(root,NodeFilter.SHOW_ALL);
+                    for(let node;(node=walker.nextNode());) if(!isToolbar(node))result.push(node);
+                    return result;
+                  });
                   const probe = window.__languageProbe = {
-                    document, roots, nodes, html: roots.map(root => root.innerHTML),
+                    document, roots, nodes, contentHtml, html: roots.map(contentHtml),
                     anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset,
                     focusNode: selection.focusNode, focusOffset: selection.focusOffset,
                     copy: window.transcriptSelectionText(), top: scrollY, left: scrollX,
-                    mutations: 0, renders: 0
+                    mutations: 0, toolbarMutations: 0, renders: 0
                   };
-                  probe.observer = new MutationObserver(records => { probe.mutations += records.length; });
+                  probe.observer = new MutationObserver(records => {
+                    for(const record of records) {
+                      if(isToolbar(record.target))probe.toolbarMutations++;
+                      else probe.mutations++;
+                    }
+                  });
                   roots.forEach(root => probe.observer.observe(root, {childList:true, characterData:true, attributes:true, subtree:true}));
                   probe.listener = event => { if (event.data?.type === 'render') probe.renders++; };
                   window.chrome.webview.addEventListener('message', probe.listener);
@@ -100,7 +118,7 @@ public partial class App
             _transcript.ShowConversation(cachedChat, [cached]);
             await WaitAsync("!!(document.querySelector('.message-body')?.textContent.includes('CACHED_LANGUAGE_BODY'))", "cached language fixture reopens");
             Check(await EvalAsync<bool>("window.__languageCached === document.querySelector('#messages > article') && !window.__languageCached.querySelector('.reasoning')"), "cached conversation reuses its DOM with translated metadata");
-            _metrics["liveLanguageSwitching"] = "passed: active/cached labels, no body mutations or render commands, selection/scroll, deferred updates";
+            _metrics["liveLanguageSwitching"] = "passed: active/cached labels and block toolbars translate; no source mutations or render commands; source nodes, selection/scroll and deferred updates preserved";
         }
         finally
         {
@@ -112,11 +130,45 @@ public partial class App
 
     private async Task CheckLanguageBodyPreservationAsync()
     {
-        Check(await EvalAsync<bool>("window.__languageProbe.mutations === 0 && window.__languageProbe.roots.every((root, index) => root.innerHTML === window.__languageProbe.html[index]) && window.__languageProbe.nodes.every(node => node.isConnected)"), "language change preserves message, code, reasoning and formula DOM");
+        Check(await EvalAsync<bool>("window.__languageProbe.mutations === 0 && window.__languageProbe.roots.every((root, index) => window.__languageProbe.contentHtml(root) === window.__languageProbe.html[index]) && window.__languageProbe.nodes.every(node => node.isConnected)"), "language change preserves every source node and source HTML in message, code, reasoning and formula DOM");
+        Check(await EvalAsync<bool>("window.__languageProbe.toolbarMutations > 0"), "language change updates the existing block toolbar while source preservation checks remain strict");
         Check(await EvalAsync<bool>("(() => { const saved = window.__languageProbe, selection = getSelection(); return selection.anchorNode === saved.anchorNode && selection.anchorOffset === saved.anchorOffset && selection.focusNode === saved.focusNode && selection.focusOffset === saved.focusOffset && window.transcriptSelectionText() === saved.copy; })()"), "language change preserves cross-message selection endpoints and exact copied text");
         Check(await EvalAsync<bool>("Math.abs(scrollY - window.__languageProbe.top) < 2 && Math.abs(scrollX - window.__languageProbe.left) < 2"), "language change preserves the manual scroll position");
         Check(await EvalAsync<bool>("!document.querySelector('.reasoning')"), "language change does not resurrect removed thinking cards");
     }
 
     private Task<bool> StopLanguageProbeAsync() => EvalAsync<bool>("(() => { const saved = window.__languageProbe; if (saved) { saved.observer.disconnect(); window.chrome.webview.removeEventListener('message', saved.listener); delete window.__languageProbe; } return true; })()");
+
+    private async Task CheckRapidLanguageNavigationAsync()
+    {
+        string originalLanguage = UiText.Language;
+        try
+        {
+            // Keep the production host message ordering and natural animation frames; no RAF callbacks are withheld.
+            // 使用正式宿主的消息顺序与自然动画帧，不拦截或扣留 RAF 回调。
+            for (int index = 0; index < 12; index++)
+            {
+                var firstChat = Guid.NewGuid();
+                _transcript.ShowConversation(firstChat, [Message(firstChat, "assistant", "RAPID_FIRST_" + index + "\n\n```text\n"
+                    + string.Join("\n", Enumerable.Range(1, 40).Select(line => "LINE " + line)) + "\n```")]);
+                await WaitAsync("__transcriptSmoke.bodyText().includes('RAPID_FIRST_" + index + "')", "rapid navigation starts with a mounted long row " + index);
+                var nextChat = Guid.NewGuid();
+                _transcript.ClearSelection();
+                UiText.Initialize("en");
+                _transcript.ShowConversation(nextChat, [Message(nextChat, "assistant", "RAPID_NEXT_" + index + " 中文\n\n```text\nOTHER SOURCE\n```")]);
+                UiText.Initialize("zh-CN");
+                await WaitAsync("transcriptState().conversationId==='" + nextChat + "' && transcriptState().mountedMessageCount===1"
+                    + " && __transcriptSmoke.bodyText().includes('RAPID_NEXT_" + index + "') && document.documentElement.lang==='zh-CN'",
+                    "rapid language updates and new navigation mount the received row without a resize " + index);
+                Check(await EvalAsync<bool>("!transcriptState().pending && !document.querySelector('[data-virtualized=true]') && document.querySelector('.content-block code').textContent==='OTHER SOURCE'"),
+                    "rapid navigation leaves no blank virtual placeholder or pending snapshot " + index);
+            }
+            _metrics["rapidLanguageNavigation"] = "twelve actual native host language/navigation transitions; natural RAF; no resize or synthetic completion event";
+        }
+        finally
+        {
+            _transcript.ClearSelection();
+            UiText.Initialize(originalLanguage);
+        }
+    }
 }

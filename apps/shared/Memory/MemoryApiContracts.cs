@@ -56,9 +56,18 @@ public sealed record MemoryCandidateQuote(Guid MessageId, string Text);
 public sealed record MemoryCandidate(string Algorithm, string Trigger, string Fingerprint,
     MemoryCandidateQuote[] Quotes, Guid? BatchThroughMessageId = null);
 
+/// <summary>Suggested mutations retain the exact existing target and never authorize themselves.</summary>
+/// <remarks>动作建议保留现有目标的完整身份，不能自行授予修改权限。</remarks>
+public sealed record MemoryProposalTarget(Guid Id, string Scope, string ScopeId, long ExpectedRevision,
+    long EntryRevision, string Identity);
+public sealed record MemoryProposal(string Algorithm, string Action, MemoryCandidateQuote[] Quotes,
+    string Reason, bool IsInference, string[] Conflicts, string Fingerprint,
+    MemoryProposalTarget? Target = null, DateTimeOffset? AppliedAt = null);
+
 public sealed record MemoryEntry(Guid Id, string Scope, string ScopeId, string Content, string Kind,
     string Status, MemorySource Source, long Revision, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
-    bool? Active = null, bool? SourceAvailable = null, bool? SourceArchived = null, MemoryCandidate? Candidate = null);
+    bool? Active = null, bool? SourceAvailable = null, bool? SourceArchived = null, MemoryCandidate? Candidate = null,
+    MemoryProposal? Proposal = null);
 
 public sealed record MemoryScopeDocument(int SchemaVersion, string Scope, string ScopeId, long Revision,
     MemoryEntry[] Entries, MemoryDismissedSource[]? DismissedSources = null,
@@ -70,7 +79,8 @@ public sealed record ConversationMemoryResponse(Guid ConversationId, Guid? Proje
 public sealed record MemoryCreateRequest(string Scope, string Content, string Kind, long ExpectedRevision);
 public sealed record MemoryUpdateRequest(string Scope, string Content, string Kind, long ExpectedRevision,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Status = null);
-public sealed record MemoryConfirmRequest(string Scope, long ExpectedRevision, string Status = MemoryStatuses.Confirmed);
+public sealed record MemoryConfirmRequest(string Scope, long ExpectedRevision, string Status = MemoryStatuses.Confirmed,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ProposalAction = null);
 public sealed record MemoryDeleteRequest(string Scope, long ExpectedRevision);
 
 public sealed record MemoryCandidateSettings(bool Enabled = true, int MinTurns = 6, int MaxTurns = 12,

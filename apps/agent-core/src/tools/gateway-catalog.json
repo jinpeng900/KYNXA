@@ -2030,6 +2030,172 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "task.document",
+      "description": "Save or reuse document findings. action=record requires resultId from an actual original read and conclusions; unresolved and outputReferences are optional. action=read requires sourceIdentity from Saved document work or list; offset/limit page its saved analysis in UTF16. Use list (offset/count) only to locate missing identities, not to recover findings already shown. Read originals only for changed versions or a specific evidence gap. Saved analysis does not certify correctness or expand permissions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["record", "list", "read"] },
+          "resultId": { "type": "string", "minLength": 1, "description": "Required for record: original read resultRef.id, also shown as resultId in Saved document work. Not a sourceIdentity or summary archive ID." },
+          "sourceIdentity": { "type": "string", "minLength": 1, "description": "Required for read: exact saved document sourceIdentity from navigation or list. offset/limit alone cannot identify a document." },
+          "conclusions": { "type": "array", "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32 },
+          "unresolved": { "type": "array", "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32 },
+          "outputReferences": { "type": "array", "items": { "type": "object" }, "maxItems": 16 },
+          "count": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 32768 }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.delegate",
+      "description": "Delegate independent authorized work to a child agent. Stable task survives attempts; input includes only goal, acceptance, contextRefs and declared writeTargets. Parent and child share total budget; no authority increase.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "acceptance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 128
+          },
+          "contextRefs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 64
+          },
+          "writeTargets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64
+          },
+          "dependencyIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 128
+          }
+        },
+        "required": [
+          "goal"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.status",
+      "description": "Read actual task states, checkpoints and result references from the current authorized task tree. A model claim is not a verified execution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.wait",
+      "description": "Wait for delegated task state changes through program events without repeated model polling. Does not repeat unknown side effects.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "taskIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 128
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          }
+        },
+        "required": [
+          "taskIds"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.control",
+      "description": "Persist pause, resume or cancellation with version checking for the current task tree. Resume does not replay successful or unknown side effects.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "pause",
+              "resume",
+              "cancel"
+            ]
+          }
+        },
+        "required": [
+          "taskId",
+          "expectedVersion",
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.read",
+      "description": "Read a task-owned checkpoint/output blob by its verified reference, within the current ancestor tree and permissions. UTF16 offsets; continue endOffset while hasMore. Original chat/tool content uses their existing read tools.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "object"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
     }
   ],
   "mcpPresets": [
@@ -2371,6 +2537,37 @@
           "web_fetch_exa"
         ],
         "startupTimeoutMs": 30000
+      }
+    },
+    {
+      "id": "parallel",
+      "name": "Parallel Search",
+      "description": "Official hosted public web search. Anonymous access is rate-limited; no API key is required.",
+      "sourceUrl": "https://docs.parallel.ai/integrations/mcp/search-mcp",
+      "capabilities": [
+        "web-search"
+      ],
+      "license": "Hosted service terms",
+      "publisher": "vendor",
+      "network": "remote",
+      "requirements": [],
+      "notes": [
+        "Anonymous access uses server-managed search settings and lower rate limits. No unlimited usage is promised.",
+        "Conversation session identity remains stable across calls; authentication and paid search are optional user configuration."
+      ],
+      "server": {
+        "id": "parallel",
+        "name": "Parallel Search",
+        "transport": "streamable-http",
+        "command": "",
+        "args": [],
+        "url": "https://search.parallel.ai/mcp",
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [
+          "web_fetch"
+        ],
+        "startupTimeoutMs": 20000
       }
     },
     {

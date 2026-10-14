@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:services="using:KYNXA_Desktop.Services"
+    xmlns:controls="using:KYNXA_Desktop.Controls"
     Title="KYNXA">
     <Grid x:Name="WindowRoot" Background="{StaticResource KynxaMainBrush}" Loaded="WindowRoot_Loaded">
         <Grid.Resources>
@@ -59,22 +60,22 @@
                 <Grid x:Name="SavedConnectionsList" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,18,0,12">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="ProviderList" Spacing="4" /></ScrollViewer>
                     <StackPanel x:Name="EmptyConnections" Margin="8,12" Spacing="8" IsHitTestVisible="False">
-                        <FontIcon Glyph="&#xE774;" FontSize="24" Foreground="#888888" HorizontalAlignment="Left" />
+                        <FontIcon Glyph="&#xE774;" FontSize="24" Foreground="{StaticResource KynxaSecondaryTextBrush}" HorizontalAlignment="Left" />
                         <TextBlock services:UiLocalization.Text="还没有模型连接" TextWrapping="Wrap" />
                         <TextBlock services:UiLocalization.Text="选择服务商，&#xA;添加你的第一个模型。" TextWrapping="Wrap" FontSize="12" LineHeight="20" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                     </StackPanel>
                 </Grid>
-                <ComboBox x:Name="CompactConnectionPicker" Grid.Row="1" Visibility="Collapsed" Margin="0,0,8,0"
+                <controls:ScrollSafeComboBox x:Name="CompactConnectionPicker" Grid.Row="1" Visibility="Collapsed" Margin="0,0,8,0"
                           MinHeight="38" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13"
                           CornerRadius="8" services:UiLocalization.PlaceholderText="选择已保存连接"
                           SelectionChanged="CompactConnectionPicker_SelectionChanged" services:UiLocalization.AutomationName="已保存的模型连接">
-                    <ComboBox.ItemTemplate>
+                    <controls:ScrollSafeComboBox.ItemTemplate>
                         <DataTemplate x:DataType="services:ModelProvider">
                             <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" ToolTipService.ToolTip="{x:Bind DisplayName, Mode=OneTime}"
                                        MaxWidth="320" TextTrimming="CharacterEllipsis" />
                         </DataTemplate>
-                    </ComboBox.ItemTemplate>
-                </ComboBox>
+                    </controls:ScrollSafeComboBox.ItemTemplate>
+                </controls:ScrollSafeComboBox>
                 <Button x:Name="NewConnectionButton" Grid.Row="2" Grid.ColumnSpan="2" HorizontalAlignment="Stretch" Background="{StaticResource KynxaSurfaceBrush}" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="NewConnectionButton_Click">
                     <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE710;" FontSize="12" /><TextBlock services:UiLocalization.Text="添加连接" /></StackPanel>
                 </Button>
@@ -97,13 +98,13 @@
                         <Border Background="{StaticResource KynxaSidebarBrush}" CornerRadius="12" Padding="16">
                             <StackPanel Spacing="10">
                                 <TextBlock services:UiLocalization.Text="服务商" FontWeight="SemiBold" />
-                                <ComboBox x:Name="PresetBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectionChanged="PresetBox_SelectionChanged" services:UiLocalization.AutomationName="选择服务商">
-                                    <ComboBox.ItemTemplate>
+                                <controls:ScrollSafeComboBox x:Name="PresetBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectionChanged="PresetBox_SelectionChanged" services:UiLocalization.AutomationName="选择服务商">
+                                    <controls:ScrollSafeComboBox.ItemTemplate>
                                         <DataTemplate x:DataType="services:ModelPreset">
                                             <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" TextWrapping="Wrap" />
                                         </DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
+                                    </controls:ScrollSafeComboBox.ItemTemplate>
+                                </controls:ScrollSafeComboBox>
                                 <TextBlock x:Name="PresetHint" TextWrapping="Wrap" FontSize="12" LineHeight="19" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                             </StackPanel>
                         </Border>
@@ -119,14 +120,14 @@
                                 <Grid x:Name="ContextWindowRow" ColumnSpacing="8">
                                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <ComboBox x:Name="ContextWindowBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="0" SelectionChanged="ContextWindowBox_SelectionChanged" services:UiLocalization.AutomationName="上下文窗口">
+                                    <controls:ScrollSafeComboBox x:Name="ContextWindowBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="0" SelectionChanged="ContextWindowBox_SelectionChanged" services:UiLocalization.AutomationName="上下文窗口">
                                         <ComboBoxItem Content="8K" Tag="8192" />
                                         <ComboBoxItem Content="32K" Tag="32768" />
                                         <ComboBoxItem Content="128K" Tag="131072" />
                                         <ComboBoxItem Content="256K" Tag="262144" />
                                         <ComboBoxItem services:UiLocalization.Content="1M（1,000,000）" Tag="1000000" />
                                         <ComboBoxItem services:UiLocalization.Content="自定义" Tag="custom" />
-                                    </ComboBox>
+                                    </controls:ScrollSafeComboBox>
                                     <TextBox x:Name="CustomContextWindowBox" Grid.Column="1" Width="154" Visibility="Collapsed" PlaceholderText="2048–2000000" InputScope="Number" services:UiLocalization.AutomationName="自定义上下文窗口（tokens）" />
                                 </Grid>
                                 <TextBlock services:UiLocalization.Text="新连接按所选模型设置；实际额度取决于模型服务。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
@@ -138,7 +139,7 @@
                                 <Grid x:Name="MaxOutputTokensRow" ColumnSpacing="8">
                                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <ComboBox x:Name="MaxOutputTokensBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="6" SelectionChanged="MaxOutputTokensBox_SelectionChanged" services:UiLocalization.AutomationName="最大输出">
+                                    <controls:ScrollSafeComboBox x:Name="MaxOutputTokensBox" HorizontalAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13" CornerRadius="8" MinHeight="38" SelectedIndex="6" SelectionChanged="MaxOutputTokensBox_SelectionChanged" services:UiLocalization.AutomationName="最大输出">
                                         <ComboBoxItem Content="4K" Tag="4096" />
                                         <ComboBoxItem Content="8K" Tag="8192" />
                                         <ComboBoxItem Content="16K" Tag="16384" />
@@ -147,7 +148,7 @@
                                         <ComboBoxItem Content="128K" Tag="131072" />
                                         <ComboBoxItem services:UiLocalization.Content="256K · 默认" Tag="262144" />
                                         <ComboBoxItem services:UiLocalization.Content="自定义" Tag="custom" />
-                                    </ComboBox>
+                                    </controls:ScrollSafeComboBox>
                                     <TextBox x:Name="CustomMaxOutputTokensBox" Grid.Column="1" Width="154" Visibility="Collapsed" PlaceholderText="1024–262144" InputScope="Number" services:UiLocalization.AutomationName="自定义最大输出（tokens）" />
                                 </Grid>
                                 <TextBlock services:UiLocalization.Text="这是上限；实际输出受模型服务和剩余上下文限制。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
@@ -170,11 +171,11 @@
                         </StackPanel>
                         <Expander x:Name="AdvancedSettings" services:UiLocalization.Header="高级设置" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" FontFamily="{StaticResource KynxaUIFont}" FontSize="13">
                             <StackPanel Spacing="14">
-                                <ComboBox x:Name="ProtocolBox" services:UiLocalization.Header="接口协议" HorizontalAlignment="Stretch" SelectedIndex="0" FontSize="13">
+                                <controls:ScrollSafeComboBox x:Name="ProtocolBox" services:UiLocalization.Header="接口协议" HorizontalAlignment="Stretch" SelectedIndex="0" FontSize="13">
                                     <ComboBoxItem services:UiLocalization.Content="OpenAI 兼容 · Chat Completions" Tag="openai-completions" />
                                     <ComboBoxItem Content="OpenAI · Responses" Tag="openai-responses" />
                                     <ComboBoxItem Content="Claude · Messages" Tag="anthropic-messages" />
-                                </ComboBox>
+                                </controls:ScrollSafeComboBox>
                                 <TextBox x:Name="ProviderIdBox" services:UiLocalization.Header="连接 ID" services:UiLocalization.PlaceholderText="自动生成，可修改" />
                                 <TextBlock services:UiLocalization.Text="连接 ID 用于区分配置；已保存连接的 ID 固定不变。" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                             </StackPanel>
@@ -187,7 +188,7 @@
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <ProgressRing x:Name="BusyIndicator" Width="18" Height="18" IsActive="False" HorizontalAlignment="Left" />
                             <Button x:Name="ProbeButton" Grid.Column="1" services:UiLocalization.Content="获取模型 / 测试" BorderBrush="{StaticResource KynxaDividerBrush}" BorderThickness="1" Click="TestConnectionButton_Click" />
-                            <Button x:Name="SaveButton" Grid.Column="2" services:UiLocalization.Content="保存连接" Background="{StaticResource KynxaSendBrush}" Foreground="White" Click="SaveConnectionButton_Click" />
+                            <Button x:Name="SaveButton" Grid.Column="2" services:UiLocalization.Content="保存连接" Background="{StaticResource KynxaSendBrush}" Foreground="{StaticResource KynxaOnAccentBrush}" Click="SaveConnectionButton_Click" />
                         </Grid>
                         <TextBlock x:Name="StatusText" FontSize="12" MaxHeight="52" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" Foreground="{StaticResource KynxaSecondaryTextBrush}" AutomationProperties.LiveSetting="Polite" />
                     </StackPanel>

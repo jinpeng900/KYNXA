@@ -22,6 +22,20 @@ fn cancelled(token: &Arc<AtomicBool>) -> Result<(), ContractError> {
         crate::storage::sqlite_store::cancelled()
     }
 }
+
+/// Equal OCR text cannot prove equal source bytes or decoder identity.
+/// 相同识别文字不能证明原文件字节或解码身份未变化；回源与发布共用这一检查。
+pub(crate) fn verify_extraction(expected: &Value, current: &Value) -> Result<(), ContractError> {
+    if expected.is_object() && expected != current {
+        Err(gateway::error(
+            "文档原始字节或提取版本已变化，请重新检索。",
+            "STALE_RETRIEVAL_SOURCE",
+            409,
+        ))
+    } else {
+        Ok(())
+    }
+}
 pub fn read(path: &Path, limits: &Value, cancel: &Arc<AtomicBool>) -> Result<Value, ContractError> {
     read_impl(None, path, limits, cancel)
 }
@@ -46,21 +60,21 @@ fn read_impl(
         fields["excludedRoots"] =
             json!([config.data_root, config.data_home, config.extension_root]);
     }
-    policy
+    let policy = policy
         .apply("source.reading.filePolicy", &fields, &Some(cancel.clone()))
         .map_err(|error| {
             gateway::error(
                 &error.message,
-                "PROTECTED_RETRIEVAL_SOURCE",
+                if error.code == "UNSUPPORTED_RETRIEVAL_SOURCE" {
+                    "UNSUPPORTED_RETRIEVAL_SOURCE"
+                } else {
+                    "PROTECTED_RETRIEVAL_SOURCE"
+                },
                 error.status_code,
             )
         })?;
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !["pdf", "docx"].contains(&extension.as_str()) {
+    let format = policy["format"].as_str();
+    if format.is_none() {
         let mut args = limits.clone();
         args["path"] = json!(path);
         args["decodeText"] = json!(true);
@@ -77,21 +91,32 @@ fn read_impl(
             )
         });
     }
-    let maximum = limits["maximumDocumentInputBytes"]
-        .as_u64()
-        .unwrap_or(32 * 1024 * 1024);
+    let maximum = policy["inputBytes"].as_u64().unwrap().min(32 * 1024 * 1024);
     let (bytes, metadata) = crate::tools::service_source_reading::read_binary_stable(
         path,
         maximum,
         &Some(cancel.clone()),
     )
-    .map_err(|_| failure("DOCUMENT_READ_FAILED"))?;
-    let digest = super::gateway_index::hash_bytes(&bytes);
-    let result = if extension == "pdf" {
-        pdf(config, &bytes, limits, cancel, &digest)?
-    } else {
-        docx(&bytes, limits, cancel, &digest)?
-    };
+    .map_err(|error| {
+        failure(
+            if error.code.contains("LIMIT")
+                || error
+                    .details
+                    .get("observedBytes")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|bytes| bytes > maximum)
+            {
+                "DOCUMENT_INPUT_LIMIT"
+            } else if error.code == "ABORT_ERR" {
+                "ABORT_ERR"
+            } else {
+                "DOCUMENT_READ_FAILED"
+            },
+        )
+    })?;
+    let mut decoder_limits = limits.clone();
+    decoder_limits["maximumDocumentOutputBytes"] = policy["outputBytes"].clone();
+    let result = parse_bytes(config, path, &bytes, &decoder_limits, cancel)?;
     let mut result = result;
     result["metadata"] = metadata.clone();
     for window in result["documentWindows"]
@@ -103,6 +128,59 @@ fn read_impl(
     }
     Ok(result)
 }
+
+/// Downloaded and archived bytes use the same decoder without inventing a temporary source path.
+/// 下载和包内字节共用正式解码器；虚拟成员名称用于选解析器，不被伪装成真实磁盘来源。
+pub(crate) fn parse_bytes(
+    config: Option<&crate::gateway_contract::GatewayConfig>,
+    name: &Path,
+    bytes: &[u8],
+    limits: &Value,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Value, ContractError> {
+    cancelled(cancel)?;
+    let input_maximum = limits["maximumDocumentInputBytes"].as_u64().unwrap_or(32 * 1024 * 1024)
+        .min(limits["maximumSourceBytes"].as_u64().unwrap_or(32 * 1024 * 1024));
+    if bytes.is_empty() || bytes.len() as u64 > input_maximum {
+        return Err(failure("DOCUMENT_INPUT_LIMIT"));
+    }
+    let digest = super::gateway_index::hash_bytes(bytes);
+    let Some(format) = crate::document_formats::detect(name) else {
+        if !crate::tools::service_source_reading::supported(name) {
+            return Err(failure("UNSUPPORTED_RETRIEVAL_SOURCE"));
+        }
+        let text = if let Some(body) = bytes.strip_prefix(&[0xff, 0xfe]) {
+            crate::tools::service_source_reading::decode(body, "utf-16le")
+        } else {
+            crate::tools::service_source_reading::decode(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes), "utf-8")
+        }.map_err(|_| failure("DOCUMENT_TEXT_ENCODING_UNSUPPORTED"))?;
+        let maximum = limits["maximumDocumentOutputBytes"].as_u64().unwrap_or(2 * 1024 * 1024).clamp(1024, 32 * 1024 * 1024) as usize;
+        if text.len() > maximum {
+            let mut windows = Vec::new(); let mut start = 0; let mut utf16_start = 0;
+            while start < text.len() {
+                cancelled(cancel)?;
+                let mut end = start.saturating_add(maximum).min(text.len());
+                while !text.is_char_boundary(end) { end -= 1; }
+                let part = &text[start..end]; let length = part.encode_utf16().count();
+                windows.push(json!({"text":part,"rawContentHash":digest,"textRange":{"startOffset":utf16_start,"endOffset":utf16_start+length,"unit":"utf16"},"windowIndex":windows.len(),"complete":true}));
+                start = end; utf16_start += length;
+            }
+            return Ok(json!({"documentWindows":windows,"rawContentHash":digest,"complete":true}));
+        }
+        return Ok(json!({"text":text,"rawContentHash":digest}));
+    };
+    use crate::document_formats::ParserFamily;
+    let result = match format.family {
+        ParserFamily::Pdf => pdf(config, bytes, limits, cancel, &digest),
+        ParserFamily::Word => docx(bytes, limits, cancel, &digest),
+        ParserFamily::Image => image(config, format.name, bytes, limits, cancel, &digest),
+        ParserFamily::Office => super::gateway_office_documents::decode(format.name, bytes, limits, cancel, &digest),
+        ParserFamily::Archive => Err(failure("DOCUMENT_ARCHIVE_REQUIRES_EXPANSION")),
+        ParserFamily::LegacyOffice => super::gateway_legacy_office::decode(format.name, bytes, limits, cancel, &digest),
+    }?;
+    cancelled(cancel)?;
+    Ok(result)
+}
 /// The existing Windows OCR protocol keeps a real process owner and lease until the child exits.
 /// 沿用 Windows OCR 协议，真实进程所有者与资源租约持续到子进程确认退出。
 fn recognize(
@@ -110,6 +188,7 @@ fn recognize(
     bytes: &[u8],
     pages: &[u32],
     maximum: usize,
+    format: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Value, ContractError> {
     use crate::tools::{gateway_process, service_document_extraction::DocumentExtractionState};
@@ -118,47 +197,152 @@ fn recognize(
     use tokio::io::{AsyncWriteExt, BufReader};
     let mut control = DocumentExtractionState::default();
     let apply = |control: &mut DocumentExtractionState, operation: &str, args: Value| {
-        control
-            .apply(operation, &args)
-            .map_err(|error| gateway::error(&error.message, "OCR_FAILED", error.status_code))
+        control.apply(operation, &args).map_err(|error| {
+            failure(match error.code.as_str() {
+                "OCR_INVALID_REQUEST" => "OCR_INVALID_REQUEST",
+                "OCR_LANGUAGE_UNAVAILABLE" => "OCR_LANGUAGE_UNAVAILABLE",
+                "OCR_INVALID_PAGE" => "OCR_INVALID_PAGE",
+                "OCR_IMAGE_MULTIFRAME_UNSUPPORTED" => "OCR_IMAGE_MULTIFRAME_UNSUPPORTED",
+                "OCR_IMAGE_PIXEL_LIMIT" => "OCR_IMAGE_PIXEL_LIMIT",
+                "OCR_OUTPUT_LIMIT" => "OCR_OUTPUT_LIMIT",
+                "OCR_INVALID_RESULT" => "OCR_INVALID_RESULT",
+                "OCR_CANCELLED" => "ABORT_ERR",
+                "OCR_UNAVAILABLE" => "OCR_UNAVAILABLE",
+                "DOCUMENT_INVALID_INPUT" => "DOCUMENT_INVALID_INPUT",
+                _ => "OCR_FAILED",
+            })
+        })
     };
     let plan = apply(
         &mut control,
         "ocrOpen",
-        json!({"bytesValid":true,"byteLength":bytes.len(),"pages":pages,"maximumOutputBytes":maximum,"timeoutMs":8000}),
+        json!({"bytesValid":true,"byteLength":bytes.len(),"pages":pages,"maximumOutputBytes":maximum,"format":format,"timeoutMs":20000}),
     )?;
-    let result=super::gateway_embedding::runtime()?.block_on(async{
-        let service=crate::resources::gateway::global().ok_or_else(||failure("DOCUMENT_RESOURCE_FAILED"))?;
-        let(sender,receiver)=tokio::sync::watch::channel(false);let token=cancel.clone();let monitor=tokio::spawn(async move{while !token.load(Ordering::Acquire){tokio::time::sleep(Duration::from_millis(25)).await;}let _=sender.send(true);});
-        let mut request=plan["resource"].clone();request["taskId"]=json!(gateway::new_id());request["workspaceId"]=json!("local");request["gpuMemoryBytes"]=json!(0);request["ttlMs"]=json!(30000);
-        let acquired=service.acquire(request,receiver).await;monitor.abort();let mut lease=acquired.map_err(|_|failure("DOCUMENT_RESOURCE_FAILED"))?;
-        let process=(||{
-            let mut command=tokio::process::Command::new(&config.toolhost_exe);gateway_process::hide(&mut command);command.arg("--document-ocr").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-            command.spawn().map_err(|_|failure("OCR_UNAVAILABLE"))
-        })();
-        let result=match process {Ok(mut child)=>{
-            let mut child_owner=None;
-            let output=async{
-                child_owner=Some(gateway_process::OwnedProcessJob::attach(&child).map_err(|error|gateway::error(&error.message,"OCR_UNAVAILABLE",error.status))?);
-                let registered=service.request("registerExecutor",json!({"leaseId":lease.allocation["leaseId"],"processId":child.id()}),Duration::from_secs(5)).await.map_err(|_|failure("DOCUMENT_RESOURCE_FAILED"))?;
-                apply(&mut control,"registered",json!({"status":registered["status"]}))?;
-                let mut stdin=child.stdin.take().ok_or_else(||failure("OCR_FAILED"))?;let stdout=child.stdout.take().ok_or_else(||failure("OCR_FAILED"))?;
-                let mut wire=json!({"operation":"document_ocr","schemaVersion":1,"bytesBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"pages":pages,"maximumOutputBytes":maximum}).to_string();wire.push('\n');
-                stdin.write_all(wire.as_bytes()).await.map_err(|_|failure("OCR_FAILED"))?;drop(stdin);
-                let wire=gateway_process::bounded_line(&mut BufReader::new(stdout),maximum+65536).await.map_err(|_|failure("DOCUMENT_OUTPUT_LIMIT"))?.ok_or_else(||failure("OCR_INVALID_RESULT"))?;
-                apply(&mut control,"ocrChunk",json!({"id":plan["id"],"bytes":wire.len()}))?;
-                let value:Value=serde_json::from_str(&wire).map_err(|_|failure("OCR_INVALID_RESULT"))?;
-                let exit=child.wait().await.map_err(|_|failure("OCR_FAILED"))?;
-                apply(&mut control,"ocrResult",json!({"id":plan["id"],"result":value,"exitCode":exit.code(),"textBytes":value["pages"].as_array().map(|pages|pages.iter().map(|page|page["text"].as_str().map(str::len)).collect::<Vec<_>>())}))?;Ok(value)
-            };
-            let aborted=async{while !cancel.load(Ordering::Acquire){tokio::time::sleep(Duration::from_millis(25)).await;}};
-            let result=tokio::select!{result=output=>result,_=aborted=>Err(failure("ABORT_ERR")),_=tokio::time::sleep(Duration::from_millis(plan["timeoutMs"].as_u64().unwrap_or(8000)))=>Err(failure("DOCUMENT_DECODER_TIMEOUT"))};
-            if result.is_err(){gateway_process::terminate(&mut child).await;}let _=child.wait().await;drop(child_owner);result
-        },Err(error)=>Err(error)};
-        lease.release_confirmed().await.map_err(|_|failure("DOCUMENT_RESOURCE_FAILED"))?;result
+    let result = super::gateway_embedding::runtime()?.block_on(async {
+        let service = crate::resources::gateway::global()
+            .ok_or_else(|| failure("DOCUMENT_RESOURCE_FAILED"))?;
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let token = cancel.clone();
+        let monitor = tokio::spawn(async move {
+            while !token.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let _ = sender.send(true);
+        });
+        let mut request = plan["resource"].clone();
+        request["taskId"] = json!(gateway::new_id());
+        request["workspaceId"] = json!("local");
+        request["gpuMemoryBytes"] = json!(0);
+        request["ttlMs"] = json!(30000);
+        let acquired = service.acquire(request, receiver).await;
+        monitor.abort();
+        let mut lease = acquired.map_err(|_| failure("DOCUMENT_RESOURCE_FAILED"))?;
+        let mut command = tokio::process::Command::new(&config.toolhost_exe);
+        gateway_process::hide(&mut command);
+        command.arg("--document-ocr").stdin(Stdio::piped())
+            .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        let process = command.spawn().map_err(|_| failure("OCR_UNAVAILABLE"));
+        let result = match process {
+            Ok(mut child) => {
+                let mut child_owner = None;
+                let output = async {
+                    child_owner = Some(gateway_process::OwnedProcessJob::attach(&child)
+                        .map_err(|error| gateway::error(&error.message, "OCR_UNAVAILABLE", error.status))?);
+                    let registered = service.request("registerExecutor",
+                        json!({"leaseId":lease.allocation["leaseId"],"processId":child.id()}), Duration::from_secs(5))
+                        .await.map_err(|_| failure("DOCUMENT_RESOURCE_FAILED"))?;
+                    apply(&mut control, "registered", json!({"status":registered["status"]}))?;
+                    let mut stdin = child.stdin.take().ok_or_else(|| failure("OCR_FAILED"))?;
+                    let stdout = child.stdout.take().ok_or_else(|| failure("OCR_FAILED"))?;
+                    let mut wire = json!({"operation":"document_ocr","schemaVersion":1,
+                        "bytesBase64":base64::engine::general_purpose::STANDARD.encode(bytes),
+                        "pages":pages,"maximumOutputBytes":maximum,"format":format}).to_string();
+                    wire.push('\n');
+                    // EOF is the ToolHost's owner-loss cancellation signal; retain stdin through the receipt and exit.
+                    // EOF 表示调用方丢失并触发 ToolHost 取消；收到回执并确认退出前保留标准输入。
+                    stdin.write_all(wire.as_bytes()).await.map_err(|_| failure("OCR_FAILED"))?;
+                    // JSON escaping and recognized UTF-8 text have separate bounded budgets.
+                    // JSON 转义帧与识别文字的 UTF-8 字节数分别按额度核验。
+                    let wire = gateway_process::bounded_line(&mut BufReader::new(stdout), maximum.saturating_mul(6) + 65536)
+                        .await.map_err(|_| failure("DOCUMENT_OUTPUT_LIMIT"))?
+                        .ok_or_else(|| failure("OCR_INVALID_RESULT"))?;
+                    apply(&mut control, "ocrChunk", json!({"id":plan["id"],"bytes":wire.len()}))?;
+                    let value: Value = serde_json::from_str(&wire).map_err(|_| failure("OCR_INVALID_RESULT"))?;
+                    let exit = child.wait().await.map_err(|_| failure("OCR_FAILED"))?;
+                    apply(&mut control, "ocrResult", json!({"id":plan["id"],"result":value,
+                        "exitCode":exit.code(),"textBytes":value["pages"].as_array().map(|pages|
+                            pages.iter().map(|page|page["text"].as_str().map(str::len)).collect::<Vec<_>>())}))?;
+                    Ok(value)
+                };
+                let aborted = async {
+                    while !cancel.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                };
+                let timeout = Duration::from_millis(plan["timeoutMs"].as_u64().unwrap_or(20000));
+                let result = tokio::select! {
+                    result = output => result,
+                    _ = aborted => Err(failure("ABORT_ERR")),
+                    _ = tokio::time::sleep(timeout) => Err(failure("DOCUMENT_DECODER_TIMEOUT")),
+                };
+                if result.is_err() { gateway_process::terminate(&mut child).await; }
+                let _ = child.wait().await;
+                drop(child_owner);
+                result
+            }
+            Err(error) => Err(error),
+        };
+        lease.release_confirmed().await.map_err(|_| failure("DOCUMENT_RESOURCE_FAILED"))?;
+        result
     });
     let _ = apply(&mut control, "ocrClose", json!({"id":plan["id"]}));
     result
+}
+
+/// Raster OCR publishes recognized text with the original byte hash, not an invented image description.
+/// 栅格 OCR 发布识别文字并保留原图哈希，不把文字识别冒充图像语义理解。
+fn image(
+    config: Option<&crate::gateway_contract::GatewayConfig>,
+    encoding: &str,
+    bytes: &[u8],
+    limits: &Value,
+    cancel: &Arc<AtomicBool>,
+    digest: &str,
+) -> Result<Value, ContractError> {
+    cancelled(cancel)?;
+    if limits["ocrDisabled"] == true {
+        return Err(failure("OCR_UNAVAILABLE"));
+    }
+    let maximum = limits["maximumDocumentOutputBytes"]
+        .as_u64()
+        .unwrap_or(2 * 1024 * 1024)
+        .min(
+            limits["maximumSourceBytes"]
+                .as_u64()
+                .unwrap_or(32 * 1024 * 1024),
+        )
+        .min(2 * 1024 * 1024) as usize;
+    let result = recognize(
+        config.ok_or_else(|| failure("OCR_UNAVAILABLE"))?,
+        bytes,
+        &[1],
+        maximum,
+        encoding,
+        cancel,
+    )?;
+    let text = result["pages"][0]["text"].as_str().unwrap();
+    if text.trim().is_empty() {
+        return Err(failure("DOCUMENT_TEXT_UNAVAILABLE"));
+    }
+    let extraction = json!({"format":"image","version":"windows-image-ocr-text-v1",
+        "rawContentHash":digest,"image":result["image"],"complete":true,
+        "textRange":{"startOffset":0,"endOffset":text.encode_utf16().count()},
+        "ocr":{"backend":"windows-media-ocr","version":result["version"],"language":result["language"]}});
+    crate::storage::retrieval::apply(
+        "storage.retrieval.extraction",
+        &json!({"value":extraction,"textLength":text.encode_utf16().count()}),
+    )?;
+    Ok(json!({"text":text,"extraction":extraction}))
 }
 fn pdf(
     config: Option<&crate::gateway_contract::GatewayConfig>,
@@ -192,6 +376,9 @@ fn pdf(
         let mut page_text = document.extract_text(&[*page]).unwrap_or_default();
         let mut method = "text";
         if page_text.trim().is_empty() {
+            if limits["ocrDisabled"] == true {
+                return Err(failure("OCR_UNAVAILABLE"));
+            }
             if !recognized.contains_key(page) {
                 let missing = pages
                     .keys()
@@ -211,6 +398,7 @@ fn pdf(
                     bytes,
                     &missing,
                     output_limit,
+                    "pdf",
                     cancel,
                 )?;
                 ocr_identity = json!({"backend":"windows-media-ocr","version":result["version"],"language":result["language"]});
@@ -380,7 +568,121 @@ fn docx(
             return Err(failure("DOCUMENT_OUTPUT_LIMIT"));
         }
     }
+    if text.trim().is_empty() {
+        return Err(failure("DOCUMENT_TEXT_UNAVAILABLE"));
+    }
     Ok(
         json!({"text":text,"extraction":{"format":"docx","version":"rust-docx-text-v1","rawContentHash":digest}}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/documents")
+            .join(name)
+    }
+
+    #[test]
+    fn document_fixture_text_offsets_and_original_hash_survive_readback() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        for (name, expected, format) in [
+            ("account-text.pdf", "Account password reset", Some("pdf")),
+            ("account-guide.docx", "账户密码重置说明", Some("docx")),
+            ("account-guide.md", "账户密码重置", None),
+        ] {
+            let path = fixture(name);
+            let first = read(&path, &json!({}), &cancel).unwrap();
+            assert!(
+                first["text"].as_str().unwrap().contains(expected),
+                "{first}"
+            );
+            let second = read(&path, &json!({}), &cancel).unwrap();
+            assert_eq!(first, second);
+            if let Some(format) = format {
+                assert_eq!(first["extraction"]["format"], format);
+                assert_eq!(
+                    first["extraction"]["rawContentHash"],
+                    super::super::gateway_index::hash_bytes(&std::fs::read(path).unwrap())
+                );
+                crate::storage::retrieval::apply("storage.retrieval.extraction", &json!({"value":first["extraction"],"textLength":first["text"].as_str().unwrap().encode_utf16().count()})).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn original_bytes_and_extraction_identity_cannot_be_replaced_by_equal_ocr_text() {
+        let original = json!({"format":"image","rawContentHash":"original","ocr":{"version":"v2","language":"zh-Hans-CN"}});
+        let mut changed = original.clone();
+        assert!(verify_extraction(&original, &changed).is_ok());
+        changed["rawContentHash"] = json!("changed-even-with-equal-text");
+        assert_eq!(
+            verify_extraction(&original, &changed).unwrap_err().code(),
+            "STALE_RETRIEVAL_SOURCE"
+        );
+        changed = original.clone();
+        changed["ocr"]["language"] = json!("en-US");
+        assert!(verify_extraction(&original, &changed).is_err());
+        assert!(verify_extraction(&Value::Null, &Value::Null).is_ok());
+    }
+
+    #[test]
+    fn document_limits_cancel_and_missing_ocr_do_not_publish_partial_text() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            read(
+                &fixture("account-guide.docx"),
+                &json!({"maximumDocumentInputBytes":100}),
+                &cancel
+            )
+            .unwrap_err()
+            .code(),
+            "DOCUMENT_INPUT_LIMIT"
+        );
+        assert_eq!(
+            read(
+                &fixture("account-guide.docx"),
+                &json!({"maximumSourceBytes":100}),
+                &cancel
+            )
+            .unwrap_err()
+            .code(),
+            "DOCUMENT_INPUT_LIMIT"
+        );
+        assert_eq!(
+            read(
+                &fixture("account-guide.docx"),
+                &json!({"maximumDocumentOutputBytes":8}),
+                &cancel
+            )
+            .unwrap_err()
+            .code(),
+            "DOCUMENT_OUTPUT_LIMIT"
+        );
+        assert_eq!(
+            read(
+                &fixture("account-guide.png"),
+                &json!({"ocrDisabled":true}),
+                &cancel
+            )
+            .unwrap_err()
+            .code(),
+            "OCR_UNAVAILABLE"
+        );
+        assert_eq!(
+            read(
+                &fixture("account-scan.pdf"),
+                &json!({"ocrDisabled":true}),
+                &cancel
+            )
+            .unwrap_err()
+            .code(),
+            "OCR_UNAVAILABLE"
+        );
+        cancel.store(true, Ordering::Release);
+        assert!(read(&fixture("account-text.pdf"), &json!({}), &cancel).is_err());
+    }
 }

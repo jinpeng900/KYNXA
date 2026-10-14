@@ -33,7 +33,7 @@ public partial class App : Application
         // 创建控件前恢复语言与外观，避免首帧使用不同的配色。
         var preferences = new Services.LayoutStateService().Load();
         Services.UiText.Initialize(preferences.InterfaceLanguage);
-        Services.AppearanceService.Apply(preferences.AppearancePaletteId);
+        Services.AppearanceService.ApplyPreferences(preferences.AppearancePaletteId, preferences.AppearanceMode, preferences.ChatFontSize, preferences.AppearanceAccent);
         Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
             ? Services.StoragePaths.DesktopDirectory : null;
         string? configuredModelHome = Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME");

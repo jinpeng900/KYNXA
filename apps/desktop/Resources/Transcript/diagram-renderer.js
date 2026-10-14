@@ -30,6 +30,7 @@
       mindmap: { useMaxWidth: false },
       themeVariables: {
         fontFamily: UI_FONT_FAMILY,
+        darkMode: palette?.isDark === true,
         background: main, primaryColor: soft, primaryTextColor: text, primaryBorderColor: accent,
         secondaryColor: main, secondaryTextColor: text, secondaryBorderColor: border,
         tertiaryColor: soft, tertiaryTextColor: text, tertiaryBorderColor: border,
@@ -40,7 +41,17 @@
         labelBoxBorderColor: accent, labelTextColor: text, loopTextColor: text,
         noteBkgColor: soft, noteBorderColor: border, noteTextColor: text,
         activationBkgColor: soft, activationBorderColor: accent,
-        classText: text, titleColor: text, fontSize: '16px'
+        classText: text, titleColor: text, fontSize: '16px',
+        taskTextColor: text, taskTextDarkColor: text, taskTextLightColor: text, taskTextOutsideColor: text,
+        taskBkgColor: soft, taskBorderColor: accent, activeTaskBkgColor: soft, activeTaskBorderColor: accent,
+        doneTaskBkgColor: soft, doneTaskBorderColor: border, critBkgColor: soft, critBorderColor: accent,
+        sectionBkgColor: soft, altSectionBkgColor: main, sectionBkgColor2: soft, gridColor: border,
+        errorBkgColor: soft, errorTextColor: text,
+        // High contrast diagrams use only the actual system foreground/background pair.
+        // 高对比图表仅使用真实系统前景和背景组合，避免自动衍生的色阶削弱对比度。
+        ...(palette?.isHighContrast === true ? Object.fromEntries(Array.from({ length: 12 }, (_, index) => [
+          ['cScale' + index, main], ['cScaleLabel' + index, text], ['cScaleInv' + index, text]
+        ]).flat()) : {})
       }
     };
   }

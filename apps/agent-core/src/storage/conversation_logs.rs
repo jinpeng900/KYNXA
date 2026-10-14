@@ -205,6 +205,25 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     match operation {
         "storage.logs.read" => {
             if let Some(bytes) = bytes {
+                if let Err(encoding) = std::str::from_utf8(&bytes) {
+                    let tail_start = bytes
+                        .iter()
+                        .rposition(|byte| *byte == b'\n')
+                        .map_or(0, |index| index + 1);
+                    // Lossy projection is permitted only to classify an incomplete final scalar;
+                    // the recovery receipt still backs up the original bytes before truncation.
+                    // 仅为识别末尾截断字符允许有损投影；恢复回执在截断前备份完整原始残尾字节。
+                    if bytes.ends_with(b"\n")
+                        || encoding.error_len().is_some()
+                        || encoding.valid_up_to() < tail_start
+                    {
+                        return Err(error(
+                            "历史包含无效 UTF-8 编码。",
+                            "INVALID_CONVERSATION_HISTORY",
+                            400,
+                        ));
+                    }
+                }
                 let hash = managed_files::digest(&bytes);
                 check_cancelled()?;
                 // A cache hit still verifies all authoritative bytes, but never copies the body across the bridge.

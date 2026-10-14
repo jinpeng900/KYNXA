@@ -1,0 +1,18 @@
+/* The out-of-flow find bar never shifts the reader's content when opening or typing.
+ * 搜索栏脱离正文布局，打开或输入关键词时不会挤动阅读内容。 */
+#transcript-search { position: fixed; top: 8px; right: 16px; z-index: 5; width: min(620px, calc(100% - 32px)); padding: 8px 10px; border: 1px solid var(--appearance-border); border-radius: 12px; background: var(--appearance-main); color: var(--appearance-text); box-shadow: 0 3px 14px #00000014; font-family: var(--ui-font); font-size: 13px; line-height: 1.5; }
+#transcript-search[hidden] { display: none; }
+#transcript-search[data-position='bottom'] { top: auto; bottom: 8px; }
+.transcript-search-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+#transcript-search-input { appearance: none; flex: 1 1 auto; min-width: 0; width: 0; height: 32px; padding: 4px 8px; border: 1px solid var(--appearance-border); border-radius: 7px; background: var(--appearance-main); color: var(--appearance-text); font: inherit; line-height: 1.5; user-select: text; -webkit-user-select: text; }
+#transcript-search-input::placeholder { color: var(--appearance-secondary); }
+#transcript-search-input:focus-visible { outline: 2px solid var(--appearance-accent); outline-offset: -1px; }
+#transcript-search-count { flex: 0 0 auto; min-width: 52px; max-width: 38%; font-variant-numeric: tabular-nums; font-size: 12px; text-align: center; color: var(--appearance-secondary); overflow-wrap: anywhere; }
+#transcript-search button { display: inline-flex; flex: 0 0 30px; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 5px; border-radius: 7px; font-size: 18px; line-height: 1; }
+#transcript-search button:disabled { opacity: .4; cursor: default; }
+#transcript-search button:disabled:hover { background: transparent; }
+#transcript-search-status { display: block; min-width: 0; margin: 5px 3px 0; color: var(--appearance-secondary); font-size: 11px; overflow-wrap: anywhere; }
+::highlight(transcript-search-all) { color: var(--appearance-text); background-color: var(--appearance-selection); text-decoration: underline; text-decoration-color: var(--appearance-accent); }
+::highlight(transcript-search-current) { color: var(--appearance-on-accent); background-color: var(--appearance-accent); text-decoration: underline; text-decoration-color: var(--appearance-on-accent); }
+@media (max-width: 420px) { #transcript-search { right: 8px; width: calc(100% - 16px); padding: 7px; } #transcript-search-count { min-width: 40px; } .transcript-search-row { gap: 3px; } }
+@media (forced-colors: active) { #transcript-search { border-color: CanvasText; } ::highlight(transcript-search-all) { color: CanvasText; background-color: Mark; } ::highlight(transcript-search-current) { color: HighlightText; background-color: Highlight; } }

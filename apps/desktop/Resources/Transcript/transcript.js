@@ -10,6 +10,10 @@
     conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
     copied: '已复制', copyFailed: '复制失败，请重试。', jumpToLatest: '跳转到最新消息',
     copyBlock: '复制此内容块', copyCurrentContent: '复制当前内容', blockPlainText: '文本',
+    blockWrap: '自动换行', blockUnwrap: '原样显示', blockExpand: '展开', blockCollapse: '收起',
+    blockLineCount: '{0} 行', blockClearSelection: '请先取消文字选择，再调整显示。',
+    tableBlockLabel: '表格', copyTable: '复制表格（可粘贴到 Excel）', copyTableMarkdown: '复制为 Markdown',
+    tableCopyOptions: '更多复制格式', tableEmpty: '空表格',
     reasoning: '思考过程', thinking: '正在思考…', reasoningDuration: '思考过程 · {0} 秒', stopped: '已停止生成',
     interrupted: '回复中断，请重试。', replying: '正在回复…', generating: '正在生成',
     toolActivities: '工具活动', toolRunning: '执行中', toolCompleted: '已完成', toolError: '工具失败',
@@ -39,6 +43,14 @@
     diagramZoomIn: '放大图表', diagramZoomOut: '缩小图表', diagramFit: '适应窗口',
     diagramFullscreen: '全屏查看图表', diagramClose: '关闭图表', diagramViewport: 'Mermaid 图表，可缩放和平移',
     diagramViewerHint: '拖动平移 · Ctrl＋滚轮缩放 · ＋／－缩放 · 0 适应窗口 · Esc 关闭',
+    diagramExport: '导出图表', diagramExportSvg: '导出 SVG', diagramExportPng: '导出 PNG',
+    diagramExportPreparing: '正在准备图表…', diagramExporting: '正在保存图表…',
+    diagramExported: '图表已导出', diagramExportCancelled: '已取消导出',
+    diagramExportFailed: '导出失败，请重试。', diagramExportReduced: '已按尺寸限制缩放导出',
+    findText: '查找会话正文', findTextPlaceholder: '查找当前会话…', findTextPrevious: '上一处', findTextNext: '下一处',
+    findTextClose: '关闭正文查找', findTextNoResults: '没有找到匹配内容', findTextCount: '{0} / {1}',
+    findTextHint: 'Enter 下一处 · Shift+Enter 上一处 · Esc 关闭', findTextSelection: '请先取消文字选择，再跳转到匹配内容。',
+    findTextSearching: '正在查找…',
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
   let entries = new Map();
@@ -61,9 +73,13 @@
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   let anchoringScroll = false, anchorFrame = 0;
+  let updatingAppearance = false, appearanceFrame = 0;
   let bottomNavigationPending = false, navigationGeneration = 0;
+  let bottomFollowingPaused = false, lastScrollTop = scrollY;
   let historyIntent = false, historyRequestTimer = 0;
   let historyHasOlder = false, historyHasNewer = false;
+  let conversationNavigationGeneration = 0, restoredReadingNavigation = null;
+  let searchingLoadedMessages = false;
   let nextCopyRequest = 0, copyFeedbackTimer = 0, copyFeedbackEntry = null;
   const pendingCopies = new Map();
   const messageTimeFormatters = new Map();
@@ -109,7 +125,9 @@
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
-    const taskStatus = {partial:uiStrings.taskPartial,'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
+    // Ordinary unfinished follow-ups are stated in the answer; genuine verification/unknown effects remain explicit.
+    // 普通待办由正文说明，不叠加“部分完成”；核验失败和未知副作用仍明确显示。
+    const taskStatus = {'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
     if (taskStatus) return taskStatus + (message.error ? ' · ' + message.error : '');
     if (presentation.mode === 'incomplete') return uiStrings.interrupted;
     if (message.status === 'interrupted')
@@ -221,12 +239,46 @@
       main: '--appearance-main', soft: '--appearance-soft', accent: '--appearance-accent', selection: '--appearance-selection',
       text: '--appearance-text', secondary: '--appearance-secondary', border: '--appearance-border', sidebar: '--appearance-sidebar'
     };
+    const semanticVariables = {
+      muted: '--appearance-muted', success: '--appearance-success', error: '--appearance-error', warning: '--appearance-warning', replySurface: '--appearance-reply-surface',
+      accentText: '--appearance-accent-text', onAccent: '--appearance-on-accent',
+      codeKeyword: '--code-keyword', codeString: '--code-string', codeComment: '--code-comment',
+      codeNumber: '--code-number', codeType: '--code-type', codeFunction: '--code-function'
+    };
     const palette = command.palette;
     if (!palette || Object.keys(variables).some(key => typeof palette[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(palette[key]))) return;
-    // Color-only updates preserve active ranges, cached message nodes, copy feedback and scroll positions.
-    // 只更新颜色，保留活动选区、缓存消息节点、复制反馈和滚动位置。
-    const style = document.documentElement.style;
+    const root = document.documentElement, style = root.style;
+    const fontSize = Number(command.fontSize), oldFontSize = parseFloat(getComputedStyle(root).fontSize);
+    const changingFont = Number.isFinite(fontSize) && Number.isInteger(fontSize * 2) && fontSize >= 13 && fontSize <= 22 && fontSize !== oldFontSize;
+    const anchors = changingFont && !following ? scrollAnchors() : [];
+    const expectedConversation = conversationId, expectedGeneration = conversationNavigationGeneration;
+    const expectedNavigation = navigationGeneration;
+    if (changingFont) { updatingAppearance = true; cancelAnimationFrame(scrollFrame); cancelAnimationFrame(appearanceFrame); }
+    // Palette/size preferences change styles, never selected text nodes or the bounded conversation cache.
+    // 配色和字号仅修改样式，不替换已选文字节点或有界会话缓存。
     for (const [key, variable] of Object.entries(variables)) style.setProperty(variable, palette[key]);
+    for (const [key, variable] of Object.entries(semanticVariables))
+      if (typeof palette[key] === 'string' && /^#[0-9a-f]{6}$/i.test(palette[key])) style.setProperty(variable, palette[key]);
+    root.dataset.theme = palette.isDark === true ? 'dark' : 'light';
+    root.dataset.highContrast = String(palette.isHighContrast === true);
+    style.colorScheme = palette.isDark === true ? 'dark' : 'light';
+    if (changingFont) {
+      style.setProperty('--chat-font-size', fontSize + 'px');
+      // Recalculate a folded preview using the new line box, then preserve its visible paragraph.
+      // 先按新的行高重算完整十二行预览，再恢复原来可见段落，保留选区与折叠偏好。
+      window.kynxaContentBlocks?.hydrate(messages);
+      restoreScrollAnchor(anchors);
+      appearanceFrame = requestAnimationFrame(() => {
+        // New wheel/key/jump navigation wins over the deferred font-size anchor correction.
+        // 字号更新后若出现新的滚轮、键盘或跳转操作，不再覆盖用户刚选择的阅读位置。
+        if (conversationId === expectedConversation && conversationNavigationGeneration === expectedGeneration
+            && navigationGeneration === expectedNavigation) restoreScrollAnchor(anchors);
+        appearanceFrame = requestAnimationFrame(() => {
+          updatingAppearance = false; updateJumpButton(); followBottom();
+          if (!activeSelection() && !pointerSelecting) window.kynxaDiagrams?.hydrate(messages);
+        });
+      });
+    }
     window.kynxaDiagrams?.setAppearance(palette);
   }
   function initializeUi(command) {
@@ -250,6 +302,8 @@
     for (const saved of conversations.values()) for (const entry of saved.entries.values()) localizeEntry(entry);
     window.kynxaDiagrams?.setLanguage(uiStrings);
     window.kynxaContentBlocks?.setLanguage(uiStrings);
+    window.kynxaTables?.setLanguage(uiStrings);
+    window.kynxaTranscriptSearch?.setLanguage(uiStrings);
     if (!localizingUi) return;
     // Labels may wrap differently. Keep the user's scroll position and suppress only
     // the automatic bottom-follow triggered by this layout, without touching ranges.
@@ -258,9 +312,13 @@
     languageFrame = requestAnimationFrame(() => {
       languageFrame = requestAnimationFrame(() => {
         localizingUi = false;
+        // A viewport callback may have yielded to the latest language update; resume its pending work.
+        // 视口回调可能因最新一轮语言更新而暂停；解除保护后继续挂载待处理消息。
+        if (viewportDirty) scheduleViewport();
         if (!activeSelection() && !pointerSelecting) {
           window.kynxaDiagrams?.hydrate(messages);
           window.kynxaContentBlocks?.hydrate(messages);
+          window.kynxaTables?.hydrate(messages);
         }
         if (bottomNavigationPending) followBottom();
       });
@@ -279,12 +337,12 @@
     } catch { return false; }
   };
   function followBottom() {
-    if (localizingUi || !following || activeSelection() || pointerSelecting) return;
+    if (localizingUi || updatingAppearance || !following || activeSelection() || pointerSelecting) return;
     const expectedConversation = conversationId, expectedGeneration = navigationGeneration;
     bottomNavigationPending = true;
     cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
-      if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi) return;
+      if (conversationId !== expectedConversation || navigationGeneration !== expectedGeneration || localizingUi || updatingAppearance) return;
       if (following && !activeSelection() && !pointerSelecting) scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
       // Offscreen layout may settle on the next frame; user upward input still revokes this generation immediately.
       // 屏幕外布局可能在下一帧稳定；用户真实上滚仍立即撤销本代跟随，不被布局回调覆盖。
@@ -297,12 +355,15 @@
     });
   }
   function beginBottomNavigation() {
+    restoredReadingNavigation = null;
+    bottomFollowingPaused = false;
     following = true;
     bottomNavigationPending = true;
     navigationGeneration++;
   }
   function stopFollowing() {
     following = false;
+    bottomFollowingPaused = true;
     bottomNavigationPending = false;
     navigationGeneration++;
   }
@@ -314,6 +375,8 @@
     // Explicit navigation preserves the selection; selected text continues to freeze transcript updates.
     // 显式跳转保留选区；已选文字仍继续冻结聊天更新。
     following = !activeSelection();
+    bottomFollowingPaused = false;
+    restoredReadingNavigation = null;
     bottomNavigationPending = false;
     navigationGeneration++;
     cancelAnimationFrame(scrollFrame);
@@ -334,6 +397,8 @@
       if (!activeSelection() && !pointerSelecting) {
         window.kynxaDiagrams?.hydrate(messages);
         window.kynxaContentBlocks?.hydrate(messages);
+        window.kynxaTables?.hydrate(messages);
+        scheduleViewport();
       }
     });
   }
@@ -431,11 +496,16 @@
     actions.append(copy, time, retry, copyStatus); content.append(elapsed, timeline, body, status); article.append(content, actions);
     mountedEntries.add(entry);
     updateMessage(entry, message);
-    window.kynxaContentBlocks?.hydrate(article); window.kynxaDiagrams?.hydrate(article);
+    window.kynxaContentBlocks?.restoreReading(article, entry.readingPreferences);
+    delete entry.readingPreferences;
+    window.kynxaContentBlocks?.hydrate(article);
+    window.kynxaTables?.hydrate(article);
+    window.kynxaDiagrams?.hydrate(article);
   }
   function unmountMessage(entry) {
     if (!entry.mounted) return;
     entry.height = Math.max(1, entry.article.getBoundingClientRect().height);
+    entry.readingPreferences = window.kynxaContentBlocks?.captureReading(entry.article);
     if (copyFeedbackEntry === entry) clearCopyFeedback();
     for (const [id, request] of pendingCopies) if (request.entry === entry) pendingCopies.delete(id);
     liveElapsedEntries.delete(entry); mountedEntries.delete(entry);
@@ -453,18 +523,22 @@
     if (!viewportDirty || applying || localizingUi) return;
     viewportDirty = false;
     const anchors = following ? [] : scrollAnchors();
+    let contentChanged = false;
     const required = new Set(visibleEntries);
-    if (entries.size <= 48) for (const entry of entries.values()) required.add(entry);
+    if (entries.size <= 48 || searchingLoadedMessages) for (const entry of entries.values()) required.add(entry);
     for (const entry of entries.values()) if (entry.message?.streaming) required.add(entry);
     if (following) {
       const last = [...entries.values()].at(-1); if (last) required.add(last);
     }
-    for (const entry of required) if (entries.get(entry.article.dataset.messageId) === entry) mountMessage(entry);
+    for (const entry of required) if (entries.get(entry.article.dataset.messageId) === entry && !entry.mounted) {
+      mountMessage(entry); contentChanged = true;
+    }
     // Selected nodes are never recycled; dragging may bring additional messages into the window.
     // 已选节点不回收；拖动选区滚动时允许把新消息加入窗口，清除选区后恢复回收。
     if (!activeSelection() && !pointerSelecting)
-      for (const entry of [...mountedEntries]) if (!required.has(entry)) unmountMessage(entry);
-    window.kynxaContentBlocks?.disposeDetached(); window.kynxaDiagrams?.disposeDetached();
+      for (const entry of [...mountedEntries]) if (!required.has(entry)) { unmountMessage(entry); contentChanged = true; }
+    window.kynxaContentBlocks?.disposeDetached(); window.kynxaTables?.disposeDetached(); window.kynxaDiagrams?.disposeDetached();
+    if (contentChanged) window.kynxaTranscriptSearch?.refresh();
     restoreScrollAnchor(anchors); synchronizeElapsedTimer(); followBottom();
   }
   function updateMessage(entry, message) {
@@ -688,14 +762,25 @@
     if (conversationId === id) return;
     historyIntent = false; clearTimeout(historyRequestTimer); historyRequestTimer = 0;
     historyHasOlder = historyHasNewer = false;
+    // Capture the outgoing viewport before selection cleanup or DOM replacement can change it.
+    // 清理选区或替换 DOM 前记录当前视口，连同阅读锚点和底部跟随状态一起缓存。
+    const view = { top: scrollY, left: scrollX, following: following && (bottomNavigationPending || atBottom()), anchors: scrollAnchors() };
+    const search = window.kynxaTranscriptSearch?.capture();
+    const navigation = ++conversationNavigationGeneration;
+    window.kynxaDiagrams?.resetExports();
     window.kynxaDiagrams?.closeViewer();
     window.kynxaContentBlocks?.resetCopies();
+    window.kynxaTables?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
-    pending = null; clearSelection(); beginBottomNavigation();
+    pending = null; clearSelection(); cancelAnimationFrame(scrollFrame);
     // Detach complete DOM trees: returning to a chat reuses KaTeX, code highlighting
     // and expanded reasoning instead of rebuilding every element.
     // 暂存完整 DOM 树；返回聊天时复用公式、高亮与展开状态，避免重建所有元素。
     const restored = removeCached(id);
+    if (restored?.view && !restored.view.following) {
+      stopFollowing();
+      restoredReadingNavigation = { conversationId: id, generation: navigation };
+    } else beginBottomNavigation();
     if (conversationId && entries.size && entries.size <= 400) {
       let characters = 0;
       for (const entry of entries.values()) {
@@ -707,7 +792,7 @@
         const fragment = document.createDocumentFragment();
         while (messages.firstChild) fragment.append(messages.firstChild);
         removeCached(conversationId);
-        conversations.set(conversationId, { entries, fragment, characters, nodes });
+        conversations.set(conversationId, { entries, fragment, characters, nodes, view, search });
         cachedCharacters += characters; cachedNodes += nodes;
         while (conversations.size > 4 || cachedCharacters > maxCachedCharacters || cachedNodes > maxCachedNodes)
           removeCached(conversations.keys().next().value);
@@ -717,18 +802,27 @@
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
-    window.kynxaContentBlocks?.disposeDetached();
-    window.kynxaContentBlocks?.hydrate(messages);
-    window.kynxaDiagrams?.disposeDetached();
-    window.kynxaDiagrams?.hydrate(messages);
-    updateJumpButton();
+    // Rebuild the active row registry before restoring search or reading anchors from cached DOM.
+    // 恢复搜索和阅读锚点前先重建当前行登记，缓存节点仍使用同一条消息身份。
     liveElapsedEntries.clear();
     for (const entry of entries.values()) {
       viewportObserver.observe(entry.article);
       if (entry.mounted) mountedEntries.add(entry);
-      if (entry.elapsedMode !== 'live') continue;
+      if (!entry.mounted || entry.elapsedMode !== 'live') continue;
       liveElapsedEntries.add(entry); refreshElapsedText(entry);
     }
+    window.kynxaTranscriptSearch?.attachConversation(id, restored?.search);
+    window.kynxaContentBlocks?.disposeDetached();
+    window.kynxaContentBlocks?.hydrate(messages);
+    window.kynxaTables?.disposeDetached();
+    window.kynxaTables?.hydrate(messages);
+    window.kynxaDiagrams?.disposeDetached();
+    window.kynxaDiagrams?.hydrate(messages);
+    if (restoringReadingNavigation()) {
+      scrollToReadingPosition(restored.view.left, restored.view.top);
+      restoreScrollAnchor(restored.view.anchors);
+    }
+    updateJumpButton();
     synchronizeElapsedTimer();
     scheduleViewport();
     followBottom();
@@ -738,7 +832,9 @@
     const changedConversation = conversationId !== snapshot.conversationId;
     if (changedConversation) openConversation(snapshot.conversationId);
     historyHasOlder = snapshot.historyHasOlder === true; historyHasNewer = snapshot.historyHasNewer === true;
-    if (changedConversation || snapshot.openAtBottom) {
+    // The host's first navigation snapshot requests the bottom even for a cached revisit.
+    // 宿主首个导航快照总会请求到底；已有阅读位置的缓存回访仅忽略这一次自动请求。
+    if ((changedConversation || snapshot.openAtBottom) && !restoringReadingNavigation()) {
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
@@ -768,17 +864,27 @@
       if (entry.message !== message) { updateMessage(entry, message); if (entry.mounted) changedArticles.push(entry.article); }
       const expected = previous ? previous.nextSibling : messages.firstChild;
       if (expected !== entry.article) messages.insertBefore(entry.article, expected);
+      if (searchingLoadedMessages && !entry.mounted) mountMessage(entry);
       previous = entry.article;
     }
+    // Older pages may prepend messages; the data registry must share the rendered order for later patches.
+    // 加载旧页可能前插消息；数据登记与 DOM 顺序一致，后续增量不得把旧页移回末尾。
+    entries = new Map(snapshot.messages.map(message => [String(message.id), entries.get(String(message.id))]));
     // Account for block headers before restoring the reader's visible anchor.
     // 内容框工具栏先参与布局，再恢复阅读位置，避免追加内容时把正文挤离视口。
     window.kynxaContentBlocks?.disposeDetached();
-    for (const article of changedArticles) window.kynxaContentBlocks?.hydrate(article);
+    window.kynxaTables?.disposeDetached();
+    for (const article of changedArticles) {
+      window.kynxaContentBlocks?.hydrate(article);
+      window.kynxaTables?.hydrate(article);
+    }
     restoreScrollAnchor(anchors);
     applying = false;
     scheduleViewport();
     window.kynxaDiagrams?.disposeDetached();
     for (const article of changedArticles) window.kynxaDiagrams?.hydrate(article);
+    window.kynxaTranscriptSearch?.refresh();
+    restoredReadingNavigation = null;
     updateJumpButton();
     synchronizeElapsedTimer();
     followBottom();
@@ -835,12 +941,21 @@
       if (!bounds.height) continue;
       const delta = bounds.top - anchor.top;
       if (Math.abs(delta) > .5) {
-        anchoringScroll = true; cancelAnimationFrame(anchorFrame);
-        scrollTo({ top: scrollY + delta, left: scrollX, behavior: 'instant' });
-        anchorFrame = requestAnimationFrame(() => { anchoringScroll = false; });
+        scrollToReadingPosition(scrollX, scrollY + delta);
       }
       return;
     }
+  }
+  function restoringReadingNavigation() {
+    return restoredReadingNavigation?.conversationId === conversationId &&
+      restoredReadingNavigation.generation === conversationNavigationGeneration;
+  }
+  function scrollToReadingPosition(left, top) {
+    // Programmatic restoration must not let queued scroll notifications re-enable bottom following.
+    // 程序恢复位置期间屏蔽排队的滚动通知，避免短暂高度夹紧重新开启底部跟随。
+    anchoringScroll = true; cancelAnimationFrame(anchorFrame);
+    scrollTo({ left, top, behavior: 'instant' });
+    anchorFrame = requestAnimationFrame(() => { anchoringScroll = false; });
   }
 
   function visibleMathRange(math) {
@@ -967,7 +1082,12 @@
     if (activeSelection()) stopFollowing();
     else scheduleFlush();
   });
-  document.addEventListener('pointerdown', event => { if (event.button === 0) pointerSelecting = true; });
+  document.addEventListener('pointerdown', event => {
+    if (event.button === 0) {
+      pointerSelecting = true;
+      if (updatingAppearance) navigationGeneration++;
+    }
+  });
   const releasePointer = () => { pointerSelecting = false; if (!activeSelection()) scheduleFlush(); };
   document.addEventListener('pointerup', releasePointer);
   document.addEventListener('pointercancel', releasePointer);
@@ -979,22 +1099,41 @@
   });
   window.addEventListener('pagehide', () => { if (elapsedTimer !== null) clearInterval(elapsedTimer); elapsedTimer = null; });
   window.addEventListener('scroll', () => {
+    const movedUp = scrollY < lastScrollTop, movedDown = scrollY > lastScrollTop;
+    // Update the direction baseline even for guarded restoration and navigation scrolls.
+    // 锚点恢复或导航屏蔽的程序滚动也更新方向基准，避免沿用上一会话的位置。
+    lastScrollTop = scrollY;
     // Clearing the old DOM may queue a scroll event until after the new long chat is rendered.
     // Keep explicit navigation alive until its first bottom frame; real upward input cancels it immediately.
     // 清空旧 DOM 产生的滚动事件可能在新长聊天渲染后才到达；首个底部帧前保留显式导航，真实上滚输入立即撤销。
-    if (!applying && !localizingUi && !anchoringScroll && !bottomNavigationPending)
-      following = !activeSelection() && !pointerSelecting && atBottom();
+    if (!applying && !localizingUi && !updatingAppearance && !anchoringScroll && !bottomNavigationPending && !restoringReadingNavigation()) {
+      // A smooth upward wheel starts inside the usual 36 px bottom tolerance. Keep its reading pause
+      // until a real downward scroll reaches the bottom; viewport reconciliation must not pull it back.
+      // 平滑上滚首帧仍可能处于常用的 36 px 底部容差内；仅真实向下滚动到底才解除阅读暂停，避免虚拟视口协调反拉到底。
+      if (movedUp) bottomFollowingPaused = true;
+      const reachedBottom = document.documentElement.scrollHeight - innerHeight - scrollY <= 1;
+      if (bottomFollowingPaused && movedDown && reachedBottom && !activeSelection() && !pointerSelecting)
+        bottomFollowingPaused = false;
+      following = !bottomFollowingPaused && !activeSelection() && !pointerSelecting && atBottom();
+    }
     updateJumpButton();
     scheduleViewport();
     requestEarlierHistory();
   }, { passive: true });
   window.addEventListener('wheel', event => {
     if (event.deltaY < 0) { stopFollowing(); historyIntent = true; requestEarlierHistory(); }
-    else if (event.deltaY > 0) { historyIntent = 'newer'; requestEarlierHistory(); }
+    else if (event.deltaY > 0) {
+      if (updatingAppearance) navigationGeneration++;
+      historyIntent = 'newer'; requestEarlierHistory();
+    }
   }, { passive: true });
   window.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.target.closest?.('input,textarea,[contenteditable="true"]')) return;
     if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) { stopFollowing(); historyIntent = true; requestEarlierHistory(); }
-    else if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) { historyIntent = 'newer'; requestEarlierHistory(); }
+    else if (['ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) {
+      if (updatingAppearance) navigationGeneration++;
+      historyIntent = 'newer'; requestEarlierHistory();
+    }
   });
   messages.addEventListener('click', event => {
     const link = event.target.closest('a[href]');
@@ -1017,16 +1156,24 @@
     }
     else if (command?.type === 'forgetConversation' && command.conversationId !== conversationId) removeCached(command.conversationId);
     else if (command?.type === 'clearSelection') clearSelection();
+    else if (command?.type === 'findText') {
+      if (command.action === 'open') window.kynxaTranscriptSearch?.show();
+      else if (command.action === 'close') window.kynxaTranscriptSearch?.hide();
+    }
     else if (command?.type === 'copyResult') {
       acknowledgeCopy(command);
       if (command.conversationId === conversationId) {
         window.kynxaDiagrams?.acknowledgeCopy(command);
         window.kynxaContentBlocks?.acknowledgeCopy(command);
+        window.kynxaTables?.acknowledgeCopy(command);
       }
+    }
+    else if (command?.type === 'diagramExportResult') {
+      if (command.conversationId === conversationId) window.kynxaDiagrams?.acknowledgeExport(command);
     }
     else if (command?.type === 'jumpToLatest') jumpToLatest();
     else if (command?.type === 'beforeSend') {
-      if (atBottom() && !activeSelection()) { following = true; followBottom(); }
+      if (atBottom() && !activeSelection()) { bottomFollowingPaused = false; following = true; followBottom(); }
       else stopFollowing();
     }
   });
@@ -1037,21 +1184,69 @@
     cachedConversations: conversations.size, cachedCharacters, cachedNodes,
     liveElapsedCount: liveElapsedEntries.size, elapsedTimerActive: elapsedTimer !== null });
   const diagramAnchors = new WeakMap();
+  const contentLayoutAnchors = new WeakMap();
+  function requestContentCopy(source, block, requestId) {
+    const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
+    if (!block.isConnected || entries.get(messageId)?.article !== article) return false;
+    send({ type: 'copy', conversationId, requestId, messageId, text: source });
+    return true;
+  }
+  function beforeContentLayoutChange(block) {
+    if (activeSelection() || pointerSelecting || localizingUi) return false;
+    // An explicit reading control keeps its visible header, or the surrounding prose,
+    // in place rather than moving the reader to the end of the reply.
+    // 主动调整阅读方式时保留可见工具栏或周围正文的位置，避免把读者带到回复末尾。
+    stopFollowing(); cancelAnimationFrame(scrollFrame);
+    const anchors = scrollAnchors(), bounds = block.getBoundingClientRect();
+    const visibleHeader = bounds.top >= 0 && bounds.top < innerHeight;
+    const preferred = visibleHeader ? [{ node: block, top: bounds.top }]
+      : anchors.filter(anchor => anchor.node !== block && anchor.top >= 0);
+    contentLayoutAnchors.set(block, [...preferred, ...anchors]);
+    return true;
+  }
+  function afterContentLayoutChange(block) {
+    restoreScrollAnchor(contentLayoutAnchors.get(block) || []); contentLayoutAnchors.delete(block);
+    updateJumpButton();
+  }
   window.kynxaContentBlocks?.configure({
-    requestCopy(source, block, requestId) {
-      const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
-      if (!block.isConnected || entries.get(messageId)?.article !== article) return;
-      send({ type: 'copy', conversationId, requestId, messageId, text: source });
-    }
+    requestCopy: requestContentCopy,
+    beforeLayoutChange: beforeContentLayoutChange,
+    afterLayoutChange: afterContentLayoutChange
+  });
+  window.kynxaTables?.configure({ requestCopy: requestContentCopy, serializeNode: serializeSelectionNode });
+  window.kynxaTranscriptSearch?.configure({
+    stopFollowing() { stopFollowing(); cancelAnimationFrame(scrollFrame); },
+    canNavigate: () => !activeSelection() && !pointerSelecting && !localizingUi && !updatingAppearance,
+    navigate(top) { stopFollowing(); scrollToReadingPosition(scrollX, top); updateJumpButton(); },
+    searchConversations() { send({ type: 'searchConversations', conversationId: conversationId || '' }); },
+    stateChanged(open) {
+      searchingLoadedMessages = open;
+      // Search indexes the currently loaded history page, including rows outside the virtual viewport.
+      // 搜索覆盖当前已加载历史页，包含虚拟视口外的消息；尚未回读的历史不在此次索引内。
+      if (open) {
+        const anchors = following ? [] : scrollAnchors();
+        for (const entry of entries.values()) mountMessage(entry);
+        restoreScrollAnchor(anchors); synchronizeElapsedTimer();
+      }
+      scheduleViewport();
+      send({ type: 'findTextState', conversationId: conversationId || '', open });
+    },
+    closed() { send({ type: 'findTextClosed', conversationId: conversationId || '' }); }
   });
   window.kynxaDiagrams?.configure({
+    requestExport(format, content, block, requestId) {
+      const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
+      if (!block.isConnected || entries.get(messageId)?.article !== article) return false;
+      send({ type: 'exportDiagram', conversationId, requestId, messageId, format, content });
+      return true;
+    },
     requestCopy(source, block, requestId) {
       const article = block.closest('article[data-message-id]'), messageId = article?.dataset.messageId;
       if (!block.isConnected || entries.get(messageId)?.article !== article) return;
       send({ type: 'copy', conversationId, requestId, messageId, text: source });
     },
     beforeLayoutChange(block) {
-      if (activeSelection() || pointerSelecting || localizingUi) return false;
+      if (activeSelection() || pointerSelecting || localizingUi || updatingAppearance) return false;
       diagramAnchors.set(block, following ? [] : scrollAnchors());
       return true;
     },

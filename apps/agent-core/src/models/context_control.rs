@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-/// Context rules operate on bounded metadata; provider bodies, archives and history remain in Node.
-/// 上下文规则处理受限元信息；供应商正文、归档和正式历史仍由 Node 持有。
+/// Pure context rules operate on bounded metadata and perform no provider, archive or history I/O.
+/// 纯上下文规则只处理受限元信息；供应商、归档与正式历史 I/O 由原生接线层负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
     match operation {
         "context.outputDefaults" | "context.outputValidate" | "context.outputBudget" => {
@@ -15,6 +15,18 @@ pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
         "context.observationPlan" => Ok(observation_plan(args)),
         _ => Err("AGENT_CORE_UNKNOWN_OPERATION".to_owned()),
     }
+}
+
+/// Limit schemas to 40% / 24K; mandatory system, user goals and live guidance leave 40% for working evidence.
+/// 工具定义最多占输入的 40% / 24K；系统、原始目标和实时指引均计入必需输入，再为工作证据保留 40%。
+pub(crate) fn tool_declaration_budget(input_budget: u64, mandatory_tokens: u64) -> u64 {
+    let working_tokens = (u128::from(input_budget) * 2 / 5) as u64;
+    let schema_limit = working_tokens.min(24_000);
+    schema_limit.min(
+        input_budget
+            .saturating_sub(mandatory_tokens)
+            .saturating_sub(working_tokens),
+    )
 }
 
 fn complete_turns(args: &Value) -> Value {
@@ -230,6 +242,21 @@ fn observation_plan(args: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_schemas_leave_working_capacity_and_respect_small_and_large_input_limits() {
+        // A 16K window's 10.6K input grant must retain evidence after mandatory instructions.
+        // 16K 窗口实际约 10.6K 输入授额时，工具定义不能挤占必需提示后的工作证据空间。
+        assert_eq!(tool_declaration_budget(10_649, 2_600), 3_790);
+        // The caller reserves the actual original goal and live notices alongside the system prompt.
+        // 调用端须把原始目标及实时指引与系统提示一起授额，不能仅按系统文字给工具目录分配空间。
+        let mandatory_tokens = 2_600 + 600 + 874;
+        let schema_tokens = tool_declaration_budget(10_649, mandatory_tokens);
+        assert_eq!(schema_tokens, 2_316);
+        assert_eq!(mandatory_tokens + schema_tokens + 4_259, 10_649);
+        assert_eq!(tool_declaration_budget(2_048, 1_600), 0);
+        assert_eq!(tool_declaration_budget(1_000_000, 1_000), 24_000);
+    }
 
     #[test]
     fn physical_window_and_provider_caps_keep_the_exact_input_boundary() {

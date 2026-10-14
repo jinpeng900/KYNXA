@@ -24,6 +24,9 @@ public sealed class LayoutStateService
                     state.RecentWorkChatIds ??= [];
                     state.InterfaceLanguage = UiText.NormalizeLanguage(state.InterfaceLanguage);
                     state.AppearancePaletteId = AppearanceService.NormalizePaletteId(state.AppearancePaletteId);
+                    state.AppearanceMode = AppearanceService.NormalizeMode(state.AppearanceMode);
+                    state.ChatFontSize = AppearanceService.NormalizeChatFontSize(state.ChatFontSize);
+                    state.AppearanceAccent = AppearanceService.NormalizeAccent(state.AppearanceAccent);
                     if (state.LayoutVersion < 3)
                     {
                         state.SidebarWidth = Layout.ShellLayoutMetrics.SidebarDefault;
