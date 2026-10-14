@@ -52,6 +52,14 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--api-final-only", StringComparer.Ordinal))
+            {
+                await CheckApiFinalAnswersAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native real-API final-answer checks; full final Markdown, task outcome isolation, continuation projection, hidden tool progress, native clipboard, export and reopened conversation.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--format-only", StringComparer.Ordinal))
             {
                 await CheckOutputFormatAndResizeAsync();

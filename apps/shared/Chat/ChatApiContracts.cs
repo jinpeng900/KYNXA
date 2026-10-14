@@ -19,7 +19,8 @@ public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid Requ
     string? Delta = null, string? Content = null, string? Reasoning = null, string? Error = null, ToolActivity? Tool = null,
     AssistantSegment? Segment = null, string? SegmentId = null, AssistantSegment[]? AssistantSegments = null,
     int? ToolStreamProtocol = null, long DurationMs = 0, HostTerminalOutput? Terminal = null, JsonElement? TaskCompletion = null,
-    string? ServerId = null, bool? Ready = null, string? Code = null, string? Message = null);
+    string? ServerId = null, bool? Ready = null, string? Code = null, string? Message = null, Guid? TaskId = null,
+    Guid? RootRequestTaskId = null, string? Phase = null, int? Round = null, Guid? ApprovalId = null);
 
 public static class ChatDurationRules
 {

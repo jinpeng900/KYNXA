@@ -29,6 +29,7 @@ public static partial class UiText
             || RuntimeTranslations.TryGetValue(chinese, out translated)
             || MemoryTranslations.TryGetValue(chinese, out translated)
             || AgentTranslations.TryGetValue(chinese, out translated)
+            || TaskTranslations.TryGetValue(chinese, out translated)
                 ? translated : chinese;
     }
 }

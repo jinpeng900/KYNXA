@@ -11,6 +11,17 @@ Run from the repository root after building:
 dotnet run --project tests/memory-ui-smoke/MemoryUiSmoke.csproj
 ```
 
+For the isolated pending-candidate and mutation-confirmation checks only:
+
+```powershell
+dotnet run --project tests/memory-ui-smoke/MemoryUiSmoke.csproj -- --confirmation-only
+```
+
+This short path covers separate draft editing and explicit confirmation, original
+user quotations, draft exclusion from model context, reviewed update/delete target
+actions, cancelled confirmations, candidate discard, and unavailable sources.
+The injected fixture never launches the real gateway, a local model, or a main desktop window.
+
 The host exercises real native controls through automation peers and programmatic
 control input. It does not claim physical mouse or keyboard interaction. Native
 dialog buttons are invoked through their exposed automation peers. Window resize,

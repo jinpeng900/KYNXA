@@ -47,6 +47,7 @@ public sealed partial class ShellPage : Page
         ScreenshotPanel.ScreenshotOpenRequested += ToolResultRequested;
         ScreenshotPanel.ScreenshotsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
         InitializeWorkTabs();
+        InitializeTaskPanel();
         MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
         MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;

@@ -28,6 +28,8 @@ struct CandidateOwner {
 static CANDIDATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CandidateOwner>>>> = OnceLock::new();
 type IndexCallback = Arc<dyn Fn(&Value) + Send + Sync>;
 static INDEXERS: OnceLock<Mutex<HashMap<PathBuf, IndexCallback>>> = OnceLock::new();
+#[cfg(test)]
+static CANDIDATE_COMMIT_OBSERVER: Mutex<Option<(PathBuf, IndexCallback)>> = Mutex::new(None);
 pub fn set_indexer(root: &Path, callback: IndexCallback) {
     INDEXERS
         .get_or_init(Default::default)
@@ -245,6 +247,142 @@ pub fn stop_candidates(root: &Path) {
         }
     }
 }
+
+/// A saved explicit instruction grants confirmation; ordinary background proposals keep their draft boundary.
+/// 已正式保存的明确记住指令授权立即确认；普通后台建议仍保留草稿确认边界。
+pub fn capture_explicit_instruction(
+    root: &Path,
+    conversation: &str,
+    user_message_id: &str,
+) -> ContractResult {
+    let source = memory::apply(
+        "storage.memory.source",
+        &json!({"value":{"type":"user-message","role":"user","conversationId":conversation,"messageId":user_message_id}}),
+    )?;
+    let conversation = source["conversationId"].as_str().unwrap();
+    let message_id = source["messageId"].as_str().unwrap();
+    let catalog = gateway::load_catalog(root)?;
+    let relationship = super::catalog::apply(
+        "storage.catalog.related",
+        &json!({"current":catalog,"id":conversation}),
+    )?;
+    let mut history = super::conversation_history::read_latest(
+        root,
+        &gateway::locate(&catalog, conversation)?,
+        Some(&HashSet::from([message_id.to_string()])),
+        true,
+    )?;
+    let raw = history.messages.first().ok_or_else(|| {
+        gateway::error("记忆来源须为已保存的真实用户消息。", "INVALID_MEMORY", 400)
+    })?;
+    let saved: Value = serde_json::from_str(&super::raw_json::scalar_projection(raw))
+        .map_err(|_| gateway::error("记忆来源消息损坏。", "CORRUPT_CONVERSATION", 500))?;
+    let saved = gateway::normalize_message(&saved)?;
+    let instruction = memory::apply(
+        "storage.memory.instruction",
+        &json!({"message":saved["Content"],"hasProject":relationship["memoryScopes"].as_array().unwrap().contains(&json!("project"))}),
+    )?;
+    if instruction.is_null() {
+        history.verify()?;
+        return Ok(json!({"created":false,"reason":"no-trigger"}));
+    }
+    let scope = instruction["scope"].as_str().unwrap();
+    let scope_owner = if scope == "project" {
+        relationship["projectId"].as_str().unwrap()
+    } else {
+        conversation
+    };
+    let text_units = saved["Content"]
+        .as_str()
+        .unwrap()
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let content = String::from_utf16(
+        &text_units[instruction["startOffset"].as_u64().unwrap() as usize
+            ..instruction["endOffset"].as_u64().unwrap() as usize],
+    )
+    .map_err(|_| gateway::error("记忆原话边界无效。", "INVALID_MEMORY", 400))?;
+    let (result, changed_document) = gateway::with_catalog(root, |current, _| {
+        gateway::verify_catalog_sources(&catalog, current, &[conversation.to_string()])?;
+        let (scope_id, path) = location(root, current, scope, scope_owner, Some(conversation))?;
+        let (document, digest) = read_scope(root, &path, scope, &scope_id)?;
+        let mut input = json!({"scope":scope,"scopeId":scope_id,"content":content,"kind":instruction["kind"],"source":source});
+        memory_service::apply(
+            "storage.memoryService.validateSource",
+            &source_facts(root, current, &input)?,
+        )?;
+        // Older captures may already hold this strict remember instruction as a draft; only that exact source may upgrade.
+        // 旧提取可能已把严格记住指令保存成草稿；只迁移同一来源的 remember 候选，不接受模型推断或动作提案。
+        let is_dismissed = document["dismissedSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["conversationId"] == source["conversationId"]
+                    && item["messageId"] == source["messageId"]
+            });
+        let legacy = document["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                !is_dismissed
+                    && entry["status"] == "draft"
+                    && entry["source"] == source
+                    && entry["candidate"]["trigger"] == "remember"
+            });
+        let (operation, entry_id) = if let Some(entry) = legacy {
+            memory_service::apply(
+                "storage.memoryService.validateSource",
+                &source_facts(root, current, entry)?,
+            )?;
+            input["status"] = json!("confirmed");
+            ("storage.repository.update", entry["id"].clone())
+        } else {
+            ("storage.repository.create", json!(gateway::new_id()))
+        };
+        let planned = memory_repository::apply(
+            operation,
+            &json!({"document":document,"input":input,"id":entry_id,"now":gateway::now()}),
+        )?;
+        let mut next = planned["document"].clone();
+        history.verify()?;
+        if planned["changed"] == true {
+            next["revision"] = json!(document["revision"].as_u64().unwrap() + 1);
+            memory::apply(
+                "storage.memory.document",
+                &json!({"value":next,"scope":scope,"scopeId":scope_id,"timestamps":gateway::timestamps(&next)}),
+            )?;
+            gateway::commit_json(root, &path, &next, digest.as_deref(), MAXIMUM_BYTES)?;
+        }
+        let entries = next["entries"].as_array().unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry["id"] == entry_id)
+            .or_else(|| {
+                entries.iter().find(|entry| {
+                    entry["source"]["conversationId"] == source["conversationId"]
+                        && entry["source"]["messageId"] == source["messageId"]
+                })
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok((
+            json!({"created":planned["changed"],"reason":if planned["changed"]==true{"created"}else{"deduplicated"},"scope":scope,"scopeId":scope_id,"revision":next["revision"],"entry":entry,"requiresConfirmation":entry["status"]=="draft"}),
+            (planned["changed"] == true).then_some(next),
+        ))
+    })?;
+    if let Some(document) = changed_document {
+        if let Some(callback) = INDEXERS
+            .get()
+            .and_then(|owners| owners.lock().ok())
+            .and_then(|owners| owners.get(root).cloned())
+        {
+            callback(&document);
+        }
+    }
+    Ok(result)
+}
 /// Retire queued candidates only; a running capture still verifies the formal catalog before committing.
 /// 仅撤出已删除聊天的排队候选；正在运行的提取仍在提交前核验正式目录，不影响其他聊天或共享确认记忆。
 pub(crate) fn retire_chat_candidates(root: &Path, conversation: &str) -> ContractResult {
@@ -372,13 +510,19 @@ fn capture_candidates(
             documents.push((scope.to_string(), scope_id, path, document, digest));
         }
         let user = documents.iter().find(|record| record.0 == "user").unwrap();
+        let settings_revision = user.3["candidateSettingsRevision"].as_u64().unwrap_or(0);
         lifecycle(
             owner,
             "storage.memoryLifecycle.initialize",
             json!({"document":user.3}),
         )?;
         let settings = lifecycle(owner, "storage.memoryLifecycle.settings", json!({}))?;
-        let projected=messages.iter().map(|message|json!({"id":if message["Role"]=="user"{message["Id"].clone()}else{Value::Null},"role":message["Role"],"status":message["Status"],"text":if message["Role"]=="user"&&message["Content"].as_str().is_some_and(|text|text.encode_utf16().count()<=4096){message["Content"].clone()}else{json!("")},"eligibleLength":message["Content"].as_str().is_some_and(|text|text.encode_utf16().count()<=4096),"hasContent":message["Content"].as_str().is_some_and(|text|!text.trim().is_empty()),"estimatedTokens":message["Content"].as_str().map(|text|text.len().div_ceil(3)).unwrap_or(0)})).collect::<Vec<_>>();
+        let projected = messages.iter().map(|message| {
+            let text = message["Content"].as_str().unwrap_or("");
+            let text_length_utf16 = text.encode_utf16().count();
+            let eligible_length = text_length_utf16 <= 4000;
+            json!({"id":if message["Role"]=="user"{message["Id"].clone()}else{Value::Null},"role":message["Role"],"status":message["Status"],"text":if message["Role"]=="user"&&eligible_length{message["Content"].clone()}else{json!("")},"textLengthUtf16":text_length_utf16,"eligibleLength":eligible_length,"hasContent":!text.trim().is_empty(),"estimatedTokens":text.len().div_ceil(3)})
+        }).collect::<Vec<_>>();
         let plan = lifecycle(
             owner,
             "storage.memoryLifecycle.capturePlan",
@@ -459,6 +603,18 @@ fn capture_candidates(
                     "storage.memory.document",
                     &json!({"value":next,"scope":record.0,"scopeId":record.1,"timestamps":gateway::timestamps(&next)}),
                 )?;
+                #[cfg(test)]
+                {
+                    let observer = CANDIDATE_COMMIT_OBSERVER
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|(owner, _)| owner == root)
+                        .map(|(_, observer)| Arc::clone(observer));
+                    if let Some(observer) = observer {
+                        observer(&next);
+                    }
+                }
                 let receipt = gateway::with_catalog(root, |current, _| {
                     gateway::verify_catalog_sources(catalog, current, &[conversation.to_string()])?;
                     let (_, current_path) =
@@ -471,8 +627,27 @@ fn capture_candidates(
                         ));
                     }
                     history.verify()?;
+                    // A settings edit after capture invalidates this draft, including disabling while it is queued.
+                    // 捕获后的设置修改使本次草稿失效，包括排队或提取过程中关闭自动候选。
+                    let latest_user =
+                        read_scope(root, &root.join("Memory/entries.json"), "user", "user")?.0;
+                    if latest_user["candidateSettings"]["enabled"] == false {
+                        return Ok(json!({"skippedReason":"disabled"}));
+                    }
+                    if latest_user["candidateSettingsRevision"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        != settings_revision
+                    {
+                        return Ok(json!({"skippedReason":"settings-changed"}));
+                    }
                     gateway::commit_json(root, &record.2, &next, record.4.as_deref(), MAXIMUM_BYTES)
                 })?;
+                if let Some(reason) = receipt.get("skippedReason") {
+                    return Ok(
+                        json!({"created":created,"deduplicated":deduplicated,"reason":reason,"completeTurns":extracted["completeTurns"],"estimatedTokens":extracted["estimatedTokens"],"skippedOverlongMessages":extracted["skippedOverlongMessages"]}),
+                    );
+                }
                 record.3 = next;
                 record.4 = receipt["hash"].as_str().map(str::to_string);
                 created += 1;
@@ -485,7 +660,7 @@ fn capture_candidates(
             history.verify()
         })?;
         Ok(
-            json!({"created":created,"deduplicated":deduplicated,"reason":extracted["reason"],"completeTurns":extracted["completeTurns"],"estimatedTokens":extracted["estimatedTokens"]}),
+            json!({"created":created,"deduplicated":deduplicated,"reason":extracted["reason"],"completeTurns":extracted["completeTurns"],"estimatedTokens":extracted["estimatedTokens"],"skippedOverlongMessages":extracted["skippedOverlongMessages"],"skippedTokenBudgetMessages":extracted["skippedTokenBudgetMessages"]}),
         )
     })()
 }
@@ -1574,4 +1749,600 @@ pub fn handle(method: &str, path: &str, body: &Value, root: &Path) -> Option<Gat
         }
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod candidate_transition_tests {
+    use super::*;
+    use std::{
+        io::Write,
+        time::{Duration, Instant},
+    };
+
+    struct Fixture {
+        root: PathBuf,
+        chat: String,
+        log: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("kynxa-memory-transitions-{}", gateway::new_id()));
+            let chat = gateway::new_id();
+            gateway::ensure_conversation(&root, &chat, "合成记忆回归").unwrap();
+            let catalog = gateway::load_catalog(&root).unwrap();
+            let log = super::super::conversation_logs::directory(
+                &root,
+                &gateway::locate(&catalog, &chat).unwrap(),
+            )
+            .unwrap()
+            .join("events.jsonl");
+            Self { root, chat, log }
+        }
+        fn append(&self, role: &str, content: &str) -> String {
+            let id = gateway::new_id();
+            let mut writer = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.log)
+                .unwrap();
+            writeln!(writer, "{}", json!({"version":1,"type":"message.upsert","message":{"Id":id,"Role":role,"Status":"completed","Content":content}})).unwrap();
+            writer.sync_all().unwrap();
+            id
+        }
+        fn turns(&self, start: usize, count: usize) -> Vec<String> {
+            (start..start + count)
+                .map(|index| {
+                    let id = self.append("user", &format!("我喜欢第 {index} 种展示约定。"));
+                    self.append("assistant", "已收到这条合成讨论。");
+                    id
+                })
+                .collect()
+        }
+        fn document(&self) -> Value {
+            read_index_document(&self.root, "chat", &self.chat).unwrap()
+        }
+        fn wait(&self) -> Value {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let status = candidate_status(&self.root).unwrap();
+                if status["pendingTasks"] == 0 {
+                    return status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "candidate did not settle: {status}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        fn capture(&self) -> Value {
+            capture_candidates(
+                &self.root,
+                &self.chat,
+                &json!({"phase":"completed","userMessageId":null}),
+                &candidate_owner(&self.root).unwrap(),
+            )
+            .unwrap()
+        }
+        fn patch(&self, id: &str, revision: &Value, patch: Value) -> Value {
+            let mut body = patch;
+            body["expectedRevision"] = revision.clone();
+            handle(
+                "PATCH",
+                &format!("/api/conversations/{}/memory/{id}", self.chat),
+                &body,
+                &self.root,
+            )
+            .unwrap()
+            .unwrap()
+            .1
+        }
+        fn delete(&self, id: &str, revision: &Value) -> Value {
+            handle(
+                "DELETE",
+                &format!("/api/conversations/{}/memory/{id}", self.chat),
+                &json!({"expectedRevision":revision}),
+                &self.root,
+            )
+            .unwrap()
+            .unwrap()
+            .1
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            stop_candidates(&self.root);
+            self.wait();
+            let mut observer = CANDIDATE_COMMIT_OBSERVER.lock().unwrap();
+            if observer
+                .as_ref()
+                .is_some_and(|(root, _)| root == &self.root)
+            {
+                *observer = None;
+            }
+            drop(observer);
+            if let Some(owners) = CANDIDATES.get() {
+                owners.lock().unwrap().remove(&self.root);
+            }
+            if let Some(owners) = INDEXERS.get() {
+                owners.lock().unwrap().remove(&self.root);
+            }
+            std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn saved_assistant_completion_creates_draft_then_confirmation_crud_preserves_batch_dismissals()
+    {
+        let fixture = Fixture::new();
+        let mut users = fixture.turns(0, 11);
+        let final_user = gateway::new_id();
+        gateway::upsert_message(&fixture.root, &fixture.chat, &json!({"Id":final_user,"Role":"user","Status":"completed","Content":"我喜欢第 11 种展示约定。"})).unwrap();
+        fixture.wait();
+        assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+        let assistant = gateway::new_id();
+        gateway::upsert_message(&fixture.root, &fixture.chat, &json!({"Id":assistant,"Role":"assistant","Status":"streaming","Content":"先完成合成答复。"})).unwrap();
+        assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+        gateway::upsert_message(&fixture.root, &fixture.chat, &json!({"Id":assistant,"Role":"assistant","Status":"completed","Content":"已完成合成答复。"})).unwrap();
+        let settled = fixture.wait();
+        assert_eq!(settled["lastResult"]["created"], 1, "{settled}");
+        users.push(final_user.clone());
+        let draft = fixture.document();
+        let entry = &draft["entries"][0];
+        assert_eq!(entry["status"], "draft");
+        assert_eq!(entry["scopeId"], fixture.chat);
+        assert_eq!(entry["source"]["messageId"], final_user);
+        assert_eq!(entry["candidate"]["batchThroughMessageId"], final_user);
+        assert_eq!(entry["candidate"]["quotes"].as_array().unwrap().len(), 12);
+        assert!(
+            context(&fixture.root, &fixture.chat).unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let id = entry["id"].as_str().unwrap();
+        let confirmed = fixture.patch(id, &draft["revision"], json!({"status":"confirmed"}));
+        assert_eq!(
+            context(&fixture.root, &fixture.chat).unwrap()["entries"][0]["id"],
+            id
+        );
+        let stale = handle(
+            "PATCH",
+            &format!("/api/conversations/{}/memory/{id}", fixture.chat),
+            &json!({"expectedRevision":draft["revision"],"content":"旧表单不能覆盖"}),
+            &fixture.root,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(stale.code(), "MEMORY_CONFLICT");
+        let edited = fixture.patch(
+            id,
+            &confirmed["revision"],
+            json!({"content":"用户编辑后的约定"}),
+        );
+        assert_eq!(edited["entries"][0]["content"], "用户编辑后的约定");
+        let deleted = fixture.delete(id, &edited["revision"]);
+        assert!(deleted["entries"].as_array().unwrap().is_empty());
+        assert_eq!(deleted["dismissedSources"].as_array().unwrap().len(), 12);
+        assert!(
+            deleted["dismissedSources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|source| source["candidateBatchThroughMessageId"] == final_user)
+        );
+        assert_eq!(fixture.capture()["created"], 0);
+        assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+        let next_users = fixture.turns(12, 12);
+        assert_eq!(fixture.capture()["created"], 1);
+        let next = fixture.document();
+        let quotes = next["entries"][0]["candidate"]["quotes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(quotes.len(), 12);
+        assert!(quotes.iter().all(|quote| {
+            next_users.contains(&quote["messageId"].as_str().unwrap().to_string())
+                && !users.contains(&quote["messageId"].as_str().unwrap().to_string())
+        }));
+    }
+
+    #[test]
+    fn capture_rechecks_disabled_and_changed_settings_before_draft_commit() {
+        for (patch, reason) in [
+            (json!({"enabled":false}), "disabled"),
+            (json!({"maxCandidates":4}), "settings-changed"),
+        ] {
+            let fixture = Fixture::new();
+            fixture.turns(0, 12);
+            let root = fixture.root.clone();
+            *CANDIDATE_COMMIT_OBSERVER.lock().unwrap() = Some((
+                root.clone(),
+                Arc::new(move |_| {
+                    handle(
+                        "PATCH",
+                        "/api/memory/candidates/settings",
+                        &json!({"expectedRevision":0,"patch":patch}),
+                        &root,
+                    )
+                    .unwrap()
+                    .unwrap();
+                }),
+            ));
+            let result = fixture.capture();
+            assert_eq!(result["created"], 0);
+            assert_eq!(result["reason"], reason);
+            assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+            assert_eq!(
+                candidate_status(&fixture.root).unwrap()["settingsRevision"],
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_source_is_skipped_without_truncation_or_losing_other_batch_quotes() {
+        let fixture = Fixture::new();
+        fixture.append("user", &format!("我喜欢{}", "长".repeat(4000)));
+        fixture.append("assistant", "已收到超长合成输入。");
+        let valid = fixture.turns(1, 11);
+        let result = fixture.capture();
+        assert_eq!(result["created"], 1);
+        assert_eq!(result["skippedOverlongMessages"], 1);
+        let document = fixture.document();
+        let quotes = document["entries"][0]["candidate"]["quotes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(quotes.len(), 11);
+        assert!(
+            quotes
+                .iter()
+                .all(|quote| valid.contains(&quote["messageId"].as_str().unwrap().to_string()))
+        );
+    }
+
+    #[test]
+    fn changed_user_quote_cannot_confirm_the_previous_candidate() {
+        let fixture = Fixture::new();
+        let users = fixture.turns(0, 12);
+        assert_eq!(fixture.capture()["created"], 1);
+        let document = fixture.document();
+        gateway::upsert_message(&fixture.root, &fixture.chat, &json!({"Id":users[0],"Role":"user","Status":"completed","Content":"已更改的原话不再支持旧候选。"})).unwrap();
+        fixture.wait();
+        let entry = &document["entries"][0];
+        let error = handle(
+            "PATCH",
+            &format!(
+                "/api/conversations/{}/memory/{}",
+                fixture.chat,
+                entry["id"].as_str().unwrap()
+            ),
+            &json!({"expectedRevision":document["revision"],"status":"confirmed"}),
+            &fixture.root,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.code(), "MEMORY_SOURCE_UNAVAILABLE");
+        let current = fixture.document();
+        assert_eq!(current["revision"], document["revision"]);
+        assert_eq!(current["entries"][0]["status"], "draft");
+        assert_eq!(current["entries"][0]["sourceAvailable"], false);
+    }
+
+    #[test]
+    fn explicit_scope_shares_only_authorized_work_and_pauses_after_source_moves() {
+        let mut fixture = Fixture::new();
+        fixture.append("user", "已有合成聊天。");
+        let first_work = gateway::new_id();
+        let second_work = gateway::new_id();
+        let sibling = gateway::new_id();
+        let foreign = gateway::new_id();
+        for folder in ["first-work", "second-work"] {
+            std::fs::create_dir_all(fixture.root.join(folder)).unwrap();
+        }
+        let original = gateway::load_catalog(&fixture.root).unwrap();
+        gateway::handle("PUT", "/api/conversations/catalog", &[], &json!({"Revision":original["Revision"],"Chats":[],"Projects":[
+            {"Id":first_work,"Name":"合成工作一","FolderPath":fixture.root.join("first-work"),"Chats":[
+                {"Id":fixture.chat,"Title":"合成来源","Messages":[]},
+                {"Id":sibling,"Title":"合成同工作聊天","Messages":[{"Id":gateway::new_id(),"Role":"user","Content":"同工作合成输入"}]}]},
+            {"Id":second_work,"Name":"合成工作二","FolderPath":fixture.root.join("second-work"),"Chats":[
+                {"Id":foreign,"Title":"合成其他工作聊天","Messages":[{"Id":gateway::new_id(),"Role":"user","Content":"其他工作合成输入"}]}]}
+        ]}), &fixture.root).unwrap().unwrap();
+        let catalog = gateway::load_catalog(&fixture.root).unwrap();
+        fixture.log = super::super::conversation_logs::directory(
+            &fixture.root,
+            &gateway::locate(&catalog, &fixture.chat).unwrap(),
+        )
+        .unwrap()
+        .join("events.jsonl");
+        let mut entries = HashMap::new();
+        for (text, scope) in [
+            ("记住：共享工作约定", "project"),
+            ("全局记住：跨工作偏好", "user"),
+            ("聊天记住：私有聊天约定", "chat"),
+        ] {
+            let message = fixture.append("user", text);
+            let saved =
+                capture_explicit_instruction(&fixture.root, &fixture.chat, &message).unwrap();
+            assert_eq!(saved["scope"], scope);
+            entries.insert(scope, saved["entry"]["id"].clone());
+        }
+        let same_work = context(&fixture.root, &sibling).unwrap();
+        let same_entries = same_work["entries"].as_array().unwrap();
+        assert_eq!(same_entries.len(), 2);
+        assert!(
+            same_entries
+                .iter()
+                .any(|entry| entry["id"] == entries["project"])
+        );
+        assert!(
+            same_entries
+                .iter()
+                .any(|entry| entry["id"] == entries["user"])
+        );
+        let other_work = context(&fixture.root, &foreign).unwrap();
+        assert_eq!(other_work["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(other_work["entries"][0]["id"], entries["user"]);
+        let mut moved = gateway::handle(
+            "GET",
+            "/api/conversations/catalog",
+            &[("includeMessages".into(), "false".into())],
+            &Value::Null,
+            &fixture.root,
+        )
+        .unwrap()
+        .unwrap()
+        .1;
+        let index = moved["Projects"][0]["Chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|chat| chat["Id"] == fixture.chat)
+            .unwrap();
+        let source = moved["Projects"][0]["Chats"]
+            .as_array_mut()
+            .unwrap()
+            .remove(index);
+        moved["Projects"][1]["Chats"]
+            .as_array_mut()
+            .unwrap()
+            .push(source);
+        gateway::handle(
+            "PUT",
+            "/api/conversations/catalog",
+            &[],
+            &moved,
+            &fixture.root,
+        )
+        .unwrap()
+        .unwrap();
+        let old_work = read_index_document(&fixture.root, "project", &first_work).unwrap();
+        assert_eq!(old_work["entries"][0]["active"], false);
+        assert_eq!(old_work["entries"][0]["sourceAvailable"], true);
+        let remaining = context(&fixture.root, &sibling).unwrap();
+        assert_eq!(remaining["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(remaining["entries"][0]["id"], entries["user"]);
+        let moved_chat = context(&fixture.root, &fixture.chat).unwrap();
+        assert_eq!(moved_chat["entries"].as_array().unwrap().len(), 2);
+        assert!(
+            moved_chat["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == entries["chat"])
+        );
+    }
+
+    #[test]
+    fn legacy_remember_draft_upgrades_only_after_rechecking_the_saved_instruction() {
+        let fixture = Fixture::new();
+        let user = fixture.append("user", "聊天记住：旧草稿😀内容");
+        assert_eq!(fixture.capture()["created"], 1);
+        let before = fixture.document();
+        assert_eq!(before["entries"][0]["status"], "draft");
+        assert_eq!(before["entries"][0]["candidate"]["trigger"], "remember");
+        let saved = capture_explicit_instruction(&fixture.root, &fixture.chat, &user).unwrap();
+        assert_eq!(saved["created"], true);
+        assert_eq!(saved["entry"]["id"], before["entries"][0]["id"]);
+        assert_eq!(saved["entry"]["revision"], 2);
+        assert_eq!(saved["entry"]["status"], "confirmed");
+        assert_eq!(saved["entry"]["content"], "旧草稿😀内容");
+        assert_eq!(
+            saved["entry"]["candidate"]["quotes"][0]["text"],
+            "聊天记住：旧草稿😀内容"
+        );
+        assert_eq!(fixture.capture()["created"], 0);
+        assert_eq!(fixture.document()["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn explicit_instruction_reads_saved_utf16_source_and_stays_confirmed_when_candidates_disabled()
+    {
+        let fixture = Fixture::new();
+        handle(
+            "PATCH",
+            "/api/memory/candidates/settings",
+            &json!({"expectedRevision":0,"patch":{"enabled":false}}),
+            &fixture.root,
+        )
+        .unwrap()
+        .unwrap();
+        let ordinary = fixture.append("user", "普通讨论里提到记住：不会自动确认。");
+        assert_eq!(
+            capture_explicit_instruction(&fixture.root, &fixture.chat, &ordinary).unwrap()["reason"],
+            "no-trigger"
+        );
+        let user = fixture.append("user", "  聊天记住：  中文😀偏好  ");
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = callbacks.clone();
+        set_indexer(
+            &fixture.root,
+            Arc::new(move |document| {
+                assert!(
+                    document["entries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|entry| entry["status"] == "confirmed")
+                );
+                observed.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let saved = capture_explicit_instruction(&fixture.root, &fixture.chat, &user).unwrap();
+        assert_eq!(saved["created"], true);
+        assert_eq!(saved["entry"]["content"], "中文😀偏好");
+        assert_eq!(saved["entry"]["status"], "confirmed");
+        assert_eq!(saved["entry"]["source"]["messageId"], user);
+        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            capture_explicit_instruction(&fixture.root, &fixture.chat, &user).unwrap()["created"],
+            false
+        );
+        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+        let deleted = fixture.delete(saved["entry"]["id"].as_str().unwrap(), &saved["revision"]);
+        assert!(deleted["entries"].as_array().unwrap().is_empty());
+        assert_eq!(
+            capture_explicit_instruction(&fixture.root, &fixture.chat, &user).unwrap()["created"],
+            false
+        );
+        assert_eq!(
+            candidate_status(&fixture.root).unwrap()["settings"]["enabled"],
+            false
+        );
+        CANDIDATES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&fixture.root);
+        let restarted = candidate_status(&fixture.root).unwrap();
+        assert_eq!(restarted["settings"]["enabled"], false);
+        assert_eq!(restarted["settingsRevision"], 1);
+        assert!(
+            capture_explicit_instruction(
+                &fixture.root,
+                &fixture.chat,
+                &fixture.append("assistant", "记住：助手不能授权")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn update_and_delete_proposals_require_explicit_action_and_fresh_target_identity() {
+        let fixture = Fixture::new();
+        let original = fixture.append("user", "聊天记住：初始约定");
+        let created =
+            capture_explicit_instruction(&fixture.root, &fixture.chat, &original).unwrap();
+        let target_id = created["entry"]["id"].as_str().unwrap().to_string();
+        for action in ["update", "delete"] {
+            let quote = if action == "update" {
+                "请把约定改成新约定。"
+            } else {
+                "请删除这条约定。"
+            };
+            let message = fixture.append("user", quote);
+            let read = handle_tool(
+                "memory.read",
+                &json!({"scopes":["chat"]}),
+                &json!({"conversationId":fixture.chat}),
+                &fixture.root,
+            )
+            .unwrap()
+            .unwrap();
+            let target = read["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == target_id)
+                .unwrap()["target"]
+                .clone();
+            let input = json!({"action":action,"scope":"chat","content":"新约定","quotes":[{"messageId":message,"text":quote}],"reason":"用户提出修改动作","isInference":false,"target":target});
+            let proposal = handle_tool(
+                "memory.propose",
+                &input,
+                &json!({"conversationId":fixture.chat}),
+                &fixture.root,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proposal["entry"]["status"], "draft");
+            let id = proposal["entry"]["id"].as_str().unwrap();
+            let wrong = handle(
+                "PATCH",
+                &format!("/api/conversations/{}/memory/{id}", fixture.chat),
+                &json!({"expectedRevision":proposal["revision"],"status":"confirmed"}),
+                &fixture.root,
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(wrong.code(), "MEMORY_PROPOSAL_CONFIRMATION_REQUIRED");
+            if action == "delete" {
+                let changed = fixture.patch(
+                    &target_id,
+                    &proposal["revision"],
+                    json!({"content":"用户刚修改的目标"}),
+                );
+                let stale = handle("PATCH", &format!("/api/conversations/{}/memory/{id}", fixture.chat), &json!({"expectedRevision":changed["revision"],"status":"confirmed","proposalAction":"delete"}), &fixture.root).unwrap().unwrap_err();
+                assert_eq!(stale.code(), "MEMORY_TARGET_CHANGED");
+                fixture.delete(id, &changed["revision"]);
+                let latest = handle_tool(
+                    "memory.read",
+                    &json!({"scopes":["chat"]}),
+                    &json!({"conversationId":fixture.chat}),
+                    &fixture.root,
+                )
+                .unwrap()
+                .unwrap();
+                let fresh_message = fixture.append("user", "确认删除最新约定。");
+                let fresh_input = json!({"action":"delete","scope":"chat","content":latest["entries"][0]["content"],"quotes":[{"messageId":fresh_message,"text":"确认删除最新约定。"}],"reason":"用户重新确认最新目标","isInference":false,"target":latest["entries"][0]["target"]});
+                let fresh = handle_tool(
+                    "memory.propose",
+                    &fresh_input,
+                    &json!({"conversationId":fixture.chat}),
+                    &fixture.root,
+                )
+                .unwrap()
+                .unwrap();
+                let deleted = fixture.patch(
+                    fresh["entry"]["id"].as_str().unwrap(),
+                    &fresh["revision"],
+                    json!({"status":"confirmed","proposalAction":"delete"}),
+                );
+                assert!(deleted["entries"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    handle_tool(
+                        "memory.propose",
+                        &fresh_input,
+                        &json!({"conversationId":fixture.chat}),
+                        &fixture.root
+                    )
+                    .unwrap()
+                    .unwrap()["created"],
+                    false
+                );
+                continue;
+            }
+            let applied = fixture.patch(
+                id,
+                &proposal["revision"],
+                json!({"status":"confirmed","proposalAction":action}),
+            );
+            assert_eq!(applied["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(applied["entries"][0]["id"], target_id);
+            assert_eq!(applied["entries"][0]["content"], "新约定");
+            assert!(applied["entries"][0]["proposal"]["appliedAt"].is_string());
+            assert_eq!(
+                handle_tool(
+                    "memory.propose",
+                    &input,
+                    &json!({"conversationId":fixture.chat}),
+                    &fixture.root
+                )
+                .unwrap()
+                .unwrap()["created"],
+                false
+            );
+        }
+    }
 }

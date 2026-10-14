@@ -72,9 +72,12 @@ fn eligible(message: &Value) -> bool {
     static EXCLUDED: OnceLock<Regex> = OnceLock::new();
     let pattern = EXCLUDED.get_or_init(|| regex(r"(?im)(?:```|~~~|^\s*>|\[KYNXA_|https?://|(?:网页|工具|模型|助手)(?:说|回复|输出|返回)|(?:quoted|tool output|web page)\s*[:：])"));
     message["eligibleLength"] == true
-        && message["text"]
-            .as_str()
-            .is_some_and(|text| !trim(text).is_empty() && !pattern.is_match(text))
+        && message["text"].as_str().is_some_and(|text| {
+            !trim(text).is_empty()
+                && utf16_length(text) <= 4000
+                && !text.contains('\0')
+                && !pattern.is_match(text)
+        })
 }
 fn proposed(
     scope: &str,
@@ -124,7 +127,9 @@ pub fn extract(args: &Value) -> ContractResult {
         .filter(|(_, message)| message["role"] == "user")
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let current_id = args.get("userMessageId");
+    // Completed assistant events omit their user identity or send null; both select the latest saved user.
+    // 助手完成事件可缺省用户身份或发送 null；两者均选择最后一条已保存用户消息。
+    let current_id = args.get("userMessageId").filter(|id| !id.is_null());
     let current = current_id
         .map(|id| {
             users
@@ -136,6 +141,16 @@ pub fn extract(args: &Value) -> ContractResult {
     if current_id.is_some() && current.is_none() {
         return Err(error("候选来源须为已保存的用户消息。"));
     }
+    let skipped_overlong_messages = users
+        .iter()
+        .filter(|index| {
+            let message = &messages[**index];
+            message["textLengthUtf16"]
+                .as_u64()
+                .unwrap_or_else(|| utf16_length(message["text"].as_str().unwrap_or("")) as u64)
+                > 4000
+        })
+        .count();
     let consumed: HashSet<&str> = args["consumedMessageIds"]
         .as_array()
         .map(Vec::as_slice)
@@ -161,7 +176,7 @@ pub fn extract(args: &Value) -> ContractResult {
     }
     if phase == "user" {
         return Ok(
-            json!({"reason": if candidates.is_empty() { "no-trigger" } else { "explicit-user-trigger" }, "candidates": candidates, "completeTurns": 0, "estimatedTokens": 0}),
+            json!({"reason": if candidates.is_empty() { "no-trigger" } else { "explicit-user-trigger" }, "candidates": candidates, "completeTurns": 0, "estimatedTokens": 0, "skippedOverlongMessages": skipped_overlong_messages}),
         );
     }
     let mut complete = Vec::new();
@@ -222,7 +237,7 @@ pub fn extract(args: &Value) -> ContractResult {
         || tokens < settings["minTokens"].as_u64().unwrap_or(2048) && rounds.len() < maximum
     {
         return Ok(
-            json!({"candidates": candidates, "reason": "batch-not-due", "completeTurns": rounds.len(), "estimatedTokens": tokens}),
+            json!({"candidates": candidates, "reason": "batch-not-due", "completeTurns": rounds.len(), "estimatedTokens": tokens, "skippedOverlongMessages": skipped_overlong_messages}),
         );
     }
     static ORDINARY: OnceLock<Regex> = OnceLock::new();
@@ -231,6 +246,7 @@ pub fn extract(args: &Value) -> ContractResult {
     let mut indices = Vec::new();
     let mut used_tokens = 0;
     let mut characters = 0;
+    let mut skipped_token_budget_messages = 0;
     let batch_checkpoint = rounds.last().map(|(index, _)| &messages[*index]["id"]);
     for (index, _) in rounds {
         let message = &messages[*index];
@@ -244,7 +260,8 @@ pub fn extract(args: &Value) -> ContractResult {
         }
         let tokens = message["estimatedTokens"].as_u64().unwrap_or(0);
         if used_tokens + tokens > settings["maxTokens"].as_u64().unwrap_or(4096) {
-            break;
+            skipped_token_budget_messages += 1;
+            continue;
         }
         let length = utf16_length(trim(text));
         if characters + length + 2 > 4000 {
@@ -280,6 +297,77 @@ pub fn extract(args: &Value) -> ContractResult {
         ));
     }
     Ok(
-        json!({"candidates": candidates, "reason": "complete-turn-batch", "completeTurns": rounds.len(), "estimatedTokens": tokens}),
+        json!({"candidates": candidates, "reason": "complete-turn-batch", "completeTurns": rounds.len(), "estimatedTokens": tokens, "skippedOverlongMessages": skipped_overlong_messages, "skippedTokenBudgetMessages": skipped_token_budget_messages}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completed_batch() -> Value {
+        let messages = (0..12)
+            .flat_map(|index| {
+                [
+                    json!({"id": format!("user-{index}"), "role": "user", "text": format!("我喜欢第 {index} 项约定。"), "eligibleLength": true, "estimatedTokens": 10}),
+                    json!({"role": "assistant", "status": "completed", "hasContent": true, "estimatedTokens": 10}),
+                ]
+            })
+            .collect::<Vec<_>>();
+        json!({"messages": messages, "phase": "completed", "taskCompleted": false, "settings": {}, "hasProject": false})
+    }
+
+    #[test]
+    fn completed_null_identity_matches_omission_and_rejects_non_null_invalid_sources() {
+        let omitted = completed_batch();
+        let mut nullable = omitted.clone();
+        nullable["userMessageId"] = Value::Null;
+        let result = extract(&omitted).unwrap();
+        assert_eq!(result, extract(&nullable).unwrap());
+        assert_eq!(
+            result["candidates"][0]["indices"].as_array().unwrap().len(),
+            12
+        );
+        assert_eq!(result["candidates"][0]["batchThroughMessageId"], "user-11");
+        for invalid in [json!(""), json!("missing"), json!(7), json!({})] {
+            nullable["userMessageId"] = invalid;
+            assert_eq!(extract(&nullable).unwrap_err().code(), "INVALID_MEMORY");
+        }
+    }
+
+    #[test]
+    fn overlong_and_over_budget_sources_do_not_block_later_complete_turns() {
+        let mut args = completed_batch();
+        args["messages"][0]["text"] = json!(format!("我喜欢{}", "长".repeat(4000)));
+        args["messages"][2]["estimatedTokens"] = json!(5000);
+        let result = extract(&args).unwrap();
+        assert_eq!(result["skippedOverlongMessages"], 1);
+        assert_eq!(result["skippedTokenBudgetMessages"], 1);
+        let indices = result["candidates"][0]["indices"].as_array().unwrap();
+        assert_eq!(indices.len(), 10);
+        assert_eq!(indices.first().unwrap(), 4);
+        assert_eq!(indices.last().unwrap(), 22);
+        assert_eq!(result["candidates"][0]["batchThroughMessageId"], "user-11");
+    }
+
+    #[test]
+    fn incomplete_and_unquoted_assistant_output_never_becomes_a_candidate() {
+        let mut args = completed_batch();
+        args["messages"][23]["status"] = json!("interrupted");
+        assert_eq!(extract(&args).unwrap()["reason"], "batch-not-due");
+        args["messages"][23]["status"] = json!("completed");
+        for message in args["messages"].as_array_mut().unwrap() {
+            if message["role"] == "user" {
+                message["text"] = json!("请分析这道题。");
+            } else {
+                message["text"] = json!("我喜欢使用这个结论。");
+            }
+        }
+        assert!(
+            extract(&args).unwrap()["candidates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

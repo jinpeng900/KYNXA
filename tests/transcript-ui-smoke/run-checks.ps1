@@ -1,8 +1,9 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('format', 'all', 'block-copy', 'metadata', 'diagrams', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline')]
+    [ValidateSet('format', 'all', 'block-copy', 'metadata', 'diagrams', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final')]
     [string]$Scenario = 'format',
+    [string]$ApiReportPath,
     [switch]$BuildOnly,
     [switch]$Rebuild,
     [switch]$SingleProcessor,
@@ -12,6 +13,16 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($Scenario -eq 'api-final' -and !$BuildOnly) {
+    if ([string]::IsNullOrWhiteSpace($ApiReportPath) -or !(Test-Path -LiteralPath $ApiReportPath -PathType Leaf)) {
+        throw 'The api-final scenario requires an existing -ApiReportPath from this acceptance run.'
+    }
+    $ApiReportPath = (Resolve-Path -LiteralPath $ApiReportPath).Path
+}
+elseif (![string]::IsNullOrWhiteSpace($ApiReportPath)) {
+    throw '-ApiReportPath is supported only by the api-final scenario.'
+}
 
 function Get-VisualStudioMSBuild {
     $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -53,7 +64,7 @@ $metricsPath = Join-Path $temporaryRoot 'kynxa-transcript-smoke.json'
 $failurePath = Join-Path $temporaryRoot 'kynxa-transcript-failure.json'
 [string[]]$scenarioArguments = @()
 if ($Scenario -ne 'all') { $scenarioArguments = @('--' + $Scenario + '-only') }
-$environmentNames = @('DOTNET_PROCESSOR_COUNT', 'DOTNET_TieredCompilation', 'TEMP', 'TMP', 'WEBVIEW2_USER_DATA_FOLDER')
+$environmentNames = @('DOTNET_PROCESSOR_COUNT', 'DOTNET_TieredCompilation', 'TEMP', 'TMP', 'WEBVIEW2_USER_DATA_FOLDER', 'KYNXA_TRANSCRIPT_API_REPORT')
 $previousEnvironment = @{}
 $fixtureProcess = $null
 $buildLock = $null
@@ -76,6 +87,7 @@ try {
     [Environment]::SetEnvironmentVariable('TEMP', $temporaryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('TMP', $temporaryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('WEBVIEW2_USER_DATA_FOLDER', (Join-Path $temporaryRoot 'webview2'), 'Process')
+    if ($Scenario -eq 'api-final') { [Environment]::SetEnvironmentVariable('KYNXA_TRANSCRIPT_API_REPORT', $ApiReportPath, 'Process') }
 
     $msbuildPath = Get-VisualStudioMSBuild
     # Keep the SDK/target runtime while using VS's .NET Framework compiler host.
@@ -156,6 +168,7 @@ try {
     }
     [ordered]@{
         scenario = $Scenario
+        apiReportPath = $ApiReportPath
         msbuildPath = $msbuildPath
         compilerPath = $compilerPath
         compilerConfigPath = $compilerConfigPath

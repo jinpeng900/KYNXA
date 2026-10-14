@@ -71,6 +71,28 @@ internal sealed class FakeMemoryApi : IMemoryApi, IDisposable
         return FinishWrite(target, document, document.Entries.Where(entry => entry.Id != entryId).ToArray());
     }
 
+    public Task<MemoryScopeDocument> ConfirmAsync(MemoryTarget target, Guid entryId, MemoryConfirmRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var document = BeforeWrite(target, request.ExpectedRevision, cancellationToken);
+        var draft = document.Entries.Single(entry => entry.Id == entryId);
+        if (draft.Status != MemoryStatuses.Draft || draft.SourceAvailable != true || request.Status != MemoryStatuses.Confirmed)
+            throw new InvalidOperationException("Synthetic confirmation requires a pending available source.");
+        if (draft.Proposal is { Action: "update" or "delete", Target: { } proposalTarget } proposal)
+        {
+            if (request.ProposalAction != proposal.Action) throw new InvalidOperationException("Synthetic proposal action must be reviewed.");
+            var currentTarget = document.Entries.Single(entry => entry.Id == proposalTarget.Id);
+            if (currentTarget.Revision != proposalTarget.EntryRevision)
+                throw new GatewayApiException("Synthetic changed target", HttpStatusCode.Conflict, "MEMORY_TARGET_CHANGED");
+            var entries = document.Entries.Where(entry => entry.Id != draft.Id &&
+                (proposal.Action != "delete" || entry.Id != currentTarget.Id)).Select(entry => entry.Id == currentTarget.Id
+                ? entry with { Content = draft.Content, Kind = draft.Kind, Revision = entry.Revision + 1 } : entry).ToArray();
+            return FinishWrite(target, document, entries);
+        }
+        return FinishWrite(target, document, document.Entries.Select(entry => entry.Id == entryId
+            ? entry with { Status = MemoryStatuses.Confirmed, Active = true, Revision = entry.Revision + 1 } : entry).ToArray());
+    }
+
     private MemoryScopeDocument BeforeWrite(MemoryTarget target, long expectedRevision, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

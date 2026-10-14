@@ -21,3 +21,10 @@ apps/desktop/Resources/Diagrams/Mermaid/mermaid.min.js whitespace=-blank-at-eol,
 apps/desktop/Build/licenses/windows-sdk-license.md -text whitespace=-blank-at-eol,cr-at-eol
 apps/desktop/Build/licenses/*LICENSE.txt -text whitespace=-blank-at-eol,cr-at-eol
 apps/agent-core/licenses/** -text whitespace=-blank-at-eol,cr-at-eol
+apps/desktop/Build/native-assets/licenses/*/* -text whitespace=-blank-at-eol,cr-at-eol
+
+# Parser fixtures are byte-level evidence; line conversion would corrupt PDF offsets or reference hashes.
+# 解析夹具是原始字节证据；转换换行会破坏 PDF 偏移或对照哈希，原件和许可不得规范化。
+apps/agent-core/tests/fixtures/** -text whitespace=-blank-at-eol,cr-at-eol
+apps/agent-core/tests/fixtures/**/*.pdf binary
+tests/archive-worker-smoke/fixtures/** -text

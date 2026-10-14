@@ -38,6 +38,51 @@ Check(activeExport.Contains("HIDDEN_SUCCESS_STAGE") && activeExport.Contains(raw
 Check(!activeExport.Contains("HIDDEN_THOUGHT") && !activeExport.Contains("HIDDEN_TOOL_RECEIPT"),
     "Active export omits reasoning and JSON receipts while preserving visible stages.");
 completed.Status = "completed";
+foreach (string outcome in new[] { "partial", "verification-failed", "execution-unknown" })
+{
+    var delivered = TranscriptPresentation.Select("assistant", "completed", "old aggregate",
+        completed.AssistantSegments, completed.ToolActivities, outcome);
+    Check(delivered.Mode == "final" && delivered.Content == rawFinal && delivered.Tools.Length == 0,
+        "A truthful task outcome never hides the delivered final answer: " + outcome);
+}
+
+const string answerPrefix = "正文开头\n\n```cs\nint count =";
+const string answerMiddle = "2;\n```\n\n$$\\alpha";
+const string answerEnding = "^2$$\n\n正文结尾。";
+var continuedSegments = new AssistantSegment[]
+{
+    new("tool-stage", 1, 1, "commentary", "completed", "HIDDEN_TOOL_STAGE", ""),
+    new("answer-prefix", 2, 2, "commentary", "completed", answerPrefix, "", IsAnswerContinuation: true),
+    new("answer-middle", 3, 3, "commentary", "completed", answerMiddle, "", IsAnswerContinuation: true),
+    new("answer-end", 4, 4, "final_answer", "completed", answerEnding, "")
+};
+string wholeAnswer = string.Join("\n\n", answerPrefix, answerMiddle, answerEnding);
+var continued = TranscriptPresentation.Select("assistant", "completed", "outdated aggregate", continuedSegments,
+    completed.ToolActivities, "partial");
+Check(continued.Mode == "final" && continued.Content == wholeAnswer && continued.Tools.Length == 0,
+    "Output continuations keep the complete final answer without unrelated execution stages.");
+Check(continued.Segments.Length == 1 && continued.Segments[0].Phase == "final_answer"
+    && continued.Segments[0].Content == wholeAnswer,
+    "The complete continuation is parsed as one Markdown body, preserving cross-chunk code and math.");
+Check(continuedSegments[1].Content == answerPrefix && continuedSegments[2].IsAnswerContinuation
+    && continuedSegments[0].Content == "HIDDEN_TOOL_STAGE",
+    "Combining the final presentation does not modify formal chunks or execution history.");
+var continuedMessage = new ChatMessageState { Role = "assistant", Content = "old aggregate",
+    AssistantSegments = continuedSegments.ToList() };
+string continuedExport = ConversationExport.ToMarkdown("", [continuedMessage], "User", "Assistant");
+Check(continuedExport.Contains(wholeAnswer) && !continuedExport.Contains("HIDDEN_TOOL_STAGE"),
+    "Export and final rendering retain the same complete continued source text.");
+var brokenChain = continuedSegments.ToArray();
+brokenChain[2] = brokenChain[2] with { IsAnswerContinuation = false };
+Check(TranscriptPresentation.Select("assistant", "completed", "", brokenChain, []).Content == answerEnding,
+    "An unmarked stage stops continuation merging instead of being inferred as answer text.");
+var interruptedChain = continuedSegments.ToArray();
+interruptedChain[2] = interruptedChain[2] with { Status = "interrupted" };
+Check(TranscriptPresentation.Select("assistant", "completed", "", interruptedChain, []).Content == answerEnding,
+    "An interrupted chunk cannot become a certified answer continuation.");
+Check(AssistantSegmentRules.IsValidSequence(continuedSegments)
+    && !AssistantSegmentRules.IsValid(continuedSegments[^1] with { IsAnswerContinuation = true }),
+    "Continuation metadata keeps the single final-answer contract and excludes final-phase flags.");
 
 var interrupted = new ChatMessageState
 {

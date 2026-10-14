@@ -109,7 +109,9 @@
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
-    const taskStatus = {partial:uiStrings.taskPartial,'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
+    // Ordinary unfinished follow-ups are stated in the answer; genuine verification/unknown effects remain explicit.
+    // 普通待办由正文说明，不叠加“部分完成”；核验失败和未知副作用仍明确显示。
+    const taskStatus = {'verification-failed':uiStrings.taskVerificationFailed,'execution-unknown':uiStrings.taskExecutionUnknown}[message.taskCompletionState];
     if (taskStatus) return taskStatus + (message.error ? ' · ' + message.error : '');
     if (presentation.mode === 'incomplete') return uiStrings.interrupted;
     if (message.status === 'interrupted')

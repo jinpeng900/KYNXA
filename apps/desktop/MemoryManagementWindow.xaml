@@ -120,7 +120,11 @@
                         <Border Background="{StaticResource KynxaReplySurfaceBrush}" CornerRadius="8" Padding="12">
                             <StackPanel Spacing="8">
                                 <TextBlock x:Name="MemorySourceLabel" TextWrapping="Wrap" />
+                                <TextBlock x:Name="MemoryEntryStatusLabel" TextWrapping="Wrap" />
                                 <TextBlock x:Name="MemorySourceStatusLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock x:Name="MemoryProposalLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock x:Name="MemoryQuotesLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                <TextBlock x:Name="MemoryRevisionLabel" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                                 <TextBlock x:Name="MemoryUpdatedLabel" FontSize="12" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
@@ -129,6 +133,7 @@
                 <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
                     <Button x:Name="DeleteMemoryButton" AutomationProperties.AutomationId="DeleteMemoryButton" services:UiLocalization.Content="删除" Click="Delete_Click" />
                     <Button x:Name="SaveMemoryButton" AutomationProperties.AutomationId="SaveMemoryButton" services:UiLocalization.Content="保存" Click="Save_Click" />
+                    <Button x:Name="ConfirmMemoryButton" AutomationProperties.AutomationId="ConfirmMemoryButton" services:UiLocalization.Content="确认记忆" Click="Confirm_Click" Visibility="Collapsed" />
                 </StackPanel>
             </Grid>
         </Grid>

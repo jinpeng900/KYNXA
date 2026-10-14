@@ -2,7 +2,7 @@ pub mod contracts;
 pub mod discovery;
 pub mod effects;
 pub mod intent;
-mod local_files;
+pub(crate) mod local_files;
 pub mod observations;
 pub mod policy;
 mod sensitive_files;
@@ -100,8 +100,9 @@ pub mod gateway;
 mod gateway_browser;
 mod gateway_mcp;
 mod gateway_mcp_budget;
+mod gateway_search;
 pub(crate) mod gateway_process;
-mod gateway_web;
+pub(crate) mod gateway_web;
 mod gateway_web_proxy;
 
 pub fn execute_source_io(

@@ -79,8 +79,10 @@ public sealed partial class RetrievalSettingsWindow
         var sourcesActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var addFile = ActionButton("添加文件", "RetrievalAddFile");
         var addFolder = ActionButton("添加文件夹", "RetrievalAddFolder");
+        var addLinks = ActionButton("添加链接", "RetrievalAddLinks");
         sourcesActions.Children.Add(addFile);
         sourcesActions.Children.Add(addFolder);
+        sourcesActions.Children.Add(addLinks);
         _settingsPanel.Children.Add(Row(_projectId is null ? "全局资料" : "工作资料", sourcesActions));
         _settingsPanel.Children.Add(_sourcesPanel);
         var indexActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -117,6 +119,7 @@ public sealed partial class RetrievalSettingsWindow
         _inherit.Unchecked += async (_, _) => { if (!_rendering) await SaveAsync(); };
         addFile.Click += async (_, _) => await ImportAsync(folder: false);
         addFolder.Click += async (_, _) => await ImportAsync(folder: true);
+        addLinks.Click += async (_, _) => await ImportLinksAsync();
         _rebuild.Click += async (_, _) => await RunOperationAsync(async () => ShowJob(await _api.RebuildIndexAsync(_projectId, _lifetime.Token)));
         _cancelJob.Click += async (_, _) => await RunOperationAsync(async () =>
         {

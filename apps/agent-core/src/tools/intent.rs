@@ -684,7 +684,7 @@ const CODE_EXTENSIONS: &[&str] = &[
     "c", "cpp", "cxx", "cc", "h", "hpp", "hxx", "ps1", "psm1", "sh", "bat", "cmd", "sql", "xaml",
     "html", "css",
 ];
-const DOCUMENT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "pdf", "docx"];
+const DOCUMENT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "pdf", "docx", "png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff", "webp"];
 
 fn current_browser_instruction(text: &str) -> String {
     let units = text.encode_utf16().collect::<Vec<_>>();

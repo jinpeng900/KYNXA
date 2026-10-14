@@ -49,6 +49,11 @@ public sealed partial class ShellPage
             return;
 
         e.Handled = true;
+        if (IsReplyInProgress(ActiveChatId))
+        {
+            await SendTaskSteeringAsync();
+            return;
+        }
         await SendPromptAsync();
     }
 
@@ -146,6 +151,7 @@ public sealed partial class ShellPage
 
     private void UpdateConversationPresentation(bool openAtBottom = true)
     {
+        NotifyApprovalConversationChanged();
         if (ConversationMessages is null) return;
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         ActiveMessages.Clear();
@@ -177,7 +183,8 @@ public sealed partial class ShellPage
     {
         if (ActiveChatId is Guid id && _pendingReplies.TryGetValue(id, out var pending))
         {
-            pending.Cancellation.Cancel();
+            if (!string.IsNullOrWhiteSpace(PromptTextBox.Text)) await SendTaskSteeringAsync();
+            else await StopPendingReplyAsync(pending);
             return;
         }
         await SendPromptAsync();
@@ -186,6 +193,7 @@ public sealed partial class ShellPage
     private async Task SendPromptAsync()
     {
         if (_sendingPrompt || _savingOnClose || _chatClosing || IsReplyInProgress(ActiveChatId)) return;
+        if (await TrySteerPausedTaskAsync()) return;
         string originalDraft = PromptTextBox.Text;
         string text = originalDraft.Trim();
         bool chatMode = ViewModel.IsChatMode;

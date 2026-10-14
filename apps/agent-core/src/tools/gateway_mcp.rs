@@ -560,13 +560,7 @@ fn sse_frames(buffer: &mut String) -> Vec<(String, String)> {
 }
 
 async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, GatewayError> {
-    if !response.status().is_success() {
-        return Err(failure(
-            "MCP_HTTP_REJECTED",
-            &format!("MCP 服务返回 HTTP {}。", response.status().as_u16()),
-            response.status().as_u16(),
-        ));
-    }
+    let response = check_http_status(response, "MCP_HTTP_REJECTED", "MCP 服务拒绝了请求")?;
     let is_sse = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -613,6 +607,47 @@ async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, Gat
         "MCP 没有返回匹配的请求回执。",
         502,
     ))
+}
+
+fn check_http_status(
+    response: reqwest::Response,
+    code: &str,
+    message: &str,
+) -> Result<reqwest::Response, GatewayError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    Err(failure(
+        code,
+        &format!("{message}（HTTP {}）。", response.status().as_u16()),
+        response.status().as_u16(),
+    )
+    .with_retry_after(retry_after_ms(response.headers())))
+}
+
+/// Preserve seconds/date cooldowns without retaining remote bodies, URLs or credentials.
+/// 保留秒数或日期形式的冷却提示，不留存远端正文、URL 或凭据。
+pub(crate) fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let milliseconds = if let Ok(seconds) = value.parse::<u64>() {
+        seconds.saturating_mul(1000)
+    } else {
+        let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+        let now = headers
+            .get(reqwest::header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        deadline.timestamp_millis().saturating_sub(now).max(0) as u64
+    };
+    // Preserve the upstream interval; callers compare elapsed time instead of adding an overflowing Instant.
+    // 保留远端真实冷却；调用端比较经过时间，不对 Instant 做可能溢出的日期加法。
+    Some(milliseconds)
 }
 
 impl McpClient {
@@ -730,9 +765,9 @@ impl McpClient {
                     .headers(headers.clone())
                     .send()
                     .await
-                    .map_err(|_| failure("MCP_CONNECTION_FAILED", "MCP SSE 无法连接。", 503))?
-                    .error_for_status()
-                    .map_err(|_| failure("MCP_CONNECTION_FAILED", "MCP SSE 连接被拒绝。", 503))?;
+                    .map_err(|_| failure("MCP_CONNECTION_FAILED", "MCP SSE 无法连接。", 503))?;
+                let response =
+                    check_http_status(response, "MCP_CONNECTION_FAILED", "MCP SSE 连接被拒绝")?;
                 let (sender, mut receiver) = mpsc::channel(128);
                 let origin = url.origin();
                 let base = url.clone();
@@ -918,14 +953,11 @@ impl McpClient {
                 if let Some(session) = session {
                     request = request.header("Mcp-Session-Id", session.as_str());
                 }
-                request
+                let response = request
                     .send()
                     .await
-                    .map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 通知发送失败。", 502))?
-                    .error_for_status()
-                    .map_err(|_| {
-                        failure("MCP_NOTIFICATION_REJECTED", "MCP 通知被服务拒绝。", 502)
-                    })?;
+                    .map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 通知发送失败。", 502))?;
+                check_http_status(response, "MCP_NOTIFICATION_REJECTED", "MCP 通知被服务拒绝")?;
             }
             Transport::Sse {
                 client,
@@ -933,15 +965,14 @@ impl McpClient {
                 headers,
                 ..
             } => {
-                client
+                let response = client
                     .post(endpoint.clone())
                     .headers(headers.clone())
                     .json(&request)
                     .send()
                     .await
-                    .map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 通知发送失败。", 502))?
-                    .error_for_status()
-                    .map_err(|_| failure("MCP_NOTIFICATION_REJECTED", "MCP 通知被拒绝。", 502))?;
+                    .map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 通知发送失败。", 502))?;
+                check_http_status(response, "MCP_NOTIFICATION_REJECTED", "MCP 通知被服务拒绝")?;
             }
         }
         Ok(())
@@ -1043,17 +1074,16 @@ impl McpClient {
                     receiver,
                     ..
                 } => {
-                    client
+                    let response = client
                         .post(endpoint.clone())
                         .headers(headers.clone())
                         .json(&request)
                         .send()
                         .await
-                        .map_err(|_| failure("MCP_CONNECTION_LOST", "MCP SSE 请求发送失败。", 502))?
-                        .error_for_status()
                         .map_err(|_| {
-                            failure("MCP_REQUEST_REJECTED", "MCP SSE 请求被拒绝。", 502)
+                            failure("MCP_CONNECTION_LOST", "MCP SSE 请求发送失败。", 502)
                         })?;
+                    check_http_status(response, "MCP_REQUEST_REJECTED", "MCP SSE 请求被拒绝")?;
                     loop {
                         let value = receiver.recv().await.ok_or_else(|| {
                             failure("MCP_CONNECTION_CLOSED", "MCP SSE 已关闭。", 502)
@@ -1245,7 +1275,9 @@ async fn connection_with_priority(
         disconnect(id, ctx).await?;
     }
     if let Some((saved, when, error)) = lifecycle.failures.lock().await.get(id) {
-        if saved == &configuration && when.elapsed() < Duration::from_secs(2) {
+        if saved == &configuration
+            && when.elapsed() < Duration::from_millis(error.retry_after_ms.unwrap_or(2000))
+        {
             return Err(error.clone());
         }
     }

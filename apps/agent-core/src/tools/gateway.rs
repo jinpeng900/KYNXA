@@ -38,6 +38,7 @@ pub struct ToolRuntime {
     pub(crate) mcp_errors: tokio::sync::Mutex<HashMap<String, Value>>,
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
+    pub(crate) web_search: super::gateway_search::SearchState,
 }
 
 impl Default for ToolRuntime {
@@ -56,6 +57,7 @@ impl Default for ToolRuntime {
             mcp_errors: Default::default(),
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
+            web_search: Default::default(),
         }
     }
 }
@@ -78,6 +80,19 @@ pub struct GatewayToolContext {
     pub approved: bool,
     pub events: Option<mpsc::Sender<Value>>,
     pub external_execute: Option<ExternalTool>,
+}
+
+pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *cancellation.borrow_and_update() {
+            break;
+        }
+        if cancellation.changed().await.is_err() {
+            // A closed signal channel is not an explicit cancellation request.
+            // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 pub(crate) fn failure(code: &str, message: &str, status: u16) -> GatewayError {
@@ -735,7 +750,7 @@ async fn execute_inner(
         return super::gateway_web::fetch(args, ctx).await;
     }
     if tool_name == "web.search" {
-        return super::gateway_web::search(args, ctx).await;
+        return super::gateway_search::search(args, ctx).await;
     }
     if tool_name.starts_with("skill.") {
         return skills(tool_name, args, ctx).await;
@@ -743,7 +758,28 @@ async fn execute_inner(
     if tool_name == "tool.search" || tool_name == "tool.load" {
         let mut all = builtin_catalog();
         if tool_name == "tool.load" {
-            let names = args["names"].as_array().cloned().unwrap_or_default();
+            let mut known = all.clone();
+            known.extend(ctx.runtime.schemas.read().await.iter().cloned());
+            // Resolve exact known wire aliases only; model spelling or a guessed hash cannot invent a capability.
+            // 只归一化已知工具的精确协议别名；模型拼写或猜出的哈希不能创造能力。
+            let names: Vec<Value> = args["names"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|requested| {
+                    known
+                        .iter()
+                        .find(|tool| {
+                            tool["name"].as_str().is_some_and(|name| {
+                                requested == name
+                                    || requested.as_str()
+                                        == Some(crate::models::protocol::wire_name(name).as_str())
+                            })
+                        })
+                        .map(|tool| tool["name"].clone())
+                        .unwrap_or_else(|| requested.clone())
+                })
+                .collect();
             let servers = super::gateway_mcp::servers(ctx)
                 .into_iter()
                 .filter(|server| {
@@ -765,7 +801,10 @@ async fn execute_inner(
             }
             return Ok(
                 json!({"tools":all.into_iter().filter(|tool| names.iter().filter_map(Value::as_str)
-                .any(|name| tool["name"] == name || tool["name"].as_str().is_some_and(|value| value.starts_with(&format!("{name}."))))).collect::<Vec<_>>() }),
+                .any(|name| tool["name"] == name || tool["name"].as_str().is_some_and(|value| value.starts_with(&format!("{name}."))))).map(|mut tool| {
+                    tool["wireName"] = json!(crate::models::protocol::wire_name(tool["name"].as_str().unwrap_or("")));
+                    tool
+                }).collect::<Vec<_>>() }),
             );
         }
         all.extend(
@@ -1259,6 +1298,7 @@ pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError>
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     get_config(ctx).await?;
     let result = native(ctx, "config.update", json!({"input":input})).await?;
+    ctx.runtime.web_search.clear_queries();
     super::gateway_mcp::reset(ctx).await;
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
@@ -1272,18 +1312,17 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
     let loaded = ctx.runtime.schemas.read().await;
-    let pattern = regex::Regex::new(r"(?i)(?:^|[-_.])(?:exa|brave(?:-search)?)(?:[-_.]|$)")
-        .expect("static provider pattern");
     let rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
-        pattern.is_match(server["id"].as_str().unwrap_or("")) || server["args"].as_array().into_iter().flatten().filter_map(Value::as_str)
-            .any(|argument|argument.contains("exa-mcp-server")||argument.contains("brave-search-mcp")||argument.contains("server-brave-search"))
-            || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&tool["name"].as_str().is_some_and(|name|name.ends_with("web_search_exa")||name.ends_with("brave_web_search")))
+        super::service_web::search_server(server)
+            || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&super::service_web::provider_kind(tool).is_some())
     }).map(|server|{
         let state=diagnostics.iter().find(|state|state["serverId"]==server["id"]);
         let enabled=server["enabled"]!=false;
-        let ready=enabled&&state.is_some_and(|state|state["ready"]==true);
-        json!({"id":server["id"],"name":if server["id"].as_str().unwrap_or("").contains("brave"){"Brave Search"}else{"Exa"},
-            "enabled":enabled,"ready":ready,"state":if !enabled{"disabled"}else if ready{"ready"}else if state.is_some_and(|state|!state["error"].is_null()){"error"}else{"disconnected"},
+        let cooling=ctx.runtime.web_search.cooling(server);
+        let ready=enabled&&cooling.is_none()&&state.is_some_and(|state|state["ready"]==true);
+        json!({"id":server["id"],"name":server["name"].as_str().unwrap_or("Web search"),
+            "enabled":enabled,"ready":ready,"state":if !enabled{"disabled"}else if cooling.is_some(){"cooldown"}else if ready{"ready"}else if state.is_some_and(|state|!state["error"].is_null()){"error"}else{"disconnected"},
+            "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms),
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
     json!({"selectedId":selected_id,"providers":rows})

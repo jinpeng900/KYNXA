@@ -51,12 +51,15 @@ pub struct RequestRun {
     pub request_id: String,
     pub fingerprint: String,
     pub original_message_raw: Option<String>,
+    pub journal: Option<Arc<super::gateway_task_journal::TaskJournal>>,
+    pub parent_task_id: Option<String>,
     pub cancellation: watch::Sender<bool>,
     pub native_cancellation: crate::service_cancellation::CancellationLease,
     pub cancellation_key: String,
     pub events: broadcast::Sender<Value>,
     replay: Mutex<ReplayState>,
     pub finished: AtomicBool,
+    pub suspending: AtomicBool,
     pub result: Mutex<Option<Value>>,
     pub created: Instant,
 }
@@ -146,6 +149,39 @@ impl RequestRun {
                 replay.active_segment = None;
             }
         }
+        // Persist compact deltas and formal references; never re-encode the growing full reply per token.
+        // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
+        if let Some(journal) = &self.journal {
+            if event["taskId"].is_null() {
+                event["taskId"] = json!(journal.task_id());
+            }
+            event["rootRequestTaskId"] = json!(journal.task_id());
+            let durable = if terminal_event(&event) {
+                json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":self.request_id,"taskCompletion":event["taskCompletion"]})
+            } else if event["type"] == "assistant_segment" {
+                json!({"type":"assistant_segment","segmentId":event["segment"]["id"],"phase":event["segment"]["phase"],"status":event["segment"]["status"]})
+            } else if event.to_string().len() <= 24 * 1024 {
+                event.clone()
+            } else {
+                json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
+            };
+            if !journal.is_released() {
+                if let Err(error) =
+                    journal.emit_control(event["type"].as_str().unwrap_or("progress"), &durable)
+                {
+                    // An unavailable durable journal stops future dispatch rather than silently accepting untracked effects.
+                    // 日志不可写时停止后续派发，不静默接受无法追踪的副作用。
+                    self.cancel();
+                    event["persistenceError"] = json!({"code":error.code,"message":error.message});
+                }
+                if terminal_event(&event) {
+                    if let Err(error) = journal.flush().await {
+                        event["persistenceError"] =
+                            json!({"code":error.code,"message":error.message});
+                    }
+                }
+            }
+        }
         // Publish the final reply before waking either HTTP reader; emit/finish cannot leave a lost wakeup.
         // 唤醒 HTTP 读取者前发布最终结果；emit/finish 之间不能出现漏唤醒窗口。
         if terminal_event(&event) {
@@ -208,6 +244,8 @@ impl RequestRun {
             request_id: new_id(),
             fingerprint: String::new(),
             original_message_raw: None,
+            journal: None,
+            parent_task_id: None,
             cancellation,
             native_cancellation: crate::service_cancellation::CancellationLease::acquire(
                 &cancellation_key,
@@ -217,6 +255,7 @@ impl RequestRun {
             events,
             replay: Default::default(),
             finished: AtomicBool::new(false),
+            suspending: AtomicBool::new(false),
             result: Default::default(),
             created: Instant::now(),
         })
@@ -234,6 +273,9 @@ pub struct GatewayRuntime {
     pub tools: Arc<ToolRuntime>,
     pub models: ModelConfigStore,
     pub model_preparation: Arc<PreparationService>,
+    pub tasks: Arc<super::gateway_task_hub::TaskHub>,
+    pub model_slots: Arc<super::gateway_model_pool::ModelSlots>,
+    task_runs: std::sync::Mutex<HashMap<String, Weak<RequestRun>>>,
     runs: Mutex<HashMap<String, Arc<RequestRun>>>,
     conversations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     approvals: Mutex<HashMap<String, Approval>>,
@@ -243,9 +285,15 @@ pub struct GatewayRuntime {
 }
 impl GatewayRuntime {
     pub fn new(config: GatewayConfig) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             models: ModelConfigStore::new(&config.data_home),
             model_preparation: PreparationService::new(config.clone()),
+            tasks: Arc::new(super::gateway_task_hub::TaskHub::new(
+                config.clone(),
+                weak.clone(),
+            )),
+            model_slots: Arc::new(super::gateway_model_pool::ModelSlots::default()),
+            task_runs: Default::default(),
             config,
             tools: Arc::new(ToolRuntime::default()),
             runs: Default::default(),
@@ -299,7 +347,10 @@ impl GatewayRuntime {
                 }
             }
             let _ = runtime.prepare_models(Value::Null).await;
-            runtime.model_preparation.wait_idle(cancellation.clone(), Duration::from_secs(90)).await;
+            runtime
+                .model_preparation
+                .wait_idle(cancellation.clone(), Duration::from_secs(90))
+                .await;
             if *cancellation.borrow() {
                 return;
             }
@@ -329,18 +380,26 @@ impl GatewayRuntime {
     }
     pub async fn prepare_models(self: &Arc<Self>, selection: Value) -> Result<Value, GatewayError> {
         self.model_selection_received.send_replace(true);
-        let status = self.model_preparation.schedule(
-            ModelConfigStore::new(&self.config.data_home), selection,
-            self.background_cancellation.subscribe(),
-        ).await?;
+        let status = self
+            .model_preparation
+            .schedule(
+                ModelConfigStore::new(&self.config.data_home),
+                selection,
+                self.background_cancellation.subscribe(),
+            )
+            .await?;
         if status["scheduled"] == true {
             let runtime = self.clone();
             let priority = crate::tools::gateway::foreground(&runtime.tools);
             tokio::spawn(async move {
                 let _priority = priority;
-                runtime.model_preparation.wait_idle(
-                    runtime.background_cancellation.subscribe(), Duration::from_secs(90),
-                ).await;
+                runtime
+                    .model_preparation
+                    .wait_idle(
+                        runtime.background_cancellation.subscribe(),
+                        Duration::from_secs(90),
+                    )
+                    .await;
             });
         }
         Ok(status)
@@ -408,6 +467,10 @@ impl GatewayRuntime {
         let fingerprint = crate::retrieval::gateway_index::hash(
             &json!([input, format!("{:x}", identity.finalize())]).to_string(),
         );
+        let acceptance_gate = self
+            .conversation_gate(&format!("accept:{request_id}"))
+            .await;
+        let _acceptance = acceptance_gate.lock().await;
         let mut runs = self.runs.lock().await;
         if let Some(existing) = runs.get(&request_id) {
             if existing.conversation_id != conversation || existing.fingerprint != fingerprint {
@@ -439,6 +502,35 @@ impl GatewayRuntime {
                 429,
             ));
         }
+        drop(runs);
+        let task = super::gateway_task_input::accept(
+            &self.config,
+            &input,
+            original_message_raw.as_deref(),
+            &fingerprint,
+        )
+        .await?;
+        use crate::storage::task_repository::TaskState;
+        if matches!(
+            task.state,
+            TaskState::Paused | TaskState::Cancelled | TaskState::Failed | TaskState::Partial
+        ) {
+            return Err(GatewayError::new(
+                "TASK_CONTROLLED",
+                "任务已暂停或结束，请查看任务状态并明确继续。",
+                409,
+            ));
+        }
+        let journal = if task.state == TaskState::Completed {
+            None
+        } else {
+            Some(super::gateway_task_journal::TaskJournal::start_existing(
+                &self.config.data_root,
+                &task,
+                &format!("gateway:{}", std::process::id()),
+                30_000,
+            )?)
+        };
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(256);
         let cancellation_key = new_id();
@@ -450,17 +542,23 @@ impl GatewayRuntime {
             request_id: request_id.clone(),
             fingerprint,
             original_message_raw,
+            journal,
+            parent_task_id: None,
             cancellation,
             events,
             native_cancellation,
             cancellation_key,
             replay: Default::default(),
             finished: AtomicBool::new(false),
+            suspending: AtomicBool::new(false),
             result: Default::default(),
             created: Instant::now(),
         });
-        runs.insert(request_id, run.clone());
-        drop(runs);
+        self.task_runs
+            .lock()
+            .map_err(|_| GatewayError::new("TASK_RUN_LOCK_FAILED", "任务执行者登记失败。", 500))?
+            .insert(task.task_id, Arc::downgrade(&run));
+        self.runs.lock().await.insert(request_id, run.clone());
         let runtime = self.clone();
         let operation = run.clone();
         tokio::spawn(async move {
@@ -469,11 +567,24 @@ impl GatewayRuntime {
         Ok(run)
     }
     pub async fn cancel(&self, conversation: &str, request: &str) -> Result<Value, GatewayError> {
-        let runs = self.runs.lock().await;
-        let run = runs
+        let run = self
+            .runs
+            .lock()
+            .await
             .get(request)
             .filter(|run| run.conversation_id == conversation)
+            .cloned()
             .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404))?;
+        if let Some(journal) = &run.journal {
+            let task = journal.load_current()?;
+            self.tasks
+                .control(
+                    &task.task_id,
+                    task.version,
+                    crate::storage::task_repository::TaskControl::Cancel,
+                )
+                .await?;
+        }
         run.cancel();
         Ok(json!({"cancelled":true}))
     }
@@ -489,6 +600,113 @@ impl GatewayRuntime {
         Some(
             json!({"requestId":request,"conversationId":conversation,"status":if run.finished.load(Ordering::Acquire){"completed"}else{"running"},"result":result}),
         )
+    }
+    /// Attach to an existing task execution; observing a stream never starts or replays an operation.
+    /// 连接已有任务执行，观察事件流不启动模型，也不重放操作；等待恢复执行者登记有界。
+    pub async fn observe_task(
+        &self,
+        task_id: &str,
+        conversation: &str,
+    ) -> Result<Arc<RequestRun>, GatewayError> {
+        let deadline = Instant::now() + Duration::from_secs(35);
+        loop {
+            let detail = self.tasks.detail(task_id).await?;
+            let task = &detail["task"];
+            if task["scope"]["conversationId"] != conversation || !task["parentTaskId"].is_null() {
+                return Err(GatewayError::new(
+                    "TASK_SCOPE_DENIED",
+                    "只能观察本聊天的主任务回复。",
+                    403,
+                ));
+            }
+            let request = task["requestId"].as_str().unwrap_or("");
+            if let Some(run) = self.runs.lock().await.get(request).cloned() {
+                let owns_attempt = run.journal.as_ref().is_some_and(|journal| {
+                    detail["attempt"]["token"]["attemptId"] == journal.token().attempt_id
+                        && detail["attempt"]["token"]["executionVersion"]
+                            == journal.token().execution_version
+                });
+                if task["state"] != "queued" && owns_attempt {
+                    return Ok(run);
+                }
+            }
+            if !["queued", "running", "waiting-children"]
+                .contains(&task["state"].as_str().unwrap_or(""))
+                || Instant::now() >= deadline
+            {
+                return Err(GatewayError::new(
+                    "TASK_STREAM_NOT_READY",
+                    "任务回复尚未可连接，已保存的进度仍可读取。",
+                    409,
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    /// Child agents have independent execution/cancellation, while retaining the parent's permission scope.
+    /// 子代理拥有独立执行和取消身份，权限范围仍由父任务确定。
+    pub fn child_run(
+        &self,
+        task: &crate::storage::task_repository::TaskRecord,
+        journal: Arc<super::gateway_task_journal::TaskJournal>,
+    ) -> Arc<RequestRun> {
+        let cancellation_key = new_id();
+        let (cancellation, _) = watch::channel(false);
+        let (events, _) = broadcast::channel(256);
+        let run = Arc::new(RequestRun {
+            conversation_id: task.scope.conversation_id.clone(),
+            // Child request deduplication keys may be namespaced; formal receipt ownership requires a stable UUID.
+            // 子任务查重键可以带命名空间；正式工具回执使用稳定 task UUID，恢复时不换身份，也不伪造主聊天消息。
+            request_id: task.task_id.clone(),
+            fingerprint: String::new(),
+            original_message_raw: None,
+            journal: Some(journal),
+            parent_task_id: task.parent_task_id.clone(),
+            cancellation,
+            native_cancellation: crate::service_cancellation::CancellationLease::acquire(
+                &cancellation_key,
+            )
+            .expect("unique task cancellation lease"),
+            cancellation_key,
+            events,
+            replay: Default::default(),
+            finished: AtomicBool::new(false),
+            suspending: AtomicBool::new(false),
+            result: Default::default(),
+            created: Instant::now(),
+        });
+        if let Ok(mut runs) = self.task_runs.lock() {
+            runs.retain(|_, run| run.strong_count() > 0);
+            runs.insert(task.task_id.clone(), Arc::downgrade(&run));
+        }
+        run
+    }
+    pub async fn cancel_task_worker(&self, task_id: &str) {
+        if let Ok(runs) = self.task_runs.lock() {
+            if let Some(run) = runs.get(task_id).and_then(Weak::upgrade) {
+                run.cancel();
+            }
+        }
+    }
+    pub async fn wait_task_delivery_boundary(&self, task_id: &str) {
+        loop {
+            let run = self
+                .task_runs
+                .lock()
+                .ok()
+                .and_then(|runs| runs.get(task_id).and_then(Weak::upgrade));
+            if run.is_none_or(|run| run.finished.load(Ordering::Acquire)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    pub async fn begin_recovered(
+        self: &Arc<Self>,
+        input: Value,
+        original: Option<String>,
+    ) -> Result<Arc<RequestRun>, GatewayError> {
+        self.begin_raw(input, original).await
     }
     pub async fn tool_context(
         &self,
@@ -574,6 +792,51 @@ impl GatewayRuntime {
         self.approvals.lock().await.remove(&id);
         Ok(approved)
     }
+    /// Child control can stop an approval wait without leaving a stale approval in the parent's UI.
+    /// 子任务控制可以结束审批等待，父界面不会留下失效的审批项。
+    pub async fn await_child_approval(
+        &self,
+        parent: &Arc<RequestRun>,
+        child: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+    ) -> Result<bool, GatewayError> {
+        let mut child_cancel = child.cancellation.subscribe();
+        let mut parent_cancel = parent.cancellation.subscribe();
+        if *child_cancel.borrow() || *parent_cancel.borrow() {
+            return Ok(false);
+        }
+        let id = receipt["invocation"]["id"]
+            .as_str()
+            .ok_or_else(|| {
+                GatewayError::new("INVALID_APPROVAL_RECEIPT", "子任务审批回执无效。", 500)
+            })?
+            .to_owned();
+        let (sender, receiver) = oneshot::channel();
+        self.approvals.lock().await.insert(
+            id.clone(),
+            Approval {
+                conversation: parent.conversation_id.clone(),
+                request: parent.request_id.clone(),
+                call: call["id"].as_str().unwrap_or("").into(),
+                response: sender,
+            },
+        );
+        // Child approvals share the parent's user interface, never the parent's active tool sequence.
+        // 子审批共用父任务界面，但不能进入父回复的活动工具序号账本。
+        parent.emit(json!({"type":"task_approval_required","taskId":child.journal.as_ref().map(|journal| journal.task_id()),
+            "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"子任务等待授权","round":round,"order":order}})).await;
+        let approved = tokio::select! {
+            result = receiver => result.unwrap_or(false),
+            _ = crate::tools::gateway::wait_for_cancellation(&mut child_cancel) => false,
+            _ = crate::tools::gateway::wait_for_cancellation(&mut parent_cancel) => false,
+        };
+        self.approvals.lock().await.remove(&id);
+        parent.emit(json!({"type":"task_approval_closed","taskId":child.journal.as_ref().map(|journal|journal.task_id()),"approvalId":id,"toolCallId":call["id"],"approved":approved})).await;
+        Ok(approved)
+    }
     pub async fn approve(&self, body: &Value) -> Result<Value, GatewayError> {
         let id = body["approvalId"]
             .as_str()
@@ -606,12 +869,14 @@ impl GatewayRuntime {
     }
     pub async fn shutdown(&self) {
         self.background_cancellation.send_replace(true);
-        self.model_preparation.shutdown().await;
         for run in self.runs.lock().await.values() {
             if !run.finished.load(Ordering::Acquire) {
+                run.suspending.store(true, Ordering::Release);
                 run.cancel();
             }
         }
+        self.tasks.shutdown().await;
+        self.model_preparation.shutdown().await;
         let (_owner, cancellation) = watch::channel(false);
         let context = GatewayToolContext {
             data_home: self.config.data_root.clone(),

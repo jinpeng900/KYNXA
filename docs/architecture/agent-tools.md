@@ -2,7 +2,21 @@
 
 ## 当前入口：2026-10-12 Windows 原生网关
 
-当前正式后端是 `apps/agent-core/src/bin/kynxa-gateway.rs`，工具 I/O 位于 Rust `src/tools/gateway*` / `service_*`，官方工具目录为 `apps/official-tools` 静态资源，原生交互仍由 C# ToolHost 执行。公开 HTTP/SSE、审批、正式回执和桌面/WebView 交互继续兼容；产品后端不发货或启动 Node/NAPI。具体接线、职责及限制见 [独立 Rust 网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [当前验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
+### 2026-10-13：统一搜索来源与故障恢复
+
+`web.search` 继续由 Rust 执行，默认官方目录增加 Parallel 的 `https://search.parallel.ai/mcp`，与 Exa、用户已配置的 Brave 共用入口。Parallel 的匿名入口无需单独密钥，但有服务方限流；不是无限免费搜索。官方合同见 [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)。应用不下载或启动 Node 来访问这些托管 HTTP 搜索。
+
+- `providerId=auto` 只在已经启用的搜索配置内按顺序选择；明确选择某个 provider 时只使用该来源，失败不静默改变用户选择。禁用服务、禁用工具、缺少依赖、认证失败和取消均保留实际状态。
+- Parallel 的 `objective` 与 `search_queries` 保留本次原始查询；`session_id` 取稳定聊天身份的 SHA-256，不换身份规避限额，也不自行添加年份或扩大问题范围。返回的 `excerpts` 进入既有来源归一化与原始工具归档。
+- HTTP 429、认证拒绝和暂时故障分别处理；`Retry-After` 的秒数与 HTTP 日期会作为 `retryAfterMs` 保留，源级冷却期间跳过该服务。先使用允许的备用来源，只有短暂故障才最多补一次有界重试。限流、认证失败、参数错误和用户停止不盲目重放。
+- 相同聊天、权限与配置快照的并发重复查询共享一次请求；短期结果可复用 120 秒，最多缓存 32 项、每项 256 KiB。单个等待者取消不影响其他等待者；全部等待者离开则取消自有网络请求。配置更新撤销查询与缓存，但不抹掉远端限流冷却。
+- 成功回执记录实际 `providerId`、各次 `attempts` 和 `cache.hit/ageMs`；服务状态接口返回冷却时间。空结果是本查询未取得证据，不是自动扩大检索范围的许可。最终失败只影响搜索步骤，已有资料仍可读取；搜索失败不自动授权打开用户浏览器。
+
+这些是搜索传输与恢复机制，不宣称已接入任意模型供应商的原生联网。供应商专用联网协议、额外费用与认证必须另行核验，不从模型名称推断。
+
+实现边界：`tools/gateway_search.rs` 持有搜索生命周期与来源调度，`gateway_web.rs` 只处理公共正文抓取和解码；正式 `web.search` 直接调用搜索模块，HTTP/MCP 传输仍复用 `gateway_mcp.rs`，不建立第二套 MCP 进程或连接管理器。
+
+当前正式后端是 `apps/agent-core/src/bin/kynxa-gateway.rs`，工具 I/O 位于 Rust `src/tools/gateway*` / `service_*`，官方工具目录为 `apps/official-tools` 静态资源，原生交互仍由 C# ToolHost 执行。公开 HTTP/SSE、审批、正式回执和桌面/WebView 交互继续兼容；核心后端不依赖 Node/NAPI，随包私有 Node 仅供扩展 MCP 及已核验的 JS Skill，不恢复旧 JS 网关。具体接线、职责及限制见 [独立 Rust 网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [当前验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
 
 下文 2026-10-10、2026-10-09 等日期条目及旧模块路径、Node 打包/测试命令、SDK 接口和当时成绩均为历史记录，不是当前启动或验证入口。其中 8192 tokens 是旧未知能力回退说明，不能作为当前默认窗口或实际授额；当前有效值以 Rust 能力/本地观察、预算和运行诊断为准。固定题集/原报告保留，尚未适配的旧评测不能声称已验证原生链路。当前运行时/桌面合同分别使用 `tests/native-runtime-smoke` 与 `tests/native-gateway-contract-smoke`。
 

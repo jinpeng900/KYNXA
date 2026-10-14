@@ -20,16 +20,27 @@ internal static class TranscriptPresentation
         var ordered = segments.OrderBy(segment => segment.Order).ToArray();
         var orderedTools = tools.Select((tool, index) => (Tool: tool, Order: tool.Order ?? index))
             .OrderBy(item => item.Order).Select(item => item.Tool).ToArray();
-        if (status == "completed" && taskCompletionState is "partial" or "verification-failed" or "execution-unknown")
-            return Process("partial", ordered, orderedTools, ordered.Length == 0 ? content : "");
         if (status == "completed")
         {
+            // Delivery and task acceptance are separate: a settled answer remains readable when some work needs verification.
+            // 消息交付与任务验收分开；即使工作仍需核验，已经完成的最终正文也必须正常展示。
             if (ordered.Length == 0 && !string.IsNullOrWhiteSpace(content))
                 return new("final", content, [], []);
 
-            var final = ordered.LastOrDefault(segment => segment.Phase == "final_answer"
+            int finalIndex = Array.FindLastIndex(ordered, segment => segment.Phase == "final_answer"
                 && segment.Status == "completed" && !string.IsNullOrWhiteSpace(segment.Content));
-            if (final is not null) return new("final", final.Content, [final], []);
+            if (finalIndex >= 0)
+            {
+                int first = finalIndex;
+                while (first > 0 && ordered[first - 1] is { IsAnswerContinuation: true,
+                    Phase: "commentary", Status: "completed" }) first--;
+                // Merge only explicitly continued answer chunks before rendering Markdown once; source records stay intact.
+                // 仅合并明确的正文续写段，完整 Markdown 一次渲染；正式分段记录不被改写，工具进展不混入答案。
+                string answer = string.Join("\n\n", ordered[first..(finalIndex + 1)]
+                    .Select(segment => segment.Content).Where(text => !string.IsNullOrWhiteSpace(text)));
+                var final = ordered[finalIndex] with { Content = answer };
+                return new("final", answer, [final], []);
+            }
 
             // A recorded phase is not proof that the enclosing request finished successfully.
             // 存在阶段记录不代表整个请求已成功完成。
