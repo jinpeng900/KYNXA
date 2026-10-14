@@ -19,7 +19,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-static CANCELLATIONS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+static CANCELLATIONS: OnceLock<Mutex<HashMap<String, (std::path::PathBuf, Arc<AtomicBool>)>>> =
+    OnceLock::new();
+static INDEX_WORKERS: OnceLock<
+    Mutex<HashMap<std::path::PathBuf, Vec<std::thread::JoinHandle<()>>>>,
+> = OnceLock::new();
 static BACKGROUND_GATES: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Mutex<()>>>>> =
     OnceLock::new();
 struct BackgroundOwner {
@@ -354,6 +358,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
     {
         return Ok(json!({"started":true,"reused":true}));
     }
+    storage::gateway_memory::resume_candidates(&config.data_root)?;
     job_plan(config, "recover", json!({"resumable":false}))?;
     let root = config.data_root.clone();
     storage::gateway_memory::set_indexer(
@@ -532,12 +537,49 @@ pub fn stop_background(config: &GatewayConfig) -> Value {
         }
     }
     if let Some(tokens) = CANCELLATIONS.get() {
-        for token in tokens.lock().unwrap().values() {
-            token.store(true, Ordering::Release);
+        for (root, token) in tokens.lock().unwrap().values() {
+            if *root == config.data_root {
+                token.store(true, Ordering::Release);
+            }
         }
     }
     storage::gateway_memory::stop_candidates(&config.data_root);
     json!({"stopping":true,"cancelRequested":true})
+}
+/// Maintenance joins every writer before the desktop copies authoritative files.
+/// 维护状态在桌面复制正式文件前等待所有写入者退出；仅请求取消不能表示迁移就绪。
+pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
+    stop_background(config);
+    let owner = BACKGROUND
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("后台维护锁失效。", "RETRIEVAL_BUSY", 503))?
+        .remove(&config.data_root);
+    if let Some(owner) = owner {
+        if let Some(worker) = owner
+            .worker
+            .lock()
+            .map_err(|_| gateway::error("后台维护线程状态失效。", "RETRIEVAL_BUSY", 503))?
+            .take()
+        {
+            worker.join().map_err(|_| {
+                gateway::error("后台维护线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503)
+            })?;
+        }
+    }
+    let workers = INDEX_WORKERS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("索引线程状态失效。", "RETRIEVAL_BUSY", 503))?
+        .remove(&config.data_root)
+        .unwrap_or_default();
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| gateway::error("索引线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503))?;
+    }
+    storage::gateway_memory::drain_candidates(&config.data_root)?;
+    Ok(())
 }
 fn inventory(
     config: &GatewayConfig,
@@ -661,28 +703,44 @@ fn duplicate(entry: &Value) -> String {
         entry["originalPath"],
         entry["contentHash"],
         entry.get("extraction").map(Value::to_string),
-        entry.get("fileWindow").map(Value::to_string)
+        entry.get("fileWindow").map(Value::to_string),
+        entry.get("archive").map(Value::to_string),
+        entry.get("urlWindow"),
+        entry["origin"]["responseHash"]
     ])
     .to_string()
 }
 pub fn import(config: &GatewayConfig, input: &Value) -> Result<Value, ContractError> {
     let scope = input["scope"].as_str().unwrap_or("user");
-    let project = input["projectId"].as_str();
-    let settings = effective(config, if scope == "project" { project } else { None })?;
-    let limits = &settings["local"]["indexing"];
-    let cancel = Arc::new(AtomicBool::new(false));
-    let path = Path::new(
-        input["path"]
-            .as_str()
-            .ok_or_else(|| gateway::error("导入路径缺失。", "INVALID_RETRIEVAL_SOURCE", 400))?,
-    );
-    if !path.is_absolute() {
+    if !["user", "project"].contains(&scope) {
         return Err(gateway::error(
-            "导入需要绝对路径。",
-            "INVALID_RETRIEVAL_SOURCE",
+            "资料范围无效。",
+            "INVALID_RETRIEVAL_SCOPE",
             400,
         ));
     }
+    let project = input["projectId"].as_str();
+    let settings = effective(config, if scope == "project" { project } else { None })?;
+    let limits = &settings["local"]["indexing"];
+    let cancel = crate::service_cancellation::current_token()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let urls = input.get("url").is_some() || input.get("urls").is_some();
+    let path = if urls {
+        None
+    } else {
+        let path =
+            Path::new(input["path"].as_str().ok_or_else(|| {
+                gateway::error("导入路径缺失。", "INVALID_RETRIEVAL_SOURCE", 400)
+            })?);
+        if !path.is_absolute() {
+            return Err(gateway::error(
+                "导入需要绝对路径。",
+                "INVALID_RETRIEVAL_SOURCE",
+                400,
+            ));
+        }
+        Some(path)
+    };
     let mut staged = Vec::new();
     let mut entries = Vec::new();
     let result = (|| {
@@ -695,7 +753,21 @@ pub fn import(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
             )?;
             staged.push(json!({"id":id,"hash":receipt["hash"]}));
             let mut entry = json!({"id":id,"scope":scope,"projectId":if scope=="project"{input["projectId"].clone()}else{Value::Null},"title":file["title"],"originalPath":file["locator"]["path"],"revision":1,"storedBytes":text.len(),"contentHash":gateway_index::hash(text),"status":"ready","createdAt":gateway::now()});
-            for field in ["extraction", "fileWindow"] {
+            if file["locator"]["archive"].is_object() && !file["locator"]["origin"].is_object() {
+                let members = file["locator"]["archive"]["chain"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item["member"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("!/");
+                entry["originalPath"] = json!(format!(
+                    "{}!/{members}#{}",
+                    file["locator"]["path"].as_str().unwrap_or("archive"),
+                    file["locator"]["archive"]["partIndex"]
+                ));
+            }
+            for field in ["extraction", "fileWindow", "archive", "origin", "urlWindow"] {
                 if let Some(value) = file["locator"].get(field) {
                     entry[field] = value.clone();
                 }
@@ -703,10 +775,26 @@ pub fn import(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
             entries.push(entry);
             Ok(())
         };
-        let scan = scan_each(config, path.to_str().unwrap(), limits, &cancel, &mut stage)?;
+        let scan = if urls {
+            super::gateway_url_sources::scan(config, input, limits, &cancel, &mut stage)?
+        } else {
+            scan_each(
+                config,
+                path.unwrap().to_str().unwrap(),
+                limits,
+                &cancel,
+                &mut stage,
+            )?
+        };
         if entries.is_empty() {
             return Err(gateway::error(
-                "没有成功读取的可导入资料。",
+                &format!(
+                    "没有成功读取的可导入资料：{}。",
+                    scan["failures"][0]["errorCode"]
+                        .as_str()
+                        .or_else(|| scan["failures"][0]["code"].as_str())
+                        .unwrap_or("RETRIEVAL_IMPORT_EMPTY")
+                ),
                 "RETRIEVAL_IMPORT_EMPTY",
                 400,
             ));
@@ -994,7 +1082,7 @@ fn rebuild_internal(
     if tokens.contains_key(&id) {
         return Ok(job);
     }
-    tokens.insert(id.clone(), cancel.clone());
+    tokens.insert(id.clone(), (config.data_root.clone(), cancel.clone()));
     drop(tokens);
     let runtime = tokio::runtime::Handle::try_current().ok();
     if let Some(runtime) = &runtime {
@@ -1002,7 +1090,8 @@ fn rebuild_internal(
     }
     let config = config.clone();
     let settings = current;
-    std::thread::Builder::new().name("kynxa-corpus-index".to_string()).spawn(move|| {
+    let index_root = config.data_root.clone();
+    let worker = std::thread::Builder::new().name("kynxa-corpus-index".to_string()).spawn(move|| {
         let _runtime=runtime.as_ref().map(tokio::runtime::Handle::enter);
         let gate={let mut gates=BACKGROUND_GATES.get_or_init(Default::default).lock().unwrap();gates.entry(config.data_root.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone()};
         let _queue=gate.lock().unwrap();
@@ -1016,6 +1105,13 @@ fn rebuild_internal(
         };
         let _=job_update(&config,&id,patch);CANCELLATIONS.get().unwrap().lock().unwrap().remove(&id);
     }).map_err(|_|gateway::error("后台索引线程未启动。","RETRIEVAL_JOB_START_FAILED",503))?;
+    let mut owners = INDEX_WORKERS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("索引线程状态失效。", "RETRIEVAL_BUSY", 503))?;
+    let workers = owners.entry(index_root).or_default();
+    workers.retain(|worker| !worker.is_finished());
+    workers.push(worker);
     Ok(job)
 }
 fn run_index(
@@ -1034,6 +1130,7 @@ fn run_index(
     let mut failed = 0;
     let mut discovered = 0;
     let mut incomplete = false;
+    let mut failures = Vec::new();
     let catalog = gateway::load_catalog(&config.data_root)?;
     if let Some(project_id) = project_id {
         let project = storage::catalog::apply(
@@ -1061,6 +1158,9 @@ fn run_index(
                         identity.push(
                             source["locator"]["extraction"]["pageWindow"]["startPage"].clone(),
                         );
+                    } else if source["locator"]["archive"].is_object() {
+                        identity.push(json!("archive-part"));
+                        identity.push(source["locator"]["archive"]["part"].clone());
                     }
                     source["sourceId"] = json!(gateway_index::hash(&json!(identity).to_string()));
                     source["scopeKey"] = json!(scope);
@@ -1085,6 +1185,14 @@ fn run_index(
             failed += report["failedFiles"].as_u64().unwrap_or(0);
             discovered += report["scannedFiles"].as_u64().unwrap_or(count);
             incomplete |= report["incomplete"] == true;
+            failures.extend(
+                report["failures"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(1000)
+                    .cloned(),
+            );
         }
     }
     let (document, _) = registry(&config.data_root)?;
@@ -1115,6 +1223,11 @@ fn run_index(
         }
         if let Some(window) = entry.get("fileWindow") {
             source["locator"]["fileWindow"] = window.clone();
+        }
+        for field in ["archive", "origin", "urlWindow"] {
+            if let Some(value) = entry.get(field) {
+                source["locator"][field] = value.clone();
+            }
         }
         gateway_index::publish(config, &[source.clone()])?;
         seen.insert(entry["id"].as_str().unwrap().to_string());
@@ -1160,7 +1273,7 @@ fn run_index(
         config,
         settings,
         queued,
-        json!({"complete":failed==0&&!incomplete,"discovered":discovered,"lexical":count,"semantic":0,"failed":failed,"skipped":0,"partial":u64::from(incomplete),"reportTruncated":incomplete}),
+        json!({"complete":failed==0&&!incomplete,"discovered":discovered,"lexical":count,"semantic":0,"failed":failed,"skipped":0,"partial":u64::from(incomplete),"failures":failures,"reportTruncated":incomplete||failed>1000}),
         cancel,
     )
 }
@@ -1295,6 +1408,13 @@ fn load_queued(
             "storage.library.readSnapshot",
             &json!({"root":config.data_root,"id":source["sourceId"]}),
         )?
+    } else if source["locator"]["archive"].is_object() {
+        super::gateway_archives::read_member(
+            config,
+            &source["locator"],
+            &settings["local"]["indexing"],
+            cancel,
+        )?
     } else if source["locator"]["fileWindow"].is_object() {
         crate::tools::service_source_reading::execute_io("readTextWindow",&json!({"path":source["locator"]["path"],"window":source["locator"]["fileWindow"],"maximumSourceBytes":settings["local"]["indexing"]["maximumSourceBytes"]}),&Some(cancel.clone())).map_err(|_|gateway::error("原文件已改变。","STALE_RETRIEVAL_SOURCE",409))?
     } else {
@@ -1315,6 +1435,12 @@ fn load_queued(
             .cloned()
             .unwrap_or(value)
     };
+    if source["sourceType"] == "work-file" {
+        super::gateway_documents::verify_extraction(
+            &source["locator"]["extraction"],
+            &value["extraction"],
+        )?;
+    }
     let text = value["text"]
         .as_str()
         .or_else(|| value["raw"].as_str())
@@ -1401,14 +1527,59 @@ fn scan_each(
         input["path"] = next["path"].clone();
         input["decodeText"] = json!(true);
         let filename = Path::new(next["path"].as_str().unwrap());
-        let document = ["pdf", "docx"].contains(
-            &filename
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str(),
-        );
+        if super::gateway_archives::is_archive(filename) {
+            let scanned = super::gateway_archives::scan(
+                config,
+                filename,
+                limits,
+                cancel,
+                &mut |mut source| {
+                    let logical = source["locator"]["archive"]["chain"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| item["member"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("!/");
+                    source["locator"]["relativePath"] = json!(format!(
+                        "{}!/{logical}",
+                        next["relativePath"].as_str().unwrap_or("archive")
+                    ));
+                    source["locator"]["root"] = json!(path);
+                    let admitted=scanner.apply("source.reading.scanPublish",&json!({"textBytes":source["text"].as_str().unwrap_or("").len(),"size":next["metadata"]["sizeBytes"]}),&token)
+                    .map_err(|failure|gateway::error(&failure.message,"RETRIEVAL_SCAN_LIMIT",422))?;
+                    if admitted == false {
+                        return Err(gateway::error(
+                            "扫描资料达到配置额度。",
+                            "RETRIEVAL_SCAN_LIMIT",
+                            413,
+                        ));
+                    }
+                    consume(source)
+                },
+            );
+            let report = match scanned {
+                Ok(report) => report,
+                Err(error) if error.code() == "RETRIEVAL_SCAN_LIMIT" => break 'files,
+                Err(error)
+                    if error.code().starts_with("ARCHIVE_")
+                        || error.code().starts_with("DOCUMENT_")
+                        || error.code().starts_with("OCR_")
+                        || error.code() == "RETRIEVAL_SOURCE_UNAVAILABLE" =>
+                {
+                    scanner.apply("source.reading.scanFailure",&json!({"relativePath":next["relativePath"],"error":{"code":error.code()},"aborted":false}),&token)
+                        .map_err(|_|gateway::error("压缩包覆盖记录未保存。","RETRIEVAL_SCAN_FAILED",409))?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for failure in report["failures"].as_array().into_iter().flatten() {
+                scanner.apply("source.reading.scanFailure",&json!({"relativePath":failure["relativePath"],"error":{"code":failure["errorCode"],"archive":report["archive"]},"aborted":false}),&token)
+                    .map_err(|_|gateway::error("压缩包覆盖记录未保存。","RETRIEVAL_SCAN_FAILED",409))?;
+            }
+            continue;
+        }
+        let document = crate::tools::service_source_reading::document_format(filename).is_some();
         let loaded = if !document
             && next["metadata"]["sizeBytes"].as_u64().unwrap_or(0) > 2 * 1024 * 1024
         {
@@ -1451,7 +1622,58 @@ fn scan_each(
                 }
             }
             Err(error) => {
-                scanner.apply("source.reading.scanFailure",&json!({"relativePath":next["relativePath"],"error":{"code":error.code()},"aborted":cancel.load(Ordering::Acquire)}),&token)
+                let mut failure = json!({"code":error.code()});
+                if document
+                    && (error.code().starts_with("OCR_") || error.code().starts_with("DOCUMENT_"))
+                    && !cancel.load(Ordering::Acquire)
+                {
+                    let encoding =
+                        crate::tools::service_source_reading::document_format(filename).unwrap();
+                    let mut coverage = json!({"format":if ["pdf","docx"].contains(&encoding){encoding}else{"image"},
+                        "complete":false,"reasonCode":error.code(),"processedPages":0,"publishedPages":0,
+                        "uncoveredRanges":[],"unprocessedRanges":[],"readback":{"kind":"original-document"},
+                        "effectiveLimits":{"maximumInputBytes":limits["maximumDocumentInputBytes"].as_u64().unwrap_or(32*1024*1024),
+                            "maximumOutputBytes":limits["maximumDocumentOutputBytes"].as_u64().unwrap_or(2*1024*1024),
+                            "maximumPages":if encoding=="pdf"{limits["maximumPdfPages"].as_u64().unwrap_or(100)}else{1}}});
+                    if coverage["format"] == "image" {
+                        coverage["encoding"] = json!(encoding);
+                    }
+                    if let Ok((bytes, metadata)) =
+                        crate::tools::service_source_reading::read_binary_stable(
+                            filename,
+                            limits["maximumDocumentInputBytes"]
+                                .as_u64()
+                                .unwrap_or(32 * 1024 * 1024)
+                                .min(
+                                    limits["maximumSourceBytes"]
+                                        .as_u64()
+                                        .unwrap_or(32 * 1024 * 1024),
+                                )
+                                .min(32 * 1024 * 1024),
+                            &token,
+                        )
+                    {
+                        if scanner
+                            .apply(
+                                "source.reading.sameMetadata",
+                                &json!({"previous":next["metadata"],"current":metadata}),
+                                &token,
+                            )
+                            .map_err(|failure| {
+                                gateway::error(
+                                    &failure.message,
+                                    "RETRIEVAL_SOURCE_UNAVAILABLE",
+                                    failure.status_code,
+                                )
+                            })?
+                            == true
+                        {
+                            coverage["rawContentHash"] = json!(gateway_index::hash_bytes(&bytes));
+                        }
+                    }
+                    failure["documentCoverage"] = coverage;
+                }
+                scanner.apply("source.reading.scanFailure",&json!({"relativePath":next["relativePath"],"error":failure,"aborted":cancel.load(Ordering::Acquire)}),&token)
                 .map_err(|_|gateway::error("来源读取受阻。","RETRIEVAL_SOURCE_UNAVAILABLE",409))?;
             }
         }
@@ -1488,6 +1710,10 @@ fn source_revision(digest: &str, locator: &Value) -> Result<String, ContractErro
         if extraction.get("pageWindow").is_some() || extraction.get("ocr").is_some() {
             identity.push(extraction["pageWindow"].clone());
             identity.push(extraction["ocr"].clone());
+        }
+        if extraction["format"] == "image" {
+            identity.push(extraction["image"].clone());
+            identity.push(extraction["textRange"].clone());
         }
         return Ok(gateway_index::hash(&json!(identity).to_string()));
     }
@@ -1598,13 +1824,15 @@ pub fn handle(
     if parts.len() >= 5 && parts[..4] == ["api", "retrieval", "index", "jobs"] {
         let id = parts[4];
         if parts.len() == 6 && parts[5] == "cancel" && method == "POST" {
-            if let Some(token) = CANCELLATIONS
+            if let Some((root, token)) = CANCELLATIONS
                 .get_or_init(Default::default)
                 .lock()
                 .unwrap()
                 .get(id)
             {
-                token.store(true, Ordering::Release);
+                if *root == config.data_root {
+                    token.store(true, Ordering::Release);
+                }
             }
             return Some(job_update(config,id,json!({"status":"cancelled","error":"INDEX_CANCELLED","automaticRebuildBlocked":true,"finishedAt":gateway::now()})).map(|value|(200,value)));
         }
@@ -1627,7 +1855,7 @@ pub fn handle(
     if ["/api/retrieval/sources", "/api/retrieval/sources/import"].contains(&path)
         && method == "POST"
     {
-        return Some(import(config, body).map(|value| {let first=&value["sources"][0];(200,json!({"id":first["id"],"title":first["title"],"scope":first["scope"],"projectId":first["projectId"],"path":first["originalPath"],"status":first["status"],"revision":first["revision"],"importedCount":value["sources"].as_array().unwrap().len(),"jobId":value["job"]["jobId"],"sourceCoverage":{"discovered":value["scan"]["scannedFiles"],"failed":value["scan"]["failedFiles"],"complete":value["scan"]["incomplete"]!=true&&value["scan"]["failedFiles"].as_u64().unwrap_or(0)==0}}))}));
+        return Some(import(config, body).map(|value| {let first=&value["sources"][0];(200,json!({"id":first["id"],"title":first["title"],"scope":first["scope"],"projectId":first["projectId"],"path":first["originalPath"],"status":first["status"],"revision":first["revision"],"importedCount":value["sources"].as_array().unwrap().len(),"jobId":value["job"]["jobId"],"sourceCoverage":{"discovered":value["scan"]["scannedFiles"],"failed":value["scan"]["failedFiles"],"failures":value["scan"]["failures"],"complete":value["scan"]["incomplete"]!=true&&value["scan"]["failedFiles"].as_u64().unwrap_or(0)==0}}))}));
     }
     if parts.len() == 4 && parts[..3] == ["api", "retrieval", "sources"] && method == "DELETE" {
         return Some(remove_source(config, parts[3], body).map(|value| (200, value)));

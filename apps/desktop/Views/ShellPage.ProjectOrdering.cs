@@ -93,7 +93,7 @@ public sealed partial class ShellPage
             if (!new Rect(origin, new Size(targetRow.ActualWidth, targetRow.ActualHeight)).Contains(point)) continue;
             _orderingTarget = targetRow;
             _orderingAfter = point.Y - origin.Y > targetRow.ActualHeight / 2;
-            targetRow.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 145, 145, 145));
+            targetRow.BorderBrush = AppearanceService.GetBrush("KynxaFocusBrush");
             targetRow.BorderThickness = new Thickness(0, _orderingAfter ? 0 : 1, 0, _orderingAfter ? 1 : 0);
             break;
         }

@@ -7,7 +7,7 @@ using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
+using PathShape = Microsoft.UI.Xaml.Shapes.Path;
 
 namespace KYNXA_Desktop;
 
@@ -16,15 +16,23 @@ public partial class App
     private static SolidColorBrush? PresentedBackground(Button button) => NativeUi.Descendants<ContentPresenter>(button)
         .FirstOrDefault(presenter => presenter.Name == "ContentPresenter")?.Background as SolidColorBrush;
 
+    private bool SendArrowUsesBrush(string key) => Element<PathShape>("SendArrow").Stroke is SolidColorBrush stroke &&
+        ReferenceEquals(stroke, AppearanceService.GetBrush(key));
+
     private async Task CheckEmptyComposerPolishAsync()
     {
         var send = Element<Button>("SendButton");
         await SettleAsync();
         var background = PresentedBackground(send);
-        Check(!send.IsEnabled && background is not null && background.Color.R == 0xE2 && background.Color.G == 0xE4 && background.Color.B == 0xE8,
-            "the real disabled Send visual uses the readable grey background, not the WinUI near-white fallback");
-        Check(Element<Image>("SendArrow").Source is SvgImageSource arrow && arrow.UriSource.AbsolutePath.EndsWith("send-arrow-disabled.svg"),
-            "the empty composer presents the dedicated dark arrow instead of the fixed white SVG");
+        Check(!send.IsEnabled && background is not null && background.Color == AppearanceService.ParseColor(AppearanceService.Current.Disabled),
+            "the real disabled Send visual uses the current palette's readable disabled background");
+        Check(SendArrowUsesBrush("KynxaDisabledTextBrush"),
+            "the empty composer uses the shared disabled-text stroke so theme and high contrast updates reach its arrow");
+        var arrow = Element<PathShape>("SendArrow");
+        Check(arrow.Width == 20 && arrow.Height == 20 && Math.Abs(arrow.StrokeThickness - 5d / 3) < 0.000001 &&
+            arrow.StrokeStartLineCap == PenLineCap.Round && arrow.StrokeEndLineCap == PenLineCap.Round &&
+            arrow.StrokeLineJoin == PenLineJoin.Round,
+            "the themed native arrow retains the original 20 DIP SVG layout, scaled line width and round caps");
         Check(!Element<Button>("ComposerAddButton").IsEnabled,
             "the unimplemented attachment action is explicitly unavailable");
         Check(Element<ComposerSurface>("ComposerHost").EditorHeight == 104,
@@ -44,16 +52,16 @@ public partial class App
         {
             NativeUi.SetText(Prompt, " \r\n ");
             await SettleAsync();
-            Check(!send.IsEnabled && Element<Image>("SendArrow").Source is SvgImageSource disabled &&
-                disabled.UriSource.AbsolutePath.EndsWith("send-arrow-disabled.svg"), "whitespace-only drafts retain the disabled visual and cannot send");
+            Check(!send.IsEnabled && SendArrowUsesBrush("KynxaDisabledTextBrush"),
+                "whitespace-only drafts retain the themed disabled stroke and cannot send");
             NativeUi.SetText(Prompt, "Synthetic nonempty draft");
             await SettleAsync();
             var activeBackground = PresentedBackground(send);
             Check(send.IsEnabled && activeBackground is not null &&
                 new[] { AppearanceService.Current.Accent, AppearanceService.Current.AccentHover, AppearanceService.Current.AccentPressed }
                     .Select(AppearanceService.ParseColor).Contains(activeBackground.Color) &&
-                Element<Image>("SendArrow").Source is SvgImageSource enabled && enabled.UriSource.AbsolutePath.EndsWith("send-arrow.svg"),
-                "typing enables the real Send button in the current palette and restores its white arrow");
+                SendArrowUsesBrush("KynxaOnAccentBrush"),
+                "typing enables the real Send button in the current palette and uses its matching on-accent stroke");
 
             // Insert only an owned in-memory pending state. No stream, store, model or tool request is started.
             // 只加入夹具拥有的内存生成状态；不启动流、存储、模型或工具请求。
@@ -63,9 +71,9 @@ public partial class App
             Call("UpdateSendButtonState");
             await SettleAsync();
             var stop = Element<FontIcon>("StopReplyIcon");
-            Check(send.IsEnabled && NativeUi.IsVisible(stop) && Element<Image>("SendArrow").Visibility == Visibility.Collapsed &&
-                stop.Foreground is SolidColorBrush foreground && foreground.Color.R == 255 && foreground.Color.G == 255 && foreground.Color.B == 255,
-                "a pending reply keeps Stop enabled with a white glyph even when the composer is empty");
+            Check(send.IsEnabled && NativeUi.IsVisible(stop) && Element<PathShape>("SendArrow").Visibility == Visibility.Collapsed &&
+                ReferenceEquals(stop.Foreground, AppearanceService.GetBrush("KynxaOnAccentBrush")),
+                "a pending reply keeps Stop enabled with the matching on-accent glyph even when the composer is empty");
             await CapturePresentedAsync("shell-polish-stop-wide.png");
             var ownedMessage = (KYNXA_Desktop.Models.UI.ChatMessageState)replyType.GetProperty("Message")!.GetValue(ownedReply)!;
             replyType.GetProperty("Presentation")!.SetValue(ownedReply,

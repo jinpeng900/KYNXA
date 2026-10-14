@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -15,20 +16,20 @@ public sealed partial class RetrievalSettingsWindow
     private readonly TextBlock _embeddingStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly TextBlock _indexStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly CheckBox _inherit = new();
-    private readonly ComboBox _localMode = new();
-    private readonly ComboBox _semanticMode = new();
-    private readonly ComboBox _rerankMode = new();
-    private readonly ComboBox _webMode = new();
-    private readonly ComboBox _webProvider = new();
-    private readonly ComboBox _webDepth = new();
-    private readonly ComboBox _webLanguage = new();
+    private readonly ScrollSafeComboBox _localMode = new();
+    private readonly ScrollSafeComboBox _semanticMode = new();
+    private readonly ScrollSafeComboBox _rerankMode = new();
+    private readonly ScrollSafeComboBox _webMode = new();
+    private readonly ScrollSafeComboBox _webProvider = new();
+    private readonly ScrollSafeComboBox _webDepth = new();
+    private readonly ScrollSafeComboBox _webLanguage = new();
     private readonly Button _rebuild = new();
     private readonly Button _cancelJob = new();
     private readonly DispatcherTimer _jobTimer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     private void BuildLayout()
     {
-        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = AppearanceService.GetBrush("KynxaMainBrush") };
+        var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
@@ -79,8 +80,10 @@ public sealed partial class RetrievalSettingsWindow
         var sourcesActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var addFile = ActionButton("添加文件", "RetrievalAddFile");
         var addFolder = ActionButton("添加文件夹", "RetrievalAddFolder");
+        var addLinks = ActionButton("添加链接", "RetrievalAddLinks");
         sourcesActions.Children.Add(addFile);
         sourcesActions.Children.Add(addFolder);
+        sourcesActions.Children.Add(addLinks);
         _settingsPanel.Children.Add(Row(_projectId is null ? "全局资料" : "工作资料", sourcesActions));
         _settingsPanel.Children.Add(_sourcesPanel);
         var indexActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -117,6 +120,7 @@ public sealed partial class RetrievalSettingsWindow
         _inherit.Unchecked += async (_, _) => { if (!_rendering) await SaveAsync(); };
         addFile.Click += async (_, _) => await ImportAsync(folder: false);
         addFolder.Click += async (_, _) => await ImportAsync(folder: true);
+        addLinks.Click += async (_, _) => await ImportLinksAsync();
         _rebuild.Click += async (_, _) => await RunOperationAsync(async () => ShowJob(await _api.RebuildIndexAsync(_projectId, _lifetime.Token)));
         _cancelJob.Click += async (_, _) => await RunOperationAsync(async () =>
         {

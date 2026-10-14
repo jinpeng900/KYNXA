@@ -233,20 +233,8 @@ fn owner_kind(
     } else {
         model_root(config)
     };
-    let preference = local[if rerank {
-        "rerankDevicePolicy"
-    } else {
-        "embeddingDevicePolicy"
-    }]
-    .as_str()
-    .or_else(|| local["devicePreference"].as_str())
-    .or_else(|| local["device"].as_str())
-    .unwrap_or("auto");
-    let key = format!(
-        "{}:{}:{preference}",
-        config.data_root.display(),
-        root.display()
-    );
+    let preference = device_preference(local, rerank);
+    let key = owner_key(config, &root, preference);
     let mut owners = OWNERS.get_or_init(Default::default).lock().map_err(|_| {
         gateway::error("推理会话暂时不可用。", "INFERENCE_RUNTIME_UNAVAILABLE", 503)
     })?;
@@ -291,6 +279,26 @@ fn owner_kind(
     }));
     owners.insert(key, owner.clone());
     Ok(Some(owner))
+}
+fn device_preference(local: &Value, rerank: bool) -> &str {
+    local[if rerank {
+        "rerankDevicePolicy"
+    } else {
+        "embeddingDevicePolicy"
+    }]
+    .as_str()
+    .or_else(|| local["devicePreference"].as_str())
+    .or_else(|| local["device"].as_str())
+    .unwrap_or("auto")
+}
+/// Owner identity keeps the requested policy even when automatic admission chooses CPU or GPU.
+/// 所有者身份保留请求策略，自动准入实际选择 CPU 或 GPU 时仍使用同一键。
+fn owner_key(config: &GatewayConfig, root: &Path, preference: &str) -> String {
+    format!(
+        "{}:{}:{preference}",
+        config.data_root.display(),
+        root.display()
+    )
 }
 fn rerank_root(config: &GatewayConfig) -> PathBuf {
     let installed = config
@@ -630,15 +638,11 @@ pub fn status(config: &GatewayConfig, local: &Value) -> Value {
         .flatten()
         .find(|profile| profile["id"] == configured)
         .is_some_and(|profile| profile["available"] == true);
+    let key = owner_key(config, &model_root(config), device_preference(local, false));
     let observed = OWNERS
         .get()
         .and_then(|owners| owners.lock().ok())
-        .and_then(|owners| {
-            owners
-                .iter()
-                .find(|(key, _)| key.starts_with(&format!("{}:", config.data_root.display())))
-                .map(|(_, owner)| owner.clone())
-        });
+        .and_then(|owners| owners.get(&key).cloned());
     let backend = observed.and_then(|owner| {
         owner
             .try_lock()
@@ -678,4 +682,75 @@ pub fn profiles(config: &GatewayConfig) -> Value {
             }),
     );
     json!({"profiles":values})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_status_excludes_reranker_and_keeps_auto_cpu_owner_identity() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kynxa-embedding-status-{}",
+            crate::gateway_contract::new_id()
+        ));
+        let config = GatewayConfig {
+            data_home: fixture.clone(),
+            data_root: fixture.join("Data"),
+            extension_root: fixture.join("Extensions"),
+            application_root: fixture.join("Package"),
+            port: 0,
+            toolhost_exe: fixture.join("ToolHost.exe"),
+            vector_extension: fixture.join("vec0.dll"),
+            inference_library: fixture.join("onnxruntime.dll"),
+        };
+        let local = json!({"embeddingDevicePolicy":"auto","rerankDevicePolicy":"auto"});
+        let embedding_root = model_root(&config);
+        let reranker_root = rerank_root(&config);
+        let embedding_key = owner_key(&config, &embedding_root, "auto");
+        let reranker_key = owner_key(&config, &reranker_root, "auto");
+        let observed = |root: PathBuf, model: &str| {
+            Arc::new(Mutex::new(InferenceOwner {
+                policy: ReservationState::default(),
+                leases: Vec::new(),
+                root,
+                device: "cpu".into(),
+                last_used: Instant::now(),
+                ready: true,
+                retired: false,
+                backend_status: json!({"device":"cpu","gpuValidated":false,"model":model}),
+            }))
+        };
+        OWNERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(reranker_key.clone(), observed(reranker_root, "BGE"));
+        let unloaded = status(&config, &local);
+        assert_eq!(unloaded["loaded"], false);
+        assert!(unloaded["inferenceBackend"].is_null());
+
+        // An auto owner may execute on CPU; observed device must not replace its lookup policy.
+        // auto 所有者可能实际使用 CPU；状态查询不能用实际设备替换所有者的请求策略。
+        OWNERS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .insert(embedding_key.clone(), observed(embedding_root, "E5"));
+        let loaded = status(&config, &local);
+        assert_eq!(loaded["loaded"], true);
+        assert_eq!(loaded["inferenceBackend"]["model"], "E5");
+        assert_eq!(loaded["inferenceBackend"]["device"], "cpu");
+        for fallback in [json!({"devicePreference":"auto"}), json!({"device":"auto"})] {
+            assert_eq!(status(&config, &fallback)["loaded"], true);
+        }
+        assert_eq!(
+            status(&config, &json!({"embeddingDevicePolicy":"cpu"}))["loaded"],
+            false
+        );
+        let mut owners = OWNERS.get().unwrap().lock().unwrap();
+        owners.remove(&embedding_key);
+        owners.remove(&reranker_key);
+    }
 }

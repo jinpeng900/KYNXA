@@ -2,14 +2,21 @@
 .mermaid-header, .mermaid-viewer-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; background: var(--appearance-sidebar); border-bottom: 1px solid var(--appearance-border); }
 .mermaid-label, .mermaid-viewer-title { flex: 1 1 100px; color: var(--appearance-secondary); font-size: 12px; font-weight: 500; }
 .mermaid-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
-.mermaid-copy-status { min-width: 0; max-width: 160px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; color: var(--appearance-accent); }
+.mermaid-copy-status { min-width: 0; max-width: 160px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; color: var(--appearance-accent-text); }
 .mermaid-copy-status:empty { display: none; }
-.mermaid-copy-status[data-copy-state='error'] { color: #765e51; }
+.mermaid-copy-status[data-copy-state='error'] { color: var(--appearance-error); }
+.mermaid-export-controls { display: flex; flex: 1 0 100%; min-width: 0; align-items: center; gap: 5px; }
+.mermaid-export-controls button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 28px; padding: 5px 8px; border-radius: 6px; color: var(--appearance-secondary); font-size: 11px; line-height: 1; }
+.mermaid-export-controls button[disabled] { opacity: .45; cursor: default; }
+.mermaid-export-controls button[disabled]:hover { background: transparent; }
+.mermaid-export-status { flex: 1 1 auto; min-width: 0; margin-left: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--appearance-secondary); font-size: 12px; line-height: 1.4; }
+.mermaid-export-status[data-export-state='success'] { color: var(--appearance-accent-text); }
+.mermaid-export-status[data-export-state='error'] { color: var(--appearance-error); }
 .mermaid-toolbar button, .mermaid-viewer-header button { display: inline-flex; justify-content: center; align-items: center; min-width: 30px; min-height: 30px; padding: 5px 7px; border-radius: 6px; color: var(--appearance-secondary); line-height: 1; }
 .mermaid-toolbar button svg { display: block; width: 17px; height: 17px; pointer-events: none; }
 .mermaid-toolbar button[disabled] { opacity: .45; cursor: default; }
 .mermaid-toolbar button[disabled]:hover { background: transparent; }
-.mermaid-copy-source[data-copy-state='success'] { color: var(--appearance-accent); }
+.mermaid-copy-source[data-copy-state='success'] { color: var(--appearance-accent-text); }
 .mermaid-status { margin: 0; padding: 9px 12px; color: var(--appearance-secondary); font-size: 12px; }
 .mermaid-status:empty, .mermaid-status[hidden], .mermaid-viewport[hidden], .mermaid-viewer[hidden] { display: none; }
 .mermaid-viewport, .mermaid-viewer-viewport { position: relative; width: 100%; min-width: 0; height: 320px; overflow: hidden; background: var(--appearance-main); touch-action: none; outline-offset: -3px; }

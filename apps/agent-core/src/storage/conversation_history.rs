@@ -124,7 +124,19 @@ fn build_index(
             ));
         }
         hash.update(&line);
-        let raw = std::str::from_utf8(&line).map_err(|_| invalid("历史包含无效 UTF-8 编码。"))?;
+        let raw = std::str::from_utf8(&line).map_err(|encoding| {
+            // Only an unfinished UTF-8 scalar at the unclosed final record is a crash tail.
+            // 仅未闭合末条记录中被截断的 UTF-8 字符属于崩溃残尾；完整非法字节仍拒绝读取。
+            if !line.ends_with(b"\n") && encoding.error_len().is_none() {
+                conversation_logs::error(
+                    "历史末尾尚未完整写入，请使用正式日志恢复入口。",
+                    "CONVERSATION_HISTORY_TAIL_INCOMPLETE",
+                    409,
+                )
+            } else {
+                invalid("历史包含无效 UTF-8 编码。")
+            }
+        })?;
         let (id, role) = conversation_logs::event_identity(raw).map_err(|error| {
             if !line.ends_with(b"\n") {
                 conversation_logs::error(

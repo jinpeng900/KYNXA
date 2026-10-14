@@ -1,5 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <!-- Keep normal build outputs excluded when a runner redirects its intermediate directory.
+         测试入口重定向中间目录时，仍排除项目原有产物，防止旧生成 XAML 与源码重复参与编译。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
@@ -12,6 +15,7 @@
     <EnableMsixTooling>false</EnableMsixTooling>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../apps/desktop/Controls/ScrollSafeComboBox.cs" Link="ScrollSafeComboBox.cs" />
     <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
@@ -21,7 +25,6 @@
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/ViewModels/Memory*.cs" Link="ViewModels/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/Data/MemoryApiClient.cs" Link="Services/MemoryApiClient.cs" />
-    <Compile Include="../../apps/desktop/Services/Integration/ModelGatewayService.cs" Link="Services/ModelGatewayService.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="Services/GatewayApiException.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="Services/GatewayResponseReader.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />

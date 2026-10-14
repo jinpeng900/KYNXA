@@ -377,6 +377,61 @@ pub fn close(root: &Path, path: &Path) -> Result<(), ContractError> {
     }
     Ok(())
 }
+/// Called with application admission closed and background writers already joined.
+/// 调用前关闭应用准入并等待后台写入者退出；迁移复制前结算 WAL 并释放全部本根连接。
+pub fn drain_root(root: &Path) -> Result<(), ContractError> {
+    let mut pools = POOLS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(sqlite_store::failure)?;
+    let paths = pools
+        .keys()
+        .filter(|path| path.starts_with(root))
+        .cloned()
+        .collect::<Vec<_>>();
+    for path in &paths {
+        let state = pools[path].state.lock().map_err(sqlite_store::failure)?;
+        if state.reads.handles != state.reads.idle.len()
+            || state.writes.handles != state.writes.idle.len()
+        {
+            return Err(ContractError::new(
+                "SQLite leases are still active. / SQLite 租约仍未结算，不能迁移。",
+                "STORAGE_MIGRATION_BUSY",
+                409,
+            ));
+        }
+    }
+    for path in paths {
+        checked_identity(root, &path)?;
+        let pool = pools.get(&path).unwrap();
+        let mut state = pool.state.lock().map_err(sqlite_store::failure)?;
+        // Idle readers hold no transaction; close them before checkpointing the writer.
+        // 空闲读连接不持事务；先关闭读句柄再归并写连接 WAL，避免复制仅包含部分已提交页。
+        state.reads.idle.clear();
+        state.reads.handles = 0;
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(sqlite_store::failure)?;
+        connection
+            .busy_timeout(Duration::from_secs(3))
+            .map_err(sqlite_store::failure)?;
+        let busy: i64 = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(sqlite_store::failure)?;
+        if busy != 0 {
+            return Err(ContractError::new(
+                "SQLite checkpoint is still busy. / SQLite 检查点仍繁忙，原目录已保留。",
+                "STORAGE_MIGRATION_BUSY",
+                409,
+            ));
+        }
+        drop(connection);
+        state.retire();
+        pool.available.notify_all();
+        drop(state);
+        pools.remove(&path);
+    }
+    Ok(())
+}
 
 pub fn stats(root: &Path, path: &Path) -> Result<serde_json::Value, ContractError> {
     let pool = pool_for(root, path)?;

@@ -16,6 +16,7 @@ public static class StorageMigrationService
 {
     private static readonly string[] ConversationEntries =
         ["Projects", "Chats", "Trash", "Backups", "Memory", "Knowledge", "Retrieval", "Index", "Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json", "settings.json", "catalog.json", ".conversations-v1.json", ".catalog-transaction.json"];
+    internal static readonly string[] TaskStorageEntries = ["tasks.sqlite", "tasks.sqlite-wal", "tasks.sqlite-shm", "tasks.sqlite-journal", "task-artifacts"];
 
     internal sealed record CopyRoot(string Source, string Name, string[]? Include = null, string[]? Exclude = null);
 
@@ -51,11 +52,15 @@ public static class StorageMigrationService
         // A custom model home keeps conversations below itself; move that subtree to
         // the new Data root exactly once, where the standard Models layout expects it.
         // 自定义模型目录可能包含聊天子目录；只迁移一次到新 Data 根目录，使其符合标准 Models 布局。
-        var roots = new[] {
+        var roots = new List<CopyRoot> {
             new CopyRoot(desktop, "Desktop"),
             new CopyRoot(models, "Models", Exclude: standardModelsDirectory ? null : ["Conversations"]),
             new CopyRoot(conversationRoot, "", Include: migrateExtensions ? ConversationEntries : ConversationEntries.Except(["Agent", "Skills", "MCP", "extension-layout.json", "extension-migration-info.json", "extensions-pointer.previous.json"]).ToArray())
         };
+        // Task state belongs to Data even when extension configuration uses another root.
+        // 扩展配置使用独立根目录时，任务账本和任务产物仍属于 Data，必须随数据迁移。
+        if (!migrateExtensions && TaskStorageEntries.Any(name => File.Exists(Path.Combine(conversationRoot, "Agent", name)) || Directory.Exists(Path.Combine(conversationRoot, "Agent", name))))
+            roots.Add(new CopyRoot(Path.Combine(conversationRoot, "Agent"), "Agent", Include: TaskStorageEntries));
         var snapshots = roots.Select(root => (Root: root, Existed: Directory.Exists(root.Source), Files: ListFiles(root), Directories: ListFiles(root, true))).ToArray();
         Directory.CreateDirectory(target);
         var verified = new List<(string Source, string Destination, byte[] Hash)>();
@@ -209,6 +214,7 @@ public static class StorageMigrationService
 
     private static async Task ValidateLayoutSettingsAsync(string root, CancellationToken cancellationToken)
     {
+        await ValidateTaskStorageAsync(root, cancellationToken);
         string path = Path.Combine(root, "settings.json");
         if (!File.Exists(path))
         {
@@ -227,6 +233,30 @@ public static class StorageMigrationService
                 throw new InvalidDataException(UiText.Get("此数据目录的结构版本不受当前程序支持，请使用兼容版本打开。"));
         }
         catch (JsonException error) { throw new InvalidDataException(UiText.Get("存储设置文件格式无效，原文件已保留。"), error); }
+    }
+
+    private static async Task ValidateTaskStorageAsync(string root, CancellationToken cancellationToken)
+    {
+        string database = Path.Combine(root, "Agent", "tasks.sqlite");
+        if (!File.Exists(database))
+        {
+            if (Directory.Exists(database)) throw new InvalidDataException(UiText.Get("任务库路径被文件夹占用。"));
+            return;
+        }
+        RejectLinks(database);
+        await using var input = new FileStream(database, FileMode.Open, FileAccess.Read, FileShare.Read);
+        byte[] header = new byte[100];
+        int count = await input.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken);
+        if (count != header.Length || !header.AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8)
+            || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(60, 4)) != 1)
+            throw new InvalidDataException(UiText.Get("任务库格式或版本不受支持，原库已保留。"));
+        string wal = database + "-wal";
+        if (File.Exists(wal))
+        {
+            RejectLinks(wal);
+            if (new FileInfo(wal).Length != 0)
+                throw new InvalidDataException(UiText.Get("任务库仍有未归并日志，请等待网关完成维护。"));
+        }
     }
 
     // Metadata may also be present in a pending catalog transaction. Rewrite only

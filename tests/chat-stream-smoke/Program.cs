@@ -70,6 +70,36 @@ foreach (var malformed in new[] { unavailableMcp with { ServerId = null }, unava
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(unavailableMcp with { ConversationId = Guid.NewGuid() })),
     "MCP status bypassed conversation identity.");
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("unregistered_status"))), "Unregistered event accepted.");
+// Child events are a separate task projection, not replayed main-agent tools or final replies.
+// 子任务事件单独投影，不重放为主代理工具，也不能提前结束主回复。
+Guid rootTaskId = Guid.NewGuid(), childTaskId = Guid.NewGuid();
+string taskPrefix = Frame(Event("started") with { TaskId = rootTaskId, RootRequestTaskId = rootTaskId });
+var childEvents = new[]
+{
+    Event("task_progress") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId, Phase = "model", Round = 1 },
+    Event("task_tool_call") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId },
+    Event("task_tool_result") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId },
+    Event("task_finished") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId }
+};
+var childContinued = await Read(taskPrefix + string.Concat(childEvents.Select(Frame))
+    + Frame(Event("text_delta", "结合子任务结果继续回答")) + Frame(Event("completed", content: "最终回答")));
+Check(childContinued.Count == 7 && childContinued[^1].Type == "completed" && childContinued[^1].Content == "最终回答",
+    "Child diagnostics interrupted or prematurely completed the main response.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childEvents[0] with { TaskId = Guid.Empty })), "Empty child task identity accepted.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childEvents[0] with { RootRequestTaskId = Guid.NewGuid() })), "Child progress crossed a root task identity.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childEvents[0] with { ConversationId = Guid.NewGuid() })), "Child progress bypassed chat identity.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childEvents[0] with { Round = -1 })), "Negative child round accepted.");
+var childApprovalId = Guid.NewGuid();
+var childApproval = Event("task_approval_required") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId,
+    Tool = new ToolActivity("child_call", "filesystem.write", JsonSerializer.SerializeToElement(new { path = "guide.md" }),
+        "approval-required", "写入授权工作文件", ApprovalId: childApprovalId, Round: 256, Order: 2048) };
+var childClosed = Event("task_approval_closed") with { TaskId = childTaskId, RootRequestTaskId = rootTaskId, ApprovalId = childApprovalId };
+var childApprovalFlow = await Read(taskPrefix + Frame(childApproval) + Frame(childClosed) + Frame(Event("completed", content: "子审批已撤销，继续总结。")));
+Check(childApprovalFlow.Count == 4 && childApprovalFlow[^1].Type == "completed",
+    "Independent child approval contaminated the main timeline or interrupted its response.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childClosed with { ApprovalId = null })), "Missing closed approval identity accepted.");
+await ExpectAsync<InvalidDataException>(() => Read(taskPrefix + Frame(childApproval with { Tool = childApproval.Tool! with { ApprovalId = Guid.Empty } })),
+    "Invalid child approval receipt accepted.");
 using (var cancellation = new CancellationTokenSource(30))
 using (var stream = new WaitingStream())
 {
@@ -135,6 +165,27 @@ var secondSegment = new AssistantSegment("fixture-round-2", 2, 2, "commentary", 
 var finalSegment = secondSegment with { Phase = "final_answer", Status = "completed", Content = "这是核验后的最终答案。" };
 ChatStreamEvent SegmentEvent(AssistantSegment segment) => Event("assistant_segment") with { Segment = segment, ToolStreamProtocol = 3 };
 var finalSegmentEvent = Event("completed", content: finalSegment.Content) with { AssistantSegments = [firstCompleted, finalSegment], ToolStreamProtocol = 3 };
+// The continuation marker can be finalized after the completed round; it does not create another stream event.
+// 续写标记可在已完成轮次之后于终态确定；不重复发送已完成段，也不改变分段身份。
+var continuedFirst = firstCompleted with { IsAnswerContinuation = true };
+var continuedTerminal = finalSegmentEvent with { Content = firstCompleted.Content + "\n\n" + finalSegment.Content,
+    AssistantSegments = [continuedFirst, finalSegment] };
+var continuedEvents = await Read(prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted)) +
+    Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment)) + Frame(continuedTerminal));
+Check(continuedEvents[^1].AssistantSegments![0].IsAnswerContinuation && !continuedEvents[^1].AssistantSegments![1].IsAnswerContinuation
+    && continuedEvents[^1].Content == continuedTerminal.Content,
+    "A terminal continuation marker preserves both answer chunks without emitting a duplicate completed round.");
+Check(!continuedEvents[2].Segment!.IsAnswerContinuation,
+    "Older unmarked public round events retain the default continuation value.");
+var legacySegmentEvents = await Read(prefix + Frame(SegmentEvent(firstSegment))
+    .Replace(",\"isAnswerContinuation\":false", "", StringComparison.Ordinal) + Frame(Event("interrupted", content: "partial")));
+Check(!legacySegmentEvents[1].Segment!.IsAnswerContinuation,
+    "Legacy SSE frames without a continuation field keep the default false value.");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(firstSegment with { IsAnswerContinuation = true }))),
+    "A streaming segment was incorrectly accepted as a completed answer continuation");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(continuedTerminal with
+    { AssistantSegments = [continuedFirst, finalSegment with { IsAnswerContinuation = true }] })),
+    "The final phase was incorrectly accepted as another continuation");
 // A repaired model step keeps its interrupted trace while the final answer must be complete.
 // 已修复模型步骤保留中断轨迹，最终回答自身仍必须完整结束。
 var repairedSegment = firstCompleted with { Status = "interrupted" };
@@ -147,6 +198,7 @@ await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(f
     Frame(finalSegmentEvent with { AssistantSegments = [firstCompleted, finalSegment with { Status = "interrupted" }] })),
     "An interrupted final answer was accepted as completed");
 string publicTimelineWire = "";
+string largeWriteTimelineWire = "";
 // The gateway can compact before generation, then stream text in the same still-open segment.
 // 网关可以在生成前整理上下文，随后在同一个尚未完成的消息段中输出正文。
 var contextActivity = new ToolActivity("compact-before-model", "context.compact", JsonSerializer.SerializeToElement(new { }),
@@ -213,6 +265,38 @@ using (var timelineArguments = JsonDocument.Parse("{\"url\":\"https://example.in
     await ExpectAsync<InvalidDataException>(() => Read(parallelStart + Frame(SegmentEvent(parallelNext with { Order = 4 }))), "A new round reused a tool position");
 }
 
+// Exercise a real long-write frame without making every fixture byte a separate transport packet.
+// 验证真实长文写入帧；已有测试覆盖逐字节分包，此处不把大夹具每个字节都拆成一个包。
+const string longWriteBodyPrefix = "物理科普正文：";
+string longWriteBody = longWriteBodyPrefix + new string('文', 120000);
+var longWriteArguments = JsonSerializer.SerializeToElement(new { path = "physics.md", content = longWriteBody }, json);
+var longWrite = new ToolActivity("long-document-write", "filesystem.write", longWriteArguments,
+    "running", "写入物理长文", Round: 1, Order: 1);
+var longApproval = longWrite with { Status = "approval-required", ApprovalId = Guid.NewGuid() };
+largeWriteTimelineWire = prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted))
+    + Frame(Event("tool_call") with { Tool = longWrite })
+    + Frame(Event("approval_required") with { Tool = longApproval })
+    + Frame(Event("tool_result") with { Tool = longWrite with { Status = "completed", Result = "已写入并核验" } })
+    + Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment)) + Frame(finalSegmentEvent);
+using (var longWriteStream = new MemoryStream(Encoding.UTF8.GetBytes(largeWriteTimelineWire)))
+{
+    var longEvents = new List<ChatStreamEvent>();
+    await foreach (var item in ChatStreamReader.ReadAsync(longWriteStream, conversationId, requestId)) longEvents.Add(item);
+    Check(longEvents[^1].Type == "completed" && longEvents[^1].Content == finalSegment.Content,
+        "A legitimate 120K-character document write interrupted its subsequent final answer.");
+    Check(longEvents.Single(item => item.Type == "approval_required").Tool!.Arguments!.Value.GetProperty("content").GetString() == longWriteBody
+        && longEvents.Single(item => item.Type == "tool_result").Tool!.Arguments!.Value.GetProperty("content").GetString() == longWriteBody,
+        "Long-write approval and receipt parameters were truncated or changed.");
+}
+var oversizedWrite = longWrite with { Arguments = JsonSerializer.SerializeToElement(new
+    { path = "too-large.md", content = new string('x', 1024 * 1024) }, json) };
+await ExpectAsync<InvalidDataException>(async () =>
+{
+    using var stream = new MemoryStream(Encoding.UTF8.GetBytes(prefix + Frame(SegmentEvent(firstSegment))
+        + Frame(SegmentEvent(firstCompleted)) + Frame(Event("tool_call") with { Tool = oversizedWrite })));
+    await foreach (var _ in ChatStreamReader.ReadAsync(stream, conversationId, requestId)) { }
+}, "Over-budget tool argument frames were accepted.");
+
 var legacyText = JsonSerializer.Deserialize<ChatMessageState>("\"原有问题\"")!;
 Check(legacyText.Content == "原有问题" && legacyText.Role == "user" && legacyText.Status == "completed", "Legacy plain text failed");
 var legacyObject = JsonSerializer.Deserialize<ChatMessageState>("{\"Role\":\"assistant\",\"Content\":\"旧回复\"}")!;
@@ -236,6 +320,10 @@ Check(restored.Status == "interrupted" && restored.Content == saved.Content && r
 saved.AssistantSegments = [firstCompleted, finalSegment]; saved.Status = "completed";
 restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(saved))!;
 Check(restored.AssistantSegments.SequenceEqual(saved.AssistantSegments), "Saved assistant rounds did not survive reopening");
+saved.AssistantSegments = [continuedFirst, finalSegment];
+restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(saved))!;
+Check(restored.AssistantSegments[0].IsAnswerContinuation && restored.AssistantSegments.SequenceEqual(saved.AssistantSegments),
+    "The continuation marker and original chunks survive persisted chat reopening.");
 saved.Status = "streaming"; saved.AssistantSegments = [firstCompleted, secondSegment];
 restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(saved))!;
 Check(restored.AssistantSegments[0] == firstCompleted && restored.AssistantSegments[1].Status == "interrupted", "Crashed open round was not recovered independently");
@@ -275,6 +363,15 @@ async Task Handle(HttpListenerContext context)
             await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"runtime\":\"rust\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3,\"retrievalProtocol\":1}"));
             return;
         }
+        if (context.Request.Url.AbsolutePath.StartsWith("/api/tasks/", StringComparison.Ordinal))
+        {
+            Check(context.Request.HttpMethod == "GET" && context.Request.QueryString["conversationId"] == conversationId.ToString("D")
+                && context.Request.Headers["Accept"] == "text/event-stream", "Task observation changed scope or dispatched another request.");
+            context.Response.ContentType = "text/event-stream";
+            context.Response.SendChunked = true;
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(publicTimelineWire));
+            return;
+        }
         var incoming = await JsonSerializer.DeserializeAsync<ChatRequest>(context.Request.InputStream, json)
             ?? throw new InvalidDataException("Missing request body");
         Check(incoming.RequestId == requestId && incoming.ConversationId == conversationId, "Transport changed request IDs");
@@ -300,6 +397,11 @@ async Task Handle(HttpListenerContext context)
         if (incoming.Message == "timeline")
         {
             await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(publicTimelineWire));
+            return;
+        }
+        if (incoming.Message == "large-write")
+        {
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(largeWriteTimelineWire));
             return;
         }
         await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(prefix + Frame(Event("text_delta", "立即显示"))));
@@ -338,6 +440,15 @@ try
     await foreach (var item in client.StreamReplyAsync(request with { Message = "timeline" }, testDeadline.Token)) publicRounds.Add(item);
     Check(publicRounds.Count == 11 && publicRounds[^1].Content == finalSegment.Content && publicRounds[^1].AssistantSegments!.SequenceEqual(new[] { firstCompleted, finalSegment }),
         "Real HTTP transport lost the public timeline or final-answer boundary");
+    var longWriteRounds = new List<ChatStreamEvent>();
+    await foreach (var item in client.StreamReplyAsync(request with { Message = "large-write" }, testDeadline.Token)) longWriteRounds.Add(item);
+    Check(longWriteRounds.Count == 9 && longWriteRounds[^1].Content == finalSegment.Content
+        && longWriteRounds.Single(item => item.Type == "approval_required").Tool!.Arguments!.Value.GetProperty("content").GetString() == longWriteBody,
+        "Real HTTP long-write transport lost complete approval parameters or the final answer.");
+    var resumedRounds = new List<ChatStreamEvent>();
+    await foreach (var item in client.StreamTaskReplyAsync(conversationId, Guid.NewGuid(), requestId, testDeadline.Token)) resumedRounds.Add(item);
+    Check(resumedRounds.Count == 11 && resumedRounds[^1].Content == finalSegment.Content,
+        "Resumed task observation returns the final answer without dispatching a new chat request.");
     using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     await ExpectAsync<OperationCanceledException>(async () =>
     {

@@ -1,10 +1,10 @@
-//! Public webpage retrieval and search, executed from the configured gateway host.
-//! 从实际网关主机读取公共网页与检索；不猜测执行环境、不自动打开用户浏览器。
+//! Public webpage retrieval, executed from the configured gateway host.
+//! 从实际网关主机读取公共网页；不猜测执行环境、不自动打开用户浏览器。
 //!
 //! Extraction and UTF-16 pagination live here; proxy selection and destination validation live in gateway_web_proxy.
 //! 本模块负责正文提取与 UTF-16 分页；代理选择和目的地核验由 gateway_web_proxy 负责。
 
-use super::gateway::{GatewayToolContext, check_cancelled, failure};
+use super::gateway::{GatewayToolContext, check_cancelled, failure, wait_for_cancellation};
 use crate::gateway_contract::GatewayError;
 use futures_util::StreamExt;
 use scraper::{Html, Selector};
@@ -14,16 +14,19 @@ use std::time::Duration;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EXTRACTED_CHARS: usize = 262144;
 
-async fn decoded_body(response: reqwest::Response) -> Result<Vec<u8>, GatewayError> {
+async fn decoded_body_bounded(
+    response: reqwest::Response,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, GatewayError> {
     // Reqwest removes accepted compression headers and yields decoded bytes; cap that stream, not the compressed wire length.
     // reqwest 解压受支持的响应并移除压缩头；限制解压后正文，不能用较小的压缩长度绕过内存额度。
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|size| size > maximum_bytes as u64)
     {
         return Err(failure(
             "WEB_RESPONSE_TOO_LARGE",
-            "网页响应超过 2 MiB。",
+            "响应超过本次读取字节额度。",
             413,
         ));
     }
@@ -44,10 +47,10 @@ async fn decoded_body(response: reqwest::Response) -> Result<Vec<u8>, GatewayErr
     while let Some(chunk) = stream.next().await {
         let chunk =
             chunk.map_err(|_| failure("WEB_NETWORK_FAILED", "网页解压或响应读取中断。", 502))?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+        if bytes.len().saturating_add(chunk.len()) > maximum_bytes {
             return Err(failure(
                 "WEB_RESPONSE_TOO_LARGE",
-                "网页响应超过 2 MiB。",
+                "响应超过本次读取字节额度。",
                 413,
             ));
         }
@@ -56,7 +59,12 @@ async fn decoded_body(response: reqwest::Response) -> Result<Vec<u8>, GatewayErr
     Ok(bytes)
 }
 
-fn extract_html(input: &str, url: &url::Url) -> (String, String) {
+#[cfg(test)]
+async fn decoded_body(response: reqwest::Response) -> Result<Vec<u8>, GatewayError> {
+    decoded_body_bounded(response, MAX_RESPONSE_BYTES).await
+}
+
+pub(crate) fn extract_html(input: &str, url: &url::Url) -> (String, String) {
     let document = Html::parse_document(input);
     let title = document
         .select(&Selector::parse("title").expect("title selector"))
@@ -117,7 +125,7 @@ fn extract_html(input: &str, url: &url::Url) -> (String, String) {
     (title, output)
 }
 
-fn decode_text(
+pub(crate) fn decode_text(
     bytes: &[u8],
     content_type: &str,
     mime: &str,
@@ -183,44 +191,42 @@ fn decode_text(
     ))
 }
 
-async fn fetch_inner(input: &Value) -> Result<Value, GatewayError> {
-    let requested_url = input["url"].as_str().unwrap_or("");
-    let mut url = super::service_http::public_url(&json!(requested_url))
-        .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
-    let timeout_ms = input["timeoutMs"]
-        .as_u64()
-        .unwrap_or(30_000)
-        .clamp(100, 60_000);
+/// One guarded transport serves webpage tools and explicitly imported document URLs.
+/// 网页工具与明确导入的文档链接共用目的地核验、代理和逐跳重定向路径。
+pub(crate) struct PublicDownload {
+    pub bytes: Vec<u8>,
+    pub final_url: url::Url,
+    pub requested_url: String,
+    pub content_type: String,
+    pub media_type: String,
+    pub status: u16,
+    pub redirects: Vec<Value>,
+    pub fetched_at: String,
+    pub response_hash: String,
+    pub route: &'static str,
+    pub resolution: &'static str,
+}
+
+pub(crate) fn normalize_public_url(requested_url: &str) -> Result<url::Url, GatewayError> {
+    super::service_http::public_url(&json!(requested_url))
+        .map_err(|error| failure(&error.code, &error.message, error.status_code))
+}
+
+async fn download_inner(
+    requested_url: &str,
+    maximum_bytes: usize,
+    timeout_ms: u64,
+    text_only: bool,
+) -> Result<PublicDownload, GatewayError> {
+    let mut url = normalize_public_url(requested_url)?;
     let mut redirects = Vec::new();
     for _ in 0..9 {
-        // Revalidate and pin every redirect, while preserving the actual configured proxy.
-        // 每次重定向重新核验并绑定公共地址，同时保留用户真正配置的代理。
         let transport =
             super::gateway_web_proxy::client(&url, Duration::from_millis(timeout_ms)).await?;
-        let response = transport
-            .client
-            .get(url.clone())
-            .header(
-                reqwest::header::USER_AGENT,
-                "KYNXA/0.1 (+native-public-fetch)",
-            )
-            .header(
-                reqwest::header::ACCEPT,
-                "text/html,application/xhtml+xml,text/plain,application/json;q=0.9",
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                failure(
-                    if error.is_timeout() {
-                        "WEB_TIMEOUT"
-                    } else {
-                        "WEB_NETWORK_FAILED"
-                    },
-                    "网页请求未完成。",
-                    502,
-                )
-            })?;
+        let response = transport.client.get(url.clone())
+            .header(reqwest::header::USER_AGENT, "KYNXA/0.1 (+native-public-fetch)")
+            .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/pdf,application/octet-stream;q=0.9,*/*;q=0.8")
+            .send().await.map_err(|error| failure(if error.is_timeout() { "WEB_TIMEOUT" } else { "WEB_NETWORK_FAILED" }, "网页请求未完成。", 502))?;
         if response.status().is_redirection() {
             let target = response
                 .headers()
@@ -234,11 +240,7 @@ async fn fetch_inner(input: &Value) -> Result<Value, GatewayError> {
                 .map_err(|_| failure("WEB_REDIRECT_FAILED", "网页重定向地址无效。", 502))?;
             let target = super::service_http::public_url(&json!(target.as_str()))
                 .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
-            redirects.push(json!({
-                "from": url.as_str(),
-                "to": target.as_str(),
-                "status": response.status().as_u16(),
-            }));
+            redirects.push(json!({"from":url.as_str(),"to":target.as_str(),"status":response.status().as_u16()}));
             url = target;
             continue;
         }
@@ -254,101 +256,46 @@ async fn fetch_inner(input: &Value) -> Result<Value, GatewayError> {
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("text/plain")
+            .unwrap_or("application/octet-stream")
             .to_owned();
-        let mime = content_type
+        let media_type = content_type
             .split(';')
             .next()
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        if ![
-            "text/html",
-            "application/xhtml+xml",
-            "text/plain",
-            "text/markdown",
-            "application/json",
-        ]
-        .contains(&mime.as_str())
+        if text_only
+            && ![
+                "text/html",
+                "application/xhtml+xml",
+                "text/plain",
+                "text/markdown",
+                "application/json",
+            ]
+            .contains(&media_type.as_str())
         {
             return Err(failure(
                 "WEB_UNSUPPORTED_CONTENT",
-                "网页响应不是可直接读取的文本；文档需下载后专用解析。",
+                "网页响应不是可直接读取的文本；文档需显式导入后专用解析。",
                 415,
             ));
         }
-        let bytes = decoded_body(response).await?;
-        let (decoded, text_decoding) = decode_text(&bytes, &content_type, &mime)?;
-        let (title, text) = if mime == "text/html" || mime == "application/xhtml+xml" {
-            extract_html(&decoded, &url)
-        } else {
-            (
-                String::new(),
-                decoded
-                    .chars()
-                    .take(MAX_EXTRACTED_CHARS)
-                    .collect::<String>(),
-            )
-        };
-        let units = text.encode_utf16().collect::<Vec<_>>();
-        let offset = input["offset"].as_u64().unwrap_or(0) as usize;
-        if offset > units.len() {
-            return Err(failure(
-                "WEB_OFFSET_OUT_OF_RANGE",
-                "网页 offset 超出当前内容。",
-                400,
-            ));
-        }
-        // Public offsets count UTF-16 units; avoid ending a page inside a surrogate pair.
-        // 公开偏移按 UTF-16 单元计数；页尾不能截断代理对。
-        let mut end = (offset + input["limit"].as_u64().unwrap_or(16000).clamp(1, 16000) as usize)
-            .min(units.len());
-        if end < units.len() && end > 0 && (0xd800..=0xdbff).contains(&units[end - 1]) {
-            if end - offset == 1 {
-                end += 1;
-            } else {
-                end -= 1;
-            }
-        }
-        let page = String::from_utf16(&units[offset..end]).map_err(|_| {
-            failure(
-                "WEB_INVALID_OFFSET",
-                "网页 offset 位于 UTF-16 代理对中间。",
-                400,
-            )
-        })?;
-        return Ok(json!({
-            "title": title,
-            "url": url.as_str(),
-            "requestedUrl": requested_url,
-            "finalUrl": url.as_str(),
-            "status": status,
-            "mediaType": mime,
-            "responseBytes": bytes.len(),
-            "textDecoding": text_decoding,
-            "redirects": redirects,
-            "fetchedAt": chrono::Utc::now().to_rfc3339(),
-            "content": page,
-            "offset": offset,
-            "nextOffset": end,
-            "totalChars": units.len(),
-            "hasMore": end < units.len(),
-            "fullText": text,
-            "executionEnvironment": {
-                "schemaVersion": 1,
-                "executorKind": "builtin-http",
-                "executorLocation": "gateway-host",
-                "operationLocation": "gateway-host",
-                "gatewayHostMeaning": "machine-running-the-gateway",
-                "userDeviceRelationship": "unverified",
-                "grantsPermission": false,
-                "network": {
-                    "requestOrigin": "gateway-host",
-                    "route": transport.route,
-                    "addressVerification": transport.resolution,
-                },
-            },
-        }));
+        let bytes = decoded_body_bounded(response, maximum_bytes).await?;
+        use sha2::Digest;
+        let response_hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+        return Ok(PublicDownload {
+            bytes,
+            final_url: url,
+            requested_url: requested_url.to_owned(),
+            content_type,
+            media_type,
+            status,
+            redirects,
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+            response_hash,
+            route: transport.route,
+            resolution: transport.resolution,
+        });
     }
     Err(failure(
         "WEB_REDIRECT_LIMIT",
@@ -357,17 +304,129 @@ async fn fetch_inner(input: &Value) -> Result<Value, GatewayError> {
     ))
 }
 
-async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch::Receiver<bool>) {
-    loop {
-        if *cancellation.borrow_and_update() {
-            break;
-        }
-        if cancellation.changed().await.is_err() {
-            // A closed signal channel is not an explicit cancellation request.
-            // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
-            std::future::pending::<()>().await;
+/// Cancellation drops the same guarded request and private relay; imported URLs do not gain a different network policy.
+/// 取消释放同一受控请求及私有转接；导入链接不会取得另一套网络权限。
+pub(crate) async fn download_public(
+    requested_url: &str,
+    maximum_bytes: usize,
+    timeout_ms: u64,
+    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<PublicDownload, GatewayError> {
+    let timeout_ms = timeout_ms.clamp(100, 120_000);
+    let maximum_bytes = maximum_bytes.min(128 * 1024 * 1024);
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_millis(timeout_ms),download_inner(requested_url,maximum_bytes,timeout_ms,false)) => {
+            result.unwrap_or_else(|_|Err(failure("WEB_TIMEOUT","链接读取总预算已到期。",504)))
+        },
+        _ = async {
+            loop {
+                if cancellation.load(std::sync::atomic::Ordering::Acquire) {break;}
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        } => Err(failure("TOOL_CANCELLED","链接读取已取消。",409)),
+    }
+}
+
+async fn fetch_inner(input: &Value) -> Result<Value, GatewayError> {
+    let requested_url = input["url"].as_str().unwrap_or("");
+    let timeout_ms = input["timeoutMs"]
+        .as_u64()
+        .unwrap_or(30_000)
+        .clamp(100, 60_000);
+    let download = download_inner(requested_url, MAX_RESPONSE_BYTES, timeout_ms, true).await?;
+    let url = &download.final_url;
+    let bytes = &download.bytes;
+    let content_type = &download.content_type;
+    let mime = &download.media_type;
+    let status = download.status;
+    let redirects = &download.redirects;
+    if ![
+        "text/html",
+        "application/xhtml+xml",
+        "text/plain",
+        "text/markdown",
+        "application/json",
+    ]
+    .contains(&mime.as_str())
+    {
+        return Err(failure(
+            "WEB_UNSUPPORTED_CONTENT",
+            "网页响应不是可直接读取的文本；文档需显式导入后专用解析。",
+            415,
+        ));
+    }
+    let (decoded, text_decoding) = decode_text(&bytes, &content_type, &mime)?;
+    let (title, text) = if mime == "text/html" || mime == "application/xhtml+xml" {
+        extract_html(&decoded, &url)
+    } else {
+        (
+            String::new(),
+            decoded
+                .chars()
+                .take(MAX_EXTRACTED_CHARS)
+                .collect::<String>(),
+        )
+    };
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    let offset = input["offset"].as_u64().unwrap_or(0) as usize;
+    if offset > units.len() {
+        return Err(failure(
+            "WEB_OFFSET_OUT_OF_RANGE",
+            "网页 offset 超出当前内容。",
+            400,
+        ));
+    }
+    // Public offsets count UTF-16 units; avoid ending a page inside a surrogate pair.
+    // 公开偏移按 UTF-16 单元计数；页尾不能截断代理对。
+    let mut end = (offset + input["limit"].as_u64().unwrap_or(16000).clamp(1, 16000) as usize)
+        .min(units.len());
+    if end < units.len() && end > 0 && (0xd800..=0xdbff).contains(&units[end - 1]) {
+        if end - offset == 1 {
+            end += 1;
+        } else {
+            end -= 1;
         }
     }
+    let page = String::from_utf16(&units[offset..end]).map_err(|_| {
+        failure(
+            "WEB_INVALID_OFFSET",
+            "网页 offset 位于 UTF-16 代理对中间。",
+            400,
+        )
+    })?;
+    return Ok(json!({
+        "title": title,
+        "url": url.as_str(),
+        "requestedUrl": requested_url,
+        "finalUrl": url.as_str(),
+        "status": status,
+        "mediaType": mime,
+        "responseBytes": bytes.len(),
+        "textDecoding": text_decoding,
+        "redirects": redirects,
+        "fetchedAt": download.fetched_at,
+        "responseHash": download.response_hash,
+        "content": page,
+        "offset": offset,
+        "nextOffset": end,
+        "totalChars": units.len(),
+        "hasMore": end < units.len(),
+        "fullText": text,
+        "executionEnvironment": {
+            "schemaVersion": 1,
+            "executorKind": "builtin-http",
+            "executorLocation": "gateway-host",
+            "operationLocation": "gateway-host",
+            "gatewayHostMeaning": "machine-running-the-gateway",
+            "userDeviceRelationship": "unverified",
+            "grantsPermission": false,
+            "network": {
+                "requestOrigin": "gateway-host",
+                "route": download.route,
+                "addressVerification": download.resolution,
+            },
+        },
+    }));
 }
 
 pub(crate) async fn fetch(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -389,187 +448,10 @@ pub(crate) async fn fetch(input: Value, ctx: &GatewayToolContext) -> Result<Valu
     }
 }
 
-async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    check_cancelled(ctx)?;
-    if ctx.config["retrieval"]["web"]["mode"] == "off" {
-        return Err(failure("WEB_SEARCH_DISABLED", "网页检索已关闭。", 409));
-    }
-    let query = input["query"]
-        .as_str()
-        .filter(|query| !query.trim().is_empty())
-        .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "搜索 query 不能为空。", 400))?;
-    let count = input["limit"].as_u64().unwrap_or(10).clamp(1, 20);
-    let selected = ctx.config["retrieval"]["web"]["providerId"]
-        .as_str()
-        .unwrap_or("auto");
-    let mut servers = super::gateway_mcp::servers(ctx);
-    let loaded = ctx.runtime.schemas.read().await.clone();
-    for server in &mut servers {
-        server["tools"] = json!(
-            loaded
-                .iter()
-                .filter(|tool| tool["serverId"] == server["id"])
-                .cloned()
-                .collect::<Vec<_>>()
-        );
-    }
-    let index = super::service_broker_completion::apply(
-        "broker.completion.searchProvider",
-        &json!({"servers": servers, "providerId": selected}),
-    )
-    .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
-    let server = index
-        .as_u64()
-        .and_then(|index| servers.get(index as usize))
-        .cloned()
-        .ok_or_else(|| {
-            failure(
-                "WEB_SEARCH_PROVIDER_UNAVAILABLE",
-                "选定搜索服务未启用；未绕过设置启用其他远程服务。",
-                503,
-            )
-        })?;
-    let brave = server["id"].as_str().is_some_and(|id| id.contains("brave"));
-    let command = std::path::Path::new(server["command"].as_str().unwrap_or(""))
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if brave && ["npx", "npx.cmd", "npm", "npm.cmd", "node", "node.exe"].contains(&command.as_str())
-    {
-        if server["disabledTools"]
-            .as_array()
-            .is_some_and(|tools| tools.contains(&json!("brave_web_search")))
-        {
-            return Err(failure(
-                "WEB_SEARCH_PROVIDER_UNAVAILABLE",
-                "Brave 搜索工具已禁用。",
-                403,
-            ));
-        }
-        let key = std::env::var("KYNXA_BRAVE_API_KEY").map_err(|_| {
-            failure(
-                "WEB_SEARCH_CREDENTIAL_MISSING",
-                "Brave API key 未配置。",
-                401,
-            )
-        })?;
-        let mut url = url::Url::parse("https://api.search.brave.com/res/v1/web/search")
-            .expect("fixed search endpoint");
-        url.query_pairs_mut()
-            .append_pair("q", query)
-            .append_pair("count", &count.to_string());
-        let transport = super::gateway_web_proxy::client(&url, Duration::from_secs(30)).await?;
-        let response = transport
-            .client
-            .get(url)
-            .header("X-Subscription-Token", key)
-            .send()
-            .await
-            .map_err(|_| failure("WEB_SEARCH_FAILED", "Brave 搜索请求失败。", 502))?
-            .error_for_status()
-            .map_err(|_| failure("WEB_SEARCH_FAILED", "Brave 搜索被服务拒绝。", 502))?;
-        let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|_| failure("WEB_SEARCH_FAILED", "Brave 搜索读取中断。", 502))?;
-            if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(failure(
-                    "WEB_RESPONSE_TOO_LARGE",
-                    "Brave 搜索响应超出读取边界。",
-                    413,
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| failure("WEB_SEARCH_INVALID_RESULT", "Brave 搜索回执无效。", 502))?;
-        let sources = value["web"]["results"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(count as usize)
-            .map(|source| {
-                json!({
-                    "title": source["title"],
-                    "url": source["url"],
-                    "snippet": source["description"],
-                })
-            })
-            .collect::<Vec<_>>();
-        return Ok(json!({
-            "query": query,
-            "providerId": server["id"],
-            "sources": sources,
-            "executionEnvironment": super::contracts::calculate(
-                "tools.resolveEnvironment",
-                &json!({"descriptor": {"name": "web.fetch", "source": "builtin"}}),
-            ).map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))?,
-        }));
-    }
-    let descriptors = super::gateway_mcp::catalog_selected(ctx, vec![server.clone()]).await?;
-    let plan = super::gateway::native(
-        ctx,
-        "web.providerPlan",
-        json!({
-            "descriptors": descriptors,
-            "providerId": server["id"],
-            "depth": if count > 6 {
-                "deep"
-            } else {
-                ctx.config["retrieval"]["web"]["depth"].as_str().unwrap_or("standard")
-            },
-            "language": ctx.config["retrieval"]["web"]["language"].as_str().unwrap_or("auto"),
-            "query": query,
-            "limit": count,
-        }),
-    )
-    .await?;
-    let tool = descriptors[plan["index"].as_u64().unwrap_or(0) as usize].clone();
-    let value = super::gateway_mcp::execute(
-        tool["name"].as_str().unwrap_or(""),
-        json!({
-            "arguments": plan["arguments"],
-            "policy": {
-                "reason": input["reason"].as_str().unwrap_or("Public web search requested by current user"),
-            },
-        }),
-        ctx,
-    ).await?;
-    Ok(json!({
-        "query": query,
-        "providerId": server["id"],
-        "canonical": value,
-        "content": value["content"],
-        "isError": value["isError"],
-        "status": value["status"],
-        "code": value["code"],
-        "executionEnvironment": super::contracts::calculate(
-            "tools.resolveEnvironment",
-            &json!({"descriptor": tool, "server": server}),
-        ).map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))?,
-    }))
-}
-
-pub(crate) async fn search(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    check_cancelled(ctx)?;
-    let mut cancellation = ctx.cancellation.clone();
-    tokio::select! {
-        result = tokio::time::timeout(Duration::from_secs(60), search_inner(input, ctx)) => {
-            result.unwrap_or_else(|_| {
-                Err(failure("WEB_TIMEOUT", "网页搜索总预算已到期。", 504))
-            })
-        },
-        _ = wait_for_cancellation(&mut cancellation) => {
-            Err(failure("TOOL_CANCELLED", "网页搜索已取消。", 409))
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     #[ignore = "Explicit public-page smoke uses the user's configured network proxy"]
     async fn configured_proxy_fetches_public_page_without_fake_ip_rejection() {
@@ -706,28 +588,5 @@ mod tests {
         assert!(!text.contains("secret"));
         assert!(!text.contains("password"));
         assert!(!text.contains("hidden"));
-    }
-    #[tokio::test]
-    async fn disabled_search_provider_never_creates_a_fallback_connection() {
-        let (mut ctx, _sender) = super::super::gateway::test_context();
-        let root = ctx.workdir.parent().unwrap().to_owned();
-        ctx.config["retrieval"] = json!({
-            "web": {"providerId": "official-exa", "mode": "auto"},
-        });
-        ctx.config["mcpServers"] = json!([{
-            "id": "official-exa",
-            "enabled": false,
-            "transport": "streamable-http",
-            "url": "http://127.0.0.1:1/mcp",
-        }]);
-        assert_eq!(
-            search(json!({"query":"public fixture"}), &ctx)
-                .await
-                .unwrap_err()
-                .code,
-            "WEB_SEARCH_PROVIDER_UNAVAILABLE"
-        );
-        assert!(ctx.runtime.mcp.lock().await.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

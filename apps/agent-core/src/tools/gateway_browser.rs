@@ -240,7 +240,10 @@ fn defer_owned_profile_cleanup(
                     drop(session);
                     if let Some(runtime) = runtime.upgrade() {
                         let mut sessions = runtime.browsers.lock().await;
-                        if sessions.get(&id).is_some_and(|active| Arc::ptr_eq(active, &handle)) {
+                        if sessions
+                            .get(&id)
+                            .is_some_and(|active| Arc::ptr_eq(active, &handle))
+                        {
                             sessions.remove(&id);
                         }
                     }
@@ -1148,8 +1151,10 @@ pub(crate) async fn execute(
         let owned = session.child.is_some();
         let execution_environment = environment(&session);
         if session.closed && session.profile_cleanup_pending {
-            return Ok(json!({"closed":true,"sessionId":id,"profileCleanupPending":true,
-                "profileCleanupError":session.profile_cleanup_error.as_ref().map(GatewayError::response),"externalProcessPreserved":!owned,"executionEnvironment":execution_environment}));
+            return Ok(
+                json!({"closed":true,"sessionId":id,"profileCleanupPending":true,
+                "profileCleanupError":session.profile_cleanup_error.as_ref().map(GatewayError::response),"externalProcessPreserved":!owned,"executionEnvironment":execution_environment}),
+            );
         }
         for socket in session.tabs.values() {
             let connected = ctx
@@ -1175,8 +1180,10 @@ pub(crate) async fn execute(
             session.profile_cleanup_error = Some(error.clone());
             drop(session);
             defer_owned_profile_cleanup(id.to_owned(), handle, &ctx.runtime);
-            return Ok(json!({"closed":true,"sessionId":id,"profileCleanupPending":true,
-                "profileCleanupError":error.response(),"externalProcessPreserved":!owned,"executionEnvironment":execution_environment}));
+            return Ok(
+                json!({"closed":true,"sessionId":id,"profileCleanupPending":true,
+                "profileCleanupError":error.response(),"externalProcessPreserved":!owned,"executionEnvironment":execution_environment}),
+            );
         }
         drop(session);
         ctx.runtime.browsers.lock().await.remove(id);
@@ -1185,7 +1192,11 @@ pub(crate) async fn execute(
         );
     }
     if session.closed {
-        return Err(failure("BROWSER_SESSION_CLOSED", "浏览器已关闭；配置清理状态可通过 browser.close 查看 / Browser is closed; inspect browser.close for profile cleanup status.", 409));
+        return Err(failure(
+            "BROWSER_SESSION_CLOSED",
+            "浏览器已关闭；配置清理状态可通过 browser.close 查看 / Browser is closed; inspect browser.close for profile cleanup status.",
+            409,
+        ));
     }
     if let Some(job) = &session._owned {
         if !job.has_running_processes()? {
@@ -1409,33 +1420,40 @@ pub(crate) async fn execute(
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    let _ = shutdown_checked(ctx).await;
+}
+
+pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     let connections = ctx
         .runtime
         .cdp
         .lock()
         .await
-        .drain()
-        .map(|(_, connection)| connection)
+        .iter()
+        .map(|(id, connection)| (id.clone(), connection.clone()))
         .collect::<Vec<_>>();
-    for connection in connections {
-        let _ = connection.close().await;
+    for (id, connection) in connections {
+        connection.close().await?;
+        ctx.runtime.cdp.lock().await.remove(&id);
     }
     let sessions = ctx
         .runtime
         .browsers
         .lock()
         .await
-        .drain()
-        .map(|(_, session)| session)
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
         .collect::<Vec<_>>();
-    for session in sessions {
+    for (id, session) in sessions {
         let mut session = session.lock().await;
-        let _ = session.close_owned_process().await;
+        session.close_owned_process().await?;
         for upload in &session.uploads {
             clean_upload(upload, ctx);
         }
-        let _ = session.remove_owned_profile().await;
+        session.remove_owned_profile().await?;
+        ctx.runtime.browsers.lock().await.remove(&id);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1636,8 +1654,12 @@ mod tests {
         );
         let profile = handle.lock().await.profile.clone();
         use std::os::windows::fs::OpenOptionsExt;
-        let locked = std::fs::OpenOptions::new().create(true).write(true).share_mode(0)
-            .open(profile.join("owned-cleanup-fixture.lock")).unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .share_mode(0)
+            .open(profile.join("owned-cleanup-fixture.lock"))
+            .unwrap();
         let closed = execute(
             "browser.close",
             json!({"sessionId":session,"reason":"Close owned fixture"}),
@@ -1647,17 +1669,33 @@ mod tests {
         .unwrap();
         assert_eq!(closed["closed"], true);
         assert_eq!(closed["profileCleanupPending"], true);
-        assert!(!handle.lock().await._owned.as_ref().unwrap().has_running_processes().unwrap());
+        assert!(
+            !handle
+                .lock()
+                .await
+                ._owned
+                .as_ref()
+                .unwrap()
+                .has_running_processes()
+                .unwrap()
+        );
         drop(locked);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
         loop {
             let state = handle.lock().await;
             if !state.profile_cleanup_pending {
-                assert!(state.profile_cleanup_error.is_none(), "{:?}", state.profile_cleanup_error);
+                assert!(
+                    state.profile_cleanup_error.is_none(),
+                    "{:?}",
+                    state.profile_cleanup_error
+                );
                 break;
             }
             drop(state);
-            assert!(tokio::time::Instant::now() < deadline, "Owned profile cleanup did not complete");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Owned profile cleanup did not complete"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!profile.exists());

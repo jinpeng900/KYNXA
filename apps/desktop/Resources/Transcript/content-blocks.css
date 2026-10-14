@@ -1,18 +1,26 @@
 /* Shared surfaces keep every fenced text block readable without covering its source.
  * 共用表面样式使所有围栏文本块易于阅读，操作栏不遮挡源码。 */
 .content-block { position: relative; min-width: 0; max-width: 100%; margin: 12px 0; border: 1px solid var(--appearance-border); border-radius: 10px; background: var(--appearance-sidebar); overflow: hidden; }
-.content-block-header { display: flex; align-items: center; gap: 6px 10px; min-width: 0; min-height: 40px; padding: 5px 9px 5px 13px; border-bottom: 1px solid var(--appearance-border); background: var(--appearance-sidebar); font-family: var(--ui-font); }
-.content-block-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--appearance-secondary); font-size: 12px; font-weight: 500; }
+.content-block-header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; min-width: 0; min-height: 40px; padding: 5px 9px 5px 13px; border-bottom: 1px solid var(--appearance-border); background: var(--appearance-sidebar); font-family: var(--ui-font); }
+.content-block-label { flex: 1 1 40px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--appearance-secondary); font-size: 12px; font-weight: 500; }
+.content-block-lines { flex: 0 0 auto; font-size: 11px; line-height: 1.5; color: var(--appearance-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.content-block [hidden] { display: none !important; }
+.content-block-reading-action { flex: 0 0 auto; min-height: 30px; max-width: 100%; padding: 4px 7px; border-radius: 6px; color: var(--appearance-secondary); font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.content-block-reading-action[aria-pressed='true'] { color: var(--appearance-accent-text); background: var(--appearance-soft); }
+.content-block-reading-action:focus-visible { outline: 2px solid var(--appearance-accent); outline-offset: -1px; }
 /* Preserve source lines; only this code surface scrolls when a line exceeds the reply width.
  * 保留源码行边界；长行超出回复宽度时，仅在当前代码表面内横向滚动。 */
 .content-block > pre { margin: 0; padding: 12px 15px; border-radius: 0; background: var(--appearance-sidebar); overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; }
+.content-block[data-wrap='true'] > pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
+.content-block[data-collapsed='true'] > pre { max-height: var(--content-block-preview-height, 318px); padding-bottom: 0; overflow-y: hidden; }
 .content-block .copy-block { display: inline-flex; flex: 0 0 30px; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 6px; border-radius: 6px; color: var(--appearance-secondary); line-height: 1; }
 .content-block .copy-block:hover { background: var(--appearance-soft); color: var(--appearance-text); }
 .content-block .copy-block:focus-visible { outline: 2px solid var(--appearance-accent); outline-offset: -1px; }
 .content-block .copy-block svg { display: block; width: 18px; height: 18px; pointer-events: none; }
-.content-block .copy-block[data-copy-state='success'] { color: var(--appearance-accent); }
-.content-block-status { flex: 0 1 auto; min-width: 0; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.4; color: var(--appearance-secondary); }
+.content-block .copy-block[data-copy-state='success'] { color: var(--appearance-accent-text); }
+.content-block-status { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: auto; text-align: right; overflow-wrap: anywhere; font-size: 12px; line-height: 1.4; color: var(--appearance-secondary); }
 .content-block-status:empty { display: none; }
-.content-block-status[data-copy-state='success'] { color: var(--appearance-accent); }
-.content-block-status[data-copy-state='error'] { color: #765e51; }
-@media (max-width: 420px) { .content-block-header { gap: 6px; padding-left: 10px; } .content-block > pre { padding: 10px 12px; } }
+.content-block-status[data-copy-state='success'] { color: var(--appearance-accent-text); }
+.content-block-status[data-copy-state='error'] { color: var(--appearance-error); }
+.content-block-status[data-reading-state='blocked'] { flex-basis: 100%; color: var(--appearance-secondary); }
+@media (max-width: 420px) { .content-block-header { gap: 4px; padding-left: 10px; } .content-block-reading-action { padding-right: 5px; padding-left: 5px; } .content-block > pre { padding: 10px 12px; } }

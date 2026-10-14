@@ -38,6 +38,13 @@ encoding_rs = "=0.8.35"
 zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 quick-xml = "=0.38.3"
 lopdf = { version = "=0.38.0", default-features = false }
+calamine = { version = "=0.31.0", features = ["chrono"] }
+cfb = "=0.12.1"
+mail-parser = { version = "=0.11.9", features = ["full_encoding"] }
+rtf-grimoire = "=0.2.1"
+tar = { version = "=0.4.46", default-features = false }
+flate2 = "=1.1.10"
+bzip2 = "=0.6.1"
 tree-sitter = "=0.25.10"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-javascript = "=0.23.1"

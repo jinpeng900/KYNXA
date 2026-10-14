@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "Microsoft.ML.OnnxRuntime.DirectML",
+      "version": "1.21.0",
+      "name": "microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.21.0/microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "bytes": 17410861,
+      "sha256": "12bed6e1e870f30e0150e039ebb6853da32eba381eda1c373faeeb17168785e6",
+      "files": [
+        {
+          "entry": "LICENSE",
+          "source": "onnxruntime-1.21.0/LICENSE",
+          "bytes": 1094,
+          "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+        },
+        {
+          "entry": "ThirdPartyNotices.txt",
+          "source": "onnxruntime-1.21.0/ThirdPartyNotices.txt",
+          "bytes": 322196,
+          "sha256": "34103169a6338d341a8560f6e680ce36093408d83a662c994c6a5d8154b5e0e8"
+        }
+      ]
+    },
+    {
+      "id": "Microsoft.AI.DirectML",
+      "version": "1.15.4",
+      "name": "microsoft.ai.directml.1.15.4.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+      "bytes": 202292617,
+      "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+      "files": [
+        {
+          "entry": "LICENSE.txt",
+          "source": "directml-1.15.4/LICENSE.txt",
+          "bytes": 10439,
+          "sha256": "a05138e3a085ff60a44881eedfa58dccb03ecc1d7b1f6ae888418e8c2fec4b8d"
+        },
+        {
+          "entry": "LICENSE-CODE.txt",
+          "source": "directml-1.15.4/LICENSE-CODE.txt",
+          "bytes": 1093,
+          "sha256": "903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c"
+        }
+      ]
+    }
+  ]
+}

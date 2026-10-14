@@ -2373,6 +2373,37 @@
       }
     },
     {
+      "id": "parallel",
+      "name": "Parallel Search",
+      "description": "Official hosted public web search. Anonymous access is rate-limited; no API key is required.",
+      "sourceUrl": "https://docs.parallel.ai/integrations/mcp/search-mcp",
+      "capabilities": [
+        "web-search"
+      ],
+      "license": "Hosted service terms",
+      "publisher": "vendor",
+      "network": "remote",
+      "requirements": [],
+      "notes": [
+        "Anonymous access uses server-managed search settings and lower rate limits. No unlimited usage is promised.",
+        "Conversation session identity remains stable across calls; authentication and paid search are optional user configuration."
+      ],
+      "server": {
+        "id": "parallel",
+        "name": "Parallel Search",
+        "transport": "streamable-http",
+        "command": "",
+        "args": [],
+        "url": "https://search.parallel.ai/mcp",
+        "enabled": true,
+        "protocolVersion": "2025-11-25",
+        "disabledTools": [
+          "web_fetch"
+        ],
+        "startupTimeoutMs": 20000
+      }
+    },
+    {
       "id": "brave-search",
       "name": "Brave Search",
       "description": "Official Brave search for web, news, images and local places. Requires a Brave Search API key.",

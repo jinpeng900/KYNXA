@@ -45,12 +45,6 @@ public sealed partial class MemoryManagementWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(MemoryTitleBar);
         AppWindow.Resize(new SizeInt32(960, 680));
-        if (AppWindowTitleBar.IsCustomizationSupported())
-        {
-            AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
-        }
         _viewModel.PropertyChanged += ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged += Entries_Changed;
         UiText.LanguageChanged += Language_Changed;
@@ -137,11 +131,21 @@ public sealed partial class MemoryManagementWindow : Window
             MemoryKindPicker.SelectedItem = selectedKind;
             _refreshKindDisplay = false;
             bool editable = _viewModel.Target is not null && !_viewModel.IsBusy;
-            MemoryContentBox.IsEnabled = MemoryKindPicker.IsEnabled = editable;
+            MemoryContentBox.IsEnabled = editable;
+            MemoryContentBox.IsReadOnly = false;
+            MemoryKindPicker.IsEnabled = editable;
             NewMemoryButton.IsEnabled = editable && _viewModel.IsLoaded;
             RefreshMemoryButton.IsEnabled = _viewModel.Target is not null && !_viewModel.IsBusy;
             SaveMemoryButton.IsEnabled = _viewModel.CanSave;
+            SaveMemoryButton.Content = UiText.Get(_viewModel.IsDraft ? "保存草稿" : "保存");
+            ConfirmMemoryButton.IsEnabled = _viewModel.CanConfirm;
+            ConfirmMemoryButton.Visibility = _viewModel.IsDraft ? Visibility.Visible : Visibility.Collapsed;
+            ConfirmMemoryButton.Content = UiText.Get(_viewModel.SelectedEntry?.Proposal?.Action switch
+            {
+                "update" => "确认更新", "delete" => "确认删除", _ => "确认记忆"
+            });
             DeleteMemoryButton.IsEnabled = _viewModel.CanDelete;
+            DeleteMemoryButton.Content = UiText.Get(_viewModel.IsDraft ? "丢弃" : "删除");
             DeleteMemoryButton.Visibility = _viewModel.IsNew ? Visibility.Collapsed : Visibility.Visible;
             MemoryEntryList.IsEnabled = !_viewModel.IsBusy;
             MemoryInputHint.Text = _viewModel.EditorContent.Length == 0 ? string.Empty : _viewModel.InputError switch
@@ -172,7 +176,7 @@ public sealed partial class MemoryManagementWindow : Window
         _rows.Clear();
         foreach (var entry in _viewModel.VisibleEntries)
             if (search.Length == 0 || entry.Content.Contains(search, StringComparison.OrdinalIgnoreCase))
-                _rows.Add(new MemoryDisplayRow(entry, $"{KindLabel(entry.Kind)} · {SourceStatus(entry)}"));
+                _rows.Add(new MemoryDisplayRow(entry, $"{KindLabel(entry.Kind)} · {UiText.Get(entry.Status == MemoryStatuses.Draft ? "待确认" : "已确认")} · {SourceStatus(entry)}"));
     }
 
     private string EmptyStateText()
@@ -193,6 +197,7 @@ public sealed partial class MemoryManagementWindow : Window
 
     private string SourceStatus(MemoryEntry entry)
     {
+        if (entry.Status == MemoryStatuses.Draft) return UiText.Get("草稿不用于模型上下文。");
         if (entry.Active == false) return UiText.Get("暂停使用");
         if (IsArchivedProject) return UiText.Get("工作已归档，暂停共享");
         if (entry.SourceAvailable == false) return UiText.Get("来源不可用");
@@ -207,9 +212,34 @@ public sealed partial class MemoryManagementWindow : Window
         if (!manual && entry!.Source.ConversationId is { } id)
             source += " · " + (_targets.FirstOrDefault(target => target.Scope == MemoryScopes.Chat && target.Id == id)?.DisplayName ?? UiText.Get("来源聊天"));
         MemorySourceLabel.Text = UiText.Get("来源") + " · " + source;
+        MemoryEntryStatusLabel.Text = UiText.Get(entry is null ? "手动保存即确认此范围的记忆。" :
+            entry.Status == MemoryStatuses.Draft ? "待确认" : "已确认");
         MemorySourceStatusLabel.Text = entry is null ? UiText.Get(IsArchivedProject ? "工作已归档，共享记忆暂停用于聊天。" : "保存后用于当前范围的上下文。") : SourceStatus(entry)
             + (entry.Active == false && entry.SourceAvailable == false ? " · " + UiText.Get("来源不可用") : string.Empty)
             + (entry.Active == false && entry.SourceArchived == true ? " · " + UiText.Get("来源已归档") : string.Empty);
+        if (entry?.Status == MemoryStatuses.Draft && _viewModel.HasChanges)
+            MemorySourceStatusLabel.Text += "\n" + UiText.Get("请先保存草稿修改，再确认。");
+        if (entry?.Status == MemoryStatuses.Draft && entry.Proposal?.Target is { } proposedTarget &&
+            !_viewModel.Entries.Any(item => item.Id == proposedTarget.Id && item.Status == MemoryStatuses.Confirmed &&
+                item.Revision == proposedTarget.EntryRevision))
+            MemorySourceStatusLabel.Text += "\n" + UiText.Get("目标已变化，请重新读取。");
+        MemoryRevisionLabel.Text = _viewModel.ScopeRevision is { } revision
+            ? string.Format(UiText.Get("范围版本 {0} · 条目版本 {1}"), revision, entry?.Revision ?? 0) : string.Empty;
+        var proposal = entry?.Proposal;
+        MemoryProposalLabel.Visibility = proposal is null ? Visibility.Collapsed : Visibility.Visible;
+        MemoryProposalLabel.Text = proposal is null ? string.Empty : string.Join("\n", new[]
+        {
+            UiText.Get("建议动作") + " · " + UiText.Get(proposal.Action switch { "update" => "更新已有记忆", "delete" => "删除已有记忆", _ => "新增记忆" }),
+            UiText.Get(proposal.IsInference ? "推断建议，请核对用户原话。" : "请核对建议与用户原话。"),
+            UiText.Get("理由") + " · " + proposal.Reason,
+            proposal.Target is { } target ? UiText.Get("目标记忆") + " · " +
+                (_viewModel.Entries.FirstOrDefault(item => item.Id == target.Id)?.Content ?? UiText.Get("目标已变化，请重新读取。")) : string.Empty,
+            proposal.Conflicts.Length > 0 ? UiText.Get("可能冲突") + " · " + string.Join("; ", proposal.Conflicts) : string.Empty
+        }.Where(line => line.Length > 0));
+        var quotes = proposal?.Quotes ?? entry?.Candidate?.Quotes;
+        MemoryQuotesLabel.Visibility = quotes is { Length: > 0 } ? Visibility.Visible : Visibility.Collapsed;
+        MemoryQuotesLabel.Text = quotes is null ? string.Empty : UiText.Get("用户原话") + "\n" +
+            string.Join("\n\n", quotes.Select(quote => $"{quote.Text}\n{UiText.Get("来源消息")} · {quote.MessageId:D}"));
         MemoryUpdatedLabel.Visibility = entry is null ? Visibility.Collapsed : Visibility.Visible;
         MemoryUpdatedLabel.Text = entry is null ? string.Empty : UiText.Get("更新时间") + " · "
             + entry.UpdatedAt.ToLocalTime().ToString("g", UiText.Language == "en" ? CultureInfo.GetCultureInfo("en-US") : CultureInfo.GetCultureInfo("zh-CN"));
@@ -223,6 +253,7 @@ public sealed partial class MemoryManagementWindow : Window
             MemoryManagementStatus.ConflictRefreshFailed => "记忆版本冲突，刷新失败。编辑内容已保留，请先刷新。",
             MemoryManagementStatus.SavedRefreshFailed => "已保存，但列表刷新失败。请刷新，避免重复添加。",
             MemoryManagementStatus.DeletedRefreshFailed => "已删除，但列表刷新失败。请刷新。",
+            MemoryManagementStatus.ConfirmedRefreshFailed => "已确认，但列表刷新失败。请刷新核对当前状态。",
             MemoryManagementStatus.WriteOutcomeUnknown => "暂时无法确认是否保存成功。请刷新检查列表，避免重复添加。",
             MemoryManagementStatus.EntryMissing => "这条记忆已被删除。编辑内容已保留，可复制后新增。",
             MemoryManagementStatus.InvalidContent => "请检查记忆内容。",
@@ -287,10 +318,27 @@ public sealed partial class MemoryManagementWindow : Window
 
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await _viewModel.RefreshAsync();
     private async void Save_Click(object sender, RoutedEventArgs e) => await _viewModel.SaveAsync();
+    private async void Confirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_viewModel.CanConfirm || _dialogOpen) return;
+        var reviewedEntry = _viewModel.SelectedEntry!;
+        long? reviewedRevision = _viewModel.ScopeRevision;
+        string? action = reviewedEntry.Proposal?.Action;
+        if (action is "update" or "delete" && !await ConfirmAsync(
+            action == "update" ? "确认更新已有记忆？" : "确认删除已有记忆？",
+            action == "update" ? "此建议将替换上方显示的目标记忆，请核对内容与来源。" : "此建议将删除上方显示的目标记忆，请核对目标与来源。",
+            action == "update" ? "确认更新" : "确认删除")) return;
+        // An open dialog grants authority only to the entry the user reviewed.
+        // 已打开的确认框仅授权用户刚才核对的条目，切换或关闭后不继续执行。
+        if (!_closed && ReferenceEquals(_viewModel.SelectedEntry, reviewedEntry) && _viewModel.ScopeRevision == reviewedRevision)
+            await _viewModel.ConfirmAsync();
+    }
     private async void Delete_Click(object sender, RoutedEventArgs e)
     {
         if (!_viewModel.CanDelete || _dialogOpen) return;
-        if (await ConfirmAsync("删除这条记忆？", "删除后，它将不再用于模型上下文。", "删除") && !_closed)
+        if (await ConfirmAsync(_viewModel.IsDraft ? "丢弃这条草稿？" : "删除这条记忆？",
+            _viewModel.IsDraft ? "丢弃后，此建议不会进入模型上下文。" : "删除后，它将不再用于模型上下文。",
+            _viewModel.IsDraft ? "丢弃" : "删除") && !_closed)
             await _viewModel.DeleteAsync();
     }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use serde_json::{Value, json};
@@ -38,6 +38,9 @@ pub struct ToolRuntime {
     pub(crate) mcp_errors: tokio::sync::Mutex<HashMap<String, Value>>,
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
+    pub(crate) web_search: super::gateway_search::SearchState,
+    configuration_updates: tokio::sync::RwLock<()>,
+    configuration_generation: AtomicU64,
 }
 
 impl Default for ToolRuntime {
@@ -56,6 +59,9 @@ impl Default for ToolRuntime {
             mcp_errors: Default::default(),
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
+            web_search: Default::default(),
+            configuration_updates: Default::default(),
+            configuration_generation: AtomicU64::new(0),
         }
     }
 }
@@ -78,6 +84,19 @@ pub struct GatewayToolContext {
     pub approved: bool,
     pub events: Option<mpsc::Sender<Value>>,
     pub external_execute: Option<ExternalTool>,
+}
+
+pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *cancellation.borrow_and_update() {
+            break;
+        }
+        if cancellation.changed().await.is_err() {
+            // A closed signal channel is not an explicit cancellation request.
+            // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 pub(crate) fn failure(code: &str, message: &str, status: u16) -> GatewayError {
@@ -696,6 +715,9 @@ async fn execute_inner(
     if tool_name == "work.folder.bind" {
         return bind_work(args, ctx).await;
     }
+    if tool_name.starts_with("mcp.") {
+        super::gateway_mcp::authorized_server(tool_name, ctx)?;
+    }
     let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop"].contains(&tool_name) || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
@@ -735,7 +757,7 @@ async fn execute_inner(
         return super::gateway_web::fetch(args, ctx).await;
     }
     if tool_name == "web.search" {
-        return super::gateway_web::search(args, ctx).await;
+        return super::gateway_search::search(args, ctx).await;
     }
     if tool_name.starts_with("skill.") {
         return skills(tool_name, args, ctx).await;
@@ -743,7 +765,28 @@ async fn execute_inner(
     if tool_name == "tool.search" || tool_name == "tool.load" {
         let mut all = builtin_catalog();
         if tool_name == "tool.load" {
-            let names = args["names"].as_array().cloned().unwrap_or_default();
+            let mut known = all.clone();
+            known.extend(ctx.runtime.schemas.read().await.iter().cloned());
+            // Resolve exact known wire aliases only; model spelling or a guessed hash cannot invent a capability.
+            // 只归一化已知工具的精确协议别名；模型拼写或猜出的哈希不能创造能力。
+            let names: Vec<Value> = args["names"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|requested| {
+                    known
+                        .iter()
+                        .find(|tool| {
+                            tool["name"].as_str().is_some_and(|name| {
+                                requested == name
+                                    || requested.as_str()
+                                        == Some(crate::models::protocol::wire_name(name).as_str())
+                            })
+                        })
+                        .map(|tool| tool["name"].clone())
+                        .unwrap_or_else(|| requested.clone())
+                })
+                .collect();
             let servers = super::gateway_mcp::servers(ctx)
                 .into_iter()
                 .filter(|server| {
@@ -765,7 +808,10 @@ async fn execute_inner(
             }
             return Ok(
                 json!({"tools":all.into_iter().filter(|tool| names.iter().filter_map(Value::as_str)
-                .any(|name| tool["name"] == name || tool["name"].as_str().is_some_and(|value| value.starts_with(&format!("{name}."))))).collect::<Vec<_>>() }),
+                .any(|name| tool["name"] == name || tool["name"].as_str().is_some_and(|value| value.starts_with(&format!("{name}."))))).map(|mut tool| {
+                    tool["wireName"] = json!(crate::models::protocol::wire_name(tool["name"].as_str().unwrap_or("")));
+                    tool
+                }).collect::<Vec<_>>() }),
             );
         }
         all.extend(
@@ -853,11 +899,108 @@ fn execution_environment(
     .map_err(|message| failure("TOOL_ENVIRONMENT_FAILED", &message, 500))
 }
 
+/// Saved request snapshots can lose capabilities, but configuration changes cannot grant them new ones.
+/// 已保存的请求快照可以被撤销能力，配置更新不能给旧请求扩大能力。
+async fn checked_configuration(
+    ctx: &GatewayToolContext,
+) -> Result<GatewayToolContext, GatewayError> {
+    let mut checked = ctx.clone();
+    let _snapshot = ctx.runtime.configuration_updates.read().await;
+    let generation = ctx.runtime.configuration_generation.load(Ordering::Acquire);
+    checked.config["configurationGeneration"] = json!(generation);
+    checked.config["mcpConfigurationGeneration"] =
+        json!(super::gateway_mcp::configuration_generation(ctx));
+    // Unpersisted contexts are internal discovery/test inputs; formal requests always carry a saved revision.
+    // 未持久化的上下文用于内部发现或夹具；正式请求始终带有已保存的配置修订号。
+    if ctx.config["revision"].is_u64() {
+        let current = get_config(ctx).await?;
+        let original = super::gateway_mcp::servers(ctx);
+        let mut latest = ctx.clone();
+        latest.config = current.clone();
+        let enabled = super::gateway_mcp::servers(&latest);
+        let retained = original
+            .into_iter()
+            .filter_map(|mut server| {
+                let active = enabled.iter().find(|active| active["id"] == server["id"])?;
+                let mut previous_identity = server.clone();
+                let mut current_identity = active.clone();
+                for field in ["name", "disabledTools", "backgroundTask", "prewarmPriority"] {
+                    previous_identity.as_object_mut()?.remove(field);
+                    current_identity.as_object_mut()?.remove(field);
+                }
+                if previous_identity != current_identity {
+                    return None;
+                }
+                let mut disabled = server["disabledTools"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                for tool in active["disabledTools"].as_array().into_iter().flatten() {
+                    if !disabled.contains(tool) {
+                        disabled.push(tool.clone());
+                    }
+                }
+                server["disabledTools"] = json!(disabled);
+                Some(server)
+            })
+            .collect::<Vec<_>>();
+        checked.config["mcpServers"] = json!(retained);
+        let mut disabled = ctx.config["disabledSkills"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for skill in current["disabledSkills"].as_array().into_iter().flatten() {
+            if !disabled.contains(skill) {
+                disabled.push(skill.clone());
+            }
+        }
+        checked.config["disabledSkills"] = json!(disabled);
+        checked.config["skillDirectories"] = json!(
+            ctx.config["skillDirectories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|directory| current["skillDirectories"]
+                    .as_array()
+                    .is_some_and(|directories| directories.contains(directory)))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(checked)
+}
+
+pub(crate) fn check_configuration_generation(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    if ctx.config["configurationGeneration"]
+        .as_u64()
+        .is_some_and(|generation| {
+            generation != ctx.runtime.configuration_generation.load(Ordering::Acquire)
+        })
+    {
+        return Err(failure(
+            "TOOL_CONFIGURATION_CHANGED",
+            "工具配置已更新，旧调用未派发，请重新加载能力。",
+            409,
+        ));
+    }
+    check_cancelled(ctx)
+}
+
 pub async fn execute(
     tool_name: &str,
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    let checked = if tool_name.starts_with("skill.")
+        || tool_name.starts_with("mcp.")
+        || tool_name == "tool.load"
+        || tool_name == "tool.search"
+    {
+        Some(checked_configuration(ctx).await?)
+    } else {
+        None
+    };
+    let ctx = checked.as_ref().unwrap_or(ctx);
     let mut result = execute_inner(tool_name, args, ctx).await?;
     let server = if let Some(suffix) = tool_name.strip_prefix("mcp.") {
         let id = suffix.split('.').next().unwrap_or("");
@@ -1047,6 +1190,28 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
                 )
             })?;
         let manifest = files.iter().map(|file| json!({"path":file["relativePath"],"size":file["size"],"sha256":file["sha256"]})).collect::<Vec<_>>();
+        let identity = json!({"id":skill["id"],"source":skill["source"],"sha256":skill["sha256"],"script":script,"files":manifest});
+        let needs = super::policy::calculate("tools.needsApproval",
+            &json!({"name":name,"permissionMode":ctx.permission_mode,"options":{"verifiedSandbox":true}}))
+            .map_err(|message| failure("TOOL_POLICY_FAILED", &message, 500))?;
+        if needs == true && !ctx.approved {
+            let mut pending = approval(name, &args, ctx);
+            pending["invocation"]["skillIdentity"] = identity;
+            return Ok(pending);
+        }
+        // A resumed approval authorizes the inspected package, not a replacement at the same path.
+        // 恢复审批仅授权已检查的技能包，不能执行相同路径后来被替换的脚本。
+        if ctx.approved
+            && ctx.config["approvedInvocation"].is_object()
+            && ctx.config["approvedInvocation"]["skillIdentity"] != identity
+        {
+            return Err(failure(
+                "APP_SKILL_CHANGED",
+                "技能包在审批期间发生变化，未派发脚本。",
+                409,
+            ));
+        }
+        check_configuration_generation(ctx)?;
         let result = super::gateway_process::execute("terminal.run",json!({"command":"node","args":args["args"],
             "timeoutMs":args["timeoutMs"].as_u64().unwrap_or(120_000),"skill":{"root":root,"script":script,"files":manifest}}),ctx).await?;
         let proof = &result["skillExecution"];
@@ -1257,8 +1422,15 @@ pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError>
 }
 
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    let _update = ctx.runtime.configuration_updates.write().await;
     get_config(ctx).await?;
+    // Invalidate already checked dispatches before the first write can yield to another task.
+    // 首次配置写入进入异步等待前使已检查的派发失效，避免检查与保存之间的竞争。
+    ctx.runtime
+        .configuration_generation
+        .fetch_add(1, Ordering::AcqRel);
     let result = native(ctx, "config.update", json!({"input":input})).await?;
+    ctx.runtime.web_search.clear_queries();
     super::gateway_mcp::reset(ctx).await;
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
@@ -1272,18 +1444,17 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
     let loaded = ctx.runtime.schemas.read().await;
-    let pattern = regex::Regex::new(r"(?i)(?:^|[-_.])(?:exa|brave(?:-search)?)(?:[-_.]|$)")
-        .expect("static provider pattern");
     let rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
-        pattern.is_match(server["id"].as_str().unwrap_or("")) || server["args"].as_array().into_iter().flatten().filter_map(Value::as_str)
-            .any(|argument|argument.contains("exa-mcp-server")||argument.contains("brave-search-mcp")||argument.contains("server-brave-search"))
-            || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&tool["name"].as_str().is_some_and(|name|name.ends_with("web_search_exa")||name.ends_with("brave_web_search")))
+        super::service_web::search_server(server)
+            || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&super::service_web::provider_kind(tool).is_some())
     }).map(|server|{
         let state=diagnostics.iter().find(|state|state["serverId"]==server["id"]);
         let enabled=server["enabled"]!=false;
-        let ready=enabled&&state.is_some_and(|state|state["ready"]==true);
-        json!({"id":server["id"],"name":if server["id"].as_str().unwrap_or("").contains("brave"){"Brave Search"}else{"Exa"},
-            "enabled":enabled,"ready":ready,"state":if !enabled{"disabled"}else if ready{"ready"}else if state.is_some_and(|state|!state["error"].is_null()){"error"}else{"disconnected"},
+        let cooling=ctx.runtime.web_search.cooling(server);
+        let ready=enabled&&cooling.is_none()&&state.is_some_and(|state|state["ready"]==true);
+        json!({"id":server["id"],"name":server["name"].as_str().unwrap_or("Web search"),
+            "enabled":enabled,"ready":ready,"state":if !enabled{"disabled"}else if cooling.is_some(){"cooldown"}else if ready{"ready"}else if state.is_some_and(|state|!state["error"].is_null()){"error"}else{"disconnected"},
+            "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms),
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
     json!({"selectedId":selected_id,"providers":rows})
@@ -1530,6 +1701,15 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
     super::gateway_process::shutdown(ctx).await;
     super::gateway_mcp::shutdown(ctx).await;
     super::gateway_browser::shutdown(ctx).await;
+}
+
+/// Migration requires verified cleanup; best-effort application shutdown is not a readiness receipt.
+/// 迁移必须取得核验清理结果；尽力退出应用不能作为迁移就绪回执。
+pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    super::gateway_process::shutdown_checked(ctx).await?;
+    super::gateway_mcp::shutdown_checked(ctx).await?;
+    super::gateway_browser::shutdown_checked(ctx).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2037,6 +2217,92 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(invalid.code, "PROTECTED_APP_DATA");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_request_capabilities_are_revocable_without_granting_new_servers() {
+        let (mut ctx, _owner) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let skill_root = root.join("skills/fixture");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: fixture\ndescription: Isolated skill\n---\nSynthetic body.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_root.join("test.mjs"),
+            "// Never executed by this test.\n",
+        )
+        .unwrap();
+        let hidden = mcp_presets(&ctx)
+            .iter()
+            .map(|preset| preset["id"].clone())
+            .collect::<Vec<_>>();
+        let initial = get_config(&ctx).await.unwrap();
+        let server = json!({"id":"fixture","name":"Isolated fixture","enabled":true,"transport":"streamable-http","url":"http://127.0.0.1:1/rpc","trusted":false});
+        ctx.config = update_config(json!({"version":1,"expectedRevision":initial["revision"],"mcpServers":[server.clone()],"skillDirectories":[root.join("skills")],"disabledSkills":[],"disabledOfficialMcpServers":hidden}), &ctx).await.unwrap();
+        let listed = execute("skill.list", json!({}), &ctx).await.unwrap();
+        let skill_id = listed["skills"][0]["id"].clone();
+        assert!(skill_id.is_string(), "{listed}");
+        ctx.permission_mode = "ask".into();
+        let arguments = json!({"id":skill_id,"path":"test.mjs","args":[]});
+        let pending = execute("skill.run", arguments.clone(), &ctx).await.unwrap();
+        assert_eq!(pending["requiresApproval"], true);
+        assert!(pending["invocation"]["skillIdentity"]["files"].is_array());
+        let mut approved = ctx.clone();
+        approved.approved = true;
+        approved.config["approvedInvocation"] = pending["invocation"].clone();
+        std::fs::write(
+            skill_root.join("test.mjs"),
+            "// Changed while approval was pending.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            execute("skill.run", arguments, &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "APP_SKILL_CHANGED"
+        );
+        let mut replacement = server.clone();
+        replacement["id"] = json!("replacement");
+        let saved = update_config(json!({"version":1,"expectedRevision":ctx.config["revision"],"mcpServers":[replacement],"skillDirectories":[root.join("skills")],"disabledSkills":[skill_id],"disabledOfficialMcpServers":hidden}), &ctx).await.unwrap();
+        assert_eq!(
+            execute("skill.read", json!({"id":skill_id}), &ctx)
+                .await
+                .unwrap_err()
+                .code,
+            "APP_SKILL_NOT_FOUND"
+        );
+        assert_eq!(
+            execute("mcp.fixture.echo", json!({}), &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "MCP_SERVER_NOT_FOUND"
+        );
+        assert_eq!(
+            execute("mcp.replacement.echo", json!({}), &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "MCP_SERVER_NOT_FOUND"
+        );
+        let retained = checked_configuration(&ctx).await.unwrap();
+        ctx.runtime
+            .configuration_generation
+            .fetch_add(1, Ordering::AcqRel);
+        assert_eq!(
+            check_configuration_generation(&retained).unwrap_err().code,
+            "TOOL_CONFIGURATION_CHANGED"
+        );
+        assert_eq!(
+            saved["revision"].as_u64(),
+            ctx.config["revision"].as_u64().map(|revision| revision + 1)
+        );
+        shutdown(&ctx).await;
         std::fs::remove_dir_all(root).unwrap();
     }
 }

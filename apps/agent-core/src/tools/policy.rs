@@ -183,7 +183,7 @@ fn can_parallel(arguments: &Value) -> bool {
     if PARALLEL_READS.contains(&name) {
         return true;
     }
-    let operation = regex::Regex::new(r"^mcp\.official-(exa|fetch|brave-search)(?:-([1-9][0-9]*))?\.(web_search_exa|fetch|brave_web_search)$").unwrap();
+    let operation = regex::Regex::new(r"^mcp\.official-(exa|fetch|brave-search|parallel)(?:-([1-9][0-9]*))?\.(web_search_exa|fetch|brave_web_search|web_search)$").unwrap();
     let effective = operation
         .captures(name)
         .filter(|captures| captures.get(2).is_none_or(|number| number.as_str() != "1"))
@@ -193,6 +193,7 @@ fn can_parallel(arguments: &Value) -> bool {
         "mcp.exa.web_search_exa",
         "mcp.brave.brave_web_search",
         "mcp.brave-search.brave_web_search",
+        "mcp.parallel.web_search",
     ]
     .contains(&effective.as_str())
     {
@@ -252,6 +253,10 @@ const PARALLEL_READS: &[&str] = &[
 ];
 
 const READ_TOOLS: &[&str] = &[
+    "task.status",
+    "task.wait",
+    "task.read",
+    "task.result",
     "filesystem.list",
     "filesystem.read",
     "filesystem.search",
@@ -278,6 +283,8 @@ const READ_TOOLS: &[&str] = &[
     "terminal.host.read",
 ];
 const REVERSIBLE_TOOLS: &[&str] = &[
+    "task.delegate",
+    "task.control",
     "filesystem.write",
     "filesystem.edit",
     "filesystem.mkdir",

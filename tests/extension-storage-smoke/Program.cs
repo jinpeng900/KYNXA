@@ -42,6 +42,7 @@ await Write(Path.Combine(source, "MCP", "npm-cache", "package", "server.js"), "n
 await Write(Path.Combine(source, "MCP", "browser-cache", "fixture.txt"), "cache");
 await Write(Path.Combine(source, "Chats", "chat", "events.jsonl"), "private conversation stays in Data");
 await Write(Path.Combine(source, "Models", "connections.json"), "not extension content");
+await Write(Path.Combine(source, "Agent", "task-artifacts", "task-fixture", "receipt.json"), "formal task artifact belongs to Data");
 Directory.CreateDirectory(Path.Combine(source, "Skills", "mine", "empty"));
 string oldId = ExtensionConfigurationMigration.SkillId(skillFile), newId = ExtensionConfigurationMigration.SkillId(Path.Combine(target, "Skills", "mine", "SKILL.md"));
 string externalId = ExtensionConfigurationMigration.SkillId(externalSkill), unknownId = new('a', 24);
@@ -84,6 +85,7 @@ string originalPointer = File.ReadAllText(pointer);
 var result = await ExtensionStorageMigrationService.MoveAsync(source, target, pointer);
 Check(result.ExtensionRoot == target && result.VerifiedFiles == 6, "extension-only files verified");
 Check(!Directory.Exists(Path.Combine(target, "Chats")) && !Directory.Exists(Path.Combine(target, "Models")), "conversations and credentials excluded");
+Check(!Directory.Exists(Path.Combine(target, "Agent", "task-artifacts")), "formal task artifacts excluded from extension migration");
 Check(File.ReadAllText(configPath) == originalConfig && File.ReadAllText(skillFile).Contains("Hello"), "source retained");
 Check(File.ReadAllText(externalSkill) == "external stays put", "external files retained");
 Check(Directory.Exists(Path.Combine(target, "Skills", "mine", "empty")), "empty directory retained");
@@ -242,7 +244,8 @@ Check(dataConfig["disabledSkills"]![0]!.GetValue<string>() == ExtensionConfigura
 Check(File.Exists(Path.Combine(dataTarget, "MCP", "browser-cache", "fixture.txt")), "Data fallback moves cache");
 string fixedTarget = Path.Combine(fixture, "Data-explicit-extension");
 await StorageMigrationService.MoveAsync(legacyDesktop, legacyModels, fixedTarget, dataPointer, migrateExtensions: false);
-Check(!Directory.Exists(Path.Combine(fixedTarget, "Agent")) && !Directory.Exists(Path.Combine(fixedTarget, "Skills")) && !Directory.Exists(Path.Combine(fixedTarget, "MCP")), "explicit extension roots excluded from Data migration");
+Check(!File.Exists(Path.Combine(fixedTarget, "Agent", "config.json")) && !Directory.Exists(Path.Combine(fixedTarget, "Skills")) && !Directory.Exists(Path.Combine(fixedTarget, "MCP")), "explicit extension roots excluded from Data migration");
+Check(File.ReadAllText(Path.Combine(fixedTarget, "Agent", "task-artifacts", "task-fixture", "receipt.json")) == "formal task artifact belongs to Data", "task artifacts follow Data when extensions stay fixed");
 Check(ExtensionPaths.Resolve(source, null, pointer).Root == target, "Data migration does not alter extensions pointer");
 
 // Runtime metadata moves without launching Python, uv or any downloaded package.

@@ -73,6 +73,10 @@ foreach ($dependency in $nativeManifest.packages) {
         Assert-NativePackage ([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -eq $asset.bytes -and (Get-PackageHash $path) -eq $asset.sha256) "Pinned native DLL/license matches: $($asset.path)"
     }
 }
+foreach ($asset in $nativeManifest.localFiles) {
+    $path=Join-Path $package $asset.path
+    Assert-NativePackage ([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -eq $asset.bytes -and (Get-PackageHash $path) -eq $asset.sha256) "Bundled upstream license matches: $($asset.path)"
+}
 foreach ($directory in @('runtime/embedding/builtin-multilingual','runtime/rerank/builtin-multilingual-reranker')) {
     $manifest=Get-Content -LiteralPath (Join-Path $package ($directory+'/manifest.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($asset in $manifest.files) {

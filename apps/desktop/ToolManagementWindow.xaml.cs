@@ -57,12 +57,6 @@ public sealed partial class ToolManagementWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AgentTitleBar);
         AppWindow.Resize(new Windows.Graphics.SizeInt32(940, 720));
-        if (AppWindowTitleBar.IsCustomizationSupported())
-        {
-            AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
-        }
         UiText.LanguageChanged += Language_Changed;
         AppWindow.Closing += Window_Closing;
         Closed += Window_Closed;

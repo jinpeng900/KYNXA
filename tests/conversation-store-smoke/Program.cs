@@ -50,6 +50,7 @@ var enteredFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuati
 var releaseFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var enteredBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var releaseBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+TaskCompletionSource? folderSaveEntered = null, releaseFolderSave = null;
 var handlers = new ConcurrentBag<Task>();
 int revision = 10, oldProtocol = 0, forceConflict = 0, blockNextPut = 0;
 var storedChat = new ProjectChatState { Title = "已有记录", Messages = [new() { Content = "已有问题" }, new() { Role = "assistant", Content = "正式回复", DurationMs = 5678 }] };
@@ -81,6 +82,11 @@ async Task Handle(HttpListenerContext context)
             var payload = document.RootElement.Clone(); uploads.Enqueue(payload);
             if (uploads.Count == 1) { enteredFirstPut.SetResult(); await releaseFirstPut.Task; }
             if (Interlocked.Exchange(ref blockNextPut, 0) == 1) { enteredBlockedPut.SetResult(); await releaseBlockedPut.Task; }
+            if (folderSaveEntered is { } entered && releaseFolderSave is { } release)
+            {
+                entered.SetResult();
+                await release.Task;
+            }
             if (payload.GetProperty("Revision").GetInt32() != revision || Volatile.Read(ref forceConflict) == 1)
             {
                 context.Response.StatusCode = 409; result = new { error = "conflict" };
@@ -191,16 +197,56 @@ try
     await pagedStore.SaveChatsAsync(metadata.Chats);
     Check(uploads.Last().GetProperty("Chats")[0].GetProperty("Messages").GetArrayLength() == 0,
         "Loading a history page caused already saved user messages to be uploaded again.");
+
+    // Reload after the independent paging client commits its draft before testing folder rebases.
+    // 独立分页客户端提交草稿后，先读取最新版本，再验证文件夹合并，避免混入无关的旧版本冲突。
+    reloaded = await store.LoadAsync();
+    // Rebase a gateway-owned folder change without dropping the user's unrelated metadata edit.
+    // 合并网关拥有的工作目录变更，同时保留用户无关的元数据编辑；同一目录竞争仍须报冲突。
+    var loadedProject = reloaded.Projects.Single();
+    canonical.Projects.Single().FolderPath = Path.Combine(dataPath, "gateway-folder");
+    canonical = canonical with { Revision = ++revision };
+    loadedProject.Name = "User renamed project";
+    int beforeRebase = uploads.Count;
+    await store.SaveAsync(reloaded.Projects);
+    Check(uploads.Count == beforeRebase + 2 && canonical.Projects.Single().Name == "User renamed project" &&
+        loadedProject.FolderPath == canonical.Projects.Single().FolderPath,
+        "Folder-only conflict did not rebase once and update the still-current UI folder reference.");
+
+    loadedProject.FolderPath = Path.Combine(dataPath, "local-folder");
+    canonical.Projects.Single().FolderPath = Path.Combine(dataPath, "competing-folder");
+    canonical = canonical with { Revision = ++revision };
+    int beforeCompeting = uploads.Count;
+    try { await store.SaveAsync(reloaded.Projects); throw new Exception("Competing folder edits were overwritten."); }
+    catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Competing folder conflict was not actionable."); }
+    Check(uploads.Count == beforeCompeting + 1 && loadedProject.FolderPath == Path.Combine(dataPath, "local-folder") &&
+        canonical.Projects.Single().FolderPath == Path.Combine(dataPath, "competing-folder"),
+        "A competing folder edit must remain local and must not retry over the gateway value.");
+
+    reloaded = await store.LoadAsync();
+    loadedProject = reloaded.Projects.Single();
+    loadedProject.FolderPath = Path.Combine(dataPath, "submitted-folder");
+    folderSaveEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    releaseFolderSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    var folderSave = store.SaveAsync(reloaded.Projects);
+    await folderSaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    loadedProject.FolderPath = Path.Combine(dataPath, "later-local-folder");
+    releaseFolderSave.SetResult();
+    await folderSave;
+    folderSaveEntered = releaseFolderSave = null;
+    Check(loadedProject.FolderPath == Path.Combine(dataPath, "later-local-folder") &&
+        canonical.Projects.Single().FolderPath == Path.Combine(dataPath, "submitted-folder"),
+        "An accepted folder response overwrote a newer local folder edit made while awaiting.");
     forceConflict = 1;
     try { await store.SaveChatsAsync([chat]); throw new Exception("Conflict ignored."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Conflict was not actionable."); }
     oldProtocol = 1;
     try { await store.LoadAsync(); throw new Exception("Old gateway accepted."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("旧网关"), "Old gateway did not explain incompatibility."); }
-    Console.WriteLine("PASS: bounded bidirectional page windows, oversized-source preservation, durable/unsaved eviction guards, historical task outcomes, canonical loads, immutable snapshots, serialized revisions, scope isolation, draft exclusion, assistant authority, only-new-user uploads, combined/no-op exit saves, folder changes, queued cancellation, conflict and protocol rejection; no desktop transcript files.");
+    Console.WriteLine("PASS: bounded bidirectional page windows, oversized-source preservation, durable/unsaved eviction guards, historical task outcomes, canonical loads, immutable snapshots, serialized revisions, scope isolation, draft exclusion, assistant authority, only-new-user uploads, combined/no-op exit saves, folder changes, queued cancellation, folder-only rebase, competing-folder conflict, in-flight folder edit protection, conflict and protocol rejection; no desktop transcript files.");
 }
 finally
 {
-    releaseFirstPut.TrySetResult(); releaseBlockedPut.TrySetResult(); stopping.Cancel(); await server; await Task.WhenAll(handlers);
+    releaseFirstPut.TrySetResult(); releaseBlockedPut.TrySetResult(); releaseFolderSave?.TrySetResult(); stopping.Cancel(); await server; await Task.WhenAll(handlers);
     Environment.SetEnvironmentVariable("KYNXA_MODEL_API_URL", oldUrl); listener.Stop();
 }

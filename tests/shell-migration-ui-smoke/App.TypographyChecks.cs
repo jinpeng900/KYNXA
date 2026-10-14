@@ -51,8 +51,8 @@ public partial class App
                     "the real title menu loads its " + language + " labels");
                 await SettleAsync();
                 var items = TypographyMenuItems();
-                Check(items.Length == 8 && items.All(item => item.FontFamily.Source == expectedFont),
-                    "all eight real navigation menu items share the UI font in " + language);
+                Check(items.Length == 9 && items.All(item => item.FontFamily.Source == expectedFont),
+                    "all nine real navigation menu items share the UI font in " + language);
                 var labels = items.Select(item => new
                 {
                     Item = item,
@@ -68,9 +68,9 @@ public partial class App
                     return bounds.Left >= -1 && bounds.Top >= -1 && bounds.Right <= label.Item.ActualWidth + 1 &&
                         bounds.Bottom <= label.Item.ActualHeight + 1 && IsInsidePopup(label.Text);
                 }), "every visible navigation label stays inside its real menu item and popup in " + language);
-                Check(new[] { "新建聊天 Ctrl+N", "搜索会话 Ctrl+F", "聚焦输入 Ctrl+L" }
+                Check(new[] { "新建聊天 Ctrl+N", "查找会话正文 Ctrl+F", "搜索会话 Ctrl+Shift+K", "聚焦输入 Ctrl+L" }
                     .All(key => labels.Any(label => label.Text.Text == UiText.Get(key))),
-                    "Chinese/English navigation labels retain complete Ctrl+N, Ctrl+F and Ctrl+L shortcuts in " + language);
+                    "Chinese/English navigation labels retain complete Ctrl+N, Ctrl+F, Ctrl+Shift+K and Ctrl+L shortcuts in " + language);
                 observations.Add(new
                 {
                     Surface = "navigation", Language = language,

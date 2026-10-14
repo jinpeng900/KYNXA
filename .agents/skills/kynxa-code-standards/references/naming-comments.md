@@ -2,6 +2,8 @@
 
 适用于 KYNXA 自有 Rust 网关与资源服务、C#/WinUI 与 ToolHost、WebView JavaScript、PowerShell 构建及对应测试。当前入口和职责见[原生网关架构](../../../../docs/architecture/native-gateway.md)；规则参考公开团队指南，再按当前语言与契约调整，不要求切换技术栈。
 
+规范化的验证与收尾遵循[最低必要验证与推进节奏](../../kynxa-development/references/validation.md#最低必要验证与推进节奏)，不为命名、注释或格式修改自动增加探针、快照及全套验收。
+
 ## 语义和兼容性
 
 名称优先表达用途。`output` 若实际持有终端标准输出，使用 `stdoutBuffer`；预算中的 `used` 使用 `usedTokens`；截图的设备上下文使用 `windowDeviceContext`。不为已经清晰的 `path`、`error`、`index` 增加重复修饰。

@@ -8,7 +8,7 @@ using KYNXA_Desktop.ViewModels;
 
 await Smoke.RunAsync();
 
-internal static class Smoke
+internal static partial class Smoke
 {
     private static readonly MemoryTarget Chat = new(MemoryScopes.Chat, Guid.Parse("b168304f-d69b-49b9-b97a-6924cc40b1a4"), "Example chat");
     private static readonly MemoryTarget Project = new(MemoryScopes.Project, Guid.Parse("d8623068-8b2f-4862-baaa-7480cb18c970"), "Example work");
@@ -20,7 +20,16 @@ internal static class Smoke
     {
         await CheckAsync("candidate provenance, confirmation-only PATCH and settings patch serialization", CandidateContractsAsync);
         await CheckAsync("HTTP scope paths and status-bearing GETs", HttpReadsAsync);
+        await CheckAsync("mixed confirmed, candidate and action-proposal drafts remain readable and validated", DraftResponsesAsync);
+        await CheckAsync("pending review never implicitly confirms while confirmed editing remains available", ReviewDraftWithoutImplicitConfirmationAsync);
         await CheckAsync("HTTP manual CRUD uses scope revision and DELETE JSON", HttpWritesAsync);
+        await CheckAsync("HTTP mixed draft and confirmed scope retains provenance and rejects active drafts", DraftHttpAsync);
+        await CheckAsync("draft edits stay pending until explicit versioned confirmation", DraftConfirmationAsync);
+        await CheckAsync("proposal confirmation sends reviewed action and selects updated target", ProposalConfirmationAsync);
+        await CheckAsync("confirmation conflicts reload authoritative status without retrying", ConfirmationConflictAsync);
+        await CheckAsync("changed draft after conflict must be reviewed before confirmation", ChangedDraftConfirmationAsync);
+        await CheckAsync("committed confirmation reload failure recovers without repeating write", ConfirmationReloadFailureAsync);
+        await CheckAsync("late confirmation cannot reload or mutate another target", ConfirmationSwitchAsync);
         await CheckAsync("HTTP errors retain status and machine code", HttpErrorsAsync);
         await CheckAsync("content validation blocks invalid requests", ValidationAsync);
         await CheckAsync("HTTP cancellation reaches the injected handler", HttpCancellationAsync);
@@ -47,6 +56,7 @@ internal static class Smoke
             new MemoryConfirmRequest(MemoryScopes.Chat, 4), options));
         Assert(confirmation.RootElement.GetProperty("status").GetString() == MemoryStatuses.Confirmed, "confirmation status retained");
         Assert(!confirmation.RootElement.TryGetProperty("content", out _) && !confirmation.RootElement.TryGetProperty("kind", out _), "omitted editor fields must not become null patches");
+        Assert(!confirmation.RootElement.TryGetProperty("proposalAction", out _), "ordinary confirmation must not fabricate an action");
         using var settings = JsonDocument.Parse(JsonSerializer.Serialize(
             new MemoryCandidateSettingsRequest(2, new MemoryCandidateSettingsPatch(Enabled: false)), options));
         Assert(settings.RootElement.GetProperty("patch").GetProperty("enabled").GetBoolean() == false, "disabled policy serialized");
@@ -127,6 +137,191 @@ internal static class Smoke
         Assert(calls.All(call => call.Body.GetProperty("expectedRevision").GetInt64() == 42), "Scope revision must travel on every write.");
         Assert(calls[2].Body.GetProperty("scope").GetString() == Chat.Scope, "DELETE requires a JSON body including scope.");
         Assert(!calls[0].Body.TryGetProperty("source", out _), "Manual management must not fabricate a message source.");
+    }
+
+    private static MemoryEntry DraftEntry(MemoryTarget target, string content = "Synthetic user decision")
+    {
+        Guid messageId = Guid.NewGuid();
+        return Entry(target, content, active: false) with
+        {
+            Status = MemoryStatuses.Draft,
+            Source = new("user-message", "user", target.Scope == MemoryScopes.Chat ? target.Id : Chat.Id, messageId),
+            Candidate = new("conservative-extractive-v1", "decision", new string('a', 64), [new(messageId, "Original saved user quote")])
+        };
+    }
+
+    private static async Task DraftHttpAsync()
+    {
+        var draft = DraftEntry(Chat);
+        var current = Doc(Chat, 4, Entry(Chat) with { Id = Guid.NewGuid() }, draft);
+        JsonElement confirmationBody = default;
+        using var http = new HttpClient(new Handler(async (request, token) =>
+        {
+            if (request.Method == HttpMethod.Patch)
+            {
+                confirmationBody = await request.Content!.ReadFromJsonAsync<JsonElement>(token);
+                return Json(current with { Revision = 5, Entries = [draft with { Status = MemoryStatuses.Confirmed, Active = true }] });
+            }
+            return Json(new ConversationMemoryResponse(Chat.Id!.Value, null, false, [current]));
+        })) { BaseAddress = new("http://memory.test.invalid") };
+        using var client = new MemoryApiClient(http);
+        var read = await client.GetAsync(Chat);
+        Assert(read.Entries.Length == 2 && read.Entries[1].Candidate!.Quotes[0].Text == "Original saved user quote", "mixed status list and user provenance must survive transport");
+        await client.ConfirmAsync(Chat, draft.Id, new(Chat.Scope, 4));
+        Assert(confirmationBody.GetProperty("expectedRevision").GetInt64() == 4 &&
+            confirmationBody.GetProperty("status").GetString() == MemoryStatuses.Confirmed &&
+            !confirmationBody.TryGetProperty("content", out _) && !confirmationBody.TryGetProperty("kind", out _), "confirmation sends explicit status without null editor patches");
+        current = current with { Entries = [draft with { Active = true }] };
+        await ThrowsAsync<InvalidDataException>(() => client.GetAsync(Chat));
+        current = current with { Entries = [draft with { Status = "unrecognized" }] };
+        await ThrowsAsync<InvalidDataException>(() => client.GetAsync(Chat));
+        await ThrowsAsync<ArgumentException>(() => client.ConfirmAsync(Chat, draft.Id, new(Chat.Scope, 4, Status: MemoryStatuses.Draft)));
+        await ThrowsAsync<ArgumentException>(() => client.UpdateAsync(Chat, draft.Id, new(Chat.Scope, "Valid", MemoryKinds.Fact, 4, Status: "unrecognized")));
+    }
+
+    private static async Task DraftConfirmationAsync()
+    {
+        var current = Doc(Chat, 7, DraftEntry(Chat));
+        var api = new FakeApi { Get = (_, _) => Task.FromResult(current) };
+        api.Update = (target, id, input, _) =>
+        {
+            Assert(input.Status is null && input.ExpectedRevision == 7, "saving draft edits grants no confirmation authority");
+            current = Doc(target, 8, current.Entries[0] with { Content = input.Content, Revision = 2 });
+            return Task.FromResult(current);
+        };
+        api.Confirm = (target, id, input, _) =>
+        {
+            Assert(id == current.Entries[0].Id && input.ExpectedRevision == 8 && input.Status == MemoryStatuses.Confirmed && input.ProposalAction is null,
+                "explicit confirmation uses refreshed scope revision and original draft ID");
+            current = Doc(target, 9, current.Entries[0] with { Status = MemoryStatuses.Confirmed, Revision = 3, Active = true });
+            return Task.FromResult(current);
+        };
+        using var vm = new MemoryManagementViewModel(api);
+        await vm.SelectTargetAsync(Chat);
+        vm.BeginEdit(vm.Entries[0]);
+        Assert(vm.IsDraft && vm.CanConfirm && !vm.CanSave && api.Writes == 0, "opening a candidate does not confirm it");
+        vm.EditorContent = "User revised draft";
+        Assert(!vm.CanConfirm && await vm.ConfirmAsync() == MemoryOperationResult.NotReady && api.Writes == 0, "unsaved edits cannot be silently confirmed");
+        Assert(await vm.SaveAsync() == MemoryOperationResult.Success && vm.IsDraft && vm.CanConfirm && vm.SelectedEntry?.Active == false,
+            "draft editing remains pending and inactive");
+        Assert(await vm.ConfirmAsync() == MemoryOperationResult.Success && vm.Status == MemoryManagementStatus.Confirmed &&
+            !vm.IsDraft && !vm.CanConfirm && vm.SelectedEntry?.Active == true && api.Writes == 2 && api.Reads == 3,
+            "only explicit confirmation activates the saved memory and reloads provenance");
+        current = Doc(Chat, 10, DraftEntry(Chat) with { SourceAvailable = false });
+        await vm.RefreshAsync();
+        vm.BeginEdit(vm.Entries[0]);
+        Assert(!vm.CanConfirm && await vm.ConfirmAsync() == MemoryOperationResult.NotReady, "unavailable user sources cannot be confirmed");
+    }
+
+    private static async Task ProposalConfirmationAsync()
+    {
+        foreach (string action in new[] { "update", "delete" })
+        {
+            var targetEntry = Entry(Project) with { Id = Guid.NewGuid(), Revision = 3 };
+            var draft = DraftEntry(Project);
+            var proposal = new MemoryProposal("model-memory-proposal-v1", action, draft.Candidate!.Quotes,
+                "Synthetic reason", true, ["Synthetic conflict"], new string('b', 64),
+                new(targetEntry.Id, Project.Scope, Project.ScopeId, 4, targetEntry.Revision, new string('c', 64)));
+            draft = draft with { Candidate = null, Proposal = proposal };
+            var current = Doc(Project, 5, targetEntry, draft);
+            var api = new FakeApi { Get = (_, _) => Task.FromResult(current) };
+            api.Confirm = (target, id, input, _) =>
+            {
+                Assert(id == draft.Id && input.ProposalAction == action && input.ExpectedRevision == 5, "confirmation must carry the reviewed mutation action");
+                current = action == "update" ? Doc(target, 6, targetEntry with { Content = draft.Content, Revision = 4 }) : Doc(target, 6);
+                return Task.FromResult(current);
+            };
+            using var vm = new MemoryManagementViewModel(api);
+            await vm.SelectTargetAsync(Project);
+            vm.BeginEdit(draft);
+            Assert(await vm.ConfirmAsync() == MemoryOperationResult.Success && vm.Status == MemoryManagementStatus.Confirmed && api.Writes == 1,
+                "proposal confirmation must apply once");
+            Assert(action == "update" ? vm.SelectedEntry?.Id == targetEntry.Id && vm.EditorContent == draft.Content : vm.IsNew && vm.Entries.Count == 0,
+                "confirmed mutation selects its actual resulting target or clears the deleted draft");
+        }
+    }
+
+    private static async Task ConfirmationConflictAsync()
+    {
+        var current = Doc(Chat, 2, DraftEntry(Chat));
+        var api = new FakeApi { Get = (_, _) => Task.FromResult(current) };
+        api.Confirm = (_, _, _, _) =>
+        {
+            current = Doc(Chat, 3, current.Entries[0] with { SourceAvailable = false });
+            throw new GatewayApiException("Source changed", HttpStatusCode.Conflict, "MEMORY_SOURCE_UNAVAILABLE");
+        };
+        using var vm = new MemoryManagementViewModel(api);
+        await vm.SelectTargetAsync(Chat);
+        vm.BeginEdit(vm.Entries[0]);
+        string original = vm.EditorContent;
+        Assert(await vm.ConfirmAsync() == MemoryOperationResult.Conflict && api.Writes == 1 && api.Reads == 2 &&
+            vm.ScopeRevision == 3 && vm.EditorContent == original && !vm.CanConfirm && vm.Status == MemoryManagementStatus.Conflict,
+            "changed source refreshes current status while preserving the reviewed text and preventing confirmation retry");
+    }
+
+    private static async Task ChangedDraftConfirmationAsync()
+    {
+        foreach (bool changeContent in new[] { true, false })
+        {
+            var current = Doc(Chat, 2, DraftEntry(Chat));
+            var api = new FakeApi { Get = (_, _) => Task.FromResult(current) };
+            api.Confirm = (_, _, _, _) =>
+            {
+                var draft = current.Entries[0];
+                current = Doc(Chat, 3, draft with
+                {
+                    Revision = draft.Revision + 1,
+                    Content = changeContent ? "Updated draft from another client" : draft.Content
+                });
+                throw new GatewayApiException("Draft changed", HttpStatusCode.Conflict, "MEMORY_CONFLICT");
+            };
+            using var vm = new MemoryManagementViewModel(api);
+            await vm.SelectTargetAsync(Chat);
+            vm.BeginEdit(vm.Entries[0]);
+            string reviewed = vm.EditorContent;
+            Assert(await vm.ConfirmAsync() == MemoryOperationResult.Conflict && vm.EditorContent == reviewed &&
+                !vm.HasChanges && !vm.CanConfirm, "a clean old form cannot confirm a changed draft or provenance revision");
+            Assert(await vm.ConfirmAsync() == MemoryOperationResult.NotReady && api.Writes == 1,
+                "conflict recovery must not authorize an unseen newer draft");
+            vm.BeginEdit(vm.Entries[0]);
+            Assert(vm.CanConfirm && vm.EditorContent == current.Entries[0].Content,
+                "explicitly opening the current draft restores confirmation of exactly the displayed version");
+        }
+    }
+
+    private static async Task ConfirmationReloadFailureAsync()
+    {
+        var current = Doc(Chat, 2, DraftEntry(Chat));
+        var api = new FakeApi();
+        api.Get = (_, _) => api.Reads == 2 ? throw new HttpRequestException("Synthetic refresh failure") : Task.FromResult(current);
+        api.Confirm = (_, _, _, _) =>
+        {
+            current = Doc(Chat, 3, current.Entries[0] with { Status = MemoryStatuses.Confirmed, Active = true, Revision = 2 });
+            return Task.FromResult(current);
+        };
+        using var vm = new MemoryManagementViewModel(api);
+        await vm.SelectTargetAsync(Chat);
+        vm.BeginEdit(vm.Entries[0]);
+        Assert(await vm.ConfirmAsync() == MemoryOperationResult.Failed && vm.Status == MemoryManagementStatus.ConfirmedRefreshFailed &&
+            !vm.IsLoaded && !vm.CanConfirm && api.Writes == 1, "known committed confirmation blocks repeats after failed refresh");
+        await vm.RefreshAsync();
+        Assert(vm.Status == MemoryManagementStatus.Confirmed && !vm.IsDraft && api.Writes == 1, "refresh recovers the committed outcome without another write");
+    }
+
+    private static async Task ConfirmationSwitchAsync()
+    {
+        var completion = new TaskCompletionSource<MemoryScopeDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var original = Doc(Chat, 2, DraftEntry(Chat));
+        var api = new FakeApi { Get = (target, _) => Task.FromResult(target == Chat ? original : Doc(User, 0)) };
+        api.Confirm = (_, _, _, _) => completion.Task;
+        using var vm = new MemoryManagementViewModel(api);
+        await vm.SelectTargetAsync(Chat);
+        vm.BeginEdit(vm.Entries[0]);
+        var confirm = vm.ConfirmAsync();
+        await vm.SelectTargetAsync(User);
+        completion.SetResult(original with { Revision = 3 });
+        Assert(await confirm == MemoryOperationResult.Superseded && vm.Target == User && vm.Entries.Count == 0 && vm.ScopeRevision == 0 && api.Reads == 2,
+            "late confirmation cannot start a follow-up read for a superseded target");
     }
 
     private static async Task HttpErrorsAsync()
@@ -417,10 +612,12 @@ internal static class Smoke
         public Func<MemoryTarget, CancellationToken, Task<MemoryScopeDocument>> Get { get; set; } = (_, _) => throw new InvalidOperationException("Unexpected read.");
         public Func<MemoryTarget, MemoryCreateRequest, CancellationToken, Task<MemoryScopeDocument>> Create { get; set; } = (_, _, _) => throw new InvalidOperationException("Unexpected create.");
         public Func<MemoryTarget, Guid, MemoryUpdateRequest, CancellationToken, Task<MemoryScopeDocument>> Update { get; set; } = (_, _, _, _) => throw new InvalidOperationException("Unexpected update.");
+        public Func<MemoryTarget, Guid, MemoryConfirmRequest, CancellationToken, Task<MemoryScopeDocument>> Confirm { get; set; } = (_, _, _, _) => throw new InvalidOperationException("Unexpected confirmation.");
         public Func<MemoryTarget, Guid, MemoryDeleteRequest, CancellationToken, Task<MemoryScopeDocument>> Delete { get; set; } = (_, _, _, _) => throw new InvalidOperationException("Unexpected delete.");
         public Task<MemoryScopeDocument> GetAsync(MemoryTarget target, CancellationToken cancellationToken = default) { Reads++; return Get(target, cancellationToken); }
         public Task<MemoryScopeDocument> CreateAsync(MemoryTarget target, MemoryCreateRequest request, CancellationToken cancellationToken = default) { Writes++; return Create(target, request, cancellationToken); }
         public Task<MemoryScopeDocument> UpdateAsync(MemoryTarget target, Guid entryId, MemoryUpdateRequest request, CancellationToken cancellationToken = default) { Writes++; return Update(target, entryId, request, cancellationToken); }
+        public Task<MemoryScopeDocument> ConfirmAsync(MemoryTarget target, Guid entryId, MemoryConfirmRequest request, CancellationToken cancellationToken = default) { Writes++; return Confirm(target, entryId, request, cancellationToken); }
         public Task<MemoryScopeDocument> DeleteAsync(MemoryTarget target, Guid entryId, MemoryDeleteRequest request, CancellationToken cancellationToken = default) { Writes++; return Delete(target, entryId, request, cancellationToken); }
         public void Dispose() => Disposed = true;
     }

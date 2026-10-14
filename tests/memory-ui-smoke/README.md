@@ -11,6 +11,17 @@ Run from the repository root after building:
 dotnet run --project tests/memory-ui-smoke/MemoryUiSmoke.csproj
 ```
 
+For the isolated pending-candidate and mutation-confirmation checks only:
+
+```powershell
+dotnet run --project tests/memory-ui-smoke/MemoryUiSmoke.csproj -- --confirmation-only
+```
+
+This short path covers separate draft editing and explicit confirmation, original
+user quotations, draft exclusion from model context, reviewed update/delete target
+actions, cancelled confirmations, candidate discard, and unavailable sources.
+The injected fixture never launches the real gateway, a local model, or a main desktop window.
+
 The host exercises real native controls through automation peers and programmatic
 control input. It does not claim physical mouse or keyboard interaction. Native
 dialog buttons are invoked through their exposed automation peers. Window resize,
@@ -35,3 +46,7 @@ automation names, and native bounds, confirming that the text fits inside its bu
 
 Results and previews are written beneath `%TEMP%/kynxa-memory-ui-smoke-*`. The
 latest result location is recorded in `%TEMP%/kynxa-memory-ui-smoke-latest.txt`.
+
+## Pending memory compatibility
+
+`--draft-only` reuses the explicit confirmation checks from `--confirmation-only`: saving edits keeps the entry pending, confirmation is a separate versioned action, update/delete proposals show their exact targets and confirmation dialog, and unavailable sources remain unconfirmable. The previous read-only draft compatibility restriction is superseded by the upstream review UI; it must not hide Save draft, Confirm or Discard. No formal gateway or user data is used.

@@ -1,0 +1,10 @@
+{
+  "npmRegistry": "https://registry.npmjs.org/",
+  "cargoRegistryIndex": "",
+  "playwrightDownloadHost": "",
+  "mirrors": {
+    "https://huggingface.co": [],
+    "https://nodejs.org/dist": [],
+    "https://registry.npmjs.org": []
+  }
+}

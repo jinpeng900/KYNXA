@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::{
-    ContractError, ContractResult, MAX_SAFE_INTEGER, hash, member, object, safe_integer, trim,
+    ContractError, ContractResult, MAX_SAFE_INTEGER, hash, keys, member, object, safe_integer, trim,
     utf16_length,
 };
 
@@ -99,10 +99,15 @@ fn source_extraction(value: &Value, text_length: Option<&Value>) -> ContractResu
             "complete",
             "uncoveredRanges",
             "ocr",
+            "image",
+            "textRange",
+            "parts",
+            "capabilities",
+            "omittedContent",
         ],
         "Source extraction",
     )?;
-    if !member(&value["format"], &["pdf", "docx"])
+    if !crate::document_formats::extracted_format(value["format"].as_str().unwrap_or(""))
         || !valid_text(&value["version"], 256)
         || !hash(&value["rawContentHash"])
     {
@@ -111,7 +116,97 @@ fn source_extraction(value: &Value, text_length: Option<&Value>) -> ContractResu
         ));
     }
     let mut result = json!({"format": value["format"], "version": value["version"], "rawContentHash": value["rawContentHash"]});
-    if value["format"] == "docx" {
+    if let Some(parts) = value.get("parts") {
+        let maximum_offset = text_length.and_then(Value::as_u64).unwrap_or(MAX_SOURCE_CHARACTERS);
+        if parts.as_array().is_none_or(|parts| parts.len() > 4096 || parts.iter().any(|part| {
+            !keys(part, &["kind", "name", "startOffset", "endOffset"])
+                || !valid_text(&part["kind"], 64) || !valid_text(&part["name"], 2048)
+                || !safe_integer(&part["startOffset"], 0, maximum_offset)
+                || !safe_integer(&part["endOffset"], 0, maximum_offset)
+                || part["endOffset"].as_u64() < part["startOffset"].as_u64()
+        })) { return Err(extraction_failure("Document structure positions are invalid. / 文档结构位置无效。")); }
+        result["parts"] = parts.clone();
+    }
+    for field in ["capabilities", "omittedContent"] {
+        if let Some(values) = value.get(field) {
+            if values.as_array().is_none_or(|values| values.len() > 64 || values.iter().any(|item| !valid_text(item, 512))) {
+                return Err(extraction_failure("Document capability metadata is invalid. / 文档能力元信息无效。"));
+            }
+            result[field] = values.clone();
+        }
+    }
+    if value["format"] == "image" {
+        if ["pageCount", "pages", "pageWindow", "uncoveredRanges"]
+            .iter()
+            .any(|field| value.get(field).is_some())
+        {
+            return Err(extraction_failure(
+                "Image frames cannot claim PDF page positions. / 图像帧不能声称 PDF 页码。",
+            ));
+        }
+        let image = &value["image"];
+        require_keys(
+            image,
+            &[
+                "encoding",
+                "width",
+                "height",
+                "decodedWidth",
+                "decodedHeight",
+                "frameCount",
+                "processedFrames",
+                "resampled",
+                "orientation",
+            ],
+            "Image dimensions",
+        )?;
+        let range = &value["textRange"];
+        require_keys(range, &["startOffset", "endOffset"], "Image text range")?;
+        let ocr = &value["ocr"];
+        require_keys(
+            ocr,
+            &["backend", "version", "language"],
+            "Image OCR identity",
+        )?;
+        if !member(
+            &image["encoding"],
+            &["png", "jpeg", "bmp", "gif", "tiff", "webp"],
+        ) || !safe_integer(&image["width"], 1, 65536)
+            || !safe_integer(&image["height"], 1, 65536)
+            || image["width"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+                .saturating_mul(image["height"].as_u64().unwrap_or(u64::MAX))
+                > 64 * 1024 * 1024
+            || !safe_integer(&image["decodedWidth"], 1, 4000)
+            || !safe_integer(&image["decodedHeight"], 1, 4000)
+            || image["frameCount"] != 1
+            || image["processedFrames"] != json!([1])
+            || value["complete"] != true
+            || !image["resampled"].is_boolean()
+            || image["orientation"] != "exif-respected"
+            || range["startOffset"] != 0
+            || !safe_integer(&range["endOffset"], 1, MAX_SOURCE_CHARACTERS)
+            || text_length.is_some_and(|length| length != &range["endOffset"])
+            || ocr["backend"] != "windows-media-ocr"
+            || !valid_text(&ocr["version"], 128)
+            || !valid_text(&ocr["language"], 128)
+        {
+            return Err(extraction_failure(
+                "Invalid image text, dimensions, coverage or OCR identity. / 图像文字、尺寸、覆盖或 OCR 身份无效。",
+            ));
+        }
+        for field in ["image", "textRange", "complete", "ocr"] {
+            result[field] = value[field].clone();
+        }
+        return Ok(result);
+    }
+    if value.get("image").is_some() || value.get("textRange").is_some() {
+        return Err(extraction_failure(
+            "Raster image fields require image format. / 栅格字段仅属于图像格式。",
+        ));
+    }
+    if value["format"] != "pdf" {
         if [
             "pageCount",
             "pages",

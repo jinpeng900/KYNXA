@@ -11,12 +11,66 @@ use futures_util::StreamExt;
 use reqwest::Method;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::{Mutex, Notify, watch};
 
 const MAX_PROVIDERS: usize = 32;
 const DEADLINE: Duration = Duration::from_secs(90);
 const RESULT_LIFETIME: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct PreparationActivity {
+    stopped: AtomicBool,
+    active: AtomicUsize,
+    completed: Notify,
+}
+
+impl PreparationActivity {
+    fn begin(self: &Arc<Self>) -> PreparationActivityGuard {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        PreparationActivityGuard(self.clone())
+    }
+
+    async fn drain(&self) {
+        loop {
+            let completed = self.completed.notified();
+            tokio::pin!(completed);
+            completed.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            completed.await;
+        }
+    }
+
+    async fn wait_stopped(&self) {
+        loop {
+            let changed = self.completed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+struct PreparationActivityGuard(Arc<PreparationActivity>);
+
+impl Drop for PreparationActivityGuard {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        self.0.completed.notify_waiters();
+    }
+}
 
 struct PreparationState {
     generation: u64,
@@ -35,6 +89,7 @@ pub struct PreparationService {
     state: Mutex<PreparationState>,
     changed: Notify,
     pending_loads: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    activity: Arc<PreparationActivity>,
 }
 
 impl PreparationService {
@@ -54,6 +109,7 @@ impl PreparationService {
             }),
             changed: Notify::new(),
             pending_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            activity: Arc::new(PreparationActivity::default()),
         })
     }
 
@@ -74,6 +130,13 @@ impl PreparationService {
             .cloned()
             .unwrap_or_default();
         let mut state = self.state.lock().await;
+        if self.activity.stopped.load(Ordering::Acquire) {
+            return Err(ModelError::new(
+                "MODEL_PREPARATION_STOPPED",
+                "模型准备服务已停止。",
+                409,
+            ));
+        }
         let explicit = !selection["providerId"].is_null() || !selection["modelId"].is_null();
         let selected = if explicit {
             selection.clone()
@@ -124,9 +187,13 @@ impl PreparationService {
             self.changed.notify_waiters();
             return Ok(response);
         }
+        // Register before releasing the scheduling lock so shutdown cannot miss a queued worker.
+        // 在释放调度锁前登记任务，避免关闭时漏掉尚未开始执行的准备任务。
+        let activity = self.activity.begin();
         drop(state);
         let service = self.clone();
         tokio::spawn(async move {
+            let _activity = activity;
             service
                 .run(generation, planned, selected, token, cancellation)
                 .await;
@@ -197,6 +264,8 @@ impl PreparationService {
 
     pub async fn shutdown(&self) {
         let mut state = self.state.lock().await;
+        self.activity.stopped.store(true, Ordering::Release);
+        self.activity.completed.notify_waiters();
         state.cancellation.send_replace(true);
         state.generation = state.generation.wrapping_add(1);
         state.preparing = false;
@@ -214,6 +283,10 @@ impl PreparationService {
             }
         }
         self.changed.notify_waiters();
+        drop(state);
+        // Cancellation requests are not settlement receipts; blocking retirement must also finish.
+        // 取消请求不等于任务结算；后台准备与阻塞的模型回收全部退出后才允许迁移。
+        self.activity.drain().await;
     }
 
     async fn publish(&self, generation: u64, index: usize, entry: Value) {
@@ -239,7 +312,8 @@ impl PreparationService {
                 .first()
                 .is_some_and(|provider| provider["providerId"] == selected["providerId"]);
             if first_selected {
-                worker.prepare_one(generation, 0, &providers[0], &selected, token.clone())
+                worker
+                    .prepare_one(generation, 0, &providers[0], &selected, token.clone())
                     .await;
             }
             let mut pending = futures_util::stream::iter(
@@ -252,7 +326,9 @@ impl PreparationService {
                         let selected = selected.clone();
                         let token = token.clone();
                         async move {
-                            worker.prepare_one(generation, index, &provider, &selected, token).await
+                            worker
+                                .prepare_one(generation, index, &provider, &selected, token)
+                                .await
                         }
                     }),
             )
@@ -467,7 +543,10 @@ impl PreparationService {
             let load_key = preload_key(connection, model);
             if self.pending_loads.lock().unwrap().contains_key(&load_key) {
                 return Ok(local_result(
-                    "unknown", Some(true), observed["loaded"].as_bool(), Some(true),
+                    "unknown",
+                    Some(true),
+                    observed["loaded"].as_bool(),
+                    Some(true),
                     Some("LOCAL_MODEL_PRELOAD_PENDING"),
                 ));
             }
@@ -505,7 +584,9 @@ impl PreparationService {
                 ));
             }
             let config = self.config.clone();
+            let retirement_activity = self.activity.begin();
             let _ = tokio::task::spawn_blocking(move || {
+                let _activity = retirement_activity;
                 crate::retrieval::gateway_embedding::retire_idle_models(&config)
             })
             .await;
@@ -519,7 +600,13 @@ impl PreparationService {
             }
             let activity = gateway_config::begin_local_generation(connection, model)?;
             let mut preload = PendingPreload::new(
-                lease, self.pending_loads.clone(), load_key, connection.clone(), model.into(), context,
+                lease,
+                self.pending_loads.clone(),
+                self.activity.clone(),
+                load_key,
+                connection.clone(),
+                model.into(),
+                context,
             )?;
             // Empty preload has no business prompt; never pull, unload, or request permanent residency.
             // 空预载不含业务提示；不拉取、不卸载、不要求永久驻留，只加载已确认安装的当前选择。
@@ -544,7 +631,8 @@ impl PreparationService {
                     502,
                 )),
                 Err(error) => {
-                    if error.details["upstreamStatus"].as_u64()
+                    if error.details["upstreamStatus"]
+                        .as_u64()
                         .is_some_and(|status| (400..500).contains(&status) && status != 408)
                     {
                         preload.complete().await;
@@ -571,20 +659,28 @@ impl PreparationService {
 
 fn preload_key(connection: &Value, model: &str) -> String {
     let origin = url::Url::parse(connection["baseUrl"].as_str().unwrap_or(""))
-        .map(|url| url.origin().ascii_serialization()).unwrap_or_default();
-    format!("{:x}", Sha256::digest(json!([origin, model]).to_string().as_bytes()))
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_default();
+    format!(
+        "{:x}",
+        Sha256::digest(json!([origin, model]).to_string().as_bytes())
+    )
 }
 
 fn remove_pending(pending: &std::sync::Mutex<HashMap<String, String>>, key: &str, id: &str) {
     let mut pending = pending.lock().unwrap();
-    if pending.get(key).is_some_and(|current| current == id) { pending.remove(key); }
+    if pending.get(key).is_some_and(|current| current == id) {
+        pending.remove(key);
+    }
 }
 
 async fn reconcile_preload(pending: &std::sync::Mutex<HashMap<String, String>>, key: &str) {
     let id = pending.lock().unwrap().get(key).cloned();
     if let (Some(id), Some(service)) = (id, crate::resources::gateway::global()) {
-        if service.request("release", json!({"leaseId":id}), Duration::from_secs(5))
-            .await.is_ok_and(|receipt| receipt["status"] == "released")
+        if service
+            .request("release", json!({"leaseId":id}), Duration::from_secs(5))
+            .await
+            .is_ok_and(|receipt| receipt["status"] == "released")
         {
             remove_pending(pending, key, &id);
         }
@@ -596,6 +692,7 @@ async fn reconcile_preload(pending: &std::sync::Mutex<HashMap<String, String>>, 
 struct PendingPreload {
     lease: Option<crate::resources::gateway::ResourceLease>,
     pending: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    activity: Arc<PreparationActivity>,
     key: String,
     connection: Value,
     model: String,
@@ -605,45 +702,90 @@ impl PendingPreload {
     fn new(
         mut lease: crate::resources::gateway::ResourceLease,
         pending: Arc<std::sync::Mutex<HashMap<String, String>>>,
-        key: String, connection: Value, model: String, context: u64,
+        activity: Arc<PreparationActivity>,
+        key: String,
+        connection: Value,
+        model: String,
+        context: u64,
     ) -> Result<Self, ModelError> {
         {
             let mut loads = pending.lock().unwrap();
             if loads.contains_key(&key) || loads.len() >= MAX_PROVIDERS {
-                return Err(ModelError::new("LOCAL_MODEL_PRELOAD_PENDING", "已有装载尚未核验，暂不重复派发。", 409));
+                return Err(ModelError::new(
+                    "LOCAL_MODEL_PRELOAD_PENDING",
+                    "已有装载尚未核验，暂不重复派发。",
+                    409,
+                ));
             }
-            loads.insert(key.clone(), lease.allocation["leaseId"].as_str().unwrap().into());
+            loads.insert(
+                key.clone(),
+                lease.allocation["leaseId"].as_str().unwrap().into(),
+            );
         }
         lease.retain_unknown_on_drop();
-        Ok(Self { lease: Some(lease), pending, key, connection, model, context })
+        Ok(Self {
+            lease: Some(lease),
+            pending,
+            activity,
+            key,
+            connection,
+            model,
+            context,
+        })
     }
 
     async fn complete(&mut self) {
-        let Some(lease) = self.lease.as_mut() else { return; };
+        let Some(lease) = self.lease.as_mut() else {
+            return;
+        };
         if lease.release_confirmed().await.is_ok() {
-            remove_pending(&self.pending, &self.key, lease.allocation["leaseId"].as_str().unwrap());
+            remove_pending(
+                &self.pending,
+                &self.key,
+                lease.allocation["leaseId"].as_str().unwrap(),
+            );
             self.lease.take();
         }
     }
 }
 impl Drop for PendingPreload {
     fn drop(&mut self) {
-        let Some(mut lease) = self.lease.take() else { return; };
+        let Some(mut lease) = self.lease.take() else {
+            return;
+        };
+        // Keep unknown external effects reserved, but start no old-root observer after quiescence.
+        // 未知的外部装载仍保留资源预约；静止阶段不再启动旧根目录所属的核验任务。
+        if self.activity.stopped.load(Ordering::Acquire) {
+            return;
+        }
         let pending = self.pending.clone();
         let key = self.key.clone();
         let connection = self.connection.clone();
         let model = self.model.clone();
         let context = self.context;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let owner = self.activity.clone();
+            let activity = self.activity.begin();
             runtime.spawn(async move {
+                let _activity = activity;
                 let (_owner, token) = watch::channel(false);
                 let verify = async {
                     loop {
-                        if gateway_config::observe_local_fresh(&connection, &model, Some(context), token.clone())
-                            .await.is_ok_and(|observed| observed["loaded"] == true)
+                        if gateway_config::observe_local_fresh(
+                            &connection,
+                            &model,
+                            Some(context),
+                            token.clone(),
+                        )
+                        .await
+                        .is_ok_and(|observed| observed["loaded"] == true)
                             && lease.release_confirmed().await.is_ok()
                         {
-                            remove_pending(&pending, &key, lease.allocation["leaseId"].as_str().unwrap());
+                            remove_pending(
+                                &pending,
+                                &key,
+                                lease.allocation["leaseId"].as_str().unwrap(),
+                            );
                             break;
                         }
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -651,7 +793,10 @@ impl Drop for PendingPreload {
                 };
                 // Verification is bounded; an unsettled lease expires into the existing quarantine ledger.
                 // 核验有界；仍未知的租约停止续租后进入既有隔离账本，后续新鲜驻留观测可受控核销。
-                let _ = tokio::time::timeout(Duration::from_secs(60), verify).await;
+                tokio::select! {
+                    _ = tokio::time::timeout(Duration::from_secs(60), verify) => {},
+                    _ = owner.wait_stopped() => {},
+                }
             });
         }
     }
@@ -911,16 +1056,24 @@ mod tests {
     }
     #[tokio::test]
     async fn unconfirmed_preload_is_not_repeated_after_connection_metadata_changes() {
-        let service = PreparationService::new(config(std::path::Path::new("unused-preparation-fixture")));
+        let service =
+            PreparationService::new(config(std::path::Path::new("unused-preparation-fixture")));
         let (mut connection, generations, server) = fixture(false, StatusCode::OK).await;
         connection["protocol"] = json!("ollama");
         let key = preload_key(&connection, "fixture-model");
-        service.pending_loads.lock().unwrap().insert(key.clone(), "isolated-held-lease".into());
+        service
+            .pending_loads
+            .lock()
+            .unwrap()
+            .insert(key.clone(), "isolated-held-lease".into());
         connection["apiKey"] = json!("changed-synthetic-preparation-secret");
         connection["displayName"] = json!("renamed provider");
         assert_eq!(preload_key(&connection, "fixture-model"), key);
         let (_owner, token) = watch::channel(false);
-        let result = service.prepare_local(&connection, "fixture-model", true, token).await.unwrap();
+        let result = service
+            .prepare_local(&connection, "fixture-model", true, token)
+            .await
+            .unwrap();
         assert_eq!(result["state"], "unknown");
         assert_eq!(result["code"], "LOCAL_MODEL_PRELOAD_PENDING");
         assert_eq!(generations.load(Ordering::SeqCst), 0);
@@ -1025,9 +1178,18 @@ mod tests {
             true
         );
         service.shutdown().await;
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(service.activity.active.load(Ordering::Acquire), 0);
         assert_eq!(service.snapshot().await["phase"], "stopped");
         assert_ne!(service.snapshot().await["models"][0]["state"], "ready");
+        let (_stopped_owner, stopped_token) = watch::channel(false);
+        assert_eq!(
+            service
+                .schedule(ModelConfigStore::new(&root), Value::Null, stopped_token)
+                .await
+                .unwrap_err()
+                .code,
+            "MODEL_PREPARATION_STOPPED"
+        );
         let (_owner, token) = watch::channel(true);
         assert_eq!(
             service
@@ -1039,5 +1201,36 @@ mod tests {
         );
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_retirement_even_when_its_async_waiter_was_cancelled() {
+        let service =
+            PreparationService::new(config(std::path::Path::new("unused-preparation-fixture")));
+        let activity = service.activity.begin();
+        let (release, released) = std::sync::mpsc::channel();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let retirement = tokio::task::spawn_blocking(move || {
+            let _activity = activity;
+            let _ = started.send(());
+            released.recv().unwrap();
+        });
+        observed.await.unwrap();
+        // Dropping this handle cannot cancel an already-running blocking operation.
+        // 已开始的阻塞操作不会因其异步等待句柄被丢弃而停止。
+        drop(retirement);
+        let shutdown = tokio::spawn({
+            let service = service.clone();
+            async move { service.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(service.activity.active.load(Ordering::Acquire), 0);
+        assert_eq!(service.snapshot().await["phase"], "stopped");
     }
 }
