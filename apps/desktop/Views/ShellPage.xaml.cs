@@ -48,6 +48,8 @@ public sealed partial class ShellPage : Page
         ScreenshotPanel.ScreenshotsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
         InitializeWorkTabs();
         InitializeTaskPanel();
+        InitializePromptQueue();
+        InitializeMessageAttachments();
         MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
         MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;
@@ -100,6 +102,7 @@ public sealed partial class ShellPage : Page
             {
                 (double minimumComposerWidth, double maximumComposerWidth) = GetComposerWidthRange(available);
                 ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, minimumComposerWidth, maximumComposerWidth);
+                PromptQueue.Width = Math.Max(0, ComposerHost.Width - 32);
             }
 
             double maximumComposerHeight = GetComposerHeightMaximum();
@@ -143,7 +146,7 @@ public sealed partial class ShellPage : Page
 
         double upwardOffset = Math.Clamp(height * 0.035, 12, 36);
 
-        MainContentHost.Translation = ActiveMessages.Count > 0 ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
+        MainContentHost.Translation = UsesConversationLayout ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
         // The transcript fills the remaining grid column as the work panel resizes.
         // 工作面板调整宽度时，聊天填满网格中剩余的列空间。
         ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 64);
@@ -549,7 +552,7 @@ public sealed partial class ShellPage : Page
             minimumAutoHeight,
             Math.Min(ComposerAutoHeightMax, maximumComposerHeight));
         _autoComposerHeight = Math.Clamp(
-            ComposerHeightDefault + extraContentHeight,
+            ComposerHeightDefault + extraContentHeight + (ComposerAttachments?.Visibility == Visibility.Visible ? 112 : 0),
             minimumAutoHeight,
             maximumAutoHeight);
         ApplyLayout();

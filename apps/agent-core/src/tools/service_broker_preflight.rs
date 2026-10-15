@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024;
 const FILESYSTEM_READS: &[&str] = &[
     "filesystem.read",
+    "document.read",
     "filesystem.list",
     "filesystem.search",
     "filesystem.stat",

@@ -158,10 +158,12 @@ pub fn open(root: &Path, path: &Path, create: bool) -> Result<Connection, Contra
         .execute_batch("PRAGMA foreign_keys=ON;PRAGMA synchronous=FULL;")
         .map_err(failure)?;
     let started = Instant::now();
-    connection.progress_handler(
-        256,
-        Some(move || cancellation::is_cancelled() || started.elapsed() >= Duration::from_secs(120)),
-    );
+    connection
+        .progress_handler(
+            256,
+            Some(move || cancellation::is_cancelled() || started.elapsed() >= Duration::from_secs(120)),
+        )
+        .map_err(failure)?;
     Ok(connection)
 }
 

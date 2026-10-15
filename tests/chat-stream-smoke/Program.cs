@@ -165,6 +165,36 @@ var secondSegment = new AssistantSegment("fixture-round-2", 2, 2, "commentary", 
 var finalSegment = secondSegment with { Phase = "final_answer", Status = "completed", Content = "这是核验后的最终答案。" };
 ChatStreamEvent SegmentEvent(AssistantSegment segment) => Event("assistant_segment") with { Segment = segment, ToolStreamProtocol = 3 };
 var finalSegmentEvent = Event("completed", content: finalSegment.Content) with { AssistantSegments = [firstCompleted, finalSegment], ToolStreamProtocol = 3 };
+// Steering keeps the old call receipt but gives the next reply its own ordered segment sequence.
+// 引导保留原调用回执，下一条回复使用独立的有序消息段，不混入旧回复正文。
+Guid anchoredReplyId = Guid.NewGuid(), steeringUserMessageId = Guid.NewGuid();
+var replyAnchor = Event("reply_anchor") with
+{
+    ReplyMessageId = anchoredReplyId, UserMessageId = steeringUserMessageId, SupersededReplyMessageId = requestId
+};
+var anchoredSegment = firstSegment with { Id = "steered-round-1" };
+var anchoredFinal = anchoredSegment with { Phase = "final_answer", Status = "completed", Content = "明白，继续按调整后的要求交付。" };
+var priorCall = new ToolActivity("before-steering", "filesystem.read", JsonSerializer.SerializeToElement(new { path = "guide.md" }),
+    "running", "Read guide.md", Round: 1, Order: 1);
+var anchoredEvents = await Read(Frame(Event("started") with { ReplyMessageId = requestId })
+    + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted))
+    + Frame(Event("tool_call") with { Tool = priorCall })
+    + Frame(Event("tool_result") with { Tool = priorCall with { Status = "completed", Result = "保留的资料" } })
+    + Frame(replyAnchor) + Frame(SegmentEvent(anchoredSegment)) + Frame(SegmentEvent(anchoredFinal))
+    + Frame(Event("completed", content: anchoredFinal.Content) with { ReplyMessageId = anchoredReplyId,
+        AssistantSegments = [anchoredFinal], ToolStreamProtocol = 3 }));
+Check(anchoredEvents[0].ReplyMessageId == requestId && anchoredEvents[5].ReplyMessageId == anchoredReplyId
+    && anchoredEvents[5].UserMessageId == steeringUserMessageId && anchoredEvents[5].SupersededReplyMessageId == requestId
+    && anchoredEvents[^1].RequestId == requestId && anchoredEvents[^1].AssistantSegments!.SequenceEqual(new[] { anchoredFinal })
+    && anchoredEvents.Single(item => item.Type == "tool_result").Tool!.ToolCallId == priorCall.ToolCallId,
+    "Steering lost its reply anchor, earlier tool receipt, or independent final-answer sequence.");
+var resumedAnchorEvents = await Read(Frame(Event("started") with { ReplyMessageId = anchoredReplyId })
+    + Frame(replyAnchor with { SupersededReplyMessageId = null })
+    + Frame(Event("content_snapshot", content: "接续已有资料", reasoning: "") with { ReplyMessageId = anchoredReplyId })
+    + Frame(Event("completed", content: anchoredFinal.Content) with { ReplyMessageId = anchoredReplyId,
+        AssistantSegments = [anchoredFinal], ToolStreamProtocol = 3 }));
+Check(resumedAnchorEvents[2].Content == "接续已有资料" && resumedAnchorEvents[^1].Content == anchoredFinal.Content,
+    "Resumed steering failed to route its snapshot and final reply to the current anchor.");
 // The continuation marker can be finalized after the completed round; it does not create another stream event.
 // 续写标记可在已完成轮次之后于终态确定；不重复发送已完成段，也不改变分段身份。
 var continuedFirst = firstCompleted with { IsAnswerContinuation = true };
@@ -314,6 +344,13 @@ Check(restored.Id == saved.Id && restored.Content == saved.Content && restored.R
     restored.Status == saved.Status && restored.Error == saved.Error && restored.Provider == saved.Provider &&
     restored.Model == saved.Model && restored.ReasoningDurationMs == saved.ReasoningDurationMs && restored.DurationMs == saved.DurationMs && restored.CreatedAt == saved.CreatedAt,
     "Streamed message persistence failed");
+saved.SupersededByUserMessageId = steeringUserMessageId;
+saved.InReplyToUserMessageId = steeringUserMessageId;
+saved.OriginUserMessageId = userMessageId;
+restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(saved))!;
+Check(restored.SupersededByUserMessageId == steeringUserMessageId && restored.InReplyToUserMessageId == steeringUserMessageId
+    && restored.OriginUserMessageId == userMessageId && legacyObject.SupersededByUserMessageId is null,
+    "Steering visibility and reply relationships did not survive formal message JSON reopening.");
 saved.Status = "streaming";
 restored = JsonSerializer.Deserialize<ChatMessageState>(JsonSerializer.Serialize(saved))!;
 Check(restored.Status == "interrupted" && restored.Content == saved.Content && restored.Reasoning == saved.Reasoning, "Crashed generation was not recovered");

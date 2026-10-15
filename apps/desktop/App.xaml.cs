@@ -45,9 +45,11 @@ public partial class App : Application
         }
         else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.EnvironmentControlled ? Services.StoragePaths.DataRoot : null;
         Services.ExtensionPaths.Reload();
+        // Start transport preparation independently of shell construction and catalog rendering.
+        // 模型连接准备与主窗口构造、目录渲染并行，不能等界面线程空闲后才启动。
+        _ = Task.Run(WarmUpModelGatewayAsync);
         Window = new MainWindow();
         Window.Activate();
-        _ = WarmUpModelGatewayAsync();
     }
 
     private static async Task WarmUpModelGatewayAsync()

@@ -179,22 +179,51 @@ pub(crate) fn locate(document: &Value, id: &str) -> ContractResult {
         .ok_or_else(|| error("聊天不存在。", "CONVERSATION_NOT_FOUND", 404))
 }
 pub fn relationship(root: &Path, id: &str) -> ContractResult {
-    with_catalog(root, |document, _| {
-        let mut relation = catalog::apply(
-            "storage.catalog.relationship",
-            &json!({"current":document,"id":id}),
-        )?;
-        // Resolve the work folder from the same authoritative catalog snapshot as its scope identity.
-        // 从范围身份对应的同一正式目录快照读取工作路径；不能因缺少路径字段误用聊天沙箱。
-        relation["folderPath"] = document["Projects"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|project| project["Id"] == relation["projectId"])
-            .map(|project| project["FolderPath"].clone())
-            .unwrap_or(Value::Null);
-        Ok(relation)
-    })
+    with_catalog(root, |document, _| relationship_from_catalog(document, id))
+}
+
+fn relationship_from_catalog(document: &Value, id: &str) -> ContractResult {
+    let mut relation = catalog::apply(
+        "storage.catalog.relationship",
+        &json!({"current":document,"id":id}),
+    )?;
+    // Resolve the work folder from the same authoritative catalog snapshot as its scope identity.
+    // 从范围身份对应的同一正式目录快照读取工作路径；不能因缺少路径字段误用聊天沙箱。
+    relation["folderPath"] = document["Projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|project| project["Id"] == relation["projectId"])
+        .map(|project| project["FolderPath"].clone())
+        .unwrap_or(Value::Null);
+    Ok(relation)
+}
+
+/// Recheck an already-open native session against the current checked catalog without preparing the whole layout.
+/// 已打开的原生会话只复核当前受检目录快照，不逐次准备整个布局；未完成的正式事务仍走恢复路径。
+pub(crate) fn current_relationship(root: &Path, id: &str) -> ContractResult {
+    let document = read_current_catalog(root)?
+        .ok_or_else(|| error("聊天不存在。", "CONVERSATION_NOT_FOUND", 404))?;
+    relationship_from_catalog(&document, id)
+}
+
+/// Read a checked catalog snapshot without preparing unrelated chat paths; pending transactions retain full recovery.
+/// 读取受检目录快照时不准备无关聊天路径；存在待完成事务时仍执行完整正式恢复。
+fn read_current_catalog(root: &Path) -> Result<Option<Value>, ContractError> {
+    if managed_files::inspect(
+        root,
+        &root.join(".catalog-transaction.json"),
+        false,
+        true,
+        64 * 1024 * 1024,
+    )? {
+        return load_catalog(root).map(Some);
+    }
+    let snapshot = match read_catalog_snapshot(root) {
+        Err(error) if error.code() == "CATALOG_CONFLICT" => read_catalog_snapshot(root),
+        result => result,
+    }?;
+    Ok(snapshot.0)
 }
 pub(crate) fn normalize_message(input: &Value) -> ContractResult {
     if !input.is_object() {
@@ -247,6 +276,7 @@ pub(crate) fn normalize_message(input: &Value) -> ContractResult {
         message["Status"] = json!("completed");
     }
     message["ReasoningDurationMs"] = plan["reasoningDurationMs"].clone();
+    super::message_attachments::normalize_descriptors(&mut message)?;
     validate_message_metadata(&message)?;
     if message.get("DurationMs").is_some_and(|value| {
         !value.is_null()
@@ -727,6 +757,7 @@ pub fn handle_raw(
             }
         }
         let submitted = locations(&next);
+        super::message_attachments::validate_catalog_submission(root, document, &submitted)?;
         let requests = catalog::apply(
             "storage.catalog.logRequests",
             &json!({"current":document,"next":next,"expectedRevision":body["Revision"]}),
@@ -1239,16 +1270,28 @@ fn upsert_message_internal(
 ) -> ContractResult {
     let mut result = with_catalog(root, |document, _| {
         let location = locate(document, id)?;
-        let messages = read_messages_at(root, &location)?;
-        let snapshot = conversation_logs::apply(
-            "storage.logs.read",
-            &json!({"root":root,"location":location}),
-        )?;
-        let mut merged = messages
-            .iter()
-            .find(|message| message["Id"] == input["Id"])
-            .cloned()
+        let message_id = super::identity(&input["Id"])?;
+        let ids =
+            std::collections::HashSet::from([message_id.as_str().unwrap().to_ascii_lowercase()]);
+        // Upserts need one latest message, not all histories or a second decoded log snapshot.
+        // 更新只需目标消息的最新原文，不读取全部历史，也不构造第二份全日志解码快照。
+        let mut read = match conversation_history::read_latest(root, &location, Some(&ids), false) {
+            Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
+                read_messages_recovering(root, &location)?;
+                conversation_history::read_latest(root, &location, Some(&ids), false)?
+            }
+            result => result?,
+        };
+        let previous_raw = read.messages.first();
+        let mut merged = previous_raw
+            .map(|raw| {
+                let value: Value = serde_json::from_str(&raw_json::scalar_projection(raw))
+                    .map_err(|_| error("消息日志无效。", "INVALID_CONVERSATION_DATA", 400))?;
+                normalize_message(&value)
+            })
+            .transpose()?
             .unwrap_or(json!({}));
+        let previous_attachments = json!({"Role":merged["Role"],"Attachments":merged["Attachments"]});
         merged
             .as_object_mut()
             .ok_or_else(|| error("消息格式无效。", "INVALID_CONVERSATION_DATA", 400))?
@@ -1259,12 +1302,9 @@ fn upsert_message_internal(
                     .clone(),
             );
         let message = normalize_message(&merged)?;
-        let originals = raw_messages_at(root, &location)?;
-        let previous_raw = originals.iter().find(|raw| {
-            serde_json::from_str::<Value>(&raw_json::scalar_projection(raw))
-                .ok()
-                .is_some_and(|value| value["Id"] == message["Id"])
-        });
+        if previous_raw.is_some() {
+            super::message_attachments::validate_repeated_descriptors(&previous_attachments, &message)?;
+        }
         let prior = previous_raw
             .map(String::as_str)
             .into_iter()
@@ -1278,11 +1318,7 @@ fn upsert_message_internal(
             encode_preserving(&message, &prior)
         };
         let unchanged = previous_raw.is_some_and(|previous| previous == &raw_message);
-        conversation_logs::apply(
-            "storage.logs.append",
-            &json!({"root":root,"location":location,
-            "expectedHash":snapshot["hash"],"rawMessage":raw_message,"unchanged":unchanged}),
-        )
+        read.append_message(&raw_message, unchanged)
     })?;
     if input["Role"] == "user" {
         // This cheap preflight grants no scope authority; the helper rereads the saved source and actual catalog.
@@ -1301,7 +1337,9 @@ fn upsert_message_internal(
             // 用户消息已正式保存；独立记忆失败不能把这次发送误报成未保存，也不能声称记忆已经生效。
             result["memoryInstruction"] = match receipt {
                 Ok(receipt) => receipt,
-                Err(error) => json!({"created":false,"reason":"save-failed","error":{"code":error.code(),"message":error.message()}}),
+                Err(error) => {
+                    json!({"created":false,"reason":"save-failed","error":{"code":error.code(),"message":error.message()}})
+                }
             };
         }
     }
@@ -1706,7 +1744,10 @@ pub fn handle_text(
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
     if parts.len() == 4 && parts[..2] == ["api", "conversations"] && parts[3] == "messages" {
         return Some((|| {
-            let catalog = load_catalog(root)?;
+            let catalog = match read_current_catalog(root)? {
+                Some(catalog) => catalog,
+                None => load_catalog(root)?,
+            };
             let location = locate(&catalog, parts[2])?;
             let mut args = json!({"root":root,"location":location});
             for field in ["limit", "maxBytes"] {
@@ -1742,10 +1783,10 @@ pub fn handle_text(
                 .map(|(key, value)| format!("{}:{}", json!(key), value))
                 .collect::<Vec<_>>();
             fields.push(format!("\"messages\":[{}]", messages.join(",")));
-            with_catalog(root, |current, _| {
-                verify_catalog_sources(&catalog, current, &[parts[2].to_string()])?;
-                conversation_history::verify_snapshot(root, &location, &page["snapshot"])
-            })?;
+            let current = read_current_catalog(root)?
+                .ok_or_else(|| error("聊天归属已改变，请重新读取。", "WORKSPACE_CHANGED", 409))?;
+            verify_catalog_sources(&catalog, &current, &[parts[2].to_string()])?;
+            conversation_history::verify_snapshot(root, &location, &page["snapshot"])?;
             Ok((200, format!("{{{}}}", fields.join(","))))
         })());
     }
@@ -2051,6 +2092,89 @@ mod gateway_tests {
         );
     }
     #[test]
+    fn history_pages_skip_unrelated_layout_and_recheck_target_scope_and_path() {
+        let workspace = Workspace::new();
+        let root = workspace.0.join("Data");
+        let target = new_id();
+        let unrelated = new_id();
+        ensure_conversation(&root, &target, "target history").unwrap();
+        ensure_conversation(&root, &unrelated, "unrelated history").unwrap();
+        let message = json!({"Id":new_id(),"Role":"user","Content":"preserved target"});
+        upsert_message(&root, &target, &message).unwrap();
+        let catalog = load_catalog(&root).unwrap();
+        let target_location = locate(&catalog, &target).unwrap();
+        let target_log = conversation_logs::directory(&root, &target_location)
+            .unwrap()
+            .join("events.jsonl");
+        let original_log = std::fs::read(&target_log).unwrap();
+        let unrelated_attachments = root.join("Chats").join(&unrelated).join("attachments");
+        std::fs::remove_dir(&unrelated_attachments).unwrap();
+        std::fs::write(&unrelated_attachments, b"invalid unrelated directory").unwrap();
+        let path = format!("/api/conversations/{target}/messages");
+        let query = [("limit".into(), "4".into())];
+
+        // A history page validates its own source; full catalog operations still validate the complete layout.
+        // 历史页核验自身来源；完整目录操作仍检查全部布局，无关聊天异常不能阻塞目标聊天显示。
+        let page = handle_text("GET", &path, &query, &root).unwrap().unwrap();
+        let page: Value = serde_json::from_str(&page.1).unwrap();
+        assert_eq!(page["messages"][0]["Id"], message["Id"]);
+        assert_eq!(
+            load_catalog(&root).unwrap_err().code(),
+            "INVALID_DATA_LAYOUT"
+        );
+
+        // External catalog replacement must invalidate a target removed or moved after the first scope snapshot.
+        // 外部替换目录后，目标删除或移动必须使先前范围快照失效，不能沿用缓存归属。
+        let mut removed = catalog.clone();
+        removed["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
+        removed["Chats"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|chat| chat["Id"] != target);
+        std::fs::write(root.join("catalog.json"), removed.to_string()).unwrap();
+        let current = read_current_catalog(&root).unwrap().unwrap();
+        assert_eq!(
+            verify_catalog_sources(&catalog, &current, &[target.clone()])
+                .unwrap_err()
+                .code(),
+            "WORKSPACE_CHANGED"
+        );
+        assert_eq!(
+            handle_text("GET", &path, &query, &root)
+                .unwrap()
+                .unwrap_err()
+                .code(),
+            "CONVERSATION_NOT_FOUND"
+        );
+        let mut moved = removed;
+        moved["Projects"] = json!([{
+            "Id":new_id(),"Name":"changed scope","FolderPath":null,"IsFolderlessWorkspace":true,
+            "Chats":[target_location["Chat"]]
+        }]);
+        std::fs::write(root.join("catalog.json"), moved.to_string()).unwrap();
+        let current = read_current_catalog(&root).unwrap().unwrap();
+        assert_eq!(
+            verify_catalog_sources(&catalog, &current, &[target.clone()])
+                .unwrap_err()
+                .code(),
+            "WORKSPACE_CHANGED"
+        );
+        std::fs::write(root.join("catalog.json"), catalog.to_string()).unwrap();
+
+        std::fs::remove_file(&target_log).unwrap();
+        std::fs::create_dir(&target_log).unwrap();
+        assert_eq!(
+            handle_text("GET", &path, &query, &root)
+                .unwrap()
+                .unwrap_err()
+                .code(),
+            "INVALID_MEMORY_PATH"
+        );
+        std::fs::remove_dir(&target_log).unwrap();
+        std::fs::write(&target_log, &original_log).unwrap();
+        assert!(handle_text("GET", &path, &query, &root).unwrap().is_ok());
+    }
+    #[test]
     fn cold_catalog_submission_does_not_read_unrelated_history() {
         for raw_transport in [false, true] {
             let workspace = Workspace::new();
@@ -2251,6 +2375,7 @@ pub fn handle(
                 }
             }
             let submitted = locations(&next);
+            super::message_attachments::validate_catalog_submission(root, document, &submitted)?;
             let requests = catalog::apply(
                 "storage.catalog.logRequests",
                 &json!({"current":document,"next":next,"expectedRevision":body["Revision"]}),
@@ -2385,7 +2510,7 @@ pub fn handle(
         }
         if parts.len() == 5 && parts[3] == "runs" && method == "GET" {
             return Some(read_messages(root,id,true).and_then(|messages| {
-                let message=messages.into_iter().find(|item|item["Role"]=="assistant"&&["RequestId","Id"].iter().any(|field|item[*field].as_str().is_some_and(|value|value.eq_ignore_ascii_case(parts[4]))))
+                let message=messages.into_iter().rev().find(|item|item["Role"]=="assistant"&&["RequestId","Id"].iter().any(|field|item[*field].as_str().is_some_and(|value|value.eq_ignore_ascii_case(parts[4]))))
                     .filter(|item|!item["ToolRun"].is_null()).ok_or_else(||error("此请求没有连续执行记录。","TOOL_RUN_NOT_FOUND",404))?;
                 Ok((200,json!({"conversationId":id,"requestId":message.get("RequestId").unwrap_or(&message["Id"]),"status":message["Status"],"run":message["ToolRun"]})))
             }));

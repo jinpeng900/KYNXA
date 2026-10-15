@@ -44,7 +44,7 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") {
+    if name.starts_with("filesystem.") || ["document.read", "attachment.read", "artifact.open"].contains(&name.as_str()) {
         return "filesystem";
     }
     "other"
@@ -87,6 +87,15 @@ fn aliases(tool: &Value) -> String {
     let action = name.rsplit('.').next().unwrap_or("");
     if name == "work.folder.bind" {
         return "work project folder directory bind associate attach mount ongoing 长期工作 工作文件夹 工作目录 关联目录 绑定目录 挂载文件夹".to_owned();
+    }
+    if name == "document.read" {
+        return "document read parse extract word docx doc pdf ppt pptx xlsx markdown image OCR 文档 读取文档 解析文档 正文 页码 图片 文字识别 表格 幻灯片".to_owned();
+    }
+    if name == "attachment.read" {
+        return "attachment upload attached document image read paginate 附件 上传文件 读取附件 正文 分页".to_owned();
+    }
+    if name == "artifact.open" {
+        return "artifact preview display open sidebar file document markdown mermaid pdf word powerpoint website browser 产物 文件 预览 展示 侧栏 文档 网页".to_owned();
     }
     if category == "computer" {
         return format!(
@@ -416,6 +425,9 @@ fn catalog_score(tool: &Value, signals: &Value) -> i32 {
     let description = tool["description"].as_str().unwrap_or("").to_lowercase();
     let yes = |key: &str| signals[key] == true;
     if name.starts_with("computer.") {
+        if name == "computer.launch" && yes("browser") && signals["browserPresentation"] == "workspace" {
+            return 0;
+        }
         return if yes("desktop") { 40 } else { 0 };
     }
     if name.starts_with("terminal.host.") {
@@ -463,6 +475,11 @@ fn catalog_score(tool: &Value, signals: &Value) -> i32 {
     );
     if yes("browser") && category(tool) == "browser" {
         score += 32;
+    }
+    if name == "artifact.open" && (yes("browser") || yes("url"))
+        && signals["browserPresentation"] == "workspace"
+    {
+        score += 48;
     }
     if signals["retainedNames"]
         .as_array()
@@ -769,7 +786,7 @@ fn current_signals(message: &str) -> Value {
       matches("(?:打开|访问|浏览|查看|看看|\\bopen\\b|\\bvisit\\b).{0,40}(?:[a-z0-9-]+\\.)+[a-z]{2,}", text) ||
       matches("(?:本机|本地).{0,30}(?:登录|界面|窗口|软件|应用)", text) ||
       matches("\\b(?:screenshot|desktop|mouse|browser|notepad|calculator|launch|computer)\\b", text),
-    "browser":browser, "remoteBrowser":remote_browser, "deviceState":device_state,
+    "browser":browser, "browserPresentation":super::intent::browser_presentation(text), "remoteBrowser":remote_browser, "deviceState":device_state,
     "hostTerminal": matches("本机终端|本地终端|本机命令|本地命令|宿主终端|conda|powershell|cmd|命令提示符", text) ||
       matches("后台.{0,12}(?:终端|进程|任务)|(?:终端|进程).{0,12}(?:后台|监控)|\\b(?:background|persistent)\\s+(?:terminal|process|job)\\b", text) ||
       matches("\\b(?:host|local|visible)\\b.*\\b(?:terminal|command)\\b|\\bterminal\\b.*\\b(?:window|visible)\\b", text) ||

@@ -368,5 +368,17 @@ public sealed partial class ShellPage
         try { _modelSelectionStore.Save(choice); }
         catch { /* The in-memory selection remains usable. 中文：内存中的选择仍可使用。 */ }
         menu.Hide();
+        _ = PrepareSelectedModelAsync(choice);
+    }
+
+    private static async Task PrepareSelectedModelAsync(ModelChoice choice)
+    {
+        try { await ModelGatewayService.WarmUpModelsAsync(choice.ProviderId, choice.ModelId).ConfigureAwait(false); }
+        catch (Exception error)
+        {
+            // Selection stays usable; optional preparation must not prevent a real model request.
+            // 保留已选模型；后台准备失败不能阻止后续正式调用。
+            System.Diagnostics.Debug.WriteLine($"Selected model preparation: {error.GetType().Name}");
+        }
     }
 }

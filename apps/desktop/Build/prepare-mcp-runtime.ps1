@@ -108,6 +108,7 @@ try {
             }
         }
         if ($isCurrent) {
+            & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $bundleRootPath
             $verified.Add($outputManifest); $verified.Add($integrityPath)
             [IO.File]::WriteAllLines($fileList, [string[]]$verified, $utf8)
             Write-Output "Private MCP payload reused: $($verified.Count) verified files; no package installation."
@@ -215,6 +216,7 @@ try {
         fileCount=$files.Count;totalBytes=$totalBytes;downloadsAtRuntime=$false;coreDependsOnNode=$false}
     Write-McpJson $outputManifest $output
     Write-McpJson $integrityPath @{schemaVersion=1;files=$files}
+    & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $bundleRootPath
     $paths = @($files | ForEach-Object { Join-Path $bundleRootPath $_.path }) + @($outputManifest, $integrityPath)
     [IO.File]::WriteAllLines($fileList, [string[]]$paths, $utf8)
     Write-Output "Private Node $($node.version) and $($services.Count) pinned MCP services ready ($($files.Count) files, $($output.totalBytes) bytes)."

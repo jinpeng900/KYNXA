@@ -1,4 +1,7 @@
 pub mod contracts;
+mod gateway_attachment_read;
+pub(crate) mod gateway_workspace_changes;
+pub(crate) mod gateway_workspace_terminal;
 pub mod discovery;
 pub mod effects;
 pub mod intent;
@@ -97,7 +100,10 @@ pub fn calculate(operation: &str, arguments: &Value) -> Result<Value, String> {
 pub mod browser;
 pub mod configuration;
 pub mod gateway;
-mod gateway_browser;
+mod gateway_document_read;
+pub(crate) mod gateway_workspace_preview;
+pub(crate) mod gateway_browser;
+mod gateway_browser_permissions;
 mod gateway_mcp;
 mod gateway_mcp_budget;
 mod gateway_search;

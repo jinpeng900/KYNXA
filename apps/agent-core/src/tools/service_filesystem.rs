@@ -162,7 +162,7 @@ fn check_hash(path: &Path, expected: &Value) -> ServiceResult<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-fn text_page(text: &str, offset: usize, maximum: usize) -> ServiceResult<Value> {
+pub(super) fn text_page(text: &str, offset: usize, maximum: usize) -> ServiceResult<Value> {
     let units = text.encode_utf16().collect::<Vec<_>>();
     if offset > units.len() {
         return Err(invalid("offset 超出当前文件长度，请从 0 重新读取。"));

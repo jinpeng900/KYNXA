@@ -21,7 +21,6 @@ public static class ModelGatewayService
     public static async Task WarmUpModelsAsync(string? providerId = null, string? modelId = null,
         CancellationToken cancellationToken = default)
     {
-        await EnsureReadyAsync(cancellationToken);
         using var client = new ModelApiClient();
         await client.SchedulePreparationAsync(providerId, modelId, cancellationToken);
     }

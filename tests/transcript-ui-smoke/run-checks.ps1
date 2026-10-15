@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('format', 'all', 'block-copy', 'metadata', 'diagrams', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final')]
+    [ValidateSet('format', 'all', 'block-copy', 'metadata', 'diagrams', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final', 'prompt-queue', 'steering-reply', 'workspace-preview', 'workspace-chrome', 'message-attachments', 'render-performance', 'work-tabs')]
     [string]$Scenario = 'format',
     [string]$ApiReportPath,
     [switch]$BuildOnly,
@@ -14,14 +14,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($Scenario -eq 'api-final' -and !$BuildOnly) {
+if (($Scenario -eq 'api-final' -and !$BuildOnly) -or ![string]::IsNullOrWhiteSpace($ApiReportPath)) {
+    if ($Scenario -notin @('api-final', 'steering-reply')) {
+        throw '-ApiReportPath is supported only by the api-final and steering-reply scenarios.'
+    }
     if ([string]::IsNullOrWhiteSpace($ApiReportPath) -or !(Test-Path -LiteralPath $ApiReportPath -PathType Leaf)) {
-        throw 'The api-final scenario requires an existing -ApiReportPath from this acceptance run.'
+        throw 'The selected scenario requires an existing -ApiReportPath from this acceptance run.'
     }
     $ApiReportPath = (Resolve-Path -LiteralPath $ApiReportPath).Path
-}
-elseif (![string]::IsNullOrWhiteSpace($ApiReportPath)) {
-    throw '-ApiReportPath is supported only by the api-final scenario.'
 }
 
 function Get-VisualStudioMSBuild {
@@ -87,7 +87,7 @@ try {
     [Environment]::SetEnvironmentVariable('TEMP', $temporaryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('TMP', $temporaryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('WEBVIEW2_USER_DATA_FOLDER', (Join-Path $temporaryRoot 'webview2'), 'Process')
-    if ($Scenario -eq 'api-final') { [Environment]::SetEnvironmentVariable('KYNXA_TRANSCRIPT_API_REPORT', $ApiReportPath, 'Process') }
+    [Environment]::SetEnvironmentVariable('KYNXA_TRANSCRIPT_API_REPORT', $ApiReportPath, 'Process')
 
     $msbuildPath = Get-VisualStudioMSBuild
     # Keep the SDK/target runtime while using VS's .NET Framework compiler host.
@@ -209,7 +209,7 @@ try {
     }
     $fixtureProcess.WaitForExit()
 
-    foreach ($evidencePath in @($resultPath, $metricsPath, $failurePath)) {
+    foreach ($evidencePath in @($resultPath, $metricsPath, $failurePath, (Join-Path $temporaryRoot 'kynxa-work-tabs.png'))) {
         if (Test-Path -LiteralPath $evidencePath) {
             $evidenceFile = Get-Item -LiteralPath $evidencePath
             if ($evidenceFile.LastWriteTimeUtc -lt $startedUtc) { throw "Stale fixture evidence: $evidencePath" }

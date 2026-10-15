@@ -35,6 +35,7 @@ public sealed class ConversationMessageViewModel(Guid conversationId, ChatMessag
 
     public void SetRetryAllowed(bool allowed)
     {
+        if (_canRetry == allowed) return;
         _canRetry = allowed;
         OnPropertyChanged(nameof(RetryVisibility));
     }

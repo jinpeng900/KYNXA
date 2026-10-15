@@ -237,7 +237,10 @@ const BROWSER_OBSERVATIONS: &[&str] = &[
     "browser.wait",
 ];
 const PARALLEL_READS: &[&str] = &[
+    "attachment.read",
+    "artifact.open",
     "filesystem.read",
+    "document.read",
     "filesystem.list",
     "filesystem.search",
     "filesystem.stat",
@@ -253,12 +256,18 @@ const PARALLEL_READS: &[&str] = &[
 ];
 
 const READ_TOOLS: &[&str] = &[
+    "attachment.read",
+    "artifact.open",
+    // Current-task metadata changes no external state and needs no additional approval.
+    // 当前任务的展示元信息不改变外部状态，不增加单独审批。
+    "task.describe",
     "task.status",
     "task.wait",
     "task.read",
     "task.result",
     "filesystem.list",
     "filesystem.read",
+    "document.read",
     "filesystem.search",
     "filesystem.stat",
     "skill.list",

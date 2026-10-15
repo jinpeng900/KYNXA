@@ -122,6 +122,10 @@ pub struct TaskRecord {
     pub task_id: String,
     pub request_id: String,
     pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_in_task_list: Option<bool>,
     pub acceptance: Vec<String>,
     pub scope: TaskScope,
     pub parent_task_id: Option<String>,

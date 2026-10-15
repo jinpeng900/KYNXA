@@ -31,6 +31,7 @@ struct ReplayState {
     content: String,
     reasoning: String,
     active_segment: Option<Value>,
+    reply_anchor: Option<Value>,
     unavailable: bool,
 }
 
@@ -54,6 +55,7 @@ pub struct RequestRun {
     pub journal: Option<Arc<super::gateway_task_journal::TaskJournal>>,
     pub parent_task_id: Option<String>,
     pub cancellation: watch::Sender<bool>,
+    pub steering: watch::Sender<u64>,
     pub native_cancellation: crate::service_cancellation::CancellationLease,
     pub cancellation_key: String,
     pub events: broadcast::Sender<Value>,
@@ -80,6 +82,22 @@ impl RequestRun {
         event["requestId"] = json!(self.request_id);
         event["createdAt"] = json!(now_iso8601());
         event["eventSequence"] = json!(replay.sequence);
+        if event["type"] == "reply_anchor" {
+            // A new reply changes only replay/display ownership; the durable task journal keeps earlier receipts.
+            // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用回执。
+            replay.content.clear();
+            replay.reasoning.clear();
+            replay.active_segment = None;
+            replay.controls.clear();
+            replay.bytes = 0;
+            replay.unavailable = false;
+            replay.reply_anchor = Some(event.clone());
+        }
+        if event["replyMessageId"].is_null() {
+            event["replyMessageId"] = replay.reply_anchor.as_ref()
+                .map(|anchor| anchor["replyMessageId"].clone())
+                .unwrap_or_else(||json!(self.request_id));
+        }
         if !replay.unavailable {
             match event["type"].as_str() {
                 Some("text_delta") => {
@@ -157,7 +175,7 @@ impl RequestRun {
             }
             event["rootRequestTaskId"] = json!(journal.task_id());
             let durable = if terminal_event(&event) {
-                json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":self.request_id,"taskCompletion":event["taskCompletion"]})
+                json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":event["replyMessageId"],"taskCompletion":event["taskCompletion"]})
             } else if event["type"] == "assistant_segment" {
                 json!({"type":"assistant_segment","segmentId":event["segment"]["id"],"phase":event["segment"]["phase"],"status":event["segment"]["status"]})
             } else if event.to_string().len() <= 24 * 1024 {
@@ -216,15 +234,20 @@ impl RequestRun {
             });
         }
         let terminal = events.back().filter(|event| terminal_event(event)).cloned();
+        if let Some(anchor) = &replay.reply_anchor {
+            if !events.iter().any(|event|event["type"]=="reply_anchor") {
+                events.push_front(anchor.clone());
+            }
+        }
         if terminal.is_some() {
             events.pop_back();
         }
         if !self.finished.load(Ordering::Acquire) {
             if let Some(segment) = &replay.active_segment {
-                events.push_back(json!({"type":"assistant_segment","segment":segment,"toolStreamProtocol":3,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
+                events.push_back(json!({"type":"assistant_segment","replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"]),"segment":segment,"toolStreamProtocol":3,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
             }
         }
-        events.push_back(json!({"type":"content_snapshot","content":replay.content,"reasoning":replay.reasoning,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
+        events.push_back(json!({"type":"content_snapshot","replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"]),"content":replay.content,"reasoning":replay.reasoning,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
         if let Some(terminal) = terminal {
             events.push_back(terminal);
         }
@@ -247,6 +270,7 @@ impl RequestRun {
             journal: None,
             parent_task_id: None,
             cancellation,
+            steering: watch::channel(0).0,
             native_cancellation: crate::service_cancellation::CancellationLease::acquire(
                 &cancellation_key,
             )
@@ -413,8 +437,20 @@ impl GatewayRuntime {
         original_message_raw: Option<String>,
     ) -> Result<Arc<RequestRun>, GatewayError> {
         let conversation = checked_id(&input["conversationId"], "conversationId")?;
+        let attachments = input.get("attachmentIds").filter(|value| !value.is_null());
+        if let Some(attachments) = attachments {
+            let ids = attachments.as_array().filter(|ids| ids.len() <= 128)
+                .ok_or_else(|| GatewayError::new("INVALID_CHAT_REQUEST", "附件列表无效。", 400))?;
+            let mut seen = std::collections::HashSet::new();
+            for id in ids {
+                if !seen.insert(checked_id(id, "attachmentId")?) {
+                    return Err(GatewayError::new("INVALID_CHAT_REQUEST", "附件 ID 重复。", 400));
+                }
+            }
+        }
         if !input["message"].as_str().is_some_and(|text| {
-            !text.trim().is_empty() && text.encode_utf16().count() <= 2 * 1024 * 1024
+            (!text.trim().is_empty() || attachments.is_some_and(|ids| ids.as_array().is_some_and(|ids| !ids.is_empty())))
+                && text.encode_utf16().count() <= 2 * 1024 * 1024
         }) {
             return Err(GatewayError::new(
                 "INVALID_CHAT_REQUEST",
@@ -545,6 +581,7 @@ impl GatewayRuntime {
             journal,
             parent_task_id: None,
             cancellation,
+            steering: watch::channel(0).0,
             events,
             native_cancellation,
             cancellation_key,
@@ -663,6 +700,7 @@ impl GatewayRuntime {
             journal: Some(journal),
             parent_task_id: task.parent_task_id.clone(),
             cancellation,
+            steering: watch::channel(0).0,
             native_cancellation: crate::service_cancellation::CancellationLease::acquire(
                 &cancellation_key,
             )
@@ -685,6 +723,15 @@ impl GatewayRuntime {
         if let Ok(runs) = self.task_runs.lock() {
             if let Some(run) = runs.get(task_id).and_then(Weak::upgrade) {
                 run.cancel();
+            }
+        }
+    }
+    /// Interrupt only the current model turn; executing tools and the task lifetime keep their own cancellation.
+    /// 只打断当前模型轮次；执行中的工具与整个任务继续使用原取消生命周期。
+    pub fn signal_task_steering(&self, task_id: &str) {
+        if let Ok(runs) = self.task_runs.lock() {
+            if let Some(run) = runs.get(task_id).and_then(Weak::upgrade) {
+                run.steering.send_modify(|sequence| *sequence = sequence.saturating_add(1));
             }
         }
     }

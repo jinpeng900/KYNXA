@@ -62,6 +62,146 @@ fn reply_response(result: Result<Value, GatewayError>) -> Response {
         }
     }))
 }
+
+/// Resolve the current conversation binding before every preview or embedded browser action.
+/// 每次文件预览或内嵌浏览器操作都解析当前会话归属，复用正式授权而非界面缓存。
+pub(crate) async fn workspace_tool_context(
+    runtime: &GatewayRuntime,
+    conversation: &str,
+) -> Result<crate::tools::gateway::GatewayToolContext, GatewayError> {
+    if conversation.trim().is_empty() {
+        return Err(GatewayError::new(
+            "INVALID_CONVERSATION",
+            "缺少文件所属聊天。",
+            400,
+        ));
+    }
+    let (_owner, cancellation) = tokio::sync::watch::channel(false);
+    runtime
+        .tool_context(conversation, "ask", "", cancellation)
+        .await
+}
+
+/// Workspace views need current scope, without rebuilding model/tool/retrieval configuration.
+/// 工作区展示只复核当前范围，不重建模型、工具及检索配置；聊天删除后仍允许关闭自有网页。
+async fn workspace_view_context(
+    runtime: &GatewayRuntime,
+    conversation: &str,
+    closing: bool,
+) -> Result<crate::tools::gateway::GatewayToolContext, GatewayError> {
+    if conversation.trim().is_empty() {
+        return Err(GatewayError::new("INVALID_CONVERSATION", "缺少工作区所属聊天。", 400));
+    }
+    let relationship = if closing {
+        Value::Null
+    } else {
+        let root = runtime.config.data_root.clone();
+        let id = conversation.to_owned();
+        tokio::task::spawn_blocking(move || crate::storage::gateway::current_relationship(&root, &id))
+            .await
+            .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "工作区范围读取失败。", 500))??
+    };
+    let workdir = relationship["folderPath"].as_str()
+        .or_else(|| relationship["workspaceRoot"].as_str())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| runtime.config.data_root.join("Sandboxes").join(conversation));
+    let (_owner, cancellation) = tokio::sync::watch::channel(false);
+    Ok(crate::tools::gateway::GatewayToolContext {
+        data_home: runtime.config.data_root.clone(),
+        extension_root: runtime.config.extension_root.clone(),
+        workdir: workdir.clone(),
+        toolhost_exe: runtime.config.toolhost_exe.clone(),
+        permission_mode: "ask".to_owned(),
+        conversation_id: conversation.to_owned(),
+        project_id: relationship["projectId"].as_str().map(str::to_owned),
+        authorized_roots: vec![workdir],
+        cancellation,
+        runtime: runtime.tools.clone(),
+        config: json!({
+            "officialToolsRoot":runtime.config.application_root.join("official-tools"),
+            "bindingSnapshot":{"projectId":relationship["projectId"],"folderPath":relationship["folderPath"]},
+            "deferredDocumentSettings":true,
+        }),
+        approved: false,
+        events: None,
+        external_execute: None,
+    })
+}
+
+fn workspace_content_response(
+    content: crate::tools::gateway_workspace_preview::WorkspaceContent,
+    headers: &HeaderMap,
+) -> Response {
+    binary_content_response(content.bytes, content.mime_type, &content.version, headers)
+}
+
+fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, headers: &HeaderMap) -> Response {
+    let total = bytes.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    let selected = if let Some(range) = range {
+        range.strip_prefix("bytes=").and_then(|range| {
+            if range.contains(',') {
+                return None;
+            }
+            let (first, last) = range.split_once('-')?;
+            if first.is_empty() {
+                let length: usize = last.parse().ok()?;
+                (length > 0 && total > 0).then_some((total.saturating_sub(length), total))
+            } else {
+                let first: usize = first.parse().ok()?;
+                let last = if last.is_empty() {
+                    total
+                } else {
+                    last.parse::<usize>().ok()?.saturating_add(1).min(total)
+                };
+                (first < last && first < total).then_some((first, last))
+            }
+        })
+    } else {
+        Some((0, total))
+    };
+    let Some((first, last)) = selected else {
+        return Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+    };
+    let mut builder = Response::builder()
+        .status(if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, mime_type)
+        .header(header::CONTENT_LENGTH, last - first)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::ETAG, format!("\"{}\"", version))
+        .header("X-Content-Type-Options", "nosniff");
+    if range.is_some() {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {first}-{}/{total}", last - 1),
+        );
+    }
+    if mime_type.starts_with("text/html") {
+        // Self-contained chart scripts run in an opaque sandbox, without network access or the native bridge.
+        // 自包含图表脚本仅在不透明来源沙箱运行，不开放网络访问和原生消息桥。
+        builder = builder.header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'");
+    } else if mime_type == "image/svg+xml" {
+        builder = builder.header("Content-Security-Policy", "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:");
+    }
+    builder
+        .body(axum::body::Body::from(
+            Bytes::from(bytes).slice(first..last),
+        ))
+        .unwrap()
+}
+
 pub fn health() -> Value {
     json!({
         "service": "kynxa-model-gateway",
@@ -258,6 +398,73 @@ async fn handle(
     let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
+    if let Some(tail) = path.strip_prefix("/api/conversations/") {
+        let parts = tail.split('/').collect::<Vec<_>>();
+        if parts.get(1) == Some(&"attachments") {
+            let conversation = parts[0];
+            let message = crate::storage::gateway::query_value(&query, "messageId").unwrap_or("");
+            return match (method.as_str(), parts.as_slice()) {
+                ("POST", [_, "attachments", "import"]) => response(crate::orchestration::gateway_attachments::import(&runtime, conversation, &body).await.map(|value| (200, value))),
+                ("GET", [_, "attachments"]) => response(crate::orchestration::gateway_attachments::list(&runtime, conversation, message).await.map(|value| (200, value))),
+                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content(&runtime, conversation, message, attachment).await {
+                    Ok(content) => {
+                        if crate::storage::gateway::query_value(&query, "version").is_some_and(|version| version != content.sha256) {
+                            response(Err(GatewayError::new("ATTACHMENT_VERSION_CHANGED", "附件预览版本已变化，请重新打开。", 409)))
+                        } else { binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers) }
+                    },
+                    Err(error) => response(Err(error)),
+                },
+                ("GET", [_, "attachments", attachment, "text"]) => {
+                    let number = |name, fallback| crate::storage::gateway::query_value(&query, name).and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);
+                    response(crate::orchestration::gateway_attachments::text(&runtime, conversation, message, attachment, number("offset", 0), number("maxChars", 24000)).await.map(|value| (200, value)))
+                },
+                _ => response(Err(GatewayError::new("NOT_FOUND", "附件接口不存在。", 404))),
+            };
+        }
+    }
+    let workspace_path = path.strip_prefix("/api").unwrap_or(path);
+    if workspace_path.starts_with("/agent/workspace/") {
+        let mut arguments = if method == Method::GET { json!({}) } else { body.clone() };
+        for (key, value) in &query { arguments[key] = json!(value); }
+        if method == Method::POST && workspace_path == "/agent/workspace/terminal/action" {
+            return response(Box::pin(crate::tools::gateway_workspace_terminal::action(
+                &arguments, &runtime.tools, &runtime.config.data_root)).await.map(|value| (200, value)));
+        }
+        let conversation = arguments["conversationId"].as_str().unwrap_or("");
+        let lightweight_view = matches!((method.as_str(), workspace_path),
+            ("POST", "/agent/workspace/chrome" | "/agent/workspace/chrome/action" | "/agent/workspace/preview")
+            | ("GET", "/agent/workspace/content"));
+        let context = match if lightweight_view {
+            let closing = workspace_path == "/agent/workspace/chrome/action" && arguments["action"] == "close";
+            workspace_view_context(&runtime, conversation, closing).await
+        } else {
+            workspace_tool_context(&runtime, conversation).await
+        } {
+            Ok(context) => context,
+            Err(error) => return response(Err(error)),
+        };
+        return match (method.as_str(), workspace_path) {
+            ("POST", "/agent/workspace/preview") => response(
+                crate::tools::gateway_workspace_preview::preview(arguments, &context).await.map(|value| (200, value))),
+            ("GET", "/agent/workspace/changes") => response(
+                crate::tools::gateway_workspace_changes::changes(&context).await.map(|value| (200, value))),
+            ("POST", "/agent/workspace/terminal/open") => response(
+                Box::pin(crate::tools::gateway_workspace_terminal::open(&arguments, &context)).await.map(|value| (200, value))),
+            ("POST", "/agent/workspace/chrome") => response(
+                Box::pin(crate::tools::gateway_browser::workspace_open(&arguments, &context)).await.map(|value| (200, value))),
+            ("POST", "/agent/workspace/chrome/action") => response(
+                Box::pin(crate::tools::gateway_browser::workspace_action(&arguments, &context)).await.map(|value| (200, value))),
+            ("GET", "/agent/workspace/content") => match crate::tools::gateway_workspace_preview::content(&arguments, &context).await {
+                Ok(content) => workspace_content_response(content, &headers),
+                Err(error) => response(Err(error)),
+            },
+            ("POST", "/agent/workspace/browser") => response(crate::tools::gateway_browser::attach_embedded(
+                arguments["cdpEndpoint"].as_str().unwrap_or(""), arguments["targetId"].as_str().unwrap_or(""), &context).await.map(|value| (200, value))),
+            ("DELETE", "/agent/workspace/browser") => response(crate::tools::gateway_browser::detach_embedded(
+                arguments["sessionId"].as_str().unwrap_or(""), &context).await.map(|value| (200, value))),
+            _ => response(Err(GatewayError::new("NOT_FOUND", "文件工作区接口不存在。", 404))),
+        };
+    }
     if method == Method::GET && path.starts_with("/api/tasks/") && path.ends_with("/stream") {
         let task_path = path.trim_end_matches("/stream");
         let authorized = crate::orchestration::gateway_task_http::handle(
@@ -724,6 +931,31 @@ fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> 
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browser_cleanup_context_survives_deleted_chat_without_reinitializing_storage() {
+        let fixture = std::env::temp_dir().join(format!("kynxa-browser-cleanup-{}", crate::gateway_contract::new_id()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let data_root = fixture.join("Data");
+        let runtime = GatewayRuntime::new(GatewayConfig {
+            data_home: fixture.clone(),
+            data_root: data_root.clone(),
+            extension_root: fixture.join("Extensions"),
+            application_root: fixture.join("App"),
+            port: 0,
+            toolhost_exe: fixture.join("ToolHost.exe"),
+            vector_extension: fixture.join("vec.dll"),
+            inference_library: fixture.join("onnxruntime.dll"),
+        });
+        let conversation = crate::gateway_contract::new_id();
+        let context = workspace_view_context(&runtime, &conversation, true).await.unwrap();
+        assert_eq!(context.conversation_id, conversation);
+        assert!(!data_root.exists());
+        assert!(workspace_view_context(&runtime, &conversation, false).await.is_err());
+        assert!(!data_root.exists());
+        assert!(workspace_view_context(&runtime, "", true).await.is_err());
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

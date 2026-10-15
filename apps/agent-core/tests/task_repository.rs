@@ -70,6 +70,38 @@ fn new_task(request: &str) -> NewTask {
 }
 
 #[test]
+fn model_task_presentation_persists_without_new_work_or_usage_reset() {
+    let fixture = Fixture::new();
+    let task = fixture.task("model-task-presentation", None);
+    let attempt = fixture.attempt(&task);
+    fixture.repository.record_usage(&attempt.token, "presentation-usage", &TaskUsage {
+        model_requests: 2,
+        input_tokens: 4096,
+        output_tokens: 1024,
+        ..TaskUsage::default()
+    }).unwrap();
+    let described = fixture.repository.describe_task(&attempt.token, " 文档成本对照 ", true).unwrap();
+    assert_eq!(described.task_id, task.task_id);
+    assert_eq!(described.title.as_deref(), Some("文档成本对照"));
+    assert_eq!(described.display_in_task_list, Some(true));
+    let reopened = TaskRepository::open(&fixture.root).unwrap();
+    let saved = reopened.load(&task.task_id).unwrap();
+    assert_eq!(saved.title, described.title);
+    assert_eq!(saved.usage.input_tokens, 4096);
+    assert_eq!(saved.usage.output_tokens, 1024);
+    assert_eq!(reopened.list_unfinished(16).unwrap().len(), 1);
+    let hidden = reopened.describe_task(&attempt.token, "文档成本对照", false).unwrap();
+    assert_eq!(hidden.display_in_task_list, Some(false));
+    assert_eq!(hidden.usage, saved.usage);
+    let mut legacy = serde_json::to_value(hidden).unwrap();
+    legacy.as_object_mut().unwrap().remove("title");
+    legacy.as_object_mut().unwrap().remove("displayInTaskList");
+    let legacy: TaskRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.title, None);
+    assert_eq!(legacy.display_in_task_list, None);
+}
+
+#[test]
 fn paused_lookup_is_indexed_bounded_and_reopens_the_same_chat_checkpoint() {
     let fixture = Fixture::new();
     let input = new_task("paused-lookup-root");
@@ -179,6 +211,28 @@ fn user_steering_preserves_identity_scope_and_supersedes_only_obsolete_delegates
         .transition(&attempt.token, current.version, TaskState::Completed, None)
         .unwrap();
 }
+#[test]
+fn running_user_steering_retains_execution_and_unfinished_children() {
+    let fixture = Fixture::new();
+    let task = fixture.task("running-steering-root", None);
+    let child = fixture.task("running-steering-child", Some(&task));
+    let attempt = fixture.attempt(&task);
+    let running = fixture.repository.load(&task.task_id).unwrap();
+    let changed = fixture.repository.record_user_steering(
+        &task.task_id,
+        running.version,
+        &uuid::Uuid::new_v4().to_string(),
+        "update",
+        &"a".repeat(64),
+    ).unwrap();
+    assert_eq!(changed.state, TaskState::Running);
+    assert_eq!(changed.current_attempt_id, running.current_attempt_id);
+    assert_eq!(changed.execution_version, running.execution_version);
+    assert_eq!(changed.stop_reason, running.stop_reason);
+    assert_eq!(fixture.repository.load(&child.task_id).unwrap().state, child.state);
+    fixture.repository.transition(&attempt.token, changed.version, TaskState::WaitingChildren, None).unwrap();
+}
+
 fn operation(id: &str) -> OperationIntent {
     OperationIntent {
         operation_id: id.into(),

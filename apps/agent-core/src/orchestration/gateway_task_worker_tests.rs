@@ -392,6 +392,38 @@ async fn child_write_scope_and_unknown_dispatch_remain_enforced_on_restart() {
 }
 
 #[tokio::test]
+async fn steering_releases_parent_child_wait_without_cancelling_child() {
+    let fixture = Fixture::new().await;
+    let mut context = fixture.context.clone();
+    context.config["activeSteeringSequence"] = json!(0);
+    let parent = fixture.parent.clone();
+    let signal = async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        parent.steering.send_modify(|sequence| *sequence += 1);
+    };
+    let wait = fixture.runtime.tasks.tool(
+        fixture.parent.clone(), context, "task.wait",
+        json!({"taskIds":[fixture.child.task_id],"timeoutMs":30_000}),
+    );
+    let (result, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(wait, signal)
+    })
+    .await
+    .expect("User steering must not wait for the child or its 30-second polling budget.");
+    let result = result.unwrap();
+    assert_eq!(result["steeringPending"], true);
+    assert_eq!(result["timedOut"], false);
+    let repository = TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
+    assert_eq!(
+        repository.load(&fixture.child.task_id).unwrap().state,
+        TaskState::Queued,
+    );
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 0);
+    assert!(repository.operations(&fixture.child.task_id).unwrap().is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn pause_inflight_keeps_actual_failed_model_cost_and_saves_recoverable_context() {
     let fixture = Fixture::new().await;
     fixture.provider.delay.store(true, Ordering::Release);

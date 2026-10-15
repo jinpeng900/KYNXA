@@ -10,7 +10,7 @@
   /* Prefer the Windows UI Latin family and let CJK glyphs fall back to YaHei UI; code and mathematics keep their own faces.
    * 西文优先使用 Windows 界面字体，中文回退到微软雅黑 UI；代码与数学仍保留各自的专用字体。 */
   --ui-font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --code-font: 'Cascadia Mono', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', monospace;
+  --code-font: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', monospace;
   color-scheme: light; font-family: var(--ui-font); font-size: 15px; color: var(--appearance-text); background: var(--appearance-main);
 }
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: #d5d5d5 transparent; }
@@ -26,6 +26,35 @@ body { margin: 0; padding: 12px 20px 24px; line-height: 1.7; overflow-wrap: anyw
 .message.user { display: flex; flex-direction: column; align-items: flex-end; padding-left: 48px; }
 .message-content { min-width: 0; max-width: 100%; }
 .user .message-content { max-width: 85%; padding: 10px 15px; border-radius: 18px; background: var(--appearance-soft); }
+/* Attachments sit above the unchanged user text bubble and share its right alignment.
+ * 附件位于原样用户正文上方并保持右对齐；窄窗口自动换行，不撑宽聊天。 */
+.user .message-content.has-attachments { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; padding: 0; background: transparent; }
+.user .has-attachments > .message-body { padding: 10px 15px; border-radius: 18px; background: var(--appearance-soft); max-width: 100%; }
+.message-attachments { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: 100%; }
+.attachment-image-list { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 100%; }
+.attachment-file-list { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: 100%; }
+.attachment-image-list[hidden], .attachment-file-list[hidden] { display: none; }
+.message-attachments[hidden] { display: none; }
+.message-attachment { display: flex; align-items: center; gap: 10px; max-width: min(100%, 300px); min-width: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--appearance-text) 13%, transparent); border-radius: 14px; background: var(--appearance-soft); color: var(--appearance-text); text-align: left; overflow: hidden; }
+.message-attachment:hover { filter: brightness(.97); }
+.message-attachment:focus-visible { outline: 2px solid var(--appearance-secondary); outline-offset: 2px; }
+.message-attachment:disabled { cursor: default; opacity: .75; }
+.attachment-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 36px; border-radius: 8px; color: var(--appearance-secondary); background: var(--appearance-main); }
+.attachment-icon[hidden], .message-attachment img[hidden] { display: none; }
+.attachment-details { display: flex; flex-direction: column; min-width: 0; }
+.attachment-name { font-weight: 600; font-size: 13px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-description { font-size: 11px; color: var(--appearance-secondary); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-description[hidden] { display: none; }
+.attachment-file-pill { gap: 5px; padding: 5px 10px; border-radius: 18px; }
+.attachment-file-pill .attachment-icon { flex-basis: 16px; width: 16px; height: 19px; background: transparent; }
+.attachment-file-pill .attachment-icon svg { width: 15px; height: 15px; }
+.attachment-file-pill .attachment-name { font-size: 12px; font-weight: 500; }
+.attachment-image { position: relative; width: 98px; height: 98px; padding: 0; border-radius: 12px; justify-content: center; }
+.attachment-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attachment-image:has(img:not([hidden])) .attachment-details { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.attachment-image:not(:has(img:not([hidden]))) .attachment-details { display: none; }
+.attachment-image.image-unavailable img { display: none; }
+.attachment-image.image-unavailable .attachment-icon { display: inline-flex; }
 .message-avatar { position: absolute; left: 0; top: 1px; width: 30px; height: 30px; border-radius: 50%; background: #f5f5f5; object-fit: contain; }
 [data-copy-ignore], button, summary { user-select: none; -webkit-user-select: none; }
 .message-body { min-width: 0; }
@@ -50,7 +79,7 @@ hr { border: 0; border-top: 1px solid #e6e6e6; margin: 18px 0; }
 pre { max-width: 100%; margin: 12px 0; padding: 12px 15px; border-radius: 9px; background: #f6f6f6; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
 code { font-family: var(--code-font); font-size: .92em; }
 :not(pre) > code { padding: 1px 5px; border-radius: 4px; background: #f1f1f1; white-space: break-spaces; }
-pre code { font-size: 13px; line-height: 1.65; }
+pre code { font-size: 14px; line-height: 1.7; font-variant-ligatures: none; }
 .table-scroll { max-width: 100%; overflow-x: auto; margin: 13px 0; border-radius: 8px; background: #f8f8f8; }
 table { border-collapse: collapse; width: 100%; font-size: 15px; }
 th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #e5e5e5; vertical-align: middle; max-width: 440px; overflow-wrap: anywhere; }

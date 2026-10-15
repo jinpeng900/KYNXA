@@ -2,6 +2,9 @@ using KYNXA_Desktop.Services;
 
 var cases = new (string Language, string Source)[]
 {
+    ("rust", "// 中文注释\nuse std::fmt;\npub fn greet(name: &str) -> String { format!(\"你好 {name}\") }"),
+    ("diff", "diff --git a/src.rs b/src.rs\n--- a/src.rs\n+++ b/src.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+    ("tsx", "interface Item { title: string; }\nconst card = <div>Hello</div>;"),
     ("python", "# 中文注释 😊\r\ndef greet(name):\r\n\treturn '你好'\r\n"),
     ("js", "// note\nconst message = \"hello\";\nif (true) console.log(message);"),
     ("ts", "interface User { name: string; }\nconst user: User = { name: '用户' };"),
@@ -46,6 +49,12 @@ foreach (string? language in new string?[] { null, "", "text", "unknown-language
 }
 foreach (string source in new[] { "", "\t\r\n", "def f():\n  return 'unfinished", new string('x', 40_001) })
     Check(string.Concat(CodeSyntaxHighlighter.Highlight(source, "python").Select(t => t.Text)) == source, "empty/incomplete/large source preservation");
+string loadedPages = string.Concat(Enumerable.Repeat("pub fn greet() -> &str { \"你好\" }\n", 4500));
+var loadedTokens = CodeSyntaxHighlighter.Highlight(loadedPages, "rust");
+Check(loadedPages.Length > 128_000 && loadedTokens.Count > 16384
+    && loadedTokens.LastOrDefault(token => token.Text.Contains("pub", StringComparison.Ordinal))?.Color is not null
+    && string.Concat(loadedTokens.Select(token => token.Text)) == loadedPages,
+    "loaded pages retain colors past the former character and token-run thresholds");
 Console.WriteLine("PASS aliases, lexical contexts, CRLF/tabs/Unicode, plain fallback, incomplete/large input");
 
 static void Check(bool condition, string message)

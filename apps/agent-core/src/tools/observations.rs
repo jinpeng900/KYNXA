@@ -267,6 +267,7 @@ fn call_key(call: &Value) -> Option<String> {
     if matches!(
         name,
         "filesystem.read"
+            | "document.read"
             | "knowledge.read"
             | "tool.result.read"
             | "conversation.history.read"
@@ -346,7 +347,7 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
             sources.sort_by_cached_key(|item| serde_json::to_string(item).unwrap_or_default());
             Value::Array(sources)
         }
-        "filesystem.read"
+        "filesystem.read" | "document.read"
             if is_truthy(&value["path"])
                 && is_truthy(&value["sha256"])
                 && (value["text"].is_string() || value["content"].is_string()) =>
@@ -356,6 +357,7 @@ fn source_observation(call: &Value, result: &Value) -> Option<(String, String)> 
                 value["sha256"],
                 value["offset"],
                 value["nextOffset"],
+                value["locator"]["extraction"]["pageWindow"],
                 value.get("text").filter(|value| value.is_string()).unwrap_or(&value["content"])
             ])
         }

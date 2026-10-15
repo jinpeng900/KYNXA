@@ -59,6 +59,10 @@ public sealed partial class ShellPage
             catch (Exception error) { Debug.WriteLine($"Exit presentation-cache flush: {error.GetType().Name}"); }
             if (StoragePaths.IsMigrating) throw new InvalidOperationException(UiText.Get("数据正在迁移，请完成迁移后再退出。"));
             _closeApproved = true;
+            // The shared gateway stays alive; terminals and browser processes share one exit cleanup deadline.
+            // 共享网关继续运行；本桌面终端与浏览器在同一退出时限内并行清理，不逐项累加等待。
+            try { await Task.WhenAll(WorkspaceTerminal.CloseAllAsync(), DocumentPanel.CloseAllAsync()).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (Exception error) { Debug.WriteLine($"Exit workspace cleanup: {error.GetType().Name}"); }
             App.Window.Close();
         }
         catch (Exception error)

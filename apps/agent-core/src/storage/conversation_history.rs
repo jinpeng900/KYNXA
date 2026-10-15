@@ -20,8 +20,11 @@ struct RecordRange {
     length: usize,
     streaming: bool,
 }
+#[derive(Clone)]
 struct HistoryIndex {
     snapshot: String,
+    hash_state: Sha256,
+    file_bytes: u64,
     version_token: Option<String>,
     records: Vec<RecordRange>,
     identities: HashMap<String, (usize, String)>,
@@ -176,7 +179,9 @@ fn build_index(
             .map(|(id, (_, role))| id.capacity() + role.capacity())
             .sum::<usize>();
     Ok(HistoryIndex {
-        snapshot: format!("{:x}", hash.finalize()),
+        snapshot: format!("{:x}", hash.clone().finalize()),
+        hash_state: hash,
+        file_bytes: offset,
         version_token,
         bytes: records.capacity() * std::mem::size_of::<RecordRange>() + identity_bytes,
         records,
@@ -195,6 +200,104 @@ pub(crate) struct HistoryRead {
     path: std::path::PathBuf,
 }
 impl HistoryRead {
+    /// Append a checked message and advance the existing offsets/hash without rereading the whole log.
+    /// 追加已核验消息并更新现有偏移与哈希，不为每次工具回执重新读取整个历史日志。
+    pub(crate) fn append_message(&mut self, raw_message: &str, unchanged: bool) -> ContractResult {
+        let _guard = conversation_logs::CONVERSATION_TRANSACTIONS
+            .lock()
+            .map_err(|_| invalid("会话存储锁失效。"))?;
+        self.verify()?;
+        let event =
+            format!("{{\"version\":1,\"type\":\"message.upsert\",\"message\":{raw_message}}}\n");
+        let (id, role) = conversation_logs::event_identity(&event)?;
+        let status: MessageStatus<'_> =
+            serde_json::from_str(raw_message).map_err(|_| invalid("历史状态无效。"))?;
+        if let Some((_, saved_role)) = self
+            .index
+            .as_ref()
+            .and_then(|index| index.identities.get(&id))
+        {
+            if saved_role != &role {
+                return Err(conversation_logs::error(
+                    "消息 ID 已用于其他角色。",
+                    "INVALID_CONVERSATION_DATA",
+                    400,
+                ));
+            }
+            if unchanged || self.messages.iter().any(|previous| previous == raw_message) {
+                return Ok(json!({"appended":false,"hash":self.index.as_ref().unwrap().snapshot}));
+            }
+        }
+        conversation_logs::check_cancelled()?;
+        managed_files::inspect(
+            &self.root,
+            self.path.parent().unwrap(),
+            true,
+            false,
+            u64::MAX,
+        )?;
+        managed_files::inspect(&self.root, &self.path, false, true, u64::MAX)?;
+        let mut handle = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)
+            .map_err(conversation_logs::io_error)?;
+        std::io::Write::write_all(&mut handle, event.as_bytes())
+            .map_err(conversation_logs::io_error)?;
+        handle.sync_all().map_err(conversation_logs::io_error)?;
+        drop(handle);
+        let reader =
+            managed_files::open_reader(&self.root, &self.path, u64::MAX)?.ok_or_else(changed)?;
+        reader.verify()?;
+        let version_token = reader.version_token()?;
+        let mut index = self
+            .index
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| HistoryIndex {
+                snapshot: managed_files::digest(&[]),
+                hash_state: Sha256::new(),
+                file_bytes: 0,
+                version_token: None,
+                records: Vec::new(),
+                identities: HashMap::new(),
+                bytes: 0,
+                has_streaming: false,
+            });
+        let range = RecordRange {
+            offset: index.file_bytes,
+            length: event.len(),
+            streaming: status.status == Some("streaming"),
+        };
+        if let Some((position, _)) = index.identities.get(&id) {
+            index.records[*position] = range;
+        } else {
+            let position = index.records.len();
+            index.records.push(range);
+            index.identities.insert(id, (position, role));
+        }
+        index.file_bytes += event.len() as u64;
+        index.hash_state.update(event.as_bytes());
+        index.snapshot = format!("{:x}", index.hash_state.clone().finalize());
+        index.version_token = version_token;
+        index.has_streaming = index.records.iter().any(|record| record.streaming);
+        index.bytes = index.records.capacity() * std::mem::size_of::<RecordRange>()
+            + index.identities.capacity()
+                * (std::mem::size_of::<String>() * 2 + std::mem::size_of::<usize>() + 16)
+            + index
+                .identities
+                .iter()
+                .map(|(id, (_, role))| id.capacity() + role.capacity())
+                .sum::<usize>();
+        let receipt = json!({"appended":true,"hash":index.snapshot});
+        let index = Arc::new(index);
+        let owner = managed_files::digest(self.path.to_string_lossy().as_bytes());
+        cache_index(&owner, &index)?;
+        self.reader = Some(reader);
+        self.index = Some(index);
+        self.messages = vec![raw_message.to_owned()];
+        Ok(receipt)
+    }
     pub fn message_ids(&self) -> Vec<String> {
         let Some(index) = &self.index else {
             return Vec::new();
@@ -385,6 +488,11 @@ fn indexed(
     {
         return Err(changed());
     }
+    cache_index(owner, &index)?;
+    Ok(index)
+}
+
+fn cache_index(owner: &str, index: &Arc<HistoryIndex>) -> Result<(), ContractError> {
     let mut cache = HISTORY_CACHE
         .lock()
         .map_err(|_| invalid("历史缓存锁失效。"))?;
@@ -397,7 +505,7 @@ fn indexed(
         cache.remove(0);
     }
     cache.push((owner.to_owned(), Arc::clone(&index)));
-    Ok(index)
+    Ok(())
 }
 
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
@@ -602,6 +710,55 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_HISTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn indexed_append_keeps_exact_log_hash_ids_and_conflict_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-append-{}-{}",
+            std::process::id(),
+            NEXT_HISTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let chat = "11111111-1111-4111-8111-111111111111";
+        let target = "22222222-2222-4222-8222-222222222222";
+        let location = json!({"Id":chat,"ProjectId":null});
+        let path = root.join("Chats").join(chat).join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = format!(
+            r#"{{"version":1,"type":"message.upsert","message":{{"Id":"{target}","Role":"assistant","Status":"streaming","Content":"before"}}}}"#
+        ) + "\n";
+        fs::write(&path, &original).unwrap();
+        let ids = HashSet::from([target.to_owned()]);
+        let mut read = read_latest(&root, &location, Some(&ids), false).unwrap();
+        let updated =
+            json!({"Id":target,"Role":"assistant","Status":"completed","Content":"after"})
+                .to_string();
+        let receipt = read.append_message(&updated, false).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(original.as_bytes()));
+        assert_eq!(receipt["hash"], managed_files::digest(&bytes));
+        let cached = read.index.as_ref().unwrap().clone();
+        let mut next = read_latest(&root, &location, Some(&ids), false).unwrap();
+        assert_eq!(next.messages, vec![updated.clone()]);
+        assert!(!next.index.as_ref().unwrap().has_streaming);
+        if next.index.as_ref().unwrap().version_token.is_some() {
+            assert!(Arc::ptr_eq(&cached, next.index.as_ref().unwrap()));
+        }
+        assert_eq!(
+            next.append_message(&updated, false).unwrap()["appended"],
+            false
+        );
+        let conflict = json!({"Id":target,"Role":"user","Content":"different role"}).to_string();
+        assert_eq!(
+            next.append_message(&conflict, false).unwrap_err().code(),
+            "INVALID_CONVERSATION_DATA"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::write(&path, &original).unwrap();
+        assert!(next.append_message(&updated, false).is_err());
+        drop(next);
+        drop(read);
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn offsets_reuse_unchanged_bytes_and_detect_edits_with_restored_write_time() {

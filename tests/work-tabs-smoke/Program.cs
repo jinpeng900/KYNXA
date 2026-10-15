@@ -16,6 +16,19 @@ var shot = new ConversationWorkTab("screenshot/message-a/call-a", "screenshot", 
 var terminal = new ConversationWorkTab("terminal/message-a/call-b", "terminal", "PowerShell · 执行中");
 var secondShot = new ConversationWorkTab("screenshot/message-a/call-c", "screenshot", "截图 2");
 
+var terminals = new ConversationWorkTabState();
+var terminalOne = new ConversationWorkTab($"terminal/{chatA:D}/{Guid.NewGuid():N}", "terminal", "终端 1", chatA.ToString("D"));
+var terminalTwo = terminalOne with { Key = $"terminal/{chatA:D}/{Guid.NewGuid():N}", Title = "终端 2" };
+terminals.ShowConversation(chatA, [terminalOne, terminalTwo]);
+Check(terminals.Select(terminalTwo.Key) && terminals.OpenItems.Count == 2,
+    "Independent terminal tabs in the same conversation remain selectable.");
+Check(terminals.Close(terminalOne.Key) && terminals.SelectedTab?.Key == terminalTwo.Key && terminals.OpenItems.Count == 1,
+    "Closing one terminal preserves the selected sibling terminal.");
+terminals.ShowConversation(chatB, []);
+terminals.ShowConversation(chatA, [terminalOne, terminalTwo]);
+Check(terminals.SelectedTab?.Key == terminalTwo.Key && terminals.OpenItems.Count == 1,
+    "Returning to the conversation retains its surviving terminal and closed-tab choice.");
+
 Check(!state.ShowConversation(null, []) && !state.HasItems && !state.HasOpenTabs && state.SelectedTab is null,
     "No active chat exposes neither tabs nor another chat's selection.");
 Check(state.ShowConversation(chatA, [shot]) && state.SelectedTab?.Key == shot.Key,
@@ -155,4 +168,65 @@ Check(ConversationScreenshotSources.Collect(chatA,
     [new(chatA, Guid.NewGuid(), "assistant", [screenshotTools[0] with { Status = "unknown" }])]).Length == 0,
     "Foreign conversations and unknown execution outcomes cannot add sidebar screenshots.");
 
-Console.WriteLine($"PASS: {checks} work tab state and screenshot receipt checks.");
+var documentTabs = new ConversationWorkTabState();
+var document = ConversationWorkspaceSources.File(@"D:\work\报告.md", version: "one");
+var sameDocument = ConversationWorkspaceSources.File(@"d:/work/报告.md", version: "two");
+Check(document.Key == sameDocument.Key, "The same Windows file keeps one logical tab across case, separator and version changes.");
+var diagram = ConversationWorkspaceSources.File(@"D:\work\流程.mmd");
+var browser = ConversationWorkspaceSources.FromReference(System.Text.Json.JsonSerializer.SerializeToElement(
+    new { kind = "browser", path = "https://example.org/article", url = "https://example.org/article", title = "资料来源" }))!;
+documentTabs.ShowConversation(chatA, [document, diagram, browser]);
+Check(documentTabs.Items.Count == 3 && diagram.Kind == "diagram" && browser.Kind == "browser",
+    "Documents, Mermaid and website tabs share the existing conversation strip.");
+documentTabs.Select(browser.Key); documentTabs.ShowConversation(chatA, [sameDocument, diagram, browser]);
+Check(documentTabs.SelectedTab?.Key == browser.Key && documentTabs.Items[0].Version == "two",
+    "Updating an artifact refreshes its version without stealing the selected webpage.");
+Check(documentTabs.Move(browser.Key, document.Key), "The user can reorder document and browser tabs.");
+documentTabs.ShowConversation(chatA, [sameDocument, diagram, browser]);
+Check(documentTabs.Items.Select(tab => tab.Key).SequenceEqual([browser.Key, document.Key, diagram.Key]),
+    "User tab ordering survives later artifact snapshots.");
+var fileReceipt = System.Text.Json.JsonSerializer.SerializeToElement(new { path = @"D:\work\成品.docx", sha256 = "actual-version", title = "成品" });
+var write = new ToolActivity("write-artifact", "filesystem.write", null, "completed", "Saved");
+Check(ConversationWorkspaceSources.FromTool(write, fileReceipt) is { Title: "成品", Version: "actual-version", Kind: "document" },
+    "A successful real write receipt exposes its actual filename, model title and version.");
+Check(ConversationWorkspaceSources.FromTool(write with { Status = "error" }, fileReceipt) is null &&
+    ConversationWorkspaceSources.FromTool(write with { Status = "unknown" }, fileReceipt) is null,
+    "Failed and unknown writes cannot masquerade as existing output files.");
+Check(ConversationWorkspaceSources.FromTool(write, System.Text.Json.JsonSerializer.SerializeToElement(new { message = "report.md created" })) is null,
+    "Prose that mentions a filename cannot invent a resource tab.");
+Check(ConversationWorkspaceSources.FromTool(write with { Name = "document.read" }, fileReceipt) is null &&
+    ConversationWorkspaceSources.FromTool(write with { Name = "filesystem.read" }, fileReceipt) is null,
+    "Ordinary source reads do not create dozens of background tabs; artifact.open explicitly chooses what to display.");
+var redirectedWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
+    { kind = "browser", presentation = "workspace", url = "https://example.org/article", title = "Article" });
+Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, redirectedWebsite) is { Kind: "browser", Title: "Article" }
+    && ConversationWorkspaceSources.FromTool(write with { Name = "computer.launch" }, redirectedWebsite) is { Kind: "browser" },
+    "Actual workspace browser receipts open sidebar tabs even when the model initially selected an application tool.");
+Check(ConversationWorkspaceSources.FromTool(write with { Name = "computer.launch" },
+    System.Text.Json.JsonSerializer.SerializeToElement(new { url = "https://example.org/article" })) is null,
+    "An ordinary external browser launch cannot create a sidebar tab without a workspace presentation receipt.");
+documentTabs.Close(document.Key); documentTabs.ShowConversation(chatA, [sameDocument, diagram, browser]);
+Check(documentTabs.OpenItems.All(tab => tab.Key != document.Key) && documentTabs.Items.Any(tab => tab.Key == document.Key),
+    "Closing a file tab preserves the real artifact and its closed choice after updates.");
+
+Check(documentTabs.SelectHome() && documentTabs.SelectedTab is null && documentTabs.HasOpenTabs,
+    "The workspace home preserves open file and browser tabs without selecting a hidden resource.");
+documentTabs.ShowConversation(chatA, [sameDocument, diagram, browser]);
+Check(documentTabs.SelectedTab is null && documentTabs.OpenItems.Count == 2,
+    "Routine refreshes keep the explicit home view and preserve closed file choices.");
+Check(documentTabs.Select(browser.Key) && documentTabs.SelectedTab?.Key == browser.Key,
+    "Selecting a retained browser tab leaves the home view and resumes that resource.");
+
+Check(WorkspaceNavigationAddress.TryResolve("  https://example.org/article?q=physics  ", out var directAddress)
+    && directAddress.AbsoluteUri == "https://example.org/article?q=physics"
+    && WorkspaceNavigationAddress.TryResolve("example.org/article", out var bareAddress)
+    && bareAddress.AbsoluteUri == "https://example.org/article",
+    "Both explicit URLs and bare website addresses navigate directly.");
+Check(WorkspaceNavigationAddress.TryResolve("量子 力学 & 实验", out var searchAddress)
+    && searchAddress.Host == "www.google.com" && searchAddress.AbsolutePath == "/search"
+    && searchAddress.Query == "?q=" + Uri.EscapeDataString("量子 力学 & 实验"),
+    "Ordinary input becomes one escaped Google query shared by both address bars.");
+Check(!WorkspaceNavigationAddress.TryResolve("  ", out _) && !WorkspaceNavigationAddress.TryResolve("file:///C:/test.txt", out _),
+    "Empty input and non-web navigation do not open a browser page.");
+
+Console.WriteLine($"PASS: {checks} work tab state, artifact and screenshot receipt checks.");

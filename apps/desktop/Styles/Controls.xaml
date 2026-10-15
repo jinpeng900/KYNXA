@@ -95,6 +95,24 @@
         <Setter Property="HorizontalAlignment" Value="Center" />
         <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
+    <Style x:Key="KynxaWorkspaceTabButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource KynxaSecondaryTextBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="Transparent" />
+        <!-- The complete tab owns its background; title and close controls never paint separate tiles.
+             完整标签统一绘制背景，标题与关闭按钮在悬停和按下时都不另画背景块。
+        -->
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                      Padding="{TemplateBinding Padding}" Background="Transparent"
+                                      Foreground="{TemplateBinding Foreground}"
+                                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                      VerticalContentAlignment="Center" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
     <Style x:Key="KynxaNavigationButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaQuietButtonStyle}">
         <Setter Property="Height" Value="{StaticResource KynxaSidebarRowHeight}" />
         <Setter Property="Margin" Value="8,0" />

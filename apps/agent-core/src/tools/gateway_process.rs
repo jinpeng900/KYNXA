@@ -258,11 +258,21 @@ impl OwnedProcessJob {
     }
 
     fn attach_with_policy(child: &Child, allow_breakaway: bool) -> Result<Self, GatewayError> {
+        let pid = child
+            .id()
+            .ok_or_else(|| failure("TOOL_PROCESS_EXITED", "进程在登记前退出。", 503))?;
+        Self::attach_pid_with_policy(pid, allow_breakaway)
+    }
+
+    /// ConPTY launches suspended Win32 processes rather than Tokio Child handles.
+    /// ConPTY 以挂起状态创建 Win32 进程，复用同一作业生命周期，不另建进程树账本。
+    pub(crate) fn attach_pid(pid: u32) -> Result<Self, GatewayError> {
+        Self::attach_pid_with_policy(pid, false)
+    }
+
+    fn attach_pid_with_policy(pid: u32, allow_breakaway: bool) -> Result<Self, GatewayError> {
         #[cfg(windows)]
         unsafe {
-            let pid = child
-                .id()
-                .ok_or_else(|| failure("TOOL_PROCESS_EXITED", "进程在登记前退出。", 503))?;
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
                 return Err(failure(
@@ -306,7 +316,7 @@ impl OwnedProcessJob {
         }
         #[cfg(not(windows))]
         {
-            let _ = (child, allow_breakaway);
+            let _ = (pid, allow_breakaway);
             Err(failure(
                 "TOOLHOST_PLATFORM_UNSUPPORTED",
                 "本工具执行器仅支持 Windows。",

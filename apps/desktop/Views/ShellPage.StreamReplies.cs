@@ -24,7 +24,9 @@ public sealed partial class ShellPage
         public string? Model { get; } = model;
         public string PermissionMode { get; } = permissionMode;
         public CancellationTokenSource Cancellation { get; } = new();
-        public ChatMessageState Message { get; } = restoredMessage ?? new() { Role = "assistant", Status = "streaming", Provider = provider ?? "", Model = model ?? "" };
+        public ChatMessageState Message { get; set; } = restoredMessage ?? new() { Role = "assistant", Status = "streaming", Provider = provider ?? "", Model = model ?? "" };
+        public Guid StreamRequestId { get; set; }
+        public Guid? WaitingReplyAnchorId { get; set; }
         public ConversationMessageViewModel Presentation { get; set; } = null!;
         public StringBuilder Content { get; } = new();
         public StringBuilder Reasoning { get; } = new();
@@ -39,6 +41,7 @@ public sealed partial class ShellPage
         public Guid? TaskId { get; set; }
         public bool PauseConfirmed { get; set; }
         public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<Guid?> TaskRegistered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string? Error => Message.Status == "streaming" ? null : Message.Error;
     }
 
@@ -53,16 +56,16 @@ public sealed partial class ShellPage
     {
         if (SendButton is null) return;
         bool active = ActiveChatId is Guid id && _pendingReplies.ContainsKey(id);
-        bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text);
+        bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
-            && !string.IsNullOrWhiteSpace(PromptTextBox.Text));
+            && hasInput);
         // SVG strokes do not inherit Button.Foreground; keep the disabled arrow readable explicitly.
         // SVG 描边不继承 Button.Foreground；显式选择禁用箭头，保证空输入时仍清晰可见。
         SendArrow.Source = (ImageSource)Application.Current.Resources[SendButton.IsEnabled ? "IconSend" : "IconSendDisabled"];
         bool pause = active && !hasInput;
         SendArrow.Visibility = pause ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = pause ? Visibility.Visible : Visibility.Collapsed;
-        string caption = pause ? "暂停并保存进度" : active ? "发送任务补充" : "发送";
+        string caption = pause ? "暂停并保存进度" : active ? "加入等待队列" : "发送";
         AutomationProperties.SetName(SendButton, UiText.Get(caption));
         ToolTipService.SetToolTip(SendButton, UiText.Get(caption));
     }
@@ -75,6 +78,7 @@ public sealed partial class ShellPage
             ?? throw new InvalidOperationException(UiText.Get("找不到要回复的用户消息。"));
         var pending = new PendingChatReply(chatId, user.Id, question, provider, model, permissionMode ?? _layout.PermissionMode);
         if (requestId is Guid existingId) pending.Message.Id = existingId;
+        pending.StreamRequestId = pending.Message.Id;
         pending.Presentation = new ConversationMessageViewModel(chatId, pending.Message);
         pending.Presentation.SetRetryAllowed(true);
         chat.Messages.Add(pending.Message);
@@ -137,17 +141,25 @@ public sealed partial class ShellPage
             if (pending.StopRequested) pending.Cancellation.Cancel();
             pending.Cancellation.Token.ThrowIfCancellationRequested();
             var updates = observedTaskId is Guid taskId
-                ? _modelApiClient.StreamTaskReplyAsync(pending.ConversationId, taskId, pending.Message.Id, pending.Cancellation.Token)
+                ? _modelApiClient.StreamTaskReplyAsync(pending.ConversationId, taskId, pending.StreamRequestId, pending.Cancellation.Token)
                 : _modelApiClient.StreamReplyAsync(new ChatRequest(pending.ConversationId, pending.Question, pending.Model,
-                    pending.PermissionMode, pending.Provider, pending.Message.Id, pending.UserMessageId), pending.Cancellation.Token);
+                    pending.PermissionMode, pending.Provider, pending.StreamRequestId, pending.UserMessageId,
+                    FindChat(pending.ConversationId).Chat?.Messages.FirstOrDefault(message => message.Id == pending.UserMessageId)
+                        ?.Attachments.Select(file => file.Id).ToArray()), pending.Cancellation.Token);
             await foreach (var update in updates)
             {
                 if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
+                if (pending.WaitingReplyAnchorId is not null && update.Type is "reasoning_delta" or "text_delta"
+                    or "assistant_segment" or "content_snapshot") continue;
                 switch (update.Type)
                 {
+                    case "reply_anchor":
+                        AcceptReplyAnchor(pending, update);
+                        break;
                     case "started":
                         pending.Started = true;
                         pending.TaskId = update.RootRequestTaskId ?? update.TaskId ?? pending.TaskId;
+                        pending.TaskRegistered.TrySetResult(pending.TaskId);
                         if (update.TaskId is not null) TaskPanel.NotifyChanged(pending.ConversationId);
                         if (pending.StopRequested) await StopPendingReplyAsync(pending);
                         break;
@@ -169,7 +181,7 @@ public sealed partial class ShellPage
                     case "tool_result":
                         if (update.Tool is { } activity)
                         {
-                            AcceptToolActivity(pending, activity);
+                            if (pending.WaitingReplyAnchorId is null) AcceptToolActivity(pending, activity);
                         }
                         break;
                     case "terminal_output":
@@ -203,18 +215,19 @@ public sealed partial class ShellPage
                         }
                         break;
                     case "content_snapshot":
-                        pending.Content.Clear();
-                        pending.Content.Append(update.Content);
-                        pending.Reasoning.Clear();
-                        pending.Reasoning.Append(update.Reasoning);
+                        if (!string.IsNullOrEmpty(update.Content) || pending.Content.Length == 0)
+                        { pending.Content.Clear(); pending.Content.Append(update.Content); }
+                        if (!string.IsNullOrEmpty(update.Reasoning) || pending.Reasoning.Length == 0)
+                        { pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning); }
                         break;
                     case "completed":
                     case "interrupted":
                     case "error":
                         pending.ThinkingTime.Stop();
-                        if (update.Content is not null) { pending.Content.Clear(); pending.Content.Append(update.Content); }
+                        if (!string.IsNullOrEmpty(update.Content) || pending.Content.Length == 0)
+                        { pending.Content.Clear(); pending.Content.Append(update.Content); }
                         if (update.Reasoning is not null) { pending.Reasoning.Clear(); pending.Reasoning.Append(update.Reasoning); }
-                        if (update.AssistantSegments is { } segments)
+                        if (update.AssistantSegments is { } segments && (segments.Any() || pending.Message.AssistantSegments.Count == 0))
                         {
                             pending.Message.AssistantSegments.Clear();
                             pending.Message.AssistantSegments.AddRange(segments);
@@ -229,7 +242,7 @@ public sealed partial class ShellPage
                         {
                             pending.PauseConfirmed = true;
                             _pausedTaskIds[pending.ConversationId] = pausedTaskId;
-                            pending.Message.Error = UiText.Get("已暂停，进度已保存。");
+                            pending.Message.Error = string.Empty;
                         }
                         MessageTimePresentation.RecordEnd(pending.ConversationId, pending.Message, DateTimeOffset.UtcNow);
                         FlushReply(pending, final: true);
@@ -247,7 +260,7 @@ public sealed partial class ShellPage
         catch (OperationCanceledException) when (pending.Cancellation.IsCancellationRequested || _chatClosing)
         {
             pending.Message.Status = "interrupted";
-            pending.Message.Error = pending.PauseConfirmed ? UiText.Get("已暂停，进度已保存。") : string.Empty;
+            pending.Message.Error = string.Empty;
         }
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException or
             System.Text.Json.JsonException or InvalidDataException or IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -291,12 +304,16 @@ public sealed partial class ShellPage
                 if (_pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
                     _pendingReplies.Remove(pending.ConversationId);
                 pending.Cancellation.Dispose();
+                pending.TaskRegistered.TrySetResult(null);
                 pending.Finished.TrySetResult();
                 if (_pendingReplies.Count == 0) _replyRefreshTimer?.Stop();
                 if (!_chatClosing)
                 {
                     UpdateSendButtonState();
                     RenderProjects();
+                    RefreshPromptQueue();
+                    if (pending.Message.Status == "completed" && !pending.StopRequested && !pending.PauseConfirmed)
+                        _ = DrainQueuedPromptsAsync(pending.ConversationId);
                 }
             }
         }
@@ -316,6 +333,9 @@ public sealed partial class ShellPage
         // The gateway owns the commit; retries keep the same user/request IDs and original work scope.
         // 正式提交仍由网关负责；重试沿用用户与请求 ID，并先保存原工作归属，避免未保存的新工作聊天变成普通聊天。
         await SaveChatChangesAsync(project);
+        pending.Cancellation.Token.ThrowIfCancellationRequested();
+        var user = chat.Messages.First(message => message.Id == pending.UserMessageId);
+        await PrepareMessageAttachmentsAsync(pending.ConversationId, user, pending.Cancellation.Token);
         pending.Cancellation.Token.ThrowIfCancellationRequested();
         var owner = FindChat(pending.ConversationId);
         if (_chatClosing || owner.Chat != chat || owner.Project?.Id != project?.Id ||
@@ -428,9 +448,12 @@ public sealed partial class ShellPage
         PauseRepliesForClose();
         _modelApiClient.Dispose();
         ScreenshotPanel.Dispose();
+        DocumentPanel.Dispose();
+        WorkspaceTerminal.Dispose();
         WorkTabs.Dispose();
         TaskPanel.Dispose();
         _tasksApiClient.Dispose();
+        _attachmentsApiClient.Dispose();
         MountedWorkspace.Dispose();
         _agentApiClient.Dispose();
         ConversationMessages.Dispose();

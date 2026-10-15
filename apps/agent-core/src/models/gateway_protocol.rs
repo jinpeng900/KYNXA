@@ -194,6 +194,12 @@ pub fn build_request(
     .map_err(ModelError::native)?;
     let mut messages = messages.to_vec();
     for message in &mut messages {
+        // Attachment restoration metadata is private broker state, not a provider message parameter.
+        // 附件恢复元信息属于私有代理状态，不作为供应商消息参数发送。
+        if let Some(fields) = message.as_object_mut() {
+            fields.remove("attachmentMessageId");
+            fields.remove("deferredAttachmentImages");
+        }
         let role = message["role"].as_str().unwrap_or("user").to_owned();
         if let Some(content) = message["content"].as_array() {
             message["content"] = json!(

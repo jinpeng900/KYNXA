@@ -7,6 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkTabState.cs" Link="ConversationWorkTabState.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkspaceSources.cs" Link="ConversationWorkspaceSources.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/WorkspaceNavigationAddress.cs" Link="WorkspaceNavigationAddress.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
   </ItemGroup>

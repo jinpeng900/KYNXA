@@ -157,6 +157,21 @@ mod checkpoint_evidence_tests {
     }
 
     #[test]
+    fn direct_document_evidence_preserves_distinct_pdf_page_windows() {
+        let source = json!({"callId":"document-page","name":"document.read","status":"completed",
+            "executed":true,"observation":true,"resultRef":archive(),"arguments":{"path":"paper.pdf"},
+            "originalExcerpt":"Actual document text.","sourceMetadata":{"path":"paper.pdf",
+                "sha256":"b".repeat(64),"offset":0,"nextOffset":40,
+                "locator":{"extraction":{"format":"pdf","pageWindow":{"startPage":1,"endPage":1}}}}});
+        let first = original_evidence(&source, &HashSet::new()).unwrap();
+        assert_eq!(first["kind"], "original-source");
+        let mut next = source;
+        next["sourceMetadata"]["locator"]["extraction"]["pageWindow"] = json!({"startPage":2,"endPage":2});
+        let second = original_evidence(&next, &HashSet::new()).unwrap();
+        assert_ne!(evidence_identity(&first), evidence_identity(&second));
+    }
+
+    #[test]
     fn broker_recovery_notes_do_not_become_user_goals_after_compaction() {
         let items = json!([
             {"key":1,"role":"user","contentString":true},
@@ -784,7 +799,7 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
     // 已取得原件由真实内容版本与正文窗口标识，不因新包装归档 ID 改变就伪装成新增证据。
     if evidence["kind"] == "original-source" {
         if let Some((start, end)) = actual_range {
-            if evidence["tool"] == "filesystem.read"
+            if matches!(string(&evidence["tool"]), "filesystem.read" | "document.read")
                 && !string(&source["path"]).is_empty()
                 && valid_digest(&source["sha256"])
             {
@@ -796,7 +811,8 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
                     source["scopeKey"],
                     source["bindingRevision"],
                     start,
-                    end
+                    end,
+                    source["locator"]
                 ])
                 .to_string();
             }
@@ -895,6 +911,7 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
             || matches!(
                 name,
                 "filesystem.read"
+                    | "document.read"
                     | "filesystem.list"
                     | "filesystem.search"
                     | "knowledge.read"

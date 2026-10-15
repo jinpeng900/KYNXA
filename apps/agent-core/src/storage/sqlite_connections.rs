@@ -111,7 +111,10 @@ impl Drop for SqliteConnectionLease {
         };
         // Clear request deadlines before cleanup; a cancelled request must not poison its next borrower.
         // 清理前撤除请求截止回调，已取消的请求不能污染下一位借用者。
-        entry.connection.progress_handler(0, None::<fn() -> bool>);
+        let clean_handler = entry
+            .connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .is_ok();
         let clean_transaction =
             entry.connection.is_autocommit() || entry.connection.execute_batch("ROLLBACK").is_ok();
         let clean_terms = entry.lexical.is_none()
@@ -127,7 +130,7 @@ impl Drop for SqliteConnectionLease {
         if let Ok(mut state) = self.pool.state.lock() {
             let retired = state.retired;
             let group = state.group(self.writable);
-            if clean_transaction && clean_terms && !retired {
+            if clean_handler && clean_transaction && clean_terms && !retired {
                 group.idle.push(entry);
             } else {
                 group.handles = group.handles.saturating_sub(1);
@@ -346,10 +349,12 @@ fn acquire_owned(
                 .min(Duration::from_secs(3)),
         )
         .map_err(sqlite_store::failure)?;
-    lease.progress_handler(
-        256,
-        Some(move || cancellation::is_cancelled() || started.elapsed() >= timeout),
-    );
+    lease
+        .progress_handler(
+            256,
+            Some(move || cancellation::is_cancelled() || started.elapsed() >= timeout),
+        )
+        .map_err(sqlite_store::failure)?;
     let version: i64 = lease
         .prepare_cached("PRAGMA user_version")
         .map_err(sqlite_store::failure)?

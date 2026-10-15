@@ -332,6 +332,7 @@ public sealed partial class ShellPage
         CaptureProjectDraft();
         DiscardEmptyProjectChats(chat.Id);
         _activeProjectChat = chat;
+        PositionConversationComposer(chat);
         _selectedWorkProjectId = project.IsFolderlessWorkspace ? null : project.Id;
         _workChatToReveal = chat.Id;
         _projectToReveal = project.IsFolderlessWorkspace ? null : project.Id;

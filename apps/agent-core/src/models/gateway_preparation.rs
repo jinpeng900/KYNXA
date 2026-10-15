@@ -366,7 +366,7 @@ impl PreparationService {
                     if matches!(error.details["upstreamStatus"].as_u64(), Some(404 | 405)) =>
                 {
                     Ok(
-                        json!({"state":"unknown","connectionReady":null,"modelReady":null,"available":null,
+                        json!({"state":"unknown","connectionReady":if error.details["connectionWarmed"]==true{json!(true)}else{Value::Null},"modelReady":null,"available":null,
                         "preparationKind":"api-connection","inferenceVerified":false,"code":"MODEL_DISCOVERY_UNSUPPORTED"}),
                     )
                 }
@@ -794,6 +794,7 @@ mod tests {
             return Json(json!({"done":true,"done_reason":"load"})).into_response();
         }
         match path.as_str() {
+            "/oversized/models" => (fixture.discovery_status, "x".repeat(64 * 1024 + 1)).into_response(),
             "/models"=> { tokio::time::sleep(Duration::from_millis(40)).await;
                 (fixture.discovery_status,Json(json!({"data":[{"id":"fixture-model"}]}))).into_response() },
             "/props"=> (StatusCode::NOT_FOUND,Json(json!({}))).into_response(),
@@ -824,7 +825,7 @@ mod tests {
     async fn api_preparation_checks_models_without_generation_and_reports_unsupported_discovery() {
         let service =
             PreparationService::new(config(std::path::Path::new("unused-preparation-fixture")));
-        for status in [StatusCode::OK, StatusCode::NOT_FOUND] {
+        for status in [StatusCode::OK, StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
             let (connection, generations, server) = fixture(false, status).await;
             let (_owner, token) = watch::channel(false);
             let result = service
@@ -840,8 +841,20 @@ mod tests {
                 }
             );
             assert!(result["modelReady"].is_null());
+            assert_eq!(result["connectionReady"], true);
+            if status != StatusCode::OK {
+                assert_eq!(result["code"], "MODEL_DISCOVERY_UNSUPPORTED");
+            }
             assert_eq!(result["inferenceVerified"], false);
             assert!(!result.to_string().contains("synthetic-preparation-secret"));
+            if status != StatusCode::OK {
+                let mut oversized = connection.clone();
+                oversized["baseUrl"] = json!(format!("{}/oversized", connection["baseUrl"].as_str().unwrap()));
+                let (_owner, token) = watch::channel(false);
+                let not_warmed = service.prepare_api(&oversized, "fixture-model", token).await.unwrap();
+                assert!(not_warmed["connectionReady"].is_null());
+                assert_eq!(not_warmed["code"], "MODEL_DISCOVERY_UNSUPPORTED");
+            }
             assert_eq!(generations.load(Ordering::SeqCst), 0);
             server.abort();
         }

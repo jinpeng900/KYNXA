@@ -22,6 +22,9 @@ public sealed class LayoutState
     // Zero keeps the right panel proportional until the user resizes it.
     // 用户未调整宽度时，零表示右侧面板按比例布局。
     public double PreviewWidth { get; set; }
+    // Zero follows the adaptive default; the remembered ratio never consumes the file viewport.
+    // 零使用自适应默认值；保存的任务比例仍为下方文件视图保留空间。
+    public double WorkTaskRatio { get; set; }
     public string PermissionMode { get; set; } = "ask";
     public string InterfaceLanguage { get; set; } = "zh-CN";
     public string AppearancePaletteId { get; set; } = AppearancePalette.DefaultId;

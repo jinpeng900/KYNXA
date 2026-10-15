@@ -52,6 +52,8 @@ public sealed partial class ShellPage
             ClearActiveChat(chat);
             chats.RemoveAt(index);
             CancelPendingReply(chat.Id);
+            WorkspaceTerminal.CloseConversation(chat.Id);
+            DocumentPanel.CloseConversation(chat.Id);
             await SaveChatChangesAsync(project);
             await MessageTimePresentation.RestoreAsync(chat.Id, chat.Messages.ToArray());
             if (!await MessageTimePresentation.RemoveConversationAsync(chat.Id))

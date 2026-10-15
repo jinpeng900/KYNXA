@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
@@ -419,6 +420,31 @@ pub fn validate_connection(mut input: Value, require_models: bool) -> Result<Val
     )
 }
 
+/// Consume a small unsupported-discovery response so the shared transport can reuse its connection.
+/// 有界消费不支持目录发现的响应，复用已建立连接；不解析错误正文、不发生成请求。
+async fn drain_discovery_response(
+    response: reqwest::Response,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<bool, ModelError> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut stream = response.bytes_stream();
+        let mut consumed_bytes = 0usize;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = gateway::cancelled(cancellation) => return Err(ModelError::cancelled()),
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else { return Ok(true); };
+            let Ok(chunk) = chunk else { return Ok(false); };
+            consumed_bytes = consumed_bytes.saturating_add(chunk.len());
+            if consumed_bytes > 64 * 1024 {
+                return Ok(false);
+            }
+        }
+    }).await.unwrap_or(Ok(false))
+}
+
 pub async fn discover_models(
     connection: &Value,
     mut cancellation: watch::Receiver<bool>,
@@ -457,7 +483,12 @@ pub async fn discover_models(
                     response.map_err(|_| ModelError::new("MODEL_DISCOVERY_NETWORK_FAILED", "无法连接模型列表接口。", 502))? };
             if !response.status().is_success() {
                 let mut error=ModelError::new("MODEL_DISCOVERY_HTTP_ERROR", "模型列表接口未成功返回。", 502);
-                error.details["upstreamStatus"]=json!(response.status().as_u16());
+                let status = response.status().as_u16();
+                error.details["upstreamStatus"]=json!(status);
+                if matches!(status, 404 | 405) {
+                    error.details["connectionWarmed"] =
+                        json!(drain_discovery_response(response, &mut cancellation).await?);
+                }
                 return Err(error);
             }
             let value = gateway::bounded_json(response, policy["maximumPageBytes"].as_u64().unwrap_or(8*1024*1024) as usize, &mut cancellation).await?;

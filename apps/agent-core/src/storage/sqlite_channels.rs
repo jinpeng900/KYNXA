@@ -166,13 +166,13 @@ pub fn source_state(connection: &Connection, arguments: &Value) -> ContractResul
         rows(
             connection,
             &format!(
-                "SELECT source_id,scope_key,source_type,source_revision,content_hash,binding_revision,title,locator,parser_version,embedding_input_version,embedding_input_signature,
-                (SELECT count(*) FROM chunks c WHERE c.source_id=sources.source_id) AS chunk_count,
-                (SELECT count(*) FROM chunks c WHERE c.source_id=sources.source_id AND c.vector IS NOT NULL) AS vector_chunks,
-                (SELECT min(c.embedding_profile_id) FROM chunks c WHERE c.source_id=sources.source_id AND c.vector IS NOT NULL) AS embedding_profile_id,
-                (SELECT min(c.embedding_space_id) FROM chunks c WHERE c.source_id=sources.source_id AND c.vector IS NOT NULL) AS embedding_space_id,
-                (SELECT min(c.embedding_model_version) FROM chunks c WHERE c.source_id=sources.source_id AND c.vector IS NOT NULL) AS embedding_model_version
-                FROM sources WHERE source_id IN ({})",
+                "SELECT s.source_id,s.scope_key,s.source_type,s.source_revision,s.content_hash,s.binding_revision,s.title,s.locator,s.parser_version,s.embedding_input_version,s.embedding_input_signature,
+                count(c.id) AS chunk_count,
+                count(CASE WHEN c.vector IS NOT NULL THEN 1 END) AS vector_chunks,
+                min(CASE WHEN c.vector IS NOT NULL THEN c.embedding_profile_id END) AS embedding_profile_id,
+                min(CASE WHEN c.vector IS NOT NULL THEN c.embedding_space_id END) AS embedding_space_id,
+                min(CASE WHEN c.vector IS NOT NULL THEN c.embedding_model_version END) AS embedding_model_version
+                FROM sources s LEFT JOIN chunks c ON c.source_id=s.source_id WHERE s.source_id IN ({}) GROUP BY s.source_id",
                 placeholders(&ids)
             ),
             parameters(&ids),

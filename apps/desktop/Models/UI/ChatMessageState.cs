@@ -10,9 +10,15 @@ public sealed class ChatMessageState
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Role { get; set; } = "user";
     public string Content { get; set; } = string.Empty;
+    public List<ChatAttachment> Attachments { get; set; } = [];
     public string Reasoning { get; set; } = string.Empty;
     public string Status { get; set; } = "completed";
     public string Error { get; set; } = string.Empty;
+    // Steering freezes prior output above the guidance and links the next reply to that guidance.
+    // 引导前的输出停留在上方，新回复关联引导消息；历史正文保持可见。
+    public Guid? SupersededByUserMessageId { get; set; }
+    public Guid? InReplyToUserMessageId { get; set; }
+    public Guid? OriginUserMessageId { get; set; }
     // Display the gateway's task outcome separately from the reply transport status.
     // 网关任务结果与回复传输状态分别展示；此投影不能反向认证正式任务结果。
     [JsonIgnore]
@@ -55,11 +61,16 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
             Id = value.TryGetProperty("Id", out var id) ? id.GetGuid() : Guid.NewGuid(),
             Role = value.GetProperty("Role").GetString() ?? "user",
             Content = value.GetProperty("Content").GetString() ?? string.Empty,
+            Attachments = value.TryGetProperty("Attachments", out var attachments) || value.TryGetProperty("attachments", out attachments)
+                ? attachments.Deserialize<List<ChatAttachment>>(ToolOptions) ?? [] : [],
             Reasoning = ReadString(value, "Reasoning"),
             // A process that exited during generation cannot resume the old HTTP stream.
             // 生成期间进程退出后，无法恢复旧 HTTP 流。
             Status = status == "streaming" ? "interrupted" : status,
             Error = ReadString(value, "Error"),
+            SupersededByUserMessageId = ReadMessageId(value, "SupersededByUserMessageId"),
+            InReplyToUserMessageId = ReadMessageId(value, "InReplyToUserMessageId"),
+            OriginUserMessageId = ReadMessageId(value, "OriginUserMessageId"),
             TaskCompletionState = ReadStoredTaskCompletion(value),
             Provider = ReadString(value, "Provider"),
             Model = ReadString(value, "Model"),
@@ -80,9 +91,17 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
         writer.WriteString("Id", value.Id);
         writer.WriteString("Role", value.Role);
         writer.WriteString("Content", value.Content);
+        if (value.Attachments.Count > 0)
+        {
+            writer.WritePropertyName("Attachments");
+            JsonSerializer.Serialize(writer, value.Attachments, ToolOptions);
+        }
         writer.WriteString("Reasoning", value.Reasoning);
         writer.WriteString("Status", value.Status);
         writer.WriteString("Error", value.Error);
+        if (value.SupersededByUserMessageId is { } supersededBy) writer.WriteString("SupersededByUserMessageId", supersededBy);
+        if (value.InReplyToUserMessageId is { } inReplyTo) writer.WriteString("InReplyToUserMessageId", inReplyTo);
+        if (value.OriginUserMessageId is { } origin) writer.WriteString("OriginUserMessageId", origin);
         writer.WriteString("Provider", value.Provider);
         writer.WriteString("Model", value.Model);
         writer.WriteNumber("ReasoningDurationMs", value.ReasoningDurationMs);
@@ -98,6 +117,9 @@ public sealed class ChatMessageStateConverter : JsonConverter<ChatMessageState>
 
     private static string ReadString(JsonElement value, string name, string fallback = "") =>
         value.TryGetProperty(name, out var field) ? field.GetString() ?? fallback : fallback;
+
+    private static Guid? ReadMessageId(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var field) && field.ValueKind != JsonValueKind.Null ? field.GetGuid() : null;
 
     private static string ReadStoredTaskCompletion(JsonElement value)
     {

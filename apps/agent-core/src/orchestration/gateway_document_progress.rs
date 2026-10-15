@@ -31,7 +31,7 @@ impl DocumentWorkRecords {
         let source = source_metadata(receipt);
         if !matches!(
             tool,
-            "filesystem.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
+            "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
         ) || !result_ref["id"].as_str().is_some_and(|id| !id.is_empty())
             || source["sourceTool"] == "context.working-summary"
             || !has_document_locator(&source)
@@ -421,6 +421,37 @@ fn matching_read_count(record: &Value) -> usize {
 
 fn read_state(record: &Value) -> &'static str {
     let ranges = array(&record["readRanges"]);
+    if let Some(page_count) = ranges.iter().find_map(|range| {
+        let extraction = &range["locator"]["extraction"];
+        (extraction["format"] == "pdf").then(|| extraction["pageCount"].as_u64()).flatten()
+    }) {
+        // Text offsets restart within each PDF window; only fully read windows cover original pages.
+        // PDF 各页窗口的字符偏移从头计数；只有正文已读完整的窗口才计入原文页覆盖。
+        let mut windows: BTreeMap<(u64, u64), Vec<Value>> = BTreeMap::new();
+        for range in ranges {
+            let extraction = &range["locator"]["extraction"];
+            if extraction["format"] != "pdf" || extraction["pageCount"].as_u64() != Some(page_count) {
+                continue;
+            }
+            let window = &extraction["pageWindow"];
+            if let Some((start, end)) = window["startPage"].as_u64().zip(window["endPage"].as_u64()) {
+                let mut text_range = range.clone();
+                text_range.as_object_mut().unwrap().remove("locator");
+                windows.entry((start, end)).or_default().push(text_range);
+            }
+        }
+        let mut covered_page = 0;
+        for ((start, end), text_ranges) in windows {
+            if read_state(&json!({"readRanges":text_ranges})) != "complete" {
+                continue;
+            }
+            if start > covered_page + 1 {
+                return "partial";
+            }
+            covered_page = covered_page.max(end);
+        }
+        return if covered_page >= page_count { "complete" } else { "partial" };
+    }
     let mut spans: Vec<(u64, u64, u64)> = ranges
         .iter()
         .filter_map(|range| {
@@ -461,7 +492,8 @@ fn adds_read_coverage(previous: &Value, current: &Value) -> bool {
         let mut spans: Vec<(u64, u64)> = old_ranges
             .iter()
             .filter_map(|old| {
-                (old["unit"] == range["unit"])
+                (old["unit"] == range["unit"]
+                    && old["locator"]["extraction"]["pageWindow"] == range["locator"]["extraction"]["pageWindow"])
                     .then(|| old["start"].as_u64().zip(old["end"].as_u64()))
                     .flatten()
             })
@@ -516,6 +548,22 @@ mod tests {
     use super::*;
     use crate::storage::{sqlite_connections, task_repository::*};
     use std::path::PathBuf;
+
+    #[test]
+    fn document_page_windows_complete_only_after_all_pages_and_text_are_read() {
+        let range = |first, last, start, end| json!({
+            "unit":"utf16","start":start,"end":end,"totalCharacters":40,
+            "locator":{"extraction":{"format":"pdf","pageCount":101,
+                "pageWindow":{"startPage":first,"endPage":last}}}
+        });
+        let first = range(1, 100, 0, 40);
+        let last_head = range(101, 101, 0, 20);
+        let last_tail = range(101, 101, 20, 40);
+        assert_eq!(read_state(&json!({"readRanges":[first]})), "partial");
+        assert_eq!(read_state(&json!({"readRanges":[first,last_head]})), "partial");
+        assert_eq!(read_state(&json!({"readRanges":[first,last_head,last_tail]})), "complete");
+        assert!(adds_read_coverage(&json!({"readRanges":[first]}), &json!({"readRanges":[last_head]})));
+    }
 
     struct Fixture {
         root: PathBuf,

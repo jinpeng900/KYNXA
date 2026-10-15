@@ -138,14 +138,21 @@ async fn execute(
                 GatewayError::new("TASK_VERSION_REQUIRED", "插话需要当前任务版本。", 400)
             })?;
             let message_id = checked_id(&body["userMessageId"], "userMessageId")?;
+            let reply_id = body
+                .get("replyMessageId")
+                .filter(|value| !value.is_null())
+                .map(|value| checked_id(value, "replyMessageId"))
+                .transpose()?;
             runtime
                 .tasks
                 .steer(
                     &task_id,
                     version,
                     &message_id,
+                    reply_id.as_deref(),
                     body["message"].as_str().unwrap_or(""),
                     body["action"].as_str().unwrap_or(""),
+                    &body["attachments"],
                 )
                 .await
                 .map(|value| (200, value))

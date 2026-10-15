@@ -538,6 +538,11 @@ async fn headers(server: &Value) -> Result<HeaderMap, GatewayError> {
 }
 
 fn sse_frames(buffer: &mut String) -> Vec<(String, String)> {
+    // Normalize after chunks are joined, so a CR/LF split cannot hide the event boundary.
+    // 合并网络块后再统一换行，避免 CR/LF 跨包时无法识别事件边界。
+    if buffer.contains('\r') {
+        *buffer = buffer.replace("\r\n", "\n");
+    }
     let mut frames = Vec::new();
     while let Some(end) = buffer.find("\n\n") {
         let frame = buffer[..end].to_owned();
@@ -572,7 +577,7 @@ async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, Gat
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 响应传输中断。", 502))?;
         bytes.extend_from_slice(&chunk);
-        if bytes.len() > MAX_RPC_BYTES {
+        if bytes.len().saturating_add(text.len()) > MAX_RPC_BYTES {
             return Err(failure(
                 "MCP_RESULT_TOO_LARGE",
                 "MCP 响应超过传输上限。",
@@ -583,7 +588,7 @@ async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, Gat
             // Retain incomplete UTF-8 bytes until the next chunk instead of lossy packet decoding.
             // 跨分包保留不完整 UTF-8 字节，不按每个网络块有损解码。
             if let Ok(decoded) = std::str::from_utf8(&bytes) {
-                text.push_str(&decoded.replace("\r\n", "\n"));
+                text.push_str(decoded);
                 bytes.clear();
             }
             for (_, frame) in sse_frames(&mut text) {
@@ -653,6 +658,10 @@ pub(crate) fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64
 impl McpClient {
     async fn connect(server: &Value, ctx: &GatewayToolContext) -> Result<Self, GatewayError> {
         check_cancelled(ctx)?;
+        let protocol = server["protocolVersion"].as_str().unwrap_or(PROTOCOL);
+        if !super::service_mcp::supports_protocol(protocol) {
+            return Err(failure("MCP_UNSUPPORTED_PROTOCOL", "所选 MCP 协议尚未实现，请选择兼容的 2025-11-25 服务。", 409));
+        }
         let external_node = if server["transport"] == "stdio" {
             validate_runtime(server)?
         } else {
@@ -781,7 +790,7 @@ impl McpClient {
                             break;
                         }
                         if let Ok(text) = std::str::from_utf8(&bytes) {
-                            buffer.push_str(&text.replace("\r\n", "\n"));
+                            buffer.push_str(text);
                             bytes.clear();
                         }
                         for (event, data) in sse_frames(&mut buffer) {
@@ -796,6 +805,17 @@ impl McpClient {
                         }
                     }
                 });
+                // A cancelled or failed handshake must also retire its not-yet-owned SSE reader.
+                // 握手取消或失败时也释放尚未转交连接所有权的 SSE 读取任务。
+                struct PendingReader(Option<tokio::task::AbortHandle>);
+                impl Drop for PendingReader {
+                    fn drop(&mut self) {
+                        if let Some(reader) = self.0.take() {
+                            reader.abort();
+                        }
+                    }
+                }
+                let mut pending_reader = PendingReader(Some(reader.abort_handle()));
                 let endpoint = tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
                         let value = receiver.recv().await.ok_or_else(|| {
@@ -811,13 +831,13 @@ impl McpClient {
                 .await
                 .map_err(|_| failure("MCP_START_TIMEOUT", "MCP SSE endpoint 等待超时。", 504))??;
                 if endpoint.origin() != origin {
-                    reader.abort();
                     return Err(failure(
                         "MCP_ENDPOINT_ORIGIN_BLOCKED",
                         "MCP SSE endpoint 不能跨配置源。",
                         403,
                     ));
                 }
+                pending_reader.0.take();
                 Transport::Sse {
                     client,
                     endpoint,
@@ -843,10 +863,7 @@ impl McpClient {
         let mut client = Self {
             transport,
             sequence: 0,
-            protocol: server["protocolVersion"]
-                .as_str()
-                .unwrap_or(PROTOCOL)
-                .to_owned(),
+            protocol: protocol.to_owned(),
             tools: Vec::new(),
             configuration: server.to_string(),
             close,
@@ -863,13 +880,16 @@ impl McpClient {
             .as_str()
             .ok_or_else(|| failure("MCP_INVALID_INITIALIZE", "MCP 初始化没有协议版本。", 502))?
             .to_owned();
+        if !super::service_mcp::supports_protocol(&client.protocol) {
+            return Err(failure("MCP_UNSUPPORTED_PROTOCOL", "MCP 服务返回了尚未实现的协议版本，未继续发送不兼容请求。", 502));
+        }
         let supports_resources = result["capabilities"]["resources"].is_object();
         client.resources = supports_resources;
         client
             .notify("notifications/initialized", json!({}))
             .await?;
         let mut cursor = Value::Null;
-        for _ in 0..32 {
+        for _ in 0..if result["capabilities"]["tools"].is_object() { 32 } else { 0 } {
             let params = if cursor.is_null() {
                 json!({})
             } else {
@@ -1580,6 +1600,14 @@ pub(crate) fn prewarm(ctx: &GatewayToolContext) -> Value {
             skipped.push(json!({"serverId":id,"code":"MCP_NOT_TRUSTED"}));
             continue;
         }
+        // Browser transports may spawn Chromium during handshake; discover them only for an actual foreground request.
+        // 浏览器服务握手时可能启动 Chromium；后台预热跳过，实际使用时仍走原来的按需连接与复用。
+        if super::service_broker::connection_facts(&server)
+            .is_ok_and(|(_, facts)| facts["connection"].is_object())
+        {
+            skipped.push(json!({"serverId":id,"code":"MCP_BROWSER_ON_DEMAND"}));
+            continue;
+        }
         if server["envRefs"]
             .as_object()
             .into_iter()
@@ -2015,6 +2043,24 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browser_mcp_prewarm_leaves_processes_unstarted_until_requested() {
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        ctx.config["mcpServers"] = json!([
+            {"id":"playwright","enabled":true,"trusted":true,"transport":"stdio","command":"node.exe","args":["D:/bundled/node_modules/@playwright/mcp/cli.js"],"cwd":ctx.workdir},
+            {"id":"chrome-devtools","enabled":true,"trusted":true,"transport":"stdio","command":"node.exe","args":["D:/bundled/node_modules/chrome-devtools-mcp/build/src/index.js"],"cwd":ctx.workdir}
+        ]);
+        let receipt = prewarm(&ctx);
+        assert_eq!(receipt["scheduled"], 0);
+        let skipped = receipt["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped.iter().all(|service| service["code"] == "MCP_BROWSER_ON_DEMAND"));
+        assert!(ctx.runtime.mcp.lock().await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_node_launchers_and_preserves_non_node_stdio() {
         assert!(is_node("C:\\runtime\\node.exe", &[]));
@@ -2407,6 +2453,64 @@ mod tests {
             vec![("message".into(), "{\n\"id\":1}".into())]
         );
         assert_eq!(value, "partial");
+        let mut split = "data: {\"id\":2}\r".to_owned();
+        assert!(sse_frames(&mut split).is_empty());
+        split.push_str("\n\r");
+        assert!(sse_frames(&mut split).is_empty());
+        split.push('\n');
+        assert_eq!(sse_frames(&mut split), vec![(String::new(), "{\"id\":2}".into())]);
+        assert!(split.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resource_only_servers_skip_tools_and_unknown_protocols_stop_before_calls() {
+        use axum::{Json, Router, extract::State, routing::post};
+        #[derive(Clone)]
+        struct Fixture {
+            version: &'static str,
+            methods: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        async fn handler(State(fixture): State<Fixture>, Json(request): Json<Value>) -> Json<Value> {
+            fixture.methods.lock().unwrap().push(request["method"].as_str().unwrap().to_owned());
+            let result = if request["method"] == "initialize" {
+                json!({"protocolVersion":fixture.version,"capabilities":{"resources":{}},"serverInfo":{"name":"resource-only","version":"1"}})
+            } else {
+                assert_ne!(request["method"], "tools/list", "A resource-only server has no tools capability");
+                json!({"contents":[{"uri":"fixture://source","text":"source evidence"}]})
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        }
+        for version in ["2025-11-25", "2026-07-28"] {
+            let methods = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let fixture = Fixture { version, methods: methods.clone() };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server_task = tokio::spawn(async move {
+                axum::serve(listener, Router::new().route("/mcp", post(handler)).with_state(fixture)).await.unwrap();
+            });
+            let (mut ctx, _keep) = super::super::gateway::test_context();
+            let root = ctx.workdir.parent().unwrap().to_owned();
+            ctx.approved = true;
+            let server = json!({"id":"resources","name":"Resources","enabled":true,"transport":"streamable-http","url":format!("http://{address}/mcp")});
+            ctx.config["mcpServers"] = json!([server]);
+            let client = connection(&ctx.config["mcpServers"][0], &ctx).await;
+            if version == PROTOCOL {
+                assert_eq!(client.unwrap().lock().await.tools.len(), 3);
+                let reply = execute("mcp.resources.kynxa_resources_read", json!({"arguments":{"uri":"fixture://source"}}), &ctx).await.unwrap();
+                assert_eq!(reply["contents"][0]["text"], "source evidence");
+                assert!(!methods.lock().unwrap().iter().any(|method| method == "tools/list"));
+            } else {
+                assert_eq!(client.err().unwrap().code, "MCP_UNSUPPORTED_PROTOCOL");
+                assert_eq!(*methods.lock().unwrap(), vec!["initialize"]);
+                let mut unsupported = ctx.config["mcpServers"][0].clone();
+                unsupported["protocolVersion"] = json!(version);
+                assert_eq!(McpClient::connect(&unsupported, &ctx).await.err().unwrap().code, "MCP_UNSUPPORTED_PROTOCOL");
+                assert_eq!(methods.lock().unwrap().len(), 1, "Unsupported local configuration must not connect");
+            }
+            shutdown(&ctx).await;
+            server_task.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[cfg(windows)]

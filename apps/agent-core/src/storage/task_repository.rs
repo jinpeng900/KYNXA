@@ -274,6 +274,42 @@ impl TaskRepository {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         row_task(&connection, task_id)
     }
+
+    /// Let the owning model name and expose its existing task without creating another task or changing execution facts.
+    /// 当前执行模型为已有任务命名并选择列表展示，不创建新任务，不改写执行事实或用量。
+    pub fn describe_task(
+        &self,
+        token: &AttemptToken,
+        title: &str,
+        display_in_task_list: bool,
+    ) -> Result<TaskRecord> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 160 || title.chars().any(char::is_control) {
+            return Err(invalid(
+                "Task title must be a short nonempty label. / 任务名称须简短且非空。",
+            ));
+        }
+        self.write(|connection| {
+            let mut task = verify_fence(connection, token, false)?;
+            if task.title.as_deref() == Some(title)
+                && task.display_in_task_list == Some(display_in_task_list)
+            {
+                return Ok(task);
+            }
+            task.title = Some(title.to_owned());
+            task.display_in_task_list = Some(display_in_task_list);
+            task.version += 1;
+            let payload = json!({"title":title,"displayInTaskList":display_in_task_list});
+            append(
+                connection,
+                &mut task,
+                &uuid::Uuid::new_v4().to_string(),
+                "task.presentation",
+                &payload,
+            )?;
+            Ok(task)
+        })
+    }
     pub fn check_attempt(&self, token: &AttemptToken) -> Result<TaskRecord> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         let task = verify_fence(&connection, token, false)?;
@@ -504,7 +540,7 @@ impl TaskRepository {
                 if ancestors(connection,&parent)?.len()>=MAX_TREE_DEPTH { return Err(invalid("Task tree is too deep. / 任务树过深。")); }
             }
             let timestamp=now_ms();
-            let mut task=TaskRecord { task_id:uuid::Uuid::new_v4().to_string(),request_id:input.request_id.clone(),goal:input.goal.clone(),acceptance:input.acceptance.clone(),scope:input.scope.clone(),parent_task_id:input.parent_task_id.clone(),dependency_ids:input.dependency_ids.clone(),budget:input.budget.clone(),usage:TaskUsage::default(),input_reference:input.input_reference.clone(),state:TaskState::Queued,version:1,execution_version:0,current_attempt_id:None,event_sequence:0,stop_reason:None,paused_by_task_id:None,created_at_ms:timestamp,updated_at_ms:timestamp };
+            let mut task=TaskRecord { task_id:uuid::Uuid::new_v4().to_string(),request_id:input.request_id.clone(),goal:input.goal.clone(),title:None,display_in_task_list:None,acceptance:input.acceptance.clone(),scope:input.scope.clone(),parent_task_id:input.parent_task_id.clone(),dependency_ids:input.dependency_ids.clone(),budget:input.budget.clone(),usage:TaskUsage::default(),input_reference:input.input_reference.clone(),state:TaskState::Queued,version:1,execution_version:0,current_attempt_id:None,event_sequence:0,stop_reason:None,paused_by_task_id:None,created_at_ms:timestamp,updated_at_ms:timestamp };
             for dependency_id in &task.dependency_ids {
                 let dependency=row_task(connection,dependency_id)?;
                 if !same_authorization(&task.scope,&dependency.scope)? || ancestors(connection,&task)?.iter().any(|parent|parent.task_id==*dependency_id) { return Err(invalid("Dependency is outside scope or creates a parent cycle. / 依赖超出范围或形成父子循环。")); }
@@ -739,7 +775,7 @@ impl TaskRepository {
         })
     }
     /// User steering references formal messages; it never grants new tool scope or replaces the original goal.
-    /// 用户插话引用正式消息，不授予新工具范围，也不替换原始目标；先暂停再以版本校验登记。
+    /// 用户插话引用正式消息，不授予新工具范围，也不替换原始目标；运行中登记不撤销执行尝试。
     pub fn record_user_steering(
         &self,
         task_id: &str,
@@ -765,11 +801,11 @@ impl TaskRepository {
                 return Ok(task);
             }
             if task.version != expected_version { return Err(conflict("Task changed before steering. / 保存插话前任务已变化。")); }
-            if task.parent_task_id.is_some() || task.state != TaskState::Paused { return Err(blocked("Steering requires a paused root task. / 插话须暂停根任务。")); }
+            if task.parent_task_id.is_some() || task.state.is_terminal() { return Err(blocked("Steering requires an unfinished root task. / 插话须关联未结束的根任务。")); }
             task.version += 1;
-            task.stop_reason = Some(event_id.clone());
+            if task.state == TaskState::Paused { task.stop_reason = Some(event_id.clone()); }
             append(connection, &mut task, &event_id, "task.user-steering", &payload)?;
-            if action == "update" {
+            if action == "update" && task.state == TaskState::Paused {
                 // A changed plan cannot silently restart old delegates; their effects and receipts remain recorded.
                 // 更新方案不静默重启旧委派；旧操作与回执仍保留，未知副作用继续阻止未经核验的修改。
                 let mut query = connection.prepare_cached("WITH RECURSIVE tree(id) AS (SELECT task_id FROM tasks WHERE parent_task_id=? UNION ALL SELECT t.task_id FROM tasks t JOIN tree p ON t.parent_task_id=p.id) SELECT id FROM tree").map_err(|_|failure())?;

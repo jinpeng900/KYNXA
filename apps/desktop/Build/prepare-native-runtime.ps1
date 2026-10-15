@@ -153,6 +153,16 @@ if ($Profile -eq 'Full') {
         }
         Copy-NativeFile $manifestPath ($model.Output + '/manifest.json') -ConfigurationText
     }
+    # Office layout preview is optional for an older/offline pack; extracted text remains available.
+    # 旧资源包或离线环境缺少 Office 转换器时保留正文预览，不阻断核心构建与聊天。
+    try {
+        & (Join-Path $PSScriptRoot 'prepare-office-preview-runtime.ps1') -BundleRoot $runtimeRoot -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+        foreach ($officeFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'office-preview-files.txt'), $utf8)) {
+            if (-not $officeFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Office preview payload escaped its selected root.' }
+            [void]$bundle.Add($officeFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
+        }
+    }
+    catch { Write-Warning ('Office page preview is unavailable; document text preview remains enabled. ' + $_.Exception.Message) }
 }
 else { Write-Host '[Runtime] Core development profile skips optional models and MCP/browser preparation; release packages use Full.' }
 
