@@ -563,7 +563,7 @@ public sealed partial class ModelManagementWindow : Window
         string text = _statusMessage();
         StatusText.Text = text;
         ToolTipService.SetToolTip(StatusText, text);
-        StatusText.Foreground = _statusIsError ? new SolidColorBrush(Windows.UI.Color.FromArgb(255, 168, 57, 45))
+        StatusText.Foreground = _statusIsError ? AppearanceService.GetBrush("KynxaErrorBrush")
             : (Brush)Application.Current.Resources["KynxaSecondaryTextBrush"];
     }
 

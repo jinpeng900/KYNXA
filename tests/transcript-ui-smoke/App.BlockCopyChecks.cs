@@ -13,6 +13,18 @@ public partial class App
     {
         string language = UiText.Language, palette = AppearanceService.Current.Id;
         var size = _window!.AppWindow.Size;
+        var clipboardExceptions = new List<object>();
+        // Record caught native clipboard errors without changing production success/failure handling.
+        // 记录正式链路捕获的原生剪贴板异常，不改变产品的成功与失败处理。
+        void ObserveClipboardException(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs args)
+        {
+            if (args.Exception is not (System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException)) return;
+            string stack = Environment.StackTrace;
+            if (!stack.Contains("ConversationTranscript.CopyMessage", StringComparison.Ordinal)) return;
+            lock (clipboardExceptions)
+                clipboardExceptions.Add(new { type = args.Exception.GetType().FullName, hresult = $"0x{args.Exception.HResult:X8}", args.Exception.Message });
+        }
+        AppDomain.CurrentDomain.FirstChanceException += ObserveClipboardException;
         try
         {
             // Keep this test-owned page active without taking the user's operating-system focus.
@@ -86,6 +98,8 @@ public partial class App
         }
         finally
         {
+            AppDomain.CurrentDomain.FirstChanceException -= ObserveClipboardException;
+            _metrics["blockCopyNativeExceptions"] = clipboardExceptions;
             _metrics["blockCopyNativeRequests"] = await EvalAsync<JsonElement>("window.__blockRequests || []");
             _metrics["blockCopyNativeReceipts"] = await EvalAsync<JsonElement>("window.__blockReceipts || []");
             _metrics["blockCopyKeyLog"] = await EvalAsync<JsonElement>("window.__blockKeyLog || []");
@@ -99,6 +113,16 @@ public partial class App
 
     private async Task CopyBlockAndCheckAsync(int index, string source)
     {
+        if (source.Length == 0)
+        {
+            // Start with materialized nonempty text, so an empty result cannot hide a skipped native copy.
+            // 先放入已实体化的非空标记，防止原生复制未执行也被误认为空框复制成功。
+            var sentinel = new DataPackage();
+            sentinel.SetText("EMPTY_BLOCK_SENTINEL 中文");
+            Clipboard.SetContent(sentinel);
+            Clipboard.Flush();
+            Check(await Clipboard.GetContent().GetTextAsync() == "EMPTY_BLOCK_SENTINEL 中文", "empty-block copy begins with a known nonempty native clipboard sentinel");
+        }
         var request = await EvalAsync<JsonElement>($"(() => {{ const before=__blockRequests.length; document.querySelectorAll('.copy-block')[{index}].click(); return __blockRequests.length>before ? __blockRequests.at(-1) : null; }})()");
         await CheckBlockCopyReceiptAsync(index, source, request);
     }
@@ -115,7 +139,19 @@ public partial class App
         Check(await EvalAsync<bool>($"document.querySelectorAll('.copy-block')[{index}]?.dataset.copyState === 'success'"), "matching native acknowledgement marks copied block " + index);
         Check(await EvalAsync<bool>($"(() => {{ const block=document.querySelectorAll('.content-block')[{index}], button=block.querySelector('.copy-block'), status=block.querySelector('.content-block-status'); return !button.hasAttribute('title') && !status.hasAttribute('title') && status.textContent==='已复制' && button.getAttribute('aria-label')==='已复制'; }})()"),
             "copy success stays beside its button without a floating tooltip");
-        Check(await Clipboard.GetContent().GetTextAsync() == source, "native clipboard equals only block " + index + " source, without fence, language or toolbar");
+        var clipboard = Clipboard.GetContent();
+        if (source.Length == 0)
+        {
+            // Windows may omit the Text format after flushing an empty string; the previous sentinel must be gone.
+            // Windows 实体化空字符串后可能移除 Text 格式；之前的非空标记必须已清除。
+            Check(!clipboard.Contains(StandardDataFormats.Text) || await clipboard.GetTextAsync() == string.Empty,
+                "empty-block copy clears the nonempty sentinel and never leaves earlier text available for paste");
+        }
+        else
+        {
+            Check(clipboard.Contains(StandardDataFormats.Text), "nonempty block " + index + " advertises the native text format");
+            Check(await clipboard.GetTextAsync() == source, "native clipboard equals only block " + index + " source, without fence, language or toolbar");
+        }
         Check(await EvalAsync<bool>($"!!document.querySelectorAll('.copy-block')[{index}].querySelector('svg path') && !document.querySelectorAll('.copy-block')[{index}].querySelector('svg rect')"),
             "copied block " + index + " displays its checkmark");
     }
@@ -183,8 +219,12 @@ public partial class App
         _transcript.Browser.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         await EvalAsync<bool>("(() => { document.querySelector('.copy-block').focus(); return true; })()");
         await BlockCopyKeyAsync("Tab", "Tab", 9);
+        Check(await EvalAsync<bool>("document.activeElement===document.querySelectorAll('.content-block')[1].querySelector('[data-block-action=wrap]')"), "trusted Tab reaches the next block's visible reading control");
+        await BlockCopyKeyAsync("Tab", "Tab", 9);
         Check(await EvalAsync<bool>("document.activeElement===document.querySelectorAll('.copy-block')[1]"), "trusted Tab reaches the next visible block-copy button");
         await CheckBlockKeyboardCopyAsync(1, "Enter", "Enter", 13);
+        await BlockCopyKeyAsync("Tab", "Tab", 9);
+        Check(await EvalAsync<bool>("document.activeElement===document.querySelectorAll('.content-block')[2].querySelector('[data-block-action=wrap]')"), "trusted Tab continues through the next plain-text block's reading control");
         await BlockCopyKeyAsync("Tab", "Tab", 9);
         Check(await EvalAsync<bool>("document.activeElement===document.querySelectorAll('.copy-block')[2]"), "trusted Tab continues to the next plain-text block");
         await CheckBlockKeyboardCopyAsync(2, " ", "Space", 32);

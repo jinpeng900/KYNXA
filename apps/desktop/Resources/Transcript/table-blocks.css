@@ -1,0 +1,28 @@
+/* Keep table actions outside the horizontal scroller and within the shared rounded surface.
+ * 表格操作放在横向滚动区外，并沿用统一圆角表面。 */
+.table-block { position: relative; min-width: 0; max-width: 100%; margin: 13px 0; border: 1px solid var(--appearance-border); border-radius: 10px; background: var(--appearance-sidebar); }
+.table-block-header { display: flex; align-items: center; gap: 6px 10px; min-width: 0; min-height: 40px; padding: 5px 9px 5px 13px; border-bottom: 1px solid var(--appearance-border); border-radius: 10px 10px 0 0; font-family: var(--ui-font); }
+.table-block-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--appearance-secondary); font-size: 12px; font-weight: 500; }
+.table-block > .table-scroll { margin: 0; border-radius: 0 0 9px 9px; background: var(--appearance-main); }
+.table-block table { margin: 0; }
+.table-block th { background: var(--appearance-sidebar); }
+/* Keep two/three-column tables responsive; wider tables retain readable column widths.
+ * 两三列表格继续自适应，四列起保留可读列宽并内部横滚；超长无断点内容仍可换行。 */
+.table-block th, .table-block td { border-color: var(--appearance-border); }
+.table-block table:has(tr > :nth-child(4)) :is(th, td) { min-width: 10rem; }
+.table-block-actions { position: relative; display: flex; flex: 0 0 auto; align-items: center; gap: 1px; }
+.table-block .copy-table, .table-block .table-copy-options { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 6px; border-radius: 6px; color: var(--appearance-secondary); line-height: 1; }
+.table-block .table-copy-options { width: 24px; padding: 4px; }
+.table-block .copy-table svg, .table-block .table-copy-options svg { display: block; width: 18px; height: 18px; pointer-events: none; }
+.table-block button:hover:not(:disabled) { background: var(--appearance-soft); color: var(--appearance-text); }
+.table-block button:focus-visible { outline: 2px solid var(--appearance-accent); outline-offset: -1px; }
+.table-block button:disabled { opacity: .45; cursor: default; }
+.table-block .copy-table[data-copy-state='success'] { color: var(--appearance-accent-text); }
+.table-block-status { flex: 0 1 auto; min-width: 0; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.4; color: var(--appearance-secondary); }
+.table-block-status:empty { display: none; }
+.table-block-status[data-copy-state='success'] { color: var(--appearance-accent-text); }
+.table-block-status[data-copy-state='error'] { color: var(--appearance-error); }
+.table-copy-menu { position: absolute; z-index: 8; top: calc(100% + 5px); right: 0; max-width: min(260px, calc(100vw - 100px)); padding: 4px; border: 1px solid var(--appearance-border); border-radius: 8px; background: var(--appearance-main); box-shadow: 0 3px 12px #00000018; }
+.table-copy-menu[hidden] { display: none; }
+.table-copy-menu > button { display: block; width: 100%; padding: 7px 10px; text-align: left; color: var(--appearance-text); white-space: nowrap; font-size: 13px; }
+@media (max-width: 420px) { .table-block-header { gap: 6px; padding-left: 10px; } .table-block th, .table-block td { padding: 8px 10px; } }

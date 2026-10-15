@@ -140,7 +140,11 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             if (path == "/health") result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1,
                 conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2,
                 hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3,
-                retrievalProtocol = 1 };
+                retrievalProtocol = 1, modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root };
+            else if (path == "/api/tasks" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
+                result = new TaskListResponse([], false, null);
+            else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
+                result = new TaskPausedResponse([]);
             else if (path == "/api/conversations/catalog")
             {
                 int read = Interlocked.Increment(ref _catalogReads);

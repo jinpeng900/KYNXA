@@ -405,6 +405,17 @@ fn read_messages_recovering(root: &Path, location: &Value) -> Result<Vec<Value>,
         .map(|index| decoded[index.as_u64().unwrap() as usize].clone())
         .collect())
 }
+fn history_page_recovering(root: &Path, location: &Value, arguments: &Value) -> ContractResult {
+    match conversation_history::apply("storage.history.page", arguments) {
+        Err(error) if error.code() == "CONVERSATION_HISTORY_TAIL_INCOMPLETE" => {
+            // Reuse the formal byte-preserving recovery transaction before creating a page snapshot.
+            // 生成分页快照前复用正式日志的保字节恢复事务；旧游标仍按新快照正常拒绝。
+            read_messages_recovering(root, location)?;
+            conversation_history::apply("storage.history.page", arguments)
+        }
+        result => result,
+    }
+}
 pub fn read_messages(root: &Path, id: &str, public: bool) -> Result<Vec<Value>, ContractError> {
     let catalog = load_catalog(root)?;
     let location = locate(&catalog, id)?;
@@ -1762,7 +1773,7 @@ pub fn handle_text(
             if let Some(cursor) = query_value(query, "cursor") {
                 args["cursor"] = json!(cursor);
             }
-            let mut page = conversation_history::apply("storage.history.page", &args)?;
+            let mut page = history_page_recovering(root, &location, &args)?;
             let messages = page["rawMessages"]
                 .as_array()
                 .unwrap()
@@ -2485,7 +2496,7 @@ pub fn handle(
                 if let Some(cursor) = query_value(query, "cursor") {
                     args["cursor"] = json!(cursor);
                 }
-                let mut page = conversation_history::apply("storage.history.page", &args)?;
+                let mut page = history_page_recovering(root, &location, &args)?;
                 let messages = page["rawMessages"]
                     .as_array()
                     .unwrap()

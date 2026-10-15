@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('format', 'all', 'block-copy', 'metadata', 'diagrams', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final', 'prompt-queue', 'steering-reply', 'workspace-preview', 'workspace-chrome', 'message-attachments', 'render-performance', 'work-tabs')]
+    [ValidateSet('format', 'all', 'block-copy', 'content-reading', 'appearance-reading', 'body-search', 'language-navigation', 'clipboard-persistence', 'render-performance', 'metadata', 'diagrams', 'diagram-export', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final', 'prompt-queue', 'steering-reply', 'workspace-preview', 'workspace-chrome', 'message-attachments', 'work-tabs')]
     [string]$Scenario = 'format',
     [string]$ApiReportPath,
     [switch]$BuildOnly,
@@ -221,6 +221,34 @@ try {
     Write-Host $result
     if ($fixtureProcess.ExitCode -ne 0 -or $result -notmatch '^PASS:' -or $result -match '(?m)^FAIL:') {
         throw "Fixture failed (exit $($fixtureProcess.ExitCode)). See $runRoot"
+    }
+    if ($Scenario -eq 'clipboard-persistence') {
+        # The writer is fully exited before the fresh reader starts; neither phase reads clipboard data early.
+        # 发送方完全退出后才启动新的读取进程；复制阶段不会提前读取剪贴板数据。
+        Copy-Item -LiteralPath $resultPath -Destination (Join-Path $runRoot 'clipboard-writer.txt')
+        Copy-Item -LiteralPath $metricsPath -Destination (Join-Path $runRoot 'clipboard-writer.json')
+        $fixtureProcess.Dispose()
+        $fixtureProcess = $null
+        Remove-Item -LiteralPath $resultPath, $metricsPath
+        $startedUtc = [DateTime]::UtcNow
+        $startParameters.ArgumentList = @('--clipboard-persistence-read-only')
+        $startParameters.RedirectStandardOutput = Join-Path $runRoot 'clipboard-reader.stdout.log'
+        $startParameters.RedirectStandardError = Join-Path $runRoot 'clipboard-reader.stderr.log'
+        $fixtureProcess = Start-Process @startParameters
+        if (!$fixtureProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $fixtureProcess.Id -ErrorAction SilentlyContinue
+            throw "Clipboard reader timed out. Only this runner's reader process was stopped."
+        }
+        $fixtureProcess.WaitForExit()
+        if (!(Test-Path -LiteralPath $resultPath)) { throw 'Clipboard reader exited without a result.' }
+        if ((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -lt $startedUtc) { throw 'Stale clipboard reader result.' }
+        Copy-Item -LiteralPath $resultPath -Destination (Join-Path $runRoot 'clipboard-reader.txt')
+        if (Test-Path -LiteralPath $metricsPath) { Copy-Item -LiteralPath $metricsPath -Destination (Join-Path $runRoot 'clipboard-reader.json') }
+        $result = (Get-Content -LiteralPath $resultPath -Raw).Trim()
+        Write-Host $result
+        if ($fixtureProcess.ExitCode -ne 0 -or $result -notmatch '^PASS:' -or $result -match '(?m)^FAIL:') {
+            throw "Clipboard reader failed (exit $($fixtureProcess.ExitCode)). See $runRoot"
+        }
     }
     Write-Host "Evidence: $runRoot"
 }

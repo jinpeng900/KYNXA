@@ -17,7 +17,10 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     public int CancelledJobs { get; private set; }
     public int JobReads { get; private set; }
     public string? LastCancelledJobId { get; private set; }
-    public RetrievalIndexJob[] StatusJobs { get; set; } = [];
+    private RetrievalIndexJob[]? _statusJobs;
+    // Observe the current automatic job unless a test explicitly supplies a status snapshot or an empty result.
+    // 默认观察当前自动任务；测试可显式提供旧状态快照或空列表，不能混淆尚未指定与没有任务。
+    public RetrievalIndexJob[] StatusJobs { get => _statusJobs ?? [Job]; set => _statusJobs = value; }
     public RetrievalSource[] Sources { get; set; } = [];
     public bool ConflictNextSave { get; set; }
     public TaskCompletionSource? SaveGate { get; set; }

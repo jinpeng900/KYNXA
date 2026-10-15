@@ -2326,36 +2326,44 @@ pub(crate) async fn execute(
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    let _ = shutdown_checked(ctx).await;
+}
+
+pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     let mut workspace = ctx.runtime.workspace_browser.lock().await;
-    if let Some(browser) = workspace.take() { let _ = browser.lock().await.close(ctx).await; }
+    if let Some(browser) = workspace.as_ref() { browser.lock().await.close(ctx).await?; }
+    workspace.take();
     drop(workspace);
     let connections = ctx
         .runtime
         .cdp
         .lock()
         .await
-        .drain()
-        .map(|(_, connection)| connection)
+        .iter()
+        .map(|(id, connection)| (id.clone(), connection.clone()))
         .collect::<Vec<_>>();
-    for connection in connections {
-        let _ = connection.close().await;
+    for (id, connection) in connections {
+        connection.close().await?;
+        ctx.runtime.cdp.lock().await.remove(&id);
     }
     let sessions = ctx
         .runtime
         .browsers
         .lock()
         .await
-        .drain()
-        .map(|(_, session)| session)
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
         .collect::<Vec<_>>();
-    for session in sessions {
+    for (id, session) in sessions {
         let mut session = session.lock().await;
-        let _ = session.close_owned_process().await;
+        session.close_owned_process().await?;
         for upload in &session.uploads {
             clean_upload(upload, ctx);
         }
-        let _ = session.remove_owned_profile().await;
+        session.remove_owned_profile().await?;
+        ctx.runtime.browsers.lock().await.remove(&id);
     }
+    Ok(())
 }
 
 #[cfg(test)]

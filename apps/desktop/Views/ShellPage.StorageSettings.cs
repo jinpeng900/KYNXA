@@ -33,7 +33,9 @@ public sealed partial class ShellPage
         var window = new Window { Title = UiText.Get("KYNXA · 设置") };
         _storageSettingsWindow = window;
         var font = (FontFamily)Application.Current.Resources["KynxaUIFont"];
-        var content = new StackPanel { Spacing = 12, Margin = new Thickness(24, 24, 24, 24), MaxWidth = 760 };
+        var content = new StackPanel { Spacing = 12, Margin = new Thickness(24),
+            HorizontalAlignment = HorizontalAlignment.Stretch };
+        AutomationProperties.SetAutomationId(content, "SettingsContentColumn");
         TextBlock Label(string text, double size = 14) => new() { Text = text, FontSize = size, FontFamily = font,
             Foreground = AppearanceService.GetBrush("KynxaTextBrush"), TextWrapping = TextWrapping.Wrap };
         TextBlock LocalizedLabel(string key, double size = 14)
@@ -51,7 +53,7 @@ public sealed partial class ShellPage
         languageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var languageLabel = LocalizedLabel("界面语言");
         languageLabel.VerticalAlignment = VerticalAlignment.Center;
-        var languagePicker = new ComboBox { FontFamily = font, FontSize = 13,
+        var languagePicker = new ScrollSafeComboBox { FontFamily = font, FontSize = 13,
             MinWidth = 140, VerticalAlignment = VerticalAlignment.Center };
         var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
         var selectedBrush = AppearanceService.GetBrush("KynxaSelectionBrush");
@@ -68,9 +70,9 @@ public sealed partial class ShellPage
         Grid.SetColumn(languagePicker, 1);
         languageRow.Children.Add(languageLabel); languageRow.Children.Add(languagePicker);
         content.Children.Add(languageRow);
-        var appearanceSection = new AppearanceSettingsSection(font, paletteId =>
+        var appearanceSection = new AppearanceSettingsSection(font, preferences =>
         {
-            TrySetAppearancePalette(paletteId, out string? errorKey);
+            TrySetAppearancePreferences(preferences, out string? errorKey);
             return errorKey;
         });
         content.Children.Add(appearanceSection.Root);
@@ -133,7 +135,7 @@ public sealed partial class ShellPage
         AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         content.Children.Add(progress); content.Children.Add(status);
         var storageControls = new StorageSettingsControls(window, row, extensionRow, memoryButton, toolsButton, languagePicker, progress, status);
-        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = AppearanceService.GetBrush("KynxaMainBrush") };
+        var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
         AutomationProperties.SetAutomationId(root, "AppearanceSettingsRoot");
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -142,8 +144,12 @@ public sealed partial class ShellPage
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
         titleBar.Children.Add(title);
+        // Fill the available width at every window size; the content margin keeps both edges balanced.
+        // 各种窗口尺寸下都铺满可用宽度，由内容外边距保持两侧留白一致。
         var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        AutomationProperties.SetAutomationId(scroll, "SettingsScrollViewer");
         Grid.SetRow(scroll, 1);
         root.Children.Add(titleBar); root.Children.Add(scroll);
         window.Content = root;
@@ -173,24 +179,7 @@ public sealed partial class ShellPage
             int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
             window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
         };
-        void UpdateSettingsAppearance(object? sender, EventArgs e)
-        {
-            if (_storageSettingsWindow != window) return;
-            if (!root.DispatcherQueue.HasThreadAccess)
-            {
-                root.DispatcherQueue.TryEnqueue(() => UpdateSettingsAppearance(sender, e));
-                return;
-            }
-            if (!Microsoft.UI.Windowing.AppWindowTitleBar.IsCustomizationSupported()) return;
-            window.AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            window.AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            window.AppWindow.TitleBar.ButtonForegroundColor = AppearanceService.ParseColor(AppearanceService.Current.Text);
-            window.AppWindow.TitleBar.ButtonInactiveForegroundColor = AppearanceService.ParseColor(AppearanceService.Current.Secondary);
-            window.AppWindow.TitleBar.ButtonHoverBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Soft);
-            window.AppWindow.TitleBar.ButtonPressedBackgroundColor = AppearanceService.ParseColor(AppearanceService.Current.Selection);
-        }
-        AppearanceService.Changed += UpdateSettingsAppearance;
-        UpdateSettingsAppearance(null, EventArgs.Empty);
+        AppearanceService.TrackWindow(window);
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
         { storageControls.Message(text, severity); }
         if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);
@@ -233,7 +222,6 @@ public sealed partial class ShellPage
             App.Window.AppWindow.Closing -= PreventClose;
             App.Window.Closed -= CloseSettings;
             UiText.LanguageChanged -= UpdateSettingsTitle;
-            AppearanceService.Changed -= UpdateSettingsAppearance;
             appearanceSection.Dispose();
             storageControls.Close();
             _storageSettingsWindow = null;
@@ -294,7 +282,7 @@ public sealed partial class ShellPage
                 using var http = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(5) };
                 var health = await http.GetFromJsonAsync<StorageHealth>("/health");
                 if (health?.StorageProtocol != 1 || string.IsNullOrWhiteSpace(health.ModelDataHome)) throw new InvalidOperationException(UiText.Get("当前网关版本不支持存储迁移，请关闭旧网关并重新打开 KYNXA。"));
-                string expectedModels = Path.Combine(StoragePaths.DataRoot ?? StoragePaths.DefaultRoot, "Models");
+                string expectedModels = ApplicationPaths.ModelHome;
                 if (!string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(health.ModelDataHome)),
                     Path.TrimEndingDirectorySeparator(Path.GetFullPath(expectedModels)), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
@@ -304,10 +292,22 @@ public sealed partial class ShellPage
                 maintenance.SetLength(0);
                 await maintenance.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new { pid = Environment.ProcessId }));
                 maintenance.Flush(true);
-                health = await http.GetFromJsonAsync<StorageHealth>("/health");
-                if (health?.RuntimeCleanupError is not null) throw new InvalidOperationException(UiText.Get("后台工具未安全停止，请重启网关后再迁移。"));
-                if (health is null || !health.Migrating || health.ActiveRequests != 0 || !health.MigrationReady)
-                    throw new InvalidOperationException(UiText.Get("模型网关还有请求正在处理，请稍后再试。"));
+                // Maintenance settles background writers asynchronously; wait without cancelling user work.
+                // 维护状态异步结算后台写入；有界等待，不强制取消用户任务。
+                var maintenanceDeadline = DateTime.UtcNow.AddSeconds(30);
+                do
+                {
+                    health = await http.GetFromJsonAsync<StorageHealth>("/health", storageControls.Token);
+                    if (health?.RuntimeCleanupError is not null) throw new InvalidOperationException(UiText.Get("后台工具未安全停止，请重启网关后再迁移。"));
+                    if (health?.StorageProtocol != 1 || string.IsNullOrWhiteSpace(health.ModelDataHome) ||
+                        !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(health.ModelDataHome)),
+                            Path.TrimEndingDirectorySeparator(Path.GetFullPath(expectedModels)), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
+                    if (health.Migrating && health.ActiveRequests == 0 && health.MigrationReady) break;
+                    if (DateTime.UtcNow >= maintenanceDeadline)
+                        throw new InvalidOperationException(UiText.Get("模型网关还有请求正在处理，请稍后再试。"));
+                    await Task.Delay(250, storageControls.Token);
+                } while (true);
                 Message(UiText.Get("正在迁移，请保持应用打开…"));
                 string sourceDesktop = StoragePaths.DesktopDirectory, sourceModels = health.ModelDataHome!;
                 var updates = new Progress<string>(text => Message(text));

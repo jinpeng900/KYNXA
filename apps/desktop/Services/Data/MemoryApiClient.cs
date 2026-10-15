@@ -43,17 +43,21 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
         string path = PathFor(target);
         await _ensureGatewayReady(cancellationToken);
         using var response = await _httpClient.GetAsync(path, cancellationToken);
+        var payload = await ReadAsync<JsonElement>(response, cancellationToken);
+        JsonElement rawDocument = payload;
         MemoryScopeDocument document;
         if (target.Scope == MemoryScopes.Chat)
         {
-            var snapshot = await ReadAsync<ConversationMemoryResponse>(response, cancellationToken);
+            var snapshot = payload.Deserialize<ConversationMemoryResponse>(JsonOptions) ?? throw InvalidResponse();
             if (snapshot.ConversationId != target.Id || snapshot.Scopes is null)
                 throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
             document = snapshot.Scopes.SingleOrDefault(scope => scope.Scope == target.Scope && scope.ScopeId == target.ScopeId)
                 ?? throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
+            rawDocument = Field(payload, "scopes").EnumerateArray().Single(scope =>
+                Text(scope, "scope") == target.Scope && Text(scope, "scopeId") == target.ScopeId);
         }
-        else document = await ReadAsync<MemoryScopeDocument>(response, cancellationToken);
-        ValidateDocument(target, document, requireSourceStatus: true);
+        else document = payload.Deserialize<MemoryScopeDocument>(JsonOptions) ?? throw InvalidResponse();
+        ValidateDocument(target, document, rawDocument, requireSourceStatus: true);
         return document;
     }
 
@@ -91,8 +95,9 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
         await _ensureGatewayReady(cancellationToken);
         using var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(payload, options: JsonOptions) };
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        var document = await ReadAsync<MemoryScopeDocument>(response, cancellationToken);
-        ValidateDocument(target, document, requireSourceStatus: false);
+        var responsePayload = await ReadAsync<JsonElement>(response, cancellationToken);
+        var document = responsePayload.Deserialize<MemoryScopeDocument>(JsonOptions) ?? throw InvalidResponse();
+        ValidateDocument(target, document, responsePayload, requireSourceStatus: false);
         return document;
     }
 
@@ -129,23 +134,30 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
         if (error != MemoryInputError.None) throw new ArgumentException($"Invalid memory input: {error}.", nameof(content));
     }
 
-    private static void ValidateDocument(MemoryTarget target, MemoryScopeDocument document, bool requireSourceStatus)
+    private static void ValidateDocument(MemoryTarget target, MemoryScopeDocument document, JsonElement rawDocument, bool requireSourceStatus)
     {
         if (document.SchemaVersion != 1 || document.Scope != target.Scope || document.ScopeId != target.ScopeId ||
             document.Revision is < 0 or > MemoryInputValidation.MaximumRevision || document.Entries is null)
             throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
         var entryIds = new HashSet<Guid>();
-        foreach (var entry in document.Entries)
+        var rawEntries = Field(rawDocument, "entries").EnumerateArray().ToArray();
+        if (rawEntries.Length != document.Entries.Length) throw InvalidResponse();
+        for (int index = 0; index < document.Entries.Length; index++)
         {
+            var entry = document.Entries[index];
             if (entry is null || entry.Id == Guid.Empty || !entryIds.Add(entry.Id) || entry.Scope != document.Scope ||
                 entry.ScopeId != document.ScopeId || !MemoryStatuses.IsSupported(entry.Status) ||
                 entry.Revision < 1 || entry.Revision > document.Revision ||
                 MemoryInputValidation.Validate(entry.Content, entry.Kind) != MemoryInputError.None || entry.Source is null ||
                 entry.Source.Role != "user" || entry.Source.Type is not ("manual" or "user-message") ||
+                entry.Source.ConversationId == Guid.Empty || entry.Source.MessageId == Guid.Empty ||
+                (entry.Source.Type == "manual" && entry.Source.MessageId is not null) ||
                 (entry.Source.Type == "user-message" && (entry.Source.ConversationId is null || entry.Source.MessageId is null)) ||
+                (entry.Status == MemoryStatuses.Draft && entry.Active == true) ||
                 (requireSourceStatus && (entry.Active is null || entry.SourceAvailable is null || entry.SourceArchived is null)))
                 throw new InvalidDataException(UiText.Get("记忆接口返回了空响应。"));
             ValidateProvenance(entry, document);
+            ValidateRawProvenance(entry, rawEntries[index]);
         }
     }
 
@@ -177,6 +189,87 @@ public sealed class MemoryApiClient : IMemoryApi, IDisposable
             !string.IsNullOrWhiteSpace(quote.Text) && quote.Text.Length <= MemoryInputValidation.MaximumContentLength &&
             !quote.Text.Contains('\0')) && quotes.Select(quote => quote.MessageId).Distinct().Count() == quotes.Length &&
         quotes.Any(quote => quote.MessageId == sourceMessageId);
+
+    // Validate raw provenance as well as the typed editor contract before showing confirmation actions.
+    // 展示确认操作前，同时核验原始来源字段和编辑器的强类型合同。
+    private static void ValidateRawProvenance(MemoryEntry entry, JsonElement rawEntry)
+    {
+        var candidate = Field(rawEntry, "candidate");
+        var proposal = Field(rawEntry, "proposal");
+        bool hasCandidate = candidate.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+        bool hasProposal = proposal.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+        if (!OnlyFields(Field(rawEntry, "source"), "type", "role", "conversationId", "messageId") ||
+            hasCandidate && hasProposal || entry.Status == MemoryStatuses.Draft && !hasCandidate && !hasProposal)
+            throw InvalidResponse();
+        if (hasCandidate)
+        {
+            string? trigger = Text(candidate, "trigger");
+            var cursor = Field(candidate, "batchThroughMessageId");
+            if (entry.Source.Type != "user-message" ||
+                !OnlyFields(candidate, "algorithm", "trigger", "fingerprint", "quotes", "batchThroughMessageId") ||
+                Text(candidate, "algorithm") != "conservative-extractive-v1" ||
+                trigger is not ("remember" or "correction" or "decision" or "task-complete" or "ordinary-batch") ||
+                !Fingerprint(candidate, "fingerprint") || !ValidQuotes(Field(candidate, "quotes"), entry.Source) ||
+                cursor.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) && (trigger != "ordinary-batch" || !ValidId(cursor)))
+                throw InvalidResponse();
+        }
+        if (hasProposal)
+        {
+            string? action = Text(proposal, "action");
+            var target = Field(proposal, "target");
+            var applied = Field(proposal, "appliedAt");
+            var conflicts = Field(proposal, "conflicts");
+            bool targetPresent = target.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+            bool hasAppliedAt = applied.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+            if (entry.Source.Type != "user-message" ||
+                !OnlyFields(proposal, "algorithm", "action", "quotes", "reason", "isInference", "conflicts", "target", "fingerprint", "appliedAt") ||
+                Text(proposal, "algorithm") != "main-model-tool-v1" || action is not ("add" or "update" or "delete") ||
+                !BoundedText(Text(proposal, "reason"), 1000) || Field(proposal, "isInference").ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+                !Fingerprint(proposal, "fingerprint") || !ValidQuotes(Field(proposal, "quotes"), entry.Source) ||
+                conflicts.ValueKind != JsonValueKind.Array || conflicts.GetArrayLength() > 8 ||
+                conflicts.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String || !BoundedText(value.GetString(), 500)) ||
+                (action != "add") != targetPresent || targetPresent && !ValidProposalTarget(target, entry) ||
+                hasAppliedAt && (entry.Status == MemoryStatuses.Draft || action != "update" ||
+                    applied.ValueKind != JsonValueKind.String || !DateTimeOffset.TryParse(applied.GetString(), out _)) ||
+                entry.Status == MemoryStatuses.Confirmed && (action == "delete" || action == "update" && !hasAppliedAt))
+                throw InvalidResponse();
+        }
+    }
+
+    private static bool ValidProposalTarget(JsonElement target, MemoryEntry entry) =>
+        OnlyFields(target, "id", "scope", "scopeId", "expectedRevision", "entryRevision", "identity") &&
+        ValidId(Field(target, "id")) && Text(target, "scope") == entry.Scope && Text(target, "scopeId") == entry.ScopeId &&
+        ValidRevision(Field(target, "expectedRevision"), minimum: 0) && ValidRevision(Field(target, "entryRevision"), minimum: 1) &&
+        Fingerprint(target, "identity");
+
+    private static bool ValidQuotes(JsonElement quotes, MemorySource source)
+    {
+        if (quotes.ValueKind != JsonValueKind.Array || quotes.GetArrayLength() is < 1 or > 12) return false;
+        var messageIds = new HashSet<Guid>();
+        foreach (var quote in quotes.EnumerateArray())
+        {
+            if (!OnlyFields(quote, "messageId", "text") || !ValidId(Field(quote, "messageId")) ||
+                !messageIds.Add(Field(quote, "messageId").GetGuid()) || !BoundedText(Text(quote, "text"), MemoryInputValidation.MaximumContentLength))
+                return false;
+        }
+        return source.MessageId is { } id && messageIds.Contains(id);
+    }
+
+    private static bool BoundedText(string? value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength && !value.Contains('\0');
+
+    private static bool Fingerprint(JsonElement value, string name) => Text(value, name) is { Length: 64 } fingerprint &&
+        fingerprint.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool ValidId(JsonElement value) => value.ValueKind == JsonValueKind.String && value.TryGetGuid(out var id) && id != Guid.Empty;
+    private static bool ValidRevision(JsonElement value, long minimum) => value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt64(out long revision) && revision >= minimum && revision <= MemoryInputValidation.MaximumRevision;
+    private static bool OnlyFields(JsonElement value, params string[] names) => value.ValueKind == JsonValueKind.Object &&
+        value.EnumerateObject().All(property => names.Contains(property.Name, StringComparer.OrdinalIgnoreCase));
+    private static JsonElement Field(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object
+        ? value.EnumerateObject().LastOrDefault(property => property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Value : default;
+    private static string? Text(JsonElement value, string name) => Field(value, name) is { ValueKind: JsonValueKind.String } field ? field.GetString() : null;
+    private static InvalidDataException InvalidResponse() => new(UiText.Get("记忆接口返回了空响应。"));
 
     private static Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken) =>
         GatewayResponseReader.ReadAsync<T>(response, UiText.Get("记忆接口返回了空响应。"),

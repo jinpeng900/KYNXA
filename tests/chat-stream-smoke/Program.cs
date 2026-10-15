@@ -397,7 +397,14 @@ async Task Handle(HttpListenerContext context)
         if (context.Request.Url!.AbsolutePath == "/health")
         {
             context.Response.ContentType = "application/json";
-            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"status\":\"ok\",\"service\":\"kynxa-model-gateway\",\"runtime\":\"rust\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3,\"retrievalProtocol\":1}"));
+            await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                status = "ok", service = "kynxa-model-gateway", runtime = "rust", conversationProtocol = 1,
+                dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5,
+                officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2,
+                extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1,
+                modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root
+            }));
             return;
         }
         if (context.Request.Url.AbsolutePath.StartsWith("/api/tasks/", StringComparison.Ordinal))

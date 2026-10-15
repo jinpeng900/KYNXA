@@ -72,7 +72,7 @@ public sealed partial class ShellPage : Page
         AttachLanguageUpdates();
         MessageTimePresentation.ConfigureCache(StoragePaths.DesktopDirectory);
         _layout = _layoutStateService.Load();
-        AppearanceService.Apply(_layout.AppearancePaletteId);
+        AppearanceService.ApplyPreferences(_layout.AppearancePaletteId, _layout.AppearanceMode, _layout.ChatFontSize, _layout.AppearanceAccent);
         UpdateWorkRecentVisibility();
         ConversationMessages.Preload();
         InitializeModelPicker();

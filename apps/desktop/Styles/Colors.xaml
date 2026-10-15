@@ -24,6 +24,13 @@
 
     <SolidColorBrush x:Key="KynxaTitleBarBrush" Color="{StaticResource KynxaTitleBarColor}" />
     <SolidColorBrush x:Key="KynxaAccentBrush" Color="#4568B2" />
+    <SolidColorBrush x:Key="KynxaOnAccentBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="KynxaAccentTextBrush" Color="#4568B2" />
+    <SolidColorBrush x:Key="KynxaMutedTextBrush" Color="#707680" />
+    <SolidColorBrush x:Key="KynxaDisabledTextBrush" Color="#606772" />
+    <SolidColorBrush x:Key="KynxaSuccessBrush" Color="#287A68" />
+    <SolidColorBrush x:Key="KynxaErrorBrush" Color="#A8392D" />
+    <SolidColorBrush x:Key="KynxaWarningBrush" Color="#946900" />
     <SolidColorBrush x:Key="KynxaFocusBrush" Color="#4568B2" />
     <SolidColorBrush x:Key="KynxaSelectionBrush" Color="#EDF2FC" />
     <SolidColorBrush x:Key="KynxaSettingsCardBrush" Color="#F5F7FB" />

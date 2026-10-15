@@ -247,6 +247,50 @@ pub fn stop_candidates(root: &Path) {
         }
     }
 }
+/// A stopped owner is replaced only after its last formal capture has settled.
+/// 仅在最后一次正式候选提取结算后替换已停止的所有者，避免迁移重载与旧写入交叠。
+pub fn resume_candidates(root: &Path) -> Result<(), super::ContractError> {
+    let mut owners = CANDIDATES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("记忆候选服务暂时不可用。", "MEMORY_CANDIDATE_FAILED", 503))?;
+    if let Some(owner) = owners.get(root) {
+        if owner.stopped.load(Ordering::Acquire) {
+            if owner.running.load(Ordering::Acquire) {
+                return Err(gateway::error(
+                    "记忆候选仍在结算。",
+                    "MEMORY_CANDIDATE_BUSY",
+                    409,
+                ));
+            }
+            owners.remove(root);
+        }
+    }
+    Ok(())
+}
+pub fn drain_candidates(root: &Path) -> Result<(), super::ContractError> {
+    stop_candidates(root);
+    let owner = CANDIDATES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| gateway::error("记忆候选服务暂时不可用。", "MEMORY_CANDIDATE_FAILED", 503))?
+        .get(root)
+        .cloned();
+    if let Some(owner) = owner {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while owner.running.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                return Err(gateway::error(
+                    "记忆候选仍未结算，原目录已保留。",
+                    "MEMORY_CANDIDATE_BUSY",
+                    409,
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    Ok(())
+}
 
 /// A saved explicit instruction grants confirmation; ordinary background proposals keep their draft boundary.
 /// 已正式保存的明确记住指令授权立即确认；普通后台建议仍保留草稿确认边界。
@@ -1978,6 +2022,69 @@ mod candidate_transition_tests {
                 1
             );
         }
+
+        let fixture = Fixture::new();
+        fixture.turns(0, 12);
+        let root = fixture.root.clone();
+        let chat = fixture.chat.clone();
+        let project = gateway::new_id();
+        std::fs::create_dir(root.join("work")).unwrap();
+        let moved = Arc::new(Mutex::new(None));
+        let move_receipt = moved.clone();
+        *CANDIDATE_COMMIT_OBSERVER.lock().unwrap() = Some((
+            root.clone(),
+            Arc::new(move |_| {
+                let root = root.clone();
+                let chat = chat.clone();
+                let project = project.clone();
+                // Pause capture after extraction and use another thread's real catalog transaction.
+                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，不能靠等候读取线程退出消除占用。
+                let receipt = std::thread::spawn(move || {
+                    let mut catalog = gateway::load_catalog(&root)?;
+                    let chats = catalog["Chats"].as_array_mut().unwrap();
+                    let position = chats
+                        .iter()
+                        .position(|record| record["Id"] == chat)
+                        .unwrap();
+                    let record = chats.remove(position);
+                    catalog["Projects"].as_array_mut().unwrap().push(json!({
+                        "Id":project,"Name":"移动目标","FolderPath":root.join("work"),
+                        "IsFolderlessWorkspace":false,"IsArchived":false,"IsPinned":false,
+                        "Chats":[record]
+                    }));
+                    gateway::handle(
+                        "PUT",
+                        "/api/conversations/catalog",
+                        &[("includeMessages".into(), "false".into())],
+                        &catalog,
+                        &root,
+                    )
+                    .unwrap()
+                })
+                .join()
+                .unwrap();
+                *move_receipt.lock().unwrap() = Some(receipt);
+            }),
+        ));
+        let capture = capture_candidates(
+            &fixture.root,
+            &fixture.chat,
+            &json!({"phase":"completed","userMessageId":null}),
+            &candidate_owner(&fixture.root).unwrap(),
+        );
+        let receipt = moved.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(
+            receipt.0, 200,
+            "the in-flight capture must not pin its source directory"
+        );
+        assert_eq!(capture.unwrap_err().code(), "WORKSPACE_CHANGED");
+        assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+        assert_eq!(
+            gateway::read_model_messages(&fixture.root, &fixture.chat)
+                .unwrap()
+                .len(),
+            24
+        );
     }
 
     #[test]

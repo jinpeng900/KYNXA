@@ -1,5 +1,7 @@
 # 前端 UI 维护入口
 
+当前正式链路为 WinUI/C# 桌面 → Rust HTTP/SSE 网关及 Agent 核心 → 模型、检索/存储和 C# ToolHost，独立 Rust 资源服务负责硬件准入。生产入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包入口为 `runtime/agent/kynxa-gateway.exe`；私有 Node 仅供扩展 MCP 和已核验的 JS Skill 使用，WebView 前端脚本继续负责呈现。开发与维护同时遵循版本化的 [kynxa-development](../../.agents/skills/kynxa-development/SKILL.md) 和 [kynxa-code-standards](../../.agents/skills/kynxa-code-standards/SKILL.md)，调用与打包边界见 [原生网关架构](../../docs/architecture/native-gateway.md)。
+
 ## 代码与纯文本框的独立复制
 
 普通 Markdown 围栏（包括未指定语言、`text`、`plaintext`、JSON、命令、配置及未知语言）和缩进代码块共用 `Resources/Transcript/content-blocks.js/css`。每框顶部左侧显示语言／文本类型，右侧常显独立复制按钮；操作栏位于源码上方，使用共享字体、配色及圆角。长类型名显示省略号，不挤出复制按钮。只有模型原文已标记为代码块的内容会成框，普通段落、引用、列表和行内代码不自动转成框。
@@ -10,7 +12,25 @@
 
 一对一包装原 `pre` 保留增量渲染块数量、原 `code` 及未变化前缀实例；包装在正常快照应用后、恢复阅读锚点之前完成，有选区时延后。切换会话清理待处理回执和反馈计时器，缓存恢复复用原控件与监听。语言／配色只更新展示，正式消息字段和网关接口不变。
 
-Mermaid 继续使用专用“复制源码”，公式源码不重复添加按钮；表格 TSV／CSV、公式 TeX 按钮、图片／图表导出、长框收起不在此批范围。测试入口为 `transcript-markdown-smoke` 及 `transcript-ui-smoke --block-copy-only`，后者使用真实 WinUI/WebView2 和剪贴板。
+原生写入成功后执行 `Clipboard.Flush()`，将文本交给系统剪贴板后才回报成功；关闭应用后仍可粘贴。写入或实体化失败均使用当前按钮旁的失败提示。`clipboard-persistence` 专项先退出复制进程，再启动独立读取进程，避免提前读取掩盖数据包生命周期问题。
+
+Mermaid 继续使用专用“复制源码”，公式源码不重复添加按钮。表格独立复制及长框阅读控制见下节；Mermaid SVG／PNG 导出见图表节，CSV 文件、公式 TeX 按钮和普通图片导出留待后续。原有复制测试入口为 `transcript-markdown-smoke` 及 `transcript-ui-smoke --block-copy-only`，后者使用真实 WinUI/WebView2 和剪贴板。
+
+## 内容框阅读控制与表格复制
+
+第二阶段第一批沿用 `content-blocks.js/css`：普通代码与文本框提供局部“自动换行／原样显示”，只改变排版，不改变源码。长框提供手动展开／收起和源行数；默认展开，未闭合围栏不收起，完成后也不自动折叠。收起只限制可见高度，独立复制仍读取完整原文。显示偏好保存在当前页面的会话状态中；消息因视口虚拟化卸载时，仅保留有界的换行、折叠和横向位置标量，重新挂载或从会话缓存返回时恢复，不复制源码或持有已卸载正文 DOM。不写入正式聊天，也不承诺应用重启或会话缓存淘汰后恢复。
+
+主动调整显示时先保护活动选区；若有文字选中，保留选区并在当前框说明先取消选择。允许调整时暂停底部跟随，优先保持可见工具栏的位置；工具栏已在视口上方时保留仍可见的正文锚点。布局变化不清除选区，也不把读者带到回复末尾。工具栏排除在跨框与跨消息复制之外。
+
+会话切出前记录当前滚动位置、可视内容锚点和底部跟随状态，与已有消息节点及虚拟行的轻量显示偏好一起保留。返回缓存中的会话时，换行／折叠状态与阅读区域一起恢复；宿主首个导航快照附带的自动到底请求不覆盖恢复位置。首次打开、缓存被容量规则淘汰或离开前仍在跟随底部时按既有规则显示最新消息；后续显式跳转和从底部发送仍有效。视图信息沿用最多 4 个会话的有界缓存，不写入正式聊天或磁盘。
+
+`Resources/Transcript/table-blocks.js/css` 为已有表格横向滚动区增加独立工具栏。默认按钮复制制表符分隔文本（TSV），适合粘贴到 Excel；菜单提供 Markdown 表格。TSV 使用 CRLF 分隔行，含制表符、换行或双引号的单元格以双引号包围并转义双引号；Markdown 转义管道等符号，并保留已有代码、强调和 TeX 内容。合并格按矩形展开，内容保留在左上格，其他覆盖位置留空；异常跨度明确失败，不静默截断。无单元格的空表禁用操作。
+
+表格复制同样使用原生剪贴板回执和会话／消息／请求身份校验。成功为当前表格的对号与“已复制”，失败在同一处说明可重试；不触发全局复制提示。表格工具栏不随单元格横向滚动，菜单支持键盘及 Escape，缓存恢复不重复添加按钮。正文查找和复制菜单同时打开时，第一次 Escape 只关闭上层菜单并返回其按钮焦点，第二次关闭查找栏；输入法组词中的 Escape 不触发这两项关闭。公式复制还原 TeX，原表格与模型 Markdown 保持不变。
+
+两三列表格继续随聊天区自适应；四列及以上的表格单元格保留 10rem 最小宽度，空间不足时在自身区域横向滚动，避免把编号和英文挤成多段。长说明与无断点超长字符串仍可换行，外层工具栏保持固定。此限制只改变展示，不改源 Markdown、单元格内容或复制结果。
+
+本批只修改桌面展示、资源与本地化，不新增后端接口、共享 DTO 或正式存储。专项入口为 `tests/transcript-ui-smoke/run-checks.ps1 -Scenario content-reading`；原生结果和未覆盖范围记录于 UI 迁移实施与验证记录。
 
 ## 模型回复中的 Mermaid 图表
 
@@ -22,21 +42,35 @@ Mermaid 继续使用专用“复制源码”，公式源码不重复添加按钮
 
 单块源码上限50,000字符、边数上限800；另有限制 SVG 大小、节点数及异步等待时间。语法或安全检查失败仅显示短提示和完整源码，大小限制不截断原文。超时可恢复异步失败，不保证硬中止浏览器同一线程上的任意同步复杂布局，过于复杂的图应拆分。Graphviz、PlantUML 和远程图标不在当前范围。
 
-聊天接线在 `transcript.js`：图表结果在正文或全屏图表选择期间延迟应用，释放后合并；上滚阅读时保留滚动锚点，切换会话丢弃过期渲染结果，全屏图不跨会话保留。主题变化仅重绘图表，保留正文和查看位置；缓存会话恢复后重接尺寸监听并刷新当前语言的控件文字。原生控制只增加本地化文案与静态资源打包，不新增模型提示、共享 DTO、后端接口或持久化字段。
+聊天接线在 `transcript.js`：图表结果在正文或全屏图表选择期间延迟应用，释放后合并；上滚阅读时保留滚动锚点，切换会话丢弃过期渲染结果，全屏图不跨会话保留。主题变化仅重绘图表，保留正文和查看位置；缓存会话恢复后重接尺寸监听并刷新当前语言的控件文字。原生控制增加本地化、静态资源及下述本机导出桥接，不新增模型提示、共享 DTO、后端接口或正式持久化字段。
+
+完整且绘制成功的图表在普通工具栏与全屏查看器中提供独立的 SVG／PNG 按钮，与“复制源码”分开。点击时冻结已经过安全重建的完整 SVG、当前主题颜色和字体，不取屏幕截图，也不使用缩放／平移后被裁切的视口。SVG 将允许的显示样式内联，补齐独立尺寸、viewBox 和主题背景；字体使用本机字体名称，不嵌入字体文件。PNG 优先使用 2 倍分辨率，过大时按比例缩小到单边不超过 8192、总像素不超过 1600 万的范围，保持完整画布。
+
+准备和保存期间，同一聊天视图只允许一项导出，图表复制、查看与导航仍可使用。当前图表操作区显示“正在准备／正在保存／已导出／已取消／导出失败，请重试”，成功仅来自原生写入回执，不触发全局提示。取消或失败可重试；未闭合、渲染失败的图表禁用导出并保留源码。导航、销毁或源码变化清理旧任务、计时器和 Blob URL；主题变化保留点击时快照，同一会话普通消息刷新不误取消保存。迟到结果不能在另一会话或 A→B→A 后冒用。
+
+`Services/Presentation/DiagramExport.cs` 在原生侧再次校验格式、规范 Base64 与真实文件内容。SVG 上限 8 MiB、尺寸上限 100000、节点上限 20000、深度上限 128；禁止 DTD、外部实体、脚本、事件、任意 HTML、外部资源和白名单外的样式，局部片段引用必须有效。PNG 上限 16 MiB，除尺寸／像素限制外检查签名、块边界、CRC、完整结尾并实际解码，拒绝动画 PNG。保存选择器绑定当前窗口，仅允许对应扩展名；取得文件后使用原生字节写入。导出不访问网关或改写消息。
 
 验收入口为 `transcript-markdown-smoke` 和 `transcript-ui-smoke --diagrams-only`，完整 Transcript 套件也覆盖图表。真实 WebView2 检查类型、中文与英文、换行与长标签、未闭合等待、失败回退、安全输入、原生复制对号、480/980布局、配色、缩放平移、全屏Esc与缓存/迟到结果；运行方法见测试 README。
 
-## 浅色配色与本机外观设置
+图表导出专项为 `tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario diagram-export`，使用真实 WebView2、生产校验与文件写入，仅替换需要人工交互的保存选择器。它覆盖七类图及 graph 别名、完整几何、深浅主题、PNG 解码、保存成功／取消／失败与重试、准备竞态、会话隔离和安全上限；实际保存对话框仍需人工验收。
 
-设置的“外观”区提供经典灰、雾蓝、青绿、柔紫、暖砂五套浅色预设，默认雾蓝。卡片按宽度排列为三、二或一列，显示预览、名称与选中勾号；点击立即应用，恢复默认只重置配色。名称与状态支持中英文及键盘访问。
+## 主题、配色与本机阅读设置
 
-`Models/UI/AppearancePalette.cs` 定义语义颜色，`Services/Presentation/AppearanceService.cs` 统一预设、共享画刷与窗口标题栏。保留已有资源键并修改画刷颜色，使静态资源使用者即时更新；原生主界面、模型/记忆/工具/检索设置、审批与结果弹窗使用相同焦点和选中资源。原生输入框使用强调色选区以适配白色选中文字；WebView 使用浅色选区与深色文字，分别验证对比度。成功、错误、权限语义色及禁用发送的可读灰色保持独立。输入区外框随实际焦点切换，不修改发送条件。
+设置的“外观”区提供浅色、深色、跟随系统三种模式，配合经典灰、雾蓝、青绿、柔紫、暖砂五套预设。默认保持雾蓝／浅色／15px。卡片按宽度排列为三、二或一列，名称与选中状态支持中英文及键盘访问。聊天字号支持13–22px、0.5px步进，正文、代码、表格和公式按比例变化，工具栏与按钮维持界面尺寸。
 
-`Views/ShellPage.Appearance.cs` 负责卡片展示与接线，`LayoutState.AppearancePaletteId` 通过现有 `layout.json` 保存。未知或缺失值回退雾蓝；先完成原子保存，再应用外观，保存失败保留原配色并提示。迁移期间拒绝更改。启动在创建主窗口前恢复配色，窗口关闭时释放外观订阅。
+自定义强调色输入严格使用`#RRGGBB`，也可通过“选择颜色”打开WinUI原生`ColorPicker`浮出层，颜色变化只更新HEX输入；点击“应用颜色”后才保存并应用。未应用的HEX草稿在主题、配色、语言和字号刷新时保留；仅应用或清除颜色、恢复默认成功后重置，保存失败保留草稿。选择器不提供透明度，无效输入在本区提示，不应用或写入。保存原始HEX，显示时分别调整按钮填充与强调文字的对比度；暗色语义文字对Main／Sidebar／Soft中最亮背景保持至少4.5:1，系统高对比度使用实际系统颜色并优先于自定义色。“使用预设颜色”仅清除自定义强调色；“恢复默认外观”恢复雾蓝／浅色／15px且清除自定义色。
 
-WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背景，不重建正文、缓存、选区、复制反馈或滚动状态。配色不进入模型请求、共享 DTO 或正式聊天存储。当前仅开放浅色预设；后续显示模式应独立于预设 ID 扩展，并补齐深色资源和可读性验收。
+`AppearancePalette`定义正文、次级文字、边框、选区、状态、强调文字、强调底上的文字及代码语义颜色。`AppearanceService`缓存应用自有画刷，既有画刷原地改色，SDK覆盖画刷首次创建一次后复用，避免重新挂载主题字典对象。主窗口和设置窗口统一`RequestedTheme`与标题栏；发送箭头使用可主题Path并保留原几何和状态，分别使用OnAccent／DisabledText。
 
-实际验收入口为 `shell-migration-ui-smoke --appearance-only`，覆盖五款切换与偏好重载、真实原生和 WebView 颜色、草稿/正文/选区/滚动保留、保存失败、迁移守卫、窄窗英文布局与焦点状态。启动命令及证据见该套件 README。
+Shell侧栏、项目与权限等图标使用`Controls/ThemeIcon.cs`的原生Viewbox／Canvas／Path，以及`ThemeIconGeometry.cs`的26个固定内置键；目录几何来自随包图标，不接受用户SVG、HTML或外部路径。描边和填充保留共享语义画刷引用，常规图标使用Icon，权限使用SecondaryText／Warning，随深浅、高对比度及强调色即时更新。图标不参与命中或键盘焦点，语义名称由现有宿主按钮提供；位图品牌标识保留原图。未知非空键明确失败，不能静默替换成不相干图标。
+
+`LayoutState`的`AppearancePaletteId`、`AppearanceMode`、`ChatFontSize`、`AppearanceAccent`通过既有`layout.json`保存。未知模式、无效颜色和非有限字号安全归一化，旧文件维持原有默认。先完成原子保存再应用；失败回滚全部字段并保留当前可见外观。迁移期间拒绝更改，启动先恢复偏好再创建主窗口。设置内容不会进入模型请求、共享DTO或正式聊天存储。
+
+WinUI桌面应用不订阅不受支持的WinRT颜色／高对比度事件；`TrackWindow`在所属UI线程监听自有HWND的`WM_SETTINGCHANGE`、`WM_THEMECHANGED`和`WM_SYSCOLORCHANGE`，启动与激活也读取真实系统状态。回调只向UI Dispatcher合并排队，窗口关闭／销毁时移除子类和订阅。高对比度临时覆盖不会写回本机偏好。
+
+WebView的`setAppearance`仅更新CSS变量和背景；字号变化重新测量12个完整可视行预览并恢复阅读锚点，不重建正文、复制源、选区或会话缓存。延迟的字号锚点校正校验会话与导航代次，不能覆盖其后发生的滚轮、键盘或显式跳转。颜色变化重绘安全沙箱内的Mermaid，图内／正文选区活动时延迟替换SVG。缓存会话恢复后应用当前全局外观，同时保留阅读区域与当前会话换行／折叠偏好。图表内部标签维持既有16px与缩放交互，源码随聊天字号变化。
+
+原生验收入口为`shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance`与`transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance-reading`，覆盖真实设置控件、深浅配色、偏好重载与保存失败、语义画刷、字号、选区／草稿／阅读锚点、完整复制和图表。高对比度包含合成系统颜色解析检查；不能把该检查当作实际更改Windows高对比度设置后的人工验收。
 
 ## 单条消息复制与行内时间
 
@@ -55,7 +89,7 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 ## 全页面细节补充：短窗、状态与结果阅读
 
 - 主输入工具栏根据已有控件的实际宽度分配模型菜单；窄窗将权限入口收为图标，完整名称和说明仍保留在可访问名称及提示中。权限和项目菜单受当前窗口宽高限制。临时侧栏支持 Escape 收起和焦点返回，已有模态与打开菜单优先处理。
-- 展开侧栏顶部在“工作／聊天”右侧提供收起按钮，折叠后由原展开按钮恢复；两者复用同一切换入口并交接键盘焦点。标题栏更多菜单的原入口继续可用。窄窗关闭的是临时抽屉，不改宽窗折叠偏好或保存宽度。侧栏边缘的8 DIP拖动区域与侧栏同色，SidebarGrip仅隐藏视觉提示线，拖动、取消和复位逻辑保留；其他分隔条不受影响。
+- 展开侧栏顶部在“工作／聊天”右侧提供圆角收起按钮，使用现有 `IconSidebarToggle` 矢量图标与共享主题画刷，折叠后由原展开按钮恢复；两者复用同一切换入口并交接键盘焦点。折叠轨道宽48 DIP，保留展开和设置图标距左侧24 DIP的原中心位置，左右留白相等；收起时同时关闭闲置的8 DIP拖动列。标题栏更多菜单的原入口继续可用。窄窗关闭的是临时抽屉，不改宽窗折叠偏好或保存宽度。展开侧栏边缘的8 DIP拖动区域与侧栏同色，SidebarGrip仅隐藏视觉提示线，拖动、取消和复位逻辑保留；其他分隔条不受影响。
 - 最近、任务、普通聊天列表与项目树的行统一使用8 DIP圆角及右侧滚动条留白。共享侧栏样式沿用当前SDK的原生ListViewItemPresenter模板属性，将圆角绑定到容器，并统一悬停、按下与选中背景；工作聊天与项目树的活动背景使用相同正内缩，对齐原生背景的左右4 DIP、上下2 DIP边界，避免点击后背景扩大。整行命中高度仍为40 DIP，文字和操作按钮使用内层边距，不再通过负边距扩展背景。圆角、行外边距与背景内缩集中来自Styles/Dimensions.xaml，保留原生容器、键盘焦点、选择与虚拟化。
 - 模型窗口用真实编辑状态显示“尚未保存／未保存的修改／已保存”。长连接名和模型 ID 只在展示时省略，完整提示和保存原文保留；原校验失败时定位输入框，并展开其所在高级区域。
 - MCP 与技能窗口按短窗高度约束列表；窄窗把已有连接操作和目录设置移动到现有滚动区域，放宽后恢复。清除筛选只恢复展示，隐藏的草稿仍保留。忙碌、未保存、取消及保存按钮共用原状态判断。
@@ -67,7 +101,7 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 
 ## 页面细节优化：按钮、菜单与空预览
 
-- 发送按钮的空输入状态使用 `KynxaSendDisabledBrush` 和独立深灰箭头 SVG；有内容时使用当前配色的主题色背景、白色箭头，生成期间停止图标明确为白色。启用与停止的原判定不变。附件上传尚未实现，入口停用并说明可用的粘贴文本、关联项目目录操作。
+- 发送按钮的空输入状态使用 `KynxaSendDisabledBrush` 和 `KynxaDisabledTextBrush` 原生Path箭头；有内容时使用当前配色的主题色背景，箭头与生成期间的停止图标使用 `KynxaOnAccentBrush`，高对比度保留系统选中前景／背景配对。启用与停止的原判定不变。附件上传尚未实现，入口停用并说明可用的粘贴文本、关联项目目录操作。
 - `ComposerSurface.xaml` 减轻原生阴影并使用较浅底栏；默认编辑器高度为 104 DIP，已有用户高度偏好不重写。空白页减小品牌图及波纹透明度。
 - 模型和会话搜索菜单按首次打开的内容确定高度，超出可用高度后滚动；输入搜索词时保持菜单高度稳定。`PickerMenu.SetContentWidth` 为这两类菜单设置局部外壳宽度，其它菜单沿用原样式。模型行仅在名称与 ID 不同时显示第三行，当前模型以勾选标记显示；行包装只用于呈现，选择和保存仍传原 `ModelChoice`。
 - `ShellPage.WorkPanel.cs` 没有打开的预览标签时默认释放右栏，已有文件夹仍可通过原按钮展开。手动空面板请求按模式、项目和会话限定；自动收起不保存布局、不改变用户宽度或显式关闭偏好。截图正式回执的发现继续独立于栏位显示，宽窗且用户允许展开时可显示首张截图，关闭标签的原状态仍保留。
@@ -76,6 +110,12 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 
 ## 本轮迁移：导航、草稿保护与窄窗适配
 
+- `Ctrl+F` 打开当前会话正文查找，`Ctrl+Shift+K` 搜索会话标题／项目；菜单、侧栏提示和 F1 说明采用同一约定。`ShellPage.TranscriptSearch.cs` 负责原生快捷键、模态／输入法保护、空会话搜索区域及显式关闭后的焦点恢复。
+- `Resources/Transcript/transcript-search.js`／`.css` 负责脱离正文布局的查找栏、字面匹配、数量、上一处／下一处及 CSS Highlight 范围。覆盖当前已加载历史页内的用户／助手正文、代码、表格、引用和 Mermaid 源码，跳过按钮、元数据、隐藏过程及重复 SVG 文字。打开查找时补挂载该页中虚拟视口外的消息，关闭后恢复常规视口回收；尚未回读的历史页不属于本次查找范围，不作为全会话或全库搜索。原消息内容和复制结果不因高亮改变；活动选区阻止结果跳转，流式快照继续遵循原有选区冻结。
+- 打开或编辑关键词不自动定位；查找框内 Enter／Shift+Enter、↑／↓、F3／Shift+F3 或按钮显式跳转时才展开命中的代码／图表源码，并滚动到搜索栏下方。搜索快照只随已有有界会话 DOM 缓存保存关键词、打开状态和匹配身份；返回 A 恢复阅读位置，不重新跳到匹配处或底部。离开页面取消任务与范围，结果不写入正式聊天记录。
+- `ScrollSafeComboBox` 统一用于原生下拉选择：收起时跳过 ComboBox 的滚轮选项切换，将滚轮路由给页面 ScrollViewer；展开列表与方向键／Home 等明确选择保留原生行为。新增下拉框继续使用该控件，选择式字段／参数仍可声明为 `ComboBox`。
+- 设置窗口的 ScrollViewer 与内容列横向铺满可用客户区，不设内容宽度上限；普通、最大化与窄窗口均保留两侧各 24 DIP 留白和纵向滚动，配色卡片随可用宽度换列。
+- 正文查找在流式更新时合并后续刷新，保留仍有效的结果及高亮；关键词、会话或关闭操作取消旧任务。Range 提交与导航前核验所属正文、消息和逻辑文本，索引与离线校验共用排除规则，避免隐藏 MathML、BR 换行或失效节点导致反复扫描。搜索栏始终固定在顶部；短正文首屏匹配被遮挡且无法继续向上滚动时，仅在显式定位中补上实际需要的顶部避让，关闭后清理并保留阅读坐标。普通打开或输入关键词不挤动正文。F3／Shift+F3 在搜索框、正文和原生输入区均可导航；点击主输入区后 Ctrl+F 重新聚焦查找、Esc 可关闭，主输入区 Enter 发送约定不变。输入法组词和前景菜单／模态保护继续生效。
 - 页面级快捷键使用 `KeyboardAcceleratorPlacementMode.Hidden`，避免鼠标停在聊天正文时 WinUI 自动弹出首个 `Ctrl+F` 提示。快捷键仍正常响应，搜索按钮自己的中英文说明提示、菜单文字和 F1 帮助保留。
 - `Views/ShellPage.PresentationActions.cs`：更多功能菜单、会话标题/项目搜索、整段会话复制及 Markdown 导出、短暂操作反馈和快捷键。搜索重新核验聊天/项目 ID，复用原选择入口恢复草稿；导出在文件选择器等待前捕获可见正文快照。审批、设置等同一 XamlRoot 的弹窗打开时，快捷键和导航先返回。
 - `Views/ShellPage.ModelPicker.cs`：模型/连接搜索、读取中/空列表/失败/已选择状态。失败保留上次成功列表和选择，只有成功读取权威列表后才清除失效选择。状态提示明确区分已选择模型与已验证模型调用，菜单底部配置/重试入口保持固定。
@@ -102,17 +142,17 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 
 增加 UI 时优先使用现有组件与样式。新的数据保存、协议解析和复杂业务放在负责对应流程的服务中，页面负责展示与事件接线，避免写入通用控件。现有 `ShellPage.*` 仍共享页面状态，不因拆成 partial 就等同于完整 MVVM。
 
-桌面通信：`Services/GatewayResponseReader.cs` 共用 JSON 响应读取及错误解码，保留调用方的 JSON 选项、空响应提示和目录 409 恢复提示。`GatewayApiException` 继承现有 `InvalidOperationException` 并携带 HTTP 状态及可用错误码。模型/会话客户端继续拥有请求、超时和响应释放，SSE 的成功响应不经过 JSON 读取；正式存储仍归网关。`dotnet run --project tests/gateway-response-smoke/GatewayResponseSmoke.csproj` 检查格式兼容、错误降级、取消与响应所有权。
+桌面通信：`Services/Integration/GatewayResponseReader.cs` 共用 JSON 响应读取及错误解码，保留调用方的 JSON 选项、空响应提示和目录 409 恢复提示。`GatewayApiException` 继承现有 `InvalidOperationException` 并携带 HTTP 状态及可用错误码。模型/会话客户端继续拥有请求、超时和响应释放，SSE 的成功响应不经过 JSON 读取；正式存储仍归网关。`dotnet run --project tests/gateway-response-smoke/GatewayResponseSmoke.csproj` 检查格式兼容、错误降级、取消与响应所有权。
 
 流式回复：`Views/ShellPage.StreamReplies.cs` 按会话 ID 维护生成任务，40ms 合并刷新当前消息；`ModelApiClient.StreamReplyAsync` 与 `ChatStreamReader` 读取网关 SSE，区分正文、公开思考和终止事件。主聊天呈现正文阶段与紧凑工具活动，不为各轮创建独立思考折叠区；发送按钮在生成期间变成停止。消息保存 `Reasoning`、`ReasoningDurationMs`、`Status`、`Error` 和原模型信息，旧记录兼容；启动时把未完成生成恢复为中断。生成开始、定期快照和完成时由网关保存到统一会话日志，页面不再每 1.5 秒重写整个聊天目录；重试复用请求 ID 与用户消息 ID，避免重复上下文。
 
-会话展示：`Controls/ConversationTranscript.cs` 用一个 WebView2 承载整段会话，页面资源在 `Resources/Transcript`，所有用户消息、可见正文阶段、工具活动和表格处于同一份 DOM。输入框、侧栏和模型菜单继续使用 WinUI。主聊天的公式直接由 KaTeX 排版，不经过截图、Skia 或原生文字上方的图片图层；浏览器负责文字、公式与表格的尺寸和换行。
+会话展示：`Controls/ConversationTranscript.cs` 用一个 WebView2 承载当前加载的会话历史页，页面资源在 `Resources/Transcript`；用户消息、可见正文阶段、工具活动和表格共用同一份 DOM，较长历史中的视口外消息可卸载为保留高度的占位行。输入框、侧栏和模型菜单继续使用 WinUI。主聊天的公式直接由 KaTeX 排版，不经过截图、Skia 或原生文字上方的图片图层；浏览器负责文字、公式与表格的尺寸和换行。
 
 `ConversationTranscript` 按可见正文、阶段内容和生成状态缓存 HTML，40ms 合并刷新；Markdig 解析和代码着色在后台任务中执行。后台仅使用跨越 `await` 前捕获的不可变消息和缓存引用，不读取 UI 拥有的可变字典；关闭控件使解析代次失效并结束尚未完成的 Ready 等待。切换聊天时清除前一会话，异步结果通过会话代际检查后才能发送给页面，避免旧任务覆盖新会话。聊天记录仍保存原始 Markdown，历史消息走相同的展示路径。
 
-`Services/TranscriptMarkdown.cs` 复用 Markdig 和 `MathMarkdown.Normalize`，输出顶层 HTML 块，支持标题、强调、列表、任务清单、引用、代码、链接与真实表格。单元格保留行内节点，公式不再经过纯文本投影。`Resources/Transcript/transcript.css` 统一管理视觉样式：正文 15px、行高 1.7，公式 1.08em，围栏代码 13px。`content-blocks.css` 让普通内容框保留源码行边界，长行在当前框内横向滚动，原始换行、连续空行和缩进供显示与复制；普通正文和表格仍随回复区调整宽度，长单词可断行，无法换行的长公式仍可横向滚动。Mermaid 源码和未完成公式保留各自原有显示规则。会话视口填满聊天列，正文不再受固定最大宽度限制，右侧栏缩小或收起时同步扩展；滚动条位于聊天列右缘。
+`Services/Presentation/TranscriptMarkdown.cs` 复用 Markdig 和 `MathMarkdown.Normalize`，输出顶层 HTML 块，支持标题、强调、列表、任务清单、引用、代码、链接与真实表格。单元格保留行内节点，公式不再经过纯文本投影。`Resources/Transcript/transcript.css` 统一管理视觉样式：正文 15px、行高 1.7，公式 1.08em，围栏代码 13px。`content-blocks.css` 让普通内容框保留源码行边界，长行在当前框内横向滚动，原始换行、连续空行和缩进供显示与复制；普通正文和表格仍随回复区调整宽度，长单词可断行，无法换行的长公式仍可横向滚动。Mermaid 源码和未完成公式保留各自原有显示规则。会话视口填满聊天列，正文不再受固定最大宽度限制，右侧栏缩小或收起时同步扩展；滚动条位于聊天列右缘。
 
-`Resources/Transcript/transcript.js` 按顶层块的源 HTML 比较并保留未变化前缀，追加内容只替换变化尾部；已排版公式缓存 DOM 字符串，不重复生成图片。有活动选区时保留现有 DOM 并暂存最新快照，清除选区后再应用最终内容；切换会话会立即清除旧选区并显示目标会话。页面独立维护跟随底部状态：打开聊天到底部，从底部发送后跟随增长，主动向上滚动或选择文字时暂停。主控件保留最多 1,024 条消息、8M 字符的 Markdown/高亮 HTML 缓存，页面保留最近 4 个聊天的 DOM（合计最多 40,000 节点、2M 字符，单个最多 400 条消息）；再次打开复用公式和消息节点，缓存命中不等流式批处理定时器。后台解析在消息边界检查会话代次，快速切换时丢弃过期结果，避免旧聊天覆盖当前聊天。
+`Resources/Transcript/transcript.js` 按顶层块的源 HTML 比较并保留未变化前缀，追加内容只替换变化尾部；已排版公式缓存 DOM 字符串，不重复生成图片。有活动选区时保留现有 DOM 并暂存最新快照，清除选区后再应用最终内容；切换会话会立即清除旧选区并显示目标会话。页面独立维护跟随底部状态：首次打开聊天到底部，从底部发送后跟随增长，主动向上滚动或选择文字时暂停，缓存恢复沿用已保存阅读位置。消息视口回收保留占位高度及轻量阅读偏好，流式消息和活动选区涉及的节点不回收，正文查找打开时覆盖当前已加载页。主控件保留最多 1,024 条消息、8M 字符的 Markdown/高亮 HTML 缓存，页面保留最近 4 个聊天的有界状态（合计最多 40,000 节点、2M 字符，单个最多 400 条消息），包括已挂载节点、虚拟行和对应消息数据；再次打开复用仍保留的公式和消息节点，缓存命中不等流式批处理定时器。后台解析在消息边界检查会话代次，快速切换时丢弃过期结果，避免旧聊天覆盖当前聊天。
 
 跨消息选择使用浏览器原生 Range，用户消息按纯文本保留空白。复制时按选区的文档顺序序列化正文、表格和代码，过滤按钮、状态信息及 KaTeX 的辅助 MathML；完整选中的公式复制为带分隔符的原始 TeX，公式内部的部分选择只复制所选可视字符。旧消息的整条复制取原始 `Content`；分段回复按顺序连接各段原始 Markdown，不包含可见思考和工具回执。输入框仍使用原生控件，其复制不经过会话页面。
 
@@ -142,7 +182,7 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 
 聊天页面只加载打包的本地 HTML、脚本、样式和字体。Markdown 原始 HTML 被转义，图片显示为文本链接；只有 `http`、`https`、`mailto` 地址可以作为链接交给宿主打开。WebView2 拦截其他页面导航、资源请求、下载和权限请求，不在排版时获取远程图片或脚本。
 
-代码高亮：`Services/CodeSyntaxHighlighter.cs` 使用 [ColorCode.Core](https://github.com/CommunityToolkit/ColorCode-Universal) 解析围栏语言，`TranscriptMarkdown` 将文字片段输出为彩色 `span`；复制仍使用完整代码文本。支持 Python、JS/TS、C#/C++、Java、JSON、SQL、HTML/CSS、XML/XAML、PowerShell 等及常见缩写。关键字紫色、字符串深蓝、注释灰绿、数字蓝色；不改动缩进和换行。未标语言、未知语言以及超过 40,000 字符或 4,096 个文字片段的代码保留等宽纯文本。
+代码高亮：`Services/Presentation/CodeSyntaxHighlighter.cs` 使用 [ColorCode.Core](https://github.com/CommunityToolkit/ColorCode-Universal) 解析围栏语言，`TranscriptMarkdown` 将文字片段输出为彩色 `span`；复制仍使用完整代码文本。支持 Python、JS/TS、C#/C++、Java、JSON、SQL、HTML/CSS、XML/XAML、PowerShell 等及常见缩写。关键字紫色、字符串深蓝、注释灰绿、数字蓝色；不改动缩进和换行。未标语言、未知语言以及超过 40,000 字符或 4,096 个文字片段的代码保留等宽纯文本。
 
 解析与协议检查：`dotnet run --project tests/transcript-markdown-smoke/TranscriptMarkdownSmoke.csproj` 验证 HTML 结构、表格内公式、列对齐、代码保真、安全链接和流式转最终结果；`dotnet run --project tests/code-highlighting-smoke/CodeHighlightingSmoke.csproj` 验证代码语言匹配与降级；`dotnet run --project tests/chat-stream-smoke/ChatStreamSmoke.csproj` 验证 SSE 分包、真实 HTTP 增量、取消与记录兼容。当前真实原生流由 `apps/agent-core/tests/gateway_http.rs` 在独立临时数据与本机模拟上游中生成，交给 `tests/native-gateway-contract-smoke` 的未修改桌面解析器读取；完整生成与运行参数见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。该合同检查不替代实际 WebView 选择、复制与滚动验收。
 
@@ -150,17 +190,17 @@ WebView 使用内部 `setAppearance` 展示消息更新 CSS 变量及默认背�
 
 保留的原生控件：`MarkdownReply.*`、`TextSelectionAutoScroll`、`ConversationAutoFollow` 仍供原生控件与旧测试使用，其 `RichTextBlock`、原生表格、图片公式和鼠标捕获逻辑不再控制主聊天。`tests/markdown-ui-smoke`、`tests/scroll-follow-smoke` 及跨消息选择脚本只验证这些原生路径；它们通过不代表新的浏览器会话展示已经通过 UI 检查。
 
-`Services/StoragePaths.cs` 统一解析桌面数据位置，与网关共享 `~/.kynxa/storage.json`（`dataRoot`）或 `KYNXA_DATA_HOME`。模型选择、布局和界面错误日志使用该目录下的 `Desktop`；未配置时兼容原 LocalState。`ProjectStore` 现在是异步会话 API 客户端，项目元信息与聊天正文的唯一正式来源在网关 `ConversationStore`；正文按项目/会话目录保存到 Data 下的 JSONL，项目关联文件夹独立。目录保存只上传元信息和新用户消息，不回写助手快照；版本冲突要求重新加载。移动已有数据使用网关目录下 `migrate-storage.mjs`，切勿只改路径导致旧记录不可见。
+`Services/Data/StoragePaths.cs` 统一解析桌面数据位置，与原生网关共享 `~/.kynxa/storage.json`（`dataRoot`）或 `KYNXA_DATA_HOME`。模型选择、布局和界面错误日志使用该目录下的 `Desktop`；未配置时兼容原 LocalState。`Services/Data/ProjectStore.cs` 是异步会话 API 客户端，项目元信息与聊天正文的唯一正式来源由 Rust `apps/agent-core/src/storage/gateway.rs` 及其目录／日志事务模块维护；正文按项目/会话目录保存到 Data 下的 JSONL，项目关联文件夹独立。目录保存只上传元信息和新用户消息，不回写助手快照；版本冲突要求重新加载。移动已有数据使用设置中的“数据存储 → 更改位置”：`ShellPage.StorageSettings.cs` 先核验网关维护状态，`StorageMigrationService.MoveAsync` 复制和校验副本，再经 `ModelGatewayService.InitializeStorageAsync` 调用随包原生网关的 `--initialize-storage` 验证目标，成功后原子切换指针并保留原数据。`--initialize-storage` 只是目标初始化/校验入口，不能代替完整复制迁移；旧 `migrate-storage.mjs` 已退休，当前不提供此处可推荐的独立全量迁移 CLI，切勿只改路径导致旧记录不可见。
 
-模型管理：`ModelManagementWindow.xaml` 使用固定底部操作区、独立滚动表单和折叠的高级设置；服务地址直接显示在主表单，连接 ID 位于高级设置。`Services/ModelPresets.cs` 集中维护服务地址、默认模型 ID、名称识别及本机/局域网地址判定。「本地 API（直接连接）」不依赖 Ollama，直接连接兼容接口，密钥提示随地址更新。新连接自动避开已有 ID，编辑连接固定 ID；切换服务商建立新配置，不修改已有连接。测试只读取模型列表，保存后通过聊天模型菜单选择。
+模型管理：`ModelManagementWindow.xaml` 使用固定底部操作区、独立滚动表单和折叠的高级设置；服务地址直接显示在主表单，连接 ID 位于高级设置。`Services/Models/ModelPresets.cs` 集中维护服务地址、默认模型 ID、名称识别及本机/局域网地址判定。「本地 API（直接连接）」不依赖 Ollama，直接连接兼容接口，密钥提示随地址更新。新连接自动避开已有 ID，编辑连接固定 ID；切换服务商建立新配置，不修改已有连接。测试只读取模型列表，保存后通过聊天模型菜单选择。
 
-上下文窗口按连接保存，可选择 8K、32K、128K、256K、1M（1000000）或自定义 2048–2000000；旧连接缺少字段时默认 8192。独立最大输出默认 256K，提供 4K、8K、16K、32K、64K、128K、256K 和自定义 1024–262144，已有 2K 等值保留；同一灰色 TokenLimitRowStyle、字号与选择/校验助手覆盖两行。输出是上限，小上下文会降低实际预留。这些配置不改变服务端能力，本地服务须匹配启动窗口。保存/测试先校验，两项均整数往返；切语言刷新选中标签并保留草稿，忙碌禁用全部预算控件。`tests/model-context-smoke` 验证通信，`tests/model-ui-smoke` 用临时 Data、模拟 HTTP 和真实 WinUI 验证表单、窄窗、关闭与晚到响应。聊天/工作/用户记忆由网关分层管理，详见 [记忆架构](../../docs/architecture/chat-work-memory.md)。
+上下文窗口按连接保存，可选择 8K、32K、128K、256K、1M（1000000）或自定义 2048–2000000；旧连接缺少字段或字段为 null 时，原生网关列表接口投影兼容默认值 32768，桌面 `ModelApiClient.DefaultContextWindowTokens` 与之保持一致，不据此改写原连接记录。独立最大输出默认 256K（262144），提供 4K、8K、16K、32K、64K、128K、256K 和自定义 1024–262144，已有 2K 等值保留；同一灰色 TokenLimitRowStyle、字号与选择/校验助手覆盖两行。运行中的上下文额度由 Rust 根据已核验官方能力、本地运行窗口及实际观察自动解析；未知部署只能使用保守回退或明确标为未核验的配置额度，不能把界面保存值当作能力证明。输出是上限，小上下文及实际服务限制会降低有效额度。这些配置不改变服务端能力，本地服务须匹配实际启动窗口。保存/测试先校验，两项均整数往返；切语言刷新选中标签并保留草稿，忙碌禁用全部预算控件。`tests/model-context-smoke` 验证通信，`tests/model-ui-smoke` 用临时 Data、模拟 HTTP 和真实 WinUI 验证表单、窄窗、关闭与晚到响应。聊天/工作/用户记忆由原生网关分层管理，详见 [记忆架构](../../docs/architecture/chat-work-memory.md)。
 
 设置中的「记忆管理 → 打开」创建独立原生窗口，可最小化、最大化和关闭。`MemoryManagementWindow` 负责展示与确认，`MemoryManagementViewModel` 管理编辑、版本冲突和取消，`MemoryApiClient` 负责范围 HTTP 接口，`apps/shared/Memory/MemoryApiContracts.cs` 定义共享 DTO 与内容校验。窗口分别选择聊天、工作、全局记忆，支持内容筛选、手动新增、编辑、单条删除，显示来源与有效状态；加载失败明确提示，写入和 409 后重新 GET，保留冲突编辑。未发送草稿不纳入聊天目标，全局/工作管理不创建聊天。中英界面即时切换，用户内容原样保留，窄窗口上下排列列表与编辑器。更改 Data 位置前须完成编辑，迁移关闭干净的记忆窗口。
 
 验证入口：`tests/memory-management-smoke` 覆盖模拟 HTTP 与状态，`tests/memory-ui-smoke` 用隔离临时目录、模拟 API 和真实 WinUI 控件检查窗口。输出配置已实现，SSE 终态可选 contextUsage 诊断尚未显示为桌面用量控件。聊天展示保持现有 Markdown DOM、稳定消息 ID 与跨消息选择行为，验收安排见 [B：桌面前端](../../docs/team/B-桌面前端.md)。
 
-预设来源（2026-10-01 核对）：共 151 个云端聊天模型 ID。数字是本应用纳入的预设数，包含可输出文本的视觉模型；不重复计算兼容别名，不代表账号已开通全部模型。精确 ID 和显示名称仅维护在 `Services/ModelCatalog.cs`，`ModelPresets` 从同一目录生成预设。
+预设来源（2026-10-01 核对）：共 151 个云端聊天模型 ID。数字是本应用纳入的预设数，包含可输出文本的视觉模型；不重复计算兼容别名，不代表账号已开通全部模型。精确 ID 和显示名称仅维护在 `Services/Models/ModelCatalog.cs`，`ModelPresets` 从同一目录生成预设。
 
 | 服务商 | 预设数 | 官方依据 |
 | --- | ---: | --- |
@@ -209,7 +249,7 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 
 最近收录全部已提交且未归档的工作聊天，包括项目内和 `IsFolderlessWorkspace` 下的会话；普通聊天模式独立。最近在项目上方，默认收起，展开选择写入 `LayoutState.WorkRecentExpanded`，刷新不改变偏好。打开项目内的最近聊天自动选中对应工作区与任务聊天，保留项目的手动展开状态。`LayoutState.RecentWorkChatIds` 保存跨项目的最近发送顺序，过滤无效 ID，置顶始终在前。项目树和最近各自滚动、各自收起，共享随窗口变化的高度预算，保证任务区始终可用并保留列表虚拟化。最近与任务复用 `WorkChatRowTemplate`，由行数据控制灰色选中背景，原生 ListView 选择关闭以避免蓝色标记；三点菜单与项目内聊天相同，鼠标或键盘焦点进入时显示。
 
-`Services/WorkSidebarState.cs` 集中处理聊天筛选、置顶排序与稳定行更新。仅在消息提交成功时，将未置顶聊天、工作移到各自置顶项之后并更新最近顺序；打开项目或聊天保持顺序，回复的开始/结束仅更新状态标识，流式 token 不触发重排。拖动工作行可在相同置顶分组内调整顺序并保存，普通刷新不覆盖该顺序。切换工作聊天仅生成一次会话展示，不重复渲染，不写入排序和最近记录；主模式未变化时也不重复保存布局。项目树与任务区共享聊天 ID 和操作，不创建第二份记录。`dotnet run --project tests/work-sidebar-smoke/WorkSidebarSmoke.csproj` 检查归属、过滤、排序和稳定刷新。
+`Services/Presentation/WorkSidebarState.cs` 集中处理聊天筛选、置顶排序与稳定行更新。仅在消息提交成功时，将未置顶聊天、工作移到各自置顶项之后并更新最近顺序；打开项目或聊天保持顺序，回复的开始/结束仅更新状态标识，流式 token 不触发重排。拖动工作行可在相同置顶分组内调整顺序并保存，普通刷新不覆盖该顺序。切换工作聊天仅生成一次会话展示，不重复渲染，不写入排序和最近记录；主模式未变化时也不重复保存布局。项目树与任务区共享聊天 ID 和操作，不创建第二份记录。`dotnet run --project tests/work-sidebar-smoke/WorkSidebarSmoke.csproj` 检查归属、过滤、排序和稳定刷新。
 
 项目树刷新由 `ShellPage.ProjectRendering.cs` 在当前输入事件结束后合并执行，`ProjectTreeReconciler` 按项目与聊天 ID 保留行对象并增量更新。不要在点击回调中清空整棵树，也不要重新加入 `TreeView.SelectedItem` 赋值；当前聊天的灰色背景由 `IsActive` 控制。重排使用移除/插入相同行对象，避免 WinRT 集合对 `ObservableCollection.Move` 的显示不同步。行卸载和窗口关闭后丢弃悬停、焦点及排队刷新操作。`dotnet run --project tests/project-tree-smoke/ProjectTreeSmoke.csproj` 使用独立原生窗口检查节点更新与生命周期，不访问用户数据。
 
@@ -217,4 +257,8 @@ dotnet run --project tests/ui-layout-smoke/KYNXA.UiLayoutSmoke.csproj
 
 记忆管理已从设置打开独立窗口，具有记忆 HTTP 客户端和聊天/工作/全局范围的查看、来源状态及单条新增/编辑/删除。实现遵循 [接口与验收切分](../../docs/architecture/chat-work-memory.md#下一轮实施切分)，使用范围文档版本检测冲突、写入后重新获取来源状态。未发送空稿不因打开记忆入口而正式保存；快速切换聊天时，晚到列表和写入结果只能更新其所属会话。独立输出配置可并行开发，批量清除及预算诊断等待对应后端/协议实现。
 
-工具管理窗口使用 API 提供的官方/用户来源和只读根目录，可筛选来源、保存官方覆盖或恢复默认；用户项保留增删改。官方文件在本体 `model-gateway/official-tools/`，配置路径只迁移用户扩展；官方技能稳定 ID 与用户路径 ID 分开。语言切换保留选择和草稿。
+工具管理窗口使用 API 提供的官方/用户来源和只读根目录，可筛选来源、保存官方覆盖或恢复默认；用户项保留增删改。官方静态资料源码位于 `apps/official-tools/`，打包为应用根目录的 `official-tools/`，工具执行及 MCP/Skill 生命周期由 Rust tools 领域管理，不恢复旧 `model-gateway/official-tools/` 后端运行链路。配置路径只迁移用户扩展；官方技能稳定 ID 与用户路径 ID 分开。仓库 `.agents/skills/kynxa-development` 与 `kynxa-code-standards` 是开发代理规范，不作为应用内模型 Skill 分发。语言切换保留选择和草稿。
+
+### 本地化绑定生命周期
+
+`UiLocalization.Bind` 使用原生单向绑定到 `LocalizedTextValue.Value`。原生控件包装对象被 GC 后，可视树中的文字仍可随语言变化；全局注册只弱持有翻译值源，值源不引用控件或窗口。属性更新通过所属 dispatcher 的 `INotifyPropertyChanged` 通知。重复绑定替换旧绑定；按状态直接设置文案的控件仍由其既有语言刷新处理器重新计算。回归需核对强制 GC 后的实际文字及释放后的值源，不能只检查 `UiText.Language` 或自动化名称。

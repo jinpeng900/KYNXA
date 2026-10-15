@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:KYNXA_Desktop.Controls">
     <!-- Use the Latin UI face first so mixed labels keep Segoe for English and YaHei UI for Chinese.
          拉丁界面字体放在前面，使混排标签中的英文使用 Segoe，中文回退到微软雅黑 UI。
     -->
@@ -35,6 +35,9 @@
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
     <Style TargetType="ComboBox">
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+    </Style>
+    <Style TargetType="controls:ScrollSafeComboBox">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
     <Style TargetType="ComboBoxItem">
@@ -139,7 +142,7 @@
         <Setter Property="Padding" Value="9" />
         <Setter Property="CornerRadius" Value="20" />
         <Setter Property="Background" Value="{StaticResource KynxaSendBrush}" />
-        <Setter Property="Foreground" Value="White" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaOnAccentBrush}" />
     </Style>
     <Style x:Key="KynxaConversationButtonStyle" TargetType="Button">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />

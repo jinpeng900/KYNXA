@@ -308,20 +308,38 @@ impl TerminalSession {
         self.native
             .lock()
             .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?
-            .close();
+            .close()?;
         self.output.finish(None);
         Ok(())
     }
 }
 
 pub(crate) async fn shutdown(context: &GatewayToolContext) {
-    let sessions = std::mem::take(&mut *context.runtime.terminals.lock().await);
-    let _ = tokio::task::spawn_blocking(move || {
-        for (_, session) in sessions {
-            let _ = session.close();
+    let _ = shutdown_checked(context).await;
+}
+
+/// Migration waits for each owned terminal job before releasing its console and registry entry.
+/// 迁移等待每个自有终端进程树退出后，再释放控制台及登记，不把清空列表当作结算成功。
+pub(crate) async fn shutdown_checked(context: &GatewayToolContext) -> Result<(), GatewayError> {
+    let sessions = context.runtime.terminals.lock().await.iter()
+        .map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
+    for (id, session) in sessions {
+        #[cfg(windows)]
+        {
+            let current = session.clone();
+            let job = tokio::task::spawn_blocking(move || {
+                let mut native = current.native.lock()
+                    .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端状态不可用。", 500))?;
+                let job = native.take_owned_job();
+                Ok::<_, GatewayError>(job)
+            }).await.map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
+            if let Some(job) = job { job.terminate_and_wait().await?; }
         }
-    })
-    .await;
+        tokio::task::spawn_blocking(move || session.close()).await
+            .map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
+        context.runtime.terminals.lock().await.remove(&id);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -710,20 +728,25 @@ mod windows {
             }
             Ok(())
         }
-        pub fn close(&mut self) {
+        pub fn take_owned_job(&mut self) -> Option<super::super::gateway_process::OwnedProcessJob> {
+            self.job.take()
+        }
+
+        pub fn close(&mut self) -> Result<(), GatewayError> {
             self.job.take();
             self.input.take();
             if let Ok(mut console) = self.console.lock() {
                 console.take();
             }
-            unsafe {
-                WaitForSingleObject(self.process.raw(), 2000);
+            if unsafe { WaitForSingleObject(self.process.raw(), 2000) } != 0 {
+                return Err(failure("TERMINAL_CLEANUP_UNCONFIRMED", "终端进程退出尚未确认。", 503));
             }
+            Ok(())
         }
     }
     impl Drop for NativeTerminal {
         fn drop(&mut self) {
-            self.close();
+            let _ = self.close();
         }
     }
 }

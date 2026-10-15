@@ -38,6 +38,8 @@ pub struct TaskJournal {
     wake_flush: Notify,
     last_flush_error: Mutex<Option<GatewayError>>,
     released: AtomicBool,
+    renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    renewal_stop: Arc<Notify>,
 }
 
 impl TaskJournal {
@@ -88,10 +90,19 @@ impl TaskJournal {
             wake_flush: Notify::new(),
             last_flush_error: Mutex::new(None),
             released: AtomicBool::new(false),
+            renewal: Default::default(),
+            renewal_stop: Arc::new(Notify::new()),
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&journal);
-            runtime.spawn(Self::renew_while_owned(weak, lease_ms));
+            let task = runtime.spawn(Self::renew_while_owned(
+                weak,
+                lease_ms,
+                journal.renewal_stop.clone(),
+            ));
+            *journal.renewal.lock().map_err(|_| {
+                GatewayError::new("TASK_HEARTBEAT_CLEANUP_FAILED", "任务心跳状态不可用。", 503)
+            })? = Some(task);
         }
         Ok(journal)
     }
@@ -120,11 +131,17 @@ impl TaskJournal {
         Ok(self.repository.check_attempt(&self.token)?)
     }
 
-    async fn renew_while_owned(weak: Weak<Self>, lease_ms: u64) {
+    async fn renew_while_owned(weak: Weak<Self>, lease_ms: u64, stop: Arc<Notify>) {
         let delay = Duration::from_millis((lease_ms / 3).clamp(1_000, 5_000));
         loop {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                _ = stop.notified() => break,
+            }
             let Some(journal) = weak.upgrade() else { break };
+            if journal.is_released() {
+                break;
+            }
             let repository = journal.repository.clone();
             let token = journal.token.clone();
             // Lease renewal performs no model call and never revives a paused/cancelled task.
@@ -302,7 +319,12 @@ impl TaskJournal {
     async fn store_blob_bytes(&self, kind: &str, bytes: &[u8]) -> Result<TaskArtifact> {
         if !matches!(
             kind,
-            "child-context" | "worker-log" | "task-output" | "task-plan" | "task-checkpoint" | "document-progress"
+            "child-context"
+                | "worker-log"
+                | "task-output"
+                | "task-plan"
+                | "task-checkpoint"
+                | "document-progress"
         ) {
             return Err(GatewayError::new(
                 "INVALID_TASK_ARTIFACT_KIND",
@@ -550,6 +572,7 @@ impl TaskJournal {
             self.repository
                 .release_attempt(&self.token, reason.unwrap_or("controlled-boundary"))?;
             self.released.store(true, Ordering::Release);
+            self.drain_background().await?;
             return Ok(task);
         }
         let ended = self
@@ -558,12 +581,47 @@ impl TaskJournal {
         self.repository
             .release_attempt(&self.token, reason.unwrap_or("task-boundary"))?;
         self.released.store(true, Ordering::Release);
+        self.drain_background().await?;
         Ok(ended)
     }
     pub async fn release(&self, reason: &str) -> Result<()> {
         self.flush().await?;
         self.repository.release_attempt(&self.token, reason)?;
         self.released.store(true, Ordering::Release);
+        self.drain_background().await?;
+        Ok(())
+    }
+
+    /// Released journals must not retain a writer or heartbeat against a root about to move.
+    /// 已释放日志不能继续持有即将迁移根目录上的写入者或心跳。
+    pub async fn drain_background(&self) -> Result<()> {
+        if !self.is_released() {
+            return Err(GatewayError::new(
+                "TASK_JOURNAL_STILL_ACTIVE",
+                "任务日志尚未释放。",
+                409,
+            ));
+        }
+        self.renewal_stop.notify_one();
+        let renewal = self
+            .renewal
+            .lock()
+            .map_err(|_| {
+                GatewayError::new("TASK_HEARTBEAT_CLEANUP_FAILED", "任务心跳状态不可用。", 503)
+            })?
+            .take();
+        if let Some(task) = renewal {
+            task.await.map_err(|_| {
+                GatewayError::new("TASK_HEARTBEAT_CLEANUP_FAILED", "任务心跳退场未确认。", 503)
+            })?;
+        }
+        self.wake_flush.notify_one();
+        while self.scheduled.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if let Some(error) = self.last_persistence_error() {
+            return Err(error);
+        }
         Ok(())
     }
 }

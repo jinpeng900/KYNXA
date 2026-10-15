@@ -46,3 +46,7 @@ automation names, and native bounds, confirming that the text fits inside its bu
 
 Results and previews are written beneath `%TEMP%/kynxa-memory-ui-smoke-*`. The
 latest result location is recorded in `%TEMP%/kynxa-memory-ui-smoke-latest.txt`.
+
+## Pending memory compatibility
+
+`--draft-only` reuses the explicit confirmation checks from `--confirmation-only`: saving edits keeps the entry pending, confirmation is a separate versioned action, update/delete proposals show their exact targets and confirmation dialog, and unavailable sources remain unconfirmable. The previous read-only draft compatibility restriction is superseded by the upstream review UI; it must not hide Save draft, Confirm or Discard. No formal gateway or user data is used.

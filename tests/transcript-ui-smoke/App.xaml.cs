@@ -43,9 +43,11 @@ public partial class App : Application
         }
         _transcript = new ConversationTranscript();
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
+        KYNXA_Desktop.Services.AppearanceService.Apply(KYNXA_Desktop.Services.AppearanceService.DefaultPaletteId);
+        KYNXA_Desktop.Services.AppearanceService.TrackWindow(_window);
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
-        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--message-time-cache-only" or "--render-performance-only" or "--steering-reply-only" or "--message-attachments-only"))
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--message-time-cache-only" or "--render-performance-only" or "--steering-reply-only" or "--message-attachments-only" or "--content-reading-only" or "--appearance-reading-only"))
         {
             _window.AppWindow.Show(activateWindow: false);
         }
@@ -91,6 +93,58 @@ public partial class App : Application
                 _metrics["checks"] = _checks;
                 File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
                 File.WriteAllText(_result, $"PASS: {_checks} native real-API final-answer checks; full final Markdown, task outcome isolation, continuation projection, hidden tool progress, native clipboard, export and reopened conversation.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--clipboard-persistence-only", StringComparer.Ordinal)
+                || Environment.GetCommandLineArgs().Contains("--clipboard-persistence-read-only", StringComparer.Ordinal))
+            {
+                bool readAfterExit = Environment.GetCommandLineArgs().Contains("--clipboard-persistence-read-only", StringComparer.Ordinal);
+                await CheckClipboardPersistenceAsync(readAfterExit);
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} clipboard persistence {(readAfterExit ? "reader" : "writer")} checks.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--language-navigation-only", StringComparer.Ordinal))
+            {
+                await CheckLiveLanguageAsync();
+                await CheckRapidLanguageNavigationAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native language-navigation checks; localized controls, strict source/selection preservation and pending viewport mounting.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--body-search-only", StringComparer.Ordinal))
+            {
+                await CheckBodySearchAsync();
+                await CheckNativeMergeAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native body-search checks; literal text and styled spans, code/table/quote/Mermaid source, selection and clipboard, folded navigation, cache restoration, streaming, localization, theme and layout; loaded-page virtualization, recycled reading preferences, long-conversation anchors and native history navigation.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--diagram-export-only", StringComparer.Ordinal))
+            {
+                await CheckDiagramExportAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native diagram-export checks; complete SVG/PNG files, native validation and writes, theme snapshots, local receipts, cancellation, failure, navigation, selection and bounded images.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--appearance-reading-only", StringComparer.Ordinal))
+            {
+                await CheckAppearanceReadingAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native appearance-reading checks; semantic themes, live font sizing, exact source and selection, cached reading anchors, twelve-line preview and diagrams.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--content-reading-only", StringComparer.Ordinal))
+            {
+                await CheckContentReadingAsync();
+                _metrics["checks"] = _checks;
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native content-reading checks; table TSV/Markdown clipboard and local receipts, long-block wrap/fold, selection, scrolling, streaming, cached navigation, localization and 480/980 layout.");
                 return;
             }
             if (Environment.GetCommandLineArgs().Contains("--format-only", StringComparer.Ordinal))
@@ -206,6 +260,7 @@ public partial class App : Application
 
             await CheckSelectionAndCopyAsync();
             await CheckLiveLanguageAsync();
+            await CheckRapidLanguageNavigationAsync();
             _transcript.ShowConversation(longChat, longRows);
             await WaitAsync("document.querySelectorAll('.katex').length === 150 && __transcriptSmoke.bottomDistance() < 4", "reopening a chat returns to bottom");
             await EvalAsync<bool>("__transcriptSmoke.scrollUp()");
@@ -238,7 +293,11 @@ public partial class App : Application
             await CheckMessageTimeCacheAsync();
             await CheckTypographyAsync();
             await CheckDiagramsAsync();
+            await CheckDiagramExportAsync();
             await CheckBlockCopyAsync();
+            await CheckContentReadingAsync();
+            await CheckBodySearchAsync();
+            await CheckNativeMergeAsync();
             await CheckMultilineRepliesAsync();
             await CheckOutputFormatAndResizeAsync();
             await CheckLongInlineMathAsync();

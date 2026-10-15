@@ -34,10 +34,12 @@ public partial class App : Application
     private ShellPage _shell = null!;
     private Exception? _unhandled;
     private bool _shortcutTooltipOnly;
+    private bool _bodySearchOnly;
     private bool _appearanceOnly;
     private bool _sidebarControlsOnly;
     private bool _sidebarRoundnessOnly;
     private bool _typographyOnly;
+    private bool _settingsInteractionsOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
     private string DesktopDirectory => Path.Combine(DataDirectory, "Desktop");
     private string WebViewDirectory => Path.Combine(_directory, "WebView");
@@ -78,6 +80,9 @@ public partial class App : Application
         _shortcutTooltipOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--shortcut-tooltip-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--shortcut-tooltip-only", StringComparer.Ordinal);
+        _bodySearchOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--body-search-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--body-search-only", StringComparer.Ordinal);
         _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
@@ -90,6 +95,9 @@ public partial class App : Application
         _typographyOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--typography-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--typography-only", StringComparer.Ordinal);
+        _settingsInteractionsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--settings-interactions-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--settings-interactions-only", StringComparer.Ordinal);
         File.WriteAllText(ResultPath, "RUNNING production MainWindow/ShellPage with temporary storage, mock HTTP and isolated WebView\n");
         UiText.Initialize("zh-CN");
         Window = new MainWindow();
@@ -371,8 +379,9 @@ public partial class App : Application
             "the production title-bar more button opens its navigation menu");
         var items = VisualTreeHelper.GetOpenPopupsForXamlRoot(_shell.XamlRoot).Where(popup => popup.IsOpen && popup.Child is not null)
             .SelectMany(popup => NativeUi.Descendants<MenuFlyoutItem>(popup.Child!)).ToArray();
-        Check(items.Any(item => item.Text == UiText.Get("搜索会话 Ctrl+F")) && items.Any(item => item.Text == UiText.Get("工具与技能")),
-            "the real navigation menu exposes conversation search and the existing tool management entry");
+        Check(items.Any(item => item.Text == UiText.Get("查找会话正文 Ctrl+F")) &&
+            items.Any(item => item.Text == UiText.Get("搜索会话 Ctrl+Shift+K")) && items.Any(item => item.Text == UiText.Get("工具与技能")),
+            "the real navigation menu exposes body search, conversation search and the existing tool management entry");
         var focus = items.Single(item => item.Text == UiText.Get("聚焦输入 Ctrl+L"));
         var peer = FrameworkElementAutomationPeer.CreatePeerForElement(focus);
         if (peer?.GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
@@ -398,6 +407,7 @@ public partial class App : Application
         // 只有真实处理函数在模态守卫处返回时，空事件参数才是安全的。
         Call("NewChatShortcut_Invoked", null, null);
         Call("SearchShortcut_Invoked", null, null);
+        Call("TranscriptSearchShortcut_Invoked", null, null);
         Call("ComposerShortcut_Invoked", null, null);
         Call("KnowledgeNavigation_Click", null, null);
         _shell.ShowNavigationMenu(Element<Button>("HistorySearchButton"));
@@ -443,6 +453,15 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
+            if (_settingsInteractionsOnly)
+            {
+                await CheckSettingsInteractionsAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused settings interaction checks complete without formal data writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell settings layout and dropdown wheel checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_typographyOnly)
             {
                 await CheckTypographyAsync();
@@ -470,8 +489,21 @@ public partial class App : Application
                     $"\nPASS: {_checks.Count} production Shell sidebar control checks.\nPreviews: {_directory}");
                 return;
             }
+            if (_bodySearchOnly)
+            {
+                await ActivateOwnedShortcutWindowAsync();
+                await CheckEmptyTranscriptFindAsync();
+                await SearchAndSelectAsync(_gateway.WorkChatId, "Work fixture");
+                await CheckBodySearchAfterNativeInputAsync(transcript);
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused native body-search checks complete without formal writes, model calls or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell body-search keyboard checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_shortcutTooltipOnly)
             {
+                await CheckEmptyTranscriptFindAsync();
                 await CheckShortcutTooltipsAsync();
                 Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
                     "focused shortcut tooltip checks complete without formal data writes or unhandled errors");
@@ -488,6 +520,7 @@ public partial class App : Application
                     $"\nPASS: {_checks.Count} production Shell appearance checks.\nPreviews: {_directory}");
                 return;
             }
+            await CheckEmptyTranscriptFindAsync();
             await CheckEmptyComposerPolishAsync();
             _gateway.FailModelReads = true;
             Check(!await RefreshModelsAsync() && AutomationProperties.GetName(Element<Button>("ModelStatusButton")).Contains("无法读取模型连接") &&
@@ -552,6 +585,7 @@ public partial class App : Application
             await CheckSidebarRoundnessAsync();
             await CheckTypographyAsync();
             await CheckAppearanceAsync();
+            await CheckSettingsInteractionsAsync();
             await CheckShortcutTooltipsAsync();
             Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
                 "native Shell migration checks complete without formal data writes, upstream model calls or unhandled errors");

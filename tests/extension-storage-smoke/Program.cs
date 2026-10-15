@@ -72,6 +72,7 @@ await Write(Path.Combine(source, "MCP", "npm-cache", "package", "server.js"), "n
 await Write(Path.Combine(source, "MCP", "browser-cache", "fixture.txt"), "cache");
 await Write(Path.Combine(source, "Chats", "chat", "events.jsonl"), "private conversation stays in Data");
 await Write(Path.Combine(source, "Models", "connections.json"), "not extension content");
+await Write(Path.Combine(source, "Agent", "task-artifacts", "task-fixture", "receipt.json"), "formal task artifact belongs to Data");
 Directory.CreateDirectory(Path.Combine(source, "Skills", "mine", "empty"));
 string oldId = ExtensionConfigurationMigration.SkillId(skillFile), newId = ExtensionConfigurationMigration.SkillId(Path.Combine(target, "Skills", "mine", "SKILL.md"));
 string externalId = ExtensionConfigurationMigration.SkillId(externalSkill), unknownId = new('a', 24);
@@ -114,6 +115,7 @@ string originalPointer = File.ReadAllText(pointer);
 var result = await ExtensionStorageMigrationService.MoveAsync(source, target, pointer);
 Check(result.ExtensionRoot == target && result.VerifiedFiles == 6, "extension-only files verified");
 Check(!Directory.Exists(Path.Combine(target, "Chats")) && !Directory.Exists(Path.Combine(target, "Models")), "conversations and credentials excluded");
+Check(!Directory.Exists(Path.Combine(target, "Agent", "task-artifacts")), "formal task artifacts excluded from extension migration");
 Check(File.ReadAllText(configPath) == originalConfig && File.ReadAllText(skillFile).Contains("Hello"), "source retained");
 Check(File.ReadAllText(externalSkill) == "external stays put", "external files retained");
 Check(Directory.Exists(Path.Combine(target, "Skills", "mine", "empty")), "empty directory retained");
@@ -272,7 +274,8 @@ Check(dataConfig["disabledSkills"]![0]!.GetValue<string>() == ExtensionConfigura
 Check(File.Exists(Path.Combine(dataTarget, "MCP", "browser-cache", "fixture.txt")), "Data fallback moves cache");
 string fixedTarget = Path.Combine(fixture, "Data-explicit-extension");
 await StorageMigrationService.MoveAsync(legacyDesktop, legacyModels, fixedTarget, dataPointer, migrateExtensions: false);
-Check(!Directory.Exists(Path.Combine(fixedTarget, "Agent")) && !Directory.Exists(Path.Combine(fixedTarget, "Skills")) && !Directory.Exists(Path.Combine(fixedTarget, "MCP")), "explicit extension roots excluded from Data migration");
+Check(!File.Exists(Path.Combine(fixedTarget, "Agent", "config.json")) && !Directory.Exists(Path.Combine(fixedTarget, "Skills")) && !Directory.Exists(Path.Combine(fixedTarget, "MCP")), "explicit extension roots excluded from Data migration");
+Check(File.ReadAllText(Path.Combine(fixedTarget, "Agent", "task-artifacts", "task-fixture", "receipt.json")) == "formal task artifact belongs to Data", "task artifacts follow Data when extensions stay fixed");
 Check(ExtensionPaths.Resolve(source, null, pointer).Root == target, "Data migration does not alter extensions pointer");
 
 // Runtime metadata moves without launching Python, uv or any downloaded package.
@@ -332,6 +335,41 @@ await Write(invalidRuntimePointer, JsonSerializer.Serialize(new { version = 1, e
 string savedRuntimePointer = File.ReadAllText(invalidRuntimePointer);
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(invalidRuntime, Path.Combine(fixture, "invalid-runtime-target"), invalidRuntimePointer), "missing owned interpreter cannot activate target");
 Check(File.ReadAllText(invalidRuntimePointer) == savedRuntimePointer && File.ReadAllText(Path.Combine(invalidRuntime, "MCP", "uv-cache", "venv", "pyvenv.cfg")).Contains("missing.exe"), "failed runtime relocation preserves pointer and source");
+
+// Simulate an immutable AppX payload and established state roots without reading user state.
+// 模拟不可写 AppX 载荷和既有持久根目录，不读取真实用户状态。
+string packagedState = Path.Combine(fixture, "packaged-state");
+string packagedProfile = Path.Combine(fixture, "packaged-profile");
+Directory.CreateDirectory(packagedProfile);
+var packagedEnvironment = new[] { "KYNXA_APPLICATION_ROOT", "KYNXA_DATA_HOME", "KYNXA_MODEL_HOME", "KYNXA_STORAGE_POINTER" }
+    .ToDictionary(name => name, Environment.GetEnvironmentVariable);
+try
+{
+    foreach (string name in packagedEnvironment.Keys) Environment.SetEnvironmentVariable(name, null);
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", portableRoot);
+    ApplicationPaths.ConfigurePackagedStorage(packagedState, packagedProfile);
+    Check(ApplicationPaths.Root == portableRoot && ApplicationPaths.DataRoot == Path.Combine(packagedState, "Data"), "packaged payload and writable default are separate");
+    Check(ExtensionPaths.DefaultRoot == Path.Combine(packagedState, "Extensions") && ExtensionPaths.PointerPath == Path.Combine(packagedProfile, "extensions.json"), "packaged extensions retain persistent locations");
+    Check(ApplicationPaths.MigrationLockPath == Path.Combine(packagedProfile, "storage-migration.lock"), "packaged maintenance marker shares the pointer directory");
+    string legacyModel = Path.Combine(fixture, "legacy-custom-models");
+    ApplicationPaths.ConfigurePackagedStorage(packagedState, packagedProfile, legacyModel);
+    Check(ApplicationPaths.DataRoot == Path.Combine(legacyModel, "Conversations") && ApplicationPaths.ModelHome == legacyModel, "legacy custom model data retained before pointer activation");
+    await File.WriteAllTextAsync(ApplicationPaths.StoragePointerPath, "{\"version\":1,\"dataRoot\":\"selected-data\"}");
+    string selectedData = Path.Combine(packagedProfile, "selected-data");
+    Check(ApplicationPaths.DataRoot == selectedData && ApplicationPaths.ModelHome == Path.Combine(selectedData, "Models"), "saved selection supersedes legacy fallback");
+    Directory.CreateDirectory(Path.Combine(selectedData, "Agent"));
+    Check(ApplicationPaths.LegacyExtensionRoot is null, "task ledger alone does not replace independent extensions");
+    Directory.CreateDirectory(Path.Combine(selectedData, "MCP"));
+    Check(ApplicationPaths.LegacyExtensionRoot == selectedData, "packaged legacy MCP root remains available");
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", movedPortableRoot);
+    Check(ApplicationPaths.Root == movedPortableRoot && ApplicationPaths.DataRoot == selectedData, "package update preserves selected data and pointer");
+    Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", fixture);
+    Check(ApplicationPaths.DataRoot == fixture, "explicit data environment supersedes packaged pointer");
+}
+finally
+{
+    foreach (var item in packagedEnvironment) Environment.SetEnvironmentVariable(item.Key, item.Value);
+}
 Console.WriteLine($"PASS: {checks} checks; isolated resolver, selective copy, hashes, paths, IDs, versions, cancellation, conflicts and Data fallback.");
 Console.WriteLine("Fixture: " + fixture);
 

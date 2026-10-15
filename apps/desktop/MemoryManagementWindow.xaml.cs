@@ -45,12 +45,6 @@ public sealed partial class MemoryManagementWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(MemoryTitleBar);
         AppWindow.Resize(new SizeInt32(960, 680));
-        if (AppWindowTitleBar.IsCustomizationSupported())
-        {
-            AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
-        }
         _viewModel.PropertyChanged += ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged += Entries_Changed;
         UiText.LanguageChanged += Language_Changed;
@@ -137,7 +131,9 @@ public sealed partial class MemoryManagementWindow : Window
             MemoryKindPicker.SelectedItem = selectedKind;
             _refreshKindDisplay = false;
             bool editable = _viewModel.Target is not null && !_viewModel.IsBusy;
-            MemoryContentBox.IsEnabled = MemoryKindPicker.IsEnabled = editable;
+            MemoryContentBox.IsEnabled = editable;
+            MemoryContentBox.IsReadOnly = false;
+            MemoryKindPicker.IsEnabled = editable;
             NewMemoryButton.IsEnabled = editable && _viewModel.IsLoaded;
             RefreshMemoryButton.IsEnabled = _viewModel.Target is not null && !_viewModel.IsBusy;
             SaveMemoryButton.IsEnabled = _viewModel.CanSave;

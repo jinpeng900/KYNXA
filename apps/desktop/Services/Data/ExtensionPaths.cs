@@ -13,13 +13,13 @@ public static class ExtensionPaths
     internal static readonly string[] LayoutDirectories = ["Agent", "Skills", "MCP", "MCP/npm-cache", "MCP/browser-cache",
         "MCP/uv-cache", "MCP/uv-tools", "MCP/bin", "MCP/python", "MCP/python-bin", "MCP/runtimes",
         "Backups", "Backups/Extensions", "Backups/Extensions/Migrations"];
-    public static string DefaultRoot => Path.Combine(ApplicationPaths.Root, "Extensions");
+    public static string DefaultRoot => ApplicationPaths.DefaultExtensionRoot;
     public static string? LegacyRoot { get; set; }
     public static string Root { get; private set; } = DefaultRoot;
     public static bool UsesLegacyRoot { get; private set; }
     public static string PointerPath => Environment.GetEnvironmentVariable("KYNXA_EXTENSION_POINTER") is string pointer && !string.IsNullOrWhiteSpace(pointer)
         ? NormalizePointer(ApplicationPaths.Resolve(pointer))
-        : Path.Combine(ApplicationPaths.Root, "extensions.json");
+        : Path.Combine(ApplicationPaths.PointerDirectory, "extensions.json");
     public static bool EnvironmentControlled => new[] { "KYNXA_EXTENSION_HOME", "KYNXA_DATA_HOME", "KYNXA_MODEL_HOME" }
         .Any(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)));
 

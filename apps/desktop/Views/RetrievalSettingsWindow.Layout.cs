@@ -1,3 +1,4 @@
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -15,20 +16,20 @@ public sealed partial class RetrievalSettingsWindow
     private readonly TextBlock _embeddingStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly TextBlock _indexStatus = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
     private readonly CheckBox _inherit = new();
-    private readonly ComboBox _localMode = new();
-    private readonly ComboBox _semanticMode = new();
-    private readonly ComboBox _rerankMode = new();
-    private readonly ComboBox _webMode = new();
-    private readonly ComboBox _webProvider = new();
-    private readonly ComboBox _webDepth = new();
-    private readonly ComboBox _webLanguage = new();
+    private readonly ScrollSafeComboBox _localMode = new();
+    private readonly ScrollSafeComboBox _semanticMode = new();
+    private readonly ScrollSafeComboBox _rerankMode = new();
+    private readonly ScrollSafeComboBox _webMode = new();
+    private readonly ScrollSafeComboBox _webProvider = new();
+    private readonly ScrollSafeComboBox _webDepth = new();
+    private readonly ScrollSafeComboBox _webLanguage = new();
     private readonly Button _rebuild = new();
     private readonly Button _cancelJob = new();
     private readonly DispatcherTimer _jobTimer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     private void BuildLayout()
     {
-        var root = new Grid { RequestedTheme = ElementTheme.Light, Background = AppearanceService.GetBrush("KynxaMainBrush") };
+        var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");

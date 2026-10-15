@@ -56,8 +56,16 @@ try {
     [IO.File]::WriteAllText((Join-Path $workspace 'fixture.txt'), 'native snapshot fixture', $utf8)
     [IO.File]::WriteAllText((Join-Path $workspace '.env'), 'FAKE_ONLY=not-a-secret', $utf8)
     $capabilities = Invoke-NativeSandbox @{ operation = 'capabilities' }
+    $hasPrivateNode = 'node' -in $capabilities.commands
+    $validCommands = if ($hasPrivateNode) {
+        @($capabilities.commands).Count -eq 2 -and 'cmd' -in $capabilities.commands -and
+            $capabilities.skillExecution.manifestVersion -eq 1 -and $capabilities.skillExecution.readOnlyPackage -and
+            $capabilities.skillExecution.hashChecked
+    } else {
+        @($capabilities.commands).Count -eq 1 -and $capabilities.commands[0] -eq 'cmd' -and $null -eq $capabilities.skillExecution
+    }
     Assert-Sandbox ($capabilities.available -and $capabilities.failClosed -and $capabilities.checksChildToken -and
-        @($capabilities.commands).Count -eq 1 -and $capabilities.commands[0] -eq 'cmd' -and $null -eq $capabilities.skillExecution) 'Actual capabilities expose verified CMD only, without a Node/script execution claim.'
+        $validCommands) 'Actual capabilities expose CMD; optional private Node requires manifest verification, a read-only skill package and hash checks.'
 
     $result = Invoke-NativeSandbox (New-SandboxRequest $workspace $true $dataRoot)
     if ($result.PSObject.Properties.Name -contains 'error') { throw ($result.error | ConvertTo-Json -Compress) }
@@ -76,7 +84,7 @@ try {
     Assert-RejectedWorkspace (New-SandboxRequest $formal $true $dataRoot) 'Formal Chats data remains excluded even with the managed flag.'
     $unsupported = New-SandboxRequest $workspace $true $dataRoot; $unsupported.command = 'node'; $unsupported.args = @('-e', 'throw new Error("not executed")')
     $refusal = Invoke-NativeSandbox $unsupported
-    Assert-Sandbox ($refusal.error.code -eq 'SANDBOX_COMMAND_UNSUPPORTED') 'Node commands are explicitly refused before staging or dispatch.'
+    Assert-Sandbox ($refusal.error.code -eq 'SANDBOX_COMMAND_UNSUPPORTED') 'Unconfigured Node commands remain refused before staging or dispatch.'
 
     $report = @{ passed = $checks.Count; failed = 0; checks = @($checks); runtime = 'native ToolHost'; fixture = $fixture }
     if ($ResultPath) { [IO.File]::WriteAllText([IO.Path]::GetFullPath($ResultPath), ($report | ConvertTo-Json -Depth 5), $utf8) }

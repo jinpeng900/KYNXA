@@ -17,6 +17,7 @@
 | `vc-runtime.json` / `prepare-vc-runtime.ps1` | 从固定正式 Microsoft Redist 获取并验证 x64 app-local VC 运行库及许可；生成明确发布清单，不复制 System32 DLL |
 | `filter-runtime-pri-layout.ps1` | 将独立运行时保留为普通包载荷，不让 WinUI 把它们解释成界面资源 |
 | `remove-obsolete-backend-payload.ps1` | 仅在验证后的桌面输出中移除精确旧 Node/NAPI/网关载荷；正式数据和链接路径拒绝清理 |
+| `check-deployment-paths.ps1` | 构建时预检原生载荷在当前 `LayoutDir` 中的最长路径；超限给出具体路径和短目录设置建议，不自动移动或删除目录 |
 
 所有项目路径以 `MSBuildProjectDirectory` 和项目内相对路径解析，输出缓存位于项目的中间目录或忽略的 `artifacts/runtime`。不根据开发机用户名、盘符或安装 SDK 的猜测版本定位运行时。嵌入权重和 VC 文件仅按验证后的发布清单复制，缓存杂项不进入安装包。模型资产清单位于 `Build/native-assets`；官方只读资料位于 `apps/official-tools`。实际发布根据 bundle-files.txt 白名单，不将下载归档、旧 Node 目录或缓存杂项打包。
 
@@ -26,12 +27,22 @@
 
 `runtime/mcp/manifest.json` 是小型入口清单，`payload-integrity.json` 记录完整文件校验；原始 Node 许可证及依赖包内 LICENSE/NOTICE 随清单打包。浏览器使用与固定 Playwright 对应的 Chromium，不借用或启动用户日常浏览器。固定依赖只在构建机 `npm ci --ignore-scripts`，后续复用已验证载荷；`-Offline` 要求本地缓存已齐备。此运行时包含真实浏览器及数据库依赖，磁盘体积与进程驻留分别统计，不能将其体积称为 Rust 核心的内存。
 
+复用缓存前同时验证清单 schema、非空且唯一的安全路径、文件数与总字节数、固定 Node/Chromium/服务入口，以及每个文件的实际长度和 SHA-256。配置文本的 LF/CRLF/BOM 等价规则继续保留，不放宽第三方二进制与依赖锁的原始字节校验。清单原子发布；Debug/Release 的原生载荷准备由同一缓存锁串行保护，调用者的编译环境在退出时恢复。
+
 在仓库根目录验证：
 
 ```powershell
 dotnet build apps/desktop/KYNXA.Desktop.csproj -p:Platform=x64 -p:EnableWinAppRunSupport=false
 powershell -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -AssetsOnly -Offline
 ```
+
+## 更新源码与随包浏览器
+
+完整 `Full` 构建把 Chromium 放在应用目录的 `runtime/mcp/browsers/`，私有 Node 和内置 MCP 也随包准备；最终用户不需要另外安装 Chrome、Node 或配置 PATH。浏览器、模型权重等大文件通过运行资源或发布资源包分发，Git 源码仓库只保存版本清单、实现和准备脚本。
+
+已有开发环境的成员拉取更新后，执行默认 `Full` 构建或 `build-desktop.ps1 -Action Run`，脚本会复用已有资源并补齐缺少部分。有本地资源 ZIP 时，使用 `-ResourcePackRoot <资源ZIP完整路径>`；完全离线还需要对应 SDK、NuGet/Cargo 缓存及完整运行资源。`Core` 只用于开发编译，不能当成包含浏览器与模型的完整成品。
+
+默认部署目录为 `artifacts/development/appx/x64/Debug`，无参数网关及本地模型启动脚本优先读取此目录，并兼容原来的 `bin/.../AppX` 输出。显式指定应用目录仍按调用参数执行。
 
 ## 固定资源包与离线源码构建
 

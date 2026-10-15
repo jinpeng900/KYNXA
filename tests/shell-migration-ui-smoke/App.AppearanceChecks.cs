@@ -70,6 +70,14 @@ public partial class App
         await SettleAsync();
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference<LocalizedTextValue> CreateReleasedLocalizationSource()
+    {
+        var target = new TextBlock();
+        UiLocalization.Bind(target, TextBlock.TextProperty, "聊天字号");
+        return new((LocalizedTextValue)target.GetBindingExpression(TextBlock.TextProperty).ParentBinding.Source);
+    }
+
     private async Task CheckAppearanceAsync()
     {
         string originalPaletteId = AppearanceService.Current.Id;
@@ -81,6 +89,14 @@ public partial class App
         var observations = new List<object>();
         try
         {
+            var releasedLocalization = CreateReleasedLocalizationSource();
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                await SettleAsync();
+            }
+            Check(!releasedLocalization.TryGetTarget(out _),
+                "releasing a native localized control allows its binding value to be collected without a global strong reference");
             Check(new LayoutStateService().Load().AppearancePaletteId == AppearanceService.Current.Id &&
                 AppearanceService.Current.Id == AppearanceService.DefaultPaletteId,
                 "the initialized production Shell applies the palette loaded from its isolated startup preference");
@@ -202,6 +218,8 @@ public partial class App
                     $"{palette.Id} has one accessible selected card status");
             }
 
+            await CheckAppearanceReadingSettingsAsync(settings, root, transcript);
+
             var status = NativeUi.ById<InfoBar>(root, "AppearanceSettingsStatus");
             string selectedId = AppearanceService.Current.Id;
             string savedPreference = File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json"));
@@ -227,6 +245,9 @@ public partial class App
             }
             finally { Directory.Delete(blockedTemporaryPath); }
 
+            // Keep native visuals alive while collecting unrooted managed wrappers before changing language.
+            // 保持原生可视树存活，切换语言前回收没有托管根的控件包装对象。
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
             UiText.Initialize("en");
             double scale = root.XamlRoot.RasterizationScale;
             settings.AppWindow.Resize(new Windows.Graphics.SizeInt32((int)(400 * scale), (int)(540 * scale)));
@@ -240,6 +261,14 @@ public partial class App
             }), "400 DIP English settings lays out all five named palette cards within its responsive grid");
             buttons[^1].StartBringIntoView();
             await SettleAsync();
+            // Verify the actual language and realized labels before trusting an English layout screenshot.
+            // 先核对当前语言与已实现文字，避免将中文布局截图计为英文验收。
+            var narrowLabels = NativeUi.Descendants<TextBlock>(root).Where(NativeUi.IsVisible).Select(text => text.Text).ToArray();
+            File.WriteAllText(Path.Combine(_directory, "shell-appearance-settings-400-language.json"),
+                JsonSerializer.Serialize(new { UiText.Language, Labels = narrowLabels }, new JsonSerializerOptions { WriteIndented = true }));
+            Check(UiText.Language == "en" && narrowLabels.Contains("Chat text size") && narrowLabels.Contains("Warm sand") &&
+                !narrowLabels.Contains("聊天字号") && !narrowLabels.Contains("暖砂"),
+                "400 DIP settings renders actual English font and palette labels before its screenshot");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "shell-appearance-settings-400-en.png"));
             var reset = NativeUi.ById<Button>(root, "AppearanceResetButton");
             reset.StartBringIntoView();
@@ -249,11 +278,16 @@ public partial class App
             Check(AppearanceService.Current.Id == AppearanceService.DefaultPaletteId && !reset.IsEnabled && !status.IsOpen &&
                 new LayoutStateService().Load().AppearancePaletteId == AppearanceService.DefaultPaletteId && Prompt.Text == draft && ActiveId == conversationId,
                 "the actual Restore default action saves Mist blue, clears the error and preserves the current conversation");
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
             UiText.Initialize("zh-CN");
             settings.AppWindow.Resize(new Windows.Graphics.SizeInt32((int)(660 * scale), (int)(650 * scale)));
             await SettleAsync();
             reset.StartBringIntoView();
             await SettleAsync();
+            var restoredLabels = NativeUi.Descendants<TextBlock>(root).Where(NativeUi.IsVisible).Select(text => text.Text).ToArray();
+            Check(UiText.Language == "zh-CN" && restoredLabels.Contains("聊天字号") && restoredLabels.Contains("暖砂") &&
+                !restoredLabels.Contains("Chat text size") && !restoredLabels.Contains("Warm sand"),
+                "settings returns every actual font and palette label to Chinese after another managed collection");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "shell-appearance-settings-wide.png"));
             settings.Close();
             settings = null;

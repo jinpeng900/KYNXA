@@ -17,6 +17,12 @@ if (-not $BundleRoot) {
     if ([IO.File]::Exists((Join-Path $BundleRoot 'AppX/runtime/agent/kynxa-gateway.exe'))) {
         $BundleRoot = Join-Path $BundleRoot 'AppX'
     }
+    # Prefer the current packaged layout while retaining the original build-directory fallback.
+    # 优先使用当前打包布局，保留旧构建目录回退，原有无参数启动命令继续可用。
+    $packagedLayout = Join-Path $repositoryRoot 'artifacts/development/appx/x64/Debug'
+    if ([IO.File]::Exists((Join-Path $packagedLayout 'runtime/agent/kynxa-gateway.exe'))) {
+        $BundleRoot = $packagedLayout
+    }
 }
 $applicationRoot = [IO.Path]::GetFullPath($BundleRoot)
 $executable = Join-Path $applicationRoot 'runtime/agent/kynxa-gateway.exe'

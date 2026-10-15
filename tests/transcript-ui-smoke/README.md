@@ -1,5 +1,29 @@
 # Transcript UI smoke
 
+## Current conversation body search
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
+```
+
+`App.BodySearchChecks.cs` exercises the production `OpenFindText` / `CloseFindText` commands in real WinUI/WebView2 with synthetic messages. It checks Chinese/English literal matching across styled spans, code/table/quote/Mermaid source, complete counts, explicit navigation, folded content reveal, non-mutating CSS Highlight ranges, native clipboard and consecutive blank lines, selection protection, cached A/B/A reading positions, streaming and rapid edits, Unicode offsets, localization, themes and native viewport sizes. It is also included in `all`; operating-system Ctrl+F / Ctrl+Shift+K and modal focus are covered by the Shell fixture. Actual results come from each run's result files, not this description.
+
+`App.NativeMergeChecks.cs` is included in `body-search` and `all`. It uses two synthetic 64-message conversations to check complete search counts across the currently loaded virtualized page, restored DOM recycling after closing search, wrap/fold preferences across actual unmount/remount, A/B/A visible reading anchors and the native latest/older history events. These checks make no model calls and do not claim to search unloaded durable history.
+
+`App.NativeMergeChecks.cs` 归属 `body-search` 和 `all`：用两个各 64 条消息的隔离会话，检查当前已加载页的完整搜索、关闭搜索后恢复 DOM 回收、真实卸载重挂后的换行/折叠偏好、A/B/A 可见阅读锚点，以及原生最新页/更早历史事件。不调用模型，也不将当前页搜索描述为未加载历史的全文搜索。
+
+Additional boundary checks span actual inline KaTeX's visual text while excluding its hidden MathML, and verify short-document matches are not obscured by the floating bar after explicit navigation. A controlled scheduling stress case uses 8000 synthetic DOM paragraphs in the real WebView, four-times CPU throttling and 80 updates at a requested 16 ms interval; it requires useful results before updates finish and an exact final count of 8080. Captured bodies are removed or hidden during that scan to exercise stale-node guards. This isolates search scheduling from Markdown parsing and does not claim an equally large generated Markdown conversation or a real provider throughput benchmark.
+
+## Native render performance
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario render-performance
+```
+
+This selects the existing `--render-performance-only` entry in `App.xaml.cs`. It checks bounded message-body DOM, changed-row transport, selected patch convergence, streaming stable-prefix reuse and user-driven native history admission using synthetic conversations. The focused metrics are written to `kynxa-transcript-performance.json` inside the run's isolated `temp` directory; the normal fresh `kynxa-transcript-smoke.txt` remains the pass/fail result. It is a presentation regression check, not a real model or gateway throughput benchmark.
+
+该选项接入现有 `--render-performance-only` 分支，用隔离消息验证有界正文 DOM、单行增量传输、选区期间更新收束、流式稳定前缀复用及用户触发的原生历史加载。指标保存在本轮独立 `temp/kynxa-transcript-performance.json`，通过/失败仍以本轮 `kynxa-transcript-smoke.txt` 为准，不代表真实模型或网关吞吐量测试。
+
 Run the real WinUI/WebView2 fixture from the repository root on Windows with PowerShell 7 and the Visual Studio build tools for WinUI development installed:
 
 ```powershell
@@ -56,6 +80,28 @@ Checks include cross-block selection without toolbars, unchanged whole-message M
 
 The block-copy fixture also verifies visible local failure messages for ordinary blocks, whole-message copy and Mermaid, with no success/failure `title` tooltip. Synthetic failure receipts do not force an OS clipboard error. The isolated page uses [CDP focus emulation](https://chromedevtools.github.io/devtools-protocol/tot/Emulation/#method-setFocusEmulationEnabled) during its keyboard/pointer/selection checks and disables it afterwards; this keeps the page active without taking the user's OS window focus. Production copy no longer emits a page-wide feedback event: tests await actual `copyResult` or the acknowledgement-driven local state and compare the native clipboard.
 
+## Table copying and long-content reading
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario content-reading
+```
+
+`App.ContentReadingChecks.cs` uses the production transcript in a real WinUI/WebView2 window. It checks independent table copying as Excel-friendly TSV and Markdown, native Windows clipboard contents, acknowledgement-driven local success/failure, retry, late previous-conversation receipts, header-only/empty tables, Chinese/English cells, escaped pipes and original TeX. Safe DOM construction additionally checks a semantic cell line break and quotes; this is a serializer boundary fixture, not acceptance of model-supplied HTML. The Markdown renderer's HTML restriction remains in force.
+
+The same focused entry checks explicit source/wrap switching, source-line counts, manual long-block folding, full-source copy from a folded preview, selected-text protection with a local explanation, trusted keyboard Space/Enter, live language changes, cached reading preferences, and synthetic streamed fence completion. It checks native 480/980 geometry, menu keyboard focus and Escape, and scrolling to the final column of a wide table. These synthetic messages use isolated data and do not call a real model or backend. Failed clipboard receipts are simulated; real operating-system clipboard failure is not forced.
+
+The reading-position regression navigates through the public C# host API with its default `openAtBottom=true`: wrap/fold in A, visit a short B, and return to the same reading region in A. It compares both scroll position and the original block's viewport anchor, then checks a late host refresh, layout notifications, native window resizing, rapid B/C/A switches, explicit latest navigation and continued bottom following. The same fixture supplies distinct LF 10-line, LF 9-line and CRLF 10-line sources and splits a synthetic stream inside CRLF pairs; rendered text, displayed line counts, selected source, actual block clipboard and whole-message clipboard must agree with their respective sources. It does not insert blank lines that were absent from the model's source.
+
+Wide-table checks compare real cell and glyph geometry: 16 columns keep a 10rem minimum, English tokens and final-column markers stay intact, horizontal scrolling reaches the final cell, and the toolbar remains fixed. Two/three-column controls keep their responsive layout, including short math, long prose and unbroken words. Requested native widths are 480/980/1600/2400; the metrics record actual WebView widths, which can be clamped by the display's available area. A requested 2400 width alone does not establish a 2400-pixel viewport.
+
+The runner saves fresh result/metrics files and table/long-content preview PNGs under its current isolated evidence directory. The default `all` suite includes this group. A build or screenshot alone does not establish a passing run.
+
+Validation (2026-10-09): the final resources passed 137 native `content-reading` checks, 155 `block-copy` regression checks and 88 `format` checks, with zero build warnings/errors in each run. Current evidence is under `artifacts/transcript-ui-smoke/vs-framework-csc-x64/runs/20261009-221400-content-reading-59a2edcf`, `20261009-221425-block-copy-f50f5ba4` and `20261009-221514-format-307f7c01`. The folded preview additionally checks actual source glyphs against `clientHeight`, excluding the horizontal scrollbar: line 12 stays completely visible and line 13 does not enter the source viewport. The 480-DIP source/wrapped screenshots were inspected.
+
+One earlier block-copy run (`20261009-220646-block-copy-0e3e12e3`) received a real failed native clipboard receipt on its final streamed-block copy, after preceding copies succeeded; its local error feedback was correct. Two later focused block-copy runs passed. The fixture now records only caught clipboard-related exception type/HResult/message through a scoped first-chance observer, removed in `finally`; the later runs recorded none. The original failure's specific exception was not recorded, so these results neither identify a unique operating-system cause nor establish a permanent clipboard repair. The failed run remains preserved and is not counted as passing.
+
+Validation follow-up (2026-10-10): the final resources passed 252 `content-reading`, 88 `format` and 94 `diagrams` native checks, with zero build warnings/errors for each fixture. The runs are `20261010-095608-content-reading-8a7af885`, `20261010-095708-format-842a3f06` and `20261010-095748-diagrams-1e37cd82` under the same evidence root. Actual wide-table viewports were 464/964/1584/1711 CSS pixels; the 2400 requested window was constrained by this display. A controlled old-script run reproduced the A/B/A bottom jump; the fixed run preserved scrollY=709.3333 and blockTop=90.1667 exactly with wrap/fold enabled and following disabled. An initial all-table minimum-width version failed the existing narrow three-column format assertion (`20261010-095032-format-81251033`); restricting the minimum to four or more columns preserved that assertion in the final rerun. Both failure records remain available and are excluded from the 434 passing checks. This follow-up does not claim to rerun the default `all` suite or call a real model.
+
 ## Content-block formatting and horizontal scrolling
 
 ```powershell
@@ -104,6 +150,24 @@ The fixture writes `kynxa-transcript-smoke.txt` into its process-local `%TEMP%`;
 
 For interactive inspection, use `-BuildOnly` and launch the printed executable path with `--keep-open`. The fixture's optional `--pointer` argument adds the WebView2 CDP drag/selection diagnostic to its complete suite when launched directly. The unattended runner waits for process completion and a current passing result.
 
+## Mermaid SVG / PNG export
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario diagram-export -TimeoutSeconds 600
+```
+
+`App.DiagramExportChecks.cs` exercises the production WebView2 rendering, export preparation, native message bridge, independent SVG/PNG validation and `StorageFile` byte writer. Only the interactive save picker is replaced with a scoped delegate that writes to the run's isolated temporary directory. Success feedback must follow the actual production file write; a build, mock receipt or screenshot does not establish a successful export. This does not claim automated interaction with the Windows save dialog.
+
+The fixture exports flowchart/graph, sequence, state, class, entity-relationship, Gantt and mind map diagrams, checking bilingual/long/multiline labels, explicit full viewBox, inert standalone SVG styles, actual PNG decoding, nonempty raster pixels and bounded image dimensions. It compares complete normalized SVG geometry before/after zoom and from fullscreen, rather than comparing only text or the visible viewport. PNG aspect checks allow only integer rounding on the short axis. Original formal message JSON must stay unchanged.
+
+Controlled save delegates cover cancellation, explicit errors, thrown I/O errors, retry and a second graph. A delayed save checks global busy controls, native duplicate rejection, same-conversation message updates, navigation and A/B/A late-result isolation. A delayed real `canvas.toBlob` callback establishes deterministic ordering for theme changes and navigation during preparation: the saved image retains the clicked theme, and abandoned preparation cannot call the native saver. This uses the real image/canvas encoder with a held callback; it does not claim a physical timing race.
+
+Safety probes first submit a valid payload through the same bridge schema, then reject scripts, DTD/entities, event handlers, arbitrary HTML, external images/URLs, invalid Base64, unsupported formats and malformed PNG. A synthetic large viewBox verifies that SVG keeps its full extent while PNG is bounded to 16 million pixels before image decode. It does not simulate a 100000-node renderer stress test. Additional checks reject excessive SVG bytes/depth, PNG CRC/truncation errors and extension mismatches. Incomplete and failed diagrams retain source and cannot export.
+
+Selected prose and the rendered SVG node survive export. Exact light/dark background pixels, standalone SVG background, English names and the 480-DIP toolbar layout are checked. Export feedback stays within its diagram. Fresh files named `diagram-export-*.svg`, `diagram-export-*.png`, a 480-width preview and the last isolated synthetic bridge payload are retained under the current run's evidence directory. Font names are included in SVG; font files are not embedded, so other computers use their installed fallback fonts. These tests do not read real conversations, call a model, access remote image resources or write formal chat data. The complete `all` suite includes this group.
+
+Validation (2026-10-11): the final focused run passed 224 native export checks, followed by 94 existing Mermaid checks. Evidence is under `artifacts/transcript-ui-smoke/vs-framework-csc-x64/runs/20261011-060618-diagram-export-64d8e137` and `20261011-060635-diagrams-15021c8e`. The final export group additionally checks the actual circular mind map label center and precise English preparation/saving/success/cancel/error/reduction text. Earlier failures exposed CSSOM marker shorthand serialization and duplicate mind map IDs; visual review found an existing circular label alignment gap and missing export localization keys. Those were fixed without relaxing native validation. The earlier 217-check result did not cover precise English feedback and is not the final result. Formal desktop Debug/x64 built with zero warnings/errors; 11 packaged transcript resources matched source SHA256. Save-dialog interaction, Release and GPU behavior were not exercised.
+
 ## Mermaid diagrams
 
 Run the focused production-renderer checks:
@@ -129,3 +193,26 @@ pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor 
 ```
 
 `App.TypographyChecks.cs` checks computed fonts for user/assistant text, headings, tables, timestamps, buttons and Mermaid labels inside the production WebView2. DevTools `CSS.getPlatformFontsForNode` additionally inspects the installed font faces actually used for English/Chinese paragraph glyphs and monospaced code. KaTeX math retains its own face. Native window resizing checks page width and heading hierarchy, saves `kynxa-transcript-typography-980.png` and `kynxa-transcript-typography-480.png` in TEMP, and checks fullscreen diagram text. Original formal message JSON must remain identical. The normal result/metrics files and default complete entry include this group; read the current result after running.
+
+## Theme and reading preferences
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance-reading
+```
+
+`App.AppearanceReadingChecks.cs` applies the production preferences to the real WinUI/WebView2 control. It covers five palettes in light/dark modes; 13, 13.5, 15, 18 and 22 px chat sizes; semantic prose, code highlighting, formulas and table colors; exact selected text and existing DOM references; twelve complete folded preview lines; full native clipboard copying; cached A/B/A reading anchors; safe redraw of the seven Mermaid types; and the actual system-mode preference. High contrast uses a synthetic system-color payload and supported current-system property reads, without changing Windows settings.
+
+A deterministic ordering check delivers keyboard/wheel navigation between the real host appearance message and its deferred animation frame. The new navigation must win over font anchor restoration. This exercises the production navigation handlers with synthetic events; it does not claim physical keyboard or mouse input. The source messages remain byte-for-byte equivalent as serialized formal objects.
+
+The focused run writes current PASS/FAIL and measurements under the runner's unique evidence directory, including `kynxa-transcript-appearance-reading-480.png`, `kynxa-transcript-appearance-reading-980.png`, `kynxa-transcript-appearance-high-contrast.png` and `kynxa-transcript-appearance-dark-diagrams.png`. Read the current result; previews alone are not verification. Native settings persistence, rollback, color picking and shared icon brushes are covered by the separate Shell fixture.
+
+## Copy lifetime and rapid language/navigation regression
+
+```powershell
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario clipboard-persistence
+pwsh -NoProfile -File tests/transcript-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario language-navigation
+```
+
+The clipboard scenario uses two sequential native processes. The writer copies synthetic Unicode, indentation and blank lines through the production content-block bridge, waits for its actual receipt and exits without reading the clipboard. Only then does a fresh reader check the advertised text format and exact source. Both process exit codes and fresh results must pass; the writer/reader evidence is retained separately. This test uses the real Windows clipboard and overwrites its current contents.
+
+The language/navigation scenario preserves strict source HTML, every source node, selected endpoints, exact selection-copy text and scroll position while the application-owned block toolbar translates. It also exercises twelve rapid native language/navigation transitions without a resize or withheld animation frame. A mounted row must follow the new conversation identity rather than remaining an empty virtual placeholder. The body-search scenario additionally verifies that a foreground table menu consumes the first trusted Escape while the search bar stays open, with IME and focus restoration preserved.

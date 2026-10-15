@@ -34,7 +34,17 @@ public sealed partial class ShellPage
         KeyboardAcceleratorPlacementMode = Microsoft.UI.Xaml.Input.KeyboardAcceleratorPlacementMode.Hidden;
         // Register SDK key enums in code so the XAML compiler need not inspect their metadata.
         // 在代码中注册 SDK 按键枚举，避免 XAML 编译器解析其元数据。
-        var search = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
+        var findText = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
+        findText.Invoked += TranscriptSearchShortcut_Invoked;
+        var findNext = new KeyboardAccelerator { Key = VirtualKey.F3 };
+        var findPrevious = new KeyboardAccelerator { Key = VirtualKey.F3, Modifiers = VirtualKeyModifiers.Shift };
+        findNext.Invoked += TranscriptSearchNavigation_Invoked;
+        findPrevious.Invoked += TranscriptSearchNavigation_Invoked;
+        var closeFind = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        closeFind.Invoked += TranscriptSearchClose_Invoked;
+        // Keep conversation search usable in Chinese input contexts that consume Ctrl+Shift+F before WebView keydown.
+        // 中文输入环境可能在 WebView 收到按下事件前处理 Ctrl+Shift+F，因此会话搜索使用 Ctrl+Shift+K。
+        var search = new KeyboardAccelerator { Key = VirtualKey.K, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
         search.Invoked += SearchShortcut_Invoked;
         var composer = new KeyboardAccelerator { Key = VirtualKey.L, Modifiers = VirtualKeyModifiers.Control };
         composer.Invoked += ComposerShortcut_Invoked;
@@ -42,11 +52,18 @@ public sealed partial class ShellPage
         newChat.Invoked += NewChatShortcut_Invoked;
         var help = new KeyboardAccelerator { Key = VirtualKey.F1 };
         help.Invoked += HelpShortcut_Invoked;
+        KeyboardAccelerators.Add(findText);
+        KeyboardAccelerators.Add(findNext);
+        KeyboardAccelerators.Add(findPrevious);
+        KeyboardAccelerators.Add(closeFind);
         KeyboardAccelerators.Add(search);
         KeyboardAccelerators.Add(composer);
         KeyboardAccelerators.Add(newChat);
         KeyboardAccelerators.Add(help);
         KeyDown += Presentation_KeyDown;
+        ConversationMessages.ConversationSearchRequested += Transcript_ConversationSearchRequested;
+        ConversationMessages.FindTextClosed += Transcript_FindTextClosed;
+        ConversationMessages.FindTextStateChanged += Transcript_FindTextStateChanged;
         Unloaded += (_, _) =>
         {
             _historySearchFlyout?.Hide();
@@ -83,6 +100,9 @@ public sealed partial class ShellPage
         // A temporary drawer never changes the user's saved sidebar width or collapse preference.
         // 临时抽屉不改变用户保存的侧栏宽度或折叠偏好。
         SidebarColumn.Width = new GridLength(_isCompactLayout || !expanded ? ShellLayoutMetrics.SidebarCollapsed : preferredWidth);
+        // Remove the unused drag gutter so the closed rail stays symmetric around the unchanged icon center.
+        // 收起时移除闲置的拖动留白，让窄侧栏在原有图标中心两侧等宽。
+        SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : 8);
         SidebarPane.Width = _isCompactLayout && expanded ? preferredWidth : double.NaN;
         SidebarPane.HorizontalAlignment = _isCompactLayout && expanded ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
         Grid.SetColumnSpan(SidebarPane, _isCompactLayout && expanded ? 3 : 1);
@@ -90,7 +110,7 @@ public sealed partial class ShellPage
         RecentArea.Visibility = GlobalNavigationArea.Visibility = ChatWorkSwitcher.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         CompactSidebarButton.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
         CollapseSidebarButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        SidebarGrip.Visibility = _isCompactLayout ? Visibility.Collapsed : Visibility.Visible;
+        SidebarGrip.Visibility = _isCompactLayout || !expanded ? Visibility.Collapsed : Visibility.Visible;
         HistorySearchButton.Visibility = ModelStatusButton.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         SidebarFooter.Margin = expanded ? new Thickness(14, 0, 10, 0) : new Thickness(8, 0, 8, 0);
     }
@@ -174,9 +194,10 @@ public sealed partial class ShellPage
             menu.Items.Add(item);
         }
         Add("新建聊天 Ctrl+N", StartNewChatFromNavigation, _projectsReady && !_projectActionPending && !_sendingPrompt);
-        Add("搜索会话 Ctrl+F", () => ShowHistorySearch(anchor), _projectsReady);
+        Add("查找会话正文 Ctrl+F", OpenTranscriptSearch);
+        Add("搜索会话 Ctrl+Shift+K", () => ShowHistorySearch(anchor), _projectsReady);
         Add("聚焦输入 Ctrl+L", () => PromptTextBox.Focus(FocusState.Programmatic));
-        Add("键盘操作", () => _ = ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。生成期间点击停止可取消当前回复。"));
+        Add("键盘操作", () => _ = ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 查找会话正文，Ctrl+Shift+K 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。查找框内 Enter／↓ 下一处、Shift+Enter／↑ 上一处；F3／Shift+F3 在任意区域切换，Esc 关闭。生成期间点击停止可取消当前回复。"));
         menu.Items.Add(new MenuFlyoutSeparator());
         Add("模型管理", () => OpenModelManagement());
         Add("工具与技能", () => OpenAgentTools());
@@ -201,7 +222,7 @@ public sealed partial class ShellPage
     private void SearchShortcut_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (_promptCompositionActive || HasPresentationModal()) return;
-        ShowHistorySearch(HistorySearchButton.Visibility == Visibility.Visible ? HistorySearchButton : CompactSidebarButton);
+        OpenConversationSearch();
         args.Handled = true;
     }
     private void ComposerShortcut_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -220,7 +241,7 @@ public sealed partial class ShellPage
     {
         if (_promptCompositionActive || HasPresentationModal()) return;
         args.Handled = true;
-        await ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。生成期间点击停止可取消当前回复。");
+        await ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 查找会话正文，Ctrl+Shift+K 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。查找框内 Enter／↓ 下一处、Shift+Enter／↑ 上一处；F3／Shift+F3 在任意区域切换，Esc 关闭。生成期间点击停止可取消当前回复。");
     }
 
     private void HistorySearch_Click(object sender, RoutedEventArgs e) => ShowHistorySearch((FrameworkElement)sender);
@@ -254,7 +275,7 @@ public sealed partial class ShellPage
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
                 <StackPanel Spacing="3" Padding="0,5">
                     <TextBlock Text="{Binding Title}" ToolTipService.ToolTip="{Binding Title}" FontSize="13" TextTrimming="CharacterEllipsis" />
-                    <TextBlock Text="{Binding Scope}" ToolTipService.ToolTip="{Binding Scope}" FontSize="11" Foreground="#777777" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding Scope}" ToolTipService.ToolTip="{Binding Scope}" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
             </DataTemplate>
             """);

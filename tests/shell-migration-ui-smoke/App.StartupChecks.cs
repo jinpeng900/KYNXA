@@ -4,7 +4,7 @@ using KYNXA_Desktop.Services;
 using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Imaging;
+using PathShape = Microsoft.UI.Xaml.Shapes.Path;
 using Windows.Foundation;
 
 namespace KYNXA_Desktop;
@@ -62,8 +62,7 @@ public partial class App
             Check(_shell.ViewModel.IsChatMode && Prompt.Text == draft && ActiveId is null &&
                 Prompt.PlaceholderText == UiText.Get("向 KYNXA 提问任何问题..."),
                 "catalog completion preserves the user's chosen mode and exact loading-time draft");
-            Check(Element<Button>("SendButton").IsEnabled && Element<Image>("SendArrow").Source is SvgImageSource arrow &&
-                arrow.UriSource.AbsolutePath.EndsWith("send-arrow.svg"),
+            Check(Element<Button>("SendButton").IsEnabled && SendArrowUsesBrush("KynxaOnAccentBrush"),
                 "the same nonempty draft becomes sendable after real project initialization without another edit");
             Check(!composer.IsFooterVisible && !NativeUi.IsVisible(workspace) && _shell.ActiveMessages.Count == 0,
                 "catalog completion preserves the empty Chat homepage and its hidden work footer");
@@ -102,11 +101,9 @@ public partial class App
     {
         var send = Element<Button>("SendButton");
         var background = PresentedBackground(send);
-        Check(!send.IsEnabled && background is not null && background.Color.R == 0xE2 &&
-            background.Color.G == 0xE4 && background.Color.B == 0xE8 &&
-            Element<Image>("SendArrow").Source is SvgImageSource arrow &&
-            arrow.UriSource.AbsolutePath.EndsWith("send-arrow-disabled.svg"),
-            description + " presents the real grey disabled button and readable disabled SVG");
+        Check(!send.IsEnabled && background is not null && background.Color == AppearanceService.ParseColor(AppearanceService.Current.Disabled) &&
+            SendArrowUsesBrush("KynxaDisabledTextBrush") && Element<PathShape>("SendArrow").Visibility == Visibility.Visible,
+            description + " presents the real disabled button and readable themed arrow");
     }
 
     private StartupHomeGeometry ReadStartupHomeGeometry()
