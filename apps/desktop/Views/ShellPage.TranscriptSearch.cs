@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.System;
 
 namespace KYNXA_Desktop.Views;
 
@@ -19,6 +21,28 @@ public sealed partial class ShellPage
     {
         if (_promptCompositionActive || HasPresentationModal()) return;
         OpenTranscriptSearch();
+        args.Handled = true;
+    }
+
+    private bool CanUseNativeTranscriptSearchShortcut() => !_promptCompositionActive && !HasPresentationModal()
+        && !_chatClosing && IsLoaded && ConversationMessages.IsFindTextOpen && XamlRoot is not null
+        && !VisualTreeHelper.GetOpenPopupsForXamlRoot(XamlRoot).Any(popup => popup.IsOpen);
+
+    private void TranscriptSearchNavigation_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        // The WebView owns F3 while focused so its current IME composition can veto navigation.
+        // WebView 持有焦点时自行处理 F3，使当前输入法组合状态仍能阻止导航。
+        if (!CanUseNativeTranscriptSearchShortcut() || ConversationMessages.Browser.FocusState != FocusState.Unfocused) return;
+        ConversationMessages.NavigateFindText(sender.Modifiers.HasFlag(VirtualKeyModifiers.Shift));
+        args.Handled = true;
+    }
+
+    private void TranscriptSearchClose_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        // Browser Escape owns its menus and diagram modal; native controls can close the underlying find bar themselves.
+        // 浏览器自行处理其菜单和图表模态的 Escape；焦点位于原生控件时才由宿主关闭正文查找。
+        if (!CanUseNativeTranscriptSearchShortcut() || ConversationMessages.Browser.FocusState != FocusState.Unfocused) return;
+        ConversationMessages.CloseFindText();
         args.Handled = true;
     }
 

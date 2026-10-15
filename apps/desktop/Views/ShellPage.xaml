@@ -5,7 +5,7 @@
     <Grid x:Name="ShellGrid" Background="{StaticResource KynxaSidebarBrush}" SizeChanged="ShellGrid_SizeChanged">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="SidebarColumn" Width="240" />
-            <ColumnDefinition Width="8" />
+            <ColumnDefinition x:Name="SidebarGripColumn" Width="8" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
@@ -72,7 +72,7 @@
                 <Button x:Name="CollapseSidebarButton" Grid.Column="1" Margin="4,0,0,0"
                         Style="{StaticResource KynxaIconButtonStyle}" Click="SidebarToggle_Click"
                         services:UiLocalization.AutomationName="收起侧栏" services:UiLocalization.ToolTip="收起侧栏">
-                    <FontIcon Glyph="&#xE76B;" FontSize="16" />
+                    <controls:ThemeIcon Width="20" Height="20" IconKey="IconSidebarToggle" />
                 </Button>
             </Grid>
 

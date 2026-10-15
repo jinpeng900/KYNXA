@@ -5,11 +5,12 @@
 ```powershell
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario settings-interactions
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario shortcut-tooltip
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
 ```
 
 `App.SettingsInteractionChecks.cs` 在真实设置窗口检查 660／1000 DIP、最大化及 420／360 DIP 窄窗，内容随可用宽度铺满且两侧各留 24 DIP；受控对照上一版居中限宽布局，确认宽窗口确实利用新增空间，并检查配色和下方设置可达。以原生普通 ComboBox 和 `ScrollSafeComboBox` 对比真实滚轮行为。收起时不改选项且所属页面实际滚动；方向键／Home 及展开列表的滚轮保留原生操作。正式设置三个下拉框还核对本机偏好文件没有因滚轮而改变。测试使用自有窗口、临时数据和模拟网关，实际通过／失败以本轮结果为准。
 
-快捷键专项使用实际键盘输入检查 `Ctrl+F` 正文查找、`Ctrl+Shift+K` 会话标题／项目搜索、空会话搜索、关闭后的焦点恢复，以及原生模态／输入法保护；WebView 焦点下不出现浏览器自带查找框或重复搜索请求。
+快捷键专项使用实际键盘输入检查 `Ctrl+F` 正文查找、`Ctrl+Shift+K` 会话标题／项目搜索、空会话搜索、关闭后的焦点恢复，以及原生模态／输入法保护；WebView 焦点下不出现浏览器自带查找框或重复搜索请求。 `body-search` 专项集中检查点击查找框或主输入区后的 Enter／方向键、F3／Shift+F3、Ctrl+F 与 Escape，并验证原生和网页处理不会重复导航。
 
 本夹具直接链接生产 MainWindow、ShellPage 的完整 C#、XAML 和资源，不复制搜索、模式选择、草稿、抽屉或导出业务实现。唯一替代的是应用启动器与外部 HTTP 网关；生产 StoragePaths、模型客户端、正式聊天客户端及 Transcript WebView 保持原实现。
 
@@ -46,9 +47,12 @@ WebView 环境变量覆盖参数行为依据 [Microsoft WebView2 官方参考](h
 
 ```powershell
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario shortcut-tooltip
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
 ```
 
 脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。审批 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
+
+`body-search` 仅执行初始化、空会话查找与正文键盘专项：真实 Enter／Shift+Enter 导航、鼠标点击原生输入框后 F3／Shift+F3 导航、Ctrl+F 返回搜索框，以及原生输入框中的 Escape。通过匹配索引核对每次按键只移动一处，保留草稿与会话，受控原生输入法组合状态仍阻止快捷键。后台启动的自有窗口若被桌面置顶窗口遮挡，夹具仅在激活期间临时提高自己的置顶层级，核验标题栏命中后点击，并在 finally 恢复原设置；不操作其他应用窗口。成功标记为 `PASS: ... production Shell body-search keyboard checks.`。
 
 所有原生输入先校验前台窗口；发送快捷键前还检查修饰键状态，用户持有 Ctrl/Shift/Alt/Win 时停止快捷键输入并报告失败。鼠标目标必须真实位于屏幕内且命中夹具窗口，使用实际 `SendInput` 移动触发 XAML 悬停。运行期间请勿操作测试窗口、持有修饰键或切换前台。观察保存在 `shell-shortcut-tooltip-observation.json`，实际滚动距离保存在 `shell-shortcut-tooltip-scroll.json`，滚动观察在失败断言前也写出，指针与弹出层诊断分别为 `shell-shortcut-tooltip-pointer.json` 和 `shell-shortcut-tooltip-popups.json`；截图为 `shell-shortcut-tooltip-hover.png` 和 `shell-shortcut-tooltip-after-scroll.png`。旧版首次断言失败前也会保留页面附加 ToolTip 的类型、内容、启用状态和所观察到的裸提示弹出层。集中入口成功标记为 `PASS: ... production Shell shortcut tooltip checks.`。
 
@@ -88,11 +92,13 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 `App.SidebarControlChecks.cs` 使用真实生产页与原生 `NativeUi.Invoke` 按钮自动化，在中文、英文的默认 240、最小 200、最大 360 DIP 侧栏中测量实际模式按钮、文本、图标和收起按钮边界，核对没有截断或交叠。展开和收起按钮互斥出现，点击隐藏原按钮后焦点应进入当前可见的对应按钮；宽窗的宽度及折叠偏好通过真实临时 `layout.json` 读取验证。
 
+收起按钮使用现有 `IconSidebarToggle` 与共享主题画刷，原生按钮继续拥有提示、命中与键盘焦点。浅色／深色宽窗、紧凑窗及返回宽窗后，检查展开与设置图标中心仍距左侧24 DIP，正文左缘为48 DIP，两侧留白相等且没有闲置拖动列；再展开时恢复原8 DIP拖动区域。深色展开与收起截图供实际视觉复核。
+
 800 DIP 紧凑模式分别以新收起按钮、原遮罩按钮和生产 `TryDismissCompactSidebar` 的 Escape 处理路径关闭临时抽屉，核对焦点及保存偏好，再恢复宽窗。测试同时覆盖原本展开和原本折叠两种宽窗偏好。Escape 在本场景调用生产处理方法，不发送系统按键；真实按钮使用原生 Invoke，而非直接调用点击方法，因此不要求键盘输入获得前台焦点。
 
 透明分隔线检查读取真实 `ResizeGrip` 的悬停状态画刷、八 DIP 命中区域及 `HitTarget`，并触发该控件实例已接线的拖动、完成、取消和重置事件，验证生产宽度逻辑和保存仍可用。还核对 `ShellGrid` 与侧栏实际背景画刷颜色相同且不透明，使透明拖动列连续显示侧栏颜色，主内容区保留独立背景；宽窗与最小宽度截图供实际边界复核。这是原生控件与接线回归，不冒充实际鼠标拖动验收。整个场景保留草稿、活动聊天 ID、原消息对象和正文，模拟网关写入始终为零，结束时恢复夹具原布局及语言。
 
-证据文件：`shell-sidebar-control-geometry.json`、`shell-sidebar-controls-wide.png`、`shell-sidebar-controls-minimum-200-en.png`、`shell-sidebar-controls-compact.png` 和 `shell-sidebar-controls-closed.png`。集中入口成功标记为 `PASS: ... production Shell sidebar control checks.`；这组也纳入默认完整入口，文档不代替实际运行结果。
+证据文件：`shell-sidebar-control-geometry.json`、`shell-sidebar-controls-wide.png`、`shell-sidebar-controls-minimum-200-en.png`、`shell-sidebar-controls-compact.png`、`shell-sidebar-controls-closed.png`、`shell-sidebar-controls-wide-dark.png` 和 `shell-sidebar-controls-closed-dark.png`。集中入口成功标记为 `PASS: ... production Shell sidebar control checks.`；这组也纳入默认完整入口，文档不代替实际运行结果。
 
 ## 侧栏行圆角与滚动边界集中回归
 

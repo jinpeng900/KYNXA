@@ -2022,6 +2022,69 @@ mod candidate_transition_tests {
                 1
             );
         }
+
+        let fixture = Fixture::new();
+        fixture.turns(0, 12);
+        let root = fixture.root.clone();
+        let chat = fixture.chat.clone();
+        let project = gateway::new_id();
+        std::fs::create_dir(root.join("work")).unwrap();
+        let moved = Arc::new(Mutex::new(None));
+        let move_receipt = moved.clone();
+        *CANDIDATE_COMMIT_OBSERVER.lock().unwrap() = Some((
+            root.clone(),
+            Arc::new(move |_| {
+                let root = root.clone();
+                let chat = chat.clone();
+                let project = project.clone();
+                // Pause capture after extraction and use another thread's real catalog transaction.
+                // 在提取完成后暂停捕获，由另一个线程执行正式目录移动，不能靠等候读取线程退出消除占用。
+                let receipt = std::thread::spawn(move || {
+                    let mut catalog = gateway::load_catalog(&root)?;
+                    let chats = catalog["Chats"].as_array_mut().unwrap();
+                    let position = chats
+                        .iter()
+                        .position(|record| record["Id"] == chat)
+                        .unwrap();
+                    let record = chats.remove(position);
+                    catalog["Projects"].as_array_mut().unwrap().push(json!({
+                        "Id":project,"Name":"移动目标","FolderPath":root.join("work"),
+                        "IsFolderlessWorkspace":false,"IsArchived":false,"IsPinned":false,
+                        "Chats":[record]
+                    }));
+                    gateway::handle(
+                        "PUT",
+                        "/api/conversations/catalog",
+                        &[("includeMessages".into(), "false".into())],
+                        &catalog,
+                        &root,
+                    )
+                    .unwrap()
+                })
+                .join()
+                .unwrap();
+                *move_receipt.lock().unwrap() = Some(receipt);
+            }),
+        ));
+        let capture = capture_candidates(
+            &fixture.root,
+            &fixture.chat,
+            &json!({"phase":"completed","userMessageId":null}),
+            &candidate_owner(&fixture.root).unwrap(),
+        );
+        let receipt = moved.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(
+            receipt.0, 200,
+            "the in-flight capture must not pin its source directory"
+        );
+        assert_eq!(capture.unwrap_err().code(), "WORKSPACE_CHANGED");
+        assert!(fixture.document()["entries"].as_array().unwrap().is_empty());
+        assert_eq!(
+            gateway::read_model_messages(&fixture.root, &fixture.chat)
+                .unwrap()
+                .len(),
+            24
+        );
     }
 
     #[test]

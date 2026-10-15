@@ -172,6 +172,26 @@ public partial class App
         await ClickBodySearchAsync("previous");
         await WaitAsync("kynxaTranscriptSearch.state().index===0", "previous button navigates independently of keyboard focus");
 
+        // Trusted pointer/key events cover clicking back into the query rather than only dispatching DOM handlers.
+        // 使用可信鼠标和按键覆盖重新点击搜索框的行为，不仅直接触发 DOM 回调。
+        var searchPoint = await EvalAsync<JsonElement>("(() => {const input=document.getElementById('transcript-search-input'),rect=input.getBoundingClientRect();return{x:rect.x+rect.width/2,y:rect.y+rect.height/2};})()");
+        double searchX = searchPoint.GetProperty("x").GetDouble(), searchY = searchPoint.GetProperty("y").GetDouble();
+        await DispatchMouse("mouseMoved", searchX, searchY);
+        await DispatchMouse("mousePressed", searchX, searchY, "left", 1);
+        await DispatchMouse("mouseReleased", searchX, searchY, "left");
+        await BlockCopyKeyAsync("Enter", "Enter", 13);
+        await WaitAsync("kynxaTranscriptSearch.state().index===1 && document.activeElement.id==='transcript-search-input'", "trusted click back into the query retains working Enter navigation and input focus");
+        await BlockCopyKeyAsync("ArrowUp", "ArrowUp", 38);
+        await WaitAsync("kynxaTranscriptSearch.state().index===0", "Up in the clicked query navigates to the previous result");
+        await BlockCopyKeyAsync("ArrowDown", "ArrowDown", 40);
+        await WaitAsync("kynxaTranscriptSearch.state().index===1", "Down in the clicked query navigates to the next result");
+        await EvalAsync<bool>("(() => {document.getElementById('transcript-search-input').blur();return true;})()");
+        await BlockCopyKeyAsync("F3", "F3", 114);
+        await WaitAsync("kynxaTranscriptSearch.state().index===0", "F3 navigates once after the search input loses focus");
+        await EvalAsync<bool>("(() => {const input=document.getElementById('transcript-search-input');input.focus();input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));input.blur();return true;})()");
+        await BlockCopyKeyAsync("F3", "F3", 114);
+        await WaitAsync("kynxaTranscriptSearch.state().index===1", "blur clears a cancelled composition flag so future navigation is not stranded");
+
         await SetBodySearchQueryAsync("MATCH_CODE", 1);
         await EvalAsync<bool>("(() => {const node=__transcriptSmoke.textNode(document.querySelector('.content-block code'),'MATCH_CODE');const start=node.nodeValue.indexOf('MATCH_CODE');getSelection().setBaseAndExtent(node,start,node,start+10);window.__searchSelectionBefore=transcriptSelectionText();window.__searchSelectionTop=scrollY;return true;})()");
         await ClickBodySearchAsync("next");
@@ -428,6 +448,7 @@ public partial class App
                 Check(await EvalAsync<bool>("kynxaTranscriptSearch.state().query==='marker' && kynxaTranscriptSearch.state().count===1"), language + " resizing retains the current query and result count at " + width);
                 await ClickBodySearchAsync("next");
                 await Task.Delay(100);
+                Check(await EvalAsync<bool>("kynxaTranscriptSearch.state().position==='top' && document.getElementById('transcript-search').getBoundingClientRect().top===8"), language + " the search bar remains at the top after navigating a short first-screen match at " + width);
                 Check(await EvalAsync<bool>("(() => {const highlight=CSS.highlights.get('transcript-search-current');if(!highlight)return false;const range=[...highlight][0].getBoundingClientRect(),bar=document.getElementById('transcript-search').getBoundingClientRect();return range.top>=0 && range.bottom<=innerHeight && (range.bottom<=bar.top || range.top>=bar.bottom || range.right<=bar.left || range.left>=bar.right);})()"), language + " explicit navigation keeps a short conversation's top match outside the floating bar at " + width);
                 if (width == 480) await CaptureViewportAsync(Path.Combine(Path.GetTempPath(), "kynxa-transcript-body-search-" + language + "-480.png"));
             }
@@ -440,6 +461,14 @@ public partial class App
         await Task.Delay(200);
         Check(await EvalAsync<bool>("kynxaTranscriptSearch.state().query==='marker' && kynxaTranscriptSearch.state().count===1 && getComputedStyle(document.documentElement).getPropertyValue('--chat-font-size').trim()==='22px'"), "dark mode, custom accent and largest reading font retain the search query and count");
         await CaptureViewportAsync(Path.Combine(Path.GetTempPath(), "kynxa-transcript-body-search.png"));
+        await EvalAsync<bool>("(() => {window.__shortSearchReading={inset:kynxaTranscriptSearch.state().topInsetPx,top:[...CSS.highlights.get('transcript-search-current')][0].getBoundingClientRect().top};return true;})()");
+        var otherChat = Guid.NewGuid();
+        _transcript.ShowConversation(otherChat, [Message(otherChat, "assistant", "SHORT_SEARCH_OTHER")]);
+        await WaitAsync("__transcriptSmoke.bodyText().includes('SHORT_SEARCH_OTHER') && !kynxaTranscriptSearch.state().open && !document.getElementById('messages').style.paddingTop", "first-screen clearance never leaks into another conversation");
+        _transcript.ShowConversation(chat, [answer]);
+        await WaitAsync("kynxaTranscriptSearch.state().open && kynxaTranscriptSearch.state().query==='marker' && kynxaTranscriptSearch.state().index===0 && !kynxaTranscriptSearch.state().searching", "returning to the short conversation restores its find result without another navigation");
+        Check(await EvalAsync<bool>("kynxaTranscriptSearch.state().topInsetPx===__shortSearchReading.inset && Math.abs([...CSS.highlights.get('transcript-search-current')][0].getBoundingClientRect().top-__shortSearchReading.top)<2"), "cached first-screen clearance retains the exact visible reading position");
         _transcript.CloseFindText();
+        await WaitAsync("!kynxaTranscriptSearch.state().open && !document.getElementById('messages').style.paddingTop", "closing search removes only the temporary first-match clearance");
     }
 }

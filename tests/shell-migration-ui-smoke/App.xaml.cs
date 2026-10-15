@@ -34,6 +34,7 @@ public partial class App : Application
     private ShellPage _shell = null!;
     private Exception? _unhandled;
     private bool _shortcutTooltipOnly;
+    private bool _bodySearchOnly;
     private bool _appearanceOnly;
     private bool _sidebarControlsOnly;
     private bool _sidebarRoundnessOnly;
@@ -79,6 +80,9 @@ public partial class App : Application
         _shortcutTooltipOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--shortcut-tooltip-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--shortcut-tooltip-only", StringComparer.Ordinal);
+        _bodySearchOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--body-search-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--body-search-only", StringComparer.Ordinal);
         _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
@@ -483,6 +487,18 @@ public partial class App : Application
                     "focused sidebar control checks complete without formal data writes or unhandled errors");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
                     $"\nPASS: {_checks.Count} production Shell sidebar control checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_bodySearchOnly)
+            {
+                await ActivateOwnedShortcutWindowAsync();
+                await CheckEmptyTranscriptFindAsync();
+                await SearchAndSelectAsync(_gateway.WorkChatId, "Work fixture");
+                await CheckBodySearchAfterNativeInputAsync(transcript);
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused native body-search checks complete without formal writes, model calls or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell body-search keyboard checks.\nPreviews: {_directory}");
                 return;
             }
             if (_shortcutTooltipOnly)

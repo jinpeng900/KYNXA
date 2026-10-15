@@ -49,7 +49,7 @@
     diagramExportFailed: '导出失败，请重试。', diagramExportReduced: '已按尺寸限制缩放导出',
     findText: '查找会话正文', findTextPlaceholder: '查找当前会话…', findTextPrevious: '上一处', findTextNext: '下一处',
     findTextClose: '关闭正文查找', findTextNoResults: '没有找到匹配内容', findTextCount: '{0} / {1}',
-    findTextHint: 'Enter 下一处 · Shift+Enter 上一处 · Esc 关闭', findTextSelection: '请先取消文字选择，再跳转到匹配内容。',
+    findTextHint: 'Enter / ↓ 下一处 · Shift+Enter / ↑ 上一处 · F3 / Shift+F3 切换 · Esc 关闭', findTextSelection: '请先取消文字选择，再跳转到匹配内容。',
     findTextSearching: '正在查找…',
     elapsedSeconds: '用时 {0}秒', elapsedMinutesSeconds: '用时 {0}分钟{1}秒', elapsedHoursMinutesSeconds: '用时 {0}小时{1}分钟{2}秒'
   };
@@ -1159,6 +1159,7 @@
     else if (command?.type === 'findText') {
       if (command.action === 'open') window.kynxaTranscriptSearch?.show();
       else if (command.action === 'close') window.kynxaTranscriptSearch?.hide();
+      else if (command.action === 'next' || command.action === 'previous') window.kynxaTranscriptSearch?.navigate(command.action === 'previous' ? -1 : 1);
     }
     else if (command?.type === 'copyResult') {
       acknowledgeCopy(command);
