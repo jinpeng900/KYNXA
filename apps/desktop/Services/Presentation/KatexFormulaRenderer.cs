@@ -160,7 +160,7 @@ public sealed class KatexFormulaRenderer
         _host.Children.Add(_canvas);
         if (_view.IsLoaded) loaded.TrySetResult();
         await loaded.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        string browserCache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Cache", "MathWebView2");
+        string browserCache = ApplicationPaths.WebViewDirectory;
         var environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, browserCache, null).AsTask().WaitAsync(TimeSpan.FromSeconds(12));
         await _view.EnsureCoreWebView2Async(environment).AsTask().WaitAsync(TimeSpan.FromSeconds(12));
         var core = _view.CoreWebView2;

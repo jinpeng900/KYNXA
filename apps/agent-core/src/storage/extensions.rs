@@ -353,7 +353,16 @@ fn contains(root: &Path, target: &Path) -> bool {
 pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.extensions.home" {
         if !arguments["explicitRoot"].is_null() {
-            let root = absolute(&arguments["explicitRoot"])?;
+            let root = if let Some(application) = arguments["applicationRoot"].as_str() {
+                super::administration::configured_path(
+                    &arguments["explicitRoot"],
+                    Path::new(application),
+                )
+                .map_err(|_| invalid("扩展位置配置无效。", "INVALID_EXTENSION_STORAGE"))?
+            } else {
+                absolute(&arguments["explicitRoot"])?
+            };
+            let root = absolute(&json!(root))?;
             inspect(&root, None)?;
             return Ok(json!(root));
         }
@@ -362,6 +371,11 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         }
         let pointer = absolute(&arguments["pointer"])?;
         let Some(document) = read_document(&pointer, "INVALID_EXTENSION_STORAGE")? else {
+            // Legacy extensions move with Data only until an independent pointer takes ownership.
+            // 旧扩展仅在没有独立位置指针时随 Data 迁移；新指针始终优先于回退位置。
+            if arguments["followDataRoot"] == true {
+                return Ok(json!(absolute(&arguments["dataRoot"])?));
+            }
             return Ok(arguments["fallback"].clone());
         };
         if document["version"].as_f64() != Some(1.0) {
@@ -370,7 +384,14 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
                 "UNSUPPORTED_EXTENSION_STORAGE",
             ));
         }
-        let root = absolute(&document["extensionRoot"])?;
+        // Explicit pointers may live elsewhere; relative roots travel with that configuration file.
+        // 显式指针可位于外部目录；相对扩展位置随该配置文件移动。
+        let root = super::administration::configured_path(
+            &document["extensionRoot"],
+            pointer.parent().unwrap(),
+        )
+        .map_err(|_| invalid("扩展位置配置无效。", "INVALID_EXTENSION_STORAGE"))?;
+        let root = absolute(&json!(root))?;
         inspect(&root, None)?;
         return Ok(json!(root));
     }

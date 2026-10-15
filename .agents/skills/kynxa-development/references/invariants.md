@@ -71,7 +71,7 @@
 
 ## 存储、迁移与凭据
 
-- 数据位置由用户配置、环境和平台默认值解析；桌面使用 [StoragePaths](../../../../apps/desktop/Services/Data/StoragePaths.cs)，网关使用 [GatewayConfig](../../../../apps/agent-core/src/gateway_contract.rs) 和 [存储管理](../../../../apps/agent-core/src/storage/administration.rs)。不把个人盘符、用户名、下载目录或参考源码地址写进生产路径。
+- 未打包便携版本默认使用软件旁固定 `Data/` 与 `Extensions/`；正式 AppX/MSIX 包继续使用既有可写用户目录与 `.kynxa` 指针，程序载荷目录只用于运行文件。有效旧选择和旧数据优先保留。`storage.json`、`extensions.json` 的相对位置按各自指针目录解析；便携软件移动后随位置解析，正式包更新不改变持久位置，显式环境配置优先。独立预览显式指定 `KYNXA_APPLICATION_ROOT` 时使用副本便携规则，不读取正式用户指针。桌面使用 [ApplicationPaths](../../../../apps/desktop/Services/Data/ApplicationPaths.cs) 和 [StoragePaths](../../../../apps/desktop/Services/Data/StoragePaths.cs)，网关使用 [GatewayConfig](../../../../apps/agent-core/src/gateway_contract.rs) 和 [存储管理](../../../../apps/agent-core/src/storage/administration.rs)。子进程接收一致的指针、默认位置与维护锁；默认值不覆盖迁移后指针，显式Data/Model隔离保持扩展隔离。复用网关核对实际模型/扩展目录；不把个人盘符、用户名或下载目录写进生产路径。
 - 外部关联工作文件夹存放项目文件，聊天和记忆继续归统一 Data。改变存储位置使用实际迁移流程，复制、验证后切换指针，并保留可恢复备份；不只改设置造成旧记录不可见。
 - 保持自动初始化、版本判断、原子写入、链接路径检查和失败恢复。迁移须能处理重复执行或中途退出。
 - 当前模型连接包含存储于 JSON 的凭据，列表接口有脱敏；不能声称已实现系统安全凭据库。开发日志、Git、文档和测试只使用虚构 Key，不输出真实连接文件内容。

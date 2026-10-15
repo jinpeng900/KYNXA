@@ -256,7 +256,7 @@ async fn storage_http_drains_active_durable_run_copies_ledger_then_reloads_data_
     let provider_server = tokio::spawn(async move {
         axum::serve(listener, provider).await.unwrap();
     });
-    let saved = fixture.client.post(format!("{}/api/models",fixture.url)).json(&json!({"providerId":"storage-fixture","baseUrl":provider_url,"apiKey":"","protocol":"openai-completions","models":["fixture"],"contextWindowTokens":32768,"maxOutputTokens":4096})).send().await.unwrap();
+    let saved = fixture.client.post(format!("{}/api/models",fixture.url)).json(&json!({"providerId":"storage-fixture","displayName":"Storage HTTP fixture","baseUrl":provider_url,"apiKey":"","protocol":"openai-completions","models":["fixture"],"contextWindowTokens":32768,"maxOutputTokens":4096})).send().await.unwrap();
     assert!(
         saved.status().is_success(),
         "{}",

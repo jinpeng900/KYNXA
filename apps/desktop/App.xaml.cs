@@ -9,6 +9,7 @@ public partial class App : Application
 
     public App()
     {
+        ConfigurePersistentStorage();
         InitializeComponent();
         UnhandledException += (_, error) =>
         {
@@ -27,6 +28,31 @@ public partial class App : Application
         };
     }
 
+    private static void ConfigurePersistentStorage()
+    {
+        // Isolated package previews explicitly opt into a portable application root.
+        // 独立包预览显式指定便携应用根目录，不读取正式应用的用户指针。
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT"))) return;
+        try
+        {
+            _ = Windows.ApplicationModel.Package.Current.Id;
+        }
+        catch (InvalidOperationException)
+        {
+            // Unpackaged builds keep upstream's portable folder behavior.
+            // 未打包版本继续使用上游的便携目录行为。
+            return;
+        }
+        string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa");
+        string legacyModels = Path.Combine(profile, "models");
+        string legacyDesktop = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+        bool hasLegacyDesktop = Directory.EnumerateFiles(legacyDesktop, "*.json").Any();
+        Services.ApplicationPaths.ConfigurePackagedStorage(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA"), profile,
+            Directory.Exists(legacyModels) || hasLegacyDesktop ? legacyModels : null,
+            hasLegacyDesktop ? legacyDesktop : null);
+    }
+
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         // Restore language and appearance before creating controls to avoid a different first frame.
@@ -34,17 +60,16 @@ public partial class App : Application
         var preferences = new Services.LayoutStateService().Load();
         Services.UiText.Initialize(preferences.InterfaceLanguage);
         Services.AppearanceService.ApplyPreferences(preferences.AppearancePaletteId, preferences.AppearanceMode, preferences.ChatFontSize, preferences.AppearanceAccent);
-        Services.ModelGatewayService.LegacyDesktopDirectory = Services.StoragePaths.DataRoot is null
-            ? Services.StoragePaths.DesktopDirectory : null;
+        Services.ModelGatewayService.LegacyDesktopDirectory = Services.ApplicationPaths.LegacyDesktopDirectory;
         string? configuredModelHome = Environment.GetEnvironmentVariable("KYNXA_MODEL_HOME");
         if (!string.IsNullOrWhiteSpace(configuredModelHome))
         {
-            string modelHome = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configuredModelHome));
+            string modelHome = Services.ApplicationPaths.Resolve(configuredModelHome);
             Services.ExtensionPaths.LegacyRoot = string.Equals(Path.GetFileName(modelHome), "Models", StringComparison.OrdinalIgnoreCase)
                 ? Path.GetDirectoryName(modelHome)! : Path.Combine(modelHome, "Conversations");
         }
-        else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.DataRoot
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kynxa");
+        else Services.ExtensionPaths.LegacyRoot = Services.StoragePaths.EnvironmentControlled
+            ? Services.StoragePaths.DataRoot : Services.ApplicationPaths.LegacyExtensionRoot;
         Services.ExtensionPaths.Reload();
         Window = new MainWindow();
         Window.Activate();

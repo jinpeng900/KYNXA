@@ -25,6 +25,36 @@ async Task Reject(Func<Task> action, string name)
 }
 string fixture = Path.Combine(Path.GetTempPath(), "kynxa-extensions-test-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(fixture);
+string portableRoot = Path.Combine(fixture, "portable application");
+string movedPortableRoot = Path.Combine(fixture, "moved application");
+Directory.CreateDirectory(portableRoot);
+Directory.CreateDirectory(movedPortableRoot);
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == Path.Combine(portableRoot, "Data"), "portable default follows application");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == ApplicationPaths.ResolveDataRoot(portableRoot), "repeated startup uses fixed folder");
+string portablePointer = "{\"version\":1,\"dataRoot\":\"saved-data\"}";
+await File.WriteAllTextAsync(Path.Combine(portableRoot, "storage.json"), portablePointer);
+await File.WriteAllTextAsync(Path.Combine(movedPortableRoot, "storage.json"), portablePointer);
+Check(ApplicationPaths.ResolveDataRoot(portableRoot) == Path.Combine(portableRoot, "saved-data"), "relative data pointer");
+Check(ApplicationPaths.ResolveDataRoot(movedPortableRoot) == Path.Combine(movedPortableRoot, "saved-data"), "relative pointer adapts after move");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, fixture) == fixture, "explicit data environment beats pointer");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, modelHome: Path.Combine(fixture, "Models")) == fixture, "explicit model home isolation");
+Check(ApplicationPaths.ResolveDataRoot(portableRoot, portableRoot, Path.Combine(fixture, "Models")) == fixture, "explicit model home wins conflicting data override");
+Check(ApplicationPaths.Store(Path.Combine(portableRoot, "user-tools"), portableRoot) == "user-tools", "portable selections stored relative");
+Check(ApplicationPaths.Store(fixture, portableRoot) == fixture, "external selection stays absolute");
+string? previousApplicationRoot = Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT");
+try
+{
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", portableRoot);
+    Check(ExtensionPaths.DefaultRoot == Path.Combine(portableRoot, "Extensions"), "portable extension default");
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray())
+        == Path.Combine(portableRoot, "user-tools"), "relative extension pointer");
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", movedPortableRoot);
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray())
+        == Path.Combine(movedPortableRoot, "user-tools"), "extension pointer adapts after move");
+    Check(ExtensionPaths.ParsePointer("{\"version\":1,\"extensionRoot\":\"user-tools\"}"u8.ToArray(), portableRoot)
+        == Path.Combine(portableRoot, "user-tools"), "explicit extension pointer uses its own directory");
+}
+finally { Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", previousApplicationRoot); }
 async Task Write(string file, string contents)
 {
     Directory.CreateDirectory(Path.GetDirectoryName(file)!);
@@ -186,7 +216,7 @@ string injectedTarget = Path.Combine(fixture, "injected-destination");
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(source, injectedTarget, failurePointer,
     new ImmediateProgress(value => { if (value.StartsWith("正在核对")) File.WriteAllText(Path.Combine(injectedTarget, "unexpected.txt"), "injected"); })), "unexpected destination files");
 Check(File.ReadAllText(failurePointer) == untouchedPointer, "directory and destination mutation preserve active pointer");
-foreach (string invalid in new[] { "{", "null", "{\"version\":2,\"extensionRoot\":\"ignored\"}", "{\"version\":\"1\",\"extensionRoot\":\"ignored\"}", "{\"version\":1,\"extensionRoot\":\"relative\"}", "{\"version\":1,\"version\":1,\"extensionRoot\":\"ignored\"}" })
+foreach (string invalid in new[] { "{", "null", "{\"version\":2,\"extensionRoot\":\"ignored\"}", "{\"version\":\"1\",\"extensionRoot\":\"ignored\"}", "{\"version\":1,\"extensionRoot\":\"\"}", "{\"version\":1,\"version\":1,\"extensionRoot\":\"ignored\"}" })
 {
     await Write(failurePointer, invalid);
     string invalidTarget = Path.Combine(fixture, "invalid-pointer-" + Guid.NewGuid().ToString("N"));
@@ -305,6 +335,41 @@ await Write(invalidRuntimePointer, JsonSerializer.Serialize(new { version = 1, e
 string savedRuntimePointer = File.ReadAllText(invalidRuntimePointer);
 await Reject(() => ExtensionStorageMigrationService.MoveAsync(invalidRuntime, Path.Combine(fixture, "invalid-runtime-target"), invalidRuntimePointer), "missing owned interpreter cannot activate target");
 Check(File.ReadAllText(invalidRuntimePointer) == savedRuntimePointer && File.ReadAllText(Path.Combine(invalidRuntime, "MCP", "uv-cache", "venv", "pyvenv.cfg")).Contains("missing.exe"), "failed runtime relocation preserves pointer and source");
+
+// Simulate an immutable AppX payload and established state roots without reading user state.
+// 模拟不可写 AppX 载荷和既有持久根目录，不读取真实用户状态。
+string packagedState = Path.Combine(fixture, "packaged-state");
+string packagedProfile = Path.Combine(fixture, "packaged-profile");
+Directory.CreateDirectory(packagedProfile);
+var packagedEnvironment = new[] { "KYNXA_APPLICATION_ROOT", "KYNXA_DATA_HOME", "KYNXA_MODEL_HOME", "KYNXA_STORAGE_POINTER" }
+    .ToDictionary(name => name, Environment.GetEnvironmentVariable);
+try
+{
+    foreach (string name in packagedEnvironment.Keys) Environment.SetEnvironmentVariable(name, null);
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", portableRoot);
+    ApplicationPaths.ConfigurePackagedStorage(packagedState, packagedProfile);
+    Check(ApplicationPaths.Root == portableRoot && ApplicationPaths.DataRoot == Path.Combine(packagedState, "Data"), "packaged payload and writable default are separate");
+    Check(ExtensionPaths.DefaultRoot == Path.Combine(packagedState, "Extensions") && ExtensionPaths.PointerPath == Path.Combine(packagedProfile, "extensions.json"), "packaged extensions retain persistent locations");
+    Check(ApplicationPaths.MigrationLockPath == Path.Combine(packagedProfile, "storage-migration.lock"), "packaged maintenance marker shares the pointer directory");
+    string legacyModel = Path.Combine(fixture, "legacy-custom-models");
+    ApplicationPaths.ConfigurePackagedStorage(packagedState, packagedProfile, legacyModel);
+    Check(ApplicationPaths.DataRoot == Path.Combine(legacyModel, "Conversations") && ApplicationPaths.ModelHome == legacyModel, "legacy custom model data retained before pointer activation");
+    await File.WriteAllTextAsync(ApplicationPaths.StoragePointerPath, "{\"version\":1,\"dataRoot\":\"selected-data\"}");
+    string selectedData = Path.Combine(packagedProfile, "selected-data");
+    Check(ApplicationPaths.DataRoot == selectedData && ApplicationPaths.ModelHome == Path.Combine(selectedData, "Models"), "saved selection supersedes legacy fallback");
+    Directory.CreateDirectory(Path.Combine(selectedData, "Agent"));
+    Check(ApplicationPaths.LegacyExtensionRoot is null, "task ledger alone does not replace independent extensions");
+    Directory.CreateDirectory(Path.Combine(selectedData, "MCP"));
+    Check(ApplicationPaths.LegacyExtensionRoot == selectedData, "packaged legacy MCP root remains available");
+    Environment.SetEnvironmentVariable("KYNXA_APPLICATION_ROOT", movedPortableRoot);
+    Check(ApplicationPaths.Root == movedPortableRoot && ApplicationPaths.DataRoot == selectedData, "package update preserves selected data and pointer");
+    Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", fixture);
+    Check(ApplicationPaths.DataRoot == fixture, "explicit data environment supersedes packaged pointer");
+}
+finally
+{
+    foreach (var item in packagedEnvironment) Environment.SetEnvironmentVariable(item.Key, item.Value);
+}
 Console.WriteLine($"PASS: {checks} checks; isolated resolver, selective copy, hashes, paths, IDs, versions, cancellation, conflicts and Data fallback.");
 Console.WriteLine("Fixture: " + fixture);
 

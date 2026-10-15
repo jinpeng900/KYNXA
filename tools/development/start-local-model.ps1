@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ServerPath,
     [string]$ModelPath,
     [string]$ModelId = 'qwen3-8b',
@@ -8,16 +8,25 @@ param(
     [string]$BackendPath
 )
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'PortableStorage.psm1') -Force
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+$applicationRoot = $env:KYNXA_APPLICATION_ROOT
+if (!$applicationRoot) {
+    [xml]$project = Get-Content -LiteralPath (Join-Path $repositoryRoot 'apps/desktop/KYNXA.Desktop.csproj') -Raw -Encoding UTF8
+    $framework = $project.SelectSingleNode('/Project/PropertyGroup/TargetFramework').InnerText
+    $applicationRoot = Join-Path $repositoryRoot "apps/desktop/bin/x64/Debug/$framework/win-x64"
+    if ([IO.File]::Exists((Join-Path $applicationRoot 'AppX/KYNXA.Desktop.exe'))) {
+        $applicationRoot = Join-Path $applicationRoot 'AppX'
+    }
+}
 $dataRoot = $env:KYNXA_DATA_HOME
-$storagePointer = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.kynxa\storage.json'
-if (!$dataRoot -and (Test-Path -LiteralPath $storagePointer)) {
-    $dataRoot = (Get-Content -LiteralPath $storagePointer -Raw -Encoding UTF8 | ConvertFrom-Json).dataRoot
-    if (!$dataRoot) { throw 'KYNXA storage directory is empty.' }
+if (!$dataRoot) {
+    $dataRoot = Get-KynxaPortablePath -ApplicationRoot $applicationRoot -PointerName 'storage.json' -PropertyName 'dataRoot' -DefaultPath 'Data'
 }
 $configDirectory = if ($env:KYNXA_MODEL_HOME) { $env:KYNXA_MODEL_HOME } elseif ($dataRoot) {
     Join-Path $dataRoot 'Models'
 } else {
-    Join-Path ([Environment]::GetFolderPath('UserProfile')) '.kynxa\models'
+    Join-Path $applicationRoot 'Data/Models'
 }
 $configFile = Join-Path $configDirectory 'local-server.json'
 if ((!$ServerPath -or !$ModelPath) -and (Test-Path -LiteralPath $configFile)) {
@@ -36,9 +45,7 @@ if ($ModelId -notmatch '^[a-zA-Z0-9._:/-]+$' -or $GpuLayers -notmatch '^(auto|al
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw "Port $Port is already in use. Choose another port or use the existing service."
 }
-$logDirectory = if ($dataRoot) { Join-Path $dataRoot 'Logs\models' } else {
-    Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'KYNXA\model-logs'
-}
+$logDirectory = Join-Path $dataRoot 'Logs/models'
 [void](New-Item -ItemType Directory -Path $logDirectory -Force)
 $logTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $arguments = @('-m', ('"' + $modelFilePath + '"'), '--alias', $ModelId, '--host', '127.0.0.1',

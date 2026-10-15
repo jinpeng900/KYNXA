@@ -52,7 +52,7 @@ var enteredBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinua
 var releaseBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 TaskCompletionSource? folderSaveEntered = null, releaseFolderSave = null;
 var handlers = new ConcurrentBag<Task>();
-int revision = 10, oldProtocol = 0, forceConflict = 0, blockNextPut = 0;
+int revision = 10, oldProtocol = 0, forceConflict = 0, blockNextPut = 0, wrongStorage = 0;
 var storedChat = new ProjectChatState { Title = "已有记录", Messages = [new() { Content = "已有问题" }, new() { Role = "assistant", Content = "正式回复", DurationMs = 5678 }] };
 var canonical = new ConversationCatalog(revision, [], [storedChat]);
 var server = Task.Run(async () =>
@@ -69,7 +69,9 @@ async Task Handle(HttpListenerContext context)
     {
         object result;
         if (context.Request.Url!.AbsolutePath == "/health")
-            result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
+            result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0,
+                modelDataHome = Volatile.Read(ref wrongStorage) == 1 ? Path.Combine(Path.GetTempPath(), "different-gateway-models") : Volatile.Read(ref wrongStorage) == 2 ? null : ApplicationPaths.ModelHome,
+                extensionRoot = Volatile.Read(ref wrongStorage) == 3 ? Path.Combine(Path.GetTempPath(), "different-gateway-extensions") : ExtensionPaths.Root };
         else if (context.Request.Url.AbsolutePath.EndsWith("/messages", StringComparison.Ordinal))
         {
             var chatId = Guid.Parse(context.Request.Url.AbsolutePath.Split('/')[3]);
@@ -240,9 +242,42 @@ try
     forceConflict = 1;
     try { await store.SaveChatsAsync([chat]); throw new Exception("Conflict ignored."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Conflict was not actionable."); }
+    foreach (int mismatch in new[] { 1, 2, 3 })
+    {
+        wrongStorage = mismatch;
+        try { await ModelGatewayService.EnsureReadyAsync(); throw new Exception("Mismatched or absent gateway storage accepted."); }
+        catch (InvalidOperationException error) { Check(error.Message.Contains("数据目录不一致"), "Storage mismatch was not actionable."); }
+    }
+    wrongStorage = 0;
     oldProtocol = 1;
     try { await store.LoadAsync(); throw new Exception("Old gateway accepted."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("旧网关"), "Old gateway did not explain incompatibility."); }
+    var configureRuntime = typeof(ModelGatewayService).GetMethod("ConfigureNativeRuntime", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    var startup = new System.Diagnostics.ProcessStartInfo("fixture-not-executed.exe");
+    configureRuntime.Invoke(null, [startup]);
+    Check(startup.Environment["KYNXA_STORAGE_POINTER"] == ApplicationPaths.StoragePointerPath
+        && startup.Environment["KYNXA_STORAGE_MIGRATION_LOCK"] == ApplicationPaths.MigrationLockPath,
+        "Child startup did not share desktop pointer and maintenance marker.");
+    string? previousDataHome = Environment.GetEnvironmentVariable("KYNXA_DATA_HOME");
+    string? previousExtensionPointer = Environment.GetEnvironmentVariable("KYNXA_EXTENSION_POINTER");
+    string? previousLegacyExtension = ExtensionPaths.LegacyRoot;
+    try
+    {
+        Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", dataPath);
+        Environment.SetEnvironmentVariable("KYNXA_EXTENSION_POINTER", null);
+        ExtensionPaths.LegacyRoot = ApplicationPaths.DataRoot;
+        startup = new System.Diagnostics.ProcessStartInfo("fixture-not-executed.exe");
+        configureRuntime.Invoke(null, [startup]);
+        Check(!startup.Environment.ContainsKey("KYNXA_EXTENSION_POINTER")
+            && startup.Environment["KYNXA_EXTENSIONS_FOLLOW_DATA"] == "1",
+            "Isolated child startup exposed a shared extension pointer or froze legacy Data extensions.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("KYNXA_DATA_HOME", previousDataHome);
+        Environment.SetEnvironmentVariable("KYNXA_EXTENSION_POINTER", previousExtensionPointer);
+        ExtensionPaths.LegacyRoot = previousLegacyExtension;
+    }
     Console.WriteLine("PASS: bounded bidirectional page windows, oversized-source preservation, durable/unsaved eviction guards, historical task outcomes, canonical loads, immutable snapshots, serialized revisions, scope isolation, draft exclusion, assistant authority, only-new-user uploads, combined/no-op exit saves, folder changes, queued cancellation, folder-only rebase, competing-folder conflict, in-flight folder edit protection, conflict and protocol rejection; no desktop transcript files.");
 }
 finally
