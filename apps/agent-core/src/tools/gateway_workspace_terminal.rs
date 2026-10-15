@@ -333,7 +333,15 @@ pub(crate) async fn shutdown_checked(context: &GatewayToolContext) -> Result<(),
                 let job = native.take_owned_job();
                 Ok::<_, GatewayError>(job)
             }).await.map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
-            if let Some(job) = job { job.terminate_and_wait().await?; }
+            if let Some(job) = job {
+                if let Err(error) = job.terminate_and_wait().await {
+                    // Keep the same job available for cleanup retries without replacing the original failure.
+                    // 原进程树仍由本会话持有，供后续重试结算；返回最初的退出错误。
+                    let mut native = session.native.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    native.restore_owned_job(job);
+                    return Err(error);
+                }
+            }
         }
         tokio::task::spawn_blocking(move || session.close()).await
             .map_err(|_| failure("TERMINAL_CLOSE_FAILED", "终端关闭线程结束。", 500))??;
@@ -730,6 +738,10 @@ mod windows {
         }
         pub fn take_owned_job(&mut self) -> Option<super::super::gateway_process::OwnedProcessJob> {
             self.job.take()
+        }
+
+        pub fn restore_owned_job(&mut self, job: super::super::gateway_process::OwnedProcessJob) {
+            self.job = Some(job);
         }
 
         pub fn close(&mut self) -> Result<(), GatewayError> {
