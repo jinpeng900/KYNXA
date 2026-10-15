@@ -129,3 +129,7 @@ finally {
         (Split-Path -Leaf $resolvedFixture) -notmatch '^kynxa-mcp-cache-[0-9a-f]{32}$') { throw 'Unexpected fixture root was preserved.' }
     if ([IO.Directory]::Exists($resolvedFixture)) { Remove-Item -LiteralPath $resolvedFixture -Recurse -Force }
 }
+
+# Expected child failures were asserted above; publish success only after checks and cleanup complete.
+# 子进程的预期失败已在上方断言；仅在检查与清理全部完成后返回成功，避免 CI 沿用其失败退出码。
+exit 0
