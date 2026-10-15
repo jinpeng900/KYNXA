@@ -24,6 +24,7 @@ function Invoke-CachePreparation {
 try {
     [IO.Directory]::CreateDirectory((Join-Path $buildRoot 'native-assets/mcp')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'apps/desktop/Build/prepare-mcp-runtime.ps1') -Destination $buildRoot
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'apps/desktop/Build/prepare-browser-sandbox.ps1') -Destination $buildRoot
     foreach ($moduleName in @('RuntimeDownloads.psm1', 'ResourceConfigCompatibility.psm1')) {
         Copy-Item -LiteralPath (Join-Path $repositoryRoot ('apps/desktop/Build/' + $moduleName)) -Destination $buildRoot
     }

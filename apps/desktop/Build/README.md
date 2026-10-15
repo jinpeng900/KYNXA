@@ -52,10 +52,7 @@ powershell -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -Asset
 # 维护者：只处理已准备好的本地资源，不进行下载或编译。
 powershell -NoProfile -File apps/desktop/Build/prepare-resource-pack.ps1 -Action Export -ArchivePath artifacts/runtime/kynxa-win-x64-resources.zip
 
-# 接收者：明确选择解压目录；导入后构建优先复用本地固定资源。
-powershell -NoProfile -File apps/desktop/Build/prepare-resource-pack.ps1 -Action Import -ArchivePath artifacts/runtime/kynxa-win-x64-resources.zip -DestinationRoot artifacts/runtime/resource-pack/win-x64
-powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -ResourcePackRoot artifacts/runtime/resource-pack/win-x64
-# 也可直接传 ZIP；构建入口负责核对并导入资源缓存。
+# 接收者：直接传 ZIP；构建入口负责核对并导入资源缓存。
 powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -ResourcePackRoot artifacts/runtime/kynxa-win-x64-resources.zip
 ```
 
@@ -64,15 +61,15 @@ powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -ResourcePackRo
 离线源码构建同时需要本机 .NET/Windows SDK、Rust/MSVC 工具链、对应 Cargo/NuGet 包缓存及还原结果。资源包解决用户运行资源分发，不包含这些构建机依赖。使用下列入口时，外部资源禁止联网，Cargo 使用 `--offline`，桌面使用 `--no-restore`，ToolHost 子构建只运行 `Build`：
 
 ```powershell
-powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -ResourcePackRoot artifacts/runtime/resource-pack/win-x64
+powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -ResourcePackRoot artifacts/runtime/kynxa-win-x64-resources.zip
 # 也可直接沿用 dotnet；--no-restore 与 KynxaOffline 必须同时传入。
-dotnet build apps/desktop/KYNXA.Desktop.csproj --no-restore -p:Platform=x64 -p:KynxaOffline=true -p:KynxaResourcePackRoot=artifacts/runtime/resource-pack/win-x64
+dotnet build apps/desktop/KYNXA.Desktop.csproj --no-restore -p:Platform=x64 -p:KynxaOffline=true -p:KynxaResourcePackRoot=artifacts/runtime/kynxa-win-x64-resources.zip
 ```
 
 `-NuGetSource` 可指定 NuGet 源，`-NuGetConfigPath` 可指定明确的 NuGet 配置。离线时只接受本地源；有本地源时先从该源还原桌面和 ToolHost，随后使用 `--no-restore` 构建。没有本地源且没有已有 `project.assets.json` 时直接提示先还原对应项目，不自动改回网络下载。
 
 ```powershell
-powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -NuGetSource artifacts/dependencies/nuget-feed -ResourcePackRoot artifacts/runtime/resource-pack/win-x64
+powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -NuGetSource artifacts/dependencies/nuget-feed -ResourcePackRoot artifacts/runtime/kynxa-win-x64-resources.zip
 ```
 
 下载源通过 `-DownloadSourcesPath` 或 MSBuild `KynxaDownloadSourcesPath` 配置。源文件可分别设置 `npmRegistry`、`cargoRegistryIndex`、`playwrightDownloadHost` 与 `mirrors`（原始 URL 前缀到可信镜像前缀的映射）。镜像只改变下载地址，版本及原始 SHA-256 保持不变；不设置时继续使用官方源。Cargo 离线规则参见 [Cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html)，浏览器下载服务器参见 [Playwright 官方说明](https://playwright.dev/docs/browsers#download-from-artifact-repository)。
