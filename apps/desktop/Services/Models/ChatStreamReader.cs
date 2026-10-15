@@ -64,6 +64,16 @@ public static class ChatStreamReader
                                 throw new InvalidDataException(UiText.Get("任务事件无效。"));
                             rootTaskId = streamEvent.RootRequestTaskId ?? streamEvent.TaskId;
                             break;
+                        case "reply_anchor":
+                            if (streamEvent.ReplyMessageId is not Guid replyMessageId || replyMessageId == Guid.Empty
+                                || streamEvent.UserMessageId is not Guid userMessageId || userMessageId == Guid.Empty
+                                || streamEvent.SupersededReplyMessageId == Guid.Empty)
+                                throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
+                            // A steering boundary starts a new visible reply while preserving the task and tool receipts.
+                            // 引导边界开启新的可见回复，任务身份及工具回执继续沿用，不重开整个请求。
+                            assistantSegments.Clear();
+                            lastTimelineOrder = -1;
+                            break;
                         case "text_delta":
                         case "reasoning_delta":
                             if (streamEvent.Delta is null) throw new InvalidDataException(UiText.Get("模型流缺少增量内容。"));

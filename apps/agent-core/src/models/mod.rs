@@ -20,6 +20,7 @@ pub mod history_service;
 pub mod inference;
 pub mod lifecycle;
 pub mod memory;
+pub(crate) mod message_attachments;
 pub mod output;
 pub mod plain;
 pub mod portable;

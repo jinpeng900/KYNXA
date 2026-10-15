@@ -4,7 +4,8 @@ namespace KYNXA_Desktop.Services;
 /// Key is a logical call identity, not a mutable result-reference or output version.
 /// 键使用逻辑调用身份，不使用可能变化的结果引用或输出版本。
 /// </summary>
-public sealed record ConversationWorkTab(string Key, string Kind, string Title);
+public sealed record ConversationWorkTab(string Key, string Kind, string Title,
+    string? Target = null, string? Version = null, bool UserSelected = false);
 
 /// <summary>
 /// Per-conversation display state. Closing never deletes or cancels the source resource.
@@ -20,6 +21,8 @@ public sealed class ConversationWorkTabState
         public Dictionary<string, long> Closed { get; } = new(StringComparer.Ordinal);
         public string? SelectedKey { get; set; }
         public long Touched { get; set; }
+        public bool HasCustomOrder { get; set; }
+        public bool HomeSelected { get; set; }
     }
 
     private readonly Dictionary<Guid, Tabs> _chats = [];
@@ -30,7 +33,7 @@ public sealed class ConversationWorkTabState
     public IReadOnlyList<ConversationWorkTab> OpenItems => Current is { } tabs ? tabs.Items.Where(item => !tabs.Closed.ContainsKey(item.Key)).ToArray() : [];
     public ConversationWorkTab? SelectedTab => Current is { } tabs ? tabs.Items.FirstOrDefault(item => item.Key == tabs.SelectedKey && !tabs.Closed.ContainsKey(item.Key)) : null;
     public bool HasItems => Items.Count > 0;
-    public bool HasOpenTabs => SelectedTab is not null;
+    public bool HasOpenTabs => OpenItems.Count > 0;
 
     public bool ShowConversation(Guid? conversationId, IReadOnlyList<ConversationWorkTab> items, bool autoOpenNew = true)
     {
@@ -42,7 +45,13 @@ public sealed class ConversationWorkTabState
         while (_chats.Count > MaximumConversations) _chats.Remove(_chats.Where(pair => pair.Key != currentId).MinBy(pair => pair.Value.Touched).Key);
         var keys = new HashSet<string>(StringComparer.Ordinal);
         var next = items.Where(item => item is not null && !string.IsNullOrWhiteSpace(item.Key) && item.Key.Length <= 512 &&
-            !item.Key.Any(char.IsControl) && item.Kind is "screenshot" or "terminal" && item.Title is not null && item.Title.Length <= 256 && keys.Add(item.Key)).ToArray();
+            !item.Key.Any(char.IsControl) && item.Kind is "screenshot" or "terminal" or "document" or "diagram" or "browser" or "changes" &&
+            item.Title is not null && item.Title.Length <= 256 && keys.Add(item.Key)).ToArray();
+        if (tabs.HasCustomOrder)
+        {
+            var order = tabs.Items.Select((item, index) => (item.Key, index)).ToDictionary(item => item.Key, item => item.index, StringComparer.Ordinal);
+            next = next.OrderBy(item => order.GetValueOrDefault(item.Key, int.MaxValue)).ToArray();
+        }
         var previousKeys = tabs.Items.Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
         var added = next.Where(item => !previousKeys.Contains(item.Key) && !tabs.Closed.ContainsKey(item.Key)).ToArray();
         tabs.Items = next;
@@ -54,7 +63,7 @@ public sealed class ConversationWorkTabState
         if (!autoOpenNew) foreach (var item in added) tabs.Closed[item.Key] = ++_version;
         // New resources open in the background. A stable, still-open selection never changes.
         // 新资源在后台打开；已有且仍打开的选择保持稳定。
-        if (keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
+        if (!tabs.HomeSelected && keys.Count > 0 && (tabs.SelectedKey is null || !keys.Contains(tabs.SelectedKey) || tabs.Closed.ContainsKey(tabs.SelectedKey)))
             tabs.SelectedKey = tabs.Items.FirstOrDefault(item => !tabs.Closed.ContainsKey(item.Key))?.Key;
         return added.Length > 0;
     }
@@ -62,7 +71,7 @@ public sealed class ConversationWorkTabState
     public bool Select(string key)
     {
         if (Current is not { } tabs || tabs.Closed.ContainsKey(key) || !tabs.Items.Any(item => item.Key == key)) return false;
-        tabs.SelectedKey = key; return true;
+        tabs.HomeSelected = false; tabs.SelectedKey = key; return true;
     }
 
     public bool Close(string key)
@@ -80,10 +89,27 @@ public sealed class ConversationWorkTabState
 
     public bool CloseSelected() => SelectedTab is { } item && Close(item.Key);
 
+    public bool Move(string key, string beforeKey)
+    {
+        if (Current is not { } tabs || key == beforeKey) return false;
+        var items = tabs.Items.ToList();
+        var item = items.FirstOrDefault(item => item.Key == key);
+        if (item is null || !items.Any(item => item.Key == beforeKey)) return false;
+        items.Remove(item); items.Insert(items.FindIndex(item => item.Key == beforeKey), item);
+        tabs.Items = items.ToArray(); tabs.HasCustomOrder = true;
+        return true;
+    }
+
     public bool Reopen(string key)
     {
         if (Current is not { } tabs || !tabs.Items.Any(item => item.Key == key)) return false;
-        tabs.Closed.Remove(key); tabs.SelectedKey = key; return true;
+        tabs.HomeSelected = false; tabs.Closed.Remove(key); tabs.SelectedKey = key; return true;
+    }
+
+    public bool SelectHome()
+    {
+        if (Current is not { } tabs) return false;
+        tabs.HomeSelected = true; tabs.SelectedKey = null; return true;
     }
 
     public void Clear() { _chats.Clear(); ConversationId = null; }

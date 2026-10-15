@@ -26,11 +26,26 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         var cold = Stopwatch.StartNew();
+        if (Environment.GetCommandLineArgs().Contains("--work-tabs-only", StringComparer.Ordinal))
+        {
+            LaunchWorkTabsChecks(cold);
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--workspace-preview-only" or "--workspace-chrome-only"))
+        {
+            LaunchWorkspacePreviewChecks(cold);
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--prompt-queue-only", StringComparer.Ordinal))
+        {
+            LaunchPromptQueueChecks(cold);
+            return;
+        }
         _transcript = new ConversationTranscript();
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
         _window.AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 850));
         _window.Closed += (_, _) => _transcript.Dispose();
-        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--message-time-cache-only" or "--render-performance-only"))
+        if (Environment.GetCommandLineArgs().Any(argument => argument is "--retrieval-tools-only" or "--reply-timing-only" or "--message-time-cache-only" or "--render-performance-only" or "--steering-reply-only" or "--message-attachments-only"))
         {
             _window.AppWindow.Show(activateWindow: false);
         }
@@ -52,6 +67,24 @@ public partial class App : Application
             await _transcript.Ready.WaitAsync(TimeSpan.FromSeconds(40));
             _metrics["initializationMs"] = cold.ElapsedMilliseconds;
             await _transcript.Browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Checks.js")));
+            if (Environment.GetCommandLineArgs().Contains("--message-attachments-only", StringComparer.Ordinal))
+            {
+                await CheckMessageAttachmentsAsync();
+                _metrics["checks"] = _checks;
+                _metrics["mode"] = "message-attachments";
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics));
+                File.WriteAllText(_result, $"PASS: {_checks} attachment checks; authorized image content, pending upload, file cards, native click, copy, history reload and narrow layout.");
+                return;
+            }
+            if (Environment.GetCommandLineArgs().Contains("--steering-reply-only", StringComparer.Ordinal))
+            {
+                await CheckSteeringReplyAsync();
+                _metrics["checks"] = _checks;
+                _metrics["mode"] = "steering-reply-only";
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(_result, $"PASS: {_checks} native steering-reply checks; prior output retained above guidance, continuation ordering, final Markdown and formal-history reload.");
+                return;
+            }
             if (Environment.GetCommandLineArgs().Contains("--api-final-only", StringComparer.Ordinal))
             {
                 await CheckApiFinalAnswersAsync();
@@ -243,14 +276,45 @@ public partial class App : Application
         var chat = Guid.NewGuid();
         var rows = Enumerable.Range(0, 200).Select(index => Message(chat, index % 2 == 0 ? "user" : "assistant",
             $"ROW_{index} 原文 " + new string('文', 300))).ToList();
+        rows[^1].Message.Content += new string('文', 40000);
         int requestedHistory = 0;
         EventHandler<Guid> history = (_, id) => { if (id == chat) requestedHistory++; };
         _transcript.HistoryRequested += history;
         try
         {
-            await EvalAsync<bool>("(() => { window.__renderCommands = []; window.chrome.webview.addEventListener('message', event => { const value = event.data; if (value.type === 'render' || value.type === 'renderPatch') __renderCommands.push({type:value.type,count:value.messages.length}); }); return true; })()");
+            await EvalAsync<bool>("""
+                (() => {
+                  window.__renderCommands = []; window.__pendingMarkdown = new Set(); window.__readablePreview = false;
+                  window.__previewObserver = new MutationObserver(() => {
+                    if (__pendingMarkdown.size && __transcriptSmoke.bodyText().includes('ROW_199')) __readablePreview = true;
+                  });
+                  __previewObserver.observe(document.getElementById('messages'), {childList:true,subtree:true});
+                  window.chrome.webview.addEventListener('message', event => {
+                    const value = event.data;
+                    if (value.type !== 'render' && value.type !== 'renderPatch') return;
+                    __renderCommands.push({type:value.type,count:value.messages.length,last:value.messages.at(-1)?.content,lastHtmlLength:value.messages.at(-1)?.html?.length || 0});
+                    if (value.type === 'render') __pendingMarkdown.clear();
+                    for (const message of value.messages) {
+                      const waiting = (message.html || '').includes('markdown-pending') ||
+                        message.assistantSegments?.some(segment => (segment.html || '').includes('markdown-pending'));
+                      if (waiting) __pendingMarkdown.add(message.id); else __pendingMarkdown.delete(message.id);
+                    }
+                    if (__pendingMarkdown.size && __transcriptSmoke.bodyText().includes('ROW_199')) __readablePreview = true;
+                  });
+                  return true;
+                })()
+                """);
             _transcript.ShowConversation(chat, rows);
+            Check(!(bool)typeof(ConversationTranscript).GetField("_hasPublishedSnapshot",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(_transcript)!,
+                "first-page projection is queued outside the caller's send/input handler");
             await WaitAsync("window.transcriptState().messageCount === 200 && __transcriptSmoke.bottomDistance() < 4", "paged long transcript opens at the latest messages");
+            Check(await EvalAsync<bool>("__renderCommands[0].count === 4 && __renderCommands[0].last.startsWith('ROW_199')"),
+                "first projection contains the latest four readable rows before older history is sent");
+            Check(await EvalAsync<bool>("__renderCommands[0].last.length > 40000 && __renderCommands[0].lastHtmlLength < 9000"),
+                "a long latest reply retains complete source but initially lays out only its readable tail");
+            await WaitAsync("window.__pendingMarkdown.size === 0", "background batches complete the initial Markdown page");
+            await EvalAsync<bool>("(() => { __previewObserver.disconnect(); return true; })()");
             await WaitAsync("window.transcriptState().mountedMessageCount < 80 && document.querySelectorAll('article[data-virtualized]').length > 100", "offscreen messages release their body DOM into measured placeholders");
             _metrics["loaded200Mounted"] = await EvalAsync<int>("window.transcriptState().mountedMessageCount");
             Check(requestedHistory == 0, "initial bottom navigation does not request earlier pages");
@@ -266,7 +330,15 @@ public partial class App : Application
             var firstHistoryDeadline = DateTime.UtcNow.AddSeconds(5);
             while (requestedHistory == 0 && DateTime.UtcNow < firstHistoryDeadline) await Task.Delay(25);
             Check(requestedHistory == 1, "user upward navigation loads one earlier page");
+            _transcript.ShowConversation(chat, rows, openAtBottom: true);
+            await Task.Delay(120);
+            Check(await EvalAsync<bool>("scrollY < 100 && !window.transcriptState().following"),
+                "a late bottom hint cannot override the user's upward navigation");
             string selected = await EvalAsync<string>("(() => { const node = __transcriptSmoke.textNode(document.querySelector('article.message'), 'ROW_0'); getSelection().setBaseAndExtent(node,0,node,20); return window.transcriptSelectionText(); })()");
+            _transcript.ShowConversation(chat, rows, openAtBottom: true);
+            await WaitAsync("window.transcriptState().pending", "late refresh waits for the active selection");
+            Check(await EvalAsync<string>("window.transcriptSelectionText()") == selected,
+                "a late first-page bottom hint leaves selected original text intact");
             rows[^1].Message.Content += " PATCH_SELECTED_A";
             rows[^1].Refresh();
             await WaitAsync("window.transcriptState().pending", "first selected patch is deferred");
@@ -277,7 +349,9 @@ public partial class App : Application
             Check(await EvalAsync<string>("window.transcriptSelectionText()") == selected, "selected original content remains stable across patches");
             _transcript.ClearSelection();
             await EvalAsync<bool>("(() => { window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'}); return true; })()");
-            await WaitAsync("__transcriptSmoke.bodyText().includes('PATCH_SELECTED_A') && __transcriptSmoke.bodyText().includes('PATCH_SELECTED_B') && !window.transcriptState().pending", "clearing selection merges both deferred row updates");
+            await WaitAsync("__transcriptSmoke.bodyText().includes('PATCH_SELECTED_A') && !window.transcriptState().pending", "clearing selection applies the visible deferred update");
+            Check(await EvalAsync<bool>("(() => { const range=document.createRange();range.selectNodeContents(document.getElementById('messages'));getSelection().removeAllRanges();getSelection().addRange(range);const text=window.transcriptSelectionText();getSelection().removeAllRanges();return text.includes('PATCH_SELECTED_A') && text.includes('PATCH_SELECTED_B');})()"),
+                "both deferred updates remain in complete selectable source even when the older row is virtualized");
 
             await EvalAsync<bool>("(() => { window.scrollTo({top:0,behavior:'instant'}); return true; })()");
             await Task.Delay(120);
@@ -296,6 +370,7 @@ public partial class App : Application
             var cacheRows = Enumerable.Range(0, 1100).Select(index => Message(cacheChat, "assistant", $"CACHE_{index} 原文")).ToList();
             _transcript.ShowConversation(cacheChat, cacheRows);
             await WaitAsync("window.transcriptState().messageCount === 1100 && __transcriptSmoke.bottomDistance() < 4", "history exceeding the HTML cache opens with a bounded DOM window");
+            await WaitAsync("window.__pendingMarkdown.size === 0", "background Markdown batches finish before measuring a changed row");
             long parsedBefore = TranscriptMarkdown.ParseCount;
             cacheRows[^1].Message.Content += " CACHE_CHANGE"; cacheRows[^1].Refresh();
             await WaitAsync("__transcriptSmoke.bodyText().includes('CACHE_CHANGE')", "a changed row is visible after historical HTML eviction");
@@ -334,7 +409,7 @@ public partial class App : Application
             var streamed = Message(streamChat, "assistant", string.Join("\n\n", Enumerable.Range(0, 300)
                 .Select(index => $"STABLE_{index} completed paragraph")) + "\n\nSTREAM_TAIL", "streaming");
             _transcript.ShowConversation(streamChat, [streamed]);
-            await WaitAsync("__transcriptSmoke.bodyText().includes('STREAM_TAIL')", "a long streamed response initially renders its stable blocks");
+            await WaitAsync("__transcriptSmoke.bodyText().includes('STREAM_TAIL') && document.querySelector('.message-body p') !== null", "a long streamed response initially renders its stable blocks");
             await EvalAsync<bool>("(() => { window.__stablePrefixNode=document.querySelector('.message-body p');return true; })()");
             long streamingCharactersBefore = TranscriptMarkdown.ParsedCharacters;
             streamed.Message.Content += " APPEND_TAIL"; streamed.Refresh();
@@ -359,7 +434,7 @@ public partial class App : Application
             ];
             taskRow.Message.TaskCompletionState = "verification-failed";
             _transcript.ShowConversation(taskChat, [taskRow]);
-            await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('核验失败') && __transcriptSmoke.bodyText().includes('CHECK_PROGRESS_RETAINED') && __transcriptSmoke.bodyText().includes('FINAL_WITH_FAILED_CHECKS')", "failed task verification is visible and does not hide its received progress");
+            await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('核验失败') && !__transcriptSmoke.bodyText().includes('CHECK_PROGRESS_RETAINED') && __transcriptSmoke.bodyText().includes('FINAL_WITH_FAILED_CHECKS')", "task verification remains visible while the completed final answer replaces execution progress");
             string originalLanguage = UiText.Language;
             UiText.Initialize("en");
             await WaitAsync("!!document.querySelector('.message-status')?.textContent.includes('Verification failed')", "task outcome controls translate without rewriting the answer");

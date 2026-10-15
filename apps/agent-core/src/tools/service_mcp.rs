@@ -10,6 +10,12 @@ use crate::models::protocol::{array, slice, string, truthy};
 const CACHE_ENTRIES: usize = 64;
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 
+/// These revisions share the implemented initialization and JSON-RPC lifecycle.
+/// 这些版本共用当前已实现的初始化和 JSON-RPC 生命周期；新主版本不能只改日期接入。
+pub(crate) fn supports_protocol(version: &str) -> bool {
+    matches!(version, "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05")
+}
+
 fn invalid_catalog() -> ServiceError {
     ServiceError::new("MCP_INVALID_CATALOG", "MCP 工具定义无效。", 400)
 }
@@ -487,7 +493,10 @@ impl McpState {
             "mcp.sdkOptions" => {
                 let version = arguments.get("protocolVersion").filter(|version|!version.is_null())
                     .cloned().unwrap_or(json!("2025-11-25"));
-                let negotiation = if version == "2026-07-28" { json!({"pin":"2026-07-28"}) } else { json!("legacy") };
+                if !supports_protocol(string(&version)) {
+                    return Err(ServiceError::new("MCP_UNSUPPORTED_PROTOCOL", "所选 MCP 协议尚未实现。", 400));
+                }
+                let negotiation = json!("legacy");
                 let timeout = arguments.get("startupTimeoutMs").filter(|timeout|!timeout.is_null()).cloned().unwrap_or(json!(15000));
                 Ok(json!({"protocolVersion":version,"connectTimeoutMs":timeout,"listRequest":{"timeout":15000,"maxTotalTimeout":15000},
                     "clientOptions":{"capabilities":{},"versionNegotiation":{"mode":negotiation},"inputRequired":{"autoFulfill":false},"listMaxPages":32,

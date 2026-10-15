@@ -191,6 +191,10 @@ pub(crate) async fn request_model(
     bool,
     u64,
 ) {
+    let steering_enabled = events.is_some();
+    let mut steering = run.steering.subscribe();
+    let steering_sequence = ctx.config["activeSteeringSequence"].as_u64()
+        .unwrap_or_else(|| *steering.borrow_and_update());
     // Join only this model's pending local preload; the accepted chat and other models remain independent.
     // 仅复用当前模型的本地预载等待；聊天已被接受，其他模型的准备不会阻塞本次请求。
     if !runtime
@@ -357,7 +361,37 @@ pub(crate) async fn request_model(
         }
     }
     let model_dispatched_at = Instant::now();
-    let result = model::request_with_catalog(connection, body, cancellation, events, catalog).await;
+    let (model_cancel, model_cancellation) = tokio::sync::watch::channel(false);
+    let mut parent_cancellation = cancellation;
+    let operation = model::request_with_catalog(connection, body, model_cancellation, events, catalog);
+    tokio::pin!(operation);
+    let mut result = tokio::select! {
+        biased;
+        _ = tools::wait_for_cancellation(&mut parent_cancellation) => {
+            model_cancel.send_replace(true);
+            operation.await
+        }
+        _ = async {
+            if !steering_enabled { std::future::pending::<()>().await; }
+            while *steering.borrow_and_update() == steering_sequence {
+                if steering.changed().await.is_err() { std::future::pending::<()>().await; }
+            }
+        } => {
+            // The model owns its socket and reports actual dispatch on cancellation; no task or tool is cancelled.
+            // 模型关闭自身连接并报告真实派发状态；不取消任务和工具，也不执行残缺工具参数。
+            model_cancel.send_replace(true);
+            let cancelled = operation.await;
+            match cancelled {
+                Err(mut error) => {
+                    error.code = "TASK_USER_STEERED".into();
+                    error.message = "当前生成已按用户引导接续。".into();
+                    Err(error)
+                }
+                response => response,
+            }
+        }
+        result = &mut operation => result,
+    };
     let dispatched = match &result {
         Ok(_) => true,
         Err(error) => error.details["requestDispatched"] == true,
@@ -371,13 +405,12 @@ pub(crate) async fn request_model(
         0
     };
     slot.observe(
-        result.is_ok(),
+        result.is_ok() || result.as_ref().is_err_and(|error|error.code=="TASK_USER_STEERED"),
         result
             .as_ref()
             .err()
             .is_some_and(|error| error.status_code == 429 || error.code.contains("RATE_LIMIT")),
     );
-    let mut result = result;
     if let Some(journal) = &run.journal {
         let reported = result.as_ref().ok().map(|response| &response.usage);
         let input = reported.and_then(|usage| {
@@ -392,8 +425,8 @@ pub(crate) async fn request_model(
         });
         let usage = crate::storage::task_repository::TaskUsage {
             model_requests: u64::from(dispatched),
-            failed_requests: u64::from(dispatched && result.is_err()),
-            retries: u64::from(dispatched && is_retry),
+            failed_requests: u64::from(dispatched && result.as_ref().is_err_and(|error|error.code!="TASK_USER_STEERED")),
+            retries: u64::from(dispatched && is_retry && !result.as_ref().is_err_and(|error|error.code=="TASK_USER_STEERED")),
             model_duration_ms,
             input_tokens: input.unwrap_or(0),
             output_tokens: output.unwrap_or(0),
@@ -443,6 +476,153 @@ struct LoopState {
     applied_steering_ids: HashSet<String>,
     documents: DocumentWorkRecords,
     work_progress: WorkProgress,
+}
+
+/// Retain real loaded definitions for later model rounds without changing provider call identity.
+/// 保留正式加载的定义供后续模型轮使用，不改变供应商调用身份。
+fn select_loaded_tools(state: &mut LoopState, loaded: &Value, requested_names: &Value) {
+    for tool in loaded["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|tool| tools::executable_descriptor(tool))
+    {
+        let named = descriptor(tool, tool["name"].as_str().unwrap_or(""));
+        if !["tool.search", "tool.load"].contains(&named["name"].as_str().unwrap_or("")) {
+            state.selected.retain(|selected| selected["name"] != named["name"]);
+            state.selected.insert(2.min(state.selected.len()), named);
+        }
+    }
+    // Preserve the model's first requested capability instead of the loader's catalog order.
+    // 保留模型首先请求的能力，不由加载器的目录顺序反转工具优先级。
+    if let Some(index) = requested_names
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find_map(|requested| {
+            state.selected.iter().position(|tool| {
+                tool["name"] == requested && !["tool.search", "tool.load"].contains(&requested)
+            })
+        })
+    {
+        let requested = state.selected.remove(index);
+        state.selected.insert(state.selected.len().min(2), requested);
+    }
+}
+
+/// Apply new formal user messages only between complete model/tool turns.
+/// 仅在完整模型/工具轮次之间应用正式插话；保留调用事实，显示切到最新插话之后。
+async fn apply_user_steering(
+    runtime: &Arc<GatewayRuntime>,
+    run: &Arc<RequestRun>,
+    state: &mut LoopState,
+    context: &mut tools::GatewayToolContext,
+) -> Result<usize, GatewayError> {
+    let steering_sequence = *run.steering.borrow();
+    let Some(journal) = &run.journal else {
+        return Ok(0);
+    };
+    let pending = journal
+        .repository()
+        .user_steering(journal.task_id())?
+        .into_iter()
+        .filter(|event| {
+            event.payload["userMessageId"]
+                .as_str()
+                .is_some_and(|id| !state.applied_steering_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        context.config["activeSteeringSequence"] = json!(steering_sequence);
+        return Ok(0);
+    }
+    let root = runtime.config.data_root.clone();
+    let conversation = run.conversation_id.clone();
+    let project = context.project_id.clone();
+    let ids = pending
+        .iter()
+        .filter_map(|event| event.payload["userMessageId"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    let messages = tokio::task::spawn_blocking(move || {
+        crate::storage::conversation_history::read_latest(
+            &root,
+            &json!({"Id":conversation,"ProjectId":project}),
+            Some(&ids),
+            false,
+        )
+    })
+    .await
+    .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "插话读取失败。", 500))??;
+    let messages = messages
+        .messages
+        .iter()
+        .map(|raw| {
+            serde_json::from_str::<Value>(&crate::storage::raw_json::scalar_projection(raw))
+                .map_err(|_| {
+                    GatewayError::new("TASK_STEERING_MESSAGE_INVALID", "插话原消息无效。", 409)
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for event in &pending {
+        let saved = messages
+            .iter()
+            .find(|message| {
+                message["Id"] == event.payload["userMessageId"] && message["Role"] == "user"
+            })
+            .ok_or_else(|| {
+                GatewayError::new("TASK_STEERING_MESSAGE_MISSING", "插话原消息不可用。", 409)
+            })?;
+        let text = saved["Content"].as_str().ok_or_else(|| {
+            GatewayError::new("TASK_STEERING_MESSAGE_INVALID", "插话正文无效。", 409)
+        })?;
+        if super::gateway_task_hub::steering_content_hash(text, &saved["Attachments"]) != event.payload["contentHash"] {
+            return Err(GatewayError::new(
+                "TASK_STEERING_MESSAGE_CHANGED",
+                "插话原文发生变化，请核对后继续。",
+                409,
+            ));
+        }
+        if saved["Attachments"].as_array().is_some_and(|items| !items.is_empty()) {
+            let prepared = super::gateway_attachments::prepare_context(runtime, &run.conversation_id,
+                saved["Id"].as_str().unwrap(), context.config["attachmentContextChars"].as_u64().unwrap_or(4096) as usize, true,
+                run.native_cancellation.token.clone()).await?;
+            state.history.push(crate::models::message_attachments::user_message(text, saved["Id"].as_str().unwrap(), &prepared));
+            if let Some(tool) = tools::builtin_catalog().into_iter().find(|tool| tool["name"] == "attachment.read") {
+                select_loaded_tools(state, &json!({"tools":[tool]}), &json!(["attachment.read"]));
+            }
+        } else { state.history.push(json!({"role":"user","content":text})); }
+        state.applied_steering_ids.insert(saved["Id"].as_str().unwrap().to_owned());
+        let trusted = context.config["trustedUserText"].as_str().unwrap_or("");
+        context.config["trustedUserText"] = json!(format!("{trusted}\n{text}"));
+    }
+    let latest = messages.iter().find(|message| message["Id"] == pending.last().unwrap().payload["userMessageId"]).unwrap();
+    let reply_id = latest["ReplyMessageId"].as_str().map(str::to_owned).unwrap_or_else(new_id);
+    let old_reply_id = state.assistant["Id"].clone();
+    let prior_tool_attempts = count_tool_attempts(&state.assistant);
+    state.assistant["SupersededByUserMessageId"] = latest["Id"].clone();
+    state.save(runtime, run, "interrupted", None).await?;
+    // Only the display projection changes; working history, effects and task usage keep their original owner.
+    // 仅切换展示投影；工作上下文、副作用与任务用量继续归原请求，不重复派发已有操作。
+    state.assistant.as_object_mut().unwrap().remove("SupersededByUserMessageId");
+    state.assistant["OriginUserMessageId"] = state.assistant.get("OriginUserMessageId")
+        .cloned().unwrap_or_else(||state.assistant["ReplyTo"].clone());
+    state.assistant["Id"] = json!(reply_id);
+    state.assistant["ReplyTo"] = latest["Id"].clone();
+    state.assistant["InReplyToUserMessageId"] = latest["Id"].clone();
+    state.assistant["CreatedAt"] = json!(now_iso8601());
+    state.assistant["Content"] = json!("");
+    state.assistant["Reasoning"] = json!("");
+    state.assistant["ReasoningDurationMs"] = json!(0);
+    state.assistant["Error"] = json!("");
+    state.assistant["ToolActivities"] = json!([]);
+    state.assistant["PriorToolAttemptCount"] = json!(prior_tool_attempts);
+    state.segments.clear();
+    state.save(runtime, run, "streaming", None).await?;
+    run.emit(json!({"type":"reply_anchor","replyMessageId":reply_id,"userMessageId":latest["Id"],"supersededReplyMessageId":old_reply_id,"toolStreamProtocol":3})).await;
+    context.config["activeSteeringSequence"] = json!(steering_sequence);
+    state.broker_note("The user amended this same task. Briefly acknowledge the actual change and explain the next meaningful step, then continue using existing output, completed work and collected tool results. Apply explicit corrections to the affected conditions; keep other constraints and the original permission scope. Do not repeat successful effects or restart discovery merely because an amendment arrived.");
+    Ok(pending.len())
 }
 
 /// Keep the live navigation compact; complete analyses and evidence stay in registered task artifacts.
@@ -549,7 +729,7 @@ fn repeated_read_projection(
 /// Context maintenance is metered as compaction/model work, never as another user tool attempt.
 /// 上下文维护另有压缩与模型计量，不重复占用用户工具额度；缓存、失败和未派发的实际调用仍计入。
 fn count_tool_attempts(assistant: &Value) -> u64 {
-    assistant["ToolActivities"]
+    assistant["PriorToolAttemptCount"].as_u64().unwrap_or(0) + assistant["ToolActivities"]
         .as_array()
         .map_or(0, |activities| {
             activities
@@ -557,6 +737,10 @@ fn count_tool_attempts(assistant: &Value) -> u64 {
                 .filter(|activity| activity["name"] != "context.compact")
                 .count() as u64
         })
+}
+
+fn steering_pending(run: &RequestRun, context: &tools::GatewayToolContext) -> bool {
+    *run.steering.borrow() != context.config["activeSteeringSequence"].as_u64().unwrap_or(0)
 }
 
 async fn document_tool(
@@ -799,7 +983,7 @@ async fn restore_root_work_context(
     };
     let Some((context, reference)) = journal
         .read_root_work_context(
-            &run.request_id,
+            state.assistant["Id"].as_str().unwrap_or(&run.request_id),
             &run.request_id,
             &run.fingerprint,
             &state.origin,
@@ -825,7 +1009,9 @@ async fn restore_root_work_context(
         || history_sources.len() > messages.len()
         || !messages
             .iter()
-            .any(|message| message["role"] == "user" && message["content"] == *original_goal)
+            .any(|message| message["role"] == "user" && (message["content"] == *original_goal
+                || message["attachmentMessageId"].as_str().is_some_and(|id| formal.iter().any(|saved|
+                    saved["Id"] == id && saved["Role"] == "user" && saved["Content"] == *original_goal))))
         || formal_sources.iter().any(|source| {
             !formal.iter().any(|message| {
                 message["Id"] == source["id"]
@@ -1091,6 +1277,23 @@ async fn restore_root_work_context(
     restored_selected.append(&mut state.selected);
     state.selected = restored_selected;
     state.history = messages;
+    for message in &mut state.history {
+        if message["deferredAttachmentImages"] != true { continue; }
+        if *cancellation.borrow() { return Err(GatewayError::new("ABORT_ERR", "附件恢复已取消。", 499)); }
+        let message_id = message["attachmentMessageId"].as_str().ok_or_else(invalid)?.to_owned();
+        // Restore only image payloads; existing extracted text and its coverage stay intact.
+        // 仅恢复图片载荷；已经提取的正文及覆盖范围保持原样，不重新解析文档。
+        let prepared = super::gateway_attachments::prepare_context(runtime, &run.conversation_id, &message_id, 0, true,
+            run.native_cancellation.token.clone()).await?;
+        let mut parts = message["content"].as_array().cloned().unwrap_or_else(|| vec![json!({"type":"text","text":message["content"]})]);
+        for image in prepared["images"].as_array().into_iter().flatten() {
+            if let (Some(mime), Some(data)) = (image["mimeType"].as_str(), image["data"].as_str()) {
+                parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}}));
+            }
+        }
+        message["content"] = json!(parts);
+        message.as_object_mut().unwrap().remove("deferredAttachmentImages");
+    }
     state.history_sources = history_sources;
     state.result_sources = result_sources;
     state.previous_summary = context["previousSummary"].clone();
@@ -1155,7 +1358,7 @@ impl LoopState {
             {
                 if self.work_context_ready && crate::models::protocol::complete_pairs(&self.history)
                 {
-                    let context = json!({"messages":self.history,"historySources":self.history_sources,
+                    let context = json!({"messages":crate::models::message_attachments::checkpoint_messages(&self.history),"historySources":self.history_sources,
                         "resultSources":self.result_sources,"selectedNames":self.selected.iter().filter_map(|tool|tool["name"].as_str()).collect::<Vec<_>>(),
                         "previousSummary":self.previous_summary,"formalSources":self.formal_sources,"appliedSteeringIds":self.applied_steering_ids,
                         "documentDirectory":self.documents.directory(),"workProgress":self.work_progress,
@@ -1272,7 +1475,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
         } else {
             TaskState::Partial
         };
-        let _ = journal.emit_control("task.final", &json!({"conversationId":run.conversation_id,"requestId":run.request_id,"assistantMessageId":run.request_id,"completion":value["taskCompletion"],"code":value["code"]}));
+        let _ = journal.emit_control("task.final", &json!({"conversationId":run.conversation_id,"requestId":run.request_id,"assistantMessageId":value.get("replyMessageId").unwrap_or(&json!(run.request_id)),"completion":value["taskCompletion"],"code":value["code"]}));
         if let Err(error) = journal
             .finish(
                 state,
@@ -1308,9 +1511,13 @@ async fn execute(
     run: Arc<RequestRun>,
     input: Value,
 ) -> Result<Value, GatewayError> {
+    let mut preparation_stages = json!({"acceptedToExecutionMs":run.created.elapsed().as_millis() as u64});
+    let mut preparation_stage_started = Instant::now();
     let gate = runtime.conversation_gate(&run.conversation_id).await;
     let mut cancellation = run.cancellation.subscribe();
     let _queue = tokio::select! {guard=gate.lock()=>guard,_=cancellation.changed()=>return Err(GatewayError::new("ABORT_ERR","任务已取消。",499))};
+    preparation_stages["conversationQueueMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let root = runtime.config.data_root.clone();
     let conversation = run.conversation_id.clone();
     let title = input["message"]
@@ -1319,26 +1526,32 @@ async fn execute(
         .chars()
         .take(80)
         .collect::<String>();
-    tokio::task::spawn_blocking(move || data::ensure_conversation(&root, &conversation, &title))
-        .await
-        .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "聊天准备失败。", 500))??;
-    let root = runtime.config.data_root.clone();
-    let conversation = run.conversation_id.clone();
-    let formal =
-        tokio::task::spawn_blocking(move || data::read_model_messages(&root, &conversation))
-            .await
-            .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "聊天读取失败。", 500))??;
+    // Desktop messages already belong to a saved conversation; initialize only the legacy direct-call case.
+    // 桌面消息已归属正式聊天，仅兼容旧直连接口时补建，避免每次再执行一遍完整目录准备。
+    let formal = tokio::task::spawn_blocking(move || {
+        match data::read_model_messages(&root, &conversation) {
+            Err(error) if error.code() == "CONVERSATION_NOT_FOUND" => {
+                data::ensure_conversation(&root, &conversation, &title)?;
+                data::read_model_messages(&root, &conversation)
+            }
+            result => result,
+        }
+    })
+    .await
+    .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "聊天读取失败。", 500))??;
+    preparation_stages["historyReadMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     // A persisted request identity is an execution witness after restart, never permission to replay.
     // 重启后已持久化的请求身份是执行见证，绝不能据此重复派发副作用。
     let resumed = formal
-        .iter()
+        .iter().rev()
         .find(|message| {
             message["Role"] == "assistant"
                 && (message["Id"] == run.request_id || message["RequestId"] == run.request_id)
         })
         .cloned();
     if let Some(saved) = &resumed {
-        if saved["ReplyTo"] != input["userMessageId"]
+        if saved.get("OriginUserMessageId").unwrap_or(&saved["ReplyTo"]) != &input["userMessageId"]
             || saved["RequestFingerprint"]
                 .as_str()
                 .is_some_and(|fingerprint| fingerprint != run.fingerprint)
@@ -1356,14 +1569,14 @@ async fn execute(
         }
         if saved["Status"] == "completed" {
             return Ok(
-                json!({"type":"completed","content":saved["Content"],"reasoning":saved["Reasoning"],"assistantSegments":saved["AssistantSegments"],"durationMs":saved["DurationMs"],"taskCompletion":saved["ToolRun"]["taskCompletion"],"toolStreamProtocol":3,"reused":true}),
+                json!({"type":"completed","replyMessageId":saved["Id"],"content":saved["Content"],"reasoning":saved["Reasoning"],"assistantSegments":saved["AssistantSegments"],"durationMs":saved["DurationMs"],"taskCompletion":saved["ToolRun"]["taskCompletion"],"toolStreamProtocol":3,"reused":true}),
             );
         }
     }
-    let user = if let Some(saved) = formal
+    let saved_user = formal
         .iter()
-        .find(|message| message["Id"] == input["userMessageId"])
-    {
+        .find(|message| message["Id"] == input["userMessageId"]);
+    let user = if let Some(saved) = saved_user {
         if saved["Role"] != "user" || saved["Content"] != input["message"] {
             return Err(GatewayError::new(
                 "CHAT_REQUEST_CONFLICT",
@@ -1375,18 +1588,31 @@ async fn execute(
     } else {
         json!({"Id":input["userMessageId"],"Role":"user","Content":input["message"],"CreatedAt":now_iso8601(),"Status":"completed","Provider":input["provider"],"Model":input["model"]})
     };
-    let root = runtime.config.data_root.clone();
-    let conversation = run.conversation_id.clone();
-    let original = run.original_message_raw.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Some(raw) = original {
-            data::upsert_message_content_raw(&root, &conversation, &user, &raw)
-        } else {
-            data::upsert_message(&root, &conversation, &user)
-        }
-    })
-    .await
-    .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "消息保存失败。", 500))??;
+    let requested_attachments = input["attachmentIds"].as_array().cloned().unwrap_or_default();
+    let saved_attachments = user["Attachments"].as_array().cloned().unwrap_or_default();
+    if requested_attachments.len() != saved_attachments.len()
+        || requested_attachments.iter().any(|id| !saved_attachments.iter().any(|item| item["Id"].as_str().zip(id.as_str()).is_some_and(|(saved, requested)| saved.eq_ignore_ascii_case(requested))))
+    {
+        return Err(GatewayError::new("CHAT_ATTACHMENT_CONFLICT", "请求附件与已保存消息不匹配，请重新发送。", 409));
+    }
+    // A verified desktop submission is already authoritative; do not repeat its storage transaction.
+    // 桌面已提交且通过身份、正文及附件校验的消息就是正式来源，不在模型启动前重复写入。
+    if saved_user.is_none() {
+        let root = runtime.config.data_root.clone();
+        let conversation = run.conversation_id.clone();
+        let original = run.original_message_raw.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(raw) = original {
+                data::upsert_message_content_raw(&root, &conversation, &user, &raw)
+            } else {
+                data::upsert_message(&root, &conversation, &user)
+            }
+        })
+        .await
+        .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "消息保存失败。", 500))??;
+    }
+    preparation_stages["userCommitMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let provider = input["provider"].as_str().unwrap_or("");
     let connection = runtime
         .models
@@ -1433,6 +1659,8 @@ async fn execute(
         }
     });
     ctx.events = Some(tool_sender);
+    preparation_stages["connectionAndToolsMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let mut all = tools::builtin_catalog()
         .into_iter()
         .filter(tools::executable_descriptor)
@@ -1450,6 +1678,9 @@ async fn execute(
         "web.search".to_owned(),
         "web.fetch".to_owned(),
     ]);
+    if formal.iter().any(|message| message["Attachments"].as_array().is_some_and(|items| !items.is_empty())) {
+        names.insert("attachment.read".to_owned());
+    }
     if formal.iter().any(|message| {
         message["ToolActivities"]
             .as_array()
@@ -1561,6 +1792,8 @@ async fn execute(
         documents: DocumentWorkRecords::default(),
         work_progress: WorkProgress::default(),
     };
+    preparation_stages["toolSelectionAndHistoryProjectionMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let summary_root = runtime.config.data_root.clone();
     let summary_chat = run.conversation_id.clone();
     if let Ok(Ok(summary)) =
@@ -1574,7 +1807,7 @@ async fn execute(
     let resuming = resumed.is_some();
     let mut first_round = 1;
     if let Some(saved) = resumed {
-        if saved["ReplyTo"] != input["userMessageId"]
+        if saved.get("OriginUserMessageId").unwrap_or(&saved["ReplyTo"]) != &input["userMessageId"]
             || saved["Provider"] != provider
             || saved["Model"] != model_name
         {
@@ -1584,7 +1817,8 @@ async fn execute(
                 409,
             ));
         }
-        for activity in saved["ToolActivities"].as_array().into_iter().flatten() {
+        for activity in formal.iter().filter(|message|message["Role"]=="assistant" && (message["Id"]==run.request_id || message["RequestId"]==run.request_id))
+            .flat_map(|message|message["ToolActivities"].as_array().into_iter().flatten()) {
             // Restore only external effects; internal compaction activities have no dispatch receipt to verify.
             // 仅恢复外部副作用；内部压缩活动没有工具派发回执，不能因该回执不存在制造未知副作用。
             if is_read_only_tool(activity["name"].as_str().unwrap_or("")) {
@@ -1634,10 +1868,10 @@ async fn execute(
                 segment["phase"] = json!("commentary");
             }
         }
-        first_round = state
-            .segments
-            .last()
-            .and_then(|segment| segment["round"].as_u64())
+        first_round = saved["ModelTranscript"]["rounds"].as_array().into_iter().flatten()
+            .chain(state.segments.iter())
+            .filter_map(|segment| segment["round"].as_u64())
+            .max()
             .unwrap_or(0)
             + 1;
         state.transcript = saved["ModelTranscript"]["rounds"]
@@ -1742,6 +1976,8 @@ async fn execute(
         );
     }
     let base_system = system.clone();
+    preparation_stages["summaryAndMemoryMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let mut automatic_evidence_note: Option<(String, Value)> = None;
     let first_output = native(crate::models::output::calculate(
         "context.outputBudget",
@@ -1794,6 +2030,8 @@ async fn execute(
             Err(_)=>system.push_str("\nBroker: automatic evidence worker unavailable; file/path/text search and direct reads remain independently available."),
         }
     }
+    preparation_stages["automaticEvidenceMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
+    preparation_stage_started = Instant::now();
     let mut max_output = connection["maxOutputTokens"].as_u64();
     let projected = protocol::history_projection_verified(
         &connection,
@@ -1820,6 +2058,24 @@ async fn execute(
         state
             .history
             .push(json!({"role":"user","content":input["message"]}));
+        if !saved_attachments.is_empty() {
+            let maximum = (context_window / 3).clamp(1024, 131072) as usize;
+            ctx.config["attachmentContextChars"] = json!(maximum);
+            let prepared = super::gateway_attachments::prepare_context(&runtime, &run.conversation_id,
+                input["userMessageId"].as_str().unwrap(), maximum, true,
+                run.native_cancellation.token.clone()).await?;
+            *state.history.last_mut().unwrap() = crate::models::message_attachments::user_message(
+                input["message"].as_str().unwrap(), input["userMessageId"].as_str().unwrap(), &prepared);
+        }
+    }
+    // Keep a compact readback directory for follow-up questions without reinserting old document bodies.
+    // 后续追问携带精简附件目录供按需回读，不反复塞入旧文档全文。
+    let attachment_directory = formal.iter().rev().take(64).flat_map(|message| {
+        message["Attachments"].as_array().into_iter().flatten().map(move |attachment|
+            json!({"messageId":message["Id"],"attachmentId":attachment["Id"],"name":attachment["Name"]}))
+    }).take(64).collect::<Vec<_>>();
+    if !attachment_directory.is_empty() {
+        system.push_str(&format!("\nSaved attachments in this conversation (read originals with attachment.read only when needed): {}", json!(attachment_directory)));
     }
     if let Some((notice, reference)) = automatic_evidence_note {
         state.context_note(&notice, json!({"projectionOrigin":"broker-summary","automaticEvidence":true,
@@ -1830,43 +2086,9 @@ async fn execute(
         state.broker_note("Continue from the restored working checkpoint using its facts, original references and already loaded tool definitions. Read only missing details or unread files; do not reconstruct the inventory or rediscover available tools merely because execution resumed. Completed effects remain protected; verify unknown outcomes before mutation.");
     }
     refresh_document_navigation(&mut state);
-    // User amendments are formal, immutable message references attached to this same durable task.
-    // 用户补充引用同一持久任务的正式原消息；恢复沿用任务及副作用身份，不因插话重跑原请求。
-    if let Some(journal) = &run.journal {
-        for event in journal.repository().user_steering(journal.task_id())? {
-            let saved = formal
-                .iter()
-                .find(|message| {
-                    message["Id"] == event.payload["userMessageId"] && message["Role"] == "user"
-                })
-                .ok_or_else(|| {
-                    GatewayError::new(
-                        "TASK_STEERING_MESSAGE_MISSING",
-                        "已保存插话的正式原消息不可用。",
-                        409,
-                    )
-                })?;
-            let text = saved["Content"].as_str().ok_or_else(|| {
-                GatewayError::new("TASK_STEERING_MESSAGE_INVALID", "插话正文无效。", 409)
-            })?;
-            if crate::retrieval::gateway_index::hash(text) != event.payload["contentHash"] {
-                return Err(GatewayError::new(
-                    "TASK_STEERING_MESSAGE_CHANGED",
-                    "插话原文发生变化，请核对后继续。",
-                    409,
-                ));
-            }
-            if state.applied_steering_ids.insert(
-                event.payload["userMessageId"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_owned(),
-            ) {
-                state.history.push(json!({"role":"user","content":text}));
-            }
-            system.push_str(&format!("\nThe user selected steering action {} for formal message {}. Continue retains the current plan with the supplied clarification; update requests replanning from completed work, and obsolete unfinished delegates have been stopped. Apply the actual user text without expanding permissions.",event.payload["action"],event.payload["userMessageId"]));
-        }
-        system.push_str("\nLater user messages amend this same task. Apply their explicit corrections to the affected conditions, retain other constraints, and continue from verified completed work. They do not expand tool permissions. Do not repeat completed effects.");
+    let steering_applied = apply_user_steering(&runtime, &run, &mut state, &mut ctx).await?;
+    if resuming && steering_applied == 0 && state.assistant["Id"] != run.request_id {
+        run.emit(json!({"type":"reply_anchor","replyMessageId":state.assistant["Id"],"userMessageId":state.assistant["ReplyTo"],"supersededReplyMessageId":run.request_id,"toolStreamProtocol":3})).await;
     }
     // Reconnection replays the saved commentary identities before introducing new phases.
     // 重连先恢复已保存的过程段身份，再引入新阶段；回执与正式数据保持同一时间线。
@@ -1892,6 +2114,7 @@ async fn execute(
     let mut task_status = json!({"state":"unknown"});
     let mut stopped = None;
     let model_started = Instant::now();
+    preparation_stages["contextAssemblyMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
     state.model_started = Some(model_started);
     let mut final_received = false;
     let mut freshness_recoveries = 0;
@@ -1901,6 +2124,7 @@ async fn execute(
     let mut synthesized_version: Option<String> = None;
     let mut grammar_recoveries = 0;
     let mut context_recoveries = 0;
+    let mut image_fallback = false;
     let mut provider_input_limit = None;
     let mut rejected_request = None;
     let mut retry_next_request = false;
@@ -1914,6 +2138,10 @@ async fn execute(
                 499,
             ));
             break;
+        }
+        if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
+            review_pending = false;
+            let _ = state.task.apply("task.resumed", &json!({}));
         }
         if state.started.elapsed().as_millis() as u64
             > limits["maxDurationMs"].as_u64().unwrap_or(1800000)
@@ -2392,7 +2620,7 @@ async fn execute(
         drop(sender);
         let _ = relay.await;
         let partial = current.lock().await.clone();
-        let response = match result {
+        let mut response = match result {
             Ok(response) => response,
             Err(error) => {
                 if !reviewing {
@@ -2402,6 +2630,23 @@ async fn execute(
                         last["status"] = json!("interrupted");
                     }
                     run.emit(json!({"type":"assistant_segment","segment":state.segment(&segment),"toolStreamProtocol":3})).await;
+                }
+                if error.code == "TASK_USER_STEERED" && !*cancellation.borrow() {
+                    if !reviewing && !partial.0.is_empty() {
+                        state.history.push(json!({"role":"assistant","content":partial.0}));
+                    }
+                    apply_user_steering(&runtime, &run, &mut state, &mut ctx).await?;
+                    review_pending = false;
+                    retry_next_request = false;
+                    let _ = state.task.apply("task.resumed", &json!({}));
+                    continue;
+                }
+                if !image_fallback && crate::models::message_attachments::image_rejection(error.status_code, &error.message, &error.details)
+                    && crate::models::message_attachments::remove_images(&mut state.history)
+                {
+                    image_fallback = true;
+                    state.broker_note("The configured model rejected image input. Continue using extracted document text; use attachment.read for image OCR. Do not claim to have inspected image pixels.");
+                    continue;
                 }
                 if error.details["contextRejection"].is_object() {
                     let rejection = &error.details["contextRejection"];
@@ -2512,6 +2757,12 @@ async fn execute(
         .await
         .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "模型续接回执保存失败。", 500))??;
         if reviewing {
+            if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
+                review_pending = false;
+                let _ = state.task.apply("task.resumed", &json!({}));
+                state.save(&runtime, &run, "streaming", None).await?;
+                continue;
+            }
             let _ = state
                 .task
                 .apply("task.reviewResult", &json!({"value":inspected}));
@@ -2576,6 +2827,17 @@ async fn execute(
             }
         }
         if response.calls.is_empty() {
+            // A correction received while streaming must reach the next model turn before completion.
+            // 流式生成期间收到的调整先交给下一轮模型，不能以旧要求的最终答复直接结束。
+            state.history =
+                protocol::append_results(&protocol_name, &state.history, &response, &[])?;
+            if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
+                state.transcript.push(json!({"round":round,"text":text,"calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
+                review_pending = false;
+                let _ = state.task.apply("task.resumed", &json!({}));
+                state.save(&runtime, &run, "streaming", None).await?;
+                continue;
+            }
             if let Some(journal) = &run.journal {
                 let children = journal.repository().children(journal.task_id())?;
                 let pending: Vec<Value> = children
@@ -2593,8 +2855,6 @@ async fn execute(
                             json!({"taskIds":pending,"timeoutMs":30000}),
                         )
                         .await?;
-                    state.history =
-                        protocol::append_results(&protocol_name, &state.history, &response, &[])?;
                     // Keep waiting within the program when nothing changed, without spending model calls.
                     // 尚无变化时由程序继续等待，不消耗模型调用来轮询。
                     let mut child_results = child_results;
@@ -2614,8 +2874,6 @@ async fn execute(
                     continue;
                 }
             }
-            state.history =
-                protocol::append_results(&protocol_name, &state.history, &response, &[])?;
             state.transcript.push(json!({"round":round,"text":text,"calls":[],"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
             let effects = native(state.effects.apply("effects.state", &json!({})))?;
             let decision=native(state.task.apply("task.decide",&json!({"reply":task_status,"hasCalls":false,"outputTruncated":response.output_truncated,"hasUnknownEffects":effects["hasUnknownEffects"],"outputContinuations":output_continuations})))?;
@@ -2689,6 +2947,25 @@ async fn execute(
             final_received = true;
             break;
         }
+        // Resolve only exact known identities before classifying effects; loading still follows admission.
+        // 先按已知目录精确归一化身份再分类副作用；定义加载仍须经过本轮额度与执行准入。
+        {
+            let cached = ctx.runtime.schemas.read().await;
+            for call in &mut response.calls {
+                if call["unavailable"] != true {
+                    continue;
+                }
+                let requested = call["name"].as_str().unwrap_or("");
+                if let Some(tool) = all.iter().chain(cached.iter()).find(|tool| {
+                    tools::executable_descriptor(tool)
+                        && tool["name"].as_str().is_some_and(|name| {
+                            name == requested || crate::models::protocol::wire_name(name) == requested
+                        })
+                }) {
+                    call["name"] = tool["name"].clone();
+                }
+            }
+        }
         // Persist the completed model step before any effect is dispatched.
         // 派发任何副作用前，先持久化已完成的模型步骤。
         state.transcript.push(json!({"round":round,"text":text,"calls":response.calls,"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
@@ -2698,6 +2975,17 @@ async fn execute(
         for call in &response.calls {
             if *cancellation.borrow() {
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
+                break;
+            }
+            if steering_pending(&run, &ctx) {
+                // Pair undispatched calls with an explicit skipped result before applying the user's correction.
+                // 应用用户调整前，为未派发调用补齐明确跳过结果；保持协议配对，不执行旧计划。
+                for skipped in &response.calls {
+                    if !results.iter().any(|result:&Value|result["call"]["id"]==skipped["id"]) {
+                        results.push(json!({"call":skipped,"observation":is_read_only_tool(skipped["name"].as_str().unwrap_or("")),
+                            "result":{"status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED","content":{"notice":"Not dispatched: the user amended the current task. Continue with the new requirements and retain completed receipts."}}}));
+                    }
+                }
                 break;
             }
             let name = call["name"].as_str().unwrap_or("");
@@ -2750,29 +3038,46 @@ async fn execute(
                 .unwrap()
                 .push(activity.clone());
             state.save(&runtime, &run, "streaming", None).await?;
-            let mut receipt = if call["unavailable"] == true {
-                let known = all
-                    .iter()
-                    .find(|tool| tool["wireName"] == call["name"] || tool["name"] == call["name"]);
-                let mut candidate = known
-                    .and_then(|tool| tool["name"].as_str())
-                    .map(str::to_owned);
-                if candidate.is_none() {
+            let mut definition_failure = None;
+            if call["unavailable"] == true
+                && saved.is_null()
+                && !steering_pending(&run, &ctx)
+                && (effect_state["hasUnknownEffects"] != true || is_observation)
+            {
+                let candidate = {
                     let cached = ctx.runtime.schemas.read().await;
-                    candidate = cached
-                        .iter()
-                        .filter_map(|tool| tool["name"].as_str())
-                        .find(|canonical| {
-                            *canonical == name
-                                || crate::models::protocol::wire_name(canonical) == name
-                        })
-                        .map(str::to_owned);
+                    all.iter().chain(cached.iter()).find(|tool| {
+                        tools::executable_descriptor(tool) && tool["name"] == name
+                    }).map(|tool| tool["name"].clone())
+                };
+                if let Some(candidate) = candidate {
+                    // This call has not run: load once through the real gateway, then dispatch its original arguments.
+                    // 原调用尚未执行：通过正式入口加载一次定义，再派发原参数；不重放成功或未知副作用。
+                    ctx.config["activeToolCallId"] = call["id"].clone();
+                    match tools::execute("tool.load", json!({"names":[candidate]}), &ctx).await {
+                        Ok(loaded) => {
+                            select_loaded_tools(&mut state, &loaded, &json!([name]));
+                            if !loaded["tools"].as_array().into_iter().flatten().any(|tool| {
+                                tool["name"] == name && tools::executable_descriptor(tool)
+                            }) {
+                                definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_LOADED",
+                                    "content":{"notice":"The real loader did not return an executable definition; this call was not dispatched.","requestedName":name,"loadResult":loaded}}));
+                            }
+                        }
+                        Err(error) => {
+                            definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":error.code,
+                                "content":{"error":error.message,"code":error.code,"requestedName":name}}));
+                        }
+                    }
+                } else {
+                    definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":"TOOL_NOT_DISCOVERED",
+                        "content":{"notice":"No exact executable definition is known. Discover the actual capability through tool.search; this call was not dispatched.","requestedName":name}}));
                 }
-                // An undeclared alias is unavailable in this step, not proof that its implementation is absent.
-                // 本轮未声明的别名表示尚未加载，不能误报原生实现不存在，也不能跳过加载与权限执行。
-                json!({"status":"error","executed":false,"isError":true,"code":if candidate.is_some(){"TOOL_NOT_LOADED"}else{"TOOL_NOT_DISCOVERED"},
-                    "content":{"notice":"This call was not dispatched. Load the real tool definition before calling it; unknown names must be found through tool.search, never invented.",
-                        "requestedName":name,"candidateName":candidate,"loadWith":candidate.as_deref().map(|name|json!({"tool":"tool.load","arguments":{"names":[name]}}))}})
+            }
+            let mut receipt = if steering_pending(&run, &ctx) {
+                json!({"status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED","content":{"notice":"Not dispatched: the user amended the task before execution."}})
+            } else if let Some(failure) = definition_failure {
+                failure
             } else if !saved.is_null() {
                 let mut receipt = saved["result"].clone();
                 receipt["reused"] = json!(true);
@@ -2903,7 +3208,7 @@ async fn execute(
             }
             if matches!(
                 name,
-                "filesystem.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
+                "filesystem.read" | "document.read" | "knowledge.read" | "web.fetch" | "tool.result.read"
             ) {
                 round_progress.source_reads += 1;
                 if receipt["isError"] != true
@@ -2916,7 +3221,7 @@ async fn execute(
                         .await?
                     {
                         round_progress.new_read_range |= document["informationAdded"] == true;
-                        if name == "filesystem.read"
+                        if matches!(name, "filesystem.read" | "document.read")
                             && document["informationAdded"] == false
                             && document["matchingReadCount"].as_u64().is_some_and(|count|count>=3)
                             && source_metadata["offset"] == 0
@@ -3082,40 +3387,7 @@ async fn execute(
                 state.broker_note(&format!("Broker: the formal work binding now resolves relative files within {}. This is the current authorized work scope; unrelated formal/private stores remain protected.",ctx.workdir.to_string_lossy()));
             }
             if name == "tool.load" {
-                for tool in receipt["content"]["tools"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|tool| tools::executable_descriptor(tool))
-                {
-                    let named = descriptor(tool, tool["name"].as_str().unwrap_or(""));
-                    if !["tool.search", "tool.load"].contains(&named["name"].as_str().unwrap_or(""))
-                    {
-                        state
-                            .selected
-                            .retain(|selected| selected["name"] != named["name"]);
-                        state.selected.insert(2.min(state.selected.len()), named);
-                    }
-                }
-                // Preserve the model's first explicit request rather than the catalog's return order.
-                // 按模型明确请求的顺序保留下一步能力，不能由目录返回顺序反转工具优先级。
-                if let Some(index) = call["arguments"]["names"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .find_map(|requested| {
-                        state.selected.iter().position(|tool| {
-                            tool["name"] == requested
-                                && !["tool.search", "tool.load"].contains(&requested)
-                        })
-                    })
-                {
-                    let requested = state.selected.remove(index);
-                    state
-                        .selected
-                        .insert(state.selected.len().min(2), requested);
-                }
+                select_loaded_tools(&mut state, &receipt["content"], &call["arguments"]["names"]);
             }
             if name == "tool.search" && receipt["isError"] != true {
                 // Promote an already loaded match instead of sending discovery back into the same loop.
@@ -3227,6 +3499,9 @@ async fn execute(
             "本次任务轮次已用完，已完成内容和回执保留。",
             409,
         ));
+    }
+    if stopped.is_some() && !*cancellation.borrow() {
+        apply_user_steering(&runtime, &run, &mut state, &mut ctx).await?;
     }
     if let Some(error) = stopped.clone() {
         let mut delivered_progress = false;
@@ -3376,6 +3651,7 @@ async fn execute(
         "acceptedToFinalizationMs": run.created.elapsed().as_millis() as u64,
         "includesDesktopCatalogSave": false,
         "includesFinalPersistence": false,
+        "preparationStages": preparation_stages,
     });
     state.assistant["ToolRun"] = json!({"version":1,"requestId":run.request_id,"diagnostics":diagnostics,"taskCompletion":completion,"effects":effects});
     state.assistant["DurationMs"] = json!(model_started.elapsed().as_millis() as u64);
@@ -3399,6 +3675,6 @@ async fn execute(
         .await?;
     crate::retrieval::gateway::release_task(&run.conversation_id, &run.request_id);
     Ok(
-        json!({"type":if reply_interrupted{"interrupted"}else{"completed"},"content":state.assistant["Content"],"reasoning":state.assistant["Reasoning"],"assistantSegments":state.segments,"toolStreamProtocol":3,"durationMs":model_started.elapsed().as_millis() as u64,"taskCompletion":completion,"error":stopped.as_ref().filter(|_|reply_interrupted).map(|error|&error.message),"code":stopped.as_ref().map(|error|&error.code)}),
+        json!({"type":if reply_interrupted{"interrupted"}else{"completed"},"replyMessageId":state.assistant["Id"],"content":state.assistant["Content"],"reasoning":state.assistant["Reasoning"],"assistantSegments":state.segments,"toolStreamProtocol":3,"durationMs":model_started.elapsed().as_millis() as u64,"taskCompletion":completion,"error":stopped.as_ref().filter(|_|reply_interrupted).map(|error|&error.message),"code":stopped.as_ref().map(|error|&error.code)}),
     )
 }

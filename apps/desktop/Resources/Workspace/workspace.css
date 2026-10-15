@@ -1,0 +1,42 @@
+:root {
+  --appearance-main: #ffffff; --appearance-soft: #f3f2f0; --appearance-accent: #666666;
+  --appearance-text: #262626; --appearance-secondary: #666666; --appearance-border: #dddddd;
+  --appearance-sidebar: #f8f7f5;
+  /* UI text keeps system Latin/CJK faces; only code uses a monospaced family.
+   * 正文使用系统中英文字体；仅代码使用等宽字体，避免中文 TXT 落入浏览器默认宋体。 */
+  --ui-font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --code-font: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', monospace;
+  color: var(--appearance-text); background: var(--appearance-main); font: 15px/1.75 var(--ui-font);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { padding: 18px 22px 32px; overflow-wrap: anywhere; }
+main { min-width: 0; }
+h1, h2, h3, h4 { line-height: 1.4; margin: 1.3em 0 .6em; }
+h1 { font-size: 1.65em; } h2 { font-size: 1.35em; } h3 { font-size: 1.16em; }
+p { margin: .7em 0; }
+a { color: inherit; text-underline-offset: 3px; }
+pre { padding: 12px; border: 1px solid var(--appearance-border); border-radius: 9px;
+  background: var(--appearance-sidebar); overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+pre.plain-text { font-family: var(--ui-font); font-size: 15px; line-height: 1.75; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+code { font-family: var(--code-font); font-size: .92em; }
+:not(pre) > code { padding: 1px 4px; border-radius: 4px; background: var(--appearance-soft); }
+table { border-collapse: collapse; min-width: max-content; max-width: 100%; }
+th, td { padding: 7px 10px; border: 1px solid var(--appearance-border); text-align: left; }
+th { background: var(--appearance-soft); }
+.table-scroll { overflow-x: auto; }
+blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--appearance-border); color: var(--appearance-secondary); }
+img { max-width: 100%; height: auto; }
+.image-view { display: flex; min-height: 200px; justify-content: center; align-items: flex-start; }
+.image-view img { cursor: zoom-in; }
+.image-view img.actual-size { max-width: none; cursor: zoom-out; }
+.math[data-display='true'] { overflow-x: auto; padding: 6px 0; }
+.mermaid-viewport:focus-visible, .mermaid-viewer-viewport:focus-visible,
+.mermaid-source-details summary:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 1px solid var(--appearance-secondary); outline-offset: 2px; border-radius: 5px;
+}
+@media (max-width: 420px) { body { padding: 12px 12px 24px; } }
+
+pre.source-code { margin: 0; border: 0; border-radius: 0; padding: 0; background: transparent; tab-size: 4; }
+pre.source-code code { font-family: var(--code-font); font-size: 14px; line-height: 1.7; font-variant-ligatures: none; }

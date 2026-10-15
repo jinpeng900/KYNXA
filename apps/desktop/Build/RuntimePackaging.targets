@@ -106,4 +106,12 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />
   </Target>
+  <!-- Copy/extraction inherits the destination ACL; prepare sandbox RX again in the actual executable layout.
+       复制或解压会继承目标 ACL；在实际可执行布局中再次补齐浏览器沙箱的只读执行权限。 -->
+  <Target Name="PrepareBrowserSandboxOutput" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(DesignTimeBuild)' != 'true' and Exists('$(TargetDir)KYNXA.Desktop.dll')">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-browser-sandbox.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />
+  </Target>
+  <Target Name="PrepareBrowserSandboxLooseLayout" AfterTargets="_WinAppCopyContentToLooseLayout" Condition="'$(DesignTimeBuild)' != 'true' and Exists('$(TargetDir)KYNXA.Desktop.dll')">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-browser-sandbox.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />
+  </Target>
 </Project>

@@ -19,7 +19,7 @@ public interface ITasksApi
         Guid? projectId = null, CancellationToken cancellationToken = default);
     Task<TaskControlResponse> SteerAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
         Guid userMessageId, string message, string action, Guid? projectId = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, Guid? replyMessageId = null);
 }
 
 /// <summary>
@@ -130,20 +130,26 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         return result;
     }
 
-    public async Task<TaskControlResponse> SteerAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
+    public Task<TaskControlResponse> SteerAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
         Guid userMessageId, string message, string action, Guid? projectId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Guid? replyMessageId = null) =>
+        SteerAsync(conversationId, taskId, expectedVersion, userMessageId, message, action, projectId,
+            cancellationToken, replyMessageId, null);
+
+    public async Task<TaskControlResponse> SteerAsync(Guid conversationId, Guid taskId, ulong expectedVersion,
+        Guid userMessageId, string message, string action, Guid? projectId,
+        CancellationToken cancellationToken, Guid? replyMessageId, ChatAttachment[]? attachments)
     {
-        // Steering can wait for the old attempt's 35-second lease; this is control acknowledgement, not execution time.
-        // 插话可能等待旧尝试的 35 秒租约；这是控制确认预算，不是实际任务执行时限。
+        // Running-task steering keeps the live attempt; resuming a paused task may await lease release.
+        // 运行中的引导保留当前尝试；恢复暂停任务时可能等待旧租约释放。
         using var deadline = CreateDeadline(cancellationToken, 60);
         cancellationToken = deadline.Token;
-        if (action is not ("continue" or "update") || expectedVersion == 0 || string.IsNullOrWhiteSpace(message)
+        if (action is not ("continue" or "update") || expectedVersion == 0 || (string.IsNullOrWhiteSpace(message) && !(attachments?.Length > 0))
             || Encoding.UTF8.GetByteCount(message) > 32768) throw new ArgumentException("Invalid task steering.");
         string path = $"/api/tasks/{ValidId(taskId):D}/steer";
         await _ensureReady(cancellationToken);
         using var response = await _http.PostAsJsonAsync(path,
-            new TaskSteeringRequest(ValidId(conversationId), expectedVersion, ValidId(userMessageId), message, action),
+            new TaskSteeringRequest(ValidId(conversationId), expectedVersion, ValidId(userMessageId), message, action, replyMessageId, attachments),
             JsonOptions, cancellationToken);
         var result = await ReadAsync<TaskControlResponse>(response, cancellationToken);
         Validate(result.Task, conversationId, projectId, taskId);

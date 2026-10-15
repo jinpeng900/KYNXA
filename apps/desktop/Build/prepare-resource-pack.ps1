@@ -163,6 +163,7 @@ else {
             finally { if ([IO.File]::Exists($pendingPath)) { Remove-Item -LiteralPath $pendingPath } }
         }
         [IO.File]::WriteAllText((Join-Path $DestinationRoot 'resource-pack.json'), ($manifest | ConvertTo-Json -Depth 8), $utf8)
+        & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $DestinationRoot
         Write-Output "Imported $(@($manifest.files).Count) verified resource files: $DestinationRoot"
     }
     finally { if ($archive) { $archive.Dispose() } }

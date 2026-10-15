@@ -30,6 +30,8 @@ pub struct ToolRuntime {
     pub(crate) browsers: tokio::sync::Mutex<
         HashMap<String, Arc<tokio::sync::Mutex<super::gateway_browser::BrowserSession>>>,
     >,
+    pub(crate) workspace_browser:
+        tokio::sync::Mutex<Option<Arc<tokio::sync::Mutex<super::gateway_browser::WorkspaceBrowser>>>>,
     pub(crate) cdp: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_browser::CdpClient>>>,
     pub(crate) jobs: tokio::sync::Mutex<HashMap<String, super::gateway_process::HostJob>>,
     pub(crate) schemas: tokio::sync::RwLock<Vec<Value>>,
@@ -39,6 +41,8 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
+    pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
 }
 
 impl Default for ToolRuntime {
@@ -49,6 +53,7 @@ impl Default for ToolRuntime {
             native: Arc::new(Mutex::new(session)),
             mcp: Default::default(),
             browsers: Default::default(),
+            workspace_browser: Default::default(),
             cdp: Default::default(),
             jobs: Default::default(),
             schemas: Default::default(),
@@ -58,6 +63,8 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            preview_grants: Default::default(),
+            terminals: Default::default(),
         }
     }
 }
@@ -92,6 +99,33 @@ pub(crate) async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch:
             // 信号通道关闭不等于用户明确取消，继续等待外层执行或超时结束。
             std::future::pending::<()>().await;
         }
+    }
+}
+
+/// Own the bridge for a blocking reader; dropping the caller cancels parsing and retires its monitor.
+/// 持有阻塞读取的取消桥；调用方退出时停止解析并释放监听任务，不能只在正常返回后清理。
+pub(super) struct WorkerCancellation {
+    pub signal: Arc<AtomicBool>,
+    monitor: tokio::task::JoinHandle<()>,
+}
+
+impl WorkerCancellation {
+    pub fn new(context: &GatewayToolContext) -> Self {
+        let signal = Arc::new(AtomicBool::new(*context.cancellation.borrow()));
+        let worker_signal = signal.clone();
+        let mut receiver = context.cancellation.clone();
+        let monitor = tokio::spawn(async move {
+            wait_for_cancellation(&mut receiver).await;
+            worker_signal.store(true, Ordering::Release);
+        });
+        Self { signal, monitor }
+    }
+}
+
+impl Drop for WorkerCancellation {
+    fn drop(&mut self) {
+        self.signal.store(true, Ordering::Release);
+        self.monitor.abort();
     }
 }
 
@@ -471,7 +505,7 @@ pub(crate) fn protected_path(ctx: &GatewayToolContext, path: &Path) -> bool {
     .any(|(index, root)| super::local_files::within(&root, path) && !(index == 0 && own_sandbox))
 }
 
-async fn filesystem(
+pub(super) async fn filesystem(
     name: &str,
     args: Value,
     ctx: &GatewayToolContext,
@@ -527,7 +561,15 @@ async fn filesystem(
         return Ok(approval(name, &args, ctx));
     }
     let binding = json!({"requestedPath":super::local_files::path_text(&requested),"path":super::local_files::path_text(&path),
-        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat"});
+        "allowMissing":missing,"allowHardLinks":name.starts_with("filesystem.read") || name == "filesystem.stat" || name == "document.read" || name == "artifact.open"});
+    if name == "artifact.open" {
+        return super::gateway_workspace_preview::open(args, path, binding, ctx).await;
+    }
+    if name == "document.read" {
+        let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
+        observe_code_target(ctx, &binding)?;
+        return Ok(result);
+    }
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
             "permissionMode":ctx.permission_mode});
@@ -690,6 +732,28 @@ async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, Gatew
     execute("work.folder.bind".into(), normalized).await
 }
 
+/// Correct a browser launch chosen for an in-app website request before any desktop process is started.
+/// 在启动任何桌面进程前，修正软件内网页请求误选的浏览器启动；明确本机应用请求保持原路径。
+fn workspace_launch_target(args: &Value, ctx: &GatewayToolContext) -> Result<Option<Value>, GatewayError> {
+    let executable = args["appPath"].as_str().unwrap_or("")
+        .rsplit(['/', '\\']).next().unwrap_or("");
+    if !super::intent::is_browser_executable(&executable.to_ascii_lowercase()) {
+        return Ok(None);
+    }
+    let intent = super::intent::calculate("tools.browserIntent", &json!({
+        "message":ctx.config["trustedUserText"],"previousUserMessages":ctx.config["previousUserMessages"]
+    })).map_err(|message| failure("TOOL_INTENT_FAILED", &message, 500))?;
+    if intent["presentationTarget"] == "application" {
+        return Ok(None);
+    }
+    let url = args["args"].as_array().into_iter().flatten().filter_map(Value::as_str)
+        .map(|argument| argument.strip_prefix("--app=").unwrap_or(argument))
+        .find(|argument| argument.starts_with("https://") || argument.starts_with("http://"))
+        .ok_or_else(|| failure("WORKSPACE_BROWSER_REQUIRED",
+            "网页默认在右侧工作区打开。请使用 artifact.open 的 url，或需要网页操作时使用 browser.open；只有明确本机浏览器请求才启动桌面应用。", 400))?;
+    super::gateway_workspace_preview::web_target(&json!({"url":url})).map(Some)
+}
+
 async fn execute_inner(
     tool_name: &str,
     args: Value,
@@ -711,6 +775,19 @@ async fn execute_inner(
     if tool_name == "work.folder.bind" {
         return bind_work(args, ctx).await;
     }
+    if tool_name == "computer.launch" {
+        if let Some(target) = workspace_launch_target(&args, ctx)? {
+            let mut opened = super::gateway_browser::workspace_open(&target, ctx).await?;
+            for (field, value) in target.as_object().unwrap() {
+                if !opened.get(field).is_some_and(|value| !value.is_null()) {
+                    opened[field] = value.clone();
+                }
+            }
+            opened["presentation"] = json!("workspace");
+            opened["redirectedFrom"] = json!("computer.launch");
+            return Ok(opened);
+        }
+    }
     let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop"].contains(&tool_name) || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
@@ -729,12 +806,27 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
+        && !["document.read", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
         return Ok(approval(tool_name, &args, ctx));
     }
-    if tool_name.starts_with("filesystem.") {
+    if tool_name == "artifact.open" && args["url"].is_string() {
+        return super::gateway_workspace_preview::web_target(&args);
+    }
+    if tool_name == "attachment.read" {
+        return super::gateway_attachment_read::read(args, ctx).await;
+    }
+    if tool_name == "artifact.open" {
+        if !args["path"].as_str().is_some_and(|path| !path.trim().is_empty()) {
+            return Err(failure("INVALID_TOOL_ARGUMENTS", "请选择真实文件路径或网页地址。", 400));
+        }
+        let mut target = args;
+        target["_metadataOnly"] = json!(true);
+        return filesystem(tool_name, target, ctx).await;
+    }
+    if tool_name.starts_with("filesystem.") || ["document.read", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.") || tool_name.starts_with("computer.") {
@@ -934,7 +1026,7 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             .map(PathBuf::from),
     );
     let mut available = Vec::new();
-    for root in roots.into_iter().filter(|root| root.is_dir()) {
+    'roots: for root in roots.into_iter().filter(|root| root.is_dir()) {
         let mut entries = tokio::fs::read_dir(&root)
             .await
             .map_err(|_| failure("APP_SKILL_UNAVAILABLE", "技能目录不可读。", 503))?;
@@ -943,11 +1035,29 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             .await
             .map_err(|_| failure("APP_SKILL_UNAVAILABLE", "技能目录读取失败。", 503))?
         {
+            check_cancelled(ctx)?;
             if available.len() >= 128 {
                 break;
             }
             let path = entry.path().join("SKILL.md");
             if !path.is_file() || super::local_files::inspect(&path, false, false).is_err() {
+                continue;
+            }
+            // A selected skill needs only its own body; unrelated packages must not slow or break that read.
+            // 已选择技能只读取自身正文，其他包的大小或损坏不能拖慢、阻断该次读取。
+            let identity = super::service_skill_discovery::identity(
+                &path,
+                &json!({"bundledDirectory":official,"officialDirectory":official}),
+            );
+            let id = identity["id"].as_str().unwrap_or("");
+            if id.is_empty()
+                || name != "skill.list" && args["id"] != id
+                || ctx.config["disabledSkills"].as_array().is_some_and(|disabled| {
+                    disabled.iter().any(|entry| entry == id
+                        || identity["legacyIds"].as_array().is_some_and(|aliases| aliases.contains(entry)))
+                })
+                || available.iter().any(|entry: &Value| entry["id"] == id)
+            {
                 continue;
             }
             let source = path.clone();
@@ -983,31 +1093,11 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             {
                 continue;
             }
-            let identity = native(
-                ctx,
-                "discovery.identity",
-                json!({"path":path,"bundledDirectory":official,"officialDirectory":official}),
-            )
-            .await?;
-            let id = identity["id"].as_str().unwrap_or("");
-            if ctx.config["disabledSkills"]
-                .as_array()
-                .is_some_and(|disabled| {
-                    disabled.iter().any(|entry| {
-                        entry == id
-                            || identity["legacyIds"]
-                                .as_array()
-                                .is_some_and(|aliases| aliases.contains(entry))
-                    })
-                })
-            {
-                continue;
-            }
-            if id.is_empty() || available.iter().any(|entry: &Value| entry["id"] == id) {
-                continue;
-            }
             available.push(json!({"id":id,"name":header["name"],"description":header["description"],"source":path,
                 "sha256":hash,"content":text,"standardCompliant":true}));
+            if name != "skill.list" {
+                break 'roots;
+            }
         }
     }
     if name == "skill.list" {
@@ -1147,7 +1237,7 @@ async fn inspect_package(root: PathBuf, ctx: &GatewayToolContext) -> Result<Valu
     result?
 }
 
-fn bundled_mcp_manifest(ctx: &GatewayToolContext) -> Option<(PathBuf, Value)> {
+pub(super) fn bundled_mcp_manifest(ctx: &GatewayToolContext) -> Option<(PathBuf, Value)> {
     use std::io::Read;
     let application = Path::new(ctx.config["officialToolsRoot"].as_str()?).parent()?;
     let path = application.join("runtime/mcp/manifest.json");
@@ -1171,7 +1261,7 @@ fn bundled_mcp_manifest(ctx: &GatewayToolContext) -> Option<(PathBuf, Value)> {
     Some((application.to_path_buf(), manifest))
 }
 
-fn bundled_mcp_path(application: &Path, relative: &Value) -> Option<PathBuf> {
+pub(super) fn bundled_mcp_path(application: &Path, relative: &Value) -> Option<PathBuf> {
     let relative = Path::new(relative.as_str()?);
     if relative.is_absolute()
         || !relative.starts_with("runtime/mcp")
@@ -1291,8 +1381,13 @@ pub fn mcp_presets(ctx: &GatewayToolContext) -> Vec<Value> {
 }
 
 pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
-    native(ctx,"config.init",json!({"root":ctx.extension_root,"presets":mcp_presets(ctx),"metadata":{"officialToolsRoot":ctx.config["officialToolsRoot"],"userToolsRoot":ctx.extension_root,"officialPackageVersion":"native-v1"}})).await?;
-    native(ctx, "config.read", json!({})).await
+    // Resolve installed preset files off the async runtime, then initialize/read under one native lock acquisition.
+    // 随包工具文件检查移至阻塞线程；配置初始化与读取在同一次原生加锁中完成，避免重复排队。
+    let preset_context = ctx.clone();
+    let presets = tokio::task::spawn_blocking(move || mcp_presets(&preset_context))
+        .await
+        .map_err(|_| failure("TOOL_WORKER_FAILED", "随包工具配置读取线程结束。", 500))?;
+    native(ctx,"config.initRead",json!({"root":ctx.extension_root,"presets":presets,"metadata":{"officialToolsRoot":ctx.config["officialToolsRoot"],"userToolsRoot":ctx.extension_root,"officialPackageVersion":"native-v1"}})).await
 }
 
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1566,6 +1661,7 @@ async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, Ga
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    super::gateway_workspace_terminal::shutdown(ctx).await;
     super::gateway_process::shutdown(ctx).await;
     super::gateway_mcp::shutdown(ctx).await;
     super::gateway_browser::shutdown(ctx).await;
@@ -1602,6 +1698,26 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn website_launches_target_the_workspace_unless_a_local_browser_is_explicit() {
+        let (mut ctx, _keep) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let args = json!({"appPath":"C:/Browser/Chrome.EXE","args":["--new-window","https://example.org/"],"reason":"Open requested page"});
+        for message in ["在右侧打开这个网站", "打开这个网站"] {
+            ctx.config["trustedUserText"] = json!(message);
+            let target = workspace_launch_target(&args, &ctx).unwrap().unwrap();
+            assert_eq!(target["kind"], "browser");
+            assert_eq!(target["url"], "https://example.org/");
+        }
+        ctx.config["trustedUserText"] = json!("用本机 Chrome 打开这个网站");
+        assert!(workspace_launch_target(&args, &ctx).unwrap().is_none());
+        ctx.config["trustedUserText"] = json!("在右侧打开这个网站");
+        assert_eq!(workspace_launch_target(&json!({"appPath":"C:/Browser/chrome.exe"}), &ctx)
+            .unwrap_err().code, "WORKSPACE_BROWSER_REQUIRED");
+        assert!(workspace_launch_target(&json!({"appPath":"C:/Apps/notepad.exe"}), &ctx).unwrap().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn bundled_mcp_presets_resolve_private_paths_and_preserve_credentials() {
@@ -1895,6 +2011,9 @@ mod tests {
         let listed = execute("skill.list", json!({}), &ctx).await.unwrap();
         let id = listed["skills"][0]["id"].clone();
         assert_eq!(id.as_str().unwrap().len(), 24);
+        let unrelated = ctx.workdir.join(".kynxa/skills/unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("SKILL.md"), [0xff]).unwrap();
         let read = execute("skill.read", json!({"id":id}), &ctx).await.unwrap();
         assert!(read["content"].as_str().unwrap().contains("Read this."));
         let page = execute(

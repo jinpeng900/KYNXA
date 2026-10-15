@@ -37,7 +37,7 @@ pub(crate) fn verify_extraction(expected: &Value, current: &Value) -> Result<(),
     }
 }
 pub fn read(path: &Path, limits: &Value, cancel: &Arc<AtomicBool>) -> Result<Value, ContractError> {
-    read_impl(None, path, limits, cancel)
+    read_impl(None, path, limits, cancel, true)
 }
 pub fn read_with_config(
     config: &crate::gateway_contract::GatewayConfig,
@@ -45,18 +45,30 @@ pub fn read_with_config(
     limits: &Value,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Value, ContractError> {
-    read_impl(Some(config), path, limits, cancel)
+    read_impl(Some(config), path, limits, cancel, true)
+}
+
+/// Tool callers already verified the exact file scope, including the conversation's own sandbox.
+/// 工具调用端已校验精确文件权限及会话自有沙箱；索引入口仍排除全部正式数据目录。
+pub(crate) fn read_authorized_with_config(
+    config: &crate::gateway_contract::GatewayConfig,
+    path: &Path,
+    limits: &Value,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Value, ContractError> {
+    read_impl(Some(config), path, limits, cancel, false)
 }
 fn read_impl(
     config: Option<&crate::gateway_contract::GatewayConfig>,
     path: &Path,
     limits: &Value,
     cancel: &Arc<AtomicBool>,
+    exclude_app_data: bool,
 ) -> Result<Value, ContractError> {
     let mut policy = crate::tools::service_source_reading::SourceReadingState::default();
     let mut fields = limits.clone();
     fields["path"] = json!(path);
-    if let Some(config) = config {
+    if let Some(config) = config.filter(|_| exclude_app_data) {
         fields["excludedRoots"] =
             json!([config.data_root, config.data_home, config.extension_root]);
     }
@@ -358,6 +370,17 @@ fn pdf(
         return Err(failure("DOCUMENT_ENCRYPTED"));
     }
     let pages = document.get_pages();
+    let start_page = limits["startPage"].as_u64().unwrap_or(1);
+    let end_page = limits["endPage"].as_u64().unwrap_or(pages.len() as u64);
+    if start_page == 0 || start_page > end_page || start_page > pages.len() as u64 {
+        return Err(gateway::error("PDF 页码范围无效。", "INVALID_TOOL_ARGUMENTS", 400));
+    }
+    let end_page = end_page.min(pages.len() as u64);
+    let selected_pages = pages
+        .keys()
+        .copied()
+        .filter(|page| (*page as u64) >= start_page && (*page as u64) <= end_page)
+        .collect::<Vec<_>>();
     let per_window = limits["maximumPdfPages"]
         .as_u64()
         .unwrap_or(100)
@@ -368,10 +391,10 @@ fn pdf(
     let mut windows = Vec::new();
     let mut text = String::new();
     let mut descriptors = Vec::new();
-    let mut first = 1u32;
+    let mut first = start_page as u32;
     let mut recognized = std::collections::HashMap::new();
     let mut ocr_identity = Value::Null;
-    for (position, page) in pages.keys().enumerate() {
+    for (position, page) in selected_pages.iter().enumerate() {
         cancelled(cancel)?;
         let mut page_text = document.extract_text(&[*page]).unwrap_or_default();
         let mut method = "text";
@@ -380,8 +403,8 @@ fn pdf(
                 return Err(failure("OCR_UNAVAILABLE"));
             }
             if !recognized.contains_key(page) {
-                let missing = pages
-                    .keys()
+                let missing = selected_pages
+                    .iter()
                     .skip(position)
                     .take(per_window)
                     .filter(|page| {
@@ -434,7 +457,7 @@ fn pdf(
         text.push_str(&page_text);
         text.push('\n');
         descriptors.push(json!({"page":page,"startOffset":offset,"endOffset":text.encode_utf16().count(),"method":method}));
-        if position + 1 == pages.len() {
+        if position + 1 == selected_pages.len() {
             windows.push(pdf_window(
                 std::mem::take(&mut text),
                 std::mem::take(&mut descriptors),
@@ -460,7 +483,7 @@ fn pdf(
     }
     let mut value = windows[0].clone();
     value["documentWindows"] = json!(windows);
-    value["documentComplete"] = json!(true);
+    value["documentComplete"] = json!(start_page == 1 && end_page == pages.len() as u64);
     Ok(value)
 }
 fn pdf_window(

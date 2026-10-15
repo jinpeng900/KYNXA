@@ -17,9 +17,9 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
 
     public static IReadOnlyList<CodeToken> Highlight(string source, string? language)
     {
-        // Large/generated blocks remain selectable without thousands of UI text runs.
-        // 大型或生成的代码块仍可选择，不创建数千个 UI 文本片段。
-        if (source.Length > 40_000 || ResolveLanguage(language) is not { } syntax)
+        // The caller owns paging and background rendering; loading another page must not remove existing colors.
+        // 分页和后台渲染由调用端负责；继续加载一页不能使已经展示的代码整体失去高亮。
+        if (ResolveLanguage(language) is not { } syntax)
             return [new(source)];
         try
         {
@@ -43,17 +43,44 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
         return id switch
         {
             "py" or "python" or "python3" => Languages.Python,
-            "js" or "javascript" => Languages.JavaScript,
-            "ts" or "typescript" => Languages.Typescript,
+            "js" or "javascript" or "mjs" or "cjs" or "jsx" => Languages.JavaScript,
+            "ts" or "typescript" or "tsx" => Languages.Typescript,
             "cs" or "c#" or "csharp" => Languages.CSharp,
             "c" or "cc" or "cpp" or "c++" or "h" => Languages.Cpp,
             "html" or "htm" => Languages.Html,
-            "xml" or "xaml" or "svg" => Languages.Xml,
+            "xml" or "xaml" or "svg" or "csproj" => Languages.Xml,
+            "rs" or "rust" => Rust,
+            "diff" or "patch" => Diff,
             "ps1" or "pwsh" or "powershell" => Languages.PowerShell,
             "fs" or "f#" or "fsharp" => Languages.FSharp,
             "" or "text" or "plain" or "plaintext" or "txt" => null,
             _ => Languages.FindById(id),
         };
+    }
+
+    // Additional grammars use the same ColorCode parser and palette in chat and file previews.
+    // 扩展语法继续使用同一个 ColorCode 解析器和调色板，聊天与文件预览不重复实现词法器。
+    private static readonly ILanguage Rust = new AdditionalLanguage("rust", "Rust", [
+        Rule(@"//[^\r\n]*|/\*[\s\S]*?\*/", "Comment"),
+        Rule("""r#+"[\s\S]*?"#+|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\\r\n])'""", "String"),
+        Rule(@"\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b", "Keyword"),
+        Rule(@"\b(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|str|char|String|Vec|Option|Result)\b", "Type"),
+        Rule(@"\b[A-Za-z_]\w*(?=!)", "Function"),
+        Rule(@"\b\d[\w.]*\b", "Number")
+    ]);
+    private static readonly ILanguage Diff = new AdditionalLanguage("diff", "Git diff", [
+        Rule(@"^(?:\+\+\+|---|@@|diff |index ).*$", "Keyword"),
+        Rule(@"^\+.*$", "DiffAdded"), Rule(@"^-.*$", "DiffRemoved")
+    ]);
+    private static LanguageRule Rule(string expression, string scope) => new(expression, new Dictionary<int, string> { [0] = scope });
+    private sealed class AdditionalLanguage(string id, string name, IList<LanguageRule> rules) : ILanguage
+    {
+        public string Id => id;
+        public string Name => name;
+        public string FirstLinePattern => "";
+        public string CssClassName => id;
+        public IList<LanguageRule> Rules => rules;
+        public bool HasAlias(string alias) => string.Equals(alias, id, StringComparison.OrdinalIgnoreCase);
     }
 
     protected override void Write(string source, IList<Scope> scopes)
@@ -65,7 +92,6 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
             int end = start + 1;
             while (end < source.Length && colors[end] == colors[start]) end++;
             _tokens.Add(new CodeToken(source[start..end], colors[start]));
-            if (_tokens.Count > 4096) throw new InvalidOperationException("Code block exceeds the text-run budget.");
             start = end;
         }
     }
@@ -86,6 +112,8 @@ internal sealed class CodeSyntaxHighlighter : CodeColorizerBase
     private static uint? GetColor(string scope)
     {
         string name = scope.ToLowerInvariant();
+        if (name == "diffadded") return 0xFF116329;
+        if (name == "diffremoved") return 0xFFB42318;
         if (name.Contains("comment")) return 0xFF576F43;
         if (name.Contains("keyword") || name.Contains("const") || name.Contains("builtinvalue")) return 0xFF8250DF;
         if (name.Contains("string") || name.Contains("attributevalue")) return 0xFF0A3069;

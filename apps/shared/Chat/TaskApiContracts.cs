@@ -15,7 +15,7 @@ public sealed record TaskBudget(ulong MaxModelRequests, ulong? MaxKnownTokens, u
 public sealed record TaskRecord(Guid TaskId, string RequestId, string Goal, string[] Acceptance, TaskScope Scope,
     Guid? ParentTaskId, Guid[] DependencyIds, TaskBudget Budget, TaskUsage Usage, string State,
     ulong Version, ulong ExecutionVersion, Guid? CurrentAttemptId, ulong EventSequence, string? StopReason,
-    long CreatedAtMs, long UpdatedAtMs, bool? DisplayInTaskList = null);
+    long CreatedAtMs, long UpdatedAtMs, bool? DisplayInTaskList = null, string? Title = null);
 public sealed record TaskListResponse(TaskRecord[] Tasks, bool HasMore, Guid? NextTaskId);
 // A bounded same-chat lookup distinguishes no checkpoint, one checkpoint and ambiguous work.
 // 同聊天有界查询区分无断点、唯一断点和多项待继续任务，不改变工作任务列表范围。
@@ -33,9 +33,10 @@ public sealed record TaskEvent(Guid TaskId, ulong Sequence, string EventId, stri
     JsonElement Payload, long CreatedAtMs);
 public sealed record TaskEventsResponse(Guid TaskId, TaskEvent[] Events, ulong ThroughSequence, bool HasMore);
 public sealed record TaskControlRequest(Guid ConversationId, ulong ExpectedVersion, string Action);
-public sealed record TaskControlResponse(TaskRecord Task, Guid[] AffectedTaskIds, bool ReconnectRequired = false);
+public sealed record TaskControlResponse(TaskRecord Task, Guid[] AffectedTaskIds, bool ReconnectRequired = false,
+    Guid? ReplyMessageId = null);
 public sealed record TaskSteeringRequest(Guid ConversationId, ulong ExpectedVersion, Guid UserMessageId,
-    string Message, string Action);
+    string Message, string Action, Guid? ReplyMessageId = null, ChatAttachment[]? Attachments = null);
 
 public static class TaskStates
 {

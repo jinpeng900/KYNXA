@@ -142,6 +142,7 @@ fn failure_plan(arguments: &Value) -> ServiceResult<Value> {
             == true;
     let file_read = [
         "filesystem.read",
+        "document.read",
         "filesystem.list",
         "filesystem.search",
         "filesystem.stat",

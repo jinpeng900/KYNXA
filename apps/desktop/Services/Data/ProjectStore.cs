@@ -62,7 +62,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     public async Task<ConversationHistoryPage> LoadHistoryPageAsync(Guid conversationId, string? cursor = null,
-        int limit = 200, CancellationToken cancellationToken = default)
+        int limit = 200, CancellationToken cancellationToken = default, int? maximumBytes = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_httpClient.Timeout);
@@ -70,16 +70,24 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         await ModelGatewayService.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
         string endpoint = $"/api/conversations/{conversationId:D}/messages?limit={limit}";
         if (cursor is not null) endpoint += $"&cursor={Uri.EscapeDataString(cursor)}";
+        if (maximumBytes is int bytes) endpoint += $"&maxBytes={bytes}";
         using var response = await _httpClient.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         var page = await GatewayResponseReader.ReadAsync<ConversationHistoryPage>(response,
             UiText.Get("会话存储接口返回了空目录。"), UiText.Get("会话存储接口返回 HTTP {0}。"),
             cancellationToken, JsonOptions).ConfigureAwait(false);
         if (page.ConversationId != conversationId)
             throw new InvalidDataException("Conversation history identity mismatch. / 聊天历史身份不匹配。");
+        AcceptHistoryPage(page);
+        return page;
+    }
+
+    // Reusing a page read from durable storage also restores its known IDs after display-window eviction.
+    // 正式历史页从缓存复用时，也恢复此前随展示窗口淘汰的已保存消息身份，不能把旧消息当成新提交。
+    internal void AcceptHistoryPage(ConversationHistoryPage page)
+    {
         lock (_knownUserMessagesLock)
             foreach (var message in page.Messages.Where(message => message.Role == "user"))
-                _knownUserMessages.Add((conversationId, message.Id));
-        return page;
+                _knownUserMessages.Add((page.ConversationId, message.Id));
     }
 
     /// <summary>

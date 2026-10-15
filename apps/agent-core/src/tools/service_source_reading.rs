@@ -990,7 +990,7 @@ pub(crate) fn execute_io(
                 if text.contains('\0') {
                     return Err(error("UNSUPPORTED_RETRIEVAL_SOURCE"));
                 }
-                Ok(json!({"text": text, "metadata": metadata}))
+                Ok(json!({"text": text, "metadata": metadata, "rawContentHash": digest(&bytes)}))
             } else {
                 Ok(json!({"bytesBase64": STANDARD.encode(bytes), "metadata": metadata}))
             }

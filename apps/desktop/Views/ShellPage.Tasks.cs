@@ -14,7 +14,7 @@ public sealed partial class ShellPage
     private void InitializeTaskPanel()
     {
         TaskPanel.ConfigureApi(_tasksApiClient);
-        TaskPanel.ControlApplied += TaskPanel_ControlApplied;
+        TaskPanel.SetPreviewEnabled(false);
         Unloaded += (_, _) => TaskPanel.SetPreviewEnabled(false);
     }
 
@@ -23,6 +23,8 @@ public sealed partial class ShellPage
         NotifyApprovalConversationChanged();
         Guid? projectId = ActiveChatId is Guid chat ? FindChat(chat).Project?.Id : null;
         TaskPanel.ShowConversation(ActiveChatId, projectId);
+        // The collapsed header does not poll; expanding this view never changes the task itself.
+        // 折叠标题不发起轮询；展开查看不会改变正式任务及暂停恢复状态。
         TaskPanel.SetPreviewEnabled(sidebarVisible && !_chatClosing);
     }
 
@@ -50,7 +52,7 @@ public sealed partial class ShellPage
             _pausedTaskIds[pending.ConversationId] = taskId;
             if (pending.Message.Status != "streaming")
             {
-                pending.Message.Error = UiText.Get("已暂停，进度已保存。");
+                pending.Message.Error = string.Empty;
                 FlushReply(pending, final: true);
             }
             if (!_chatClosing && _pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending)
@@ -66,7 +68,6 @@ public sealed partial class ShellPage
         catch (Exception error) when (error is System.Net.Http.HttpRequestException or OperationCanceledException
             or InvalidOperationException or InvalidDataException or System.Text.Json.JsonException)
         {
-            if (!_chatClosing) ShowActionFeedback(UiText.Get("任务暂停结果尚未确认，请查看任务状态。"));
             TaskPanel.NotifyChanged(pending.ConversationId);
         }
         finally
@@ -74,27 +75,13 @@ public sealed partial class ShellPage
             pending.StopControlPending = false;
             if (waitingRegistration && pending.Started && pending.StopRegistrationRetries++ < 1 && !_chatClosing)
                 _ = StopPendingReplyAsync(pending);
-            else if (waitingRegistration && pending.Started && !_chatClosing)
-                ShowActionFeedback(UiText.Get("任务暂停结果尚未确认，请查看任务状态。"));
         }
-    }
-
-    private async void TaskPanel_ControlApplied(object? sender, TaskControlResponse receipt)
-    {
-        if (_chatClosing || receipt.Task.ParentTaskId is not null) return;
-        if (receipt.Task.State == "paused")
-        {
-            _pausedTaskIds[receipt.Task.Scope.ConversationId] = receipt.Task.TaskId;
-            return;
-        }
-        if (receipt.Task.State is "queued" or "running") await ObserveResumedTaskAsync(receipt.Task);
-        else if (TaskStates.IsTerminal(receipt.Task.State)) _pausedTaskIds.Remove(receipt.Task.Scope.ConversationId);
     }
 
     private async Task<bool> TrySteerPausedTaskAsync()
     {
-        if (ActiveChatId is not Guid conversation || string.IsNullOrWhiteSpace(PromptTextBox.Text)) return false;
-        if (_pausedTaskIds.TryGetValue(conversation, out var taskId)) return await SendTaskSteeringAsync(taskId);
+        if (ActiveChatId is not Guid conversation || (string.IsNullOrWhiteSpace(PromptTextBox.Text) && !HasAttachmentDrafts)) return false;
+        if (_pausedTaskIds.ContainsKey(conversation)) return TryQueuePrompt();
         var (chat, owner) = FindChat(conversation);
         // An empty new draft has no formal chat or task yet; persisted chats remain eligible even before history loads.
         // 空的新聊天草稿尚无正式聊天及任务；已持久化的旧聊天即使历史未加载也必须查询。
@@ -128,101 +115,92 @@ public sealed partial class ShellPage
             return true;
         }
         finally { _sendingPrompt = false; UpdateSendButtonState(); }
-        return recoveredTaskId is Guid recovered && await SendTaskSteeringAsync(recovered);
+        return recoveredTaskId is not null && TryQueuePrompt();
     }
 
-    private async Task<bool> SendTaskSteeringAsync(Guid? pausedTaskId = null)
+    private async Task<bool> SendTaskSteeringAsync(Guid conversation, QueuedPrompt prompt)
     {
-        if (_sendingPrompt || _savingOnClose || _chatClosing || ActiveChatId is not Guid conversation) return false;
-        string draft = PromptTextBox.Text;
-        string text = draft.Trim();
-        if (text.Length == 0) return false;
+        if (_savingOnClose || _chatClosing) return false;
         _pendingReplies.TryGetValue(conversation, out var pending);
-        Guid? taskId = pausedTaskId ?? pending?.TaskId;
-        if (taskId is null)
-        {
-            ShowActionFeedback(UiText.Get("任务正在准备，补充内容已保留，请稍后发送。"));
-            return true;
-        }
-        _sendingPrompt = true;
-        UpdateSendButtonState();
-        ChatMessageState? submitted = null;
+        Guid? taskId = pending?.TaskId;
+        if (taskId is null && _pausedTaskIds.TryGetValue(conversation, out var paused)) taskId = paused;
+        var (chat, project) = FindChat(conversation);
+        if (chat is null) return false;
+        var previous = pending?.Message ?? chat.Messages.LastOrDefault(message => message.Role == "assistant"
+            && message.SupersededByUserMessageId is null && message.Status != "completed");
+        string? previousStatus = previous?.Status;
+        var submitted = PrepareSteeringReply(conversation, prompt, pending);
+        bool steeringAccepted = false;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         try
         {
-            var actions = new ComboBox { HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Stretch, SelectedIndex = 0 };
-            actions.Items.Add(UiText.Get("补充并继续当前任务"));
-            actions.Items.Add(UiText.Get("按补充内容更新方案"));
-            actions.Items.Add(UiText.Get("取消当前任务"));
-            var dialog = new ContentDialog
-            {
-                XamlRoot = XamlRoot, Title = UiText.Get("调整当前任务"), Content = actions,
-                PrimaryButtonText = UiText.Get("确认"), CloseButtonText = UiText.Get("返回"),
-                DefaultButton = ContentDialogButton.Primary
-            };
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary || _chatClosing || ActiveChatId != conversation) return true;
-            var (chat, project) = FindChat(conversation);
-            if (chat is null) return true;
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            await PrepareMessageAttachmentsAsync(conversation, submitted, deadline.Token);
+            prompt.Attachments = submitted.Attachments.ToList();
+            if (taskId is null && pending is not null)
+                taskId = await pending.TaskRegistered.Task.WaitAsync(deadline.Token);
+            if (taskId is null || _chatClosing) throw new InvalidOperationException("The task has no active continuation.");
             var current = await _tasksApiClient.GetAsync(conversation, taskId.Value, project?.Id, deadline.Token);
             if (TaskStates.IsTerminal(current.Task.State))
             {
                 _pausedTaskIds.Remove(conversation);
-                ShowActionFeedback(UiText.Get("原任务已经结束，输入内容已保留。"));
-                return true;
+                throw new InvalidOperationException("The task has already ended.");
             }
-            if (actions.SelectedIndex == 2)
+            TaskControlResponse receipt;
+            try
             {
-                await _tasksApiClient.ControlAsync(conversation, taskId.Value, current.Task.Version, "cancel", project?.Id, deadline.Token);
-                _pausedTaskIds.Remove(conversation);
-                TaskPanel.NotifyChanged(conversation);
-                return true;
+                receipt = await _tasksApiClient.SteerAsync(conversation, taskId.Value, current.Task.Version,
+                    submitted.Id, prompt.Text, "continue", project?.Id, deadline.Token, replyMessageId: prompt.ReplyMessageId,
+                    attachments: submitted.Attachments.ToArray());
             }
-            // Render the update before I/O; the gateway saves its formal message and binds steering to its source/hash.
-            // 先展示用户补充再进行通信；网关保存正式消息，并以来源与哈希绑定任务插话。
-            submitted = new ChatMessageState { Role = "user", Content = text };
-            chat.Messages.Add(submitted);
-            if (PromptTextBox.Text == draft) PromptTextBox.Text = ViewModel.Prompt = string.Empty;
-            UpdateConversationPresentation(openAtBottom: false);
-            var receipt = await _tasksApiClient.SteerAsync(conversation, taskId.Value, current.Task.Version,
-                submitted.Id, text, actions.SelectedIndex == 1 ? "update" : "continue", project?.Id, deadline.Token);
-            _pausedTaskIds.Remove(conversation);
+            catch (GatewayApiException error) when (error.StatusCode == System.Net.HttpStatusCode.Conflict
+                && error.ErrorCode == "TASK_VERSION_CONFLICT")
+            {
+                // Refresh only a rejected version; keep the same task and message identities.
+                // 仅对已明确拒绝的旧版本刷新一次，保持任务及引导消息身份，不重放未知操作。
+                current = await _tasksApiClient.GetAsync(conversation, taskId.Value, project?.Id, deadline.Token);
+                if (TaskStates.IsTerminal(current.Task.State)) throw;
+                receipt = await _tasksApiClient.SteerAsync(conversation, taskId.Value, current.Task.Version,
+                    submitted.Id, prompt.Text, "continue", project?.Id, deadline.Token, replyMessageId: prompt.ReplyMessageId,
+                    attachments: submitted.Attachments.ToArray());
+            }
+            steeringAccepted = true;
             TaskPanel.NotifyChanged(conversation);
             if (receipt.Task.State == "paused")
             {
                 _pausedTaskIds[conversation] = taskId.Value;
-                if (pending is not null) { pending.PauseConfirmed = true; pending.Cancellation.Cancel(); }
-                ShowActionFeedback(UiText.Get("补充已保存，正在等待旧操作结束。"));
                 return true;
             }
+            _pausedTaskIds.Remove(conversation);
             if (receipt.ReconnectRequired && pending is not null)
             {
-                // The gateway has fenced the old attempt; close only its observation and attach to the resumed task.
-                // 网关已停止旧尝试的后续派发；这里只关闭观察流，再接回同一个任务。
                 pending.PauseConfirmed = true;
                 pending.Cancellation.Cancel();
             }
             if (pending is null || receipt.ReconnectRequired) await ObserveResumedTaskAsync(receipt.Task);
+            return true;
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException
             or InvalidOperationException or InvalidDataException or System.Text.Json.JsonException or ArgumentException)
         {
-            if (!_chatClosing)
+            // A failed observation cannot put an already accepted guidance back in the queue.
+            // 接续观察失败不能把已接受的引导退回队列，正式补充与当前回复位置仍保留。
+            if (steeringAccepted)
             {
-                if (submitted is not null && (error is ArgumentException
-                    || error is GatewayApiException gateway && (int)gateway.StatusCode < 500))
-                {
-                    FindChat(conversation).Chat?.Messages.Remove(submitted);
-                    if (string.IsNullOrWhiteSpace(PromptTextBox.Text)) PromptTextBox.Text = ViewModel.Prompt = draft;
-                    UpdateConversationPresentation(openAtBottom: false);
-                }
-                ShowActionFeedback(UiText.Get("任务补充未确认，原任务进度已保留，请查看状态。"));
                 TaskPanel.NotifyChanged(conversation);
+                return true;
             }
+            chat.Messages.RemoveAll(message => message.Id == submitted.Id || message.Id == prompt.ReplyMessageId);
+            if (previous is not null)
+            {
+                previous.SupersededByUserMessageId = null;
+                previous.Status = previousStatus ?? "interrupted";
+                if (pending is not null) { SetPendingReplyMessage(pending, previous); pending.WaitingReplyAnchorId = null; }
+            }
+            if (ActiveChatId == conversation) UpdateConversationPresentation(openAtBottom: false);
+            if (!_chatClosing) ShowActionFeedback(UiText.Get("任务补充未确认，原任务进度已保留，请查看状态。"));
+            return false;
         }
-        finally { _sendingPrompt = false; UpdateSendButtonState(); }
-        return true;
     }
-
     private async Task ObserveResumedTaskAsync(TaskRecord task)
     {
         if (_chatClosing || task.ParentTaskId is not null || task.State is not ("queued" or "running")
@@ -238,21 +216,25 @@ public sealed partial class ShellPage
             }
         }
         var (chat, _) = FindChat(task.Scope.ConversationId);
-        var message = chat?.Messages.FirstOrDefault(item => item.Id == requestId && item.Role == "assistant");
-        if (chat is null || message is null)
+        var rootMessage = chat?.Messages.FirstOrDefault(item => item.Id == requestId && item.Role == "assistant");
+        if (chat is null || rootMessage is null)
         {
             if (!_chatClosing) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。"));
             return;
         }
-        int position = chat.Messages.IndexOf(message);
+        int position = chat.Messages.IndexOf(rootMessage);
         var original = chat.Messages.Take(position).LastOrDefault(item => item.Role == "user");
         if (original is null) return;
+        var message = chat.Messages.LastOrDefault(item => item.Role == "assistant"
+            && item.SupersededByUserMessageId is null && (item.Id == requestId || item.OriginUserMessageId == original.Id))
+            ?? rootMessage;
         try
         {
             await MessageTimePresentation.ForgetAsync(chat.Id, message);
             if (_chatClosing || _pendingReplies.ContainsKey(chat.Id)) return;
             var pending = new PendingChatReply(chat.Id, original.Id, original.Content, message.Provider, message.Model,
-                _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true };
+                _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true, StreamRequestId = requestId };
+            pending.TaskRegistered.TrySetResult(task.TaskId);
             message.Status = "streaming"; message.Error = string.Empty;
             pending.Content.Append(message.Content); pending.Reasoning.Append(message.Reasoning);
             foreach (var segment in message.AssistantSegments)

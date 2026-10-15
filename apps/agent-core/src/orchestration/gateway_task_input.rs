@@ -44,7 +44,7 @@ pub async fn accept(
         let relative = format!("Agent/task-inputs/{request}-{hash}.json");
         managed_files::atomic_write(&root, &root.join(&relative), &bytes, 32 * 1024 * 1024)?;
         let task = NewTask {
-            request_id: request.into(), goal: input["message"].as_str().unwrap_or("").chars().take(4096).collect(),
+            request_id: request.into(), goal: input["message"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or("处理用户附件 / Process user attachments").chars().take(4096).collect(),
             acceptance: vec!["Return the requested result with actual execution and verification status. / 返回请求结果及真实执行、验证状态。".into()],
             scope: TaskScope { conversation_id: conversation.into(), project_id: relationship["projectId"].as_str().map(str::to_owned),
                 permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":{"projectId":relationship["projectId"],"folderPath":relationship["folderPath"]},"requestFingerprint":fingerprint}) },

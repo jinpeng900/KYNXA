@@ -9,6 +9,8 @@ using Microsoft.UI.Xaml.Markup;
 
 namespace KYNXA_Desktop.Controls;
 
+public sealed record TaskArtifactRequest(Guid ConversationId, TaskArtifact Artifact);
+
 /// <summary>
 /// Lazy, virtualized task projections. Hiding or disposing this view cancels reads, never work.
 /// 延迟加载的虚拟任务投影；隐藏或释放视图只取消读取，绝不取消正式工作。
@@ -26,7 +28,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private readonly Dictionary<Guid, Expander> _realized = [];
     private readonly HashSet<Guid> _expanded = [];
     private readonly HashSet<Guid> _loadingDetails = [];
-    private readonly HashSet<Guid> _controlling = [];
     private CancellationTokenSource _reads = new();
     private ITasksApi? _api;
     private Guid? _conversationId, _projectId, _nextTaskId;
@@ -34,14 +35,31 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private long _generation;
     private string? _noticeKey;
     private DateTimeOffset _lastRefresh;
+    private readonly Grid _body = new() { RowSpacing = 6 };
+    private double _availableHeight = 220;
+
+    public bool HasTasks => _rows.Count > 0;
+    public bool IsExpanded => _section.IsExpanded;
+    public event EventHandler? TasksChanged;
+    public event EventHandler<TaskArtifactRequest>? ArtifactOpenRequested;
+    public event EventHandler<TaskArtifactRequest[]>? ArtifactsChanged;
 
     public ConversationTaskPanel()
     {
-        var body = new StackPanel { Spacing = 6 };
+        _body.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        _body.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        _body.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         actions.Children.Add(_refresh); actions.Children.Add(_more);
-        body.Children.Add(actions); body.Children.Add(_notice); body.Children.Add(_list);
-        _section.Content = body; Children.Add(_section);
+        _body.Children.Add(actions); Grid.SetRow(_notice, 1); _body.Children.Add(_notice);
+        Grid.SetRow(_list, 2); _body.Children.Add(_list);
+        _list.MaxHeight = double.PositiveInfinity;
+        _section.Content = _body; _section.IsExpanded = false;
+        _section.MinHeight = 28; _section.FontSize = 12;
+        _section.Resources["ExpanderHeaderPadding"] = new Thickness(8, 0, 8, 0);
+        _section.Resources["ExpanderChevronButtonSize"] = 24d;
+        _section.Resources["ExpanderChevronMargin"] = new Thickness(8, 0, 4, 0);
+        Children.Add(_section);
         _list.ItemsSource = _rows;
         _list.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
@@ -60,24 +78,43 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         _section.RegisterPropertyChangedCallback(Expander.IsExpandedProperty, (_, _) =>
         {
             if (!_section.IsExpanded) CancelReads();
+            UpdateBodyHeight();
             UpdatePolling();
             if (_section.IsExpanded) _ = RefreshAsync();
+            TasksChanged?.Invoke(this, EventArgs.Empty);
         });
         _refresh.Click += (_, _) => _ = RefreshAsync();
         _more.Click += (_, _) => _ = RefreshAsync(loadMore: true);
         _poll.Tick += (_, _) => _ = RefreshAsync();
         UiText.LanguageChanged += LanguageChanged;
         RefreshLanguage();
+        UpdateBodyHeight();
+    }
+
+    public void SetAvailableHeight(double height)
+    {
+        _availableHeight = Math.Max(72, height);
+        MaxHeight = _availableHeight;
+        UpdateBodyHeight();
+    }
+
+    private void UpdateBodyHeight()
+    {
+        _body.Height = Math.Max(32, _availableHeight - 32);
+        // Explicit collapsed geometry wins over the framework's default expander header height.
+        // 收起时使用明确高度，避免框架默认 Expander 标题仍占据大块空间。
+        _section.Height = _section.IsExpanded ? double.NaN : 28;
+        _section.MaxHeight = _section.IsExpanded ? _availableHeight : 28;
     }
 
     public void ConfigureApi(ITasksApi api) => _api = api;
-    public event EventHandler<TaskControlResponse>? ControlApplied;
 
     public void ShowConversation(Guid? conversationId, Guid? projectId)
     {
         if (_disposed || (_conversationId == conversationId && _projectId == projectId)) return;
         CancelReads(); _conversationId = conversationId; _projectId = projectId;
         _rows.Clear(); _realized.Clear(); _expanded.Clear(); _nextTaskId = null;
+        TasksChanged?.Invoke(this, EventArgs.Empty);
         _noticeKey = null; _notice.Text = ""; _section.IsEnabled = conversationId is not null;
         UpdatePolling();
         if (CanRead) _ = RefreshAsync();
@@ -103,7 +140,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private void CancelReads()
     {
         _generation++; _reads.Cancel(); _reads.Dispose(); _reads = new();
-        _loading = false; _loadingDetails.Clear(); _controlling.Clear();
+        _loading = false; _loadingDetails.Clear();
     }
 
     private void UpdatePolling()
@@ -148,10 +185,12 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                     row.Update(task);
                 }
             }
-            foreach (var pair in _realized.Where(pair => _expanded.Contains(pair.Key)).ToArray())
-                if (_rows.FirstOrDefault(row => row.Record.TaskId == pair.Key) is { } row) _ = LoadDetailsAsync(row, pair.Value);
+            if (_section.IsExpanded)
+                foreach (var pair in _realized.Where(pair => _expanded.Contains(pair.Key)).ToArray())
+                    if (_rows.FirstOrDefault(row => row.Record.TaskId == pair.Key) is { } row) _ = LoadDetailsAsync(row, pair.Value);
             Notice(_rows.Count == 0 ? "此聊天暂无任务。" : _rows.Count >= MaximumVisibleRoots
                 ? "已显示最近 500 个任务，更早记录仍保存在任务服务。" : null);
+            TasksChanged?.Invoke(this, EventArgs.Empty);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error) when (error is HttpRequestException or InvalidOperationException or InvalidDataException or JsonException or TaskCanceledException)
@@ -198,14 +237,16 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private async Task LoadDetailsAsync(TaskRow row, Expander expander)
     {
         Guid taskId = row.Record.TaskId;
-        if (!CanRead || !_expanded.Contains(taskId) || !_loadingDetails.Add(taskId)) return;
+        if (!CanRead || !_section.IsExpanded || !_expanded.Contains(taskId) || !_loadingDetails.Add(taskId)) return;
         long generation = _generation;
         var token = _reads.Token;
         try
         {
             var detail = await _api!.GetAsync(row.Record.Scope.ConversationId, taskId, _projectId, token);
-            if (!Current(generation) || !_expanded.Contains(taskId) || expander.DataContext != row) return;
+            if (!Current(generation) || !_section.IsExpanded || !_expanded.Contains(taskId) || expander.DataContext != row) return;
             row.Update(detail.Task);
+            ArtifactsChanged?.Invoke(this, detail.Artifacts.Select(artifact => new TaskArtifactRequest(
+                detail.Task.Scope.ConversationId, artifact)).ToArray());
             if (expander.Content is StackPanel body) RenderDetail(body, detail, generation);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -228,14 +269,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         body.Children.Add(Label(string.Format(UiText.Get("模型耗时 {0:F1}s · 工具耗时 {1:F1}s · 失败调用 {2}"),
             usage.ModelDurationMs / 1000d, usage.ToolDurationMs / 1000d, usage.FailedRequests)));
         if (!string.IsNullOrEmpty(task.StopReason)) body.Children.Add(Label(task.StopReason));
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-        if (!TaskStates.IsTerminal(task.State))
-        {
-            if (task.State != "paused") AddControl(controls, task, "pause", "暂停", generation);
-            if (TaskStates.CanResume(task.State)) AddControl(controls, task, "resume", "继续执行", generation);
-            AddControl(controls, task, "cancel", "取消任务", generation);
-        }
-        body.Children.Add(controls);
         if (detail.Children.Length > 0)
         {
             body.Children.Add(Label(UiText.Get("子任务")));
@@ -263,58 +296,20 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
             body.Children.Add(children);
             body.Children.Add(selectedChild);
         }
-        if (detail.Operations.Length > 0)
-        {
-            body.Children.Add(Label(UiText.Get("操作回执")));
-            body.Children.Add(new ListView { SelectionMode = ListViewSelectionMode.None, MaxHeight = 140,
-                ItemsSource = detail.Operations.Select(operation => $"{operation.Intent.ToolName} · {OperationText(operation.State)}").ToArray() });
-        }
         if (detail.Artifacts.Length > 0)
         {
             body.Children.Add(Label(UiText.Get("结果引用")));
-            body.Children.Add(new ListView { SelectionMode = ListViewSelectionMode.None, MaxHeight = 150,
-                ItemsSource = detail.Artifacts.Select(artifact => $"{artifact.Kind} · {artifact.ArtifactId}\n{ReferenceText(artifact.Reference)}").ToArray() });
+            var artifacts = new ListView { SelectionMode = ListViewSelectionMode.None, MaxHeight = 150,
+                IsItemClickEnabled = true, DisplayMemberPath = nameof(ArtifactRow.Title),
+                ItemsSource = detail.Artifacts.Select(artifact => new ArtifactRow(artifact,
+                    $"{artifact.Kind} · {ReferenceText(artifact.Reference)}")).ToArray() };
+            artifacts.ItemClick += (_, args) =>
+            {
+                if (Current(generation) && args.ClickedItem is ArtifactRow artifact)
+                    ArtifactOpenRequested?.Invoke(this, new(task.Scope.ConversationId, artifact.Artifact));
+            };
+            body.Children.Add(artifacts);
         }
-    }
-
-    private void AddControl(StackPanel host, TaskRecord task, string action, string caption, long generation)
-    {
-        var button = new Button { Content = UiText.Get(caption), MinHeight = 26, Padding = new Thickness(6, 3, 6, 3) };
-        button.Click += async (_, _) =>
-        {
-            if (!Current(generation) || !_controlling.Add(task.TaskId)) return;
-            foreach (var item in host.Children.OfType<Button>()) item.IsEnabled = false;
-            var token = _reads.Token;
-            try
-            {
-                // Retry only after a fresh read and another explicit action; never replay a stale control.
-                // 先刷新状态再由用户重新操作；不自动重放旧版本控制。
-                var receipt = await _api!.ControlAsync(task.Scope.ConversationId, task.TaskId, task.Version, action, _projectId, token);
-                ControlApplied?.Invoke(this, receipt);
-                if (Current(generation)) await RefreshAsync();
-                if (Current(generation) && _realized.TryGetValue(task.TaskId, out var expander)
-                    && _rows.FirstOrDefault(row => row.Record.TaskId == task.TaskId) is { } row)
-                    await LoadDetailsAsync(row, expander);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception error) when (error is HttpRequestException or InvalidOperationException or InvalidDataException or JsonException or TaskCanceledException)
-            {
-                if (Current(generation))
-                {
-                    Notice("任务控制未确认，请刷新状态后再操作。");
-                    await RefreshAsync();
-                }
-            }
-            finally
-            {
-                if (_generation == generation)
-                {
-                    _controlling.Remove(task.TaskId);
-                    foreach (var item in host.Children.OfType<Button>()) item.IsEnabled = true;
-                }
-            }
-        };
-        host.Children.Add(button);
     }
 
     private static TextBlock Label(string text) => new() { Text = text, FontSize = 11, TextWrapping = TextWrapping.Wrap,
@@ -330,8 +325,6 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
             }
         return "";
     }
-    private static string OperationText(string state) => UiText.Get(state switch
-    { "pending" => "等待执行", "dispatched" => "正在执行", "succeeded" => "执行完成", "failed" => "执行失败", "unknown" => "执行结果未知", _ => state });
     internal static string StateText(string state) => UiText.Get(state switch
     {
         "queued" => "等待执行", "running" => "正在执行", "waiting-network" => "等待网络",
@@ -364,7 +357,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     public sealed class TaskRow(TaskRecord record) : INotifyPropertyChanged
     {
         public TaskRecord Record { get; private set; } = record;
-        public string Goal => Record.Goal;
+        public string Goal => string.IsNullOrWhiteSpace(Record.Title) ? Record.Goal : Record.Title;
         public string StateText => ConversationTaskPanel.StateText(Record.State);
         public event PropertyChangedEventHandler? PropertyChanged;
         public void Update(TaskRecord updated)
@@ -376,4 +369,5 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     }
 
     private sealed class RowHook { public bool Recycling { get; set; } }
+    private sealed record ArtifactRow(TaskArtifact Artifact, string Title);
 }

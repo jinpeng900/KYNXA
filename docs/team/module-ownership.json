@@ -331,9 +331,11 @@
         "models/gateway_protocol.rs",
         "orchestration/gateway_loop.rs",
         "orchestration/gateway_runtime.rs",
+        "orchestration/gateway_attachments.rs",
         "resources/gateway.rs",
         "retrieval/gateway.rs",
         "retrieval/gateway_documents.rs",
+        "retrieval/gateway_message_attachments.rs",
         "retrieval/gateway_embedding.rs",
         "retrieval/gateway_index.rs",
         "retrieval/gateway_structure.rs",
@@ -349,6 +351,7 @@
         "storage/experiences.rs",
         "storage/extensions.rs",
         "storage/gateway.rs",
+        "storage/message_attachments.rs",
         "storage/gateway_memory.rs",
         "storage/layout.rs",
         "storage/library.rs",
@@ -366,7 +369,13 @@
         "storage/sqlite_vector_reads.rs",
         "storage/tool_results.rs",
         "tools/gateway.rs",
+        "tools/gateway_document_read.rs",
+        "tools/gateway_workspace_preview.rs",
+        "tools/gateway_attachment_read.rs",
+        "tools/gateway_workspace_changes.rs",
+        "tools/gateway_workspace_terminal.rs",
         "tools/gateway_browser.rs",
+        "tools/gateway_browser_permissions.rs",
         "tools/gateway_mcp.rs",
         "tools/gateway_mcp_budget.rs",
         "tools/gateway_process.rs",
@@ -412,7 +421,7 @@
         "sha2": "=0.10.9",
         "regex": "=1.12.2",
         "unicode-normalization": "=0.1.24",
-        "rusqlite": "=0.37.0",
+        "rusqlite": "=0.40.2",
         "chrono": "=0.4.42",
         "url": "=2.5.8",
         "ignore": "=0.4.24",
@@ -453,6 +462,36 @@
         "bzip2": "=0.6.1"
       },
       "integrationModules": [
+        {
+          "path": "storage/message_attachments.rs",
+          "allowedDomains": ["retrieval"],
+          "purpose": "Conversation-owned attachment snapshots and extraction cache / 会话所有的附件快照与解析缓存"
+        },
+        {
+          "path": "orchestration/gateway_attachments.rs",
+          "allowedDomains": ["storage", "retrieval", "tools"],
+          "purpose": "Message-scoped attachment import and model context / 消息范围附件导入与模型上下文"
+        },
+        {
+          "path": "retrieval/gateway_message_attachments.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Document parsing with conversation-owned cache / 文档解析及会话自有缓存"
+        },
+        {
+          "path": "tools/gateway_attachment_read.rs",
+          "allowedDomains": ["retrieval", "storage"],
+          "purpose": "Authorized original attachment readback / 已授权原始附件回读"
+        },
+        {
+          "path": "tools/gateway_workspace_terminal.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Conversation-owned interactive ConPTY lifecycle / 聊天自有交互终端生命周期"
+        },
+        {
+          "path": "tools/gateway_workspace_changes.rs",
+          "allowedDomains": [],
+          "purpose": "Read-only Git changes in the authorized work directory / 授权工作目录内的只读 Git 变更"
+        },
         {
           "path": "gateway.rs",
           "allowedDomains": [
@@ -555,6 +594,20 @@
           "purpose": "Authoritative tool execution and exact model wire-name loading / 正式工具执行与精确模型协议名称加载"
         },
         {
+          "path": "tools/gateway_document_read.rs",
+          "allowedDomains": [
+            "retrieval"
+          ],
+          "purpose": "Authorized direct file-document extraction without an index / 已授权文件的直接文档解析，不依赖索引"
+        },
+        {
+          "path": "tools/gateway_workspace_preview.rs",
+          "allowedDomains": [
+            "retrieval"
+          ],
+          "purpose": "Authorized workspace file previews and local Office conversion / 授权工作区文件预览与本地 Office 转换"
+        },
+        {
           "path": "tools/gateway_process.rs",
           "allowedDomains": [
             "resources"
@@ -572,6 +625,11 @@
           "path": "tools/gateway_browser.rs",
           "allowedDomains": [],
           "purpose": "Owned CDP browser transport / 拥有的 CDP 浏览器传输"
+        },
+        {
+          "path": "tools/gateway_browser_permissions.rs",
+          "allowedDomains": [],
+          "purpose": "Bundled Chromium sandbox program-file permissions / 随包 Chromium 沙箱程序文件权限"
         },
         {
           "path": "tools/gateway_web.rs",

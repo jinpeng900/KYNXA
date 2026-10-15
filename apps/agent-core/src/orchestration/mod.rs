@@ -2,6 +2,7 @@ pub mod budget;
 pub mod context;
 pub mod embedding_policy;
 pub mod gateway_runtime;
+pub mod gateway_attachments;
 pub mod gateway_loop;
 pub mod gateway_task_journal;
 pub mod gateway_document_progress;

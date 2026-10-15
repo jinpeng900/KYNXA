@@ -146,7 +146,12 @@ fn maintenance_attempt(
                             .iter()
                             .filter_map(Value::as_str)
                             .any(temporary_index_failure)
-                    }))
+                    })
+                // Reuse the scanner's failure classification instead of leaving unchanged files stuck after a timeout.
+                // 复用扫描器的失败分类，避免未变更文件因一次超时永久停留在未完成状态。
+                || job["coverage"]["failures"]
+                    .as_array()
+                    .is_some_and(|failures| failures.iter().any(|failure| failure["retryable"] == true)))
     });
     if let Some(previous) = retry {
         let attempt = previous["automaticRetryAttempt"]
@@ -1251,10 +1256,20 @@ fn finish_semantic(
         if settings["local"]["semantic"] == "off" {
             continue;
         }
-        let original = load_queued(config, &source, settings, cancel);
-        match original.and_then(|source| {
-            gateway_index::publish_semantic(config, &source, &settings["local"], cancel)
-        }) {
+        // Lexical publication already checked this version; complete vectors need no second document decode.
+        // 词法发布已核验此来源版本；向量完整时直接复用，不再次解析整份文档。
+        let receipt = gateway_index::reuse_semantic(config, &source, &settings["local"])
+            .and_then(|cached| match cached {
+                Some(cached) if source["sourceType"] != "work-file" => Ok(cached),
+                Some(cached) if source.get("fileMetadata").is_some() => {
+                    observe_queued_file(&source, cancel)?;
+                    Ok(cached)
+                }
+                _ => load_queued(config, &source, settings, cancel).and_then(|source| {
+                    gateway_index::publish_semantic(config, &source, &settings["local"], cancel)
+                }),
+            });
+        match receipt {
             Ok(receipt) => {
                 semantic += 1;
                 total_chunks += receipt["chunks"].as_u64().unwrap_or(0);
@@ -1283,27 +1298,7 @@ fn load_queued(
     settings: &Value,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Value, ContractError> {
-    let observed = if source["sourceType"] == "work-file" {
-        let receipt = crate::tools::service_source_reading::execute_io(
-            "metadata",
-            &json!({"path":source["locator"]["path"]}),
-            &Some(cancel.clone()),
-        )
-        .map_err(|_| gateway::error("原文件已改变。", "STALE_RETRIEVAL_SOURCE", 409))?;
-        if source
-            .get("fileMetadata")
-            .is_some_and(|metadata| *metadata != receipt["metadata"])
-        {
-            return Err(gateway::error(
-                "原文件已改变。",
-                "STALE_RETRIEVAL_SOURCE",
-                409,
-            ));
-        }
-        Some(receipt["metadata"].clone())
-    } else {
-        None
-    };
+    let observed = observe_queued_file(source, cancel)?;
     let value = if source["sourceType"] == "knowledge" {
         library::apply(
             "storage.library.readSnapshot",
@@ -1364,6 +1359,33 @@ fn load_queued(
         loaded["fileMetadata"] = observed;
     }
     Ok(loaded)
+}
+
+fn observe_queued_file(
+    source: &Value,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Option<Value>, ContractError> {
+    if source["sourceType"] == "work-file" {
+        let receipt = crate::tools::service_source_reading::execute_io(
+            "metadata",
+            &json!({"path":source["locator"]["path"]}),
+            &Some(cancel.clone()),
+        )
+        .map_err(|_| gateway::error("原文件已改变。", "STALE_RETRIEVAL_SOURCE", 409))?;
+        if source
+            .get("fileMetadata")
+            .is_some_and(|metadata| *metadata != receipt["metadata"])
+        {
+            return Err(gateway::error(
+                "原文件已改变。",
+                "STALE_RETRIEVAL_SOURCE",
+                409,
+            ));
+        }
+        Ok(Some(receipt["metadata"].clone()))
+    } else {
+        Ok(None)
+    }
 }
 fn scan_each(
     config: &GatewayConfig,
@@ -2132,6 +2154,72 @@ mod gateway_tests {
         job["status"] = json!("cancelled");
         assert!(maintenance_attempt(&[job], None, &signature, false, now).is_none());
         assert_eq!(retry_delay(10), std::time::Duration::from_secs(900));
+    }
+    #[test]
+    fn unchanged_inventory_retries_retryable_scan_failures_without_retrying_permanent_errors() {
+        let now = chrono::Utc::now();
+        let signature = "b".repeat(64);
+        let mut scanner = crate::tools::service_source_reading::SourceReadingState::default();
+        let failure = scanner
+            .apply(
+                "source.reading.classify",
+                &json!({"code":"DOCUMENT_DECODER_TIMEOUT"}),
+                &None,
+            )
+            .unwrap();
+        let mut job = json!({"projectId":null,"status":"partial","automaticRebuildScope":signature,"automaticRetryAttempt":0,
+            "finishedAt":(now-chrono::Duration::seconds(31)).to_rfc3339(),
+            "coverage":{"complete":false,"failures":[failure]},"semantic":{"skippedSources":0,"diagnosticCodes":[]}});
+        let attempt = maintenance_attempt(&[job.clone()], None, &signature, false, now).unwrap();
+        assert!(!attempt.semantic_only);
+        assert_eq!(attempt.attempt, 1);
+        job["finishedAt"] = json!(now.to_rfc3339());
+        assert!(maintenance_attempt(&[job.clone()], None, &signature, false, now).is_none());
+        job["finishedAt"] = json!((now - chrono::Duration::hours(1)).to_rfc3339());
+        job["coverage"]["failures"][0] = scanner
+            .apply(
+                "source.reading.classify",
+                &json!({"code":"DOCUMENT_PARSE_FAILED"}),
+                &None,
+            )
+            .unwrap();
+        assert!(maintenance_attempt(&[job.clone()], None, &signature, false, now).is_none());
+        job["coverage"]["failures"][0]["retryable"] = json!(true);
+        job["automaticRebuildBlocked"] = json!(true);
+        assert!(maintenance_attempt(&[job], None, &signature, false, now).is_none());
+    }
+    #[test]
+    fn semantic_reuse_uses_published_version_without_reopening_the_original() {
+        let workspace = Workspace::new();
+        gateway_index::initialize(&workspace.config).unwrap();
+        let mut source = json!({"sourceId":"cached-document","scopeKey":"user","sourceType":"document",
+            "sourceRevision":1,"title":"cached.txt","text":"A persisted document already has its complete vector.",
+            "locator":{"relativePath":"cached.txt","path":workspace.root.join("never-reopen.txt")},
+            "embeddingProfileId":"builtin-multilingual","embeddingModelVersion":"fixture-v1","embeddingSpaceId":"fixture-space"});
+        let prepared = gateway_index::prepare_source(&source, Some(&[vec![1.0, 0.0]])).unwrap();
+        gateway_index::publish_prepared(&workspace.config, &[prepared.clone()]).unwrap();
+        source = prepared["source"].clone();
+        source.as_object_mut().unwrap().remove("text");
+        let settings = json!({"local":{"semantic":"auto","embeddingDevicePolicy":"cpu"}});
+        let report = finish_semantic(
+            &workspace.config,
+            &settings,
+            vec![source.clone()],
+            json!({"lexical":1,"failed":0,"complete":true}),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(report["semantic"]["state"], "complete");
+        assert_eq!(report["semantic"]["cachedChunks"], 1);
+        assert_eq!(report["failed"], 0);
+        source["sourceRevision"] = json!(2);
+        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
+        source["sourceRevision"] = json!(1);
+        source["contentHash"] = json!("c".repeat(64));
+        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
+        gateway_index::remove(&workspace.config, "cached-document", &json!(["user"]), false).unwrap();
+        source["contentHash"] = prepared["source"]["contentHash"].clone();
+        assert!(gateway_index::reuse_semantic(&workspace.config, &source, &settings["local"]).unwrap().is_none());
     }
     #[test]
     fn startup_memory_joins_existing_queue_and_indexes_confirmed_scopes_without_cold_models() {

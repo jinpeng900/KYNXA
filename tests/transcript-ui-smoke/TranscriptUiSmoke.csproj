@@ -22,6 +22,23 @@
     <PackageReference Include="Markdig" Version="1.4.0" />
     <PackageReference Include="ColorCode.Core" Version="2.0.15" />
     <Compile Include="../../apps/desktop/Controls/ConversationTranscript.cs" Link="ConversationTranscript.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationPromptQueue.cs" Link="ConversationPromptQueue.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationAttachmentDrafts.cs" Link="ConversationAttachmentDrafts.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationWorkspaceHome.cs" Link="ConversationWorkspaceHome.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationWorkTabs.cs" Link="ConversationWorkTabs.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationDocumentPanel.cs" Link="ConversationDocumentPanel.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkTabState.cs" Link="ConversationWorkTabState.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationChromeView.cs" Link="ConversationChromeView.cs" />
+    <Compile Include="../../apps/desktop/Controls/ConversationChromeView.Input.cs" Link="ConversationChromeView.Input.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/ChromeWorkspaceApiClient.cs" Link="ChromeWorkspaceApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/WorkspacePreviewApiClient.cs" Link="WorkspacePreviewApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/MessageAttachmentsApiClient.cs" Link="MessageAttachmentsApiClient.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/WorkspacePreviewTarget.cs" Link="WorkspacePreviewTarget.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/WorkspaceNavigationAddress.cs" Link="WorkspaceNavigationAddress.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/QueuedPrompt.cs" Link="QueuedPrompt.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/MessageAttachmentDraft.cs" Link="MessageAttachmentDraft.cs" />
     <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <Compile Include="../../apps/desktop/Controls/ToolResultRequest.cs" Link="ToolResultRequest.cs" />
@@ -35,10 +52,14 @@
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
     <Content Include="../../apps/desktop/Resources/Transcript/**/*" Link="Resources/Transcript/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../apps/desktop/Resources/Workspace/**/*" Link="Resources/Workspace/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/Math/**/*" Link="Resources/Math/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/Diagrams/**/*" Link="Resources/Diagrams/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../apps/desktop/Resources/UI/Brand/**/*" Link="Resources/UI/Brand/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Checks.js" CopyToOutputDirectory="PreserveNewest" />
+    <Page Include="../../apps/desktop/Styles/Colors.xaml" Link="Styles/Colors.xaml" />
+    <Page Include="../../apps/desktop/Styles/Dimensions.xaml" Link="Styles/Dimensions.xaml" />
+    <Page Include="../../apps/desktop/Styles/Controls.xaml" Link="Styles/Controls.xaml" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />

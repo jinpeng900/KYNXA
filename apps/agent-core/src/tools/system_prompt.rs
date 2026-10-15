@@ -154,8 +154,13 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
         "Invoke exact declared function names (k_*); guidance uses logical names. tool.load takes logical names.",
         "Follow the original goal; keywords are hints, not intent or permission.",
         "Preserve entities/negations/dates/scope. Exclusions and target/window/local/remote limits bind every action.",
-        "Reuse loaded tools; discover only missing capabilities. Use execution receipts and executionEnvironment for results and location.",
+        "Reuse loaded tools; known unloaded definitions load automatically. Discover missing capabilities; trust actual receipts and executionEnvironment.",
     ].into_iter().map(str::to_owned).collect();
+    lines.push(if compact {
+        "DOCX/PDF/Office/OCR: document.read by path; no index or manual conversion. Follow offsets/pages."
+    } else {
+        "Read DOCX/PDF/Office documents or image OCR by path with document.read, without waiting for indexing. filesystem.read is for UTF-8 text. Try native parsing before asking the user to convert files; continue returned text offsets and PDF page windows."
+    }.into());
     lines.extend(catalog_lines(catalog, maximum));
     lines.push(format!(
         "Now: {}, zone {}; footers are not clocks.",
@@ -166,9 +171,20 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
     lines.push(if mode == "full" { "Mode: Full; allowed tools need no per-call approval; target/path/protected-data checks remain.".into() }
         else { format!("Mode: {mode}. Scoped reads/web.fetch/app/window listing; {}effects, env/credentials/deletion/external files/host/unknown MCP need policy approval.", if mode == "smart" { "scoped writes/verified Windows CMD sandbox; " } else { "" }) });
     lines.push(if compact { "External paths need reason; formal data protected except managed workspace; no connection files. Read/stat and exact SHA-256 before writes; expectedHash:null creation. No hardlink writes/recursive deletion." } else { "Prefer work folder; external paths need reason. Formal data protected except managed workspace; no connection files/backups. Read/stat before mutation; exact SHA-256, expectedHash:null creation. Hardlinks read-only; no recursive deletion." }.into());
-    // Deliver the requested product, not an account of tool preparation; execution evidence stays separate from prose.
-    // 交付用户所需成果，不复述内部工具准备；执行证据与面向用户的正文分别说明。
-    lines.push("Answer with the requested final content or usable artifact links. Keep progress about actual findings or remaining work; do not narrate tool discovery/loading, claim many tools are ready, or stop at a plan. Do not replace requested writing with a brief completion announcement.".into());
+    // Explain meaningful work naturally; these prompt preferences introduce no fixed update cadence or extra model calls.
+    // 自然说明有意义的工作；提示词偏好不引入固定播报频率或额外模型调用。
+    lines.push("Before a substantive task, briefly state the requested outcome as understood and the immediate work direction. During execution, interleave concise key findings, meaningful progress, direction changes or blockers when useful; avoid repetitive preparation chatter and fixed-frequency updates.".into());
+    lines.push("For mid-task user guidance, briefly acknowledge the changed requirement and next step in your next natural reply, then continue with existing evidence, artifacts and settled calls. Do not restart the task or replay completed effects just to acknowledge an adjustment; keep the acknowledgement within the ongoing work.".into());
+    // Presentation is a model choice on the existing identity, never a separate classifier request or new task.
+    // 展示由当前模型在已有身份上选择，不新增分类请求；插话仍是同一任务的补充。
+    lines.push("For substantive multi-step or long work, load/use task.describe to give this task a concise title and choose displayInTaskList=true; brief chat need not appear. Reconsider visibility if scope changes. Mid-task amendments update this same task, not a new task. Existing input/output token and duration accounting remains automatic.".into());
+    lines.push("Answer with the requested final content or usable artifact links. Explain work and findings; do not narrate tool discovery/loading or announce each tool name unless its use materially affects the result or a user decision. Continue beyond the plan; do not replace requested writing with a brief completion announcement.".into());
+    if uses("artifact.open") || uses("browser.") || uses("computer.") {
+        lines.push("Open websites in the right workspace by default: artifact.open(url) for display, browser.open(url) for interaction. Right/sidebar/workspace never means a desktop app; computer.launch is for explicit local/system/external browser requests. Claim opened only after a successful opening receipt.".into());
+    }
+    if uses("artifact.open") {
+        lines.push("Choose descriptive filenames and the useful output format. After a real file is saved, artifact.open can present it in the sidebar. Reuse the same file for revisions. Do not claim a preview or a DOCX/PPT file exists before its successful receipt. Ordinary chat needs no artifact.".into());
+    }
     lines.push("Meet the user's acceptance criteria; saved-file readback for writing, relevant real tests/type checks for code edits. Reuse successful checks unless affected files changed; avoid repeated verification without a new issue. Report actual failures.".into());
     lines.push("Observe interrupted/unknown effects before retry. Continue authorized unfinished work from saved progress; a model output boundary or context checkpoint does not finish the task. Produce the final answer before declaring completion.".into());
     lines.push("Honor user cancellation; preserve settled receipts and resume only when requested.".into());
@@ -209,7 +225,8 @@ pub fn calculate(args: &Value) -> Result<Value, String> {
             .iter()
             .map(|value| string(value).to_owned()),
         );
-        lines.push("Signed-in work: verified authorization/session; no secret readback/cookie copying; user handles trust/MFA.".into());
+        lines.push("Workspace sign-in persists application-wide across chats/works until cleared. Verify authorization/session; no secret readback/cookie copying; user handles trust/MFA.".into());
+        lines.push("Research queries prefer web.search's enabled providers over repeated browser searches. needsHumanVerification/evidenceUsable=false means preserve that page for the user, stop reload/retry/wait loops, and continue independent research through web.search; verification text is not source evidence.".into());
     }
     if uses("terminal.run") {
         lines.push(match context["sandboxCapabilities"]["available"].as_bool() {
@@ -397,6 +414,8 @@ mod tests {
         assert!(prompt.contains("context checkpoint does not finish the task"));
         assert!(prompt.contains("catalogs are runtime configuration, not user memory"));
         assert!(prompt.contains("do not narrate tool discovery/loading"));
+        assert!(prompt.contains("Open websites in the right workspace by default"));
+        assert!(prompt.contains("only after a successful opening receipt"));
         let focused = calculate(&json!({"maximumTokens":1800,"context":{
             "permissionMode":"full","projectId":"work-fixture","workspaceRoot":"/work"
         },"catalogState":{

@@ -856,6 +856,17 @@ fn requests_browser_operation(clause: &str) -> bool {
     )
 }
 
+/// Presentation hints select an existing surface; they never authorize a browser or desktop effect.
+/// 展示线索仅选择既有界面，不授予浏览器或桌面操作权限。
+pub(super) fn browser_presentation(active: &str) -> &'static str {
+    let in_workspace = matches(r"右侧|侧栏|工作区|\b(?:sidebar|workspace)\b", active);
+    let external = matches(
+        r"(?:本机|本地|系统|桌面|外部|我的).{0,12}(?:浏览器|chrome|chromium|edge|firefox)|\b(?:local|system|desktop|external|my)\s+(?:browser|chrome|edge|firefox)\b|(?:启动|运行|launch|start).{0,12}(?:浏览器|chrome|chromium|edge|firefox)",
+        active,
+    );
+    if external && !in_workspace { "application" } else { "workspace" }
+}
+
 fn current_browser_intent(message: &str) -> Value {
     let text = browser_instruction(message);
     let projection = analyze_clauses(&text);
@@ -903,7 +914,10 @@ fn current_browser_intent(message: &str) -> Value {
         );
         local |= !remote;
     }
-    let mut intent = json!({"allowLocalBrowser":local,"explicitBrowserTask":explicit});
+    // Display location is separate from browser authority: website requests stay in the app unless a desktop browser is explicit.
+    // 展示位置与浏览器授权分开；普通网站请求留在软件内，明确桌面浏览器请求才使用外部应用。
+    let mut intent = json!({"allowLocalBrowser":local,"explicitBrowserTask":explicit,
+        "presentationTarget":browser_presentation(projection["activeText"].as_str().unwrap_or(""))});
     if !excluded.is_empty() {
         intent["excludedBrowserExecutables"] = json!(excluded);
     }
@@ -916,6 +930,7 @@ fn browser_intent(message: &str, history: &[Value]) -> Value {
     if analyze_clauses(&text)["boundary"] != "none"
         || !browser_followup(message)
         || matches(BROWSER_NAME, &text)
+        || matches(r"右侧|侧栏|工作区|\b(?:sidebar|workspace)\b", &text)
     {
         current["inherited"] = json!(false);
         return current;
@@ -1001,6 +1016,24 @@ pub(super) fn is_browser_executable(name: &str) -> bool {
         "vivaldi.exe",
     ]
     .contains(&name)
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    #[test]
+    fn website_presentation_defaults_to_workspace_and_honors_explicit_desktop_requests() {
+        for message in ["在右侧打开B站官网", "打开https://example.org", "不要用本机Chrome，在右侧打开网站", "Open this website in the sidebar"] {
+            assert_eq!(current_browser_intent(message)["presentationTarget"], "workspace", "{message}");
+        }
+        for message in ["用系统浏览器打开网站", "启动本机Chrome", "Open this in the external browser"] {
+            assert_eq!(current_browser_intent(message)["presentationTarget"], "application", "{message}");
+        }
+        let resumed = browser_intent("在右侧打开网站", &[json!("启动本机Chrome")]);
+        assert_eq!(resumed["presentationTarget"], "workspace");
+        assert_eq!(resumed["inherited"], false);
+    }
 }
 
 const REQUEST_LEAD: &str = "^(?:(?:请|先|暂时|暂且|现在|目前|我们|我|那|就|并|也|好(?:的)?|这次)\\s*|(?:please|for now|now|currently|we|let['’]s)\\s+)*";

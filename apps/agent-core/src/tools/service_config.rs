@@ -53,6 +53,23 @@ mod lifecycle_configuration_tests {
         assert_eq!(normalized["trusted"], true);
         assert_eq!(normalized["backgroundTask"], true);
         assert_eq!(normalized["prewarmPriority"], 37);
+        let mut unsupported = source.clone();
+        unsupported["protocolVersion"] = json!("2026-07-28");
+        assert_eq!(
+            normalize_server(&unsupported).unwrap()["protocolVersion"],
+            "2026-07-28"
+        );
+        let mut legacy = source.clone();
+        legacy["protocolVersion"] = json!("2025-06-18");
+        assert_eq!(
+            normalize_server(&legacy).unwrap()["protocolVersion"],
+            "2025-06-18"
+        );
+        for protocol in [json!(20260728), json!("newest"), json!("2026-07-28\n")] {
+            let mut malformed = source.clone();
+            malformed["protocolVersion"] = protocol;
+            assert!(normalize_server(&malformed).is_err());
+        }
         for (field, value) in [
             ("trusted", json!("true")),
             ("backgroundTask", json!(1)),
@@ -62,6 +79,57 @@ mod lifecycle_configuration_tests {
             invalid[field] = value;
             assert!(normalize_server(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn unsupported_mcp_revision_preserves_other_servers_and_config_round_trip() {
+        let root = std::env::temp_dir().join(format!("kynxa-config-{}", uuid::Uuid::new_v4()));
+        let file = root.join("Agent/config.json");
+        let servers = (0..18)
+            .map(|index| json!({"id":format!("fixture-{index}"),"name":format!("Fixture {index}"),
+                "enabled":true,"transport":"stdio","command":format!("fixture-{index}.exe"),"args":[],
+                "protocolVersion":if index == 17 {"2026-07-28"} else {"2025-11-25"}}))
+            .collect::<Vec<_>>();
+        let original = json!({"version":1,"revision":7,"mcpServers":servers,
+            "skillDirectories":[],"disabledSkills":[]});
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        std::fs::write(&file, &original_bytes).unwrap();
+        let mut repository = ConfigRepository::default();
+        let loaded = repository
+            .apply("config.initRead", &json!({"root":root}))
+            .unwrap();
+        assert_eq!(loaded["mcpServers"].as_array().unwrap().len(), 18);
+        assert_eq!(loaded["mcpServers"][17]["protocolVersion"], "2026-07-28");
+        assert_eq!(std::fs::read(&file).unwrap(), original_bytes);
+
+        let mut mcp = super::super::service_mcp::McpState::default();
+        let unsupported = mcp
+            .apply("mcp.sdkOptions", &loaded["mcpServers"][17])
+            .unwrap_err();
+        assert_eq!(unsupported.code, "MCP_UNSUPPORTED_PROTOCOL");
+        assert!(mcp.apply("mcp.sdkOptions", &loaded["mcpServers"][0]).is_ok());
+
+        let mut input = loaded;
+        input["expectedRevision"] = json!(7);
+        let updated = repository
+            .apply("config.update", &json!({"input":input}))
+            .unwrap();
+        assert_eq!(updated["revision"], 8);
+        let persisted = repository.apply("config.read", &json!({})).unwrap();
+        assert_eq!(persisted, updated);
+        assert_eq!(persisted["mcpServers"][17]["protocolVersion"], "2026-07-28");
+
+        let mut malformed = original;
+        malformed["mcpServers"][17]["protocolVersion"] = json!(42);
+        let malformed_bytes = serde_json::to_vec(&malformed).unwrap();
+        std::fs::write(&file, &malformed_bytes).unwrap();
+        assert_eq!(
+            repository.apply("config.read", &json!({})).unwrap_err().code,
+            "CORRUPT_AGENT_CONFIG"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), malformed_bytes);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 fn object(value: &Value) -> ServiceResult<()> {
@@ -162,8 +230,10 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
     } else {
         protocol.as_str().unwrap_or("")
     };
-    if !["2025-11-25", "2026-07-28"].contains(&protocol) {
-        return Err(invalid("MCP 协议须明确为 2025-11-25 兼容或 2026-07-28。"));
+    // Persist well-formed revisions independently of this client's transport capabilities.
+    // 配置保留合法协议日期；连接时再判断实现能力，单个不兼容服务不能使整份配置损坏。
+    if !matches(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", protocol) {
+        return Err(invalid("MCP 协议版本须为 YYYY-MM-DD 日期格式。"));
     }
     let disabled = server
         .get("disabledTools")
@@ -632,11 +702,15 @@ impl ConfigRepository {
 
     pub fn apply(&mut self, operation: &str, arguments: &Value) -> ServiceResult<Value> {
         match operation {
-            "config.init" => {
+            "config.init" | "config.initRead" => {
                 self.root = absolute_path(string(&arguments["root"]));
                 self.presets = arguments["presets"].as_array().cloned();
                 self.metadata = arguments["metadata"].clone();
-                Ok(Value::Null)
+                if operation == "config.initRead" {
+                    self.effective(&self.read_user()?)
+                } else {
+                    Ok(Value::Null)
+                }
             }
             "config.read" => self.effective(&self.read_user()?),
             "config.validate" => {

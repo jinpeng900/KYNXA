@@ -45,6 +45,7 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     private long _loadGeneration;
     private int _selectedSourceIndex;
     private bool _previewEnabled, _disposed, _tabbedMode;
+    private bool _sourcesRefreshQueued, _forceSourcesRefresh;
     private string _noticeKey = "正在读取工具结果…";
 
     private sealed record CachedScreenshot(ArchivedScreenshot Archive, DecodedToolImage Image, int PreviewDimension)
@@ -123,7 +124,11 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
         if (_disposed) return;
         ArgumentNullException.ThrowIfNull(messages);
         bool changed = _conversationId != conversationId;
-        if (changed) { CancelLoading(); ClearImages(); _screenshotSources = []; _selectedSourceIndex = 0; }
+        if (changed)
+        {
+            CancelLoading(); ClearImages(); _screenshotSources = []; _selectedSourceIndex = 0;
+            _open.IsEnabled = false; _notice.Visibility = Visibility.Collapsed; Visibility = Visibility.Collapsed;
+        }
         bool sameRows = !changed && _messages.Count == messages.Count && _messages.Zip(messages).All(pair => ReferenceEquals(pair.First, pair.Second));
         _conversationId = conversationId;
         if (sameRows && !_messages.Any(RememberActivities)) return;
@@ -189,6 +194,22 @@ public sealed class ConversationScreenshotsPanel : Grid, IDisposable
     }
 
     private void RefreshSources(bool force = false)
+    {
+        if (_disposed) return;
+        _forceSourcesRefresh |= force;
+        if (_sourcesRefreshQueued) return;
+        // Defer and merge activity scans; read the current conversation when dispatched.
+        // 延后合并工具扫描，执行时读取当前聊天，避免旧队列带回上个聊天的截图。
+        _sourcesRefreshQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            _sourcesRefreshQueued = false;
+            bool refreshForced = _forceSourcesRefresh;
+            _forceSourcesRefresh = false;
+            if (!_disposed) RefreshSourcesNow(refreshForced);
+        });
+    }
+
+    private void RefreshSourcesNow(bool force)
     {
         var selected = SelectedSource;
         var next = ConversationScreenshotSources.Collect(_conversationId,

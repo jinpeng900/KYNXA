@@ -487,7 +487,10 @@ async fn summarize_current_step(
     let saved_fit = if pending_sources == 0 && !facts.is_empty() {
         super::tool_context::semantic_checkpoint_fit(plan, projection, &previous, checkpoint_budget)
     } else { Value::Null };
-    let saved_refinement = saved_fit["omittedFacts"].as_u64().is_some_and(|count| count > 0);
+    // A valid projection may keep extra facts in its verified archive; unchanged completed work needs no new model call.
+    // 有效投影允许完整事实留在已核验归档；输入未变且已经适配时复用完成结果，不重复调用模型。
+    let saved_refinement = saved_fit["omittedFacts"].as_u64().is_some_and(|count| count > 0)
+        && (previous["inputSignature"] != signature || saved_fit["fits"] != true);
     let saved_content_budget = saved_fit["remainingFactBudgetTokens"].as_u64()
         .unwrap_or(content_budget).min(content_budget);
     let mut calls = 0_u64;
@@ -2249,8 +2252,8 @@ mod tests {
         assert_eq!(limited["modelCalls"], 1);
         assert_eq!(limited["summaryOutputBudgetTokens"], 1024);
         assert_eq!(observed_output_cap.load(Ordering::Acquire), 1024);
-        assert_eq!(limited["contentBudgetTokens"], 2048);
-        assert_eq!(limited["requestedSummaryOutputTokens"], 5120);
+        assert_eq!(limited["contentBudgetTokens"], 3072);
+        assert_eq!(limited["requestedSummaryOutputTokens"], 6144);
         assert_eq!(limited["metadataOnlySources"], 1);
         assert_eq!(limited["unprocessedSources"], 0);
         assert_eq!(

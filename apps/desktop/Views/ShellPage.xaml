@@ -520,11 +520,13 @@
                             <Image x:Name="KynxaLogo" Width="353" Height="235" HorizontalAlignment="Center" VerticalAlignment="Center" Source="{StaticResource KynxaLogoImage}" Stretch="Uniform" />
                         </Grid>
 
+                        <controls:ConversationPromptQueue x:Name="PromptQueue" Margin="16,0,16,0" HorizontalAlignment="Stretch" />
                         <controls:ComposerSurface x:Name="ComposerHost" IsFooterVisible="True" services:UiLocalization.AutomationName="对话输入区">
                             <controls:ComposerSurface.Body>
                                 <Grid>
-                                    <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
-                                    <TextBox x:Name="PromptTextBox" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
+                                    <controls:ConversationAttachmentDrafts x:Name="ComposerAttachments" />
+                                    <TextBox x:Name="PromptTextBox" Grid.Row="1" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                         <TextBox.Resources>
                                             <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
                                             <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
@@ -537,19 +539,17 @@
                                         </TextBox.Resources>
                                     </TextBox>
 
-                                    <Button x:Name="ComposerExpandButton" Style="{StaticResource KynxaCompactIconButtonStyle}" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Click="ComposerExpandButton_Click" CornerRadius="7" ToolTipService.ToolTip="{services:UiText Key='展开输入区'}">
+                                    <Button x:Name="ComposerExpandButton" Grid.Row="1" Style="{StaticResource KynxaCompactIconButtonStyle}" Margin="12,8,0,0" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Top" Click="ComposerExpandButton_Click" CornerRadius="7" ToolTipService.ToolTip="{services:UiText Key='展开输入区'}">
                                         <FontIcon x:Name="ComposerExpandIcon" FontSize="14" Glyph="" />
                                     </Button>
 
-                                    <Grid x:Name="ComposerToolbar" Grid.Row="1" Margin="12,0,12,8">
+                                    <Grid x:Name="ComposerToolbar" Grid.Row="2" Margin="12,0,12,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                         <StackPanel x:Name="ComposerToolbarLeft" HorizontalAlignment="Left" Orientation="Horizontal" Spacing="4">
-                                            <Border Background="Transparent" services:UiLocalization.ToolTip="附件上传尚未开放，可直接粘贴文本或在项目菜单关联文件夹。">
-                                                <Button x:Name="ComposerAddButton" IsEnabled="False" Style="{StaticResource KynxaComposerAddButtonStyle}"
-                                                        services:UiLocalization.AutomationName="附件上传尚未开放">
-                                                    <Image Width="20" Height="20" Source="{StaticResource IconAdd}" Opacity="0.55" />
-                                                </Button>
-                                            </Border>
+                                            <Button x:Name="ComposerAddButton" Style="{StaticResource KynxaComposerAddButtonStyle}"
+                                                    Click="ComposerAddButton_Click" services:UiLocalization.AutomationName="添加附件" services:UiLocalization.ToolTip="添加附件">
+                                                <Image Width="20" Height="20" Source="{StaticResource IconAdd}" />
+                                            </Button>
                                             <Button x:Name="PermissionPickerButton" Style="{StaticResource KynxaPickerButtonStyle}"
                                                     Click="PermissionPickerButton_Click" AutomationProperties.Name="{services:UiText Key='权限：请求批准'}">
                                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
@@ -587,9 +587,9 @@
                                         </Grid>
                                     </Grid>
 
-                                    <controls:ResizeGrip x:Name="ComposerLeftGrip" Grid.RowSpan="2" HorizontalAlignment="Left" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerLeftGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
-                                    <controls:ResizeGrip x:Name="ComposerRightGrip" Grid.RowSpan="2" HorizontalAlignment="Right" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerRightGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
-                                    <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="2" VerticalAlignment="Top" Axis="Vertical" IndicatorBrush="Transparent" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerLeftGrip" Grid.RowSpan="3" HorizontalAlignment="Left" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerLeftGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerRightGrip" Grid.RowSpan="3" HorizontalAlignment="Right" Axis="Horizontal" CancelRequested="ComposerWidthGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerRightGrip_DragDelta" DragStarted="ComposerWidthGrip_DragStarted" ResetRequested="ComposerWidthGrip_ResetRequested" />
+                                    <controls:ResizeGrip x:Name="ComposerTopGrip" Grid.RowSpan="3" VerticalAlignment="Top" Axis="Vertical" IndicatorBrush="Transparent" CancelRequested="ComposerHeightGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="ComposerTopGrip_DragDelta" DragStarted="ComposerHeightGrip_DragStarted" ResetRequested="ComposerHeightGrip_ResetRequested" />
                                 </Grid>
                             </controls:ComposerSurface.Body>
                             <controls:ComposerSurface.Footer>
@@ -622,20 +622,26 @@
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                         <controls:MountedWorkspaceHeader x:Name="MountedWorkspace" Margin="10,3,40,0" />
-                        <Grid x:Name="WorkContextModulesHost" Grid.Row="1" Margin="14,10,14,14">
+                        <Grid x:Name="WorkContextModulesHost" Grid.Row="1" Margin="14,10,14,14" SizeChanged="WorkContextModulesHost_SizeChanged">
                             <Grid.RowDefinitions>
+                                <RowDefinition x:Name="WorkTaskRow" Height="Auto" />
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
+                                <RowDefinition x:Name="WorkFileTabsRow" Height="Auto" MinHeight="26" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
-                            <controls:ConversationTaskPanel x:Name="TaskPanel" Margin="0,0,0,8" />
-                            <controls:ConversationWorkTabs x:Name="WorkTabs" Grid.Row="1" />
-                            <Grid Grid.Row="2">
+                            <controls:ConversationTaskPanel x:Name="TaskPanel" Visibility="Collapsed" />
+                            <controls:ResizeGrip x:Name="TaskRegionGrip" Grid.Row="1" Axis="Vertical" Visibility="Collapsed"
+                                                 services:UiLocalization.AutomationName="调整任务区高度"
+                                                 services:UiLocalization.ToolTip="拖动调整高度，双击恢复默认"
+                                                 DragStarted="TaskRegionGrip_DragStarted" DragDelta="TaskRegionGrip_DragDelta"
+                                                 DragCompleted="LayoutGrip_DragCompleted" CancelRequested="TaskRegionGrip_CancelRequested"
+                                                 ResetRequested="TaskRegionGrip_ResetRequested" />
+                            <controls:ConversationWorkTabs x:Name="WorkTabs" Grid.Row="2" />
+                            <Grid Grid.Row="3">
                                 <controls:ConversationScreenshotsPanel x:Name="ScreenshotPanel" />
-                                <TextBlock x:Name="WorkTabEmptyHint" Text="{services:UiText Key='暂无预览内容。工具返回截图后会在此显示。'}"
-                                           Foreground="{StaticResource KynxaSecondaryTextBrush}" FontSize="12"
-                                           TextWrapping="Wrap" TextAlignment="Center" MaxWidth="240"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+                                <controls:ConversationDocumentPanel x:Name="DocumentPanel" Visibility="Collapsed" />
+                                <controls:ConversationWorkspaceTerminal x:Name="WorkspaceTerminal" Visibility="Collapsed" />
+                                <controls:ConversationWorkspaceHome x:Name="WorkspaceHome" Visibility="Collapsed" />
                             </Grid>
                         </Grid>
                         <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Top"

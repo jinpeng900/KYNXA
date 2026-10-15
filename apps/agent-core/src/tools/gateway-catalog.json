@@ -1,6 +1,42 @@
 {
   "tools": [
     {
+      "name": "attachment.read",
+      "description": "Read extracted text from a file attached to a saved user message in this conversation. Use messageId and attachmentId from the attachment manifest; no private filesystem path is needed. Continue with nextOffset while hasMore. Returns original snapshot version and extraction coverage; unsupported or failed extraction is explicit, not empty evidence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string" },
+          "attachmentId": { "type": "string" },
+          "offset": { "type": "integer", "minimum": 0 },
+          "maxChars": { "type": "integer", "minimum": 1, "maximum": 262144 },
+          "expectedSha256": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "required": ["messageId", "attachmentId"],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "artifact.open",
+      "description": "Display an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. Write real files with existing file tools first. Returns the validated file/version and actual supported preview, including text fallback when Office page conversion is unavailable. It does not create files, claim task completion, or grant broader file access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "Existing file path, relative to the current workspace or explicitly authorized absolute path." },
+          "url": { "type": "string", "description": "Full HTTP or HTTPS webpage URL, used instead of path." },
+          "title": { "type": "string", "maxLength": 1024 },
+          "reason": { "type": "string" },
+          "offset": { "type": "integer", "minimum": 0 },
+          "maxChars": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "filesystem.list",
       "description": "List one directory without following links. Returns bounded entries.",
       "inputSchema": {
@@ -64,6 +100,58 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 1048577
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "document.read",
+      "description": "Read DOCX/Word, PDF, PowerPoint, spreadsheets, Markdown and other supported documents directly by file path using native extraction; no index or manual conversion required. Images/scanned PDF use OCR when available. Returns original SHA-256, UTF-16 text offsets, format/version and actual PDF page coverage. Follow nextOffset while hasMore with the same page range and expectedSha256. PDF defaults to up to 100 pages from startPage; then continue nextPage with offset 0. This reads only; it does not import or index the document.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Relative to the linked work folder, or an authorized absolute file path."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required explanation for access outside the linked work folder."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 33554432,
+            "description": "UTF-16 position in the extracted text of the selected page range; use nextOffset."
+          },
+          "maxChars": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64000
+          },
+          "startPage": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "PDF only: inclusive 1-based page, default 1. Keep unchanged while following nextOffset."
+          },
+          "endPage": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "PDF only: inclusive 1-based page; default startPage+99, clipped to the actual last page."
+          },
+          "expectedSha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "Original file SHA-256 from the preceding read; rejects continuation after the file changes."
           }
         },
         "required": [
@@ -1617,7 +1705,7 @@
     {
       "name": "computer.launch",
       "source": "builtin",
-      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
+      "description": "Open a local application executable discovered with computer.apps/windows or supplied by the user. Websites default to artifact.open/browser.open in the right workspace; use this for browsers only when the user explicitly requests a local/system/external browser application. Absolute .exe path required; console-subsystem applications such as Blender are supported. pythonw requires an absolute .py/.pyw entry; javaw requires -jar and an absolute .jar. Commands and inline scripts use terminal.host.run. Background Chrome/Edge retains rendering for screenshots. Host desktop; broker permissions and target checks apply.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2093,6 +2181,29 @@
         },
         "required": [
           "goal"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
+      "name": "task.describe",
+      "description": "Name this existing task and choose whether it belongs in the task list. Use a concise meaningful title for substantive multi-step work; brief chat can stay hidden. Changes only current-task presentation, preserves usage and task identity, and never starts another task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "displayInTaskList": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "displayInTaskList"
         ],
         "additionalProperties": false
       },

@@ -150,9 +150,34 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
     }
     if state.cancel
         && (!state.steering_cycle.load(Ordering::Acquire)
-            || state.calls.load(Ordering::SeqCst) == 1)
+            || state.calls.load(Ordering::SeqCst) <= 2)
     {
-        let chunk = json!({"id":"cancel-fixture","choices":[{"index":0,"delta":{"content":"已开始，保留这段正文。"},"finish_reason":null}]}).to_string();
+        let mut delta = json!({"content":"已开始，保留这段正文。"});
+        if state.steering_cycle.load(Ordering::Acquire) {
+            delta["tool_calls"] = json!([{"index":0,"id":"obsolete-partial-write","type":"function","function":{"name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.write"),"arguments":"{\"path\":\"obsolete.txt\",\"content\":\""}}]);
+        }
+        let chunk = json!({"id":"cancel-fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]}).to_string();
+        if state.steering_cycle.load(Ordering::Acquire) {
+            let completed = json!({"id":"cancel-fixture","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}).to_string();
+            let events = futures_util::stream::unfold(
+                (Some(format!("data: {chunk}\n\n")), Some(format!("data: {completed}\n\ndata: [DONE]\n\n"))),
+                |(first, last)| async move {
+                    if let Some(first) = first {
+                        return Some((Ok::<_, std::convert::Infallible>(first), (None, last)));
+                    }
+                    if let Some(last) = last {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        return Some((Ok::<_, std::convert::Infallible>(last), (None, None)));
+                    }
+                    None
+                },
+            );
+            return (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(events),
+            )
+                .into_response();
+        }
         let events = futures_util::stream::unfold(
             (Some(format!("data: {chunk}\n\n")), false),
             |(chunk, delayed)| async move {
@@ -288,15 +313,10 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
             .flatten()
             .filter(|message| message["role"] == "tool")
             .count();
-        if count < 3 {
-            let (name, arguments) = if count == 1 {
-                ("tool.load", json!({"names":["task.status"]}))
-            } else {
-                ("task.status", json!({}))
-            };
-            json!({"role":"assistant","content":"Load the declared capability and continue.","tool_calls":[{"id":format!("unloaded-{count}"),"type":"function","function":{"name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}}]})
+        if count < 2 {
+            json!({"role":"assistant","content":"Check the authorized file metadata and continue.","tool_calls":[{"id":format!("unloaded-{count}"),"type":"function","function":{"name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.stat"),"arguments":json!({"path":"fixture.txt"}).to_string()}}]})
         } else {
-            json!({"role":"assistant","content":"Tool loading recovered and the task status was read."})
+            json!({"role":"assistant","content":"Tool loading recovered and the authorized file metadata was read."})
         }
     } else if state.mcp {
         let count = body["messages"]
@@ -897,6 +917,66 @@ async fn tool_result_http_rejects_invalid_pages_foreign_scope_and_private_archiv
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn message_attachments_reach_model_and_keep_original_user_message() {
+    use kynxa_agent_core_native::storage::gateway as data;
+    use base64::Engine;
+    let fixture = Fixture::new(false, false).await;
+    let doc = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/documents/account-guide.docx")).unwrap();
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJesAAAAASUVORK5CYII=").unwrap();
+    let message = new_id();
+    let document_id = new_id();
+    let image_id = new_id();
+    let files = [(document_id.clone(), "作业.docx", doc), (image_id.clone(), "图.png", png)];
+    for (_, name, bytes) in &files { std::fs::write(fixture.root.join("work").join(name), bytes).unwrap(); }
+    data::upsert_message(&fixture.runtime.config.data_root, &fixture.conversation,
+        &json!({"Id":message,"Role":"user","Content":"","Attachments":files.iter().map(|(id,name,bytes)|json!({"Id":id,"Name":name,"SizeBytes":bytes.len()})).collect::<Vec<_>>()})).unwrap();
+    let response = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
+        .json(&json!({"messageId":message,"files":files.iter().map(|(id,name,_)|json!({"id":id,"name":name,"path":fixture.root.join("work").join(name)})).collect::<Vec<_>>()}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let mut input = fixture.request("");
+    input["userMessageId"] = json!(message);
+    input["attachmentIds"] = json!([document_id, image_id]);
+    let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["type"], "completed", "{response}");
+    let requests = fixture.provider.requests.lock().await;
+    let wire = requests.first().unwrap();
+    assert!(wire.to_string().contains("How to reset an account password"), "{wire}");
+    assert!(!wire.to_string().contains("attachmentMessageId"));
+    assert!(!wire.to_string().contains("deferredAttachmentImages"));
+    assert!(wire["messages"].as_array().unwrap().iter().any(|message| message["content"].as_array()
+        .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image_url"))));
+    drop(requests);
+    let stored = data::read_messages(&fixture.runtime.config.data_root, &fixture.conversation, true).unwrap();
+    let original = stored.iter().find(|item| item["Id"] == message).unwrap();
+    assert_eq!(original["Content"], "");
+    assert_eq!(original["Attachments"].as_array().unwrap().len(), 2);
+    assert!(!original.to_string().contains("base64"));
+    let markup_message = new_id();
+    let markup = [(new_id(), "图表.svg", "<svg xmlns='http://www.w3.org/2000/svg'><rect width='20' height='10' fill='red'/></svg>"),
+        (new_id(), "页面.html", "<!doctype html><style>body{background:#fafafa}h1{color:#146e49}</style><h1>预览样式</h1><button onclick='this.textContent=Number(this.textContent)+1'>0</button><script>document.body.dataset.chart='ready'</script>")];
+    data::upsert_message(&fixture.runtime.config.data_root, &fixture.conversation,
+        &json!({"Id":markup_message,"Role":"user","Content":"preview markup","Attachments":markup.iter().map(|(id,name,text)|json!({"Id":id,"Name":name,"SizeBytes":text.len()})).collect::<Vec<_>>()})).unwrap();
+    for (id, name, text) in markup {
+        std::fs::write(fixture.root.join("work").join(name), text).unwrap();
+        let imported: Value = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
+            .json(&json!({"messageId":markup_message,"files":[{"id":id,"name":name,"path":fixture.root.join("work").join(name)}]})).send().await.unwrap().json().await.unwrap();
+        let sha = imported["attachments"][0]["sha256"].as_str().unwrap();
+        let content_url = format!("{}/api/conversations/{}/attachments/{id}/content?messageId={markup_message}", fixture.url, fixture.conversation);
+        let response = fixture.client.get(format!("{content_url}&version={sha}")).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let policy = response.headers().get("Content-Security-Policy").unwrap().to_str().unwrap();
+        assert!(policy.contains("sandbox") && policy.contains("style-src 'unsafe-inline'"));
+        assert!(!policy.contains("allow-same-origin") && !policy.contains("allow-top-navigation"));
+        if name.ends_with(".html") { assert!(policy.contains("sandbox allow-scripts") && policy.contains("script-src 'unsafe-inline'") && policy.contains("connect-src 'none'")); }
+        else { assert!(!policy.contains("allow-scripts")); }
+        assert_eq!(response.text().await.unwrap(), text);
+        assert_eq!(fixture.client.get(format!("{content_url}&version=stale")).send().await.unwrap().status(), 409);
+    }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn greeting_reuses_request_and_persists_original_messages() {
     let fixture = Fixture::new(false, false).await;
     let health: Value = fixture
@@ -1365,7 +1445,7 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unloaded_tool_recovers_without_settling_an_undispatched_operation() {
+async fn unloaded_tool_definition_loads_once_and_continues_with_original_call() {
     let fixture = Fixture::new(false, false).await;
     fixture
         .provider
@@ -1384,11 +1464,12 @@ async fn unloaded_tool_recovers_without_settling_an_undispatched_operation() {
     let text = response.text().await.unwrap();
     let events = event_values(&mut text.as_bytes().to_vec());
     assert!(
-        events.iter().any(|event| event["type"] == "tool_result"
-            && event["tool"]["status"] == "error"
-            && event.to_string().contains("TOOL_NOT_LOADED")),
+        events.iter().filter(|event| event["type"] == "tool_result"
+            && event["tool"]["name"] == "filesystem.stat"
+            && event["tool"]["status"] == "completed").count() == 2,
         "{text}"
     );
+    assert!(!text.contains("TOOL_NOT_LOADED"), "{text}");
     assert!(
         events.iter().any(|event| event["type"] == "completed"
             && event["content"]
@@ -1408,7 +1489,18 @@ async fn unloaded_tool_recovers_without_settling_an_undispatched_operation() {
     assert_eq!(operations.len(), 2);
     assert!(operations.iter().all(|operation| operation.state
         == kynxa_agent_core_native::storage::task_repository::OperationState::Succeeded));
-    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 4);
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 3);
+    let requests = fixture.provider.requests.lock().await;
+    let wire_name = kynxa_agent_core_native::models::protocol::wire_name("filesystem.stat");
+    assert!(!requests[0]["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == wire_name));
+    assert!(requests[1]["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == wire_name));
+    let result = requests[1]["messages"].as_array().unwrap().iter().find(|message| message["role"] == "tool").unwrap();
+    assert_eq!(result["tool_call_id"], "unloaded-0");
+    assert!(result["content"].as_str().unwrap().contains("fixture.txt"), "{result}");
+    assert!(!requests.iter().any(|request| request["messages"].as_array().unwrap().iter().any(|message| {
+        message["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|call| call["function"]["name"] == kynxa_agent_core_native::models::protocol::wire_name("tool.load")))
+    })));
+    drop(requests);
     fixture.close().await;
 }
 
@@ -1908,7 +2000,7 @@ async fn durable_pause_preserves_budget_and_late_receipt_then_cancel_is_explicit
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_task() {
+async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarting_attempt() {
     use kynxa_agent_core_native::storage::task_repository::{TaskRepository, TaskState};
     let fixture = Fixture::new(false, true).await;
     fixture
@@ -1944,9 +2036,12 @@ async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_t
     }
     let repository = TaskRepository::open(&fixture.runtime.config.data_root).unwrap();
     let before = repository.load(&task_id).unwrap();
+    let initial_attempt = repository.current_attempt(&task_id).unwrap().unwrap();
     let message_id = new_id();
+    let reply_id = new_id();
     let amendment = "更新方案：保留原范围，只解释结果，不再继续写入。";
-    let steering_input = json!({"conversationId":fixture.conversation,"expectedVersion":before.version,"userMessageId":message_id,"message":amendment,"action":"update"});
+    let steering_input = json!({"conversationId":fixture.conversation,"expectedVersion":before.version,"userMessageId":message_id,"replyMessageId":reply_id,"message":amendment,"action":"update"});
+    let steering_started = std::time::Instant::now();
     let response = fixture
         .client
         .post(format!("{}/api/tasks/{task_id}/steer", fixture.url))
@@ -1957,30 +2052,44 @@ async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_t
     let status = response.status();
     let accepted: Value = response.json().await.unwrap();
     assert_eq!(status, 200, "{accepted}");
-    assert_eq!(accepted["reconnectRequired"], true);
+    assert_eq!(accepted["reconnectRequired"], false);
+    assert_eq!(accepted["resumeRequired"], false);
+    assert_eq!(accepted["task"]["state"], "running");
     assert_eq!(accepted["task"]["taskId"], task_id);
     assert_eq!(accepted["affectedTaskIds"][0], task_id);
-    let recovered = fixture
-        .client
-        .get(format!(
-            "{}/api/tasks/{task_id}/stream?conversationId={}",
-            fixture.url, fixture.conversation
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(recovered.status(), 200);
-    let body = tokio::time::timeout(Duration::from_secs(15), recovered.text())
+    assert_eq!(accepted["replyMessageId"], reply_id);
+    let mut events = Vec::new();
+    while !events.iter().any(|event:&Value|event["type"]=="text_delta" && event["replyMessageId"]==reply_id) {
+        let bytes=tokio::time::timeout(Duration::from_secs(8),stream.next()).await.unwrap().unwrap().unwrap();
+        buffer.extend_from_slice(&bytes);
+        events.extend(event_values(&mut buffer));
+    }
+    assert!(steering_started.elapsed()<Duration::from_secs(8),"Guidance must not wait for the 30-second obsolete generation.");
+    let latest_message_id = new_id();
+    let latest_reply_id = new_id();
+    let latest_amendment = "再补充：用简短结论回答，接着当前工作。";
+    let latest_input = json!({"conversationId":fixture.conversation,"expectedVersion":repository.load(&task_id).unwrap().version,"userMessageId":latest_message_id,"replyMessageId":latest_reply_id,"message":latest_amendment,"action":"update"});
+    let latest: Value = fixture.client.post(format!("{}/api/tasks/{task_id}/steer",fixture.url)).json(&latest_input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(latest["replyMessageId"],latest_reply_id,"{latest}");
+    while let Some(bytes) = tokio::time::timeout(Duration::from_secs(15), stream.next())
         .await
         .unwrap()
-        .unwrap();
-    let mut body = body.into_bytes();
-    let events = event_values(&mut body);
+    {
+        buffer.extend_from_slice(&bytes.unwrap());
+        events.extend(event_values(&mut buffer));
+    }
     assert_eq!(events.last().unwrap()["type"], "completed");
     assert_eq!(events.last().unwrap()["requestId"], input["requestId"]);
+    assert_eq!(events.last().unwrap()["replyMessageId"], latest_reply_id);
+    let anchor = events.iter().rposition(|event|event["type"]=="reply_anchor").unwrap();
+    assert_eq!(events[anchor]["replyMessageId"],latest_reply_id);
+    assert_eq!(events[anchor]["userMessageId"],latest_message_id);
+    assert!(events[anchor]["supersededReplyMessageId"]==input["requestId"] || events[anchor]["supersededReplyMessageId"]==reply_id);
+    assert!(events[anchor+1..].iter().all(|event|event["replyMessageId"]==latest_reply_id));
+    assert!(!events.last().unwrap()["content"].as_str().unwrap().contains("已开始，保留这段正文。"));
     assert_eq!(
         fixture.provider.calls.load(Ordering::Acquire),
-        2,
+        3,
         "observation must not dispatch another model request"
     );
     let actual = fixture.provider.requests.lock().await;
@@ -1992,11 +2101,22 @@ async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_t
             .any(|message| message["role"] == "user" && message["content"] == amendment)
     );
     drop(actual);
+    let settled=repository.load(&task_id).unwrap();
+    assert_eq!(settled.usage.model_requests,3);
+    assert_eq!(settled.usage.failed_requests,0,"User guidance is not a failed model request.");
+    assert_eq!(settled.usage.retries,0);
+    assert!(!fixture.root.join("work/obsolete.txt").exists(),"Partial tool arguments must never execute.");
+    assert!(repository.operations(&task_id).unwrap().is_empty());
     assert_eq!(
         repository.load(&task_id).unwrap().state,
         TaskState::Completed
     );
-    assert_eq!(repository.user_steering(&task_id).unwrap().len(), 1);
+    assert_eq!(repository.user_steering(&task_id).unwrap().len(), 2);
+    assert_eq!(
+        repository.current_attempt(&task_id).unwrap().unwrap().token,
+        initial_attempt.token,
+        "steering must retain the original execution fence and receipt owner"
+    );
     let messages = fixture.messages().await;
     assert_eq!(
         messages
@@ -2005,6 +2125,20 @@ async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_t
             .count(),
         1
     );
+    let old = messages.iter().find(|message|message["Id"]==input["requestId"]).unwrap();
+    assert!(old["SupersededByUserMessageId"]==message_id || old["SupersededByUserMessageId"]==latest_message_id);
+    assert_eq!(old["Status"],"interrupted");
+    assert!(old["Content"].as_str().unwrap().contains("已开始，保留这段正文。"));
+    let user_position = messages.iter().position(|message|message["Id"]==latest_message_id).unwrap();
+    let reply_position = messages.iter().position(|message|message["Id"]==latest_reply_id).unwrap();
+    assert!(reply_position>user_position,"{messages:?}");
+    let reply=&messages[reply_position];
+    assert_eq!(reply["RequestId"],input["requestId"]);
+    assert_eq!(reply["ReplyTo"],latest_message_id);
+    assert_eq!(reply["InReplyToUserMessageId"],latest_message_id);
+    assert!(reply["SupersededByUserMessageId"].is_null());
+    assert!(!reply["Content"].as_str().unwrap().is_empty());
+    assert!(!reply["Content"].as_str().unwrap().contains("已开始，保留这段正文。"));
     let replay: Value = fixture
         .client
         .post(format!("{}/api/tasks/{task_id}/steer", fixture.url))
@@ -2016,7 +2150,7 @@ async fn user_steering_pauses_saves_formal_input_and_observes_the_same_resumed_t
         .await
         .unwrap();
     assert_eq!(replay["reused"], true);
-    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 2);
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 3);
     drop(stream);
     fixture.close().await;
 }
@@ -2238,16 +2372,15 @@ async fn context_pressure_keeps_loaded_tools_callable_and_normalizes_exact_wire_
                 == kynxa_agent_core_native::models::protocol::wire_name("filesystem.write")),
         "The requested writer was displaced after compaction: {last_request}"
     );
+    // Callable schemas are the contract; a redundant prose name list is no longer required.
+    // 可调用 schema 才是能力合同；精简提示词后不再要求重复列出工具名的旧文案。
     assert!(
-        last.contains("Tools callable in this request:"),
-        "The live capability guidance was lost during compaction: {last_request}"
+        last_request["tools"].as_array().unwrap().iter().any(|tool|
+            tool["function"]["name"] == kynxa_agent_core_native::models::protocol::wire_name("filesystem.read")),
+        "The already-loaded reader was lost during compaction: {last_request}"
     );
-    assert!(
-        requests
-            .iter()
-            .any(|request| request.to_string().contains("Broker delivery priority:")),
-        "The read reentry was not exercised after stalled work entered consolidation."
-    );
+    // Actual read receipts, restored analysis and the final file above verify reentry and delivery.
+    // 上面的真实读取回执、恢复分析及最终文件已验证接续交付，不依赖已移除的强制收尾提示文案。
     drop(requests);
     fixture.close().await;
 }

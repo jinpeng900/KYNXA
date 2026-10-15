@@ -20,6 +20,15 @@ use std::{
 use tokio::sync::{Notify, OnceCell, Semaphore, watch};
 
 type Result<T> = std::result::Result<T, GatewayError>;
+
+/// Include immutable file identity in steering deduplication while retaining older text-only receipts.
+/// 插话去重包含不可变附件身份；纯文本仍兼容原有回执。
+pub(super) fn steering_content_hash(text: &str, attachments: &Value) -> String {
+    if attachments.as_array().is_some_and(|items| !items.is_empty()) {
+        crate::retrieval::gateway_index::hash(&json!([text, attachments]).to_string())
+    } else { crate::retrieval::gateway_index::hash(text) }
+}
+
 struct Runner {
     cancel: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
@@ -129,7 +138,7 @@ impl TaskHub {
             .iter()
             .map(|task| {
                 let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
-                value["displayInTaskList"] = json!(
+                value["displayInTaskList"] = json!(task.display_in_task_list.unwrap_or_else(|| {
                     task.usage.output_tokens >= 8192
                         || task.usage.tool_duration_ms > 0
                             && (task.usage.model_requests >= 3
@@ -142,7 +151,7 @@ impl TaskHub {
                                 | TaskState::WaitingApproval
                                 | TaskState::WaitingVerification
                         )
-                );
+                }));
                 value
             })
             .collect();
@@ -259,18 +268,23 @@ impl TaskHub {
         self.changes.notify_waiters();
         Ok(json!({"task":changed,"affectedTaskIds":affected}))
     }
-    /// Pause before accepting an amendment; resume only after the old executor has settled its lease.
-    /// 先暂停再接收补充要求，旧执行者结算租约之后才恢复；正式用户消息与原授权范围不被模型代写。
+    /// Amend the same executor at the next turn boundary, with a reply after the new formal user message.
+    /// 在下一轮边界调整同一执行者；新回复位于正式插话之后，已暂停任务仍复用原恢复路径。
     pub async fn steer(
         self: &Arc<Self>,
         id: &str,
         version: u64,
         message_id: &str,
+        reply_message_id: Option<&str>,
         message: &str,
         action: &str,
+        attachments: &Value,
     ) -> Result<Value> {
+        let mut attachment_message = json!({"Role":"user","Attachments":attachments});
+        crate::storage::message_attachments::normalize_descriptors(&mut attachment_message)?;
+        let attachments = attachment_message["Attachments"].clone();
         if !["continue", "update"].contains(&action)
-            || message.trim().is_empty()
+            || (message.trim().is_empty() && !attachments.as_array().is_some_and(|items| !items.is_empty()))
             || message.len() > 32_768
         {
             return Err(GatewayError::new(
@@ -280,6 +294,10 @@ impl TaskHub {
             ));
         }
         super::gateway_runtime::checked_id(&json!(message_id), "userMessageId")?;
+        let reply_message_id = reply_message_id
+            .map(str::to_owned)
+            .unwrap_or_else(crate::gateway_contract::new_id);
+        super::gateway_runtime::checked_id(&json!(reply_message_id), "replyMessageId")?;
         let repository = self.repository().await?;
         let task = repository.load(id)?;
         if task.parent_task_id.is_some() {
@@ -292,7 +310,7 @@ impl TaskHub {
             .ok_or_else(|| failure("TASK_RUNTIME_UNAVAILABLE"))?;
         let gate = runtime.conversation_gate(&format!("steer:{id}")).await;
         let _steering = gate.lock().await;
-        let content_hash = crate::retrieval::gateway_index::hash(message);
+        let content_hash = steering_content_hash(message, &attachments);
         let existing = repository
             .user_steering(id)?
             .into_iter()
@@ -308,20 +326,39 @@ impl TaskHub {
                 ));
             }
             let current = repository.load(id)?;
+            let root = self.config.data_root.clone();
+            let conversation = task.scope.conversation_id.clone();
+            let project = task.scope.project_id.clone();
+            let ids = HashSet::from([message_id.to_owned()]);
+            let saved = tokio::task::spawn_blocking(move || {
+                let read = crate::storage::conversation_history::read_latest(&root, &json!({"Id":conversation,"ProjectId":project}), Some(&ids), false)?;
+                Ok::<_, ContractError>(read.messages.first().and_then(|raw| serde_json::from_str::<Value>(&crate::storage::raw_json::scalar_projection(raw)).ok()))
+            }).await.map_err(|_|failure("TASK_STEERING_MESSAGE_FAILED"))??;
             return Ok(
-                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"reused":true,"reconnectRequired":true,"resumeRequired":current.state==TaskState::Paused}),
+                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":saved.as_ref().map(|message|&message["ReplyMessageId"]),"reused":true,"reconnectRequired":current.state==TaskState::Paused,"resumeRequired":current.state==TaskState::Paused}),
             );
         }
-        let paused = self.control(id, version, TaskControl::Pause).await?;
-        let paused_version = paused["task"]["version"]
-            .as_u64()
-            .ok_or_else(|| failure("TASK_STEERING_VERSION_MISSING"))?;
+        let task = repository.load(id)?;
+        if task.version != version || task.state.is_terminal() {
+            return Err(GatewayError::new(
+                "TASK_VERSION_CONFLICT",
+                "任务已变化，请刷新后提交调整。",
+                409,
+            ));
+        }
         let root = self.config.data_root.clone();
         let conversation = task.scope.conversation_id.clone();
-        let formal = json!({"Id":message_id,"Role":"user","Content":message,"CreatedAt":crate::gateway_contract::now_iso8601(),"Status":"completed"});
+        if reply_message_id == message_id || reply_message_id == task.request_id {
+            return Err(GatewayError::new("INVALID_TASK_STEERING", "引导与回复身份不能相同。", 400));
+        }
+        let mut formal = json!({"Id":message_id,"Role":"user","Content":message,"CreatedAt":crate::gateway_contract::now_iso8601(),"Status":"completed","ReplyMessageId":reply_message_id});
+        if attachments.as_array().is_some_and(|items| !items.is_empty()) { formal["Attachments"] = attachments; }
+        let superseded_reply = repository.latest_checkpoint(id)?
+            .and_then(|checkpoint| checkpoint.context_reference["assistantMessageId"].as_str().map(str::to_owned))
+            .unwrap_or_else(||task.request_id.clone());
         let project = task.scope.project_id.clone();
         tokio::task::spawn_blocking(move || {
-            let ids = HashSet::from([formal["Id"].as_str().unwrap().to_owned()]);
+            let ids = HashSet::from([formal["Id"].as_str().unwrap().to_owned(), superseded_reply.clone()]);
             let read = crate::storage::conversation_history::read_latest(
                 &root,
                 &json!({"Id":conversation,"ProjectId":project}),
@@ -343,6 +380,12 @@ impl TaskHub {
                         409,
                     ));
                 }
+                if saved["Id"] == formal["Id"] {
+                    crate::storage::message_attachments::validate_repeated_descriptors(&saved, &formal)?;
+                }
+                if saved["Id"] == superseded_reply && saved["Role"] == "assistant" {
+                    data::upsert_message(&root, &conversation, &json!({"Id":superseded_reply,"SupersededByUserMessageId":formal["Id"],"Status":"interrupted"}))?;
+                }
             }
             data::upsert_message(&root, &conversation, &formal)
         })
@@ -350,11 +393,18 @@ impl TaskHub {
         .map_err(|_| failure("TASK_STEERING_MESSAGE_FAILED"))??;
         let changed = repository.record_user_steering(
             id,
-            paused_version,
+            version,
             message_id,
             action,
             &content_hash,
         )?;
+        runtime.signal_task_steering(id);
+        self.changes.notify_waiters();
+        if changed.state != TaskState::Paused {
+            // Cancel obsolete model generation, while letting already dispatched tools settle their real receipts.
+            // 取消过时模型生成；已经派发的工具继续结算真实回执，不重放成功操作。
+            return Ok(json!({"task":changed,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":false,"resumeRequired":false}));
+        }
         match tokio::time::timeout(Duration::from_secs(35), async {
             self.wait_existing_lease(id, None).await?;
             runtime.wait_task_delivery_boundary(id).await;
@@ -365,7 +415,7 @@ impl TaskHub {
             Ok(result) => result?,
             Err(_) => {
                 return Ok(
-                    json!({"task":repository.load(id)?,"affectedTaskIds":[id],"steeringAccepted":true,"reconnectRequired":true,"resumeRequired":true}),
+                    json!({"task":repository.load(id)?,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":true,"resumeRequired":true}),
                 );
             }
         }
@@ -374,13 +424,14 @@ impl TaskHub {
         // 后到的用户控制优先，不能静默撤销再次暂停或取消。
         if current.state != TaskState::Paused || current.stop_reason != changed.stop_reason {
             return Ok(
-                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"reconnectRequired":true}),
+                json!({"task":current,"affectedTaskIds":[id],"steeringAccepted":true,"replyMessageId":reply_message_id,"reconnectRequired":true}),
             );
         }
         let mut response = self
             .control(id, current.version, TaskControl::Resume)
             .await?;
         response["steeringAccepted"] = json!(true);
+        response["replyMessageId"] = json!(reply_message_id);
         response["reconnectRequired"] = json!(true);
         Ok(response)
     }
@@ -396,6 +447,21 @@ impl TaskHub {
             .as_ref()
             .ok_or_else(|| failure("TASK_JOURNAL_UNAVAILABLE"))?;
         match name {
+            "task.describe" => {
+                self.check_tool_scope(journal.task_id(), &context).await?;
+                let title = args["title"]
+                    .as_str()
+                    .ok_or_else(|| failure("INVALID_TASK"))?
+                    .to_owned();
+                let display = args["displayInTaskList"]
+                    .as_bool()
+                    .ok_or_else(|| failure("INVALID_TASK"))?;
+                let token = journal.token().clone();
+                let task = self
+                    .store(move |repository| repository.describe_task(&token, &title, display))
+                    .await?;
+                Ok(serde_json::to_value(task).map_err(|_| failure("TASK_STORAGE_FAILED"))?)
+            }
             "task.delegate" => self.delegate(parent, context, args).await,
             "task.wait" => self.wait(parent, context, args).await,
             "task.read" => {
@@ -695,6 +761,10 @@ impl TaskHub {
                 .clamp(100, 3_600_000),
         );
         let started = tokio::time::Instant::now();
+        let mut steering = parent.steering.subscribe();
+        let expected_steering = context.config["activeSteeringSequence"]
+            .as_u64()
+            .unwrap_or_else(|| *steering.borrow_and_update());
         loop {
             let notified = self.changes.notified();
             tokio::pin!(notified);
@@ -702,6 +772,13 @@ impl TaskHub {
             let mut tasks = Vec::new();
             for id in &ids {
                 tasks.push(self.check_tool_scope(id, &context).await?);
+            }
+            // Yield the parent to its new instruction; children keep their own execution and receipts.
+            // 新引导到达即交还父循环处理；子任务继续原执行，保留已派发操作及真实回执。
+            if *steering.borrow_and_update() != expected_steering {
+                let mut response = self.wait_response(&parent, tasks, false).await?;
+                response["steeringPending"] = json!(true);
+                return Ok(response);
             }
             if tasks.iter().all(|task| task.state.is_terminal())
                 || tasks.iter().any(|task| {
@@ -720,7 +797,14 @@ impl TaskHub {
                 return self.wait_response(&parent, tasks, true).await;
             };
             let mut cancellation = parent.cancellation.subscribe();
-            tokio::select! {_=tokio::time::sleep(remaining)=>return self.wait_response(&parent,tasks,true).await,_=notified=>{},_=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))}
+            tokio::select! {
+                _=tokio::time::sleep(remaining)=>return self.wait_response(&parent,tasks,true).await,
+                _=notified=>{},
+                changed=steering.changed()=>{
+                    if changed.is_err() { return Err(failure("TASK_RUNTIME_UNAVAILABLE")); }
+                },
+                _=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))
+            }
         }
     }
     async fn wait_response(

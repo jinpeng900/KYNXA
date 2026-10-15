@@ -498,6 +498,8 @@ pub(crate) fn client() -> Result<Client, ModelError> {
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(300))
+        .tcp_keepalive(Duration::from_secs(60))
         .build()
         .map_err(|_| ModelError::new("MODEL_HTTP_CLIENT_FAILED", "无法初始化模型通信。", 500))?;
     let _ = CLIENT.set(client.clone());

@@ -57,7 +57,9 @@
   let cachedCharacters = 0, cachedNodes = 0;
   const maxCachedCharacters = 2 * 1024 * 1024, maxCachedNodes = 40000;
   const mathCache = new Map();
+  let mathRendererLoading = null, mathHydrationPending = false;
   let conversationId = null, pending = null, following = true, applying = false;
+  let messageOrder = null;
   let nextMathId = 0, mathCacheBytes = 0, scrollFrame = 0, flushFrame = 0;
   let pointerSelecting = false, localizingUi = false, languageFrame = 0;
   let anchoringScroll = false, anchorFrame = 0;
@@ -165,6 +167,7 @@
     } else if (entry.time.hasAttribute('datetime')) entry.time.removeAttribute('datetime');
   }
   function localizeEntry(entry) {
+    if (entry.mounted && entry.message) updateAttachments(entry, entry.message);
     if (!entry.mounted) return;
     localizeCopyButton(entry);
     entry.retry.textContent = uiStrings.retry;
@@ -310,6 +313,7 @@
   }
   function jumpToLatest() {
     if (historyHasNewer && !activeSelection()) {
+      beginBottomNavigation(); followBottom();
       send({ type: 'history', direction: 'latest', conversationId });
       return;
     }
@@ -334,23 +338,48 @@
     flushFrame = requestAnimationFrame(() => {
       if (pending && !activeSelection()) { const snapshot = pending; pending = null; applyTranscript(snapshot); }
       if (!activeSelection() && !pointerSelecting) {
+        if (mathHydrationPending && window.katex) {
+          const anchors = following ? [] : scrollAnchors();
+          mathHydrationPending = false;
+          renderMath(messages);
+          restoreScrollAnchor(anchors); followBottom();
+        }
         window.kynxaDiagrams?.hydrate(messages);
         window.kynxaContentBlocks?.hydrate(messages);
       }
     });
   }
+  function ensureMathRenderer() {
+    if (window.katex || mathRendererLoading) return;
+    // Text-only startup never loads KaTeX; all visible formula blocks share one local load.
+    // 纯文字启动不加载 KaTeX，可见公式共用一次本地加载，不阻塞聊天 ready 或首屏原文。
+    mathRendererLoading = new Promise(resolve => {
+      const script = document.createElement('script');
+      script.src = '../Math/KaTeX/katex.min.js'; script.async = true;
+      script.onload = () => resolve(!!window.katex);
+      script.onerror = () => resolve(false);
+      document.head.append(script);
+    });
+    mathRendererLoading.then(loaded => { if (loaded) scheduleFlush(); });
+  }
   function renderMath(root) {
-    for (const math of root.querySelectorAll('.math[data-latex]')) {
-      math.dataset.mathId = String(++nextMathId);
+    const formulas = root.querySelectorAll('.math[data-latex]:not([data-math-rendered])');
+    if (formulas.length && !window.katex) {
+      for (const math of formulas) math.textContent = math.dataset.latex || '';
+      mathHydrationPending = true; ensureMathRenderer();
+    }
+    for (const math of formulas) {
+      if (!math.dataset.mathId) math.dataset.mathId = String(++nextMathId);
+      if (!window.katex) continue;
       const latex = math.dataset.latex || '', displayMode = math.dataset.display === 'true';
       if (latex.length > 32768) continue;
       const key = (displayMode ? 'D:' : 'I:') + latex;
       let html = mathCache.get(key);
       if (html === undefined) {
         const options = { displayMode, throwOnError: true, trust: false, maxExpand: 1000, maxSize: 100 };
-        try { html = katex.renderToString(latex, options); }
+        try { html = window.katex.renderToString(latex, options); }
         catch {
-          try { html = katex.renderToString(latex, { ...options, strict: 'ignore', throwOnError: false }); }
+          try { html = window.katex.renderToString(latex, { ...options, strict: 'ignore', throwOnError: false }); }
           catch { math.textContent = latex; math.classList.add('katex-error'); continue; }
         }
         while (mathCache.size && (mathCache.size >= 512 || mathCacheBytes + html.length > 4 * 1024 * 1024)) {
@@ -361,6 +390,7 @@
         if (html.length <= 4 * 1024 * 1024) { mathCache.set(key, html); mathCacheBytes += html.length; }
       }
       math.innerHTML = html;
+      math.dataset.mathRendered = 'true';
     }
     for (const table of root.querySelectorAll('table')) {
       if (table.parentElement?.classList.contains('table-scroll')) continue;
@@ -401,7 +431,7 @@
     const article = document.createElement('article');
     article.className = 'message ' + (message.role === 'user' ? 'user' : 'assistant');
     article.dataset.messageId = String(message.id);
-    const height = Math.max(80, Math.min(2000000, Math.ceil((message.content?.length || 0) / 75) * 27 + 56));
+    const height = Math.max(80, Math.min(2000000, Math.ceil((message.content?.length || 0) / 75) * 27 + 56 + (message.attachments?.length ? 110 : 0)));
     article.style.height = height + 'px'; article.dataset.virtualized = 'true';
     const entry = { article, message, height, mounted: false };
     viewportObserver.observe(article);
@@ -413,6 +443,9 @@
     article.style.height = ''; delete article.dataset.virtualized;
     const content = document.createElement('div'); content.className = 'message-content';
     const elapsed = document.createElement('div'); elapsed.className = 'message-elapsed'; elapsed.dataset.copyIgnore = ''; elapsed.hidden = true;
+    const attachments = document.createElement('div'); attachments.className = 'message-attachments'; attachments.hidden = true; attachments.dataset.copyIgnore = '';
+    const attachmentImages = document.createElement('div'); attachmentImages.className = 'attachment-image-list';
+    const attachmentFiles = document.createElement('div'); attachmentFiles.className = 'attachment-file-list'; attachments.append(attachmentImages, attachmentFiles);
     const body = document.createElement('div'); body.className = 'message-body';
     const status = document.createElement('div'); status.className = 'message-status'; status.dataset.copyIgnore = '';
     const actions = document.createElement('div'); actions.className = 'message-actions'; actions.dataset.copyIgnore = '';
@@ -426,11 +459,11 @@
     const tools = document.createElement('div'); tools.className = 'tool-activities'; tools.hidden = true;
     const timeline = document.createElement('div'); timeline.className = 'assistant-timeline'; timeline.hidden = true;
     Object.assign(entry, { content, elapsed, body, status, actions, copy, copyStatus, time, retry,
-      tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null, mounted: true });
+      attachments, attachmentImages, attachmentFiles, attachmentRows: new Map(), tools, toolRows: new Map(), timeline, segmentRows: new Map(), message: null, presentation: null, mounted: true });
     copy.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
     copy.addEventListener('click', () => requestCopy(entry));
     retry.addEventListener('click', () => send({ type: 'retry', conversationId, id: entry.message.id }));
-    actions.append(copy, time, retry, copyStatus); content.append(elapsed, timeline, body, status); article.append(content, actions);
+    actions.append(copy, time, retry, copyStatus); content.append(attachments, elapsed, timeline, body, status); article.append(content, actions);
     mountedEntries.add(entry);
     updateMessage(entry, message);
     window.kynxaContentBlocks?.hydrate(article); window.kynxaDiagrams?.hydrate(article);
@@ -443,7 +476,7 @@
     liveElapsedEntries.delete(entry); mountedEntries.delete(entry);
     entry.article.replaceChildren(); entry.article.style.height = entry.height + 'px';
     entry.article.dataset.virtualized = 'true';
-    for (const key of ['content','elapsed','body','status','actions','copy','copyStatus','time','retry','tools','toolRows','timeline','segmentRows','avatar','presentation']) delete entry[key];
+    for (const key of ['content','elapsed','body','status','actions','copy','copyStatus','time','retry','tools','toolRows','timeline','segmentRows','attachments','attachmentImages','attachmentFiles','attachmentRows','avatar','presentation']) delete entry[key];
     entry.mounted = false;
   }
   function scheduleViewport() {
@@ -456,7 +489,7 @@
     viewportDirty = false;
     const anchors = following ? [] : scrollAnchors();
     const required = new Set(visibleEntries);
-    if (entries.size <= 48) for (const entry of entries.values()) required.add(entry);
+    if (entries.size <= 8) for (const entry of entries.values()) required.add(entry);
     for (const entry of entries.values()) if (entry.message?.streaming) required.add(entry);
     if (following) {
       const last = [...entries.values()].at(-1); if (last) required.add(last);
@@ -475,7 +508,8 @@
     updateElapsedState(entry, message);
     if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
-      !old.assistantSegments?.length && !message.assistantSegments?.length) return;
+      !old.assistantSegments?.length && !message.assistantSegments?.length &&
+      JSON.stringify(old.attachments || []) === JSON.stringify(message.attachments || [])) return;
     entry.message = message;
     updateMessageTime(entry, message);
     const presentation = presentationFor(message); entry.presentation = presentation;
@@ -488,8 +522,9 @@
       entry.avatar.src = '../UI/Brand/kynxa-logo.png'; entry.avatar.alt = ''; entry.avatar.draggable = false; entry.avatar.dataset.copyIgnore = '';
       entry.article.prepend(entry.avatar);
     } else if (role === 'user' && entry.avatar) { entry.avatar.remove(); entry.avatar = null; }
+    updateAttachments(entry, message);
     const segmented = role === 'assistant' && presentation.segments.length > 0;
-    entry.timeline.hidden = !segmented; entry.body.hidden = segmented;
+    entry.timeline.hidden = !segmented; entry.body.hidden = segmented || role === 'user' && !message.content;
     updateAssistantSegments(entry, message, presentation);
     updateTools(entry, presentation.tools.filter(tool => !presentation.segments.some(segment => segment.round === tool.round)));
     if (!entry.tools.hidden && entry.tools.nextSibling !== entry.status) entry.content.insertBefore(entry.tools, entry.status);
@@ -514,6 +549,62 @@
     else if (!message.streaming) existingDot?.remove();
     entry.retry.hidden = !message.canRetry;
     entry.copy.hidden = !copiedMessage(message);
+  }
+  const FILE_ICON = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
+  function attachmentStatus(attachment) {
+    const english = document.documentElement.lang === 'en';
+    if (attachment.status === 'pending' || attachment.status === 'uploading') return english ? 'Preparing…' : '正在准备…';
+    if (attachment.status === 'error' || attachment.status === 'failed') return attachment.error || (english ? 'Could not read file' : '文件读取失败');
+    if (attachment.status === 'parsing') return english ? 'Reading…' : '正在解析…';
+    return '';
+  }
+  function updateAttachments(entry, message) {
+    const attachments = message.role === 'user' && Array.isArray(message.attachments) ? message.attachments : [];
+    entry.attachments.hidden = attachments.length === 0;
+    entry.content.classList.toggle('has-attachments', attachments.length > 0);
+    const ids = new Set(attachments.map(attachment => String(attachment.id)));
+    const previous = { image: null, file: null };
+    for (const attachment of attachments) {
+      const id = String(attachment.id);
+      let row = entry.attachmentRows.get(id);
+      if (!row) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'message-attachment';
+        button.dataset.attachmentId = id; button.dataset.copyIgnore = '';
+        const image = document.createElement('img'); image.alt = ''; image.draggable = false; image.hidden = true;
+        const icon = document.createElement('span'); icon.className = 'attachment-icon'; icon.innerHTML = FILE_ICON;
+        const details = document.createElement('span'); details.className = 'attachment-details';
+        const name = document.createElement('span'); name.className = 'attachment-name';
+        const description = document.createElement('span'); description.className = 'attachment-description';
+        details.append(name, description); button.append(image, icon, details);
+        image.addEventListener('load', () => { button.classList.remove('image-unavailable'); followBottom(); });
+        image.addEventListener('error', () => { button.classList.add('image-unavailable'); });
+        button.addEventListener('click', () => send({ type: 'attachment', conversationId, messageId: entry.message.id, attachmentId: id }));
+        row = { button, image, icon, name, description }; entry.attachmentRows.set(id, row);
+      }
+      const image = String(attachment.contentType || '').startsWith('image/');
+      const group = image ? 'image' : 'file', container = image ? entry.attachmentImages : entry.attachmentFiles;
+      const expected = previous[group] ? previous[group].nextSibling : container.firstChild;
+      if (expected !== row.button) container.insertBefore(row.button, expected);
+      previous[group] = row.button;
+      const extension = String(attachment.name || '').split('.').pop().toUpperCase();
+      const compact = !image && ['MD', 'TXT', 'CSV', 'JSON', 'MMD', 'MERMAID'].includes(extension);
+      row.button.classList.toggle('attachment-image', image);
+      row.button.classList.toggle('attachment-file-pill', compact);
+      row.button.classList.toggle('attachment-document', !image && !compact);
+      row.button.dataset.status = attachment.status || 'ready';
+      row.button.title = attachment.name || ''; row.button.setAttribute('aria-label', attachment.name || extension);
+      row.button.disabled = ['pending', 'uploading', 'error', 'failed'].includes(attachment.status);
+      row.name.textContent = attachment.name || extension;
+      row.description.textContent = attachmentStatus(attachment) || extension;
+      row.description.hidden = compact && !attachmentStatus(attachment);
+      const source = image && typeof attachment.thumbnailUrl === 'string' ? attachment.thumbnailUrl : '';
+      row.image.hidden = !source;
+      row.icon.hidden = !!source;
+      if (source && row.image.getAttribute('src') !== source) row.image.src = source;
+      else if (!source) row.image.removeAttribute('src');
+    }
+    entry.attachmentImages.hidden = !previous.image; entry.attachmentFiles.hidden = !previous.file;
+    for (const [id, row] of entry.attachmentRows) if (!ids.has(id)) { row.button.remove(); entry.attachmentRows.delete(id); }
   }
   function copiedMessage(message) {
     return presentationFor(message).content;
@@ -689,7 +780,7 @@
   function openConversation(id) {
     if (conversationId === id) return;
     historyIntent = false; clearTimeout(historyRequestTimer); historyRequestTimer = 0;
-    historyHasOlder = historyHasNewer = false;
+    historyHasOlder = historyHasNewer = false; messageOrder = null;
     window.kynxaDiagrams?.closeViewer();
     window.kynxaContentBlocks?.resetCopies();
     pendingCopies.clear(); clearCopyFeedback();
@@ -719,6 +810,7 @@
     entries = restored?.entries || new Map();
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
+    renderMath(messages);
     window.kynxaContentBlocks?.disposeDetached();
     window.kynxaContentBlocks?.hydrate(messages);
     window.kynxaDiagrams?.disposeDetached();
@@ -739,8 +831,16 @@
     if (!snapshot || !Array.isArray(snapshot.messages)) return;
     const changedConversation = conversationId !== snapshot.conversationId;
     if (changedConversation) openConversation(snapshot.conversationId);
+    if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
+    else if (snapshot.type !== 'renderPatch') messageOrder = snapshot.messages.map(message => message.id);
+    if (snapshot.progressiveSnapshot) {
+      // Recent-first snapshots merge into a restored DOM; earlier rows arrive as ordered background patches.
+      // 最近消息首屏合入复用 DOM，较早消息由后台有序补入，不清空缓存正文或抢占阅读锚点。
+      applyTranscriptPatch({ ...snapshot, progressiveSnapshot: false });
+      return;
+    }
     historyHasOlder = snapshot.historyHasOlder === true; historyHasNewer = snapshot.historyHasNewer === true;
-    if (changedConversation || snapshot.openAtBottom) {
+    if (changedConversation || snapshot.openAtBottom && following && !activeSelection() && !pointerSelecting) {
       pending = null; clearSelection(); beginBottomNavigation();
     } else if (activeSelection()) {
       pending = snapshot;
@@ -789,13 +889,14 @@
   function applyTranscriptPatch(snapshot) {
     if (!snapshot || snapshot.conversationId !== conversationId || !Array.isArray(snapshot.messages)) return;
     const replacements = new Map(snapshot.messages.map(message => [String(message.id), message]));
+    if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     const latest = pending?.conversationId === conversationId ? pending.messages
       : [...entries.values()].map(entry => entry.message);
     // Merge into a deferred selected snapshot, so multiple stream patches cannot erase earlier changes.
     // 多次流式增量合入被冻结的选区快照，后续刷新不能抹掉前一次更新。
     const merged = new Map(latest.map(message => [String(message.id), message]));
     for (const [id, message] of replacements) merged.set(id, message);
-    const ordered = Array.isArray(snapshot.messageOrder) ? snapshot.messageOrder.map(id => merged.get(String(id))).filter(Boolean)
+    const ordered = Array.isArray(messageOrder) ? messageOrder.map(id => merged.get(String(id))).filter(Boolean)
       : [...merged.values()];
     applyTranscript({ ...snapshot, messages: ordered });
   }

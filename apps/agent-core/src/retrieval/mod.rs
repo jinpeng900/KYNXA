@@ -14,6 +14,7 @@ pub mod gateway_embedding;
 pub mod gateway_history;
 pub mod gateway_index;
 pub mod gateway_legacy_office;
+pub mod gateway_message_attachments;
 pub mod gateway_office_documents;
 pub mod gateway_spreadsheets;
 pub mod gateway_structure;

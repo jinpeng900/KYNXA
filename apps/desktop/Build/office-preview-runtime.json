@@ -1,0 +1,7 @@
+{
+  "version": "26.2.6",
+  "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.6/win/x86_64/LibreOffice_26.2.6_Win_x86-64.msi",
+  "sha256": "f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660",
+  "bytes": 373252096,
+  "executable": "program/soffice.exe"
+}

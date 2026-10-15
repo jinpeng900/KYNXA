@@ -312,6 +312,9 @@ pub fn publish(config: &GatewayConfig, sources: &[Value]) -> Result<Value, Contr
 fn source_matches(state: &Value, source: &Value) -> bool {
     let text = source["text"].as_str().unwrap_or("");
     let digest = hash(text);
+    source_matches_hash(state, source, &digest)
+}
+fn source_matches_hash(state: &Value, source: &Value, digest: &str) -> bool {
     let revision = source
         .get("sourceRevision")
         .cloned()
@@ -334,26 +337,47 @@ fn source_matches(state: &Value, source: &Value) -> bool {
             )
         && state["embedding_input_version"] == "source-context-v1"
 }
+/// Complete vectors are reusable only with the same published source identity, revision and derivation inputs.
+/// 只有发布来源的身份、版本及派生输入一致，才复用完整向量；无正文的队列条目使用已核验内容哈希。
+pub(crate) fn reuse_semantic(
+    config: &GatewayConfig,
+    source: &Value,
+    local: &Value,
+) -> Result<Option<Value>, ContractError> {
+    let digest = if let Some(text) = source["text"].as_str() {
+        hash(text)
+    } else if let Some(digest) = source["contentHash"].as_str() {
+        digest.to_string()
+    } else {
+        return Ok(None);
+    };
+    let states = sqlite_queries::apply(
+        "storage.index.sourceState",
+        &arguments(config, json!({"sourceIds":[source["sourceId"]]})),
+    )?;
+    Ok(states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| {
+            source_matches_hash(state, source, &digest)
+                && state["vector_chunks"] == state["chunk_count"]
+                && state["vector_chunks"].as_u64().unwrap_or(0) > 0
+                && (local["embeddingDevicePolicy"] != "cpu"
+                    || state["embedding_profile_id"] == "builtin-multilingual")
+        })
+        .map(|state| {
+            json!({"chunks":state["chunk_count"],"vectorChunks":state["vector_chunks"],"cachedChunks":state["vector_chunks"],"profileId":state["embedding_profile_id"],"spaceId":state["embedding_space_id"],"reused":true})
+        }))
+}
 pub fn publish_semantic(
     config: &GatewayConfig,
     source: &Value,
     local: &Value,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Value, ContractError> {
-    let states = sqlite_queries::apply(
-        "storage.index.sourceState",
-        &arguments(config, json!({"sourceIds":[source["sourceId"]]})),
-    )?;
-    if let Some(state) = states["states"].as_array().unwrap().iter().find(|state| {
-        source_matches(state, source)
-            && state["vector_chunks"] == state["chunk_count"]
-            && state["vector_chunks"].as_u64().unwrap_or(0) > 0
-            && (local["embeddingDevicePolicy"] != "cpu"
-                || state["embedding_profile_id"] == "builtin-multilingual")
-    }) {
-        return Ok(
-            json!({"chunks":state["chunk_count"],"vectorChunks":state["vector_chunks"],"cachedChunks":state["vector_chunks"],"profileId":state["embedding_profile_id"],"spaceId":state["embedding_space_id"],"reused":true}),
-        );
+    if let Some(cached) = reuse_semantic(config, source, local)? {
+        return Ok(cached);
     }
     let prepared = prepare_source(source, None)?;
     let chunks = prepared["chunks"].as_array().unwrap();

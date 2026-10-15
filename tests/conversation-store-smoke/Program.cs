@@ -46,6 +46,7 @@ using var listener = new HttpListener();
 listener.Prefixes.Add($"http://127.0.0.1:{port}/"); listener.Start();
 using var stopping = new CancellationTokenSource();
 var uploads = new ConcurrentQueue<JsonElement>();
+var historyRequests = new ConcurrentQueue<string>();
 var enteredFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var releaseFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var enteredBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -71,6 +72,7 @@ async Task Handle(HttpListenerContext context)
             result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0 };
         else if (context.Request.Url.AbsolutePath.EndsWith("/messages", StringComparison.Ordinal))
         {
+            historyRequests.Enqueue(context.Request.Url.Query);
             var chatId = Guid.Parse(context.Request.Url.AbsolutePath.Split('/')[3]);
             var history = canonical.Chats.Single(chat => chat.Id == chatId).Messages;
             result = new ConversationHistoryPage(chatId, history, history.Count, false, null, "synthetic-history", 0, false);
@@ -178,10 +180,15 @@ try
     var metadata = await pagedStore.LoadMetadataAsync();
     Check(metadata.Chats[0].Messages.Count == 0 && metadata.Chats[0].CanPersist,
         "Metadata-only persisted chats were mistaken for disposable drafts.");
-    var historyPage = await pagedStore.LoadHistoryPageAsync(metadata.Chats[0].Id);
+    var historyPage = await pagedStore.LoadHistoryPageAsync(metadata.Chats[0].Id, limit: 40, maximumBytes: 1024 * 1024);
+    Check(historyRequests.Last().Contains("limit=40") && historyRequests.Last().Contains("maxBytes=1048576")
+        && !historyRequests.Last().Contains("cursor="), "Initial history did not request a bounded latest page without an old cursor.");
     Check(historyPage.Messages.Any(message => message.Content == "正式回复"), "Native history page did not deserialize its messages.");
     metadata.Chats[0].Messages = historyPage.Messages;
     Check(pagedStore.CanReleaseHistory(metadata.Chats[0]), "Durable paged messages could not release their display projection.");
+    pagedStore.ReleaseHistoryProjection(metadata.Chats[0].Id);
+    pagedStore.AcceptHistoryPage(historyPage);
+    Check(pagedStore.CanReleaseHistory(metadata.Chats[0]), "Restored latest-page cache lost its durable user-message identities.");
     var unsaved = new ChatMessageState { Content = "尚未提交的用户消息" };
     metadata.Chats[0].Messages.Add(unsaved);
     Check(!pagedStore.CanReleaseHistory(metadata.Chats[0]) && pagedStore.UnpersistedHistoryTail(metadata.Chats[0]).Contains(unsaved),

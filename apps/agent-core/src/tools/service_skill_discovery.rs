@@ -32,7 +32,7 @@ fn cancelled(cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
     Ok(())
 }
 
-fn identity(path: &Path, arguments: &Value) -> Value {
+pub(crate) fn identity(path: &Path, arguments: &Value) -> Value {
     // Normalize lexical separators before hashing legacy Windows path identities.
     // 对旧 Windows 路径身份求哈希前先统一词法分隔符。
     let normalized_path = absolute_path(&path_text(path));
