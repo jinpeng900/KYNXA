@@ -345,7 +345,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
         {
             string resources = Path.Combine(AppContext.BaseDirectory, "Resources");
             if (!File.Exists(Path.Combine(resources, "Transcript", "index.html"))) throw new FileNotFoundException(UiText.Get("聊天显示资源缺失。"));
-            string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KYNXA", "Cache", "TranscriptWebView2");
+            string cache = ApplicationPaths.WebViewDirectory;
             var environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, cache, null).AsTask().WaitAsync(TimeSpan.FromSeconds(15));
             if (_disposed) return;
             await _browser.EnsureCoreWebView2Async(environment).AsTask().WaitAsync(TimeSpan.FromSeconds(15));

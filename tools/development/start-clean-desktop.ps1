@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $utf8 = [Text.UTF8Encoding]::new($false)
+Import-Module (Join-Path $PSScriptRoot 'PortableStorage.psm1') -Force
 
 if ($InsidePackage) {
     $plan = Get-Content -LiteralPath $LaunchPlanPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -20,12 +21,12 @@ if ($InsidePackage) {
         if ($currentPackage.Id.Name -ne $plan.PackageIdentity) { throw 'The clean launcher did not receive its own package identity.' }
         $environmentValues = @{
             KYNXA_APPLICATION_ROOT = [string]$plan.ApplicationRoot
-            KYNXA_DATA_HOME = [string]$plan.DataHome
-            KYNXA_MODEL_HOME = [string]$plan.ModelHome
-            KYNXA_EXTENSION_HOME = [string]$plan.ExtensionHome
+            KYNXA_DATA_HOME = $null
+            KYNXA_MODEL_HOME = $null
+            KYNXA_EXTENSION_HOME = $null
             KYNXA_MODEL_API_PORT = [string]$plan.Port
             KYNXA_MODEL_API_URL = [string]$plan.Url
-            WEBVIEW2_USER_DATA_FOLDER = (Join-Path $plan.RunRoot 'WebView2')
+            WEBVIEW2_USER_DATA_FOLDER = (Join-Path $plan.DataHome 'Desktop/WebView2')
             KYNXA_EXTENSION_POINTER = $null
             KYNXA_LEGACY_DESKTOP_HOME = $null
             PATH = (Join-Path $plan.ApplicationRoot 'runtime/native') + ';' + $env:PATH
@@ -140,8 +141,8 @@ foreach ($relativePath in $requiredFiles) {
     }
 }
 
-# Never stop or attach to an existing gateway. Each launch gets new data and no copied API credentials.
-# 不停止或接入现有网关；每次启动建立全新数据目录，不复制旧环境的 API 凭据。
+# Never attach to another gateway; reuse this software's fixed data and local selections.
+# 不接入其他网关；重复启动复用本软件的固定数据目录和本地路径选择。
 $probe = [Net.Sockets.TcpClient]::new()
 $occupied = $false
 try { $occupied = $probe.ConnectAsync('127.0.0.1', $Port).Wait(300) -and $probe.Connected }
@@ -188,13 +189,15 @@ foreach ($dependency in $manifest.SelectNodes('/pkg:Package/pkg:Dependencies/pkg
 Add-AppxPackage -Register -Path $manifestPath
 $package = Get-AppxPackage -Name $packageIdentity | Select-Object -First 1
 if ($null -eq $package) { throw 'The clean package could not be registered.' }
-$runRoot = Join-Path $repositoryRoot ('artifacts/clean-run/' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+$runRoot = Join-Path $repositoryRoot 'artifacts/clean-run/current'
 [IO.Directory]::CreateDirectory($runRoot) | Out-Null
-$dataHome = Join-Path $runRoot 'Data'
+$dataHome = Get-KynxaPortablePath -ApplicationRoot $applicationRoot -PointerName 'storage.json' -PropertyName 'dataRoot' -DefaultPath 'Data'
+$extensionHome = Get-KynxaPortablePath -ApplicationRoot $applicationRoot -PointerName 'extensions.json' -PropertyName 'extensionRoot' -DefaultPath 'Extensions'
 $planPath = Join-Path $runRoot 'launch-plan.json'
 $receiptPath = Join-Path $runRoot 'launch-result.json'
+if ([IO.File]::Exists($receiptPath)) { Remove-Item -LiteralPath $receiptPath }
 $plan = @{ PackageIdentity = $packageIdentity; ApplicationRoot = $applicationRoot; RunRoot = $runRoot;
-    DataHome = $dataHome; ModelHome = (Join-Path $dataHome 'Models'); ExtensionHome = (Join-Path $runRoot 'Extensions');
+    DataHome = $dataHome; ModelHome = (Join-Path $dataHome 'Models'); ExtensionHome = $extensionHome;
     Port = $Port; Url = "http://127.0.0.1:$Port"; ReceiptPath = $receiptPath;
     DesktopExecutable = (Join-Path $applicationRoot $application.GetAttribute('Executable')) }
 [IO.File]::WriteAllText($planPath, ($plan | ConvertTo-Json), $utf8)

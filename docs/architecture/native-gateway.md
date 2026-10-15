@@ -22,6 +22,14 @@ flowchart LR
 
 ## 职责
 
+未打包便携版本默认将可写数据保存在软件目录下的固定 `Data/`，用户安装的工具、MCP、Skill 与缓存保存在固定 `Extensions/`；模型连接配置位于 `Data/Models/`，桌面及 WebView2 缓存位于 `Data/Desktop/`。正式 AppX/MSIX 包的程序载荷可能只读且会被更新替换，因此继续使用既有 `%LOCALAPPDATA%/KYNXA/Data` 与 `Extensions` 持久目录，以及用户 `.kynxa` 下的存储指针；有效旧指针和旧模型/桌面数据继续保留。重复启动复用这些目录，不创建新的时间戳数据目录。
+
+用户可在设置中迁移目录。便携版本的软件旁 `storage.json` 与 `extensions.json` 保存选择；相对选择按指针所在目录解析，外部自选目录使用绝对路径。移动完整便携软件文件夹后，默认目录和相对选择按新位置解析，不读取正式包的用户主目录指针。正式包更新不改变已有持久目录与指针。显式 `KYNXA_DATA_HOME`、`KYNXA_MODEL_HOME`、`KYNXA_EXTENSION_HOME` 等环境设置继续优先；独立预览显式设置 `KYNXA_APPLICATION_ROOT` 时使用该副本的便携目录规则。便携软件需放在用户可写的位置。
+
+桌面给子网关传递实际 `KYNXA_STORAGE_POINTER`、`KYNXA_STORAGE_MIGRATION_LOCK`、扩展指针及默认数据/模型/扩展位置，程序和原生依赖仍从载荷根解析。这些默认值不能覆盖有效指针；迁移发布新指针后，运行时重新解析它。显式 Data/Model 环境隔离且未指定扩展指针时，继续忽略正式扩展指针。复用共享网关前核对健康信息中的实际模型目录与扩展目录，缺失或不一致明确失败，不停止其他调用方的服务。
+
+`tools/development/start-clean-desktop.ps1` 保留独立包身份与端口，但数据也使用该副本软件旁的固定目录；仅启动日志和结果文件放入 `artifacts/clean-run/current/`。内置 Node、MCP 依赖和 E5/BGE 权重仍是 `runtime/` 下的随包资源，与用户安装的扩展分开维护。
+
 | 负责人 | 生产目录 | 新接线职责 |
 |---|---|---|
 | A | `apps/agent-core/src/orchestration/`、`resources/`、网关入口及打包 | 请求身份、队列、SSE、任务循环、审批、取消、资源 IPC、集成 |

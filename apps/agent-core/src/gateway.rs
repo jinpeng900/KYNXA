@@ -626,13 +626,9 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
             )
         })?;
     let runtime = GatewayRuntime::new(config.clone());
-    let user_home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| GatewayError::new("USER_HOME_UNAVAILABLE", "无法确定用户配置目录。", 500))?;
     let lifecycle = crate::gateway_storage::StorageLifecycle::managed(
         runtime.clone(),
-        user_home.join(".kynxa/storage-migration.lock"),
+        config.migration_lock_path()?,
         Arc::new(GatewayConfig::from_environment),
     )?;
     if config.inference_library.is_file() {

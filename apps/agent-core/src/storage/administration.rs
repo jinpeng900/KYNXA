@@ -60,6 +60,34 @@ fn absolute(value: &Value) -> Result<PathBuf, ContractError> {
     }
     Ok(path)
 }
+
+/// Resolve portable settings against the application location, never the process working directory.
+/// 便携配置相对软件所在目录解析，不随进程工作目录或用户账户变化。
+pub(crate) fn configured_path(value: &Value, base: &Path) -> Result<PathBuf, ContractError> {
+    let value = value
+        .as_str()
+        .filter(|value| !value.trim().is_empty() && !value.contains(['\0', '\r', '\n']))
+        .ok_or_else(|| failure("KYNXA 存储目录配置无效。"))?;
+    let path = Path::new(value);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !resolved.pop() {
+                    return Err(failure("KYNXA 存储目录配置无效。"));
+                }
+            }
+            component => resolved.push(component.as_os_str()),
+        }
+    }
+    absolute(&json!(resolved))
+}
 fn root(path: &Path) -> PathBuf {
     path.components()
         .take_while(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
@@ -548,42 +576,54 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
             Ok(json!({"path":public_path,"folder":public_folder}))
         }
         "storage.administration.modelHome" => {
-            let home = absolute(&arguments["userHome"])?;
+            let application = absolute(&arguments["applicationRoot"])?;
             if let Some(path) = arguments["modelHome"]
                 .as_str()
                 .filter(|value| !value.is_empty())
             {
-                return Ok(json!(PathBuf::from(path)));
+                return Ok(json!(configured_path(&json!(path), &application)?));
             }
-            let configured = arguments["dataHome"]
+            if let Some(path) = arguments["dataHome"]
                 .as_str()
                 .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            let configured = if configured.is_some() {
-                configured
-            } else {
-                let pointer = home.join(".kynxa").join("storage.json");
-                optional(&pointer)?
-                    .map(|bytes| {
-                        serde_json::from_str::<Value>(&raw_json::scalar_projection(
-                            String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}'),
-                        ))
-                        .map_err(|_| failure("Invalid storage pointer JSON."))
-                    })
-                    .transpose()?
-                    .map(|value| value["dataRoot"].as_str().unwrap_or("").to_owned())
-            };
-            if let Some(value) = configured {
-                if value.is_empty() {
-                    return Err(failure("KYNXA 存储目录配置为空。"));
-                }
-                if !Path::new(&value).is_absolute() {
-                    return Err(failure("KYNXA 存储目录必须为绝对路径。"));
-                }
-                Ok(json!(Path::new(&value).join("Models")))
-            } else {
-                Ok(json!(home.join(".kynxa").join("models")))
+            {
+                return Ok(json!(
+                    configured_path(&json!(path), &application)?.join("Models")
+                ));
             }
+            let pointer = if arguments["pointer"].is_null() {
+                application.join("storage.json")
+            } else {
+                configured_path(&arguments["pointer"], &application)?
+            };
+            let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
+                // Packaged hosts keep legacy writable defaults outside the immutable payload.
+                // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
+                if !arguments["defaultModelHome"].is_null() {
+                    return Ok(json!(configured_path(
+                        &arguments["defaultModelHome"],
+                        &application
+                    )?));
+                }
+                let data = if arguments["defaultDataRoot"].is_null() {
+                    application.join("Data")
+                } else {
+                    configured_path(&arguments["defaultDataRoot"], &application)?
+                };
+                return Ok(json!(data.join("Models")));
+            };
+            let source = std::str::from_utf8(&bytes)
+                .map_err(|_| failure("Invalid storage pointer UTF-8."))?;
+            let document: Value = serde_json::from_str(&raw_json::scalar_projection(
+                source.strip_prefix('\u{feff}').unwrap_or(source),
+            ))
+            .map_err(|_| failure("Invalid storage pointer JSON."))?;
+            if document["version"].as_u64() != Some(1) {
+                return Err(failure("KYNXA 存储目录配置版本不受支持。"));
+            }
+            Ok(json!(
+                configured_path(&document["dataRoot"], pointer.parent().unwrap())?.join("Models")
+            ))
         }
         "storage.administration.migrationLock" => {
             let path = absolute(&arguments["path"])?;

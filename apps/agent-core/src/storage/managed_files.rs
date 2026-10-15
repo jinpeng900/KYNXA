@@ -93,11 +93,8 @@ pub fn inspect(
                     ));
                 }
                 if final_file {
-                    let handle = std::fs::File::open(&current).map_err(io_failure)?;
-                    let identity =
-                        crate::file_identity::handle_identity(&handle).map_err(io_failure)?;
-                    if identity.is_link || identity.links != 1 {
-                        return Err(unsafe_path());
+                    if !inspect_open_file(&current)? {
+                        return Ok(false);
                     }
                 }
             }
@@ -120,6 +117,61 @@ pub fn inspect(
         }
     }
     Ok(true)
+}
+
+fn inspect_open_file(path: &Path) -> Result<bool, ContractError> {
+    let handle = match read_options().open(path) {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_failure(error)),
+    };
+    inspect_handle_identity(path, &handle)
+}
+
+fn inspect_handle_identity(path: &Path, handle: &std::fs::File) -> Result<bool, ContractError> {
+    let identity = crate::file_identity::handle_identity(handle).map_err(io_failure)?;
+    if identity.is_link {
+        return Err(unsafe_path());
+    }
+    // SQLite may unlink a sidecar between metadata inspection and checking its opened handle.
+    // SQLite 可在路径检查与句柄核验之间删除旁车；仅已无目录项的零链接对象按不存在处理。
+    if identity.links == 0
+        && matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(false);
+    }
+    if identity.links != 1 {
+        return Err(unsafe_path());
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn removed_sidecar_is_absent_but_a_hard_link_remains_unsafe() {
+        let root = std::env::temp_dir().join(format!("kynxa-sidecar-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tasks.sqlite-wal");
+        fs::write(&path, b"sidecar").unwrap();
+        let handle = read_options().open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!inspect_handle_identity(&path, &handle).unwrap());
+        drop(handle);
+        fs::write(&path, b"protected").unwrap();
+        let alias = root.join("alias");
+        fs::hard_link(&path, &alias).unwrap();
+        assert_eq!(
+            inspect_open_file(&path).unwrap_err().code,
+            "INVALID_MEMORY_PATH"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"protected");
+        fs::remove_file(alias).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 }
 
 /// A bounded reader holds one checked object and verifies its identity again after range reads.

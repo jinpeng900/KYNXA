@@ -6,6 +6,7 @@
   <ItemGroup><Compile Include="../../apps/desktop/Services/Data/StorageMigrationService.cs" Link="StorageMigrationService.cs" /></ItemGroup>
   <ItemGroup><Compile Include="../../apps/desktop/Services/Data/ExtensionConfigurationMigration.cs" Link="ExtensionConfigurationMigration.cs" /></ItemGroup>
   <ItemGroup><Compile Include="../../apps/desktop/Services/Data/ExtensionPaths.cs" Link="ExtensionPaths.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="../../apps/desktop/Services/Data/ApplicationPaths.cs" Link="ApplicationPaths.cs" /></ItemGroup>
   <ItemGroup>
     <Compile Include="../../apps/desktop/Services/Presentation/UiText.cs" Link="UiText.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiText.English.cs" Link="UiText.English.cs" />

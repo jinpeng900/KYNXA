@@ -78,34 +78,6 @@ pub struct GatewayConfig {
 
 impl GatewayConfig {
     pub fn from_environment() -> Result<Self, GatewayError> {
-        let user_home = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                GatewayError::new("USER_HOME_UNAVAILABLE", "无法确定用户配置目录。", 500)
-            })?;
-        let arguments = json!({"userHome": user_home, "modelHome": std::env::var_os("KYNXA_MODEL_HOME").map(PathBuf::from),
-            "dataHome": std::env::var_os("KYNXA_DATA_HOME").map(PathBuf::from)});
-        let selected =
-            crate::storage::administration::apply("storage.administration.modelHome", &arguments)
-                .map_err(|_| {
-                GatewayError::new(
-                    "INVALID_STORAGE_CONFIGURATION",
-                    "存储配置无效，原位置未改变。",
-                    409,
-                )
-            })?;
-        let data_home = PathBuf::from(selected.as_str().ok_or_else(|| {
-            GatewayError::new("INVALID_STORAGE_CONFIGURATION", "模型目录无效。", 409)
-        })?);
-        let root = crate::storage::administration::apply(
-            "storage.administration.conversationRoot",
-            &json!({"dataHome": data_home}),
-        )
-        .map_err(|_| GatewayError::new("INVALID_STORAGE_CONFIGURATION", "数据目录无效。", 409))?;
-        let data_root = PathBuf::from(root["path"].as_str().or_else(|| root.as_str()).ok_or_else(
-            || GatewayError::new("INVALID_STORAGE_CONFIGURATION", "正式数据目录无效。", 409),
-        )?);
         let application_root = match std::env::var_os("KYNXA_APPLICATION_ROOT") {
             Some(root) => PathBuf::from(root),
             None => {
@@ -126,17 +98,74 @@ impl GatewayConfig {
                     })?
             }
         };
+        let arguments = json!({"applicationRoot": application_root,
+            "modelHome": std::env::var_os("KYNXA_MODEL_HOME").map(PathBuf::from),
+            "dataHome": std::env::var_os("KYNXA_DATA_HOME").map(PathBuf::from),
+            "pointer": std::env::var_os("KYNXA_STORAGE_POINTER").map(PathBuf::from),
+            "defaultDataRoot": std::env::var_os("KYNXA_DEFAULT_DATA_HOME").map(PathBuf::from),
+            "defaultModelHome": std::env::var_os("KYNXA_DEFAULT_MODEL_HOME").map(PathBuf::from)});
+        let selected =
+            crate::storage::administration::apply("storage.administration.modelHome", &arguments)
+                .map_err(|_| {
+                GatewayError::new(
+                    "INVALID_STORAGE_CONFIGURATION",
+                    "存储配置无效，原位置未改变。",
+                    409,
+                )
+            })?;
+        let data_home = PathBuf::from(selected.as_str().ok_or_else(|| {
+            GatewayError::new("INVALID_STORAGE_CONFIGURATION", "模型目录无效。", 409)
+        })?);
+        let root = crate::storage::administration::apply(
+            "storage.administration.conversationRoot",
+            &json!({"dataHome": data_home}),
+        )
+        .map_err(|_| GatewayError::new("INVALID_STORAGE_CONFIGURATION", "数据目录无效。", 409))?;
+        let data_root = PathBuf::from(root["path"].as_str().or_else(|| root.as_str()).ok_or_else(
+            || GatewayError::new("INVALID_STORAGE_CONFIGURATION", "正式数据目录无效。", 409),
+        )?);
         let port = std::env::var("KYNXA_MODEL_API_PORT")
             .unwrap_or_else(|_| "5218".into())
             .parse()
             .map_err(|_| GatewayError::new("INVALID_GATEWAY_PORT", "模型网关端口无效。", 400))?;
         let runtime = application_root.join("runtime");
+        let extension_pointer = std::env::var_os("KYNXA_EXTENSION_POINTER")
+            .map(|pointer| {
+                crate::storage::administration::configured_path(
+                    &json!(PathBuf::from(pointer)),
+                    &application_root,
+                )
+            })
+            .transpose()
+            .map_err(|_| {
+                GatewayError::new(
+                    "INVALID_EXTENSION_STORAGE",
+                    "扩展存储配置无效，原位置未改变。",
+                    409,
+                )
+            })?
+            .unwrap_or_else(|| application_root.join("extensions.json"));
+        let default_extension_root = std::env::var_os("KYNXA_DEFAULT_EXTENSION_HOME")
+            .map(|root| {
+                crate::storage::administration::configured_path(
+                    &json!(PathBuf::from(root)),
+                    &application_root,
+                )
+            })
+            .transpose()?;
         let extension = crate::storage::extensions::apply("storage.extensions.home", &json!({
             "explicitRoot": std::env::var_os("KYNXA_EXTENSION_HOME").map(PathBuf::from),
             "isolated": std::env::var_os("KYNXA_EXTENSION_POINTER").is_none() &&
                 (std::env::var_os("KYNXA_DATA_HOME").is_some() || std::env::var_os("KYNXA_MODEL_HOME").is_some()),
-            "pointer": std::env::var_os("KYNXA_EXTENSION_POINTER").map(PathBuf::from)
-                .unwrap_or_else(|| user_home.join(".kynxa").join("extensions.json")), "fallback": data_root
+            "pointer": extension_pointer,
+            "applicationRoot": application_root,
+            "followDataRoot": std::env::var("KYNXA_EXTENSIONS_FOLLOW_DATA").is_ok_and(|value| value == "1"),
+            "dataRoot": data_root,
+            "fallback": if std::env::var_os("KYNXA_DATA_HOME").is_some() || std::env::var_os("KYNXA_MODEL_HOME").is_some() {
+                data_root.clone()
+            } else {
+                default_extension_root.unwrap_or_else(|| application_root.join("Extensions"))
+            }
         })).map_err(|_| GatewayError::new("INVALID_EXTENSION_STORAGE", "扩展存储配置无效，原位置未改变。", 409))?;
         let extension_root = PathBuf::from(extension.as_str().ok_or_else(|| {
             GatewayError::new("INVALID_EXTENSION_STORAGE", "扩展目录无效。", 409)
@@ -155,6 +184,23 @@ impl GatewayConfig {
             application_root,
             port,
         })
+    }
+
+    /// The host may place its maintenance marker beside persistent pointers instead of package files.
+    /// 宿主可将维护标记放到持久指针旁，不要求向只读安装载荷写入。
+    pub fn migration_lock_path(&self) -> Result<PathBuf, GatewayError> {
+        std::env::var_os("KYNXA_STORAGE_MIGRATION_LOCK")
+            .map(|path| {
+                crate::storage::administration::configured_path(
+                    &json!(PathBuf::from(path)),
+                    &self.application_root,
+                )
+            })
+            .transpose()
+            .map(|path| {
+                path.unwrap_or_else(|| self.application_root.join("storage-migration.lock"))
+            })
+            .map_err(GatewayError::from)
     }
 }
 
