@@ -22,6 +22,7 @@ struct Fixture {
     url: String,
     conversation: String,
     message: String,
+    shutdown: tokio::sync::oneshot::Sender<()>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Fixture {
@@ -73,8 +74,14 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let service = gateway::router_with_lifecycle(lifecycle.clone());
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
-            axum::serve(listener, service).await.unwrap();
+            axum::serve(listener, service)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
         });
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -108,6 +115,7 @@ impl Fixture {
             url,
             conversation,
             message,
+            shutdown,
             server,
         }
     }
@@ -161,10 +169,13 @@ impl Fixture {
             .await
             .unwrap();
         self.lifecycle.shutdown().await;
-        self.server.abort();
-        let _ = self.server.await;
+        // Idle HTTP connections also own router state and its exclusive data-root handle.
+        // 空闲 HTTP 连接也持有路由状态及数据根目录独占句柄；等待连接退场后再删除测试目录。
+        drop(self.client);
+        let _ = self.shutdown.send(());
+        self.server.await.unwrap();
         drop(self.lifecycle);
-        std::fs::remove_dir_all(self.root).unwrap();
+        std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
 

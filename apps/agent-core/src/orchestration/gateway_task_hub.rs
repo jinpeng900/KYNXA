@@ -42,6 +42,7 @@ pub struct TaskHub {
     restoring_roots: Mutex<HashSet<String>>,
     root_slots: Mutex<HashMap<String, Arc<Semaphore>>>,
     workspace_writers: Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>,
+    recovery_gate: tokio::sync::Mutex<()>,
     changes: Notify,
     stopping: std::sync::atomic::AtomicBool,
 }
@@ -55,6 +56,7 @@ impl TaskHub {
             restoring_roots: Mutex::new(HashSet::new()),
             root_slots: Mutex::new(HashMap::new()),
             workspace_writers: Mutex::new(HashMap::new()),
+            recovery_gate: tokio::sync::Mutex::new(()),
             changes: Notify::new(),
             stopping: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1200,6 +1202,12 @@ impl TaskHub {
         }
     }
     pub async fn recover(self: &Arc<Self>) -> Result<Value> {
+        // Recovery must finish before migration retires its database connections.
+        // 恢复扫描须在迁移退池前结束；已停止的旧运行时不得重新打开任务库。
+        let _recovery = self.recovery_gate.lock().await;
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(json!({"scheduled":0,"source":"persistent-task-index"}));
+        }
         let repository = self.repository().await?;
         // File-cleanup markers survive metadata deletion; retry them before accepting old work.
         // 元数据删除后的文件清理标记仍存活；恢复先重试它们，不能丢失待清理路径。
@@ -1247,6 +1255,7 @@ impl TaskHub {
     /// 迁移等待自有 Worker 实际结算日志，不能把发送取消信号当作完成。
     pub async fn quiesce(self: &Arc<Self>) -> Result<()> {
         self.shutdown().await;
+        let _recovery = self.recovery_gate.lock().await;
         while self.active_workers()? != 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
