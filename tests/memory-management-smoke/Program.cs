@@ -8,7 +8,7 @@ using KYNXA_Desktop.ViewModels;
 
 await Smoke.RunAsync();
 
-internal static class Smoke
+internal static partial class Smoke
 {
     private static readonly MemoryTarget Chat = new(MemoryScopes.Chat, Guid.Parse("b168304f-d69b-49b9-b97a-6924cc40b1a4"), "Example chat");
     private static readonly MemoryTarget Project = new(MemoryScopes.Project, Guid.Parse("d8623068-8b2f-4862-baaa-7480cb18c970"), "Example work");
@@ -20,6 +20,8 @@ internal static class Smoke
     {
         await CheckAsync("candidate provenance, confirmation-only PATCH and settings patch serialization", CandidateContractsAsync);
         await CheckAsync("HTTP scope paths and status-bearing GETs", HttpReadsAsync);
+        await CheckAsync("mixed confirmed, candidate and action-proposal drafts remain readable and validated", DraftResponsesAsync);
+        await CheckAsync("pending review never implicitly confirms while confirmed editing remains available", ReviewDraftWithoutImplicitConfirmationAsync);
         await CheckAsync("HTTP manual CRUD uses scope revision and DELETE JSON", HttpWritesAsync);
         await CheckAsync("HTTP mixed draft and confirmed scope retains provenance and rejects active drafts", DraftHttpAsync);
         await CheckAsync("draft edits stay pending until explicit versioned confirmation", DraftConfirmationAsync);

@@ -18,6 +18,12 @@ if (!$applicationRoot) {
     if ([IO.File]::Exists((Join-Path $applicationRoot 'AppX/KYNXA.Desktop.exe'))) {
         $applicationRoot = Join-Path $applicationRoot 'AppX'
     }
+    # Use the packaged deployment root when present, matching the desktop and gateway launchers.
+    # 存在打包部署目录时与桌面、网关启动入口保持一致，仍保留旧构建目录兼容。
+    $packagedLayout = Join-Path $repositoryRoot 'artifacts/development/appx/x64/Debug'
+    if ([IO.File]::Exists((Join-Path $packagedLayout 'KYNXA.Desktop.exe'))) {
+        $applicationRoot = $packagedLayout
+    }
 }
 $dataRoot = $env:KYNXA_DATA_HOME
 if (!$dataRoot) {

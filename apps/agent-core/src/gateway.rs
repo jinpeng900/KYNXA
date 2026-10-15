@@ -16,7 +16,7 @@ use axum::{
     },
     routing::any,
 };
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -225,10 +225,13 @@ pub fn health() -> Value {
 }
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
+    router_with_lifecycle(crate::gateway_storage::StorageLifecycle::fixed(runtime))
+}
+pub fn router_with_lifecycle(lifecycle: Arc<crate::gateway_storage::StorageLifecycle>) -> Router {
     Router::new()
         .fallback(any(handle))
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .with_state(runtime)
+        .with_state(lifecycle)
 }
 
 struct StreamOwner(Arc<crate::orchestration::gateway_runtime::RequestRun>);
@@ -355,7 +358,7 @@ impl RequestEventStream {
 }
 
 async fn handle(
-    State(runtime): State<Arc<GatewayRuntime>>,
+    State(lifecycle): State<Arc<crate::gateway_storage::StorageLifecycle>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -370,6 +373,57 @@ async fn handle(
             403,
         )));
     }
+    if uri.path() == "/health" && method == Method::GET {
+        let health = lifecycle.health().await;
+        if health["migrating"] != true {
+            lifecycle.current().await.schedule_extension_prewarm();
+        }
+        return response(Ok((200, health)));
+    }
+    let control = method == Method::POST
+        && (["/api/chat/cancel", "/api/agent/approvals"].contains(&uri.path())
+            || uri.path().starts_with("/api/tasks/")
+                && uri.path().ends_with("/control")
+                && serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .is_some_and(|body| {
+                        matches!(body["action"].as_str(), Some("pause" | "cancel"))
+                    }));
+    let (runtime, admission) = match lifecycle.admit(control).await {
+        Ok(admitted) => admitted,
+        Err(error) => return response(Err(error)),
+    };
+    // The admitted task owns its writes even if the HTTP caller disconnects during blocking I/O.
+    // 即使 HTTP 调用方在阻塞读写期间断开，已准入任务仍持有计数直到真实操作完成。
+    tokio::spawn(async move {
+        let result = handle_request(runtime, method, uri, headers, bytes).await;
+        let (parts, body) = result.into_parts();
+        // SSE may still read its durable journal after the run has reached a terminal state.
+        // SSE 在任务终态后仍可能读取持久事件；准入所有权保持到响应体发送结束或连接关闭。
+        let source = stream::unfold(
+            (body.into_data_stream(), admission),
+            |(mut body, admission)| async move {
+                body.next().await.map(|chunk| (chunk, (body, admission)))
+            },
+        );
+        Response::from_parts(parts, axum::body::Body::from_stream(source))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        response(Err(GatewayError::new(
+            "GATEWAY_REQUEST_FAILED",
+            "网关请求处理未完成。",
+            500,
+        )))
+    })
+}
+async fn handle_request(
+    runtime: Arc<GatewayRuntime>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
     let raw = match std::str::from_utf8(&bytes) {
         Ok(value) => value.to_owned(),
         Err(_) => {
@@ -518,10 +572,6 @@ async fn handle(
     .await
     {
         return response(result);
-    }
-    if path == "/health" && method == Method::GET {
-        runtime.schedule_extension_prewarm();
-        return response(Ok((200, health())));
     }
     if method == Method::POST && ["/api/chat", "/api/chat/stream"].contains(&path) {
         let original = serde_json::from_str::<HashMap<String, &serde_json::value::RawValue>>(&raw)
@@ -783,8 +833,12 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
                 503,
             )
         })?;
-    let _data_owner = own_data_root(&config.data_root)?;
     let runtime = GatewayRuntime::new(config.clone());
+    let lifecycle = crate::gateway_storage::StorageLifecycle::managed(
+        runtime.clone(),
+        config.migration_lock_path()?,
+        Arc::new(GatewayConfig::from_environment),
+    )?;
     if config.inference_library.is_file() {
         crate::models::gateway_inference::initialize_runtime(&config.inference_library)
             .map_err(GatewayError::from)?;
@@ -835,8 +889,8 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
             );
         }
     });
-    let shutdown = runtime.clone();
-    axum::serve(listener, router(runtime))
+    let shutdown = lifecycle.clone();
+    axum::serve(listener, router_with_lifecycle(lifecycle))
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             shutdown.shutdown().await;
@@ -855,6 +909,7 @@ pub fn initialize_storage(target: &str) -> Result<Value, GatewayError> {
         ));
     }
     let catalog = crate::storage::gateway::load_catalog(root)?;
+    crate::storage::task_repository::TaskRepository::validate_existing(root)?;
     let projects = catalog["Projects"].as_array().map_or(0, Vec::len);
     let chats = catalog["Chats"].as_array().map_or(0, Vec::len)
         + catalog["Projects"]
@@ -868,7 +923,7 @@ pub fn initialize_storage(target: &str) -> Result<Value, GatewayError> {
 
 /// An OS-owned lock expires with the process; stale PID files never authorize a second writer.
 /// 所有者锁由操作系统随进程释放，过期 PID 文件不能授权第二个正式数据写入者。
-fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> {
+pub(crate) fn own_data_root(root: &std::path::Path) -> Result<std::fs::File, GatewayError> {
     // Only trusted application configuration selects this root; validate and prepare every missing ancestor.
     // 此根目录仅由可信应用配置选定；逐层核验并准备缺失祖先，不能只假设最终一层存在。
     let volume_root: std::path::PathBuf = root

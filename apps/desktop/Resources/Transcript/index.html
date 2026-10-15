@@ -3,20 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' https://kynxa-attachments.local data:; frame-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' https://kynxa-attachments.local data: blob:; frame-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <link rel="stylesheet" href="../Math/KaTeX/katex.min.css">
   <link rel="stylesheet" href="transcript.css">
   <link rel="stylesheet" href="diagrams.css">
   <link rel="stylesheet" href="content-blocks.css">
+  <link rel="stylesheet" href="table-blocks.css">
+  <link rel="stylesheet" href="transcript-search.css">
   <script src="tool-web-links.js" defer></script>
   <script src="tool-presentation.js" defer></script>
   <script src="message-presentation.js" defer></script>
   <script src="diagrams.js" defer></script>
   <script src="content-blocks.js" defer></script>
+  <script src="table-blocks.js" defer></script>
+  <script src="transcript-search.js" defer></script>
   <script src="transcript.js" defer></script>
   <title>对话</title>
 </head>
 <body>
+  <section id="transcript-search" hidden data-copy-ignore role="search" aria-label="查找会话正文">
+    <div class="transcript-search-row">
+      <input id="transcript-search-input" type="text" autocomplete="off" spellcheck="false" aria-label="查找会话正文" aria-describedby="transcript-search-status">
+      <span id="transcript-search-count" aria-live="polite" aria-atomic="true"></span>
+      <button type="button" data-search-action="previous" aria-label="上一处">↑</button>
+      <button type="button" data-search-action="next" aria-label="下一处">↓</button>
+      <button type="button" data-search-action="close" aria-label="关闭正文查找">×</button>
+    </div>
+    <span id="transcript-search-status" role="status" aria-live="polite"></span>
+  </section>
   <main id="messages" aria-label="聊天记录"></main>
   <button id="jump-to-latest" type="button" hidden data-copy-ignore aria-label="跳转到最新消息">↓ 跳转到最新消息</button>
 </body>

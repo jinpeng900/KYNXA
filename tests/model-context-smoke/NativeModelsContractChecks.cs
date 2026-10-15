@@ -68,7 +68,14 @@ internal static class NativeModelsContractChecks
                 Check(context.Request.HttpMethod == "GET", "The fixture unexpectedly tried to save or probe a model.");
                 byte[] bytes = path switch
                 {
-                    "/health" => Encoding.UTF8.GetBytes("{\"service\":\"kynxa-model-gateway\",\"status\":\"ok\",\"runtime\":\"rust\",\"conversationProtocol\":1,\"dataLayoutVersion\":1,\"memoryProtocol\":1,\"contextProtocol\":3,\"agentProtocol\":5,\"officialToolsProtocol\":2,\"hostTerminalProtocol\":3,\"browserAutomationProtocol\":2,\"extensionStorageProtocol\":1,\"toolStreamProtocol\":3,\"retrievalProtocol\":1}"),
+                    "/health" => JsonSerializer.SerializeToUtf8Bytes(new
+                    {
+                        service = "kynxa-model-gateway", status = "ok", runtime = "rust", conversationProtocol = 1,
+                        dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5,
+                        officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2,
+                        extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1,
+                        modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root
+                    }),
                     "/api/models" => publicResponse,
                     _ => throw new InvalidOperationException("The fixture requested an unexpected API.")
                 };

@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -291,6 +291,8 @@ struct Approval {
     request: String,
     call: String,
     response: oneshot::Sender<bool>,
+    expires: Instant,
+    deadline_code: &'static str,
 }
 pub struct GatewayRuntime {
     pub config: GatewayConfig,
@@ -300,9 +302,11 @@ pub struct GatewayRuntime {
     pub tasks: Arc<super::gateway_task_hub::TaskHub>,
     pub model_slots: Arc<super::gateway_model_pool::ModelSlots>,
     task_runs: std::sync::Mutex<HashMap<String, Weak<RequestRun>>>,
+    task_journals: std::sync::Mutex<Vec<Weak<super::gateway_task_journal::TaskJournal>>>,
     runs: Mutex<HashMap<String, Arc<RequestRun>>>,
     conversations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     approvals: Mutex<HashMap<String, Approval>>,
+    execution_tasks: AtomicUsize,
     extension_prewarm_scheduled: AtomicBool,
     model_selection_received: watch::Sender<bool>,
     background_cancellation: watch::Sender<bool>,
@@ -318,11 +322,13 @@ impl GatewayRuntime {
             )),
             model_slots: Arc::new(super::gateway_model_pool::ModelSlots::default()),
             task_runs: Default::default(),
+            task_journals: Default::default(),
             config,
             tools: Arc::new(ToolRuntime::default()),
             runs: Default::default(),
             conversations: Default::default(),
             approvals: Default::default(),
+            execution_tasks: AtomicUsize::new(0),
             extension_prewarm_scheduled: AtomicBool::new(false),
             model_selection_received: watch::channel(false).0,
             background_cancellation: watch::channel(false).0,
@@ -595,10 +601,21 @@ impl GatewayRuntime {
             .lock()
             .map_err(|_| GatewayError::new("TASK_RUN_LOCK_FAILED", "任务执行者登记失败。", 500))?
             .insert(task.task_id, Arc::downgrade(&run));
+        if let Some(journal) = &run.journal {
+            self.register_journal(journal)?;
+        }
         self.runs.lock().await.insert(request_id, run.clone());
         let runtime = self.clone();
         let operation = run.clone();
+        self.execution_tasks.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
+            struct ExecutionTask(Arc<GatewayRuntime>);
+            impl Drop for ExecutionTask {
+                fn drop(&mut self) {
+                    self.0.execution_tasks.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _execution = ExecutionTask(runtime.clone());
             super::gateway_loop::run(runtime, operation, input).await;
         });
         Ok(run)
@@ -682,11 +699,28 @@ impl GatewayRuntime {
     }
     /// Child agents have independent execution/cancellation, while retaining the parent's permission scope.
     /// 子代理拥有独立执行和取消身份，权限范围仍由父任务确定。
+    fn register_journal(
+        &self,
+        journal: &Arc<super::gateway_task_journal::TaskJournal>,
+    ) -> Result<(), GatewayError> {
+        let mut journals = self.task_journals.lock().map_err(|_| {
+            GatewayError::new(
+                "TASK_JOURNAL_REGISTRY_FAILED",
+                "任务日志生命周期状态不可用。",
+                503,
+            )
+        })?;
+        journals.retain(|journal| journal.strong_count() > 0);
+        journals.push(Arc::downgrade(journal));
+        Ok(())
+    }
+
     pub fn child_run(
         &self,
         task: &crate::storage::task_repository::TaskRecord,
         journal: Arc<super::gateway_task_journal::TaskJournal>,
-    ) -> Arc<RequestRun> {
+    ) -> Result<Arc<RequestRun>, GatewayError> {
+        self.register_journal(&journal)?;
         let cancellation_key = new_id();
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(256);
@@ -704,7 +738,7 @@ impl GatewayRuntime {
             native_cancellation: crate::service_cancellation::CancellationLease::acquire(
                 &cancellation_key,
             )
-            .expect("unique task cancellation lease"),
+            .map_err(|code| GatewayError::new(code, "子任务取消状态无法创建。", 503))?,
             cancellation_key,
             events,
             replay: Default::default(),
@@ -713,11 +747,12 @@ impl GatewayRuntime {
             result: Default::default(),
             created: Instant::now(),
         });
-        if let Ok(mut runs) = self.task_runs.lock() {
-            runs.retain(|_, run| run.strong_count() > 0);
-            runs.insert(task.task_id.clone(), Arc::downgrade(&run));
-        }
-        run
+        let mut runs = self.task_runs.lock().map_err(|_| {
+            GatewayError::new("TASK_RUN_LOCK_FAILED", "子任务执行者登记失败。", 503)
+        })?;
+        runs.retain(|_, run| run.strong_count() > 0);
+        runs.insert(task.task_id.clone(), Arc::downgrade(&run));
+        Ok(run)
     }
     pub async fn cancel_task_worker(&self, task_id: &str) {
         if let Ok(runs) = self.task_runs.lock() {
@@ -814,7 +849,42 @@ impl GatewayRuntime {
         receipt: &Value,
         round: u64,
         order: u64,
+        task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
+        self.await_approval_until(
+            run,
+            call,
+            receipt,
+            round,
+            order,
+            task_deadline,
+            Instant::now() + Duration::from_secs(300),
+        )
+        .await
+    }
+    async fn await_approval_until(
+        &self,
+        run: &Arc<RequestRun>,
+        call: &Value,
+        receipt: &Value,
+        round: u64,
+        order: u64,
+        task_deadline: Instant,
+        approval_deadline: Instant,
+    ) -> Result<bool, GatewayError> {
+        let expires = task_deadline.min(approval_deadline);
+        let deadline_code = if task_deadline <= approval_deadline {
+            "TOOL_RUN_TIMEOUT"
+        } else {
+            "TOOL_APPROVAL_EXPIRED"
+        };
+        if Instant::now() >= expires {
+            return Err(GatewayError::new(
+                deadline_code,
+                "审批或任务有效期已结束，操作未派发。",
+                408,
+            ));
+        }
         let id = receipt["invocation"]["id"]
             .as_str()
             .ok_or_else(|| GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?
@@ -827,6 +897,8 @@ impl GatewayRuntime {
                 request: run.request_id.clone(),
                 call: call["id"].as_str().unwrap_or("").to_owned(),
                 response: sender,
+                expires,
+                deadline_code,
             },
         );
         run.emit(json!({"type":"approval_required","tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"等待授权","round":round,"order":order}})).await;
@@ -835,9 +907,20 @@ impl GatewayRuntime {
             self.approvals.lock().await.remove(&id);
             return Ok(false);
         }
-        let approved = tokio::select! { result = receiver => result.unwrap_or(false), _ = cancellation.changed() => false };
+        // Expiry and cancellation release the conversation task even without a user decision.
+        // 即使用户没有决定，过期与取消也会释放当前会话任务，不把审批永远留在活动槽中。
+        let approved = tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408)),
+            _ = cancellation.changed() => Ok(false),
+            result = receiver => {
+                if Instant::now() >= expires {
+                    Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408))
+                } else { Ok(result.unwrap_or(false)) }
+            },
+        };
         self.approvals.lock().await.remove(&id);
-        Ok(approved)
+        approved
     }
     /// Child control can stop an approval wait without leaving a stale approval in the parent's UI.
     /// 子任务控制可以结束审批等待，父界面不会留下失效的审批项。
@@ -849,7 +932,22 @@ impl GatewayRuntime {
         receipt: &Value,
         round: u64,
         order: u64,
+        task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
+        let approval_deadline = Instant::now() + Duration::from_secs(300);
+        let expires = task_deadline.min(approval_deadline);
+        let deadline_code = if task_deadline <= approval_deadline {
+            "TOOL_RUN_TIMEOUT"
+        } else {
+            "TOOL_APPROVAL_EXPIRED"
+        };
+        if Instant::now() >= expires {
+            return Err(GatewayError::new(
+                deadline_code,
+                "子任务审批或任务有效期已结束，操作未派发。",
+                408,
+            ));
+        }
         let mut child_cancel = child.cancellation.subscribe();
         let mut parent_cancel = parent.cancellation.subscribe();
         if *child_cancel.borrow() || *parent_cancel.borrow() {
@@ -869,6 +967,8 @@ impl GatewayRuntime {
                 request: parent.request_id.clone(),
                 call: call["id"].as_str().unwrap_or("").into(),
                 response: sender,
+                expires,
+                deadline_code,
             },
         );
         // Child approvals share the parent's user interface, never the parent's active tool sequence.
@@ -876,13 +976,17 @@ impl GatewayRuntime {
         parent.emit(json!({"type":"task_approval_required","taskId":child.journal.as_ref().map(|journal| journal.task_id()),
             "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"子任务等待授权","round":round,"order":order}})).await;
         let approved = tokio::select! {
-            result = receiver => result.unwrap_or(false),
-            _ = crate::tools::gateway::wait_for_cancellation(&mut child_cancel) => false,
-            _ = crate::tools::gateway::wait_for_cancellation(&mut parent_cancel) => false,
+            biased;
+            _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "子任务审批或任务有效期已结束，操作未派发。", 408)),
+            _ = crate::tools::gateway::wait_for_cancellation(&mut child_cancel) => Ok(false),
+            _ = crate::tools::gateway::wait_for_cancellation(&mut parent_cancel) => Ok(false),
+            result = receiver => if Instant::now() >= expires {
+                Err(GatewayError::new(deadline_code, "子任务审批或任务有效期已结束，操作未派发。", 408))
+            } else { Ok(result.unwrap_or(false)) },
         };
         self.approvals.lock().await.remove(&id);
-        parent.emit(json!({"type":"task_approval_closed","taskId":child.journal.as_ref().map(|journal|journal.task_id()),"approvalId":id,"toolCallId":call["id"],"approved":approved})).await;
-        Ok(approved)
+        parent.emit(json!({"type":"task_approval_closed","taskId":child.journal.as_ref().map(|journal|journal.task_id()),"approvalId":id,"toolCallId":call["id"],"approved":approved.as_ref().is_ok_and(|approved| *approved),"code":approved.as_ref().err().map(|error|&error.code)})).await;
+        approved
     }
     pub async fn approve(&self, body: &Value) -> Result<Value, GatewayError> {
         let id = body["approvalId"]
@@ -906,6 +1010,15 @@ impl GatewayRuntime {
                 ));
             }
         }
+        if Instant::now() >= pending.expires {
+            let code = pending.deadline_code;
+            approvals.remove(id);
+            return Err(GatewayError::new(
+                code,
+                "审批或任务有效期已结束，操作未派发。",
+                408,
+            ));
+        }
         let approved = body["approved"]
             .as_bool()
             .or_else(|| body["allow"].as_bool())
@@ -914,6 +1027,95 @@ impl GatewayRuntime {
         let _ = pending.response.send(approved);
         Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call}))
     }
+    pub async fn active_requests(&self) -> usize {
+        let unfinished = self
+            .runs
+            .lock()
+            .await
+            .values()
+            .filter(|run| !run.finished.load(Ordering::Acquire))
+            .count();
+        unfinished
+            .max(self.execution_tasks.load(Ordering::Acquire))
+            .saturating_add(self.tasks.active_workers().unwrap_or(usize::MAX))
+    }
+
+    /// The router must first close its maintenance gate; no new request may enter while roots drain.
+    /// 路由必须先关闭维护入口；根目录结算期间不得进入新请求。
+    pub async fn quiesce_storage(&self) -> Result<(), GatewayError> {
+        if self.active_requests().await != 0 {
+            return Err(GatewayError::new(
+                "STORAGE_MIGRATION_BUSY",
+                "仍有活动任务，存储尚未就绪。",
+                409,
+            ));
+        }
+        self.tasks.quiesce().await?;
+        self.background_cancellation.send_replace(true);
+        self.model_preparation.shutdown().await;
+        // Released attempts may still own a batched writer; drain it before moving the root.
+        // 已释放的尝试可能仍拥有批量写入者；移动根目录前等待其实际退场。
+        let journals = self
+            .task_journals
+            .lock()
+            .map_err(|_| {
+                GatewayError::new(
+                    "TASK_JOURNAL_REGISTRY_FAILED",
+                    "任务日志生命周期状态不可用。",
+                    503,
+                )
+            })?
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for journal in journals {
+            journal.drain_background().await?;
+        }
+        let (_owner, cancellation) = watch::channel(false);
+        let context = GatewayToolContext {
+            data_home: self.config.data_root.clone(),
+            extension_root: self.config.extension_root.clone(),
+            workdir: self.config.data_root.join("Sandboxes"),
+            toolhost_exe: self.config.toolhost_exe.clone(),
+            permission_mode: "ask".into(),
+            conversation_id: String::new(),
+            project_id: None,
+            authorized_roots: vec![],
+            cancellation,
+            runtime: self.tools.clone(),
+            config: json!({}),
+            approved: false,
+            events: None,
+            external_execute: None,
+        };
+        crate::tools::gateway::shutdown_checked(&context).await?;
+        let config = self.config.clone();
+        tokio::task::spawn_blocking(move || crate::retrieval::gateway::drain_background(&config))
+            .await
+            .map_err(|_| {
+                GatewayError::new("RETRIEVAL_WORKER_FAILED", "检索后台结算线程退出。", 503)
+            })??;
+        let retired = tokio::task::spawn_blocking(crate::models::gateway_inference::shutdown_idle)
+            .await
+            .map_err(|_| {
+                GatewayError::new("INFERENCE_CLEANUP_FAILED", "推理运行时结算线程退出。", 503)
+            })??;
+        if !retired {
+            return Err(GatewayError::new(
+                "INFERENCE_CLEANUP_PENDING",
+                "仍有推理资产在使用，存储尚未就绪。",
+                409,
+            ));
+        }
+        let root = self.config.data_root.clone();
+        tokio::task::spawn_blocking(move || crate::storage::sqlite_connections::drain_root(&root))
+            .await
+            .map_err(|_| {
+                GatewayError::new("STORAGE_CLEANUP_FAILED", "数据库结算线程退出。", 503)
+            })??;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         self.background_cancellation.send_replace(true);
         for run in self.runs.lock().await.values() {
@@ -960,4 +1162,132 @@ pub fn checked_id(value: &Value, field: &str) -> Result<String, GatewayError> {
         .and_then(|text| uuid::Uuid::parse_str(text).ok())
         .map(|id| id.to_string())
         .ok_or_else(|| GatewayError::new("INVALID_CHAT_REQUEST", format!("{field} 无效。"), 400))
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    fn runtime() -> (Arc<GatewayRuntime>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("kynxa-approval-{}", new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runtime = GatewayRuntime::new(GatewayConfig {
+            data_home: root.join("models"),
+            data_root: root.join("data"),
+            extension_root: root.join("extensions"),
+            application_root: root.join("app"),
+            port: 0,
+            toolhost_exe: root.join("missing.exe"),
+            vector_extension: root.join("missing-vector.dll"),
+            inference_library: root.join("missing-inference.dll"),
+        });
+        (runtime, root)
+    }
+    #[tokio::test]
+    async fn formal_approval_expires_and_task_deadline_interrupts_waiting() {
+        let (runtime, root) = runtime();
+        let run = RequestRun::test_run(16);
+        let call = json!({"id":"owned-call","name":"skill.run","arguments":{}});
+        for (approval_ms, task_ms, code) in [
+            (20, 2000, "TOOL_APPROVAL_EXPIRED"),
+            (20_000, 20, "TOOL_RUN_TIMEOUT"),
+        ] {
+            let receipt = json!({"invocation":{"id":new_id()}});
+            let error = runtime
+                .await_approval_until(
+                    &run,
+                    &call,
+                    &receipt,
+                    1,
+                    1,
+                    Instant::now() + Duration::from_millis(task_ms),
+                    Instant::now() + Duration::from_millis(approval_ms),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(runtime.approvals.lock().await.is_empty());
+            assert_eq!(runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":"owned-call","approved":true})).await.unwrap_err().code, "APPROVAL_NOT_FOUND");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn approval_submission_checks_expiry_and_scope_and_accepts_live_decision() {
+        let (runtime, root) = runtime();
+        let run = RequestRun::test_run(16);
+        let (sender, _receiver) = oneshot::channel();
+        runtime.approvals.lock().await.insert(
+            "expired".into(),
+            Approval {
+                conversation: run.conversation_id.clone(),
+                request: run.request_id.clone(),
+                call: "call".into(),
+                response: sender,
+                expires: Instant::now() - Duration::from_millis(1),
+                deadline_code: "TOOL_APPROVAL_EXPIRED",
+            },
+        );
+        let decision = json!({"approvalId":"expired","conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":"call","approved":true});
+        assert_eq!(
+            runtime.approve(&decision).await.unwrap_err().code,
+            "TOOL_APPROVAL_EXPIRED"
+        );
+        assert!(runtime.approvals.lock().await.is_empty());
+        let receipt = json!({"invocation":{"id":new_id()}});
+        let call = json!({"id":"call","name":"skill.run","arguments":{}});
+        let waiting = {
+            let runtime = runtime.clone();
+            let run = run.clone();
+            let receipt = receipt.clone();
+            tokio::spawn(async move {
+                runtime
+                    .await_approval(
+                        &run,
+                        &call,
+                        &receipt,
+                        1,
+                        1,
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .await
+            })
+        };
+        while runtime.approvals.lock().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let mut live = decision;
+        live["approvalId"] = receipt["invocation"]["id"].clone();
+        live["requestId"] = json!(new_id());
+        assert_eq!(
+            runtime.approve(&live).await.unwrap_err().code,
+            "APPROVAL_SCOPE_MISMATCH"
+        );
+        live["requestId"] = json!(run.request_id);
+        assert_eq!(runtime.approve(&live).await.unwrap()["approved"], true);
+        assert!(waiting.await.unwrap().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn child_approval_also_obeys_task_deadline() {
+        let (runtime, root) = runtime();
+        let parent = RequestRun::test_run(16);
+        let child = RequestRun::test_run(16);
+        let call = json!({"id":"child-call","name":"skill.run","arguments":{}});
+        let receipt = json!({"invocation":{"id":new_id()}});
+        let error = runtime
+            .await_child_approval(
+                &parent,
+                &child,
+                &call,
+                &receipt,
+                1,
+                1,
+                Instant::now() + Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "TOOL_RUN_TIMEOUT");
+        assert!(runtime.approvals.lock().await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

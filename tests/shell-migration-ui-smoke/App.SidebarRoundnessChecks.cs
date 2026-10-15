@@ -205,9 +205,26 @@ public partial class App
         await WaitAsync(() => backplate.Background is null || backplate.Background is SolidColorBrush normalBrush && normalBrush.Color.A == 0,
             key + " reaches the actual transparent native normal background before hovering");
         MovePointerInside(item);
-        await WaitAsync(() => backplate.Background is SolidColorBrush hoverBrush && hoverBrush.Color == selection.Color &&
-            actions.Opacity > 0.99 && actions.IsHitTestVisible,
-            key + " receives real mouse hover and paints its actual native backplate");
+        try
+        {
+            await WaitAsync(() => backplate.Background is SolidColorBrush hoverBrush && hoverBrush.Color == selection.Color &&
+                actions.Opacity > 0.99 && actions.IsHitTestVisible,
+                key + " receives real mouse hover and paints its actual native backplate");
+        }
+        catch (TimeoutException)
+        {
+            // Preserve the failing native state before the outer finally restores rows and layout.
+            // 在外层 finally 恢复集合和布局前保留真实失败现场，区分背景悬停和行操作命中。
+            try
+            {
+                await CaptureSidebarHoverFailureAsync(key, list, firstItem, item, row, presenter, backplate, actions, scroll);
+            }
+            catch (Exception diagnosticError)
+            {
+                File.WriteAllText(Path.Combine(_directory, "shell-sidebar-hover-failure-diagnostic-error.txt"), diagnosticError.ToString());
+            }
+            throw;
+        }
         Check(SidebarBounds(backplate, list) == surface && IsEightDips(backplate.CornerRadius),
             key + " paints real mouse hover within the measured rounded backplate");
         await CapturePresentedAsync($"shell-sidebar-roundness-{list.Name}-{width}-hover.png");
@@ -290,6 +307,48 @@ public partial class App
 
     private static Rect SidebarBounds(FrameworkElement element, FrameworkElement relativeTo) => element.TransformToVisual(relativeTo)
         .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+
+    private async Task CaptureSidebarHoverFailureAsync(string key, ListView list, object firstItem, ListViewItem item,
+        Grid row, ListViewItemPresenter presenter, Border backplate, StackPanel actions, ScrollViewer scroll)
+    {
+        nint ownedWindow = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        if (!GetCursorPos(out NativePoint cursor)) throw new InvalidOperationException("Cannot read the failed hover pointer.");
+        var clientOrigin = new NativePoint();
+        if (!ClientToScreen(ownedWindow, ref clientOrigin)) throw new InvalidOperationException("Cannot locate the failed hover client origin.");
+        var root = (FrameworkElement)Window.Content;
+        double scale = _shell.XamlRoot.RasterizationScale;
+        var pointerDips = new Point((cursor.X - clientOrigin.X) / scale, (cursor.Y - clientOrigin.Y) / scale);
+        var hitElements = VisualTreeHelper.FindElementsInHostCoordinates(pointerDips, root).ToArray();
+        object Describe(FrameworkElement element) => new
+        {
+            type = element.GetType().Name, element.Name, element.IsLoaded, element.Visibility, element.IsHitTestVisible,
+            element.Opacity, element.ActualWidth, element.ActualHeight,
+            bounds = SidebarBounds(element, root),
+            clip = element.Clip is RectangleGeometry geometry ? (Rect?)geometry.Rect : null
+        };
+        var ancestors = new List<object>();
+        for (DependencyObject? current = row; current is not null; current = VisualTreeHelper.GetParent(current))
+            if (current is FrameworkElement element) ancestors.Add(Describe(element));
+        string? BrushColor(Brush? brush) => brush is SolidColorBrush solid ? solid.Color.ToString() : brush?.GetType().Name;
+        var states = NativeUi.Descendants<FrameworkElement>(item)
+            .SelectMany(element => VisualStateManager.GetVisualStateGroups(element)
+                .Select(group => new { element.Name, group = group.Name, state = group.CurrentState?.Name })).ToArray();
+        File.WriteAllText(Path.Combine(_directory, "shell-sidebar-hover-failure.json"), JsonSerializer.Serialize(new
+        {
+            key, cursor = new { cursor.X, cursor.Y }, pointerDips, scale,
+            foregroundWindow = GetForegroundWindow().ToInt64(), ownedWindow = ownedWindow.ToInt64(),
+            hitRoot = GetAncestor(WindowFromPoint(cursor), 2).ToInt64(),
+            sameContainer = ReferenceEquals(list.ContainerFromItem(firstItem), item),
+            productRowHovered = ShellField<HashSet<Grid>>("_hoveredProjectRows").Contains(row),
+            background = BrushColor(backplate.Background), expectedBackground = BrushColor(presenter.PointerOverBackground),
+            actions.Opacity, actions.IsHitTestVisible,
+            list = Describe(list), item = Describe(item), row = Describe(row), backplate = Describe(backplate),
+            scroll = new { scroll.VerticalOffset, scroll.ScrollableHeight, scroll.ViewportHeight, scroll.ExtentHeight },
+            hitsItem = hitElements.Contains(item), hitsRow = hitElements.Contains(row),
+            hitElements = hitElements.OfType<FrameworkElement>().Select(Describe).ToArray(), ancestors, states
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        await NativeWindowCapture.CaptureAsync(Window, Path.Combine(_directory, "shell-sidebar-hover-failure.png"));
+    }
 
     private static bool IsEightDips(CornerRadius radius) => radius.TopLeft == 8 && radius.TopRight == 8 && radius.BottomLeft == 8 && radius.BottomRight == 8;
 

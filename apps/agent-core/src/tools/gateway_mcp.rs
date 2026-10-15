@@ -564,6 +564,51 @@ fn sse_frames(buffer: &mut String) -> Vec<(String, String)> {
     frames
 }
 
+/// One bounded incremental decoder is shared by both MCP SSE transports.
+/// 两种 MCP SSE 传输共用同一有界增量解码器，保留跨分包 UTF-8 与 CRLF 状态。
+#[derive(Default)]
+struct SseBuffer {
+    bytes: Vec<u8>,
+    text: String,
+    previous_cr: bool,
+}
+impl SseBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<(String, String)>, GatewayError> {
+        if chunk.len() > MAX_RPC_BYTES.saturating_sub(self.bytes.len() + self.text.len()) {
+            return Err(failure(
+                "MCP_RESULT_TOO_LARGE",
+                "MCP 响应超过传输上限。",
+                413,
+            ));
+        }
+        self.bytes.extend_from_slice(chunk);
+        let decoded_bytes = match std::str::from_utf8(&self.bytes) {
+            Ok(_) => self.bytes.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => {
+                return Err(failure(
+                    "MCP_INVALID_RESPONSE",
+                    "MCP SSE 不是有效 UTF-8。",
+                    502,
+                ));
+            }
+        };
+        let decoded =
+            std::str::from_utf8(&self.bytes[..decoded_bytes]).expect("validated UTF-8 prefix");
+        for character in decoded.chars() {
+            if self.previous_cr && character == '\n' {
+                self.previous_cr = false;
+                continue;
+            }
+            self.previous_cr = character == '\r';
+            self.text
+                .push(if self.previous_cr { '\n' } else { character });
+        }
+        self.bytes.drain(..decoded_bytes);
+        Ok(sse_frames(&mut self.text))
+    }
+}
+
 async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, GatewayError> {
     let response = check_http_status(response, "MCP_HTTP_REJECTED", "MCP 服务拒绝了请求")?;
     let is_sse = response
@@ -573,31 +618,26 @@ async fn response_rpc(response: reqwest::Response, id: u64) -> Result<Value, Gat
         .is_some_and(|value| value.contains("text/event-stream"));
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
-    let mut text = String::new();
+    let mut sse = SseBuffer::default();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| failure("MCP_CONNECTION_LOST", "MCP 响应传输中断。", 502))?;
-        bytes.extend_from_slice(&chunk);
-        if bytes.len().saturating_add(text.len()) > MAX_RPC_BYTES {
-            return Err(failure(
-                "MCP_RESULT_TOO_LARGE",
-                "MCP 响应超过传输上限。",
-                413,
-            ));
-        }
         if is_sse {
-            // Retain incomplete UTF-8 bytes until the next chunk instead of lossy packet decoding.
-            // 跨分包保留不完整 UTF-8 字节，不按每个网络块有损解码。
-            if let Ok(decoded) = std::str::from_utf8(&bytes) {
-                text.push_str(decoded);
-                bytes.clear();
-            }
-            for (_, frame) in sse_frames(&mut text) {
+            for (_, frame) in sse.push(&chunk)? {
                 if let Ok(value) = serde_json::from_str::<Value>(&frame) {
                     if value["id"] == id {
                         return Ok(value);
                     }
                 }
             }
+        } else {
+            if chunk.len() > MAX_RPC_BYTES.saturating_sub(bytes.len()) {
+                return Err(failure(
+                    "MCP_RESULT_TOO_LARGE",
+                    "MCP 响应超过传输上限。",
+                    413,
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
         }
     }
     if !is_sse {
@@ -782,18 +822,12 @@ impl McpClient {
                 let base = url.clone();
                 let reader = tokio::spawn(async move {
                     let mut stream = response.bytes_stream();
-                    let mut buffer = String::new();
-                    let mut bytes = Vec::new();
+                    let mut buffer = SseBuffer::default();
                     while let Some(Ok(chunk)) = stream.next().await {
-                        bytes.extend_from_slice(&chunk);
-                        if bytes.len() + buffer.len() > MAX_RPC_BYTES {
+                        let Ok(frames) = buffer.push(&chunk) else {
                             break;
-                        }
-                        if let Ok(text) = std::str::from_utf8(&bytes) {
-                            buffer.push_str(text);
-                            bytes.clear();
-                        }
-                        for (event, data) in sse_frames(&mut buffer) {
+                        };
+                        for (event, data) in frames {
                             let value = if event == "endpoint" {
                                 json!({"endpoint":data})
                             } else {
@@ -1227,6 +1261,16 @@ async fn admit_buffers(
     ctx.runtime.mcp_lifecycle.check(id, generation)?;
     Ok(Some(lease))
 }
+pub(crate) fn configuration_generation(ctx: &GatewayToolContext) -> u64 {
+    ctx.runtime.mcp_lifecycle.generation.load(Ordering::Acquire)
+}
+
+fn invocation_generation(ctx: &GatewayToolContext) -> u64 {
+    ctx.config["mcpConfigurationGeneration"]
+        .as_u64()
+        .unwrap_or_else(|| configuration_generation(ctx))
+}
+
 async fn connection_with_priority(
     server: &Value,
     ctx: &GatewayToolContext,
@@ -1235,8 +1279,8 @@ async fn connection_with_priority(
 ) -> Result<Arc<Mutex<McpClient>>, GatewayError> {
     let id = server["id"].as_str().unwrap_or("");
     let lifecycle = &ctx.runtime.mcp_lifecycle;
-    let generation =
-        expected_generation.unwrap_or_else(|| lifecycle.generation.load(Ordering::Acquire));
+    let generation = expected_generation.unwrap_or_else(|| invocation_generation(ctx));
+    super::gateway::check_configuration_generation(ctx)?;
     lifecycle.check(id, generation)?;
     if !background {
         lifecycle.foreground_waiters.fetch_add(1, Ordering::AcqRel);
@@ -1781,6 +1825,27 @@ pub(crate) async fn catalog_selected(
     Ok(all)
 }
 
+pub(crate) fn authorized_server(
+    name: &str,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
+    let (id, tool) = name
+        .strip_prefix("mcp.")
+        .and_then(|suffix| suffix.split_once('.'))
+        .ok_or_else(|| failure("MCP_TOOL_NOT_FOUND", "MCP 工具名无效。", 404))?;
+    let server = servers(ctx)
+        .into_iter()
+        .find(|server| server["id"] == id)
+        .ok_or_else(|| failure("MCP_SERVER_NOT_FOUND", "MCP 服务未启用或配置已改变。", 404))?;
+    if server["disabledTools"]
+        .as_array()
+        .is_some_and(|disabled| disabled.iter().any(|entry| entry == tool))
+    {
+        return Err(failure("MCP_TOOL_DISABLED", "MCP 工具已被用户禁用。", 403));
+    }
+    Ok(server)
+}
+
 pub(crate) async fn execute(
     name: &str,
     args: Value,
@@ -1792,19 +1857,10 @@ pub(crate) async fn execute(
     let (id, tool) = suffix
         .split_once('.')
         .ok_or_else(|| failure("MCP_TOOL_NOT_FOUND", "MCP 工具名无效。", 404))?;
-    let server = servers(ctx)
-        .into_iter()
-        .find(|server| server["id"] == id)
-        .ok_or_else(|| failure("MCP_SERVER_NOT_FOUND", "MCP 服务未启用。", 404))?;
-    if server["disabledTools"]
-        .as_array()
-        .is_some_and(|disabled| disabled.iter().any(|value| value == tool))
-    {
-        return Err(failure("MCP_TOOL_DISABLED", "MCP 工具已被用户禁用。", 403));
-    }
-    let client = connection(&server, ctx).await?;
+    let server = authorized_server(name, ctx)?;
+    let generation = invocation_generation(ctx);
+    let client = connection_with_priority(&server, ctx, false, Some(generation)).await?;
     let lifecycle = &ctx.runtime.mcp_lifecycle;
-    let generation = lifecycle.generation.load(Ordering::Acquire);
     // Keep one exchange per connection, while independent services share a dynamically resized quota.
     // 单连接保持一次完整协议交换，不同服务共用动态可收缩的调用额度；排队取消尚未派发副作用。
     let mut client = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
@@ -1830,7 +1886,7 @@ pub(crate) async fn execute(
     };
     let _permit = tokio::select! {permit=lifecycle.calls.acquire_owned()=>permit,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
     let _buffers = admit_buffers(ctx, id, generation, false).await?;
-    check_cancelled(ctx)?;
+    super::gateway::check_configuration_generation(ctx)?;
     lifecycle.check(id, generation)?;
     if *client.close.borrow() {
         return Err(failure(
@@ -1879,6 +1935,10 @@ pub(crate) async fn execute(
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    let _ = shutdown_checked(ctx).await;
+}
+
+pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     ctx.runtime
         .mcp_lifecycle
         .closing
@@ -1887,10 +1947,16 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
         .mcp_lifecycle
         .generation
         .fetch_add(1, Ordering::AcqRel);
-    if let Ok(mut task) = ctx.runtime.mcp_lifecycle.maintenance.lock() {
-        if let Some(task) = task.take() {
-            task.abort();
-        }
+    let maintenance = ctx
+        .runtime
+        .mcp_lifecycle
+        .maintenance
+        .lock()
+        .ok()
+        .and_then(|mut task| task.take());
+    if let Some(task) = maintenance {
+        task.abort();
+        let _ = task.await;
     }
     if let Ok(mut aborters) = ctx.runtime.mcp_aborters.lock() {
         for (_, cancel) in aborters.drain() {
@@ -1905,9 +1971,31 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
         .keys()
         .cloned()
         .collect::<Vec<_>>();
+    let mut cleanup_error = None;
     for id in ids {
-        let _ = disconnect(&id, ctx).await;
+        if let Err(error) = disconnect(&id, ctx).await {
+            cleanup_error.get_or_insert(error);
+        }
     }
+    // Closing invalidates queued starts; wait for their owners to release reservations before moving roots.
+    // 关闭使排队启动失效；迁移根目录前等待所有者实际释放启动预约。
+    loop {
+        let pending = ctx
+            .runtime
+            .mcp_lifecycle
+            .pending
+            .lock()
+            .map_err(|_| failure("TOOL_STATE_POISONED", "MCP 启动状态不可用。", 500))?
+            .is_empty();
+        if pending {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    if let Some(error) = cleanup_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) async fn reset(ctx: &GatewayToolContext) {
@@ -2832,5 +2920,107 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
         shutdown(&ctx).await;
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sse_incremental_decoder_preserves_all_line_endings_and_utf8_boundaries() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!(
+                "event: message{ending}data: {{\"id\":1,\"text\":\"中文\"}}{ending}{ending}"
+            );
+            for split in 0..=source.len() {
+                let mut buffer = SseBuffer::default();
+                let mut frames = buffer.push(&source.as_bytes()[..split]).unwrap();
+                frames.extend(buffer.push(&source.as_bytes()[split..]).unwrap());
+                assert_eq!(
+                    frames,
+                    vec![("message".into(), "{\"id\":1,\"text\":\"中文\"}".into())],
+                    "{ending:?} split {split}"
+                );
+            }
+            let mut buffer = SseBuffer::default();
+            let mut frames = Vec::new();
+            for byte in source.as_bytes() {
+                frames.extend(buffer.push(&[*byte]).unwrap());
+            }
+            assert_eq!(frames.len(), 1);
+        }
+    }
+
+    #[test]
+    fn sse_incremental_decoder_limits_accumulated_unterminated_frames() {
+        let mut buffer = SseBuffer::default();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..32 {
+            assert!(buffer.push(&chunk).unwrap().is_empty());
+        }
+        assert_eq!(buffer.push(b"x").unwrap_err().code, "MCP_RESULT_TOO_LARGE");
+        assert_eq!(
+            SseBuffer::default().push(&[0xff]).unwrap_err().code,
+            "MCP_INVALID_RESPONSE"
+        );
+    }
+
+    #[tokio::test]
+    async fn streamable_http_rpc_decodes_fragmented_crlf_and_rejects_oversized_sse() {
+        use axum::{Router, response::IntoResponse, routing::get};
+        async fn fragmented() -> impl IntoResponse {
+            let data = "data: {\"id\":7,\"result\":{\"text\":\"中文\"}}\r\n\r\n";
+            let chunks = data
+                .as_bytes()
+                .iter()
+                .map(|byte| vec![*byte])
+                .collect::<Vec<_>>();
+            let stream =
+                futures_util::stream::unfold(chunks.into_iter(), |mut chunks| async move {
+                    let chunk = chunks.next()?;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    Some((Ok::<_, std::convert::Infallible>(chunk), chunks))
+                });
+            (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(stream),
+            )
+        }
+        async fn oversized() -> impl IntoResponse {
+            let stream = futures_util::stream::iter(
+                (0..33).map(|_| Ok::<_, std::convert::Infallible>(vec![b'x'; 1024 * 1024])),
+            );
+            (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(stream),
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/fragmented", get(fragmented))
+                    .route("/oversized", get(oversized)),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{address}/fragmented"))
+            .send()
+            .await
+            .unwrap();
+        let value = response_rpc(response, 7).await.unwrap();
+        assert_eq!(value["result"]["text"], "中文");
+        let response = client
+            .get(format!("http://{address}/oversized"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response_rpc(response, 7).await.unwrap_err().code,
+            "MCP_RESULT_TOO_LARGE"
+        );
+        task.abort();
+        let _ = task.await;
     }
 }

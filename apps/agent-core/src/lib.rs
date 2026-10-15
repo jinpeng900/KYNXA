@@ -10,6 +10,7 @@ pub mod file_identity;
 pub mod document_formats;
 pub mod gateway;
 pub mod gateway_contract;
+pub mod gateway_storage;
 pub mod models;
 pub mod orchestration;
 pub mod resources;

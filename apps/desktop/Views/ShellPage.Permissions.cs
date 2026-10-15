@@ -36,13 +36,14 @@ public sealed partial class ShellPage
         var option = PermissionOptions.First(option => option.Mode == _layout.PermissionMode);
         SelectedPermissionLabel.Text = option.Label;
         SelectedPermissionLabel.Foreground = PermissionBrush(option.Mode);
-        SelectedPermissionIcon.Source = (ImageSource)Application.Current.Resources[option.Icon];
+        SelectedPermissionIcon.IconKey = option.Icon;
+        SelectedPermissionIcon.Foreground = PermissionBrush(option.Mode);
         AutomationProperties.SetName(PermissionPickerButton, string.Format(UiText.Get("权限：{0}"), option.Label));
         ToolTipService.SetToolTip(PermissionPickerButton, $"{option.Label}\n{option.Description}");
     }
 
     private static Brush PermissionBrush(string mode) => (Brush)Application.Current.Resources[
-        mode == ChatPermissionModes.Full ? "KynxaPermissionFullBrush" : "KynxaSecondaryTextBrush"];
+        mode == ChatPermissionModes.Full ? "KynxaWarningBrush" : "KynxaSecondaryTextBrush"];
 
     private void PermissionPickerButton_Click(object sender, RoutedEventArgs e)
     {
@@ -57,10 +58,10 @@ public sealed partial class ShellPage
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-            row.Children.Add(new Image
+            row.Children.Add(new ThemeIcon
             {
                 Width = 18, Height = 18, VerticalAlignment = VerticalAlignment.Center,
-                Source = (ImageSource)Application.Current.Resources[option.Icon]
+                IconKey = option.Icon, Foreground = PermissionBrush(option.Mode)
             });
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             text.Children.Add(new TextBlock

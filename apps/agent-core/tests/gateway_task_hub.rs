@@ -82,44 +82,97 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn paused_lookup_http_distinguishes_none_unique_ambiguous_and_rejects_wrong_scope() {
-    use kynxa_agent_core_native::{gateway_contract::GatewayError, orchestration::gateway_task_http};
+    use kynxa_agent_core_native::{
+        gateway_contract::GatewayError, orchestration::gateway_task_http,
+    };
     use serde_json::Value;
-    async fn read_paused(runtime: &Arc<GatewayRuntime>, conversation: &str, project: Option<&str>)
-        -> Result<Value, GatewayError>
-    {
+    async fn read_paused(
+        runtime: &Arc<GatewayRuntime>,
+        conversation: &str,
+        project: Option<&str>,
+    ) -> Result<Value, GatewayError> {
         let mut query = vec![("conversationId".into(), conversation.into())];
-        if let Some(project) = project { query.push(("projectId".into(), project.into())); }
+        if let Some(project) = project {
+            query.push(("projectId".into(), project.into()));
+        }
         gateway_task_http::handle(runtime, "GET", "/api/tasks/paused", &query, &Value::Null)
-            .await.unwrap().map(|(status, value)| { assert_eq!(status, 200); value })
+            .await
+            .unwrap()
+            .map(|(status, value)| {
+                assert_eq!(status, 200);
+                value
+            })
     }
     let fixture = Fixture::new();
     let conversation = &fixture.scope.conversation_id;
-    let none = read_paused(&fixture.runtime, conversation, None).await.unwrap();
+    let none = read_paused(&fixture.runtime, conversation, None)
+        .await
+        .unwrap();
     assert_eq!(none["tasks"].as_array().unwrap().len(), 0);
     let repository = TaskRepository::open(&fixture.root).unwrap();
-    let root = repository.accept_task(&fixture.input("lookup-http-root", None)).unwrap();
-    repository.accept_task(&fixture.input("lookup-http-child", Some(&root.task_id))).unwrap();
-    repository.control(&root.task_id, root.version, TaskControl::Pause).unwrap();
+    let root = repository
+        .accept_task(&fixture.input("lookup-http-root", None))
+        .unwrap();
+    repository
+        .accept_task(&fixture.input("lookup-http-child", Some(&root.task_id)))
+        .unwrap();
+    repository
+        .control(&root.task_id, root.version, TaskControl::Pause)
+        .unwrap();
     let other_chat = uuid::Uuid::new_v4().to_string();
     data::ensure_conversation(&fixture.root, &other_chat, "Other isolated chat").unwrap();
     let mut other_input = fixture.input("lookup-http-other-chat", None);
     other_input.scope.conversation_id = other_chat;
     let other = repository.accept_task(&other_input).unwrap();
-    repository.control(&other.task_id, other.version, TaskControl::Pause).unwrap();
-    let unique = read_paused(&fixture.runtime, conversation, None).await.unwrap();
+    repository
+        .control(&other.task_id, other.version, TaskControl::Pause)
+        .unwrap();
+    let unique = read_paused(&fixture.runtime, conversation, None)
+        .await
+        .unwrap();
     assert_eq!(unique["tasks"].as_array().unwrap().len(), 1);
     assert_eq!(unique["tasks"][0]["taskId"], root.task_id);
     assert!(unique["tasks"][0]["parentTaskId"].is_null());
-    let second = repository.accept_task(&fixture.input("lookup-http-second", None)).unwrap();
-    repository.control(&second.task_id, second.version, TaskControl::Pause).unwrap();
-    let ambiguous = read_paused(&fixture.runtime, conversation, None).await.unwrap();
+    let second = repository
+        .accept_task(&fixture.input("lookup-http-second", None))
+        .unwrap();
+    repository
+        .control(&second.task_id, second.version, TaskControl::Pause)
+        .unwrap();
+    let ambiguous = read_paused(&fixture.runtime, conversation, None)
+        .await
+        .unwrap();
     assert_eq!(ambiguous["tasks"].as_array().unwrap().len(), 2);
-    assert!(ambiguous["tasks"].as_array().unwrap().iter().all(|task| task["scope"]["conversationId"].as_str() == Some(conversation.as_str())));
+    assert!(
+        ambiguous["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|task| task["scope"]["conversationId"].as_str() == Some(conversation.as_str()))
+    );
     let wrong_project = uuid::Uuid::new_v4().to_string();
-    assert_eq!(read_paused(&fixture.runtime, conversation, Some(&wrong_project)).await.unwrap_err().code, "TASK_SCOPE_DENIED");
-    assert_eq!(read_paused(&fixture.runtime, "invalid-chat-id", None).await.unwrap_err().status, 400);
-    assert_eq!(repository.load(&root.task_id).unwrap().state, TaskState::Paused);
-    assert_eq!(repository.load(&root.task_id).unwrap().version, unique["tasks"][0]["version"].as_u64().unwrap());
+    assert_eq!(
+        read_paused(&fixture.runtime, conversation, Some(&wrong_project))
+            .await
+            .unwrap_err()
+            .code,
+        "TASK_SCOPE_DENIED"
+    );
+    assert_eq!(
+        read_paused(&fixture.runtime, "invalid-chat-id", None)
+            .await
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(
+        repository.load(&root.task_id).unwrap().state,
+        TaskState::Paused
+    );
+    assert_eq!(
+        repository.load(&root.task_id).unwrap().version,
+        unique["tasks"][0]["version"].as_u64().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -201,7 +254,7 @@ async fn declared_dependencies_and_execution_budget_survive_the_hub_boundary() {
         .unwrap();
     assert_eq!(root.budget.max_execution_ms, Some(3_600_000));
     let journal = TaskJournal::start_existing(&fixture.root, &root, "fixture", 60_000).unwrap();
-    let parent = fixture.runtime.child_run(&root, journal.clone());
+    let parent = fixture.runtime.child_run(&root, journal.clone()).unwrap();
     let repository = TaskRepository::open(&fixture.root).unwrap();
     let mut prerequisite = fixture.input("prerequisite", Some(&root.task_id));
     prerequisite.scope = root.scope.clone();
@@ -229,7 +282,10 @@ async fn waiting_child_wakes_on_control_and_network_gap_returns_without_model_po
     )
     .unwrap();
     let parent_task = journal.load_current().unwrap();
-    let parent = fixture.runtime.child_run(&parent_task, journal.clone());
+    let parent = fixture
+        .runtime
+        .child_run(&parent_task, journal.clone())
+        .unwrap();
     let child = journal
         .repository()
         .accept_task(&fixture.input("child", Some(journal.task_id())))
@@ -351,7 +407,8 @@ async fn burst_controls_utf16_readback_and_elapsed_budget_keep_their_contracts()
         .unwrap();
     let parent = fixture
         .runtime
-        .child_run(&journal.load_current().unwrap(), journal.clone());
+        .child_run(&journal.load_current().unwrap(), journal.clone())
+        .unwrap();
     let result = fixture
         .runtime
         .tasks
@@ -500,7 +557,8 @@ async fn wait_returns_latest_bounded_child_report_with_a_verified_full_read_entr
     .unwrap();
     let parent_run = fixture
         .runtime
-        .child_run(&parent.load_current().unwrap(), parent.clone());
+        .child_run(&parent.load_current().unwrap(), parent.clone())
+        .unwrap();
     let child = parent
         .repository()
         .accept_task(&fixture.input("report-child", Some(parent.task_id())))
@@ -555,7 +613,8 @@ async fn trash_stops_work_preserves_records_and_permanent_cleanup_waits_for_late
     .unwrap();
     let parent = fixture
         .runtime
-        .child_run(&journal.load_current().unwrap(), journal.clone());
+        .child_run(&journal.load_current().unwrap(), journal.clone())
+        .unwrap();
     let reference = journal
         .save_blob("child-context", b"private task body")
         .await

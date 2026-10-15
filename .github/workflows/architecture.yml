@@ -30,3 +30,22 @@ jobs:
       # The private packaged Node runtime is reserved for MCP extensions and verified sandbox skills.
       # 随包私有 Node 仅供 MCP 扩展和已核验的沙箱技能使用。
       - run: node tools/development/check-architecture.mjs
+
+  packaging-guards:
+    name: Windows packaging guards
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # These isolated offline checks need neither SDK installation nor private runtime assets.
+      # 这些隔离离线检查不需要安装 SDK 或准备私有运行资产。
+      # Native build, deployment and GUI acceptance remain separate verification requirements.
+      # 原生构建、部署和界面验收仍需单独执行，不能用本任务结果代替。
+      - name: Reject incomplete MCP caches
+        shell: powershell
+        run: ./tests/native-runtime-smoke/check-mcp-cache.ps1
+      - name: Check deployment path boundaries
+        shell: powershell
+        run: ./tests/native-runtime-smoke/check-deployment-paths.ps1

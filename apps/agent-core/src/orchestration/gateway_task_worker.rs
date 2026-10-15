@@ -874,6 +874,14 @@ async fn execute_loop(
             .expect("durable pending response")
             .clone();
         for index in state.pending_results.len()..response.calls.len() {
+            if started.elapsed()
+                >= Duration::from_millis(limits["maxDurationMs"].as_u64().unwrap_or(1_800_000))
+            {
+                return Err(failure(
+                    "TOOL_RUN_TIMEOUT",
+                    "Child task duration is exhausted. / 子任务总时限已到。",
+                ));
+            }
             let call = &response.calls[index];
             let name = call["name"].as_str().unwrap_or("");
             if *parent.cancellation.borrow() || *run.cancellation.borrow() {
@@ -968,10 +976,17 @@ async fn execute_loop(
                                         &value,
                                         state.rounds,
                                         state.tool_calls,
+                                        started
+                                            + Duration::from_millis(
+                                                limits["maxDurationMs"]
+                                                    .as_u64()
+                                                    .unwrap_or(1_800_000),
+                                            ),
                                     )
                                     .await?
                                 {
                                     ctx.approved = true;
+                                    ctx.config["approvedInvocation"] = value["invocation"].clone();
                                     let approved_tool_started = Instant::now();
                                     let executed =
                                         tools::execute(name, call["arguments"].clone(), &ctx).await;
@@ -983,6 +998,10 @@ async fn execute_loop(
                                             as u64,
                                     );
                                     ctx.approved = false;
+                                    ctx.config
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .remove("approvedInvocation");
                                     executed
                                 } else {
                                     Err(GatewayError::new(
@@ -1291,7 +1310,7 @@ pub async fn execute(
         "native-child-worker",
         60_000,
     )?;
-    let run = runtime.child_run(&child, journal.clone());
+    let run = runtime.child_run(&child, journal.clone())?;
     let mut queued_cancel = context.cancellation.clone();
     let mut parent_cancel = parent.cancellation.subscribe();
     let weak_run = Arc::downgrade(&run);

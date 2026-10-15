@@ -52,6 +52,17 @@ public partial class App : Application
     private CheckBox Toggle(string id) => NativeUi.ById<CheckBox>(_root, id);
     private InfoBar Notice => NativeUi.ById<InfoBar>(_root, "RetrievalSettingsNotice");
 
+    private static string SelectedDisplayText(ComboBox picker)
+    {
+        // Read the closed control's rendered selection, not the independently localized item data.
+        // 检查收起控件实际呈现的选中文字，不用已翻译的选项数据代替显示层验收。
+        picker.ApplyTemplate();
+        picker.UpdateLayout();
+        var presenter = NativeUi.ByName<ContentPresenter>(picker, "ContentPresenter");
+        return string.Join("", NativeUi.Descendants<TextBlock>(presenter)
+            .Where(NativeUi.IsVisible).Select(text => text.Text));
+    }
+
     private async Task RunAsync()
     {
         bool passed = false;
@@ -81,6 +92,18 @@ public partial class App : Application
             await WaitAsync(() => Notice.IsOpen && !_window!.HasPendingChanges, "Version conflict refreshes the current settings and displays a useful error.");
             Check(_api.GlobalWrites == beforeConflict + 1 && Picker("RetrievalWebDepth").SelectedIndex == 1,
                 "A stale selection is not silently replayed after conflict.");
+            var choices = new[]
+            {
+                (Id: "RetrievalLocalMode", Chinese: "启用", English: "Enabled"),
+                (Id: "RetrievalSemanticMode", Chinese: "自动", English: "Automatic"),
+                (Id: "RetrievalRerankMode", Chinese: "停用", English: "Disabled"),
+                (Id: "RetrievalWebMode", Chinese: "按需搜索", English: "Search when needed"),
+                (Id: "RetrievalWebProvider", Chinese: "自动", English: "Automatic"),
+                (Id: "RetrievalWebDepth", Chinese: "深入", English: "Deep"),
+                (Id: "RetrievalWebLanguage", Chinese: "自动", English: "Automatic")
+            };
+            var selectedChoices = choices.Select(choice => Picker(choice.Id).SelectedItem).ToArray();
+            int globalWritesBeforeLanguage = _api.GlobalWrites, projectWritesBeforeLanguage = _api.ProjectWrites;
             UiText.Initialize("en");
             await Task.Delay(100);
             Check(_window!.Title == "KYNXA · Retrieval and web search", "Open window title changes language without restart.");
@@ -88,6 +111,25 @@ public partial class App : Application
             Check(((ComboBoxItem)Picker("RetrievalRerankMode").Items[1]).Content?.ToString() == "Enable when needed",
                 "Conditional reranking choices change language without restart.");
             Check(NativeUi.Descendants<TextBlock>(_root).Any(label => label.Text == "Ready locally"), "Dynamic model status is translated live.");
+            foreach (var choice in choices)
+                Check(SelectedDisplayText(Picker(choice.Id)) == choice.English,
+                    choice.Id + " closed selection displays English after a live language switch.");
+            Check(Notice.IsOpen && Notice.Message == "Retrieval settings changed elsewhere. The settings were refreshed; choose again.",
+                "An already open conflict notice translates to English without retrying a write.");
+            UiText.Initialize("zh-CN");
+            await Task.Delay(100);
+            foreach (var choice in choices)
+                Check(SelectedDisplayText(Picker(choice.Id)) == choice.Chinese,
+                    choice.Id + " closed selection restores Chinese after a live language switch.");
+            Check(Notice.IsOpen && Notice.Message == "检索设置已在其他位置更新。已刷新，请重新选择。",
+                "An already open conflict notice restores Chinese without losing its source message.");
+            UiText.Initialize("en");
+            await Task.Delay(100);
+            Check(choices.All(choice => SelectedDisplayText(Picker(choice.Id)) == choice.English),
+                "Repeated language switches keep the real selected text current.");
+            Check(choices.Select((choice, index) => ReferenceEquals(Picker(choice.Id).SelectedItem, selectedChoices[index])).All(same => same)
+                && _api.GlobalWrites == globalWritesBeforeLanguage && _api.ProjectWrites == projectWritesBeforeLanguage,
+                "Language refresh preserves all selected objects and performs no settings writes.");
             await NativeWindowCapture.CaptureAsync(_window, Path.Combine(_directory, "global-en.png"));
             foreach (int width in new[] { 540, 880 })
             {

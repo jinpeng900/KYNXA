@@ -131,7 +131,7 @@ impl Fixture {
         )
         .unwrap();
         let parent_record = parent_journal.load_current().unwrap();
-        let parent = runtime.child_run(&parent_record, parent_journal);
+        let parent = runtime.child_run(&parent_record, parent_journal).unwrap();
         let repository = TaskRepository::open(&runtime.config.data_root).unwrap();
         let child = repository
             .accept_task(&NewTask {
@@ -246,7 +246,10 @@ async fn restart_checkpoint_preserves_settled_file_effect_without_replaying() {
         60_000,
     )
     .unwrap();
-    let run = fixture.runtime.child_run(&fixture.child, journal.clone());
+    let run = fixture
+        .runtime
+        .child_run(&fixture.child, journal.clone())
+        .unwrap();
     let call = json!({"id":"restart-write","name":"filesystem.write","arguments":{"path":"created.txt","content":"A","expectedHash":null}});
     let intent = operation_intent(&call, false, 0);
     journal.record_operation(&intent).unwrap();
@@ -483,7 +486,10 @@ async fn compaction_preserves_original_context_through_real_hub_readback() {
         60_000,
     )
     .unwrap();
-    let run = fixture.runtime.child_run(&fixture.child, journal.clone());
+    let run = fixture
+        .runtime
+        .child_run(&fixture.child, journal.clone())
+        .unwrap();
     let connection = fixture
         .runtime
         .models

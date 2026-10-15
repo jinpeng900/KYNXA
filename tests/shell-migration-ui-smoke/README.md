@@ -1,15 +1,27 @@
 # 正式 Shell UI 迁移隔离验收
 
+## 设置窗口布局、下拉滚轮与正文查找
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario settings-interactions
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario shortcut-tooltip
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
+```
+
+`App.SettingsInteractionChecks.cs` 在真实设置窗口检查 660／1000 DIP、最大化及 420／360 DIP 窄窗，内容随可用宽度铺满且两侧各留 24 DIP；受控对照上一版居中限宽布局，确认宽窗口确实利用新增空间，并检查配色和下方设置可达。以原生普通 ComboBox 和 `ScrollSafeComboBox` 对比真实滚轮行为。收起时不改选项且所属页面实际滚动；方向键／Home 及展开列表的滚轮保留原生操作。正式设置三个下拉框还核对本机偏好文件没有因滚轮而改变。测试使用自有窗口、临时数据和模拟网关，实际通过／失败以本轮结果为准。
+
+快捷键专项使用实际键盘输入检查 `Ctrl+F` 正文查找、`Ctrl+Shift+K` 会话标题／项目搜索、空会话搜索、关闭后的焦点恢复，以及原生模态／输入法保护；WebView 焦点下不出现浏览器自带查找框或重复搜索请求。 `body-search` 专项集中检查点击查找框或主输入区后的 Enter／方向键、F3／Shift+F3、Ctrl+F 与 Escape，并验证原生和网页处理不会重复导航。
+
 本夹具直接链接生产 MainWindow、ShellPage 的完整 C#、XAML 和资源，不复制搜索、模式选择、草稿、抽屉或导出业务实现。唯一替代的是应用启动器与外部 HTTP 网关；生产 StoragePaths、模型客户端、正式聊天客户端及 Transcript WebView 保持原实现。
 
-采用独立 MSIX 身份 `KYNXA.ShellMigrationUiSmoke`，以支持生产代码所用的 Windows.Storage.ApplicationData。构建与运行请串行执行，避免与正式桌面或其他 WinUI 夹具竞争编译内存和窗口。
+采用每轮唯一的独立 MSIX 调试身份 `KYNXA.ShellMigrationUiSmoke.<短ID>`，以支持生产代码所用的 Windows.Storage.ApplicationData。入口通过已还原的 Windows App SDK winapp 工具注册本轮身份，直接启动程序继承隔离环境，退出后精确注销；不使用正式 KYNXA 身份。构建与运行请串行执行，避免与正式桌面或其他 WinUI 夹具竞争编译内存和窗口。
 
 ```powershell
 dotnet build tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64
 dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build
 ```
 
-运行结果通过 `%TEMP%/kynxa-shell-migration-latest.txt` 指向独立结果目录，包含 `result.txt` 和原生截图。先检查结果含 `PASS: ... production Shell UI migration checks.`，不能只凭运行进程创建判定通过。
+脚本将本轮 `%TEMP%/kynxa-shell-migration-latest.txt`、`result.txt`、原生截图、构建与身份工具日志收集到 `artifacts/shell-migration-ui-smoke/vs-framework-csc-x64/runs/<本轮名称>/`。先检查结果含 `PASS: ... production Shell UI migration checks.`，不能只凭运行进程创建判定通过。
 
 `App.StartupChecks.cs` 在正式页面加载前挂起模拟网关的首次目录响应，核对目录尚未返回时的工作提示、灰色禁用发送按钮、禁用箭头和44 DIP工作页脚。检查跨实际渲染帧的位置稳定，再在加载期间切换聊天并输入虚构草稿，释放响应后核对模式、草稿、发送可用状态及原生矩形坐标；恢复工作模式后的位置也应一致。挂起只作用于首次目录GET，模型列表和健康检查独立，失败和退出都会释放或取消门闩。截图为 `shell-startup-before-catalog.png`、`shell-startup-chat-after-catalog.png`，坐标保存在 `shell-startup-geometry.json`；不等待真实网关，也不读取日常数据。
 
@@ -17,7 +29,7 @@ dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj
 
 截图包含 `shell-migration-model-menu.png`、`shell-migration-drawer-search-800.png` 和 `shell-migration-wide.png`。捕获前核对搜索行的真实文本，等待弹出动画、XAML Rendered 事件和桌面合成刷新；失败时另保存 `shell-migration-failure.png`。模型选择仅保存临时 Desktop 下的 UI 偏好，模拟网关仍禁止 POST 等写入。
 
-页面细节回归覆盖：真实发送按钮模板的灰色禁用背景与深灰 SVG、非空输入的原白色箭头、内存生成状态下的白色停止图标、附件不可用状态、104 DIP 默认输入高度、620 DIP 英文窄窗；模型菜单按内容确定高度、筛选后稳定高度、重复 ID 行隐藏与当前模型勾选。
+页面细节回归覆盖：真实发送按钮模板的禁用背景与语义色原生箭头、非空输入的配套强调色前景、内存生成状态下的配套停止图标、附件不可用状态、104 DIP 默认输入高度、620 DIP 英文窄窗；模型菜单按内容确定高度、筛选后稳定高度、重复 ID 行隐藏与当前模型勾选。
 
 `App.PanelPolishChecks.cs` 使用两个虚构挂载项目和真实生产 Open/Close、关闭标签与 Reopen 菜单，检查空右栏默认释放、模式/项目/会话作用域、草稿及 432 DIP 用户宽度保留。窄窗注入正式形状的截图回执，再恢复宽窗，通过原 `AgentApiClient` 读取单条模拟归档并显示；显式关闭及关闭最后标签不会被刷新或缩放撤销。图片为 WinRT 编码的 48×24 合成 PNG，引用中的长度与 SHA256 由归档 JSON 的 UTF-8 字节计算，未知会话和资源请求仍使夹具失败。
 
@@ -34,22 +46,39 @@ WebView 环境变量覆盖参数行为依据 [Microsoft WebView2 官方参考](h
 ## Ctrl+F 悬浮提示集中回归
 
 ```powershell
-dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build -- -- --shortcut-tooltip-only
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario shortcut-tooltip
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
 ```
 
-两层 `--` 分别将参数交给 `dotnet run` 的 WinApp 启动器和被启动的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。审批 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
+脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。审批 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
 
-所有原生输入先校验前台窗口；发送快捷键前还检查修饰键状态，用户持有 Ctrl/Shift/Alt/Win 时停止快捷键输入并报告失败。鼠标目标必须真实位于屏幕内且命中夹具窗口，使用实际 `SendInput` 移动触发 XAML 悬停。运行期间请勿操作测试窗口、持有修饰键或切换前台。观察保存在 `shell-shortcut-tooltip-observation.json`，实际滚动距离保存在 `shell-shortcut-tooltip-scroll.json`，指针与弹出层诊断分别为 `shell-shortcut-tooltip-pointer.json` 和 `shell-shortcut-tooltip-popups.json`；截图为 `shell-shortcut-tooltip-hover.png` 和 `shell-shortcut-tooltip-after-scroll.png`。旧版首次断言失败前也会保留页面附加 ToolTip 的类型、内容、启用状态和所观察到的裸提示弹出层。集中入口成功标记为 `PASS: ... production Shell shortcut tooltip checks.`。
+`body-search` 仅执行初始化、空会话查找与正文键盘专项：真实 Enter／Shift+Enter 导航、鼠标点击原生输入框后 F3／Shift+F3 导航、Ctrl+F 返回搜索框，以及原生输入框中的 Escape。通过匹配索引核对每次按键只移动一处，保留草稿与会话，受控原生输入法组合状态仍阻止快捷键。后台启动的自有窗口若被桌面置顶窗口遮挡，夹具仅在激活期间临时提高自己的置顶层级，核验标题栏命中后点击，并在 finally 恢复原设置；不操作其他应用窗口。成功标记为 `PASS: ... production Shell body-search keyboard checks.`。
 
-## 浅色配色集中回归
+所有原生输入先校验前台窗口；发送快捷键前还检查修饰键状态，用户持有 Ctrl/Shift/Alt/Win 时停止快捷键输入并报告失败。鼠标目标必须真实位于屏幕内且命中夹具窗口，使用实际 `SendInput` 移动触发 XAML 悬停。运行期间请勿操作测试窗口、持有修饰键或切换前台。观察保存在 `shell-shortcut-tooltip-observation.json`，实际滚动距离保存在 `shell-shortcut-tooltip-scroll.json`，滚动观察在失败断言前也写出，指针与弹出层诊断分别为 `shell-shortcut-tooltip-pointer.json` 和 `shell-shortcut-tooltip-popups.json`；截图为 `shell-shortcut-tooltip-hover.png` 和 `shell-shortcut-tooltip-after-scroll.png`。旧版首次断言失败前也会保留页面附加 ToolTip 的类型、内容、启用状态和所观察到的裸提示弹出层。集中入口成功标记为 `PASS: ... production Shell shortcut tooltip checks.`。
+
+## 主题与阅读设置集中回归
 
 ```powershell
-dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build -- -- --appearance-only
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance
+```
+
+新的脚本入口使用 VS Full MSBuild / Framework C# 编译器，独立 obj、bin、临时数据和 WebView2 目录；构建期可选单逻辑处理器兼容参数，运行前恢复进程调度范围。`-Scenario all` 包含完整主窗口回归；专项目录的原始 obj/bin 显式排除，不能因自定义中间目录将旧生成 XAML 再次作为源码编译。
+
+在既有五套配色回归上，`App.AppearanceReadingChecks.cs` 验证浅色／深色／跟随系统、13～22 px 半像素步进、HEX 与真实 ColorPicker。选色只更新待应用 HEX，点击应用后才保存。重新加载临时布局文件、迁移守卫和真实原子保存失败分别验证持久化与回滚；打开的设置页、主窗口及 Transcript 同步，选区、草稿、正式消息和模拟网关写入保持不变。
+
+新增 `App.ThemeIconChecks.cs` 验证实际 Shell 图标的共享语义画刷、原始尺寸与固定路径、权限切换、26 个图标键及品牌位图保留。极端自定义强调色验证主要背景上的文字对比度；系统变化采用当前值读取及自有 HWND 通知路径，不修改系统主题。每项以当前结果文件为准。
+
+配色及主题集中入口：
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance
 ```
 
 `App.AppearanceChecks.cs` 打开生产设置窗口，通过真实原生按钮逐个选择经典灰、雾蓝、青绿、柔紫和暖砂，重新读取本次临时 `layout.json` 核对保存，并检查已存在的原生发送按钮、侧栏、模式选中背景画刷即时变化。正式 Transcript 的 CSS、实际用户消息气泡和 WebView 背景须同步；虚构长文切换前后的消息与正文 DOM 引用、精确选区、滚动位置、输入草稿、正式消息对象和模拟目录须保持一致。
 
 夹具仅将长文临时附加到视图，结束时恢复生产消息来源。迁移守卫通过临时 `StoragePaths.IsMigrating` 检查；保存失败通过在夹具临时 Desktop 下建立空 `layout.json.tmp` 目录阻止真实原子保存，核对可见错误及配色回滚后立即删除。全部操作使用隔离数据和模拟 GET 网关，不消耗模型 API、不写正式会话。还检查 400 DIP 英文设置卡片布局及恢复默认配色，结果追加到完整入口。
+
+实际文字检查在强制 GC 后双向切换语言，直接核对已实现的字号标题和五套配色名称，并记录 `shell-appearance-settings-400-language.json`；仅检查自动化名称或窗口几何不能证明英文已经显示。另释放一个真实原生绑定控件，确认翻译值源可被回收，防止全局本地化注册强持有窗口。
 
 还核对旧版偏好缺少配色字段及未知预设值的默认回退，以及真实输入框获得和离开焦点时外框画刷的切换。证据文件为 `shell-appearance-observations.json`、`shell-appearance-settings-400-en.png`、`shell-appearance-settings-wide.png` 和 `shell-appearance-mist-blue-wide.png`。集中入口成功标记为 `PASS: ... production Shell appearance checks.`。这些是需要实际运行的验收条件，文档描述本身不代表本轮已经通过。
 
@@ -58,21 +87,23 @@ dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj
 ## 侧栏展开与收起集中回归
 
 ```powershell
-dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build -- -- --sidebar-controls-only
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario sidebar-controls
 ```
 
 `App.SidebarControlChecks.cs` 使用真实生产页与原生 `NativeUi.Invoke` 按钮自动化，在中文、英文的默认 240、最小 200、最大 360 DIP 侧栏中测量实际模式按钮、文本、图标和收起按钮边界，核对没有截断或交叠。展开和收起按钮互斥出现，点击隐藏原按钮后焦点应进入当前可见的对应按钮；宽窗的宽度及折叠偏好通过真实临时 `layout.json` 读取验证。
+
+收起按钮使用现有 `IconSidebarToggle` 与共享主题画刷，原生按钮继续拥有提示、命中与键盘焦点。浅色／深色宽窗、紧凑窗及返回宽窗后，检查展开与设置图标中心仍距左侧24 DIP，正文左缘为48 DIP，两侧留白相等且没有闲置拖动列；再展开时恢复原8 DIP拖动区域。深色展开与收起截图供实际视觉复核。
 
 800 DIP 紧凑模式分别以新收起按钮、原遮罩按钮和生产 `TryDismissCompactSidebar` 的 Escape 处理路径关闭临时抽屉，核对焦点及保存偏好，再恢复宽窗。测试同时覆盖原本展开和原本折叠两种宽窗偏好。Escape 在本场景调用生产处理方法，不发送系统按键；真实按钮使用原生 Invoke，而非直接调用点击方法，因此不要求键盘输入获得前台焦点。
 
 透明分隔线检查读取真实 `ResizeGrip` 的悬停状态画刷、八 DIP 命中区域及 `HitTarget`，并触发该控件实例已接线的拖动、完成、取消和重置事件，验证生产宽度逻辑和保存仍可用。还核对 `ShellGrid` 与侧栏实际背景画刷颜色相同且不透明，使透明拖动列连续显示侧栏颜色，主内容区保留独立背景；宽窗与最小宽度截图供实际边界复核。这是原生控件与接线回归，不冒充实际鼠标拖动验收。整个场景保留草稿、活动聊天 ID、原消息对象和正文，模拟网关写入始终为零，结束时恢复夹具原布局及语言。
 
-证据文件：`shell-sidebar-control-geometry.json`、`shell-sidebar-controls-wide.png`、`shell-sidebar-controls-minimum-200-en.png`、`shell-sidebar-controls-compact.png` 和 `shell-sidebar-controls-closed.png`。集中入口成功标记为 `PASS: ... production Shell sidebar control checks.`；这组也纳入默认完整入口，文档不代替实际运行结果。
+证据文件：`shell-sidebar-control-geometry.json`、`shell-sidebar-controls-wide.png`、`shell-sidebar-controls-minimum-200-en.png`、`shell-sidebar-controls-compact.png`、`shell-sidebar-controls-closed.png`、`shell-sidebar-controls-wide-dark.png` 和 `shell-sidebar-controls-closed-dark.png`。集中入口成功标记为 `PASS: ... production Shell sidebar control checks.`；这组也纳入默认完整入口，文档不代替实际运行结果。
 
 ## 侧栏行圆角与滚动边界集中回归
 
 ```powershell
-dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build -- -- --sidebar-roundness-only
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario sidebar-roundness
 ```
 
 `App.SidebarRoundnessChecks.cs` 仅向工作最近、任务、聊天历史和项目树的视图绑定集合放入夹具拥有的长标题合成条目，结束后按原对象恢复。它不把条目加入正式项目或聊天目录、不点击合成会话、不调用模型。为依次呈现模板，夹具临时切换工作/聊天侧栏内容的可见性，保留业务模式和当前聊天 ID。工作最近、任务和聊天历史各有 30 行，并验证真实 ScrollViewer 发生滚动；318 和最小 200 DIP 侧栏分别读取已实现的原生容器、ListViewItemPresenter、活动背景、文本及操作按钮边界。
@@ -86,7 +117,7 @@ dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj
 ## 中英文字体集中回归
 
 ```powershell
-dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj -p:Platform=x64 --no-build -- -- --typography-only
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario typography
 ```
 
 `App.TypographyChecks.cs` 在生产 MainWindow/ShellPage 内检查动态主导航菜单、侧栏、输入框和设置弹窗的实际字体、已实现文字与边界，保存真实窗口截图和字体诊断。普通文字应使用 Segoe UI Variable Text / Segoe UI / Microsoft YaHei UI / Microsoft YaHei 的统一回退顺序，专用图标与代码字体保留。夹具使用临时数据和模拟网关，不请求模型；默认完整入口也包含本组。以本次 result.txt 的 PASS 或 FAIL 为准。

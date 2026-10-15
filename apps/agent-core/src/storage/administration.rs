@@ -591,12 +591,29 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
                     configured_path(&json!(path), &application)?.join("Models")
                 ));
             }
-            let pointer = application.join("storage.json");
-            let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
-                return Ok(json!(application.join("Data").join("Models")));
+            let pointer = if arguments["pointer"].is_null() {
+                application.join("storage.json")
+            } else {
+                configured_path(&arguments["pointer"], &application)?
             };
-            let source =
-                std::str::from_utf8(&bytes).map_err(|_| failure("Invalid storage pointer UTF-8."))?;
+            let Some(bytes) = managed_files::read(&root(&pointer), &pointer, 16 * 1024)? else {
+                // Packaged hosts keep legacy writable defaults outside the immutable payload.
+                // 包身份宿主将既有可写默认位置保留在只读程序载荷之外；有效指针仍优先于默认值。
+                if !arguments["defaultModelHome"].is_null() {
+                    return Ok(json!(configured_path(
+                        &arguments["defaultModelHome"],
+                        &application
+                    )?));
+                }
+                let data = if arguments["defaultDataRoot"].is_null() {
+                    application.join("Data")
+                } else {
+                    configured_path(&arguments["defaultDataRoot"], &application)?
+                };
+                return Ok(json!(data.join("Models")));
+            };
+            let source = std::str::from_utf8(&bytes)
+                .map_err(|_| failure("Invalid storage pointer UTF-8."))?;
             let document: Value = serde_json::from_str(&raw_json::scalar_projection(
                 source.strip_prefix('\u{feff}').unwrap_or(source),
             ))
@@ -605,7 +622,7 @@ fn calculate(operation: &str, arguments: &Value) -> ContractResult {
                 return Err(failure("KYNXA 存储目录配置版本不受支持。"));
             }
             Ok(json!(
-                configured_path(&document["dataRoot"], &application)?.join("Models")
+                configured_path(&document["dataRoot"], pointer.parent().unwrap())?.join("Models")
             ))
         }
         "storage.administration.migrationLock" => {

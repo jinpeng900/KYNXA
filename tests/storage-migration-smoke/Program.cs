@@ -137,6 +137,17 @@ await File.WriteAllTextAsync(Path.Combine(customModels, "Conversations", "Chats"
 await StorageMigrationService.MoveAsync(desktop, customModels, customTarget, pointer);
 Check(File.Exists(Path.Combine(customTarget, "Chats", "custom-chat", "events.jsonl")), "custom conversation root relocated");
 Check(!Directory.Exists(Path.Combine(customTarget, "Models", "Conversations")), "custom root not copied twice");
+// These malformed headers exercise the pre-copy gate; real SQLite contents are checked by the native HTTP suite.
+// 这些损坏文件头验证复制前守卫；真实 SQLite 内容由原生 HTTP 套件核验。
+string taskDatabase = Path.Combine(oldRoot, "Agent", "tasks.sqlite");
+foreach (byte[] invalidHeader in new[] { new byte[12], new byte[100] })
+{
+    await File.WriteAllBytesAsync(taskDatabase, invalidHeader);
+    string invalidTaskTarget = Path.Combine(root, "invalid-task-" + invalidHeader.Length);
+    await Reject(() => StorageMigrationService.MoveAsync(desktop, models, invalidTaskTarget, pointer, migrateExtensions: false), "invalid task database");
+    Check(!Directory.Exists(invalidTaskTarget), "invalid task database rejected before copying");
+}
+File.Delete(taskDatabase);
 Console.WriteLine("PASS: legacy/canonical migration, history/backup hashes, managed/external metadata, custom roots, empty directories, target safety, cancellation and concurrent modification.");
 // This directory contains only generated fixtures; leave it available for inspection.
 // 此目录仅包含生成的测试数据，保留以便检查。

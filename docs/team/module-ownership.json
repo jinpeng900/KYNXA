@@ -71,7 +71,8 @@
         "apps/agent-core/src/service_cancellation.rs",
         "apps/agent-core/src/gateway.rs",
         "apps/agent-core/src/gateway_contract.rs",
-        "apps/agent-core/src/document_formats.rs"
+        "apps/agent-core/src/document_formats.rs",
+        "apps/agent-core/src/gateway_storage.rs"
       ],
       "role": "A"
     },
@@ -413,7 +414,8 @@
         "orchestration/gateway_task_http.rs",
         "orchestration/gateway_task_worker_tests.rs",
         "orchestration/gateway_document_progress.rs",
-        "storage/task_repository_cleanup.rs"
+        "storage/task_repository_cleanup.rs",
+        "gateway_storage.rs"
       ],
       "dependencyVersions": {
         "serde": "=1.0.228",
@@ -737,7 +739,10 @@
         },
         {
           "path": "orchestration/gateway_document_progress.rs",
-          "allowedDomains": ["storage", "models"],
+          "allowedDomains": [
+            "storage",
+            "models"
+          ],
           "purpose": "Document findings over existing task artifacts / 逐文档成果复用既有任务产物"
         },
         {
@@ -865,6 +870,18 @@
           "path": "storage/task_repository_cleanup.rs",
           "allowedDomains": [],
           "purpose": "Transactional task cleanup plans and owned-file recovery / 任务清理事务计划与自有文件恢复"
+        },
+        {
+          "path": "gateway_storage.rs",
+          "allowedDomains": [
+            "orchestration",
+            "models",
+            "tools",
+            "storage",
+            "retrieval",
+            "resources"
+          ],
+          "purpose": "Storage admission, drain and immutable runtime replacement / 存储准入、结算与不可变运行时替换"
         }
       ]
     }

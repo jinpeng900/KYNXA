@@ -23,6 +23,10 @@ public partial class App
         double originalWidth = layout.SidebarWidth;
         bool originallyCollapsed = layout.SidebarCollapsed;
         string originalLanguage = UiText.Language;
+        string originalPalette = AppearanceService.Current.Id;
+        string originalMode = AppearanceService.Mode;
+        double originalFontSize = AppearanceService.ChatFontSize;
+        string? originalAccent = AppearanceService.CustomAccent;
         string originalDraft = Prompt.Text;
         Guid? originalChat = ActiveId;
         var originalRows = _shell.ActiveMessages.ToArray();
@@ -84,6 +88,7 @@ public partial class App
                 "wide native collapse preserves keyboard focus and its focus ring on the visible expand button");
             Check(SameSavedSidebar(318, true) && Math.Abs(pane.ActualWidth - ShellLayoutMetrics.SidebarCollapsed) < 1,
                 "wide collapse persists the collapsed preference while retaining the expanded user width");
+            CheckCollapsedSidebarGeometry("wide-collapsed", observations);
             await CapturePresentedAsync("shell-sidebar-controls-closed.png");
             expand.Focus(FocusState.Keyboard);
             NativeUi.Invoke(expand);
@@ -93,6 +98,19 @@ public partial class App
                 "wide native expansion preserves keyboard focus and its focus ring on the visible collapse button");
             Check(SameSavedSidebar(318, false) && Math.Abs(pane.ActualWidth - 318) < 1,
                 "wide expansion saves the open preference and restores the previous user width");
+            AppearanceService.ApplyPreferences(originalPalette, "dark", originalFontSize, originalAccent);
+            await SettleAsync();
+            CheckSidebarHeaderGeometry("wide-dark-318", 318, observations);
+            await CapturePresentedAsync("shell-sidebar-controls-wide-dark.png");
+            NativeUi.Invoke(collapse);
+            await WaitAsync(() => NativeUi.IsVisible(expand), "the themed native collapse button closes the dark sidebar");
+            await SettleAsync();
+            CheckCollapsedSidebarGeometry("wide-collapsed-dark", observations);
+            await CapturePresentedAsync("shell-sidebar-controls-closed-dark.png");
+            NativeUi.Invoke(expand);
+            await WaitAsync(() => NativeUi.IsVisible(collapse), "the dark rail restores its expanded sidebar");
+            AppearanceService.ApplyPreferences(originalPalette, originalMode, originalFontSize, originalAccent);
+            await SettleAsync();
 
             // Exercise the real grip's subscribed Shell handlers without manufacturing pointer events.
             // 触发真实拖动控件已订阅的 Shell 处理函数，不伪造指针事件。
@@ -137,6 +155,7 @@ public partial class App
             await SettleAsync();
             Check(!NativeUi.IsVisible(scrim) && !NativeUi.IsVisible(grip) && SameSavedSidebar(318, false),
                 "entering compact mode closes the temporary drawer and preserves wide sidebar preferences");
+            CheckCollapsedSidebarGeometry("compact-collapsed", observations);
             NativeUi.Invoke(expand);
             await WaitAsync(() => NativeUi.IsVisible(collapse) && NativeUi.IsVisible(scrim) && !NativeUi.IsVisible(expand) &&
                 Math.Abs(pane.ActualWidth - 318) < 1,
@@ -186,6 +205,7 @@ public partial class App
             Check(!NativeUi.IsVisible(collapse) && !NativeUi.IsVisible(scrim) &&
                 Math.Abs(pane.ActualWidth - ShellLayoutMetrics.SidebarCollapsed) < 1 && SameSavedSidebar(318, true),
                 "wide collapsed state survives compact opening and closing without a preference rewrite");
+            CheckCollapsedSidebarGeometry("wide-collapsed-restored", observations);
             CheckContext("sidebar buttons, grip handlers, localization and compact dismissals preserve the exact draft, messages and zero-write catalog");
             File.WriteAllText(Path.Combine(_directory, "shell-sidebar-control-geometry.json"),
                 JsonSerializer.Serialize(observations, new JsonSerializerOptions { WriteIndented = true }));
@@ -195,6 +215,7 @@ public partial class App
             // Restore only fixture-owned UI preferences and its original draft; no formal messages are edited.
             // 仅恢复夹具自己的 UI 偏好和原草稿，不编辑正式消息。
             UiText.Initialize(originalLanguage);
+            AppearanceService.ApplyPreferences(originalPalette, originalMode, originalFontSize, originalAccent);
             layout.SidebarWidth = originalWidth;
             layout.SidebarCollapsed = originallyCollapsed;
             SetShellField("_temporarySidebarOpen", false);
@@ -254,6 +275,10 @@ public partial class App
         Check(AutomationProperties.GetName(collapse) == UiText.Get("收起侧栏") &&
             ToolTipService.GetToolTip(collapse)?.ToString() == UiText.Get("收起侧栏") && collapse.IsTabStop,
             key + " retains the localized accessible name, explanatory tooltip and keyboard focus target");
+        Check(collapse.Content is ThemeIcon { IconKey: "IconSidebarToggle", IsHitTestVisible: false, IsTabStop: false } collapseIcon &&
+            Math.Abs(collapseIcon.ActualWidth - 20) < 0.5 && Math.Abs(collapseIcon.ActualHeight - 20) < 0.5 &&
+            ReferenceEquals(collapseIcon.Foreground, AppearanceService.GetBrush("KynxaIconBrush")),
+            key + " renders the shared themed panel icon inside the existing native button without an extra hit or focus target");
         observations[key] = new
         {
             pane = new { pane.ActualWidth, pane.ActualHeight }, header = Bounds(header, pane),
@@ -266,6 +291,37 @@ public partial class App
                     .Select(text => new { text.Text, bounds = Bounds(text, header) }).ToArray()
             }).ToArray()
         };
+    }
+
+    private void CheckCollapsedSidebarGeometry(string key, Dictionary<string, object> observations)
+    {
+        var shell = Element<Grid>("ShellGrid");
+        var pane = Element<Grid>("SidebarPane");
+        var expand = Element<Button>("CompactSidebarButton");
+        var footer = Element<Grid>("SidebarFooter");
+        var settings = NativeUi.Descendants<Button>(footer).Single(button =>
+            AutomationProperties.GetName(button) == UiText.Get("设置"));
+        var settingsIcon = (ThemeIcon)settings.Content;
+        Rect Bounds(FrameworkElement element) => element.TransformToVisual(shell)
+            .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+        Rect expandBounds = Bounds(expand);
+        Rect settingsBounds = Bounds(settingsIcon);
+        Rect mainBounds = Bounds(Element<Grid>("MainRegion"));
+        double expandCenter = expandBounds.Left + expandBounds.Width / 2;
+        double settingsCenter = settingsBounds.Left + settingsBounds.Width / 2;
+        // Measure the complete rail through the content edge, including any dormant resize column.
+        // 测量到正文左缘的整条窄侧栏，包含可能残留的不可见拖动列。
+        Check(Math.Abs(expandCenter - 24) < 0.5 && Math.Abs(settingsCenter - 24) < 0.5,
+            key + " preserves the original 24-DIP horizontal centers of the hamburger and settings icon");
+        Check(Math.Abs(mainBounds.Left - 2 * expandCenter) < 0.5 &&
+            Math.Abs(settingsBounds.Left - (mainBounds.Left - settingsBounds.Right)) < 0.5 &&
+            Math.Abs(pane.ActualWidth - mainBounds.Left) < 0.5 && !NativeUi.IsVisible(Element<ResizeGrip>("SidebarGrip")),
+            key + " has equal left/right rail margins and no unused resize gutter before the main content");
+        Check(expandBounds.Left >= 0 && expandBounds.Right <= pane.ActualWidth + 0.5 &&
+            settingsBounds.Left >= 0 && settingsBounds.Right <= pane.ActualWidth + 0.5,
+            key + " keeps both original controls fully inside the narrower rail");
+        observations[key] = new { pane.ActualWidth, expand = expandBounds, settings = settingsBounds,
+            main = mainBounds, expandCenter, settingsCenter };
     }
 
     private static void RaiseSidebarGripEvent(ResizeGrip grip, string eventName, EventArgs args)

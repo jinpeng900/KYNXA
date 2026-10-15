@@ -152,6 +152,9 @@ public static class ModelGatewayService
                 !body.RootElement.TryGetProperty("retrievalProtocol", out var retrieval) ||
                 !retrieval.TryGetInt32(out int retrievalVersion) || retrievalVersion < 1))
                 throw new InvalidOperationException(UiText.Get("正在运行的旧网关不支持当前聊天、记忆与工具接口。请在当前回复结束后关闭旧网关，再重新打开 KYNXA。"));
+            if (ready && (!HasMatchingPath(body!.RootElement, "modelDataHome", ApplicationPaths.ModelHome)
+                || !HasMatchingPath(body.RootElement, "extensionRoot", ExtensionPaths.Root)))
+                throw new InvalidOperationException(UiText.Get("桌面与网关的数据目录不一致，请统一启动配置后再迁移。"));
             return ready;
         }
         catch (Exception error) when (error is HttpRequestException or JsonException or OperationCanceledException)
@@ -161,10 +164,38 @@ public static class ModelGatewayService
         }
     }
 
+    private static bool HasMatchingPath(JsonElement body, string property, string expected)
+    {
+        if (!body.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String
+            || value.GetString() is not string path || !Path.IsPathFullyQualified(path)) return false;
+        try
+        {
+            return string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(expected)), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+    }
+
     // Resolve bundled native dependencies without modifying the user's global PATH.
     // 只给本次子进程加入随包原生依赖目录，不修改用户全局 PATH。
     private static void ConfigureNativeRuntime(ProcessStartInfo start)
     {
+        // Pass writable defaults and pointer locations without freezing future migration reloads.
+        // 传递可写默认位置和指针；不把当前选择锁成显式环境覆盖，迁移后仍可重新解析。
+        start.Environment["KYNXA_STORAGE_POINTER"] = ApplicationPaths.StoragePointerPath;
+        start.Environment["KYNXA_STORAGE_MIGRATION_LOCK"] = ApplicationPaths.MigrationLockPath;
+        start.Environment["KYNXA_DEFAULT_DATA_HOME"] = ApplicationPaths.DefaultDataRoot;
+        start.Environment["KYNXA_DEFAULT_MODEL_HOME"] = ApplicationPaths.DefaultModelHome;
+        bool isolatedData = new[] { "KYNXA_DATA_HOME", "KYNXA_MODEL_HOME" }
+            .Any(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)));
+        bool explicitExtensionPointer = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_EXTENSION_POINTER"));
+        if (!isolatedData || explicitExtensionPointer)
+            start.Environment["KYNXA_EXTENSION_POINTER"] = ExtensionPaths.PointerPath;
+        start.Environment["KYNXA_DEFAULT_EXTENSION_HOME"] = ExtensionPaths.LegacyRoot ?? ExtensionPaths.DefaultRoot;
+        if (ExtensionPaths.LegacyRoot is string legacyRoot && string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(legacyRoot)), ApplicationPaths.DataRoot, StringComparison.OrdinalIgnoreCase))
+            start.Environment["KYNXA_EXTENSIONS_FOLLOW_DATA"] = "1";
+        else start.Environment.Remove("KYNXA_EXTENSIONS_FOLLOW_DATA");
         string nativeDirectory = Path.Combine(ApplicationPaths.Root, "runtime", "native");
         start.Environment["PATH"] = nativeDirectory + Path.PathSeparator
             + (start.Environment.TryGetValue("PATH", out string? currentPath) ? currentPath : "");

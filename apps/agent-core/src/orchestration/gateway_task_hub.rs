@@ -161,7 +161,8 @@ impl TaskHub {
         let conversation = conversation.to_owned();
         let project = project.map(str::to_owned);
         self.store(move |repository| {
-            let tasks = repository.paused_roots_for_conversation(&conversation, project.as_deref())?;
+            let tasks =
+                repository.paused_roots_for_conversation(&conversation, project.as_deref())?;
             Ok(json!({"tasks":tasks}))
         })
         .await
@@ -589,6 +590,9 @@ impl TaskHub {
             .runners
             .lock()
             .map_err(|_| failure("TASK_RUNNER_LOCK_FAILED"))?;
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(failure("TASK_HUB_STOPPING"));
+        }
         runners.retain(|_, runner| !runner.handle.is_finished());
         if runners.contains_key(&child.task_id) {
             return Ok(());
@@ -918,13 +922,17 @@ impl TaskHub {
                 break;
             }
         }
-        if !self
-            .restoring_roots
-            .lock()
-            .map_err(|_| failure("TASK_QUEUE_LOCK_FAILED"))?
-            .insert(root.task_id.clone())
         {
-            return Ok(());
+            let mut restoring = self
+                .restoring_roots
+                .lock()
+                .map_err(|_| failure("TASK_QUEUE_LOCK_FAILED"))?;
+            if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(failure("TASK_HUB_STOPPING"));
+            }
+            if !restoring.insert(root.task_id.clone()) {
+                return Ok(());
+            }
         }
         let hub = self.clone();
         tokio::spawn(async move {
@@ -1219,6 +1227,32 @@ impl TaskHub {
         }
         Ok(json!({"scheduled":scheduled,"source":"persistent-task-index"}))
     }
+    pub fn active_workers(&self) -> Result<usize> {
+        let runners = self
+            .runners
+            .lock()
+            .map_err(|_| failure("TASK_RUNNER_LOCK_FAILED"))?
+            .values()
+            .filter(|runner| !runner.handle.is_finished())
+            .count();
+        let restoring = self
+            .restoring_roots
+            .lock()
+            .map_err(|_| failure("TASK_QUEUE_LOCK_FAILED"))?
+            .len();
+        Ok(runners + restoring)
+    }
+
+    /// Migration waits for owned workers to settle journals, rather than treating cancellation as completion.
+    /// 迁移等待自有 Worker 实际结算日志，不能把发送取消信号当作完成。
+    pub async fn quiesce(self: &Arc<Self>) -> Result<()> {
+        self.shutdown().await;
+        while self.active_workers()? != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Ok(())
+    }
+
     pub async fn shutdown(self: &Arc<Self>) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Release);

@@ -60,7 +60,60 @@ function Get-McpHash([string]$Path) {
 }
 function Write-McpJson([string]$Path, $Value) {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path)) | Out-Null
-    [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 20), $utf8)
+    # Publish each complete document atomically; a mismatched pair invalidates reuse.
+    # 每份完整文档原子发布；两份清单不一致时不能复用缓存。
+    $pending = $Path + '.write-' + [Guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllText($pending, ($Value | ConvertTo-Json -Depth 20), $utf8)
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($pending, $Path, [NullString]::Value) }
+        else { [IO.File]::Move($pending, $Path) }
+    }
+    finally { if ([IO.File]::Exists($pending)) { Remove-Item -LiteralPath $pending } }
+}
+function Test-McpInventory($Previous, $Integrity) {
+    # Cache metadata cannot redefine a complete payload as an empty or partial inventory.
+    # 缓存元数据不能把空清单或部分文件重新定义为完整载荷。
+    if ($Previous.schemaVersion -ne 1 -or $Previous.runtimeIdentifier -ne $RuntimeIdentifier -or
+        $Integrity.schemaVersion -ne 1 -or -not $Integrity.files -or
+        @($Integrity.files).Count -ne $Previous.fileCount -or $Previous.totalBytes -le 0 -or
+        $Previous.coreDependsOnNode -ne $false -or $Previous.downloadsAtRuntime -ne $false) { return $false }
+    $entries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    $inventoryBytes = [long]0
+    foreach ($file in $Integrity.files) {
+        $relativePath = [string]$file.path
+        if ($relativePath -notmatch '^runtime/mcp/.+' -or $relativePath.Contains('\') -or
+            $relativePath -match '(^|/)(\.|\.\.)(/|$)|//|:' -or
+            $relativePath -in @('runtime/mcp/manifest.json', 'runtime/mcp/payload-integrity.json') -or
+            $entries.ContainsKey($relativePath) -or $file.bytes -isnot [ValueType] -or
+            $file.bytes -lt 0 -or $file.sha256 -notmatch '^[0-9a-f]{64}$') { return $false }
+        $inventoryBytes += [long]$file.bytes
+        $entries.Add($relativePath, $file)
+    }
+    if ($inventoryBytes -ne $Previous.totalBytes -or $Previous.node.path -ne $manifest.node.path -or
+        $Previous.node.version -ne $manifest.node.version -or $Previous.node.sha256 -ne $manifest.node.executableSha256 -or
+        $Previous.node.license -ne 'runtime/mcp/node/LICENSE' -or $Previous.browser.path -ne $manifest.browser.path -or
+        $Previous.browser.revision -ne $manifest.browser.revision -or $Previous.browser.version -ne $manifest.browser.version -or
+        $Previous.browser.sha256 -ne $manifest.browser.executableSha256) { return $false }
+    foreach ($identity in @(@{path=$manifest.node.path;sha256=$manifest.node.executableSha256},
+                             @{path=$manifest.browser.path;sha256=$manifest.browser.executableSha256})) {
+        if (-not $entries.ContainsKey($identity.path) -or $entries[$identity.path].sha256 -ne $identity.sha256) { return $false }
+    }
+    foreach ($requiredPath in @('runtime/mcp/node/LICENSE', 'runtime/mcp/services/package.json',
+                                 'runtime/mcp/services/package-lock.json', 'runtime/mcp/services/node_modules/playwright-core/browsers.json')) {
+        if (-not $entries.ContainsKey($requiredPath)) { return $false }
+    }
+    if ($entries['runtime/mcp/services/package.json'].sha256 -ne $Previous.packageSha256 -or
+        $entries['runtime/mcp/services/package-lock.json'].sha256 -ne $Previous.lockSha256 -or
+        @($Previous.services).Count -ne @($manifest.services).Count) { return $false }
+    foreach ($service in $manifest.services) {
+        $savedServices = @($Previous.services | Where-Object { $_.id -eq $service.id })
+        $packagePath = 'runtime/mcp/services/node_modules/' + $service.package + '/package.json'
+        if ($savedServices.Count -ne 1 -or -not $entries.ContainsKey($service.entry) -or -not $entries.ContainsKey($packagePath)) { return $false }
+        $savedService = $savedServices[0]
+        if ($savedService.package -ne $service.package -or $savedService.version -ne $service.version -or
+            $savedService.entry -ne $service.entry -or $savedService.sha256 -ne $entries[$service.entry].sha256) { return $false }
+    }
+    return $true
 }
 
 $cacheRoot = Assert-McpPath $repositoryRoot $cacheRoot
@@ -90,15 +143,17 @@ while (-not $cacheLock) {
 try {
     if ([IO.File]::Exists($outputManifest) -and [IO.File]::Exists($integrityPath)) {
         $previous = Read-McpJson $outputManifest
+        $integrity = Read-McpJson $integrityPath
         $isCurrent = (Test-KynxaConfigHash -Path $manifestPath -ExpectedHash $previous.sourceHash) -and
             (Test-KynxaConfigHash -Path (Join-Path $sourceRoot 'package-lock.json') -ExpectedHash $previous.lockSha256) -and
-            (Test-KynxaConfigHash -Path (Join-Path $sourceRoot 'package.json') -ExpectedHash $previous.packageSha256)
+            (Test-KynxaConfigHash -Path (Join-Path $sourceRoot 'package.json') -ExpectedHash $previous.packageSha256) -and
+            (Test-McpInventory $previous $integrity)
         $verified = [Collections.Generic.List[string]]::new()
         if ($isCurrent) {
             foreach ($directory in Get-ChildItem -LiteralPath $payloadRoot -Directory -Recurse -Force) {
                 if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cached MCP payload directories cannot contain links.' }
             }
-            foreach ($file in (Read-McpJson $integrityPath).files) {
+            foreach ($file in $integrity.files) {
                 if ($file.path.StartsWith('runtime/mcp/services/.playwright-mcp/', [StringComparison]::OrdinalIgnoreCase)) { $isCurrent = $false; break }
                 $path = [IO.Path]::GetFullPath((Join-Path $bundleRootPath $file.path))
                 if (-not $path.StartsWith($payloadRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cached MCP file escaped the verified payload tree.' }

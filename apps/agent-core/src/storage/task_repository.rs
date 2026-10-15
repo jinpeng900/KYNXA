@@ -216,6 +216,43 @@ pub struct TaskRepository {
 }
 
 impl TaskRepository {
+    /// Migration validates an existing ledger without creating schemas or changing stored records.
+    /// 迁移核验已有账本时不创建结构、不改写任务记录，未来版本与损坏库均保留原文件并失败。
+    pub fn validate_existing(root: &Path) -> Result<()> {
+        let path = root.join("Agent/tasks.sqlite");
+        if !managed_files::inspect(root, &path, false, true, u64::MAX)? {
+            return Ok(());
+        }
+        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        if managed_files::inspect(root, &wal, false, true, u64::MAX)?
+            && std::fs::metadata(&wal).map_err(|_| failure())?.len() != 0
+        {
+            return Err(blocked(
+                "Task WAL is not settled. / 任务 WAL 尚未结算，不能迁移。",
+            ));
+        }
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| failure())?;
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|_| failure())?;
+        if version != 1 {
+            return Err(ContractError::new(
+                "Task database version is unsupported. / 任务库版本不受支持，原库已保留。",
+                "UNSUPPORTED_TASK_STORE_VERSION",
+                409,
+            ));
+        }
+        let integrity: String = connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|_| failure())?;
+        let tables: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('tasks','task_events','task_attempts','task_operations','task_checkpoints','task_artifacts')", [], |row| row.get(0)).map_err(|_| failure())?;
+        if integrity != "ok" || tables != 6 {
+            return Err(failure());
+        }
+        Ok(())
+    }
     pub fn open(root: &Path) -> Result<Self> {
         let directory = root.join("Agent");
         let path = directory.join("tasks.sqlite");
@@ -423,7 +460,8 @@ impl TaskRepository {
                 row.get::<_, String>(0)
             })
             .map_err(|_| failure())?;
-        rows.map(|row| decode(row.map_err(|_| failure())?)).collect()
+        rows.map(|row| decode(row.map_err(|_| failure())?))
+            .collect()
     }
     pub fn find_by_request_id(
         &self,

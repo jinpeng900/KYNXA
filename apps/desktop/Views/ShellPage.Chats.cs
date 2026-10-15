@@ -27,7 +27,7 @@ public sealed partial class ShellPage
         // Persisted chat identity is available before its paged body; it must not use the centered new-chat layout.
         // 正式聊天身份先于分页正文到达；已有聊天不能因为正文仍在读取就使用居中的新聊天布局。
         bool conversationLayout = chat is not null && (chat.IsPersisted || chat.Messages.Count > 0);
-        ConversationMessages.Visibility = conversationLayout ? Visibility.Visible : Visibility.Collapsed;
+        ConversationMessages.Visibility = conversationLayout || ConversationMessages.IsFindTextOpen ? Visibility.Visible : Visibility.Collapsed;
         LogoHost.Visibility = conversationLayout ? Visibility.Collapsed : Visibility.Visible;
         ChatAmbientLayer.Visibility = conversationLayout ? Visibility.Collapsed : Visibility.Visible;
         MainContentHost.VerticalAlignment = conversationLayout ? VerticalAlignment.Bottom : VerticalAlignment.Center;

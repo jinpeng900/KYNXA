@@ -979,6 +979,7 @@ pub(crate) async fn execute(
         } else {
             Value::Null
         };
+        super::gateway::check_configuration_generation(ctx)?;
         let mut result = invoke(input, 130_000, ctx, None).await?;
         // Verify the helper's isolation and descendant cleanup before accepting a receipt.
         // 收据必须证明隔离与子进程清理；不能把成功读取 JSON 当成沙箱执行已核验。
@@ -1209,6 +1210,10 @@ fn unknown_job(id: &str, message: &str) -> Value {
 /// Cancel owned background work before cleaning verified sandbox stages; launched GUI apps stay independent.
 /// 先取消自有后台任务，再清理已核验的沙箱阶段；已启动的独立 GUI 应用保持其自身生命周期。
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    let _ = shutdown_checked(ctx).await;
+}
+
+pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
     let jobs = ctx
         .runtime
         .jobs
@@ -1223,7 +1228,16 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
     for job in jobs {
         let mut finished = job.finished;
         if !*finished.borrow() {
-            let _ = tokio::time::timeout(Duration::from_secs(8), finished.changed()).await;
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while !*finished.borrow() {
+                    finished.changed().await.map_err(|_| {
+                        failure("TOOL_CLEANUP_UNCONFIRMED", "后台工具退出状态未确认。", 503)
+                    })?;
+                }
+                Ok::<_, GatewayError>(())
+            })
+            .await
+            .map_err(|_| failure("TOOL_CLEANUP_UNCONFIRMED", "后台工具退出等待超时。", 503))??;
         }
     }
     let (_sender, cancellation) = watch::channel(false);
@@ -1231,29 +1245,23 @@ pub async fn shutdown(ctx: &GatewayToolContext) {
         cancellation,
         ..ctx.clone()
     };
-    if let Ok(stages) = native(&cleanup_context, "runner.sandboxStages", json!({})).await {
-        for stage in stages.as_array().into_iter().flatten() {
-            if let Ok(plan) = native(
-                &cleanup_context,
-                "runner.sandboxCleanupPlan",
-                json!({"stage":stage}),
-            )
-            .await
-            {
-                if native(&cleanup_context, "runner.sandboxCleanup", plan)
-                    .await
-                    .is_ok()
-                {
-                    let _ = native(
-                        &cleanup_context,
-                        "runner.sandboxCleaned",
-                        json!({"stage":stage}),
-                    )
-                    .await;
-                }
-            }
-        }
+    let stages = native(&cleanup_context, "runner.sandboxStages", json!({})).await?;
+    for stage in stages.as_array().into_iter().flatten() {
+        let plan = native(
+            &cleanup_context,
+            "runner.sandboxCleanupPlan",
+            json!({"stage":stage}),
+        )
+        .await?;
+        native(&cleanup_context, "runner.sandboxCleanup", plan).await?;
+        native(
+            &cleanup_context,
+            "runner.sandboxCleaned",
+            json!({"stage":stage}),
+        )
+        .await?;
     }
+    Ok(())
 }
 
 pub(crate) async fn capabilities(kind: &str, ctx: &GatewayToolContext) -> Value {

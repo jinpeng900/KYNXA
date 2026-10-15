@@ -103,7 +103,9 @@ def run_download(url, destination, sources=None, expect_success=True):
     )
     encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
     process = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        # Use the same process-local policy as the build entry; never change machine policy.
+        # 使用与构建入口相同的进程级策略，不更改机器的执行策略。
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
         capture_output=True,
         timeout=25,
     )

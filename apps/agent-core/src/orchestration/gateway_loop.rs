@@ -689,11 +689,12 @@ fn repeated_read_projection(
     summary: Option<&Value>,
 ) -> Value {
     let text = crate::models::tool_context::source_excerpt(canonical, usize::MAX);
-    let original_reference = if canonical["sourceTool"].is_string() && canonical["resultRef"].is_object() {
-        &canonical["resultRef"]
-    } else {
-        reference
-    };
+    let original_reference =
+        if canonical["sourceTool"].is_string() && canonical["resultRef"].is_object() {
+            &canonical["resultRef"]
+        } else {
+            reference
+        };
     let mut projection = json!({"alreadyRead":true,"unchangedRead":true,
         "excerpt":crate::models::protocol::output_excerpt(&text,1024),"excerptComplete":false,
         "source":crate::models::tool_context::source_metadata(canonical),"originalResultRef":original_reference,
@@ -704,9 +705,9 @@ fn repeated_read_projection(
             if let Some(values) = findings[field].as_array_mut() {
                 for value in values.iter_mut() {
                     if let Some(text) = value.as_str() {
-                        *value = json!(crate::models::protocol::output_excerpt(text,192));
+                        *value = json!(crate::models::protocol::output_excerpt(text, 192));
                     } else if let Some(text) = value["text"].as_str() {
-                        value["text"] = json!(crate::models::protocol::output_excerpt(text,192));
+                        value["text"] = json!(crate::models::protocol::output_excerpt(text, 192));
                     }
                 }
                 values.truncate(8);
@@ -717,7 +718,10 @@ fn repeated_read_projection(
     }
     if let Some(summary) = summary {
         let facts = summary["facts"].as_array().cloned().unwrap_or_default();
-        let preview_units = 1800usize.checked_div(facts.len()).unwrap_or(320).clamp(64,320);
+        let preview_units = 1800usize
+            .checked_div(facts.len())
+            .unwrap_or(320)
+            .clamp(64, 320);
         projection["workingFactPreviews"] = json!(facts.iter().map(|fact|json!({"resultId":fact["resultId"],
             "excerpt":crate::models::protocol::output_excerpt(fact["text"].as_str().unwrap_or(""),preview_units),"excerptComplete":false})).collect::<Vec<_>>());
         projection["originalResultRef"] = canonical["resultRef"].clone();
@@ -843,13 +847,7 @@ async fn document_tool(
             }
             state
                 .documents
-                .record_analysis(
-                    journal,
-                    result_id,
-                    &conclusions,
-                    &unresolved,
-                    &outputs,
-                )
+                .record_analysis(journal, result_id, &conclusions, &unresolved, &outputs)
                 .await
         }
         _ => Err(GatewayError::new(
@@ -891,27 +889,46 @@ fn document_notice(state: &LoopState) -> Option<String> {
     // 检查点已有工作事实时只附目录状态和读取入口，避免每轮重复目录挤掉事实，再触发整篇回读。
     if state.history_sources.iter().any(|source| {
         source["checkpointSemanticSummary"]["archive"]["verified"] == true
-            && source["checkpointSemanticSummary"]["facts"].as_array().is_some_and(|facts| !facts.is_empty())
+            && source["checkpointSemanticSummary"]["facts"]
+                .as_array()
+                .is_some_and(|facts| !facts.is_empty())
     }) {
         // Receipt coverage belongs to the current document version; summary-window prose cannot undo it.
         // 当前版本的实际读取覆盖由回执维护；摘要切片中的旧进度文字不能撤销已完成读取。
-        let source_labels = entries.iter().map(|entry| {
-            let locator = entry["path"].as_str().or_else(|| entry["url"].as_str())
-                .unwrap_or_else(|| entry["title"].as_str().unwrap_or("Document"));
-            let label = std::path::Path::new(locator).file_name().and_then(|name| name.to_str())
-                .unwrap_or(locator);
-            (locator, label)
-        }).collect::<Vec<_>>();
-        let coverage_sources = |read_state: &str| entries.iter().enumerate()
-            .filter(|(_, entry)| entry["active"] == true && entry["readState"] == read_state)
-            .map(|(index, _)| {
-                let (locator, label) = source_labels[index];
-                if source_labels.iter().filter(|(_, other)| *other == label).count() == 1 {
-                    label
-                } else {
-                    locator
-                }
-            }).collect::<Vec<_>>();
+        let source_labels = entries
+            .iter()
+            .map(|entry| {
+                let locator = entry["path"]
+                    .as_str()
+                    .or_else(|| entry["url"].as_str())
+                    .unwrap_or_else(|| entry["title"].as_str().unwrap_or("Document"));
+                let label = std::path::Path::new(locator)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(locator);
+                (locator, label)
+            })
+            .collect::<Vec<_>>();
+        let coverage_sources = |read_state: &str| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry["active"] == true && entry["readState"] == read_state)
+                .map(|(index, _)| {
+                    let (locator, label) = source_labels[index];
+                    if source_labels
+                        .iter()
+                        .filter(|(_, other)| *other == label)
+                        .count()
+                        == 1
+                    {
+                        label
+                    } else {
+                        locator
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         let navigation = json!({"totalDocuments":entries.len(),
             "readComplete":entries.iter().filter(|entry|entry["active"]==true&&entry["readState"]=="complete").count(),
             "readCompleteSources":coverage_sources("complete"),
@@ -924,10 +941,15 @@ fn document_notice(state: &LoopState) -> Option<String> {
         let mut produced_artifacts = Vec::new();
         let mut seen_artifact_paths = HashSet::new();
         for source in state.result_sources.iter().rev().filter(|source| {
-            source["status"] == "completed" && source["executed"] != false
-                && matches!(source["name"].as_str(), Some("filesystem.write" | "filesystem.edit" | "filesystem.delete"))
+            source["status"] == "completed"
+                && source["executed"] != false
+                && matches!(
+                    source["name"].as_str(),
+                    Some("filesystem.write" | "filesystem.edit" | "filesystem.delete")
+                )
         }) {
-            if let Some(path) = source["sourceMetadata"]["path"].as_str()
+            if let Some(path) = source["sourceMetadata"]["path"]
+                .as_str()
                 .or_else(|| source["arguments"]["path"].as_str())
             {
                 if seen_artifact_paths.insert(path) && source["name"] != "filesystem.delete" {
@@ -935,7 +957,10 @@ fn document_notice(state: &LoopState) -> Option<String> {
                 }
             }
         }
-        return Some(format!("Current document read coverage from actual receipts: {navigation}. Successfully written output paths: {}. Reuse those outputs; continue any required readback, validation or final response instead of creating them again. This coverage describes the current source versions. Earlier summary statements about unread offsets describe summary processing windows and do not override this read coverage. Reuse saved content facts for the remaining user requirements. For a missing fact, read that saved analysis; originals are needed for changed sources, conflicting evidence or a specific semantic gap. Do not repeat completed source reads or unchanged directory listings.", json!(produced_artifacts)));
+        return Some(format!(
+            "Current document read coverage from actual receipts: {navigation}. Successfully written output paths: {}. Reuse those outputs; continue any required readback, validation or final response instead of creating them again. This coverage describes the current source versions. Earlier summary statements about unread offsets describe summary processing windows and do not override this read coverage. Reuse saved content facts for the remaining user requirements. For a missing fact, read that saved analysis; originals are needed for changed sources, conflicting evidence or a specific semantic gap. Do not repeat completed source reads or unchanged directory listings.",
+            json!(produced_artifacts)
+        ));
     }
     let notice = format!(
         "Saved document work: {}. Reuse completed analyses. After a new analysis, record resultId and conclusions. Missing saved detail: action=read with sourceIdentity, offset/limit; use nextOffset only when hasMore. Do not list an unchanged directory repeatedly. Read originals only for a changed source or specific gap; proceed to the requested output.",
@@ -953,8 +978,12 @@ fn refresh_document_navigation(state: &mut LoopState) {
 }
 
 fn loaded_tools_notice(selected: &[Value], declared: &[Value]) -> Option<String> {
-    let deferred = selected.iter().filter(|tool| !declared.iter().any(|entry|entry["name"]==tool["name"]))
-        .filter_map(|tool|tool["name"].as_str()).take(24).collect::<Vec<_>>();
+    let deferred = selected
+        .iter()
+        .filter(|tool| !declared.iter().any(|entry| entry["name"] == tool["name"]))
+        .filter_map(|tool| tool["name"].as_str())
+        .take(24)
+        .collect::<Vec<_>>();
     (!deferred.is_empty()).then(||format!(
         "Callable: {}. Already loaded but deferred: {}. Load only a needed deferred name; do not discover known tools again. Use saved findings for the requested output.",
         json!(declared.iter().filter_map(|tool|tool["name"].as_str()).collect::<Vec<_>>()),json!(deferred)))
@@ -1263,14 +1292,18 @@ async fn restore_root_work_context(
     // Preserve the saved model-selected order, including recent loads, before applying schema admission.
     // 工具声明授额前先恢复模型保存的选择顺序，包括最近加载项，避免按目录顺序重排后再次挤掉。
     for name in selected_names {
-        if restored_selected.iter().any(|tool: &Value| tool["name"] == *name) {
+        if restored_selected
+            .iter()
+            .any(|tool: &Value| tool["name"] == *name)
+        {
             continue;
         }
         if let Some(index) = state.selected.iter().position(|tool| tool["name"] == *name) {
             restored_selected.push(state.selected.remove(index));
-        } else if let Some(tool) = catalog.iter().find(|tool| {
-            tool["name"] == *name && tools::executable_descriptor(tool)
-        }) {
+        } else if let Some(tool) = catalog
+            .iter()
+            .find(|tool| tool["name"] == *name && tools::executable_descriptor(tool))
+        {
             restored_selected.push(descriptor(tool, name.as_str().unwrap_or("")));
         }
     }
@@ -2162,17 +2195,26 @@ async fn execute(
             .delivery_plan(limits["maxToolCalls"].as_u64().unwrap_or(256), used_calls);
         let verification = native(state.progress.apply("progress.verification", &json!({})))?;
         let has_output = state.result_sources.iter().any(|source| {
-            source["status"] == "completed" && source["executed"] != false
-                && matches!(source["name"].as_str(), Some("filesystem.write" | "filesystem.edit"))
+            source["status"] == "completed"
+                && source["executed"] != false
+                && matches!(
+                    source["name"].as_str(),
+                    Some("filesystem.write" | "filesystem.edit")
+                )
         });
         let delivery_version = json!({"revision":verification["mutationRevision"],
-            "signature":verification["codeVersionCoverage"]["latestSnapshot"]["signature"]}).to_string();
+            "signature":verification["codeVersionCoverage"]["latestSnapshot"]["signature"]})
+        .to_string();
         // A verified output gets one full-answer turn without schemas; the model may still identify remaining work.
         // 已核验产物先获得一轮无工具定义的完整答复空间；模型仍可指出剩余工作并继续执行。
-        let synthesize_delivery = !review_pending && has_output
+        let synthesize_delivery = !review_pending
+            && has_output
             && verification["pendingValidation"] == false
             && (verification["state"] == "checks-passed"
-                || verification["documentValidation"]["targetCount"].as_u64().unwrap_or(0) > 0
+                || verification["documentValidation"]["targetCount"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
                     && delivery.deprioritize_discovery_and_search)
             && synthesized_version.as_ref() != Some(&delivery_version);
         if synthesize_delivery {
@@ -2210,12 +2252,27 @@ async fn execute(
         // 历史在后续统一压缩；工具声明按必要指导授额，不能因待压缩历史过大卸载刚加载的工具。
         // Schema admission includes the same mandatory messages later sent to the model, not only the system prompt.
         // 工具定义准入计入随后实际发送的必需消息，而非只计算系统提示；工作事实的额度不能再次被实时指引挤占。
-        let mut mandatory_messages = state.history.iter().enumerate().filter(|(index,message)| {
-            let source = state.history_sources.get(*index);
-            message["role"]=="user" && source.is_none_or(|source|
-                source["projectionOrigin"].is_null() && source["turnIndex"].is_null())
-        }).map(|(_,message)|message.clone()).collect::<Vec<_>>();
-        for notice in [&document_progress_notice, &delivery_notice, &strategy_notice].into_iter().flatten() {
+        let mut mandatory_messages = state
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| {
+                let source = state.history_sources.get(*index);
+                message["role"] == "user"
+                    && source.is_none_or(|source| {
+                        source["projectionOrigin"].is_null() && source["turnIndex"].is_null()
+                    })
+            })
+            .map(|(_, message)| message.clone())
+            .collect::<Vec<_>>();
+        for notice in [
+            &document_progress_notice,
+            &delivery_notice,
+            &strategy_notice,
+        ]
+        .into_iter()
+        .flatten()
+        {
             mandatory_messages.push(json!({"role":"user","content":notice}));
         }
         let occupied = crate::models::protocol::tool_message_tokens(&mandatory_messages, &system);
@@ -2273,13 +2330,24 @@ async fn execute(
         // A smaller declared catalog reclaims unused context without hiding discovery capability.
         // 缩小已声明目录以回收上下文，保留完整能力发现入口。
         loop {
-            let loaded_notice_tokens = if declarations_disabled { 0 } else {
-                loaded_tools_notice(&state.selected, &declared_tools).map_or(0, |notice|
-                    crate::models::protocol::tool_message_tokens(&[json!({"role":"user","content":notice})],""))
+            let loaded_notice_tokens = if declarations_disabled {
+                0
+            } else {
+                loaded_tools_notice(&state.selected, &declared_tools).map_or(0, |notice| {
+                    crate::models::protocol::tool_message_tokens(
+                        &[json!({"role":"user","content":notice})],
+                        "",
+                    )
+                })
             };
             let schema_budget = crate::models::context_control::tool_declaration_budget(
-                input_budget, occupied.saturating_add(loaded_notice_tokens));
-            if schemas.len() <= 2 || crate::models::protocol::estimate_tokens(&json!(schemas).to_string()) <= schema_budget {
+                input_budget,
+                occupied.saturating_add(loaded_notice_tokens),
+            );
+            if schemas.len() <= 2
+                || crate::models::protocol::estimate_tokens(&json!(schemas).to_string())
+                    <= schema_budget
+            {
                 break;
             }
             declared_tools.pop();
@@ -2300,7 +2368,11 @@ async fn execute(
                 }
             };
         }
-        let loaded_tool_notice = if declarations_disabled { None } else { loaded_tools_notice(&state.selected,&declared_tools) };
+        let loaded_tool_notice = if declarations_disabled {
+            None
+        } else {
+            loaded_tools_notice(&state.selected, &declared_tools)
+        };
         let (compact_sender, mut compact_receiver) = mpsc::channel::<Value>(16);
         let compact_run = run.clone();
         let initial_order = state.timeline_order;
@@ -2412,10 +2484,17 @@ async fn execute(
             .collect::<Vec<_>>();
         let live_tokens = crate::models::protocol::tool_message_tokens(&live_messages, "");
         let conversational_input_budget = input_budget.saturating_sub(live_tokens);
-        let remaining_model_calls = run.journal.as_ref().map(|journal| {
-            journal.load_current().map(|task|
-                task.budget.max_model_requests.saturating_sub(task.usage.model_requests))
-        }).transpose()?;
+        let remaining_model_calls = run
+            .journal
+            .as_ref()
+            .map(|journal| {
+                journal.load_current().map(|task| {
+                    task.budget
+                        .max_model_requests
+                        .saturating_sub(task.usage.model_requests)
+                })
+            })
+            .transpose()?;
         let compact = crate::models::gateway_context::compact_request_with_executor(
             &connection,
             model_name,
@@ -2487,7 +2566,9 @@ async fn execute(
                     .documents
                     .update_from_summary(journal, &summary)
                     .await?;
-                summarized_work_changed = updated["changedDocuments"].as_u64().is_some_and(|count|count>0);
+                summarized_work_changed = updated["changedDocuments"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0);
             }
         }
         if compact.budget_exceeded {
@@ -2971,8 +3052,21 @@ async fn execute(
         state.transcript.push(json!({"round":round,"text":text,"calls":response.calls,"nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint}));
         state.save(&runtime, &run, "streaming", None).await?;
         let mut results = Vec::new();
-        let mut round_progress = RoundProgress { evidence_changed:summarized_work_changed, ..Default::default() };
+        let mut round_progress = RoundProgress {
+            evidence_changed: summarized_work_changed,
+            ..Default::default()
+        };
         for call in &response.calls {
+            if state.started.elapsed().as_millis() as u64
+                >= limits["maxDurationMs"].as_u64().unwrap_or(1800000)
+            {
+                stopped = Some(GatewayError::new(
+                    "TOOL_RUN_TIMEOUT",
+                    "任务总时间已到，已完成内容保留。",
+                    504,
+                ));
+                break;
+            }
             if *cancellation.borrow() {
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
                 break;
@@ -3111,12 +3205,23 @@ async fn execute(
                 let result = match result {
                     Ok(result) if result["requiresApproval"] == true => {
                         match runtime
-                            .await_approval(&run, call, &result, round, tool_order)
+                            .await_approval(
+                                &run,
+                                call,
+                                &result,
+                                round,
+                                tool_order,
+                                state.started
+                                    + Duration::from_millis(
+                                        limits["maxDurationMs"].as_u64().unwrap_or(1800000),
+                                    ),
+                            )
                             .await
                         {
                             Ok(true) => {
                                 ctx.approved = true;
                                 let dispatched_at = Instant::now();
+                                ctx.config["approvedInvocation"] = result["invocation"].clone();
                                 let result =
                                     tools::execute(name, call["arguments"].clone(), &ctx).await;
                                 tool_execution_ms = tool_execution_ms.saturating_add(
@@ -3124,6 +3229,10 @@ async fn execute(
                                         as u64,
                                 );
                                 ctx.approved = false;
+                                ctx.config
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .remove("approvedInvocation");
                                 result
                             }
                             Ok(false) => Err(GatewayError::new(
@@ -3196,7 +3305,10 @@ async fn execute(
             let source_metadata = crate::models::tool_context::source_metadata(&receipt["content"]);
             // Identity uses the unabridged native result, including current text/structuredContent contracts.
             // 身份依据未缩小的原生结果，兼容现有 text 和 structuredContent，不能因投影变化重置查重。
-            if let Ok(observation) = crate::tools::observations::calculate("observations.source", &json!({"call":call,"value":canonical})) {
+            if let Ok(observation) = crate::tools::observations::calculate(
+                "observations.source",
+                &json!({"call":call,"value":canonical}),
+            ) {
                 if observation.is_object() {
                     receipt["observationKey"] = observation["observationKey"].clone();
                     receipt["observationHash"] = observation["observationHash"].clone();
@@ -3223,41 +3335,72 @@ async fn execute(
                         round_progress.new_read_range |= document["informationAdded"] == true;
                         if matches!(name, "filesystem.read" | "document.read")
                             && document["informationAdded"] == false
-                            && document["matchingReadCount"].as_u64().is_some_and(|count|count>=3)
+                            && document["matchingReadCount"]
+                                .as_u64()
+                                .is_some_and(|count| count >= 3)
                             && source_metadata["offset"] == 0
                             && source_metadata["nextOffset"] == source_metadata["totalCharacters"]
-                            && source_metadata["totalCharacters"].as_u64().is_some_and(|count|count>4096)
+                            && source_metadata["totalCharacters"]
+                                .as_u64()
+                                .is_some_and(|count| count > 4096)
                         {
-                            receipt["content"] = repeated_read_projection(&canonical,&reference,
-                                state.documents.saved_findings(document["sourceIdentity"].as_str().unwrap_or("")),None);
+                            receipt["content"] = repeated_read_projection(
+                                &canonical,
+                                &reference,
+                                state.documents.saved_findings(
+                                    document["sourceIdentity"].as_str().unwrap_or(""),
+                                ),
+                                None,
+                            );
                         }
                     }
                 }
             }
-            if name == "tool.result.read" && receipt["isError"] != true && state.work_progress.needs_strategy_change()
-                && source_metadata["nextOffset"].as_u64().zip(source_metadata["offset"].as_u64()).is_some_and(|(end,start)|end.saturating_sub(start)>4096)
+            if name == "tool.result.read"
+                && receipt["isError"] != true
+                && state.work_progress.needs_strategy_change()
+                && source_metadata["nextOffset"]
+                    .as_u64()
+                    .zip(source_metadata["offset"].as_u64())
+                    .is_some_and(|(end, start)| end.saturating_sub(start) > 4096)
                 && state.result_sources.iter().any(|previous| {
-                    previous["name"] == "tool.result.read" && previous["status"] == "completed"
+                    previous["name"] == "tool.result.read"
+                        && previous["status"] == "completed"
                         && previous["arguments"]["id"] == call["arguments"]["id"]
                         && previous["sourceMetadata"]["resultRef"] == source_metadata["resultRef"]
-                        && previous["sourceMetadata"]["offset"].as_u64().zip(previous["sourceMetadata"]["nextOffset"].as_u64())
-                            .zip(source_metadata["offset"].as_u64().zip(source_metadata["nextOffset"].as_u64()))
-                            .is_some_and(|((old_start,old_end),(start,end))|old_start<=start&&old_end>=end)
+                        && previous["sourceMetadata"]["offset"]
+                            .as_u64()
+                            .zip(previous["sourceMetadata"]["nextOffset"].as_u64())
+                            .zip(
+                                source_metadata["offset"]
+                                    .as_u64()
+                                    .zip(source_metadata["nextOffset"].as_u64()),
+                            )
+                            .is_some_and(|((old_start, old_end), (start, end))| {
+                                old_start <= start && old_end >= end
+                            })
                 })
             {
                 let summary = state.history_sources.iter().rev().find_map(|source| {
                     let summary = &source["checkpointSemanticSummary"];
-                    (summary["archive"]["verified"] == true && summary["archive"]["resultRef"] == source_metadata["resultRef"])
+                    (summary["archive"]["verified"] == true
+                        && summary["archive"]["resultRef"] == source_metadata["resultRef"])
                         .then_some(summary)
                 });
-                receipt["content"] = repeated_read_projection(&canonical,&reference,None,summary);
+                receipt["content"] =
+                    repeated_read_projection(&canonical, &reference, None, summary);
             }
             if name == "task.document" && receipt["content"]["informationAdded"] == true {
                 round_progress.artifact_updated = true;
             }
-            if operation_dispatched && receipt["status"] == "completed"
-                && receipt["isError"] != true && receipt["reused"] != true
-                && matches!(name, "filesystem.write" | "filesystem.edit" | "filesystem.delete")
+            if operation_dispatched
+                && receipt["status"] == "completed"
+                && receipt["isError"] != true
+                && receipt["reused"] != true
+                && matches!(
+                    name,
+                    "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+                )
             {
                 round_progress.artifact_updated = true;
             }

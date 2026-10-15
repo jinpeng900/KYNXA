@@ -8,7 +8,6 @@ using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Views;
 
@@ -59,9 +58,9 @@ public sealed partial class ShellPage
         bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
             && hasInput);
-        // SVG strokes do not inherit Button.Foreground; keep the disabled arrow readable explicitly.
-        // SVG 描边不继承 Button.Foreground；显式选择禁用箭头，保证空输入时仍清晰可见。
-        SendArrow.Source = (ImageSource)Application.Current.Resources[SendButton.IsEnabled ? "IconSend" : "IconSendDisabled"];
+        // Retain the shared theme brush while the durable-task action determines the visible icon.
+        // 保留共享主题画刷；可见图标由持久任务的当前动作决定。
+        SendArrow.Stroke = AppearanceService.GetBrush(SendButton.IsEnabled ? "KynxaOnAccentBrush" : "KynxaDisabledTextBrush");
         bool pause = active && !hasInput;
         SendArrow.Visibility = pause ? Visibility.Collapsed : Visibility.Visible;
         StopReplyIcon.Visibility = pause ? Visibility.Visible : Visibility.Collapsed;

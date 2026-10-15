@@ -12,7 +12,11 @@
     <EnableMsixTooling>false</EnableMsixTooling>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../apps/desktop/Controls/ScrollSafeComboBox.cs" Link="ScrollSafeComboBox.cs" />
     <Compile Include="../../apps/desktop/Services/Data/ApplicationPaths.cs" Link="ApplicationPaths.cs" />
+    <Compile Include="../../apps/desktop/Services/Data/ExtensionPaths.cs" Link="ExtensionPaths.cs" />
+    <Compile Include="../../apps/desktop/Services/Data/StorageMigrationService.cs" Link="StorageMigrationService.cs" />
+    <Compile Include="../../apps/desktop/Services/Data/ExtensionConfigurationMigration.cs" Link="ExtensionConfigurationMigration.cs" />
     <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />

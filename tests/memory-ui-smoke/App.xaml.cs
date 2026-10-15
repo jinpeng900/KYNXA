@@ -65,6 +65,7 @@ public partial class App : Application
         _api.Seed(_emptyChat);
         _api.Seed(_project, FakeMemoryApi.Entry(_project, "PROJECT_ONLY synthetic decision", MemoryKinds.Decision));
         _api.Seed(_archivedProject, FakeMemoryApi.Entry(_archivedProject, "ARCHIVED_PROJECT_ONLY synthetic memory"));
+        SeedDraftScenario();
         _viewModel = new MemoryManagementViewModel(_api);
         // A hidden lifetime window permits checking a late response after the real memory window closes.
         // 保留隐藏的生命周期窗口，以检查真实记忆窗口关闭之后晚到的响应。
@@ -86,6 +87,12 @@ public partial class App : Application
                 "native memory window loads the injected global snapshot");
             _window!.AppWindow.Resize(new SizeInt32(1120, 860));
             await SettleAsync();
+            if (_draftOnly)
+            {
+                await CheckDraftOnlyAsync();
+                passed = true;
+                return;
+            }
             Check(_viewModel.Target?.Scope == MemoryScopes.User && EntryList.Items.Count == 4,
                 "default global scope shows all confirmed entries, including archived and unavailable sources");
             Check(_viewModel.IsNew && ContentBox.Text.Length == 0 && !Button("SaveMemoryButton").IsEnabled,

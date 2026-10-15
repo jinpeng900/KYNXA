@@ -39,7 +39,8 @@ public static class ExtensionStorageMigrationService
         ExtensionPaths.ValidateLayout(source);
         await ExtensionConfigurationMigration.ValidateAsync(source, cancellationToken);
         var roots = new List<StorageMigrationService.CopyRoot>(new[] { "Agent", "Skills", "MCP" }
-            .Select(name => new StorageMigrationService.CopyRoot(Path.Combine(source, name), name)))
+            .Select(name => new StorageMigrationService.CopyRoot(Path.Combine(source, name), name,
+                Exclude: name == "Agent" ? StorageMigrationService.TaskStorageEntries : null)))
         {
             // Data may share this root: only the extension-owned recovery namespace moves.
             // 数据可能共用此根目录；仅迁移扩展拥有的恢复命名空间。

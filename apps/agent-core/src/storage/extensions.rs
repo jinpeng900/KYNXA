@@ -371,6 +371,11 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
         }
         let pointer = absolute(&arguments["pointer"])?;
         let Some(document) = read_document(&pointer, "INVALID_EXTENSION_STORAGE")? else {
+            // Legacy extensions move with Data only until an independent pointer takes ownership.
+            // 旧扩展仅在没有独立位置指针时随 Data 迁移；新指针始终优先于回退位置。
+            if arguments["followDataRoot"] == true {
+                return Ok(json!(absolute(&arguments["dataRoot"])?));
+            }
             return Ok(arguments["fallback"].clone());
         };
         if document["version"].as_f64() != Some(1.0) {

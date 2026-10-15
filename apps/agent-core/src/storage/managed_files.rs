@@ -93,11 +93,8 @@ pub fn inspect(
                     ));
                 }
                 if final_file {
-                    let handle = std::fs::File::open(&current).map_err(io_failure)?;
-                    let identity =
-                        crate::file_identity::handle_identity(&handle).map_err(io_failure)?;
-                    if identity.is_link || identity.links != 1 {
-                        return Err(unsafe_path());
+                    if !inspect_open_file(&current)? {
+                        return Ok(false);
                     }
                 }
             }
@@ -122,6 +119,61 @@ pub fn inspect(
     Ok(true)
 }
 
+fn inspect_open_file(path: &Path) -> Result<bool, ContractError> {
+    let handle = match read_options().open(path) {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_failure(error)),
+    };
+    inspect_handle_identity(path, &handle)
+}
+
+fn inspect_handle_identity(path: &Path, handle: &std::fs::File) -> Result<bool, ContractError> {
+    let identity = crate::file_identity::handle_identity(handle).map_err(io_failure)?;
+    if identity.is_link {
+        return Err(unsafe_path());
+    }
+    // SQLite may unlink a sidecar between metadata inspection and checking its opened handle.
+    // SQLite 可在路径检查与句柄核验之间删除旁车；仅已无目录项的零链接对象按不存在处理。
+    if identity.links == 0
+        && matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(false);
+    }
+    if identity.links != 1 {
+        return Err(unsafe_path());
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn removed_sidecar_is_absent_but_a_hard_link_remains_unsafe() {
+        let root = std::env::temp_dir().join(format!("kynxa-sidecar-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tasks.sqlite-wal");
+        fs::write(&path, b"sidecar").unwrap();
+        let handle = read_options().open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!inspect_handle_identity(&path, &handle).unwrap());
+        drop(handle);
+        fs::write(&path, b"protected").unwrap();
+        let alias = root.join("alias");
+        fs::hard_link(&path, &alias).unwrap();
+        assert_eq!(
+            inspect_open_file(&path).unwrap_err().code,
+            "INVALID_MEMORY_PATH"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"protected");
+        fs::remove_file(alias).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+}
+
 /// A bounded reader holds one checked object and verifies its identity again after range reads.
 /// 有界读取持有已校验文件对象，窗口读取结束后再核验身份，避免绕过既有路径与版本保护。
 pub struct StableReader {
@@ -132,7 +184,73 @@ pub struct StableReader {
     metadata: fs::Metadata,
 }
 
+/// Retain checked object identity without pinning an open file across another storage owner's lock.
+/// 保留已核验对象身份，不在等待另一存储所有者的锁时持有文件句柄。
+pub(crate) struct StableFileVersion {
+    root: PathBuf,
+    path: PathBuf,
+    identity: crate::file_identity::HandleIdentity,
+    metadata: fs::Metadata,
+}
+
+impl StableFileVersion {
+    pub(crate) fn reopen(&self) -> Result<Option<StableReader>, ContractError> {
+        let Some(reader) = open_reader(&self.root, &self.path, u64::MAX)? else {
+            return Ok(None);
+        };
+        if !same_file_version(
+            &self.identity,
+            &self.metadata,
+            &reader.identity,
+            &reader.metadata,
+        ) {
+            return Err(file_changed());
+        }
+        Ok(Some(reader))
+    }
+}
+
+fn file_changed() -> ContractError {
+    ContractError::new(
+        "Managed file changed while reading. / 托管文件读取期间已改变。",
+        "MEMORY_CONFLICT",
+        409,
+    )
+}
+
+fn same_file_version(
+    expected_identity: &crate::file_identity::HandleIdentity,
+    expected: &fs::Metadata,
+    actual_identity: &crate::file_identity::HandleIdentity,
+    actual: &fs::Metadata,
+) -> bool {
+    !actual_identity.is_link
+        && actual_identity.links == 1
+        && expected_identity.volume == actual_identity.volume
+        && expected_identity.identity == actual_identity.identity
+        && expected.len() == actual.len()
+        && expected.modified().ok() == actual.modified().ok()
+        && expected.created().ok() == actual.created().ok()
+}
+
 impl StableReader {
+    pub(crate) fn into_version(self) -> StableFileVersion {
+        let Self {
+            file,
+            root,
+            path,
+            identity,
+            metadata,
+        } = self;
+        drop(file);
+        StableFileVersion {
+            root,
+            path,
+            identity,
+            metadata,
+        }
+    }
+
     /// Cache only against an observable change stamp, object identity and size; unsupported files stay byte-verified.
     /// 缓存绑定可观测变更时间、文件身份及大小；不支持该时间的文件仍逐次校验完整字节。
     pub fn version_token(&self) -> Result<Option<String>, ContractError> {
@@ -159,21 +277,11 @@ impl StableReader {
             crate::file_identity::handle_identity(&current_file).map_err(io_failure)?;
         let current = current_file.metadata().map_err(io_failure)?;
         let opened_after = self.file.metadata().map_err(io_failure)?;
-        if current_identity.is_link
-            || current_identity.links != 1
-            || self.identity.volume != current_identity.volume
-            || self.identity.identity != current_identity.identity
-            || self.metadata.len() != current.len()
-            || self.metadata.modified().ok() != current.modified().ok()
-            || self.metadata.created().ok() != current.created().ok()
+        if !same_file_version(&self.identity, &self.metadata, &current_identity, &current)
             || self.metadata.len() != opened_after.len()
             || self.metadata.modified().ok() != opened_after.modified().ok()
         {
-            return Err(ContractError::new(
-                "Managed file changed while reading. / 托管文件读取期间已改变。",
-                "MEMORY_CONFLICT",
-                409,
-            ));
+            return Err(file_changed());
         }
         Ok(())
     }

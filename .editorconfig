@@ -18,6 +18,12 @@ charset = utf-8-bom
 [apps/desktop/Build/{prepare-native-runtime,prepare-mcp-runtime}.ps1]
 charset = utf-8-bom
 
+[apps/desktop/Build/check-deployment-paths.ps1]
+charset = utf-8-bom
+
+[tests/native-runtime-smoke/{check-mcp-cache,check-deployment-paths}.ps1]
+charset = utf-8-bom
+
 [apps/desktop/Build/RuntimeDownloads.psm1]
 charset = utf-8-bom
 

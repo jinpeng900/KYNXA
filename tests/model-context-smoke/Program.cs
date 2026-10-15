@@ -53,7 +53,8 @@ var server = Task.Run(async () =>
                 string path = context.Request.Url!.AbsolutePath;
                 if (path == "/health")
                     result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", storageProtocol = 1,
-                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1, retrievalProtocol = 1 };
+                        conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, dataLayoutVersion = 1, retrievalProtocol = 1,
+                        modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root };
                 else if (path == "/api/models" && context.Request.HttpMethod == "GET")
                 {
                     // Missing limits use their independent defaults. Explicit limits

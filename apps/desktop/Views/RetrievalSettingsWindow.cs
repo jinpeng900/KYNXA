@@ -24,6 +24,7 @@ public sealed partial class RetrievalSettingsWindow : Window
     private ProjectRetrievalSettingsDocument? _project;
     private RetrievalIndexJob? _job;
     private RetrievalStatus? _status;
+    private string? _noticeMessageKey;
     private bool _closed, _busy, _rendering, _loaded, _polling, _allowClose;
 
     public RetrievalSettingsWindow(Guid? projectId = null, string? projectName = null, string? mountedPath = null,
@@ -39,12 +40,6 @@ public sealed partial class RetrievalSettingsWindow : Window
         AppearanceService.TrackWindow(this);
         Title = UiText.Get("KYNXA · 检索与网页搜索");
         AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 760));
-        if (AppWindowTitleBar.IsCustomizationSupported())
-        {
-            AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.Black;
-        }
         UiText.LanguageChanged += LanguageChanged;
         AppWindow.Closing += (_, args) => { if (_busy && !_allowClose) args.Cancel = true; };
         Closed += (_, _) =>
@@ -71,11 +66,32 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         Title = UiText.Get("KYNXA · 检索与网页搜索");
+        RefreshPickerSelections();
         // The last status snapshot can predate job polling; language changes must retain the newer observation.
         // 状态快照可能早于任务轮询；切换语言时保留较新的任务观察，不退回旧状态。
         var currentJob = _job;
         if (_status is { } status) RenderStatus(status);
         if (currentJob is { } job) ShowJob(job);
+        if (_notice.IsOpen && _noticeMessageKey is { } messageKey)
+            _notice.Message = UiText.Get(messageKey);
+    }
+
+    private void RefreshPickerSelections()
+    {
+        // WinUI caches a string selection box independently of ComboBoxItem.Content.
+        // WinUI 的收起显示缓存独立于 ComboBoxItem.Content；重新选择同一项刷新显示，但不能触发保存。
+        bool wasRendering = _rendering;
+        _rendering = true;
+        try
+        {
+            foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
+            {
+                if (picker.SelectedItem is not { } selected) continue;
+                picker.SelectedItem = null;
+                picker.SelectedItem = selected;
+            }
+        }
+        finally { _rendering = wasRendering; }
     }
 
     private async Task LoadAsync()
@@ -173,7 +189,7 @@ public sealed partial class RetrievalSettingsWindow : Window
                 // Refresh on conflict, never replay a stale form over concurrent changes.
                 // 冲突时刷新；不把旧表单自动重放到并发更新上。
                 await LoadAsync();
-                ShowError(UiText.Get("检索设置已在其他位置更新。已刷新，请重新选择。"));
+                ShowError("检索设置已在其他位置更新。已刷新，请重新选择。");
             }
             catch
             {
@@ -295,7 +311,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         };
         if (active) _jobTimer.Start();
         else _jobTimer.Stop();
-        if (job.Status == "failed") ShowError(job.Error ?? UiText.Get("索引更新失败，请重试"));
+        if (job.Status == "failed") ShowError(job.Error ?? "索引更新失败，请重试");
     }
 
     private static string PartialJobSummary(RetrievalIndexJob job)
@@ -332,6 +348,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (_busy || _closed || StoragePaths.IsMigrating) return;
         _busy = true;
         _notice.IsOpen = false;
+        _noticeMessageKey = null;
         _settingsHost.IsEnabled = false;
         try { await operation(); }
         catch (OperationCanceledException) when (_closed) { }
@@ -345,7 +362,10 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private void ShowError(string message)
     {
-        _notice.Message = message;
+        // Keep the source key for an already visible local notice; unknown gateway details stay unchanged.
+        // 保留已显示本地提示的原始键，支持即时换语言；未识别的网关详情仍按原文显示。
+        _noticeMessageKey = message;
+        _notice.Message = UiText.Get(message);
         _notice.Severity = InfoBarSeverity.Error;
         _notice.IsOpen = true;
     }
