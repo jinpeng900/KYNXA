@@ -8,7 +8,7 @@ public static class ShellLayoutMetrics
 {
     public const double SidebarDefault = 240;
     public const double CompactSidebarBreakpoint = 980;
-    public const double SidebarCollapsed = 56;
+    public const double SidebarCollapsed = 48;
     public const double SidebarMin = 200;
     public const double SidebarMax = 360;
     public const double TopDefault = 96;

@@ -207,6 +207,13 @@ public sealed class ConversationTranscript : Grid, IDisposable
         Post(new { type = "findText", action = "close" });
     }
 
+    public void NavigateFindText(bool previous = false)
+    {
+        // Navigation from native controls keeps their focus and draft; the page enforces selection/modal guards.
+        // 原生控件发起导航时保留焦点与草稿；页面继续校验选区和图表模态保护。
+        if (!_disposed && IsFindTextOpen) Post(new { type = "findText", action = previous ? "previous" : "next" });
+    }
+
     private void AppearanceChanged(object? sender, EventArgs e)
     {
         if (_disposed) return;
@@ -261,7 +268,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 findText = UiText.Get("查找会话正文"), findTextPlaceholder = UiText.Get("查找当前会话…"),
                 findTextPrevious = UiText.Get("上一处"), findTextNext = UiText.Get("下一处"), findTextClose = UiText.Get("关闭正文查找"),
                 findTextNoResults = UiText.Get("没有找到匹配内容"), findTextCount = UiText.Get("{0} / {1}"),
-                findTextHint = UiText.Get("Enter 下一处 · Shift+Enter 上一处 · Esc 关闭"),
+                findTextHint = UiText.Get("Enter / ↓ 下一处 · Shift+Enter / ↑ 上一处 · F3 / Shift+F3 切换 · Esc 关闭"),
                 findTextSelection = UiText.Get("请先取消文字选择，再跳转到匹配内容。"), findTextSearching = UiText.Get("正在查找…"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),

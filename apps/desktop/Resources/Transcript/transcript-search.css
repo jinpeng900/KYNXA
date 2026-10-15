@@ -2,7 +2,6 @@
  * 搜索栏脱离正文布局，打开或输入关键词时不会挤动阅读内容。 */
 #transcript-search { position: fixed; top: 8px; right: 16px; z-index: 5; width: min(620px, calc(100% - 32px)); padding: 8px 10px; border: 1px solid var(--appearance-border); border-radius: 12px; background: var(--appearance-main); color: var(--appearance-text); box-shadow: 0 3px 14px #00000014; font-family: var(--ui-font); font-size: 13px; line-height: 1.5; }
 #transcript-search[hidden] { display: none; }
-#transcript-search[data-position='bottom'] { top: auto; bottom: 8px; }
 .transcript-search-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
 #transcript-search-input { appearance: none; flex: 1 1 auto; min-width: 0; width: 0; height: 32px; padding: 4px 8px; border: 1px solid var(--appearance-border); border-radius: 7px; background: var(--appearance-main); color: var(--appearance-text); font: inherit; line-height: 1.5; user-select: text; -webkit-user-select: text; }
 #transcript-search-input::placeholder { color: var(--appearance-secondary); }

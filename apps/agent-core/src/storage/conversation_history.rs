@@ -197,11 +197,11 @@ fn build_index(
     })
 }
 
-/// A read owns a checked file object and only the requested latest records, never a second history ledger.
-/// 读取持有已核验文件对象与指定的最新记录，不建立第二套聊天账本；提交前仍复核来源版本。
+/// A completed read keeps source identity and requested records, reopening only for final verification.
+/// 完成的读取仅保留来源身份与指定记录，最终复核时短时重开文件，不阻止目录所有者移动会话。
 pub(crate) struct HistoryRead {
     pub messages: Vec<String>,
-    reader: Option<managed_files::StableReader>,
+    source: Option<managed_files::StableFileVersion>,
     index: Option<Arc<HistoryIndex>>,
     root: std::path::PathBuf,
     path: std::path::PathBuf,
@@ -216,13 +216,15 @@ impl HistoryRead {
         identities.into_iter().map(|(id, _)| id.clone()).collect()
     }
     pub fn verify(&mut self) -> Result<(), ContractError> {
-        let Some(reader) = self.reader.as_mut() else {
+        let Some(source) = &self.source else {
             if managed_files::inspect(&self.root, &self.path, false, true, u64::MAX)? {
                 return Err(changed());
             }
             return Ok(());
         };
-        reader.verify()?;
+        let Some(mut reader) = source.reopen()? else {
+            return Err(changed());
+        };
         let index = self.index.as_ref().unwrap();
         if let Some(token) = &index.version_token {
             if reader.version_token()?.as_ref() != Some(token) {
@@ -233,11 +235,11 @@ impl HistoryRead {
                 .file
                 .seek(SeekFrom::Start(0))
                 .map_err(conversation_logs::io_error)?;
-            if source_hash(reader)? != index.snapshot {
+            if source_hash(&mut reader)? != index.snapshot {
                 return Err(changed());
             }
         }
-        Ok(())
+        reader.verify()
     }
 }
 
@@ -275,17 +277,19 @@ fn read_snapshot(
     };
     let mut result = HistoryRead {
         messages: Vec::new(),
-        reader,
+        source: None,
         index: None,
         root: root.to_path_buf(),
         path: path.clone(),
     };
-    let Some(reader) = result.reader.as_mut() else {
+    let Some(mut reader) = reader else {
         return Ok(result);
     };
     let owner = managed_files::digest(path.to_string_lossy().as_bytes());
-    let index = indexed(reader, &owner)?;
+    let index = indexed(&mut reader, &owner)?;
     if !include_messages {
+        reader.verify()?;
+        result.source = Some(reader.into_version());
         result.index = Some(index);
         result.verify()?;
         return Ok(result);
@@ -324,6 +328,8 @@ fn read_snapshot(
         let event: Event<'_> = serde_json::from_str(raw).map_err(|_| invalid("历史事件无效。"))?;
         result.messages.push(event.message.get().to_string());
     }
+    reader.verify()?;
+    result.source = Some(reader.into_version());
     result.index = Some(index);
     result.verify()?;
     Ok(result)
@@ -614,6 +620,49 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_HISTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn completed_snapshot_releases_directory_and_rejects_replaced_or_new_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "kynxa-history-lifetime-{}-{}",
+            std::process::id(),
+            NEXT_HISTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let location = json!({"Id":"source-chat","ProjectId":null});
+        let folder = conversation_logs::directory(&root, &location).unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("events.jsonl");
+        let raw = "{\"version\":1,\"type\":\"message.upsert\",\"message\":{\"Id\":\"saved-user\",\"Role\":\"user\",\"Content\":\"原始内容\",\"Status\":\"completed\"}}\n";
+        let mut absent = read_latest(&root, &location, None, false).unwrap();
+        absent.verify().unwrap();
+        fs::write(&path, raw).unwrap();
+        assert_eq!(
+            absent.verify().unwrap_err().code,
+            "CONVERSATION_HISTORY_CHANGED"
+        );
+        let mut messages = read_latest(&root, &location, None, false).unwrap();
+        let mut metadata = read_metadata(&root, &location).unwrap();
+        messages.verify().unwrap();
+        metadata.verify().unwrap();
+        let destination = root.join("moved-source");
+        let source = folder.clone();
+        let moved = destination.clone();
+        // Both returned snapshots remain alive while the real Windows directory rename executes.
+        // 两个已返回快照保持存活时执行真实 Windows 目录移动，验证文件句柄已及时释放。
+        std::thread::spawn(move || fs::rename(source, moved))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(messages.messages.len(), 1);
+        assert_eq!(metadata.message_ids(), vec!["saved-user"]);
+        assert!(messages.verify().is_err());
+        assert!(metadata.verify().is_err());
+        fs::create_dir(&folder).unwrap();
+        fs::write(&path, raw).unwrap();
+        assert_eq!(messages.verify().unwrap_err().code, "MEMORY_CONFLICT");
+        assert_eq!(metadata.verify().unwrap_err().code, "MEMORY_CONFLICT");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn offsets_reuse_unchanged_bytes_and_detect_edits_with_restored_write_time() {

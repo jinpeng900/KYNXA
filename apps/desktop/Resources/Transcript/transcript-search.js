@@ -9,7 +9,7 @@
   const strings = {
     findText: '查找会话正文', findTextPlaceholder: '查找当前会话…', findTextPrevious: '上一处',
     findTextNext: '下一处', findTextClose: '关闭正文查找', findTextNoResults: '没有找到匹配内容',
-    findTextCount: '{0} / {1}', findTextHint: 'Enter 下一处 · Shift+Enter 上一处 · Esc 关闭',
+    findTextCount: '{0} / {1}', findTextHint: 'Enter / ↓ 下一处 · Shift+Enter / ↑ 上一处 · F3 / Shift+F3 切换 · Esc 关闭',
     findTextSelection: '请先取消文字选择，再跳转到匹配内容。', findTextSearching: '正在查找…'
   };
   const bar = document.getElementById('transcript-search');
@@ -20,7 +20,7 @@
   const next = bar.querySelector('[data-search-action="next"]');
   const close = bar.querySelector('[data-search-action="close"]');
   let hooks = {}, conversationId = null, open = false, query = '', matches = [], index = -1;
-  let position = 'top';
+  let topInsetPx = 0;
   let searching = false, refreshTimer = 0, workTimer = 0, generation = 0, blocked = false, composing = false;
   let scanning = false, needsRefresh = false;
   let refreshDueAtMs = 0, lastStartedAtMs = 0;
@@ -37,7 +37,6 @@
   }
   function updateControls() {
     bar.hidden = !open;
-    bar.dataset.position = position;
     bar.setAttribute('aria-label', translated('findText'));
     input.placeholder = translated('findTextPlaceholder'); input.setAttribute('aria-label', translated('findText'));
     for (const [button, key] of [[previous, 'findTextPrevious'], [next, 'findTextNext'], [close, 'findTextClose']]) {
@@ -72,13 +71,20 @@
     generation++; clearTimeout(refreshTimer); refreshTimer = 0; clearTimeout(workTimer); workTimer = 0;
     searching = false; scanning = false; needsRefresh = false;
   }
-  function capture() { return { open, query, active: matchKey(matches[index]) || requestedMatch, position }; }
+  function setTopInset(insetPx, preserveReading = false) {
+    const nextInsetPx = Math.max(0, Math.ceil(insetPx)), deltaPx = nextInsetPx - topInsetPx;
+    if (!deltaPx) return;
+    topInsetPx = nextInsetPx;
+    document.getElementById('messages').style.paddingTop = topInsetPx ? topInsetPx + 'px' : '';
+    if (preserveReading) hooks.navigate?.(Math.max(0, scrollY + deltaPx));
+  }
+  function capture() { return { open, query, active: matchKey(matches[index]) || requestedMatch, topInsetPx }; }
   function attachConversation(id, saved = null) {
     cancelWork(); clearHighlights(); matches = []; index = -1; blocked = false;
     conversationId = id; open = saved?.open === true; query = typeof saved?.query === 'string' ? saved.query : '';
-    position = saved?.position === 'bottom' ? 'bottom' : 'top';
     requestedMatch = saved?.active || null; input.value = query;
     refreshDueAtMs = 0; lastStartedAtMs = 0; updateControls(); hooks.stateChanged?.(open);
+    setTopInset(open && Number.isFinite(saved?.topInsetPx) ? Math.min(saved.topInsetPx, bar.getBoundingClientRect().height + 24) : 0);
     if (open && query) refresh(true);
   }
   function show() {
@@ -94,6 +100,7 @@
     if (!open) return;
     requestedMatch = matchKey(matches[index]) || requestedMatch;
     open = false; cancelWork(); clearHighlights(); updateControls();
+    setTopInset(0, true);
     hooks.stateChanged?.(false);
     if (notify) hooks.closed?.();
   }
@@ -265,7 +272,7 @@
     refreshDueAtMs = dueAtMs; refreshTimer = setTimeout(startSearch, Math.max(0, dueAtMs - performance.now()));
   }
   function navigate(direction) {
-    if (!open || !matches.length) return false;
+    if (!open || !matches.length || document.querySelector('.mermaid-viewer[open]')) return false;
     if (hooks.canNavigate?.() === false) { blocked = true; updateControls(); return false; }
     blocked = false;
     const nextIndex = index < 0 ? direction < 0 ? matches.length - 1 : 0 : (index + direction + matches.length) % matches.length;
@@ -290,19 +297,19 @@
       if (rect.left < bounds.left + 12 || rect.right > bounds.right - 12)
         ancestor.scrollLeft += rect.left - bounds.left - Math.min(60, bounds.width / 4);
     }
-    const rect = match.range.getBoundingClientRect(), documentTop = scrollY + rect.top;
-    const maximumScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
-    position = 'top'; bar.dataset.position = position;
+    let rect = match.range.getBoundingClientRect(), documentTop = scrollY + rect.top;
+    let maximumScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
     const barBounds = bar.getBoundingClientRect(), safeTop = barBounds.bottom + 16;
     let top = Math.min(maximumScroll, Math.max(0, documentTop - Math.max(safeTop, Math.min(innerHeight * .35, innerHeight - 80))));
     const predictedTop = documentTop - top;
-    // A short document cannot scroll its first match below a top overlay. Move only the bar on explicit navigation.
-    // 短正文无法滚动到顶部浮栏下方时，仅在主动定位时把搜索栏移到底部，不挤动或填充正文布局。
+    // Keep the find bar anchored at the top. Only explicit navigation to an occluded first-screen match needs a small inset.
+    // 搜索栏固定在顶部；仅在主动定位被遮挡的首屏匹配时补上必要的顶部避让，不随匹配跳到右下角。
     if (predictedTop < barBounds.bottom + 8 && predictedTop + rect.height > barBounds.top - 8
         && rect.left < barBounds.right + 8 && rect.right > barBounds.left - 8) {
-      position = 'bottom'; bar.dataset.position = position;
-      const targetTop = Math.max(16, Math.min(innerHeight * .35, innerHeight - barBounds.height - 36));
-      top = Math.min(maximumScroll, Math.max(0, documentTop - targetTop));
+      setTopInset(topInsetPx + Math.max(0, safeTop - predictedTop));
+      rect = match.range.getBoundingClientRect(); documentTop = scrollY + rect.top;
+      maximumScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+      top = Math.min(maximumScroll, Math.max(0, documentTop - safeTop));
     }
     hooks.navigate?.(top);
     requestedMatch = matchKey(match); paintHighlights(); updateControls(); return true;
@@ -310,6 +317,9 @@
   input.addEventListener('input', () => { query = input.value; requestedMatch = null; index = -1; refresh(false, true); });
   input.addEventListener('compositionstart', () => { composing = true; });
   input.addEventListener('compositionend', () => { composing = false; });
+  // A blur may end/cancel native composition without another key reaching this field.
+  // 失焦可能由原生输入法结束或取消组词，清理局部状态；按键自身的 isComposing 仍阻止误导航。
+  input.addEventListener('blur', () => { composing = false; });
   for (const button of [previous, next, close]) button.addEventListener('pointerdown', event => {
     if (event.pointerType === 'mouse' && event.button === 0) event.preventDefault();
   });
@@ -327,12 +337,14 @@
       // Dismiss the foreground menu before the search surface underneath it.
       // 优先关闭搜索栏上方的表格菜单，下一次 Escape 才关闭搜索。
       if (!window.kynxaTables?.dismissMenu()) hide();
-    } else if (open && event.key === 'Enter' && event.target === input) {
-      event.preventDefault(); event.stopImmediatePropagation(); navigate(event.shiftKey ? -1 : 1);
+    } else if (open && !document.querySelector('.mermaid-viewer[open]') && !event.ctrlKey && !event.metaKey && !event.altKey
+        && (event.key === 'F3' || event.target === input && ['Enter', 'ArrowUp', 'ArrowDown'].includes(event.key))) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      navigate(event.key === 'ArrowUp' || event.shiftKey ? -1 : 1);
     }
   }, true);
   window.addEventListener('pagehide', () => { cancelWork(); clearHighlights(); matches = []; });
   window.kynxaTranscriptSearch = { configure, show, hide, refresh, capture, attachConversation, setLanguage, navigate,
-    state: () => ({ open, query, count: matches.length, index, conversationId, searching, canHighlight, position }) };
+    state: () => ({ open, query, count: matches.length, index, conversationId, searching, canHighlight, position: 'top', topInsetPx }) };
   updateControls();
 })();

@@ -183,6 +183,7 @@ public partial class App
             await WaitForTranscriptFindAsync(transcript, open: false);
             await WaitAsync(() => Prompt.FocusState != FocusState.Unfocused,
                 "explicit Escape in body search returns focus to the native composer");
+            await CheckBodySearchAfterNativeInputAsync(transcript);
             search.Focus(FocusState.Programmatic);
             DispatchShortcut(0x4B, shift: true);
             await WaitAsync(() => HasPopup<TextBox>("HistorySearchBox"), "actual Ctrl+Shift+K opens the production history search");
@@ -310,6 +311,65 @@ public partial class App
         finally { composition.SetValue(_shell, false); }
     }
 
+    private async Task CheckBodySearchAfterNativeInputAsync(ConversationTranscript transcript)
+    {
+        Guid? chatId = ActiveId;
+        string draft = Prompt.Text;
+        var row = new ConversationMessageViewModel(chatId ?? Guid.NewGuid(), new ChatMessageState
+        { Role = "assistant", Content = "KEYBOARD_MATCH first\n\nKEYBOARD_MATCH second\n\nKEYBOARD_MATCH third", Status = "completed" });
+        async Task WaitForSearchIndexAsync(int index)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                using var state = JsonDocument.Parse(await transcript.Browser.ExecuteScriptAsync("kynxaTranscriptSearch.state()"));
+                if (state.RootElement.GetProperty("count").GetInt32() == 3
+                    && state.RootElement.GetProperty("index").GetInt32() == index) return;
+                await Task.Delay(30);
+            }
+            throw new TimeoutException("Native search did not reach index " + index);
+        }
+        try
+        {
+            transcript.ShowConversation(chatId, [row], openAtBottom: false);
+            await SettleAsync();
+            DispatchShortcut(0x46);
+            await WaitForTranscriptFindAsync(transcript, open: true, focused: true);
+            await transcript.Browser.ExecuteScriptAsync("(() => {const input=document.getElementById('transcript-search-input');input.value='KEYBOARD_MATCH';input.dispatchEvent(new Event('input',{bubbles:true}));})()");
+            await WaitForSearchIndexAsync(-1);
+            DispatchShortcut(0x0D, control: false);
+            await WaitForSearchIndexAsync(0);
+            DispatchShortcut(0x0D, control: false, shift: true);
+            await WaitForSearchIndexAsync(2);
+            Check(Prompt.Text == draft, "actual Enter and Shift+Enter in search navigate without sending or editing the native draft");
+
+            MovePointerInside(Prompt);
+            SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0002 } } },
+                new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }]);
+            await WaitAsync(() => Prompt.FocusState != FocusState.Unfocused, "actual click moves focus from search into the native composer");
+            DispatchShortcut(0x72, control: false);
+            await WaitForSearchIndexAsync(0);
+            DispatchShortcut(0x72, control: false, shift: true);
+            await WaitForSearchIndexAsync(2);
+            Check(Prompt.FocusState != FocusState.Unfocused && Prompt.Text == draft && ActiveId == chatId,
+                "F3 and Shift+F3 navigate exactly once from the clicked composer while retaining focus, draft and conversation");
+            DispatchShortcut(0x46);
+            await WaitForTranscriptFindAsync(transcript, open: true, focused: true);
+            DispatchShortcut(0x72, control: false);
+            await WaitForSearchIndexAsync(0);
+            Check(Prompt.Text == draft, "Ctrl+F restores search focus after clicking the composer, and F3 is not handled twice by the host and WebView");
+            Prompt.Focus(FocusState.Programmatic);
+            DispatchShortcut(0x1B, control: false);
+            await WaitForTranscriptFindAsync(transcript, open: false);
+            Check(Prompt.FocusState != FocusState.Unfocused && Prompt.Text == draft, "Escape from native input closes search without stealing focus or changing the draft");
+        }
+        finally
+        {
+            transcript.CloseFindText();
+            transcript.ShowConversation(ActiveId, _shell.ActiveMessages.ToArray(), openAtBottom: false);
+        }
+    }
+
     private async Task WaitForTranscriptFindAsync(ConversationTranscript transcript, bool open, bool focused = false)
     {
         DateTime deadline = DateTime.UtcNow.AddSeconds(20);
@@ -374,15 +434,23 @@ public partial class App
         foreach (int key in new[] { 0x01, 0x02, 0x04, 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if ((GetAsyncKeyState(key) & 0x8000) != 0)
                 throw new InvalidOperationException("Fixture activation stopped because a mouse button or modifier is held.");
-        double scale = _shell.XamlRoot.RasterizationScale;
-        var point = new NativePoint { X = (int)Math.Round(((FrameworkElement)Window.Content).ActualWidth * 0.6 * scale), Y = (int)Math.Round(24 * scale) };
-        if (!ClientToScreen(owned, ref point) || GetAncestor(WindowFromPoint(point), 2) != owned)
-            throw new InvalidOperationException("The fixture's blank title bar is covered or outside the reachable screen.");
-        int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
-        if (width <= 1 || height <= 1 || point.X < left || point.Y < top || point.X >= left + width || point.Y >= top + height)
-            throw new InvalidOperationException("The fixture activation target is outside the virtual screen.");
+        var presenter = Window.AppWindow.Presenter as OverlappedPresenter
+            ?? throw new InvalidOperationException("The shortcut fixture has no overlapped presenter.");
+        bool wasAlwaysOnTop = presenter.IsAlwaysOnTop;
         try
         {
+            // The desktop can cover a background test with an always-on-top window. Raise only this owned fixture while activating it.
+            // 桌面置顶窗口可能遮挡后台夹具；激活期间仅临时提升本夹具，并在 finally 恢复原设置。
+            presenter.IsAlwaysOnTop = true;
+            Window.AppWindow.MoveInZOrderAtTop();
+            await SettleAsync();
+            double scale = _shell.XamlRoot.RasterizationScale;
+            var point = new NativePoint { X = (int)Math.Round(((FrameworkElement)Window.Content).ActualWidth * 0.6 * scale), Y = (int)Math.Round(24 * scale) };
+            if (!ClientToScreen(owned, ref point) || GetAncestor(WindowFromPoint(point), 2) != owned)
+                throw new InvalidOperationException("The fixture's blank title bar is covered or outside the reachable screen.");
+            int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
+            if (width <= 1 || height <= 1 || point.X < left || point.Y < top || point.X >= left + width || point.Y >= top + height)
+                throw new InvalidOperationException("The fixture activation target is outside the virtual screen.");
             SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput
             {
                 X = (int)Math.Round((point.X - left) * 65535d / (width - 1)),
@@ -396,7 +464,11 @@ public partial class App
                 new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }]);
             await WaitAsync(() => GetForegroundWindow() == owned, "clicking the owned blank title bar activates only this fixture");
         }
-        finally { if (GetForegroundWindow() == owned) SetCursorPos(originalPointer.X, originalPointer.Y); }
+        finally
+        {
+            presenter.IsAlwaysOnTop = wasAlwaysOnTop;
+            if (GetForegroundWindow() == owned) SetCursorPos(originalPointer.X, originalPointer.Y);
+        }
     }
 
     private sealed record ShortcutScrollObservation(double Top, double Height, double Viewport, bool HasFixture);
