@@ -26,6 +26,7 @@
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/Tools/AgentApiClient.cs" Link="AgentApiClient.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ToolApprovalDialog.cs" Link="ToolApprovalDialog.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/DialogPresentation.cs" Link="DialogPresentation.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ComputerToolPresentation.cs" Link="ComputerToolPresentation.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ToolResultDialog.cs" Link="ToolResultDialog.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationScreenshotSources.cs" Link="ConversationScreenshotSources.cs" />
@@ -41,6 +42,7 @@
     <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Link="Services/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiLocalization.cs" Link="UiLocalization.cs" />
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
     <Compile Include="../memory-ui-smoke/NativeWindowCapture.cs" Link="NativeWindowCapture.cs" />
     <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />

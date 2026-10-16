@@ -418,7 +418,10 @@ public partial class App : Application
             await EvalAsync<bool>("(() => { window.chrome.webview.postMessage({type:'history',conversationId:'00000000-0000-0000-0000-000000000000'}); return true; })()");
             await Task.Delay(80);
             Check(requestedHistory == 1, "history request from another conversation is ignored");
-            await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true})); return true; })()");
+            // Dispatching a synthetic wheel has no default scrolling; move with the upward input intent.
+            // 合成滚轮事件不执行默认滚动；同时移动视口，避免把仍在底部的事件误当作顶部翻页。
+            await EvalAsync<bool>("(() => { window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true})); window.scrollTo({top:0,behavior:'instant'}); return true; })()");
+            await WaitAsync("scrollY <= 1 && !window.transcriptState().following", "upward history navigation reaches the top without bottom following");
             var deadline = DateTime.UtcNow.AddSeconds(5);
             while (requestedHistory == 1 && DateTime.UtcNow < deadline) await Task.Delay(25);
             Check(requestedHistory == 2, "user upward input at the top requests one history page");

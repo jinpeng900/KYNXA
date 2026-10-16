@@ -50,7 +50,7 @@ public sealed partial class ShellPage
         return true;
     }
 
-    private sealed class AppearanceSettingsSection : IDisposable
+    private sealed partial class AppearanceSettingsSection : IDisposable
     {
         private sealed record PaletteCard(AppearancePalette Palette, Button Button, Border Frame, TextBlock Check);
 
@@ -70,7 +70,8 @@ public sealed partial class ShellPage
 
         public StackPanel Root { get; } = new() { Spacing = 10, Margin = new Thickness(0, 8, 0, 8) };
 
-        public AppearanceSettingsSection(FontFamily font, Func<AppearancePreferences, string?> savePreferences)
+        public AppearanceSettingsSection(FontFamily font, Func<AppearancePreferences, string?> savePreferences,
+            Func<AppearanceTransferPreferences> readSavedPreferences, Func<bool, Task<Windows.Storage.StorageFile?>> pickFile)
         {
             _savePreferences = savePreferences;
             AutomationProperties.SetAutomationId(Root, "AppearancePaletteSection");
@@ -191,6 +192,7 @@ public sealed partial class ShellPage
                 Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") };
             UiLocalization.Bind(accentHint, TextBlock.TextProperty, "输入 #RRGGBB；显示时会自动调整对比度。系统高对比度优先。");
             Root.Children.Add(accentHint);
+            AddTransferControls(font, readSavedPreferences, pickFile);
             AutomationProperties.SetAutomationId(_paletteGrid, "AppearancePaletteGrid");
             AutomationProperties.SetAutomationId(_status, "AppearanceSettingsStatus");
             AutomationProperties.SetLiveSetting(_status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);

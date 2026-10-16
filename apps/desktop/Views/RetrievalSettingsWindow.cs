@@ -241,9 +241,9 @@ public sealed partial class RetrievalSettingsWindow : Window
             var remove = ActionButton("移除资料", "RetrievalRemoveSource-" + source.Id);
             remove.Click += async (_, _) => await RunOperationAsync(async () =>
             {
-                var choice = await new ContentDialog { XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                var choice = await DialogPresentation.ShowAsync(new ContentDialog { XamlRoot = ((FrameworkElement)Content).XamlRoot,
                     Title = UiText.Get("移除检索资料？"), Content = UiText.Get("仅移除检索资料，不删除原文件。"),
-                    PrimaryButtonText = UiText.Get("移除资料"), CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Close }.ShowAsync();
+                    PrimaryButtonText = UiText.Get("移除资料"), CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Close });
                 if (choice != ContentDialogResult.Primary || _closed) return;
                 await _api.DeleteSourceAsync(source.Id, source.Revision, _lifetime.Token);
                 if (_closed) return;

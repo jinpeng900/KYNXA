@@ -105,6 +105,8 @@ public partial class App : Application
         var shell = await OpenShellAsync(store);
         var page = shell.Page!;
         var secondary = await OpenSecondaryAsync(shell);
+        page.WorkspaceTerminal.CloseCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        page.DocumentPanel.CloseCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         page.SetMetadataBusy(true);
         string draft = page.DraftEditor.Text;
         var elapsed = Stopwatch.StartNew();
@@ -128,7 +130,16 @@ public partial class App : Application
         NativeUi.RequestClose(shell.Window);
         await Task.Delay(100);
         Check(store.SaveCalls == 1, "closing again during the pending PUT does not dispatch a duplicate save");
+        Check(page.WorkspaceTerminal.CloseCalls == 0 && page.DocumentPanel.CloseCalls == 0,
+            "owned terminal and browser cleanup waits for the formal save to succeed");
         store.CompleteSave();
+        await WaitAsync(() => page.WorkspaceTerminal.CloseCalls == 1 && page.DocumentPanel.CloseCalls == 1,
+            "successful persistence starts both owned cleanup operations without waiting for either one first");
+        Check(!shell.IsClosed && !secondary.IsClosed, "owned windows remain alive while both cleanup operations are pending");
+        page.WorkspaceTerminal.CloseCompletion.SetResult();
+        await Task.Delay(80);
+        Check(!shell.IsClosed, "completion of one cleanup operation does not bypass the remaining owned cleanup");
+        page.DocumentPanel.CloseCompletion.SetResult();
         await WaitAsync(() => shell.IsClosed && secondary.IsClosed, "successful persistence closes both owned native windows");
         Check(store.SaveCalls == 1 && !store.SaveToken.IsCancellationRequested && _unhandled is null,
             "successful native exit completes exactly one transaction without UI errors");
@@ -146,6 +157,7 @@ public partial class App : Application
             "a failed save restores the main and secondary windows and presents the save error");
         var errorDialog = NativeUi.OpenDialog(page)!;
         Check(!shell.IsClosed && store.SaveCalls == 1 && page.DraftEditor.Text == draft &&
+            page.WorkspaceTerminal.CloseCalls == 0 && page.DocumentPanel.CloseCalls == 0 &&
             errorDialog.Content?.ToString()?.Contains("synthetic catalog save failure", StringComparison.Ordinal) == true,
             "save failure preserves the draft and explains the synthetic I/O error");
         NativeUi.InvokeDialogButton(errorDialog, primary: false);

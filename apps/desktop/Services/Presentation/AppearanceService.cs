@@ -50,6 +50,7 @@ public static class AppearanceService
     private const uint SettingChangedMessage = 0x001A;
     private const uint SystemColorsChangedMessage = 0x0015;
     private const uint ThemeChangedMessage = 0x031A;
+    private const uint EraseBackgroundMessage = 0x0014;
     private const uint NonClientDestroyMessage = 0x0082;
     private static readonly nuint AppearanceSubclassId = 0x4B594E58;
     // Keep the delegate alive while any native HWND can invoke it.
@@ -127,11 +128,35 @@ public static class AppearanceService
     private static nint OnWindowMessage(nint window, uint message, nuint wParam, nint lParam,
         nuint subclassId, nuint referenceData)
     {
+        if (message == EraseBackgroundMessage && TryEraseWindowBackground(window, (nint)wParam)) return 1;
         if (message is SettingChangedMessage or SystemColorsChangedMessage or ThemeChangedMessage)
             QueueSystemAppearance();
         else if (message == NonClientDestroyMessage)
             RemoveWindowSubclass(window, AppearanceSubclassCallback, AppearanceSubclassId);
         return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    private static bool TryEraseWindowBackground(nint window, nint deviceContext)
+    {
+        // Native erasure can run before XAML paints and after Closed clears its content; keep the current palette throughout.
+        // 原生背景擦除可能发生在 XAML 绘制前或 Closed 清空内容后；整个窗口生命周期沿用当前配色。
+        if (deviceContext == 0) return false;
+        try
+        {
+            if (!GetClientRect(window, out var bounds) || bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top) return false;
+            var color = ParseColor(Current.Main);
+            uint colorRef = (uint)(color.R | color.G << 8 | color.B << 16);
+            nint brush = CreateSolidBrush(colorRef);
+            if (brush == 0) return false;
+            try { return FillRect(deviceContext, in bounds, brush) != 0; }
+            finally { DeleteObject(brush); }
+        }
+        catch
+        {
+            // Fall through to the original native procedure if drawing fails; no managed exception crosses this callback.
+            // 绘制失败时交回原生默认处理，不让托管异常跨越原生回调边界。
+            return false;
+        }
     }
 
     private static void ApplyEffectivePalette(AppearancePalette preset)
@@ -415,7 +440,8 @@ public static class AppearanceService
             Changed -= Update;
             window.Activated -= Activated;
             TrackedWindows.Remove(window);
-            RemoveWindowSubclass(windowHandle, AppearanceSubclassCallback, AppearanceSubclassId);
+            // Closed precedes XAML/native teardown; the static callback removes itself at WM_NCDESTROY.
+            // Closed 早于 XAML 和原生窗口拆除；静态回调在 WM_NCDESTROY 时自行解除，覆盖关闭空档。
         };
         Update(null, EventArgs.Empty);
         QueueSystemAppearance();
@@ -424,6 +450,29 @@ public static class AppearanceService
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate nint WindowSubclassProc(nint window, uint message, nuint wParam, nint lParam,
         nuint subclassId, nuint referenceData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(nint window, out NativeRect bounds);
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern int FillRect(nint deviceContext, in NativeRect bounds, nint brush);
+
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    private static extern nint CreateSolidBrush(uint colorRef);
+
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeleteObject(nint value);
 
     [DllImport("comctl32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

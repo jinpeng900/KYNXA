@@ -302,5 +302,13 @@ public static partial class UiText
         ["暖砂"] = "Warm sand",
         ["正在迁移数据，请稍后更改配色。"] = "Data is being moved. Change the palette in a moment.",
         ["配色未能保存，已保留原来的外观，请稍后重试。"] = "The palette couldn't be saved. Your previous appearance has been kept. Please try again.",
+        ["导入外观"] = "Import appearance",
+        ["导出外观"] = "Export appearance",
+        ["仅包含已保存的配色、主题、聊天字号和强调色。导入会替换当前外观。"] = "Contains only the saved palette, theme, chat font size and accent. Import replaces the current appearance.",
+        ["外观已导入并保存。"] = "Appearance imported and saved.",
+        ["外观已导出。"] = "Appearance exported.",
+        ["外观导入失败。请使用有效的 KYNXA 外观 JSON 文件（版本 1，不超过 16 KB），当前外观已保留。"] = "Import failed. Use a valid KYNXA appearance JSON file (version 1, up to 16 KB). Your current appearance has been kept.",
+        ["外观导出失败，请检查所选位置后重试。"] = "Export failed. Check the selected location and try again.",
+        ["功能暂未开发"] = "This feature is not available yet.",
     };
 }

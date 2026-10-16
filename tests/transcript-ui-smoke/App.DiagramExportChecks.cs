@@ -35,6 +35,8 @@ public partial class App
             AppearanceService.ApplyPreferences(AppearanceService.DefaultPaletteId, "light", 15, null);
             _transcript.ClearSelection();
             await CheckExportTypesAsync();
+            await CheckAutomaticExportAsync();
+            await CheckStandaloneExportAsync();
             await CheckExportReceiptsAsync();
             await CheckExportNavigationAsync();
             await CheckExportPreparationAsync();
@@ -180,6 +182,126 @@ public partial class App
         return Normalize(first.Bytes) == Normalize(second.Bytes);
     }
 
+    private void CheckAutomaticPngSize(DiagramExportDocument png, double width, double height, string description)
+    {
+        // Rasterization uses the full intrinsic bounds and the largest scale allowed by both limits.
+        // 栅格化使用完整固有边界，自动取同时满足边长和总像素限制的最大倍率。
+        double scale = Math.Min(Math.Min(8192 / width, 8192 / height), Math.Sqrt(16000000 / (width * height)));
+        uint expectedWidth = (uint)Math.Max(1, Math.Floor(width * scale));
+        uint expectedHeight = (uint)Math.Max(1, Math.Floor(height * scale));
+        Check(png.Width == expectedWidth && png.Height == expectedHeight && png.Width <= 8192 && png.Height <= 8192
+            && (long)png.Width * png.Height <= 16000000, description);
+    }
+
+    private async Task CheckOpaqueWhitePngAsync(string fileName, string description)
+    {
+        using var stream = await (await StorageFile.GetFileFromPathAsync(Path.Combine(Path.GetTempPath(), fileName))).OpenReadAsync();
+        var decoder = await BitmapDecoder.CreateAsync(stream);
+        byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight,
+            new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage)).DetachPixelData();
+        // Corner samples verify the white backdrop; inspect every alpha byte to reject hidden transparency.
+        // 四角采样验证白色背景，同时扫描全部 alpha 字节，避免遗漏图形内部的透明区域。
+        bool opaque = true;
+        for (int offset = 3; offset < pixels.Length; offset += 4)
+        {
+            if (pixels[offset] == 255) continue;
+            opaque = false;
+            break;
+        }
+        int width = checked((int)decoder.PixelWidth), height = checked((int)decoder.PixelHeight);
+        int[] corners = [0, (width - 1) * 4, (height - 1) * width * 4, (width * height - 1) * 4];
+        Check(opaque && corners.All(offset => pixels[offset] == 255 && pixels[offset + 1] == 255 && pixels[offset + 2] == 255), description);
+    }
+
+    private async Task CheckAutomaticExportAsync()
+    {
+        var chat = Guid.NewGuid();
+        var row = Message(chat, "assistant", "AUTOMATIC_SELECTION\n\n" + MermaidFence("flowchart LR\n A[显式样式 Explicit style] --> B[默认文本 Default text]\n B --> C[类样式 Class style]\n style A fill:#173a5e,color:#ffffff\n classDef emphasis fill:#f4b860,color:#173a5e\n class C emphasis"));
+        string formal = JsonSerializer.Serialize(row.Message);
+        _transcript.ShowConversation(chat, [row]);
+        await WaitAsync(DiagramBlockExpression(row) + "?.dataset.diagramState==='ready'", "automatic white export fixture is ready");
+        Check(await EvalAsync<bool>("(() => {const group=document.querySelector('.mermaid-block .mermaid-export-controls');return group?.querySelectorAll('[data-diagram-action^=export-]').length===2 && !group.querySelector('select,input,.mermaid-export-option,[data-diagram-export-scale],[data-diagram-export-transparent]');})()"),
+            "inline export toolbar contains SVG/PNG actions without scale or transparency controls");
+        Check(await EvalAsync<bool>("""
+            (() => {
+              const nodes=[...document.querySelectorAll('.mermaid-viewport svg .node')];
+              const node=label=>nodes.find(element=>element.textContent.includes(label));
+              const shape=label=>getComputedStyle(node(label).querySelector('rect'));
+              const text=label=>getComputedStyle(node(label).querySelector('text,tspan')).fill;
+              return shape('Explicit style').fill==='rgb(23, 58, 94)' && text('Explicit style')==='rgb(255, 255, 255)'
+                && shape('Class style').fill==='rgb(244, 184, 96)' && text('Class style')==='rgb(23, 58, 94)'
+                && text('Default text')==='rgb(36, 39, 45)';
+            })()
+            """), "explicit Mermaid style and classDef colors survive while default labels use dark text");
+        var naturalSvg = await ExportFileAsync(row, "svg", "diagram-export-automatic-natural.svg");
+        var xml = XDocument.Parse(Encoding.UTF8.GetString(naturalSvg.Bytes));
+        double[] box = xml.Root!.Attribute("viewBox")!.Value.Split([' ', ','], StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray();
+        Check(xml.Root.Elements().First().Name.LocalName == "rect" && xml.Root.Elements().First().Attribute("fill")?.Value == "#ffffff"
+            && xml.Root.Attribute("style")!.Value.Contains("background-color: #ffffff;", StringComparison.Ordinal),
+            "standalone SVG paints a white full-viewBox backdrop and white viewport letterboxing");
+        string exportedSvg = Encoding.UTF8.GetString(naturalSvg.Bytes);
+        Check(exportedSvg.Contains("fill: rgb(23, 58, 94);", StringComparison.Ordinal)
+            && exportedSvg.Contains("fill: rgb(244, 184, 96);", StringComparison.Ordinal)
+            && xml.Root.Descendants().Any(element => (element.Name.LocalName is "text" or "tspan")
+                && element.Value.Contains("Explicit style", StringComparison.Ordinal) && element.Attribute("style")!.Value.Contains("fill: rgb(255, 255, 255);", StringComparison.Ordinal))
+            && xml.Root.Descendants().Any(element => (element.Name.LocalName is "text" or "tspan")
+                && element.Value.Contains("Class style", StringComparison.Ordinal) && element.Attribute("style")!.Value.Contains("fill: rgb(23, 58, 94);", StringComparison.Ordinal))
+            && xml.Root.Descendants().Any(element => (element.Name.LocalName is "text" or "tspan")
+                && element.Value.Contains("Default text", StringComparison.Ordinal) && element.Attribute("style")!.Value.Contains("fill: rgb(36, 39, 45);", StringComparison.Ordinal)),
+            "standalone SVG freezes explicit source colors and readable default text into its own styles");
+        var automaticPng = await ExportFileAsync(row, "png", "diagram-export-automatic.png");
+        CheckAutomaticPngSize(automaticPng, box[2], box[3], "PNG automatically uses the largest complete aspect-preserving image within both allocation limits");
+        await CheckOpaqueWhitePngAsync("diagram-export-automatic.png", "automatic PNG has white corner pixels and opaque alpha across the actual decoded image");
+        await EvalAsync<bool>("(() => { document.querySelector('[data-diagram-action=fullscreen]').click();return true; })()");
+        await WaitAsync("!!document.querySelector('.mermaid-viewer[open]')", "automatic export actions reach the actual fullscreen viewer");
+        Check(await EvalAsync<bool>("(() => {const group=document.querySelector('.mermaid-viewer .mermaid-export-controls');return group?.querySelectorAll('[data-diagram-action^=export-]').length===2 && !group.querySelector('select,input,.mermaid-export-option,[data-diagram-export-scale],[data-diagram-export-transparent]');})()"),
+            "fullscreen export toolbar contains SVG/PNG actions without scale or transparency controls");
+        var fullscreen = await ExportFileAsync(row, "png", "diagram-export-automatic-fullscreen.png", fullscreen: true);
+        CheckAutomaticPngSize(fullscreen, box[2], box[3], "fullscreen PNG uses the same automatic full-diagram dimensions independently of viewer zoom");
+        Check(fullscreen.Bytes.SequenceEqual(automaticPng.Bytes), "inline and fullscreen PNG exports contain the same complete raster image");
+        await CheckOpaqueWhitePngAsync("diagram-export-automatic-fullscreen.png", "fullscreen PNG retains the same opaque white document background");
+        await EvalAsync<bool>("(() => { kynxaDiagrams.closeViewer();return true; })()");
+        await EvalAsync<bool>("(() => { const node=document.querySelector('.message-body > p').firstChild;const range=document.createRange();range.setStart(node,0);range.setEnd(node,7);getSelection().removeAllRanges();getSelection().addRange(range);window.__automaticSelection=getSelection().toString();return true; })()");
+        await ExportFileAsync(row, "svg", "diagram-export-automatic-selection.svg");
+        Check(await EvalAsync<bool>("getSelection().toString()===__automaticSelection"), "automatic export preserves the existing reading selection");
+        await EvalAsync<bool>("(() => { getSelection().removeAllRanges();return true; })()");
+        Check(formal == JsonSerializer.Serialize(row.Message), "automatic white export never changes formal messages or explicit Mermaid source styles");
+        _metrics["diagramAutomaticExport"] = new { maximumSidePx = 8192, maximumPixels = 16000000,
+            pngWidth = automaticPng.Width, pngHeight = automaticPng.Height, background = "#ffffff",
+            scope = "actual inline/fullscreen SVG/PNG through native validation and writing; decoded opaque white pixels and explicit source styles" };
+    }
+
+    private async Task CheckStandaloneExportAsync()
+    {
+        string[] names = Enumerable.Range(0, 24).Select(index => DiagramExport.CreateSuggestedFileName(index % 2 == 0 ? "svg" : "png")).ToArray();
+        Check(names.Distinct(StringComparer.OrdinalIgnoreCase).Count() == names.Length
+            && names.All(name => name.StartsWith("KYNXA-diagram-", StringComparison.Ordinal) && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0
+                && !name.Contains(' ') && Path.GetFileName(name) == name),
+            "rapid SVG and PNG exports receive distinct safe suggested filenames without any conversation text");
+        Check(names[0].StartsWith("KYNXA-diagram-svg-", StringComparison.Ordinal) && names[1].StartsWith("KYNXA-diagram-png-", StringComparison.Ordinal),
+            "suggested filenames identify the export format and retain timestamp plus sequence");
+        var chat = Guid.NewGuid();
+        string source = "flowchart LR\n" + string.Join(" --> ", Enumerable.Range(0, 8).Select(index => "N" + index + "[步骤 Step " + index + "]"));
+        var row = Message(chat, "assistant", MermaidFence(source));
+        _transcript.ShowConversation(chat, [row]);
+        await WaitAsync(DiagramBlockExpression(row) + "?.dataset.diagramState==='ready'", "a genuinely wide standalone SVG fixture renders");
+        var svg = await ExportFileAsync(row, "svg", "diagram-export-responsive-wide.svg");
+        var root = XDocument.Parse(Encoding.UTF8.GetString(svg.Bytes)).Root!;
+        Check(svg.Width > svg.Height * 5 && root.Value.Contains("Step 0", StringComparison.Ordinal) && root.Value.Contains("Step 7", StringComparison.Ordinal),
+            "saved wide SVG includes both ends of the entire diagram and natural geometry dimensions");
+        string style = root.Attribute("style")!.Value;
+        Check(style.Contains("width: 100%;", StringComparison.Ordinal) && style.Contains("height: 100vh;", StringComparison.Ordinal)
+            && root.Attribute("preserveAspectRatio")!.Value == "xMidYMid meet",
+            "standalone SVG has fixed viewport fit rules and centered aspect-preserving full-graph scaling");
+        var png = await ExportFileAsync(row, "png", "diagram-export-responsive-wide.png");
+        double[] box = root.Attribute("viewBox")!.Value.Split([' ', ','], StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray();
+        CheckAutomaticPngSize(png, box[2], box[3],
+            "standalone responsive SVG rules preserve the PNG decoder's automatic maximum intrinsic raster dimensions");
+        _metrics["standaloneWideSvgPath"] = Path.Combine(Path.GetTempPath(), "diagram-export-responsive-wide.svg");
+    }
+
     private async Task CheckExportReceiptsAsync()
     {
         UiText.Initialize("en");
@@ -263,7 +385,12 @@ public partial class App
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect onload='alert(1)'/></svg>",
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><foreignObject><div>unsafe</div></foreignObject></svg>",
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><image href='https://example.invalid/external.svg'/></svg>",
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect style='fill:url(https://example.invalid/x)'/></svg>"
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect style='fill:url(https://example.invalid/x)'/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' style='width:99%'><rect width='100' height='100'/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' style='height:100%'><rect width='100' height='100'/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' style='width:100%;height:100vh'/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' style='background-color:url(https://example.invalid/x)'><rect width='100' height='100'/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' style='background-color:#ffffff'/></svg>"
         ];
         foreach (string invalid in unsafeSvg)
         {
@@ -290,7 +417,6 @@ public partial class App
         AppearanceService.ApplyPreferences(AppearanceService.DefaultPaletteId, "light", 15, null);
         _transcript.ShowConversation(chat, [row]);
         await WaitAsync(DiagramBlockExpression(row) + "?.dataset.diagramState === 'ready'", "PNG preparation fixture renders in light mode");
-        string originalBackground = AppearanceService.Current.Main;
         var received = new TaskCompletionSource<DiagramExportDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
         int saverCalls = 0;
         _transcript.DiagramExportSaveOverride = document => { saverCalls++; received.TrySetResult(document); return Task.FromResult(DiagramExportOutcome.Success); };
@@ -308,22 +434,19 @@ public partial class App
                 """);
             await WaitAsync("typeof window.__releaseExportBlob==='function'", "PNG reaches the actual encoded-blob callback before native saving");
             Check(await EvalAsync<string>("document.querySelector('.mermaid-export-status').textContent") == UiText.Get("正在准备图表…"), "PNG preparation uses the active English feedback");
+            Check(await EvalAsync<bool>("(() => {const buttons=[...document.querySelectorAll('[data-diagram-action^=export-]')];return buttons.length===2 && buttons.every(button=>button.disabled) && document.querySelector('.mermaid-export-controls').getAttribute('aria-busy')==='true';})()"),
+                "both export actions expose their busy state and remain disabled during PNG preparation");
             AppearanceService.ApplyPreferences(AppearanceService.DefaultPaletteId, "dark", 15, null);
-            await WaitAsync("document.querySelector('.mermaid-viewport svg')!==__prepareSvg", "theme changes while PNG preparation is pending");
+            await WaitAsync("document.documentElement.dataset.theme==='dark'", "application CSS changes to dark while PNG preparation is pending");
+            Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__prepareSvg && getComputedStyle(document.querySelector('.mermaid-viewport')).backgroundColor==='rgb(255, 255, 255)'"),
+                "theme changes preserve the pending diagram node and its fixed white content surface");
             await EvalAsync<bool>("(() => { __releaseExportBlob();delete window.__releaseExportBlob;return true; })()");
             var document = await received.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await WaitAsync("document.querySelector('.mermaid-export-status')?.dataset.exportState==='success'", "theme redraw preserves the export snapshot and receives success");
+            await WaitAsync("document.querySelector('.mermaid-export-status')?.dataset.exportState==='success'", "theme changes preserve the export snapshot and receive success");
             var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetTempPath());
             var file = await folder.CreateFileAsync("diagram-export-theme-snapshot.png", CreationCollisionOption.ReplaceExisting);
             await DiagramExport.WriteAsync(file, document);
-            using (var stream = await file.OpenReadAsync())
-            {
-                var decoder = await BitmapDecoder.CreateAsync(stream);
-                var pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage)).DetachPixelData();
-                Check(pixels[2] == Convert.ToByte(originalBackground.Substring(1, 2), 16) && pixels[1] == Convert.ToByte(originalBackground.Substring(3, 2), 16)
-                    && pixels[0] == Convert.ToByte(originalBackground.Substring(5, 2), 16) && pixels[3] == 255,
-                    "PNG retains the clicked light theme despite a completed dark redraw during preparation");
-            }
+            await CheckOpaqueWhitePngAsync("diagram-export-theme-snapshot.png", "PNG retains an opaque white snapshot while the application changes to dark during preparation");
             await EvalAsync<bool>("(() => { document.querySelector('[data-diagram-action=export-png]').click();return true; })()");
             await WaitAsync("typeof window.__releaseExportBlob==='function'", "second PNG preparation can be paused before navigation");
             int previousCalls = saverCalls;
@@ -366,33 +489,45 @@ public partial class App
         _transcript.ShowConversation(chat, [row]);
         await WaitAsync(DiagramBlockExpression(row) + "?.dataset.diagramState === 'ready'", "layout graph is ready");
         await EvalAsync<bool>("(() => { window.__exportSvg=document.querySelector('.mermaid-viewport svg'); const node=document.querySelector('.message-body > p').firstChild; const r=document.createRange();r.setStart(node,0);r.setEnd(node,7);getSelection().removeAllRanges();getSelection().addRange(r);window.__exportSelection=getSelection().toString(); return true; })()");
-        await ExportFileAsync(row, "svg", "diagram-export-selected.svg");
+        var lightSvg = await ExportFileAsync(row, "svg", "diagram-export-selected.svg");
+        var lightPng = await ExportFileAsync(row, "png", "diagram-export-light.png");
+        await CheckOpaqueWhitePngAsync("diagram-export-light.png", "light application mode exports an opaque white PNG");
         Check(await EvalAsync<bool>("getSelection().toString()===__exportSelection && document.querySelector('.mermaid-viewport svg')===__exportSvg"), "export preserves text selection and existing diagram nodes");
         await EvalAsync<bool>("(() => { getSelection().removeAllRanges(); return true; })()");
         AppearanceService.ApplyPreferences(AppearanceService.DefaultPaletteId, "dark", 15, null);
-        await WaitAsync("document.querySelector('.mermaid-viewport svg') !== __exportSvg", "theme redraw completes before dark export");
+        await WaitAsync("document.documentElement.dataset.theme==='dark'", "dark application CSS reaches the existing diagram before export");
+        Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__exportSvg && getComputedStyle(document.querySelector('.mermaid-viewport')).backgroundColor==='rgb(255, 255, 255)'"),
+            "dark application mode preserves the original diagram node and white content surface");
         var darkSvg = await ExportFileAsync(row, "svg", "diagram-export-dark.svg");
         var darkPng = await ExportFileAsync(row, "png", "diagram-export-dark.png");
         var darkXml = XDocument.Parse(Encoding.UTF8.GetString(darkSvg.Bytes));
         var background = darkXml.Root!.Elements().First(element => element.Name.LocalName == "rect");
-        string expectedBackground = AppearanceService.Current.Main;
-        Check(background.Attribute("fill")?.Value.Equals(expectedBackground, StringComparison.OrdinalIgnoreCase) == true,
-            "standalone SVG contains the exact dark theme background captured at export time");
-        using (var stream = await (await StorageFile.GetFileFromPathAsync(Path.Combine(Path.GetTempPath(), "diagram-export-dark.png"))).OpenReadAsync())
-        {
-            var decoder = await BitmapDecoder.CreateAsync(stream);
-            byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage)).DetachPixelData();
-            Check(pixels[0] == Convert.ToByte(expectedBackground.Substring(5, 2), 16) && pixels[1] == Convert.ToByte(expectedBackground.Substring(3, 2), 16)
-                && pixels[2] == Convert.ToByte(expectedBackground.Substring(1, 2), 16) && pixels[3] == 255,
-                "PNG corner has the exact opaque dark background rather than white or transparent pixels");
-        }
+        Check(background.Attribute("fill")?.Value == "#ffffff", "standalone SVG keeps a white full-diagram background in dark application mode");
+        Check(darkXml.Root.Attribute("style")!.Value.Contains("background-color: #ffffff;", StringComparison.Ordinal),
+            "standalone SVG keeps white viewport letterboxing in dark application mode");
+        await CheckOpaqueWhitePngAsync("diagram-export-dark.png", "dark application mode exports white corner pixels with opaque alpha across the PNG");
+        Check(EquivalentDiagramExports(lightSvg, darkSvg) && lightPng.Bytes.SequenceEqual(darkPng.Bytes),
+            "light and dark application modes export the same complete normalized SVG and PNG image");
         Check(!Encoding.UTF8.GetString(darkSvg.Bytes).Contains("var(", StringComparison.Ordinal), "export has no dependency on application CSS variables");
+        AppearanceService.ApplyPreferences("sand", "light", 15, "#E91E63");
+        string customAccent = AppearanceService.Current.Accent.ToLowerInvariant();
+        await WaitAsync("document.documentElement.dataset.theme==='light' && document.documentElement.style.getPropertyValue('--appearance-accent').toLowerCase()===" + JsonSerializer.Serialize(customAccent),
+            "custom application palette and accent reach the existing diagram before export");
+        var customSvg = await ExportFileAsync(row, "svg", "diagram-export-custom.svg");
+        var customPng = await ExportFileAsync(row, "png", "diagram-export-custom.png");
+        Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__exportSvg && getComputedStyle(document.querySelector('.mermaid-viewport')).backgroundColor==='rgb(255, 255, 255)'"),
+            "custom application palette and accent preserve the original diagram node and white content surface");
+        Check(EquivalentDiagramExports(lightSvg, customSvg) && lightPng.Bytes.SequenceEqual(customPng.Bytes),
+            "custom application palette and accent export the same complete normalized SVG and PNG image as light mode");
+        await CheckOpaqueWhitePngAsync("diagram-export-custom.png", "custom application palette and accent retain an opaque white PNG");
         UiText.Initialize("en");
         _window!.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 820));
         await WaitAsync("document.documentElement.lang==='en' && innerWidth<=480", "export toolbar reaches the English narrow viewport");
         await WaitAsync("document.querySelector('[data-diagram-action=export-svg]').getAttribute('aria-label')==='Export SVG' && document.querySelector('[data-diagram-action=export-png]').getAttribute('aria-label')==='Export PNG' && document.querySelector('.mermaid-export-status').textContent==='Diagram exported'",
             "existing export buttons and visible success feedback switch to English together");
         Check(await EvalAsync<bool>("[...document.querySelectorAll('[data-diagram-action^=export-]')].every(b=>/SVG|PNG/.test(b.getAttribute('aria-label')) && b.getBoundingClientRect().right<=innerWidth && b.getBoundingClientRect().width>=28) && document.documentElement.scrollWidth<=innerWidth+2"), "narrow SVG/PNG buttons remain named, reachable and inside the page");
+        Check(await EvalAsync<bool>("!document.querySelector('.mermaid-export-option,[data-diagram-export-scale],[data-diagram-export-transparent]')"),
+            "English narrow export toolbar retains the simplified actions without resolution or transparency controls");
         using (var preview = File.Create(Path.Combine(Path.GetTempPath(), "diagram-export-toolbar-480.png")))
             await _transcript.Browser.CoreWebView2.CapturePreviewAsync(Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat.Png, preview.AsRandomAccessStream());
         _metrics["darkExportPngBytes"] = darkPng.Bytes.Length;

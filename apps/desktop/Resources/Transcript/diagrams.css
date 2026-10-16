@@ -5,7 +5,7 @@
 .mermaid-copy-status { min-width: 0; max-width: 160px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; color: var(--appearance-accent-text); }
 .mermaid-copy-status:empty { display: none; }
 .mermaid-copy-status[data-copy-state='error'] { color: var(--appearance-error); }
-.mermaid-export-controls { display: flex; flex: 1 0 100%; min-width: 0; align-items: center; gap: 5px; }
+.mermaid-export-controls { display: flex; flex: 1 0 100%; flex-wrap: wrap; min-width: 0; align-items: center; gap: 5px; }
 .mermaid-export-controls button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 28px; padding: 5px 8px; border-radius: 6px; color: var(--appearance-secondary); font-size: 11px; line-height: 1; }
 .mermaid-export-controls button[disabled] { opacity: .45; cursor: default; }
 .mermaid-export-controls button[disabled]:hover { background: transparent; }
@@ -19,9 +19,9 @@
 .mermaid-copy-source[data-copy-state='success'] { color: var(--appearance-accent-text); }
 .mermaid-status { margin: 0; padding: 9px 12px; color: var(--appearance-secondary); font-size: 12px; }
 .mermaid-status:empty, .mermaid-status[hidden], .mermaid-viewport[hidden], .mermaid-viewer[hidden] { display: none; }
-.mermaid-viewport, .mermaid-viewer-viewport { position: relative; width: 100%; min-width: 0; height: 320px; overflow: hidden; background: var(--appearance-main); touch-action: none; outline-offset: -3px; }
+.mermaid-viewport, .mermaid-viewer-viewport { position: relative; width: 100%; min-width: 0; height: 320px; overflow: hidden; background: #ffffff; color: #24272d; color-scheme: light; forced-color-adjust: none; touch-action: none; outline-offset: -3px; }
 .mermaid-viewport { height: 160px; }
-.mermaid-viewport:focus-visible, .mermaid-viewer-viewport:focus-visible { outline: 2px solid var(--appearance-accent); }
+.mermaid-viewport:focus-visible, .mermaid-viewer-viewport:focus-visible { outline: 2px solid #4568b2; }
 .mermaid-viewport[data-can-pan='true'], .mermaid-viewer-viewport[data-can-pan='true'] { cursor: grab; }
 .mermaid-viewport[data-panning='true'], .mermaid-viewer-viewport[data-panning='true'] { cursor: grabbing; }
 .mermaid-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }

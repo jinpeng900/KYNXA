@@ -362,7 +362,7 @@ public sealed partial class ShellPage
             IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(value) };
         input.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(input.Text);
         dialog.Opened += (_, _) => { input.Focus(FocusState.Programmatic); input.SelectAll(); };
-        return await dialog.ShowAsync() == ContentDialogResult.Primary ? input.Text.Trim() : null;
+        return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary ? input.Text.Trim() : null;
     }
 
     private async Task RunProjectActionAsync(Func<Task> action)
@@ -401,10 +401,10 @@ public sealed partial class ShellPage
     private async Task ShowProjectErrorAsync(string title, string message)
     {
         if (_savingOnClose) { _closeError = message; return; }
-        await new ContentDialog
+        await DialogPresentation.ShowAsync(new ContentDialog
         {
             XamlRoot = XamlRoot, Title = title, Content = message, CloseButtonText = UiText.Get("知道了")
-        }.ShowAsync();
+        });
     }
 
     private void PreservePendingPresentations(ConversationCatalog catalog)

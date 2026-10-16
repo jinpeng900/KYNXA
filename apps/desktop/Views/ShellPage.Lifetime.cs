@@ -95,12 +95,12 @@ public sealed partial class ShellPage
             {
                 try
                 {
-                    var choice = await new ContentDialog
+                    var choice = await DialogPresentation.ShowAsync(new ContentDialog
                     {
                         XamlRoot = XamlRoot, Title = UiText.Get("草稿保存未完成"),
                         Content = message + UiText.Get(" 已提交的聊天由会话服务保存，尚未保存的草稿或排序可能丢失。"),
                         PrimaryButtonText = UiText.Get("仍然关闭"), CloseButtonText = UiText.Get("返回"), DefaultButton = ContentDialogButton.Close
-                    }.ShowAsync();
+                    });
                     if (choice == ContentDialogResult.Primary) { _closeApproved = true; App.Window.Close(); }
                 }
                 catch (Exception dialogError) when (dialogError is System.Runtime.InteropServices.COMException or InvalidOperationException)

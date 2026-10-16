@@ -282,7 +282,6 @@
         });
       });
     }
-    window.kynxaDiagrams?.setAppearance(palette);
   }
   function initializeUi(command) {
     const left = scrollX, top = scrollY;
