@@ -108,6 +108,30 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\filter-runtime-pri-layout.ps1&quot; -LayoutPath &quot;$(_FilteredLayoutResfilesPath)&quot; -ExcludedLayoutPath &quot;$(_ExcludedLayoutResfilesPath)&quot;" />
   </Target>
+  <!-- WinUI copies compiled pages to bin, but its copy-local items do not enter the .NET publish list.
+       Publish this build's generated pages and project PRI explicitly, retaining their resource paths.
+       WinUI 将编译页面复制到 bin，但复制项不会自动进入 .NET 发布清单。
+       显式发布本轮生成的页面和项目 PRI，保留资源相对路径，不从历史输出拼装。 -->
+  <Target Name="IncludeUnpackagedWinUiPublishResources"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="Prep_ComputeProcessXamlFiles;_GenerateProjectPriFile"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(WindowsPackageType)' == 'None'">
+    <AssignTargetPath Files="@(GeneratedXamlSrc->'%(FullPath)')" RootFolder="$(XamlGeneratedOutputPath)">
+      <Output TaskParameter="AssignedFiles" ItemName="_KynxaPublishedXaml" />
+    </AssignTargetPath>
+    <Error Condition="'$(ProjectPriFullPath)' == '' or !Exists('$(ProjectPriFullPath)')"
+           Text="The unpackaged desktop publish is missing its generated project PRI: $(ProjectPriFullPath)" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="@(_KynxaPublishedXaml)" Exclude="@(ResolvedFileToPublish)">
+        <RelativePath>%(_KynxaPublishedXaml.TargetPath)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(ProjectPriFullPath)" Exclude="@(ResolvedFileToPublish)">
+        <RelativePath>$(ProjectPriFileName)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
   <Target Name="RemoveObsoleteBackendPayload" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(DesignTimeBuild)' != 'true' and Exists('$(TargetDir)KYNXA.Desktop.dll')">
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />

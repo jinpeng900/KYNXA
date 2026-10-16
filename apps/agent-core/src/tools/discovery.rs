@@ -3,8 +3,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::intent::{analyze_clauses, file_references, js_trim, matches, pattern, task_relation};
 
-// Native calculations return indices; the gateway retains the original schema objects and wire identities.
-// 原生计算返回索引；网关保留原 schema 对象和 wire 身份，不把 JSON 副本冒充原描述符。
+// Native calculations retain descriptor indices; opt-in scores allow relevance-preserving experience ranking.
+// 原生计算保留描述符索引；按需附带相关性分数，经验排序不能改变原 schema 或 wire 身份。
 fn normalized(value: &Value, maximum: usize) -> String {
     let Some(text) = value.as_str() else {
         return String::new();
@@ -245,7 +245,11 @@ fn search_tools(arguments: &Value) -> Value {
     if !text.is_empty() {
         selected.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     }
-    json!(selected.into_iter().map(|item| item.0).collect::<Vec<_>>())
+    if arguments["includeScores"] == true {
+        json!(selected.into_iter().map(|(index, score)| json!({"index":index,"score":score})).collect::<Vec<_>>())
+    } else {
+        json!(selected.into_iter().map(|item| item.0).collect::<Vec<_>>())
+    }
 }
 
 fn browser_boundary(text: &str) -> Option<&'static str> {
@@ -849,5 +853,40 @@ fn computer_alias(action: &str) -> &'static str {
         }
         "key" => "key shortcut keyboard 按键 快捷键 键盘",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod search_score_tests {
+    use super::search_tools;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn scored_search_preserves_legacy_candidates_and_relevance() {
+        let descriptors = json!([
+            {"name":"mcp.indexneedle","description":"Look up records."},
+            {"name":"indexneedle","description":"Look up records."},
+            {"name":"disabled.indexneedle","available":false},
+            {"name":"unrelated","description":"Other capability."}
+        ]);
+        let legacy = search_tools(&json!({"query":"indexneedle","descriptors":descriptors}));
+        let scored = search_tools(&json!({"query":"indexneedle","descriptors":descriptors,"includeScores":true}));
+        let hits = scored.as_array().unwrap();
+        assert_eq!(legacy, json!([1, 0]));
+        assert_eq!(hits.iter().map(|hit| hit["index"].clone()).collect::<Vec<Value>>(), *legacy.as_array().unwrap());
+        assert!(hits[0]["score"].as_u64().unwrap() > hits[1]["score"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn greetings_produce_no_tool_hints_with_or_without_scores() {
+        let descriptors = json!([
+            {"name":"web.search","description":"Search public websites."},
+            {"name":"filesystem.read","description":"Read a local file."}
+        ]);
+        for query in ["你好", "hello"] {
+            for include_scores in [false, true] {
+                assert_eq!(search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":include_scores})), json!([]));
+            }
+        }
     }
 }
