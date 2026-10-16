@@ -1359,6 +1359,11 @@
             "description": "Capability/action keywords; an empty string lists the full discoverable directory.",
             "maxLength": 200
           },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Optional explanation of the needed capability; does not grant permission."
+          },
           "offset": {
             "type": "integer",
             "minimum": 0,
