@@ -32,6 +32,9 @@
     <Content Include="Resources\Transcript\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Workspace\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Resources\Terminal\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Publish UI images as well as generated XAML; an unpackaged installer cannot read development output.
+         界面图片与生成的 XAML 一起发布；未打包安装程序不能依赖开发输出目录。 -->
+    <Content Update="Assets\**\*;Resources\UI\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
