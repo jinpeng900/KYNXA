@@ -985,7 +985,7 @@ public sealed partial class ToolManagementWindow : Window
         UiLocalization.Bind(dialog, ContentDialog.ContentProperty, content);
         UiLocalization.Bind(dialog, ContentDialog.PrimaryButtonTextProperty, action);
         UiLocalization.Bind(dialog, ContentDialog.CloseButtonTextProperty, "取消");
-        try { return await dialog.ShowAsync() == ContentDialogResult.Primary; }
+        try { return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary; }
         finally { _dialogOpen = false; }
     }
 

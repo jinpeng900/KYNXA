@@ -109,6 +109,37 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         return false;
     }
 
+    private bool TryHistoryPage(HttpListenerRequest request, out ConversationHistoryPage? page)
+    {
+        string path = request.Url!.AbsolutePath;
+        Guid conversationId;
+        if (path == $"/api/conversations/{WorkChatId:D}/messages") conversationId = WorkChatId;
+        else if (path == $"/api/conversations/{StandaloneChatId:D}/messages") conversationId = StandaloneChatId;
+        else
+        {
+            page = null;
+            return false;
+        }
+
+        // Opening a persisted fixture chat refreshes its recent page even when the catalog contains its full body.
+        // 打开已保存的夹具聊天时，即使目录带有完整正文，正式界面仍会刷新最近历史页。
+        // Serve only the two owned latest pages and the production initial/refresh bounds; cursors and unknown reads still fail.
+        // 仅提供两个自有聊天的最近页及正式初始／刷新上限；游标和未知读取仍使夹具失败。
+        var query = request.QueryString;
+        bool initial = query["limit"] == "4" && query["maxBytes"] == "262144";
+        bool refresh = query["limit"] == "40" && query["maxBytes"] == "1048576";
+        if (query.Count != 2 || query.GetValues("limit")?.Length != 1 || query.GetValues("maxBytes")?.Length != 1 ||
+            (!initial && !refresh))
+            throw new InvalidOperationException("Unexpected fixture conversation history query: " + request.Url.Query);
+        var chat = Catalog.Projects.SelectMany(project => project.Chats).Concat(Catalog.Chats)
+            .Single(chat => chat.Id == conversationId);
+        var messages = chat.Messages.ToList();
+        long returnedBytes = JsonSerializer.SerializeToUtf8Bytes(messages).LongLength;
+        page = new(conversationId, messages, messages.Count, false, null, $"fixture-history-{conversationId:D}-v1",
+            returnedBytes, false, StartIndex: 0, EndIndex: messages.Count);
+        return true;
+    }
+
     private async Task ListenAsync()
     {
         try
@@ -192,6 +223,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 Interlocked.Increment(ref _retrievalReads);
                 result = new RetrievalSourcesResponse([]);
             }
+            else if (TryHistoryPage(context.Request, out var history)) result = history!;
             else if (TryScreenshotResult(path, out var screenshot)) result = screenshot!;
             else throw new InvalidOperationException("Unexpected production Shell HTTP path: " + path);
             context.Response.ContentType = "application/json";

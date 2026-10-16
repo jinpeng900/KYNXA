@@ -153,6 +153,6 @@ public sealed partial class ShellPage
         };
         input.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(input.Text);
         dialog.Opened += (_, _) => { input.Focus(FocusState.Programmatic); input.SelectAll(); };
-        return await dialog.ShowAsync() == ContentDialogResult.Primary ? input.Text.Trim() : null;
+        return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary ? input.Text.Trim() : null;
     }
 }

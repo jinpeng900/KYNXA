@@ -254,6 +254,7 @@ public partial class App
         await EvalAsync<bool>("(() => { const node=__transcriptSmoke.textNode(document.querySelector('.message-body'),'DIAGRAM_BEFORE'); getSelection().setBaseAndExtent(node,0,node,14); return true; })()");
         string savedSelection = await EvalAsync<string>("window.transcriptSelectionText()");
         double top = await EvalAsync<double>("scrollY");
+        await EvalAsync<bool>("(() => { const viewport=__diagramBlock.querySelector('.mermaid-viewport'); window.__diagramAppearance={viewport,svg:viewport.querySelector('svg'),scale:viewport.dataset.scale,transform:viewport.querySelector('.mermaid-canvas').style.transform}; return true; })()");
         foreach (var palette in AppearanceService.Palettes)
         {
             AppearanceService.Apply(palette.Id);
@@ -264,16 +265,28 @@ public partial class App
                 document.querySelector('article') === __diagramArticle && document.querySelector('.mermaid-block') === __diagramBlock
                 && getComputedStyle(document.documentElement).getPropertyValue('--appearance-accent').trim().toLowerCase() === '{{palette.Accent.ToLowerInvariant()}}'
                 && window.transcriptSelectionText() === {{JsonSerializer.Serialize(savedSelection)}} && Math.abs(scrollY - {{top.ToString(System.Globalization.CultureInfo.InvariantCulture)}}) < 2
-                """), "palette " + palette.Id + " updates diagram styling without replacing message DOM, selection or scroll");
-            // A selected transcript defers SVG replacement; validate the new colors after clearing its range.
-            // 有选区时延迟替换 SVG；清除选区后再检查真实新颜色，避免把旧 ready 状态误当作重绘完成。
+                && __diagramAppearance.viewport.querySelector('svg') === __diagramAppearance.svg
+                && __diagramAppearance.viewport.dataset.scale === __diagramAppearance.scale
+                && __diagramAppearance.viewport.querySelector('.mermaid-canvas').style.transform === __diagramAppearance.transform
+                """), "palette " + palette.Id + " preserves diagram SVG, zoom, message DOM, selection and scroll");
+            // Diagram content keeps its fixed light palette even after the transcript range is cleared.
+            // 图表内容保持固定浅色配色；清除聊天选区后也不替换 SVG 或重置缩放。
             _transcript.ClearSelection();
-            var soft = AppearanceService.ParseColor(palette.Soft);
-            string expectedFill = $"rgb({soft.R}, {soft.G}, {soft.B})";
-            await WaitAsync($$"""
+            await WaitAsync("getSelection().isCollapsed", "the transcript selection clears after palette " + palette.Id);
+            await Task.Delay(300);
+            Check(await EvalAsync<bool>($$"""
                 __diagramBlock.dataset.diagramState === 'ready' && !!__diagramBlock.querySelector('.mermaid-viewport svg .node rect')
-                && getComputedStyle(__diagramBlock.querySelector('.mermaid-viewport svg .node rect')).fill === {{JsonSerializer.Serialize(expectedFill)}}
-                """, "the actual SVG node fill matches palette " + palette.Id + " after the deferred repaint");
+                && __diagramAppearance.viewport.querySelector('svg') === __diagramAppearance.svg
+                && getComputedStyle(__diagramAppearance.viewport).backgroundColor === 'rgb(255, 255, 255)'
+                && getComputedStyle(__diagramAppearance.svg.querySelector('.node rect')).fill === 'rgb(237, 242, 252)'
+                && getComputedStyle(__diagramAppearance.svg.querySelector('.node rect')).stroke === 'rgb(69, 104, 178)'
+                && getComputedStyle(__diagramAppearance.svg.querySelector('.node text')).fill === 'rgb(36, 39, 45)'
+                && __diagramAppearance.viewport.dataset.scale === __diagramAppearance.scale
+                && __diagramAppearance.viewport.querySelector('.mermaid-canvas').style.transform === __diagramAppearance.transform
+                && getComputedStyle(__diagramBlock.querySelector('.mermaid-header')).backgroundColor === {{JsonSerializer.Serialize(Rgb(AppearanceService.Current.Sidebar))}}
+                && getComputedStyle(__diagramBlock.querySelector('.mermaid-source')).backgroundColor === {{JsonSerializer.Serialize(Rgb(AppearanceService.Current.Sidebar))}}
+                && getComputedStyle(__diagramBlock.querySelector('.mermaid-source code')).color === {{JsonSerializer.Serialize(Rgb(AppearanceService.Current.Text))}}
+                """), "palette " + palette.Id + " keeps the same fixed light SVG and white canvas while toolbar/source follow the application theme");
             await EvalAsync<bool>("(() => { const node=__transcriptSmoke.textNode(document.querySelector('.message-body'),'DIAGRAM_BEFORE'); getSelection().setBaseAndExtent(node,0,node,14); return true; })()");
         }
         UiText.Initialize("en");
@@ -470,7 +483,8 @@ public partial class App
               const viewport = document.querySelector('.mermaid-viewer-viewport'), svg = viewport.querySelector('svg');
               const label = __transcriptSmoke.textNode(svg, 'VIEWER_SELECTED');
               getSelection().removeAllRanges(); getSelection().setBaseAndExtent(label, 0, label, 6);
-              window.__diagramViewerSelection = { viewport, svg, selected: getSelection().toString() };
+              window.__diagramViewerSelection = { viewport, svg, label, selected: getSelection().toString(),
+                scale: viewport.dataset.scale, transform: viewport.querySelector('.mermaid-canvas').style.transform };
               return true;
             })()
             """);
@@ -482,15 +496,23 @@ public partial class App
         await Task.Delay(300);
         Check(await EvalAsync<bool>("""
             !getSelection().isCollapsed && getSelection().toString() === __diagramViewerSelection.selected
+            && getSelection().anchorNode === __diagramViewerSelection.label
             && __diagramViewerSelection.viewport.querySelector('svg') === __diagramViewerSelection.svg
-            """), "changing the palette preserves fullscreen selected text and defers replacement of its SVG");
+            && __diagramViewerSelection.viewport.dataset.scale === __diagramViewerSelection.scale
+            && __diagramViewerSelection.viewport.querySelector('.mermaid-canvas').style.transform === __diagramViewerSelection.transform
+            && getComputedStyle(__diagramViewerSelection.viewport).backgroundColor === 'rgb(255, 255, 255)'
+            && getComputedStyle(__diagramViewerSelection.svg.querySelector('.node rect')).fill === 'rgb(237, 242, 252)'
+            """), "changing the palette preserves fullscreen selected text, the same fixed light SVG, white canvas and zoom");
         _transcript.ClearSelection();
-        var soft = AppearanceService.ParseColor(nextPalette.Soft);
-        string expectedFill = $"rgb({soft.R}, {soft.G}, {soft.B})";
-        await WaitAsync($$"""
-            getSelection().isCollapsed && __diagramViewerSelection.viewport.querySelector('svg') !== __diagramViewerSelection.svg
-            && getComputedStyle(__diagramViewerSelection.viewport.querySelector('svg .node rect')).fill === {{JsonSerializer.Serialize(expectedFill)}}
-            """, "clearing the fullscreen selection applies the latest theme to the existing open viewer");
+        await WaitAsync("getSelection().isCollapsed", "the fullscreen label selection clears");
+        await Task.Delay(300);
+        Check(await EvalAsync<bool>("""
+            __diagramViewerSelection.viewport.querySelector('svg') === __diagramViewerSelection.svg
+            && getComputedStyle(__diagramViewerSelection.viewport).backgroundColor === 'rgb(255, 255, 255)'
+            && getComputedStyle(__diagramViewerSelection.svg.querySelector('.node rect')).fill === 'rgb(237, 242, 252)'
+            && __diagramViewerSelection.viewport.dataset.scale === __diagramViewerSelection.scale
+            && __diagramViewerSelection.viewport.querySelector('.mermaid-canvas').style.transform === __diagramViewerSelection.transform
+            """), "clearing the fullscreen selection retains the same fixed light SVG, white canvas and zoom");
         var completeViewerCopy = await EvalAsync<JsonElement>("""
             (() => {
               const svg = document.querySelector('.mermaid-viewer-viewport svg'), range = document.createRange();

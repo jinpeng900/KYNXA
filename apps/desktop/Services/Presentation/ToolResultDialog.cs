@@ -75,6 +75,7 @@ public sealed class ToolResultDialog : IDisposable
         _contentScroll.SizeChanged += ContentSizeChanged;
         Dialog = new ContentDialog { XamlRoot = root, Content = _contentScroll,
             DefaultButton = ContentDialogButton.None, CloseButtonStyle = _more.Style };
+        DialogPresentation.Prepare(Dialog);
         UiLocalization.Bind(Dialog, ContentDialog.TitleProperty, _screenshot ? "截图预览" : "工具结果详情");
         UiLocalization.Bind(Dialog, ContentDialog.CloseButtonTextProperty, "关闭");
         Dialog.Opened += async (_, _) =>

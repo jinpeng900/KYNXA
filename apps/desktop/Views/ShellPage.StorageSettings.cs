@@ -74,7 +74,8 @@ public sealed partial class ShellPage
         {
             TrySetAppearancePreferences(preferences, out string? errorKey);
             return errorKey;
-        });
+        }, () => new AppearanceTransferPreferences(_layout.AppearancePaletteId, _layout.AppearanceMode,
+            _layout.ChatFontSize, _layout.AppearanceAccent), isImport => PickAppearanceFileAsync(window, isImport));
         content.Children.Add(appearanceSection.Root);
         var moreOptions = LocalizedLabel("更多功能", 13);
         moreOptions.Opacity = 0.6;
@@ -155,31 +156,22 @@ public sealed partial class ShellPage
         window.Content = root;
         window.ExtendsContentIntoTitleBar = true;
         window.SetTitleBar(titleBar);
-        window.AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 420));
-        var ownerBounds = App.Window.AppWindow;
-        window.AppWindow.Move(new Windows.Graphics.PointInt32(ownerBounds.Position.X + Math.Max(0, (ownerBounds.Size.Width - 720) / 2),
-            ownerBounds.Position.Y + Math.Max(0, (ownerBounds.Size.Height - 420) / 2)));
-        bool initialSizeApplied = false;
-        root.Loaded += (_, _) =>
-        {
-            if (initialSizeApplied) return;
-            initialSizeApplied = true;
-            // Native window sizes are physical pixels; size the settings page in DIP after its root is available.
-            // 原生窗口尺寸使用物理像素；根节点可用后按 DIP 设置界面并约束到工作区。
-            double scale = root.XamlRoot.RasterizationScale;
-            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
-                presenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
-            }
-            var area = DisplayArea.GetFromWindowId(App.Window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-            int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
-            int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
-            int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
-            int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
-            window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
-        };
         AppearanceService.TrackWindow(window);
+        var ownerBounds = App.Window.AppWindow;
+        // Resolve DPI from the visible owner and apply final bounds before the first activation.
+        // 使用已显示所属窗口的 DPI，在首次激活前设置最终尺寸，避免 Loaded 后再次缩放引起跳变。
+        double scale = XamlRoot?.RasterizationScale ?? 1;
+        if (window.AppWindow.Presenter is OverlappedPresenter settingsPresenter)
+        {
+            settingsPresenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
+            settingsPresenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
+        }
+        var area = DisplayArea.GetFromWindowId(ownerBounds.Id, DisplayAreaFallback.Primary).WorkArea;
+        int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
+        int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
+        int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
+        int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
+        window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
         { storageControls.Message(text, severity); }
         if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);

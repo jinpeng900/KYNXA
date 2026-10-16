@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('appearance', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions')]
+    [ValidateSet('appearance', 'appearance-transfer', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions', 'dialogs', 'window-presentation')]
     [string]$Scenario = 'appearance',
     [switch]$BuildOnly,
     [switch]$Rebuild,

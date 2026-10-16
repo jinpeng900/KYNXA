@@ -30,6 +30,7 @@ public static class DiagramExport
     private const int MaximumSvgNodes = 20000;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static int _pickerActive;
+    private static long _fileNameSequence;
     private static readonly HashSet<string> SvgElements = new(StringComparer.Ordinal)
     {
         "svg", "g", "defs", "marker", "path", "rect", "circle", "ellipse", "line", "polygon", "polyline",
@@ -127,7 +128,7 @@ public static class DiagramExport
                 if (attribute.Name.NamespaceName.Length > 0 || !SvgAttributes.Contains(attribute.Name.LocalName)
                     || attribute.Value.Length > 1000000)
                     throw new InvalidDataException("Unsupported diagram SVG attribute.");
-                if (attribute.Name.LocalName == "style") ValidateStyle(attribute.Value, ids);
+                if (attribute.Name.LocalName == "style") ValidateStyle(attribute.Value, ids, element == root);
                 else if (attribute.Name.LocalName is not ("id" or "role" or "aria-label" or "aria-labelledby" or "aria-describedby"))
                     ValidateValue(attribute.Value, ids);
             }
@@ -141,14 +142,20 @@ public static class DiagramExport
         return new("svg", bytes, width, height);
     }
 
-    private static void ValidateStyle(string style, HashSet<string> ids)
+    private static void ValidateStyle(string style, HashSet<string> ids, bool isRoot)
     {
         foreach (string declaration in style.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             int separator = declaration.IndexOf(':');
-            if (separator <= 0 || !StyleProperties.Contains(declaration[..separator].Trim()))
+            if (separator <= 0) throw new InvalidDataException("Unsupported diagram SVG style.");
+            string property = declaration[..separator].Trim(), value = declaration[(separator + 1)..].Trim();
+            // Only the root document may use these fixed responsive dimensions; geometry remains numeric and inert.
+            // 仅根文档允许这两个固定响应式尺寸；图形节点仍使用明确数值，不能借此放宽任意样式。
+            if (isRoot && (property == "width" && value == "100%" || property == "height" && value == "100vh")) continue;
+            if (isRoot && property == "background-color" && value.Length == 7 && value[0] == '#' && value.Skip(1).All(Uri.IsHexDigit)) continue;
+            if (!StyleProperties.Contains(property))
                 throw new InvalidDataException("Unsupported diagram SVG style.");
-            ValidateValue(declaration[(separator + 1)..].Trim(), ids);
+            ValidateValue(value, ids);
         }
     }
 
@@ -260,7 +267,7 @@ public static class DiagramExport
             var picker = new FileSavePicker
             {
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                SuggestedFileName = "KYNXA-diagram"
+                SuggestedFileName = CreateSuggestedFileName(document.Format)
             };
             picker.FileTypeChoices.Add(document.Format.ToUpperInvariant(), ["." + document.Format]);
             WinRT.Interop.InitializeWithWindow.Initialize(picker, ownerWindow);
@@ -286,5 +293,14 @@ public static class DiagramExport
         if (document.Format is not ("svg" or "png") || !file.FileType.Equals("." + document.Format, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected extension does not match the diagram format.");
         await FileIO.WriteBytesAsync(file, document.Bytes);
+    }
+
+    public static string CreateSuggestedFileName(string format)
+    {
+        if (format is not ("svg" or "png")) throw new ArgumentException("Unsupported diagram export format.", nameof(format));
+        // A safe local timestamp plus process sequence keeps repeated exports distinct even within one millisecond.
+        // 安全的本机时间加进程序号让同一毫秒内的重复导出也有独立文件名，不读取聊天文本或路径。
+        return "KYNXA-diagram-" + format + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture)
+            + "-" + Interlocked.Increment(ref _fileNameSequence).ToString("x4", CultureInfo.InvariantCulture);
     }
 }
