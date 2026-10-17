@@ -583,7 +583,11 @@ async fn execute_loop(
     let mut input_budget = allocated["inputBudgetTokens"].as_u64().unwrap_or(4096);
     let mut output_budget = allocated["maxOutputTokens"].as_u64().unwrap_or(4096);
     let limits = budget::apply("budget.limits", &json!({"input":input["runLimits"].as_object().map(|value| Value::Object(value.clone())).unwrap_or(json!({}))})).map_err(|code| failure(&code, "Child execution limits are invalid. / 子执行额度无效。"))?;
-    let system = child_system(child, &ctx, input);
+    let system = format!(
+        "{}\n{}",
+        child_system(child, &ctx, input),
+        protocol::runtime_identity_prompt(&connection, model)
+    );
     let all = tools::builtin_catalog();
     let mut catalog: Vec<Value> = all
         .iter()
