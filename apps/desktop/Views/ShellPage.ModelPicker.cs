@@ -214,11 +214,7 @@ public sealed partial class ShellPage
         var configure = PickerMenu.Action(UiText.Get("配置模型连接"), "ConfigureCustomModelsButton");
         UiLocalization.Bind(configure, ContentControl.ContentProperty, "配置模型连接");
         UiLocalization.Bind(configure, AutomationProperties.NameProperty, "配置模型连接");
-        configure.Click += (_, _) =>
-        {
-            menu.Hide();
-            DispatcherQueue.TryEnqueue(() => OpenModelManagement(customModels: true));
-        };
+        configure.Click += (_, _) => RunAfterFlyoutClosed(menu, () => OpenModelManagement(customModels: true));
         var footer = new StackPanel();
         if (_modelCatalogErrorKey is not null)
         {

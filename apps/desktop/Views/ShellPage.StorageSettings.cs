@@ -23,7 +23,8 @@ public sealed partial class ShellPage
         if (!_projectsReady) return;
         if (_storageSettingsWindow is { } existing)
         {
-            if (existing.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter) presenter.Restore();
+            // Window.Activate already restores an iconic HWND; use one native presentation path for reuse and restore.
+            // Window.Activate 自带最小化恢复；复用与恢复只走一次原生展示流程。
             existing.Activate();
             return;
         }
