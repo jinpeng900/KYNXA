@@ -151,7 +151,9 @@ public sealed partial class ShellPage
         if (!content.Contains(StandardDataFormats.Bitmap)) return false;
         // Clipboard pixels need a temporary file; only Send imports a durable gateway snapshot.
         // 剪贴板像素暂存为文件，点击发送后才由网关接收为持久附件。
-        var folder = await ApplicationData.Current.TemporaryFolder.CreateFolderAsync("AttachmentDrafts", CreationCollisionOption.OpenIfExists);
+        string draftDirectory = StoragePaths.AttachmentDraftDirectory;
+        Directory.CreateDirectory(draftDirectory);
+        var folder = await StorageFolder.GetFolderFromPathAsync(draftDirectory);
         var file = await folder.CreateFileAsync("截图-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".png", CreationCollisionOption.GenerateUniqueName);
         using (var source = await (await content.GetBitmapAsync()).OpenReadAsync())
         using (var output = await file.OpenAsync(FileAccessMode.ReadWrite))
@@ -179,14 +181,17 @@ public sealed partial class ShellPage
     private async Task PrepareMessageAttachmentsAsync(Guid conversation, ChatMessageState user, CancellationToken cancellationToken)
     {
         if (!_messageAttachmentDrafts.TryGetValue(user.Id, out var files) || files.Length == 0) return;
-        if (user.Attachments.Count > 0 && user.Attachments.All(file => file.Status != "pending")) return;
+        // Persisted descriptors can default to ready before import; only a gateway receipt completes the draft.
+        // 历史描述符可能在导入前就默认为 ready；只有网关接收回执才能结束草稿生命周期。
         var accepted = await _attachmentsApiClient.ImportAsync(conversation, user.Id, files, cancellationToken);
         // Preserve only in-memory thumbnails while replacing provisional metadata with real receipts.
         // 用真实接收回执替换临时元信息，缩略图仅保留在本机展示状态中。
         user.Attachments = accepted.Select(file => file with
             { ThumbnailDataUrl = user.Attachments.FirstOrDefault(previous => previous.Id == file.Id)?.ThumbnailDataUrl }).ToList();
         if (ActiveChatId == conversation) UpdateConversationPresentation(openAtBottom: false);
-        if (accepted.Any(file => file.Status == "pending")) throw new InvalidDataException(UiText.Get("附件仍在接收，请重试。"));
+        if (accepted.Length != files.Length || files.Any(draft => !accepted.Any(file => file.Id == draft.Id
+            && file.Status != "pending" && !string.IsNullOrWhiteSpace(file.Sha256))))
+            throw new InvalidDataException(UiText.Get("附件仍在接收，请重试。"));
         _messageAttachmentDrafts.Remove(user.Id);
         foreach (var file in files) DeleteTemporaryAttachment(file);
     }

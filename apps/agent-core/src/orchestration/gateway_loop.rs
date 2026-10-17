@@ -2008,6 +2008,10 @@ async fn execute(
                 .join("\n"),
         );
     }
+    // Add authoritative route facts after memory and before budgeting; compaction keeps this base system intact.
+    // 路由事实放在记忆之后并参与预算；上下文压缩继续保留这段基础系统提示。
+    system.push('\n');
+    system.push_str(&protocol::runtime_identity_prompt(&connection, model_name));
     let base_system = system.clone();
     preparation_stages["summaryAndMemoryMs"] = json!(preparation_stage_started.elapsed().as_millis() as u64);
     preparation_stage_started = Instant::now();
@@ -3660,10 +3664,13 @@ async fn execute(
             let fallback_messages = vec![
                 json!({"role":"user","content":format!("Original task: {}\nVerified broker status: {}\nSaved document outcomes: {}\nSaved reply tail: {}\nGive a concise truthful progress answer with completed work, unresolved items and continuation. Do not invoke tools, claim unverified success, or repeat effects.",input["message"].as_str().unwrap_or("").chars().take(2048).collect::<String>(),summary,document_navigation(&state.documents),state.content().chars().rev().take(3072).collect::<Vec<_>>().into_iter().rev().collect::<String>())}),
             ];
-            let fallback_system = "Summarize verified progress and failure limits only; original full request and archives remain stored. Do not invent causes.";
+            let fallback_system = format!(
+                "Summarize verified progress and failure limits only; original full request and archives remain stored. Do not invent causes.\n{}",
+                protocol::runtime_identity_prompt(&connection, model_name)
+            );
             let fallback_window = context_window.min(8192);
             let mut fallback_budget = json!({"contextWindowTokens":fallback_window,
-                "requiredInputTokens":crate::models::protocol::tool_message_tokens(&fallback_messages, fallback_system),
+                "requiredInputTokens":crate::models::protocol::tool_message_tokens(&fallback_messages, &fallback_system),
                 "requestedOutputTokens":1024});
             if let Some(limit) = provider_input_limit {
                 fallback_budget["providerMaxInputTokens"] = json!(limit);
@@ -3679,7 +3686,7 @@ async fn execute(
                             &connection,
                             model_name,
                             &fallback_messages,
-                            fallback_system,
+                            &fallback_system,
                             budget["maxOutputTokens"].as_u64(),
                             &[],
                             true,

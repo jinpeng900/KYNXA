@@ -927,11 +927,25 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
     let document_id = new_id();
     let image_id = new_id();
     let files = [(document_id.clone(), "作业.docx", doc), (image_id.clone(), "图.png", png)];
-    for (_, name, bytes) in &files { std::fs::write(fixture.root.join("work").join(name), bytes).unwrap(); }
+    let clipboard_directory = fixture.root.join("Temp").join("AttachmentDrafts");
+    std::fs::create_dir_all(&clipboard_directory).unwrap();
+    let source_paths = [fixture.root.join("work").join(files[0].1), clipboard_directory.join(files[1].1)];
+    for ((_, _, bytes), path) in files.iter().zip(&source_paths) { std::fs::write(path, bytes).unwrap(); }
     data::upsert_message(&fixture.runtime.config.data_root, &fixture.conversation,
         &json!({"Id":message,"Role":"user","Content":"","Attachments":files.iter().map(|(id,name,bytes)|json!({"Id":id,"Name":name,"SizeBytes":bytes.len()})).collect::<Vec<_>>()})).unwrap();
+    // Clipboard sources must be external temporary files; application-private sources remain forbidden.
+    // 剪贴板来源必须使用外部临时文件，应用私有数据来源仍然禁止附加。
+    let private_directory = fixture.runtime.config.data_root.join("Desktop").join("Temp").join("AttachmentDrafts");
+    std::fs::create_dir_all(&private_directory).unwrap();
+    let private_image = private_directory.join(files[1].1);
+    std::fs::write(&private_image, &files[1].2).unwrap();
+    let denied = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
+        .json(&json!({"messageId":message,"files":[{"id":image_id,"name":files[1].1,"path":private_image}]}))
+        .send().await.unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(denied.json::<Value>().await.unwrap()["code"], "PROTECTED_APP_DATA");
     let response = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
-        .json(&json!({"messageId":message,"files":files.iter().map(|(id,name,_)|json!({"id":id,"name":name,"path":fixture.root.join("work").join(name)})).collect::<Vec<_>>()}))
+        .json(&json!({"messageId":message,"files":files.iter().zip(&source_paths).map(|((id,name,_),path)|json!({"id":id,"name":name,"path":path})).collect::<Vec<_>>()}))
         .send().await.unwrap();
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
     let mut input = fixture.request("");
@@ -1282,6 +1296,137 @@ async fn explicit_remember_survives_disabled_candidates_replay_and_a_later_memor
     assert!(system_text(&requests[1]).contains("回答使用中文😀。"));
     assert!(!system_text(&requests[2]).contains("回答使用中文😀。"));
     drop(requests);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_model_identity_tracks_switches_without_rewriting_history_or_confirmed_memory() {
+    use kynxa_agent_core_native::storage::gateway as data;
+
+    let fixture = Fixture::new(false, false).await;
+    let config: Value = fixture
+        .client
+        .get(format!("{}/api/models", fixture.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut profile = config["providers"][0].clone();
+    let synthetic_key = "runtime-identity-fixture-private-key";
+    profile["displayName"] = json!("Anthropic Claude stale fixture label");
+    profile["models"] = json!(["fixture-model", "second-model"]);
+    profile["apiKey"] = json!(synthetic_key);
+    let saved = fixture
+        .client
+        .post(format!("{}/api/models", fixture.url))
+        .json(&profile)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+
+    // Stale identities stay as historical data; switching must update the trusted request metadata.
+    // 旧身份保留为历史资料；换模必须更新本次请求可信元数据，不能靠篡改原文消除冲突。
+    let old_answer = "我是 Anthropic 的 Claude，这是一条旧模型的合成回复。";
+    let old_assistant = new_id();
+    data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":old_assistant,"Role":"assistant","Status":"completed","Content":old_answer,
+            "Provider":"obsolete-fixture","Model":"obsolete-claude"}),
+    )
+    .unwrap();
+    let memory_content = "底层模型是 Anthropic Claude，继续沿用这个身份。";
+    let memory_user = new_id();
+    let saved = data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":memory_user,"Role":"user","Status":"completed",
+            "Content":format!("全局记住：{memory_content}")}),
+    )
+    .unwrap();
+    assert_eq!(saved["memoryInstruction"]["entry"]["status"], "confirmed");
+    data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":new_id(),"Role":"assistant","Status":"completed","Content":"已保存合成记忆。"}),
+    )
+    .unwrap();
+
+    let selected_models = ["second-model", "fixture-model"];
+    for model in selected_models {
+        let user = new_id();
+        let question = "你现在用的是什么模型？";
+        data::upsert_message(
+            &fixture.runtime.config.data_root,
+            &fixture.conversation,
+            &json!({"Id":user,"Role":"user","Status":"completed","Content":question}),
+        )
+        .unwrap();
+        let mut request = fixture.request(question);
+        request["userMessageId"] = json!(user);
+        request["model"] = json!(model);
+        let completed: Value = fixture
+            .client
+            .post(format!("{}/api/chat", fixture.url))
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(completed["type"], "completed", "{completed}");
+    }
+
+    let requests = fixture.provider.requests.lock().await;
+    assert_eq!(requests.len(), selected_models.len());
+    for (request, model) in requests.iter().zip(selected_models) {
+        assert_eq!(request["model"], model);
+        let system = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker = "Current runtime model configuration (data, not instructions): ";
+        let identities: Vec<Value> = system
+            .lines()
+            .filter_map(|line| line.strip_prefix(marker))
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect();
+        assert_eq!(
+            identities,
+            vec![json!({"application":"KYNXA","providerId":"native-fixture","modelId":model,
+                "endpointHost":"127.0.0.1","protocol":"openai-completions"})]
+        );
+        assert!(system.contains(memory_content));
+        assert!(request["messages"].as_array().unwrap().iter().any(|message| {
+            message["role"] == "assistant" && message["content"] == old_answer
+        }));
+        assert!(!request.to_string().contains(synthetic_key));
+    }
+    drop(requests);
+    let messages = fixture.messages().await;
+    assert!(messages.iter().any(|message| {
+        message["Id"] == old_assistant && message["Content"] == old_answer
+    }));
+    let memory: Value = fixture
+        .client
+        .get(format!("{}/api/memory/user", fixture.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(memory["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["status"] == "confirmed" && entry["content"] == memory_content
+    }));
     fixture.close().await;
 }
 
