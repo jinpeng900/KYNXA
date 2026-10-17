@@ -1,5 +1,4 @@
 using KYNXA_Desktop.Services;
-using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 
 namespace KYNXA_Desktop.Views;
@@ -18,7 +17,8 @@ public sealed partial class ShellPage
         }
         if (_toolManagementWindow is { } existing)
         {
-            if (existing.AppWindow.Presenter is OverlappedPresenter presenter) presenter.Restore();
+            // Window.Activate already restores an iconic HWND; use one native presentation path for reuse and restore.
+            // Window.Activate 自带最小化恢复；复用与恢复只走一次原生展示流程。
             existing.Activate();
             existing.ShowSection(skills);
             return;

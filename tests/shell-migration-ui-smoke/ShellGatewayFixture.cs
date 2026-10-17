@@ -21,7 +21,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private readonly List<Task> _responses = [];
     private readonly object _sync = new();
     private TaskCompletionSource? _initialCatalogGate;
-    private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads;
+    private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads, _agentReads;
     private ToolResultReference? _screenshotReference;
     private ToolResultResponse? _screenshotResult;
     public string Address { get; }
@@ -30,6 +30,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int Writes => Volatile.Read(ref _writes);
     public int ScreenshotReads => Volatile.Read(ref _screenshotReads);
     public int RetrievalReads => Volatile.Read(ref _retrievalReads);
+    public int AgentReads => Volatile.Read(ref _agentReads);
     public bool FailModelReads { get; set; }
     public Exception? Failure { get; private set; }
     public Guid ProjectId { get; } = Guid.NewGuid();
@@ -200,6 +201,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                     new("second-provider", "Second fixture provider", "https://second.example.invalid/v1",
                         ["fixture-model"], false, "openai-completions")]);
             }
+            else if (TryAgentManagementRead(context.Request, out var agentManagement)) result = agentManagement!;
             else if (path == "/api/retrieval/settings")
             {
                 Interlocked.Increment(ref _retrievalReads);
@@ -237,6 +239,32 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             context.Response.StatusCode = 500;
         }
         finally { context.Response.Close(); }
+    }
+
+    private bool TryAgentManagementRead(HttpListenerRequest request, out object? result)
+    {
+        result = null;
+        string path = request.Url!.AbsolutePath;
+        if (path is not ("/api/agent/config" or "/api/agent/tools" or "/api/agent/skills" or "/api/agent/mcp/catalog")) return false;
+        var query = request.QueryString;
+        bool conversationQuery = path == "/api/agent/skills" && query.Count == 1 &&
+            query.GetValues("conversationId") is { Length: 1 } values && Guid.TryParseExact(values[0], "D", out Guid conversationId) &&
+            (conversationId == WorkChatId || conversationId == StandaloneChatId);
+        if (!string.IsNullOrEmpty(request.Url.Query) && !conversationQuery)
+            throw new InvalidOperationException("Unexpected fixture agent management query: " + request.Url.Query);
+        // Empty skills require no preview, and disabled synthetic MCP configuration cannot start a real process.
+        // 空技能列表无需预览；禁用的虚构 MCP 配置不会启动真实进程，所有写入仍由上层统一拒绝。
+        result = path switch
+        {
+            "/api/agent/config" => new AgentConfig(1, 4,
+                [new("fixture-disabled", "Fixture MCP", "fixture-mcp", [], false)], [ExtensionPaths.Root]),
+            "/api/agent/tools" => new AgentToolsResponse([], Connections: []),
+            "/api/agent/skills" => new AgentSkillsResponse([]),
+            "/api/agent/mcp/catalog" => new McpCatalogResponse([], []),
+            _ => throw new InvalidOperationException("Unexpected fixture agent management path.")
+        };
+        Interlocked.Increment(ref _agentReads);
+        return true;
     }
 
     public async ValueTask DisposeAsync()
