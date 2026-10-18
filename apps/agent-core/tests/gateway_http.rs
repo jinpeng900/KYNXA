@@ -43,6 +43,7 @@ struct Provider {
     control_note_cycle: Arc<std::sync::atomic::AtomicBool>,
     cancel_summary: Arc<std::sync::atomic::AtomicBool>,
     summary_requests: Arc<AtomicUsize>,
+    skill_pagination_cycle: Arc<std::sync::atomic::AtomicBool>,
 }
 fn system_text(request: &Value) -> String {
     request["messages"]
@@ -105,6 +106,25 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         |remaining| remaining.checked_sub(1)).is_ok() {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":{"message":"fixture temporary provider failure"}}))).into_response();
+    }
+    if state.skill_pagination_cycle.load(Ordering::Acquire) {
+        // Follow the actual failure receipt before correcting the page; no synthetic tool success.
+        // 先读取真实失败回执再纠正分页，不伪造工具成功结果。
+        let has_receipt = |id: &str| body["messages"].as_array().into_iter().flatten()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
+        let message = if is_completion_review_request(&body) || has_receipt("skill-page-corrected") {
+            json!({"role":"assistant","content":"已按声明纠正分页并完成技能列表读取，原有上下文保留。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"已核对真实分页回执\"}</kynxa_task>"})
+        } else {
+            let correcting = has_receipt("skill-page-invalid");
+            let arguments = if correcting { json!({"offset":0,"limit":1}) }
+                else { json!({"offset":-1,"limit":1}) };
+            json!({"role":"assistant","content":"继续当前技能读取任务。","tool_calls":[{
+                "id":if correcting {"skill-page-corrected"}else{"skill-page-invalid"},"type":"function",
+                "function":{"name":kynxa_agent_core_native::models::protocol::wire_name("skill.list"),"arguments":arguments.to_string()}}]})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"}else{"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if state.control_note_cycle.load(Ordering::Acquire)
         && system_text(&body)
@@ -419,6 +439,7 @@ impl Fixture {
             control_note_cycle: Default::default(),
             cancel_summary: Default::default(),
             summary_requests: Default::default(),
+            skill_pagination_cycle: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let provider_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1718,6 +1739,61 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
         messages[1]
     );
     fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skill_pagination_correction_keeps_context_and_request_live_with_compatible_run_limits() {
+    for run_limits in [Value::Null, json!({"maxRounds":"invalid","maxDurationMs":null})] {
+        let fixture = Fixture::new(false, false).await;
+        fixture.provider.skill_pagination_cycle.store(true, Ordering::Release);
+        let original = "列出可用技能，参数有误时在当前任务内部纠正并继续。";
+        let mut input = fixture.request(original);
+        // A new user message owns a new ID; the fixture already persists its initial greeting.
+        // 夹具已保存最初的问候，新消息使用新 ID，不改写已有正式消息。
+        input["userMessageId"] = json!(new_id());
+        input["runLimits"] = run_limits;
+        let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+            .json(&input).send().await.unwrap();
+        assert!(response.status().is_success());
+        let text = response.text().await.unwrap();
+        let events = event_values(&mut text.as_bytes().to_vec());
+        assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{text}");
+        assert!(events.iter().any(|event| event["type"] == "completed"
+            && event["content"].as_str().is_some_and(|text| text.contains("纠正分页"))), "{text}");
+        let requests = fixture.provider.requests.lock().await.clone();
+        let correction = requests.iter().find(|request| request["messages"].as_array().into_iter().flatten()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "skill-page-invalid")).unwrap();
+        let invalid_receipt = correction["messages"].as_array().unwrap().iter()
+            .find(|message| message["tool_call_id"] == "skill-page-invalid").unwrap()["content"].as_str().unwrap();
+        assert!(invalid_receipt.contains("INVALID_SKILL_LIST_PAGINATION"), "{invalid_receipt}");
+        assert!(invalid_receipt.contains("\"executed\":false"), "{invalid_receipt}");
+        assert!(correction["messages"].as_array().unwrap().iter()
+            .any(|message| message["role"] == "user" && message["content"].as_str() == Some(original)));
+        let messages = fixture.messages().await;
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["Content"], "你好");
+        assert_eq!(messages[1]["Content"], original);
+        let activities = messages[2]["ToolActivities"].as_array().unwrap();
+        let pages = activities.iter().filter(|activity| activity["name"] == "skill.list").collect::<Vec<_>>();
+        assert_eq!(pages.len(), 2, "{activities:?}");
+        assert_eq!(pages[0]["status"], "error");
+        assert_eq!(pages[1]["status"], "completed");
+        let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+        let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap())
+            .unwrap().unwrap();
+        assert_eq!(task.budget.max_execution_ms, Some(1_800_000));
+        let persisted: Value = serde_json::from_slice(&std::fs::read(fixture.root.join("Data")
+            .join(task.input_reference.as_ref().unwrap()["relativePath"].as_str().unwrap())).unwrap()).unwrap();
+        assert_eq!(persisted["input"]["runLimits"], input["runLimits"]);
+        assert_eq!(persisted["input"]["message"], original);
+        assert_eq!(persisted["resolvedRunLimits"]["maxDurationMs"], 1_800_000);
+        let calls_before_replay = fixture.provider.calls.load(Ordering::SeqCst);
+        let replay: Value = fixture.client.post(format!("{}/api/chat", fixture.url))
+            .json(&input).send().await.unwrap().json().await.unwrap();
+        assert_eq!(replay["type"], "completed", "{replay}");
+        assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), calls_before_replay);
+        fixture.close().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

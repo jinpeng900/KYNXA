@@ -31,6 +31,40 @@ fn native(result: Result<Value, String>) -> Result<Value, GatewayError> {
 fn missing_public_answer(raw: &str, projected: &str, has_calls: bool) -> bool {
     !has_calls && !raw.trim().is_empty() && projected.trim().is_empty()
 }
+
+fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Value {
+    match result {
+        Ok(value) => {
+            let unknown = value["status"] == "unknown"
+                || value["outcome"] == "unknown"
+                || value["code"].as_str().is_some_and(|code| code.contains("UNKNOWN"));
+            json!({"status":if unknown{"unknown"}else if value["isError"]==true{"error"}else{"completed"},
+                "executed":unknown || value["executed"]!=false,"isError":value["isError"]==true||unknown,
+                "code":value["code"],"recoveryHandle":value["recoveryHandle"],"content":value})
+        }
+        Err(error) => {
+            let unknown = error.code.contains("UNKNOWN")
+                || error.details["status"] == "unknown"
+                || error.details["outcome"] == "unknown";
+            let parameter_error = error.code == "INVALID_TOOL_ARGUMENTS"
+                || error.code.starts_with("INVALID_SKILL_");
+            // Only trusted pre-dispatch validation may certify that no tool effect occurred.
+            // 只有内部派发前校验的明确回执能证明未产生工具副作用，未知结果不能被参数码覆盖。
+            let not_dispatched = !unknown && parameter_error
+                && error.details["executed"] == false
+                && error.details["requestDispatched"] == false;
+            let mut content = error.response();
+            if not_dispatched {
+                content["executed"] = json!(false);
+                content["requestDispatched"] = json!(false);
+                content["correction"] = json!("This call was rejected before execution. Keep the current task, prior output and successful receipts. Correct only the reported parameter using the declared tool schema and supplied bounds, then issue a new valid call. Do not repeat successful operations or guess permissions, paths, resource IDs, commands or write contents.");
+            }
+            json!({"status":if unknown{"unknown"}else{"error"},"executed":!not_dispatched,
+                "isError":true,"code":error.code,"content":content})
+        }
+    }
+}
+
 pub(crate) fn is_read_only_tool(name: &str) -> bool {
     // Execution policy owns read classification; discovery and context maintenance have no external effects.
     // 执行策略统一维护只读分类；发现控制和上下文维护没有外部副作用。
@@ -2403,10 +2437,11 @@ async fn execute(
         system.push_str("\nThis model answers directly in visible natural language. Answer the user's actual question; do not output internal task markers or status JSON. No native tools are available for this model; do not claim to have performed external actions.");
     }
     system.push_str("\nRecover a failed tool step using an available alternative. Reuse successful receipts; verify unknown mutations before retry. Check source freshness for current-fact questions. Saved analyses remain usable across compaction; continue to the requested output.");
-    let limits = native(budget::apply(
-        "budget.limits",
-        &json!({"input":input.get("runLimits").cloned().unwrap_or_else(|| json!({}))}),
-    ))?;
+    let resolved_limits = budget::resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
+    let limits = resolved_limits["limits"].clone();
+    if resolved_limits["corrections"].as_array().is_some_and(|corrections| !corrections.is_empty()) {
+        state.broker_note(&format!("Broker: malformed transport execution limits were normalized to the existing defaults. The user's goal, permissions, saved context and completed operations are unchanged. Settings correction: {}", resolved_limits["corrections"]));
+    }
     let memory_budget = (context_window / 8).clamp(512, 8192);
     let prepared_memory = native(crate::models::memory::calculate(
         "models.memory.prepare",
@@ -3663,7 +3698,7 @@ async fn execute(
                 .push(activity.clone());
             state.save(&runtime, &run, "streaming", None).await?;
             let mut definition_failure = workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
-                "code":error.code,"content":{"error":error.message,"code":error.code}}));
+                "code":error.code,"content":error.response()}));
             if call["unavailable"] == true
                 && definition_failure.is_none()
                 && saved.is_null()
@@ -3691,8 +3726,10 @@ async fn execute(
                             }
                         }
                         Err(error) => {
+                            let mut content = error.response();
+                            content["requestedName"] = json!(name);
                             definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":error.code,
-                                "content":{"error":error.message,"code":error.code,"requestedName":name}}));
+                                "content":content}));
                         }
                     }
                 } else {
@@ -3787,19 +3824,7 @@ async fn execute(
                     }
                     result => result,
                 };
-                match result {
-                    Ok(value) => {
-                        let unknown = value["status"] == "unknown"
-                            || value["outcome"] == "unknown"
-                            || value["code"]
-                                .as_str()
-                                .is_some_and(|code| code.contains("UNKNOWN"));
-                        json!({"status":if unknown{"unknown"}else if value["isError"]==true{"error"}else{"completed"},"isError":value["isError"]==true||unknown,"code":value["code"],"recoveryHandle":value["recoveryHandle"],"content":value})
-                    }
-                    Err(error) => {
-                        json!({"status":if error.code.contains("UNKNOWN"){"unknown"}else{"error"},"isError":true,"code":error.code,"content":{"error":error.message,"code":error.code}})
-                    }
-                }
+                tool_execution_receipt(result)
             };
             let canonical = receipt["content"].clone();
             let root = runtime.config.data_root.clone();
@@ -4023,7 +4048,7 @@ async fn execute(
             } else {
                 public_text
             };
-            let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":receipt["status"],"summary":if receipt["isError"]==true{"执行受阻"}else{"已完成"},"result":public_text,"resultRef":reference,"round":round,"order":tool_order,"code":receipt["code"]});
+            let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":receipt["status"],"summary":if receipt["isError"]==true{"执行受阻"}else{"已完成"},"result":public_text,"resultRef":reference,"round":round,"order":tool_order,"code":receipt["code"],"executed":receipt["executed"]!=false});
             if let Some(existing) = state.assistant["ToolActivities"]
                 .as_array_mut()
                 .unwrap()
@@ -4367,6 +4392,38 @@ async fn execute(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
+
+    #[test]
+    fn correctable_parameter_receipts_preserve_successful_effects_and_unknown_outcomes() {
+        let mut effects = EffectLedger::default();
+        let completed = json!({"id":"saved-write","name":"filesystem.write",
+            "arguments":{"path":"/work/result.txt","content":"Previously saved output"}});
+        let success = json!({"status":"completed","isError":false,"executed":true,"content":{"saved":true}});
+        effects.apply("effects.observe", &json!({"call":completed,"result":success,
+            "observation":false,"workspaceRoot":"/work"})).unwrap();
+        effects.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        for code in ["INVALID_TOOL_ARGUMENTS", "INVALID_SKILL_LIST_PAGINATION", "INVALID_SKILL_RESOURCE_PAGINATION"] {
+            let error = GatewayError::new(code, "Fixture parameter requires correction.", 400)
+                .with_details(json!({"parameter":"offset","minimum":0,"executed":false,
+                    "requestDispatched":false,"recoverable":true}));
+            let receipt = tool_execution_receipt(Err(error));
+            assert_eq!(receipt["status"], "error");
+            assert_eq!(receipt["executed"], false);
+            assert!(receipt["content"]["correction"].as_str().unwrap().contains("Do not repeat successful operations"));
+            let failed = json!({"id":code,"name":"filesystem.write",
+                "arguments":{"path":"/work/result.txt","content":"Never executed"}});
+            effects.apply("effects.observe", &json!({"call":failed,"result":receipt,
+                "observation":false,"workspaceRoot":"/work"})).unwrap();
+        }
+        let previous = effects.apply("effects.previous", &json!({"call":completed,"observation":false})).unwrap();
+        assert_eq!(previous["result"], success);
+        let unknown = tool_execution_receipt(Err(GatewayError::new("TOOL_EXECUTION_UNKNOWN", "Unknown effect.", 409)
+            .with_details(json!({"executed":false,"requestDispatched":false}))));
+        assert_eq!(unknown["status"], "unknown");
+        assert_eq!(unknown["executed"], true);
+        let uncertified = tool_execution_receipt(Err(GatewayError::new("INVALID_TOOL_ARGUMENTS", "No dispatch witness.", 400)));
+        assert_eq!(uncertified["executed"], true);
+    }
 
     #[test]
     fn repeated_small_or_partial_source_ranges_use_saved_work_without_altering_original_receipts() {

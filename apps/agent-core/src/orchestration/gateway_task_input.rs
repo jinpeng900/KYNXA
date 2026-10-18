@@ -38,7 +38,12 @@ pub async fn accept(
         let relationship = data::relationship(&root, conversation)?;
         let permission = input["permissionMode"].as_str().unwrap_or("smart");
         if !["ask", "smart", "full"].contains(&permission) { return Err(invalid("INVALID_PERMISSION_MODE")); }
-        let bytes = serde_json::to_vec(&json!({"input":input,"originalMessageRaw":original,"fingerprint":fingerprint}))
+        // Resolve execution settings before persistence without changing the fingerprinted transport input.
+        // 写入前解析执行配置，但不得改写参与指纹计算的原始传输输入。
+        let resolved = super::budget::resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
+        let limits = &resolved["limits"];
+        let bytes = serde_json::to_vec(&json!({"input":input,"originalMessageRaw":original,
+            "fingerprint":fingerprint,"resolvedRunLimits":limits,"runLimitCorrections":resolved["corrections"]}))
             .map_err(|_| invalid("INVALID_TASK_INPUT"))?;
         let hash = managed_files::digest(&bytes);
         let relative = format!("Agent/task-inputs/{request}-{hash}.json");
@@ -48,7 +53,9 @@ pub async fn accept(
             acceptance: vec!["Return the requested result with actual execution and verification status. / 返回请求结果及真实执行、验证状态。".into()],
             scope: TaskScope { conversation_id: conversation.into(), project_id: relationship["projectId"].as_str().map(str::to_owned),
                 permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":crate::storage::workspace_mounts::snapshot(&relationship),"requestFingerprint":fingerprint}) },
-            parent_task_id: None, dependency_ids: vec![], budget: TaskBudget { max_execution_ms: Some(super::budget::apply("budget.limits", &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or(json!({}))})).map_err(|_| invalid("INVALID_TASK_BUDGET"))?["maxDurationMs"].as_u64().unwrap_or(3_600_000)), ..Default::default() },
+            parent_task_id: None, dependency_ids: vec![], budget: TaskBudget {
+                max_execution_ms: limits["maxDurationMs"].as_u64(), ..Default::default()
+            },
             input_reference: Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
         };
         Ok(repository.accept_task(&task)?)

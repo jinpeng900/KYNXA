@@ -18,6 +18,41 @@ use crate::models::protocol::{array, slice, string};
 const MAX_SKILLS: usize = 128;
 const MAX_CANDIDATES: usize = 512;
 
+/// Validate the public page before discovery touches any skill source directory.
+/// 在访问任何技能目录前校验公开分页，错误保留可供模型纠正的参数边界。
+pub(crate) fn list_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
+    if !arguments.is_object() {
+        return Err(ServiceError::new(
+            "INVALID_SKILL_LIST_PAGINATION",
+            "skill.list 参数必须是对象。",
+            400,
+        )
+        .with_details(json!({"tool":"skill.list","parameter":"arguments","type":"object",
+            "executed":false,"requestDispatched":false,"recoverable":true})));
+    }
+    let page_value = |name: &str, fallback: u64| {
+        let value = &arguments[name];
+        if value.is_null() {
+            return Ok(fallback as usize);
+        }
+        let minimum = if name == "offset" { 0 } else { 1 };
+        value
+            .as_u64()
+            .filter(|value| (minimum..=MAX_SKILLS as u64).contains(value))
+            .map(|value| value as usize)
+            .ok_or_else(|| {
+                ServiceError::new(
+                    "INVALID_SKILL_LIST_PAGINATION",
+                    &format!("skill.list 的 {name} 必须是 {minimum}–{MAX_SKILLS} 范围内的整数。"),
+                    400,
+                )
+                .with_details(json!({"tool":"skill.list","parameter":name,"minimum":minimum,"maximum":MAX_SKILLS,
+                    "executed":false,"requestDispatched":false,"recoverable":true}))
+            })
+    };
+    Ok((page_value("offset", 0)?, page_value("limit", MAX_SKILLS as u64)?))
+}
+
 fn cancelled(cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
     if cancellation
         .as_ref()
@@ -712,6 +747,40 @@ impl SkillDiscovery {
                 400,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::list_page;
+    use serde_json::json;
+
+    #[test]
+    fn list_page_uses_compatible_defaults_and_accepts_schema_boundaries() {
+        assert_eq!(list_page(&json!({})).unwrap(), (0, 128));
+        assert_eq!(list_page(&json!({"offset":128,"limit":1})).unwrap(), (128, 1));
+        assert_eq!(list_page(&json!({"offset":0,"limit":128})).unwrap(), (0, 128));
+    }
+
+    #[test]
+    fn list_page_rejects_malformed_or_out_of_range_values_with_parameter_details() {
+        for (arguments, parameter) in [
+            (json!({"offset":-1}), "offset"),
+            (json!({"offset":129}), "offset"),
+            (json!({"limit":0}), "limit"),
+            (json!({"limit":129}), "limit"),
+            (json!({"limit":"16"}), "limit"),
+        ] {
+            let error = list_page(&arguments).unwrap_err();
+            assert_eq!(error.code, "INVALID_SKILL_LIST_PAGINATION");
+            assert_eq!(error.details["parameter"], parameter);
+            assert_eq!(error.details["tool"], "skill.list");
+            assert_eq!(error.details["executed"], false);
+            assert_eq!(error.details["recoverable"], true);
+        }
+        let error = list_page(&json!(null)).unwrap_err();
+        assert_eq!(error.code, "INVALID_SKILL_LIST_PAGINATION");
+        assert_eq!(error.details["parameter"], "arguments");
     }
 }
 
