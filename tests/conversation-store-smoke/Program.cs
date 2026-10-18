@@ -52,8 +52,9 @@ var releaseFirstPut = new TaskCompletionSource(TaskCreationOptions.RunContinuati
 var enteredBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var releaseBlockedPut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 TaskCompletionSource? folderSaveEntered = null, releaseFolderSave = null;
+TaskCompletionSource? healthEntered = null, releaseHealth = null;
 var handlers = new ConcurrentBag<Task>();
-int revision = 10, oldProtocol = 0, forceConflict = 0, blockNextPut = 0, wrongStorage = 0;
+int revision = 10, oldProtocol = 0, forceConflict = 0, blockNextPut = 0, wrongStorage = 0, healthRequests = 0;
 var storedChat = new ProjectChatState { Title = "已有记录", Messages = [new() { Content = "已有问题" }, new() { Role = "assistant", Content = "正式回复", DurationMs = 5678 }] };
 var canonical = new ConversationCatalog(revision, [], [storedChat]);
 var server = Task.Run(async () =>
@@ -70,9 +71,17 @@ async Task Handle(HttpListenerContext context)
     {
         object result;
         if (context.Request.Url!.AbsolutePath == "/health")
+        {
+            Interlocked.Increment(ref healthRequests);
+            if (healthEntered is { } entered && releaseHealth is { } release)
+            {
+                entered.TrySetResult();
+                await release.Task;
+            }
             result = new { service = "kynxa-model-gateway", status = "ok", runtime = "rust", dataLayoutVersion = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2, hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3, retrievalProtocol = 1, conversationProtocol = Volatile.Read(ref oldProtocol) == 0 ? 1 : 0,
                 modelDataHome = Volatile.Read(ref wrongStorage) == 1 ? Path.Combine(Path.GetTempPath(), "different-gateway-models") : Volatile.Read(ref wrongStorage) == 2 ? null : ApplicationPaths.ModelHome,
                 extensionRoot = Volatile.Read(ref wrongStorage) == 3 ? Path.Combine(Path.GetTempPath(), "different-gateway-extensions") : ExtensionPaths.Root };
+        }
         else if (context.Request.Url.AbsolutePath.EndsWith("/messages", StringComparison.Ordinal))
         {
             historyRequests.Enqueue(context.Request.Url.Query);
@@ -122,6 +131,23 @@ async Task Handle(HttpListenerContext context)
 }
 try
 {
+    // Startup fan-out shares one health request, and cancelling one waiter does not cancel the other APIs.
+    // 启动阶段并发接口共用一次健康检查；取消单个等待者不取消其他接口所需的准备。
+    healthEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    releaseHealth = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    var readiness = Enumerable.Range(0, 12).Select(_ => ModelGatewayService.EnsureReadyAsync()).ToArray();
+    using (var cancelledWaiter = new CancellationTokenSource())
+    {
+        var cancelledReadiness = ModelGatewayService.EnsureReadyAsync(cancelledWaiter.Token);
+        await healthEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancelledWaiter.Cancel();
+        try { await cancelledReadiness; throw new Exception("Cancelled readiness waiter completed."); }
+        catch (OperationCanceledException) { }
+        Check(healthRequests == 1, "Concurrent startup APIs queued duplicate health requests.");
+        releaseHealth.SetResult();
+        await Task.WhenAll(readiness);
+    }
+    healthEntered = releaseHealth = null;
     string dataPath = Path.Combine(Path.GetTempPath(), "kynxa-client-storage-" + Guid.NewGuid().ToString("N"));
     using var store = new ProjectStore(dataPath);
     var loaded = await store.LoadAsync();
@@ -246,6 +272,42 @@ try
     Check(loadedProject.FolderPath == Path.Combine(dataPath, "later-local-folder") &&
         canonical.Projects.Single().FolderPath == Path.Combine(dataPath, "submitted-folder"),
         "An accepted folder response overwrote a newer local folder edit made while awaiting.");
+
+    // Mount identity, default-root selection and concurrent edits travel in the same catalog revision.
+    // 多根身份、默认目录和并发修改沿同一目录版本提交；不能只保存兼容 FolderPath 投影。
+    reloaded = await store.LoadAsync();
+    loadedProject = reloaded.Projects.Single();
+    var frontRoot = new ProjectMountState(Guid.NewGuid(), "前端", Path.Combine(dataPath, "frontend"));
+    var backRoot = new ProjectMountState(Guid.NewGuid(), "后端", Path.Combine(dataPath, "backend"), 2);
+    loadedProject.Mounts = [frontRoot, backRoot];
+    loadedProject.DefaultMountId = backRoot.Id; loadedProject.FolderPath = backRoot.Path;
+    await store.SaveAsync(reloaded.Projects);
+    Check(canonical.Projects.Single().Mounts.SequenceEqual(new[] { frontRoot, backRoot }) &&
+        canonical.Projects.Single().DefaultMountId == backRoot.Id, "Saving a project lost mount identities, revisions or its default root.");
+    canonical.Projects.Single().Mounts.Add(new(Guid.NewGuid(), "资料", Path.Combine(dataPath, "资料")));
+    canonical = canonical with { Revision = ++revision };
+    loadedProject.Name = "多目录项目";
+    await store.SaveAsync(reloaded.Projects);
+    Check(loadedProject.Mounts.Count == 3 && canonical.Projects.Single().Name == "多目录项目",
+        "A concurrent server mount addition was lost while rebasing a local project rename.");
+    loadedProject.DefaultMountId = frontRoot.Id; loadedProject.FolderPath = frontRoot.Path;
+    canonical.Projects.Single().Mounts[0] = frontRoot with { Path = Path.Combine(dataPath, "server-frontend"), BindingRevision = 2 };
+    canonical = canonical with { Revision = ++revision };
+    try { await store.SaveAsync(reloaded.Projects); throw new Exception("Competing multi-root bindings were overwritten."); }
+    catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Competing mount edits did not retain catalog conflict semantics."); }
+    reloaded = await store.LoadAsync(); loadedProject = reloaded.Projects.Single();
+    loadedProject.DefaultMountId = frontRoot.Id; loadedProject.FolderPath = loadedProject.Mounts[0].Path;
+    folderSaveEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    releaseFolderSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    var mountSave = store.SaveAsync(reloaded.Projects);
+    await folderSaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    loadedProject.Mounts.Add(new(Guid.NewGuid(), "稍后添加", Path.Combine(dataPath, "later")));
+    loadedProject.DefaultMountId = backRoot.Id; loadedProject.FolderPath = backRoot.Path;
+    releaseFolderSave.SetResult(); await mountSave;
+    folderSaveEntered = releaseFolderSave = null;
+    Check(loadedProject.Mounts.Count == 4 && loadedProject.DefaultMountId == backRoot.Id &&
+        canonical.Projects.Single().Mounts.Count == 3 && canonical.Projects.Single().DefaultMountId == frontRoot.Id,
+        "A late catalog receipt overwrote a newly added mount or newer default-root selection.");
     forceConflict = 1;
     try { await store.SaveChatsAsync([chat]); throw new Exception("Conflict ignored."); }
     catch (InvalidOperationException error) { Check(error.Message.Contains("其他窗口"), "Conflict was not actionable."); }

@@ -151,12 +151,24 @@ impl DocumentWorkRecords {
             updates.insert(key, record);
         }
         let mut changed = 0;
+        let mut information_added = false;
         for record in updates.into_values() {
+            let previous = self.records.get(text(&record["sourceIdentity"]));
+            // New receipt IDs and summary cursors are durable bookkeeping, not new source facts.
+            // 新回执 ID 和摘要游标属于持久化元信息；只有原始读取覆盖或事实正文新增才算工作进展。
+            information_added |= previous.is_none_or(|previous| {
+                adds_read_coverage(previous, &record)
+                    || array(&record["summaryFacts"]).iter().any(|fact| {
+                        let body = text(&fact["text"]).trim();
+                        !body.is_empty() && !array(&previous["summaryFacts"]).iter()
+                            .any(|saved| text(&saved["text"]).trim() == body)
+                    })
+            });
             if self.persist_record(journal, record).await? {
                 changed += 1;
             }
         }
-        Ok(json!({"changedDocuments":changed,"directory":self.directory()}))
+        Ok(json!({"changedDocuments":changed,"informationAdded":information_added,"directory":self.directory()}))
     }
 
     /// Restore only registered artifacts in the current task tree; callers validate live source versions.
@@ -603,6 +615,38 @@ mod tests {
     }
     fn reference() -> Value {
         json!({"id":uuid::Uuid::new_v4().to_string(),"sha256":"c".repeat(64),"bytes":512})
+    }
+
+    #[tokio::test]
+    async fn summary_receipt_ids_and_cursors_do_not_reset_stagnation_without_new_facts() {
+        use super::super::gateway_work_progress::{RoundProgress, WorkProgress};
+        let fixture = Fixture::new();
+        let journal = TaskJournal::begin(&fixture.root, &input("summary-progress", 1), "fixture", 60_000).unwrap();
+        let mut records = DocumentWorkRecords::default();
+        let original = reference();
+        records.observe_read(&journal, "filesystem.read", &receipt("a", 0, 60), &original).await.unwrap();
+        let mut summary = json!({"facts":[{"resultId":original["id"],"text":"The verified capacity is 138."}],
+            "sources":[{"tool":"filesystem.read","resultRef":original,"source":receipt("a",0,60),"processedCharacters":20,"totalCharacters":60}]});
+        let first = records.update_from_summary(&journal, &summary).await.unwrap();
+        assert_eq!(first["informationAdded"], true);
+        let mut progress = WorkProgress::default();
+        for index in 1..=3 {
+            let alias = reference();
+            summary["facts"][0]["resultId"] = alias["id"].clone();
+            summary["sources"][0]["resultRef"] = alias;
+            summary["sources"][0]["processedCharacters"] = json!(20 + index);
+            let updated = records.update_from_summary(&journal, &summary).await.unwrap();
+            assert!(updated["changedDocuments"].as_u64().unwrap() > 0);
+            assert_eq!(updated["informationAdded"], false);
+            let plan = progress.observe_round(&RoundProgress {
+                evidence_changed: updated["informationAdded"] == true,
+                source_reads:1, repeated_reads:1, ..Default::default()
+            });
+            assert_eq!(plan.no_progress_rounds, index);
+        }
+        assert!(progress.needs_strategy_change());
+        summary["facts"][0]["text"] = json!("The capacity applies to production only.");
+        assert_eq!(records.update_from_summary(&journal, &summary).await.unwrap()["informationAdded"], true);
     }
 
     #[tokio::test]

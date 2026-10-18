@@ -85,7 +85,6 @@
       if (/^[a-z]+$/.test(name) && /^#[0-9a-f]{6}$/i.test(value))
         document.documentElement.style.setProperty('--appearance-' + name, value);
     }
-    window.kynxaDiagrams?.setAppearance(palette);
   }
 
   window.kynxaDiagrams?.configure({ requestCopy: (text, block, requestId) => {

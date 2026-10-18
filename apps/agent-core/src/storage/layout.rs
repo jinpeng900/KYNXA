@@ -40,6 +40,23 @@ fn inspect_session(root: &Path, session: &Path) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// Inspect the selected canonical scope afresh; preparation caches never authorize its actual paths.
+/// 每次即时检查所选正式范围；目录准备缓存不能替代实际路径授权。
+pub(crate) fn inspect_conversation(root: &Path, location: &Value) -> Result<(), ContractError> {
+    let chat_id = id(&location["Id"])?;
+    let session = if location["ProjectId"].is_null() {
+        root.join("Chats").join(chat_id)
+    } else {
+        let folder = root.join("Projects").join(id(&location["ProjectId"])?);
+        for path in [folder.clone(), folder.join("Sessions"), folder.join("Memory")] {
+            inspect_path(root, &path, true)?;
+        }
+        inspect_path(root, &folder.join("project.json"), false)?;
+        folder.join("Sessions").join(chat_id)
+    };
+    inspect_session(root, &session)
+}
+
 pub(crate) fn inspect(
     root: &Path,
     document: Option<&Value>,
@@ -119,7 +136,7 @@ fn plan(arguments: &Value) -> ContractResult {
         storage["CreatedAt"] = arguments["now"].clone();
     }
     settings["Storage"] = storage;
-    let manifests = document["Projects"].as_array().into_iter().flatten().enumerate().map(|(order, project)| json!({"id": project["Id"], "document": {"Version": 1, "Source": "../../catalog.json", "Id": project["Id"], "Name": project["Name"], "FolderPath": project["FolderPath"], "Order": order, "IsPinned": project["IsPinned"] == true, "IsArchived": project["IsArchived"] == true, "IsFolderlessWorkspace": project["IsFolderlessWorkspace"] == true, "Sessions": project["Chats"].as_array().into_iter().flatten().map(|chat| chat["Id"].clone()).collect::<Vec<_>>()}})).collect::<Vec<_>>();
+    let manifests = document["Projects"].as_array().into_iter().flatten().enumerate().map(|(order, project)| json!({"id": project["Id"], "document": {"Version": 1, "Source": "../../catalog.json", "Id": project["Id"], "Name": project["Name"], "FolderPath": project["FolderPath"], "Mounts":project["Mounts"],"DefaultMountId":project["DefaultMountId"], "Order": order, "IsPinned": project["IsPinned"] == true, "IsArchived": project["IsArchived"] == true, "IsFolderlessWorkspace": project["IsFolderlessWorkspace"] == true, "Sessions": project["Chats"].as_array().into_iter().flatten().map(|chat| chat["Id"].clone()).collect::<Vec<_>>()}})).collect::<Vec<_>>();
     Ok(json!({"settings": settings, "manifests": manifests}))
 }
 

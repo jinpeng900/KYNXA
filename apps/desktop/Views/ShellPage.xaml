@@ -5,7 +5,7 @@
     <Grid x:Name="ShellGrid" Background="{StaticResource KynxaSidebarBrush}" SizeChanged="ShellGrid_SizeChanged">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="SidebarColumn" Width="240" />
-            <ColumnDefinition x:Name="SidebarGripColumn" Width="8" />
+            <ColumnDefinition x:Name="SidebarGripColumn" Width="4" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
@@ -446,7 +446,8 @@
             </Grid>
         </Grid>
 
-        <controls:ResizeGrip x:Name="SidebarGrip" Grid.Column="1" Axis="Horizontal" IndicatorBrush="Transparent" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
+        <controls:ResizeGrip x:Name="SidebarGrip" Grid.ColumnSpan="3" HorizontalAlignment="Left" Margin="238,0,0,0" Canvas.ZIndex="21"
+                             Axis="Horizontal" IndicatorBrush="Transparent" CancelRequested="SidebarGrip_CancelRequested" DragCompleted="LayoutGrip_DragCompleted" DragDelta="SidebarGrip_DragDelta" DragStarted="SidebarGrip_DragStarted" ResetRequested="SidebarGrip_ResetRequested" />
 
         <!-- Stable main slots: top workspace, primary content and optional preview.
              主体固定为顶部工作区、主要内容以及可选预览区域。

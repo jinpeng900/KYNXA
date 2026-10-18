@@ -54,11 +54,30 @@ foreach ($directory in @('runtime','ToolHost','official-tools')) {
     Assert-NativePackage ([IO.Directory]::Exists((Join-Path $source $directory))) "Required payload directory exists: $directory"
     Copy-Item -LiteralPath (Join-Path $source $directory) -Destination $package -Recurse
 }
+$officeScripts = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$officeRoot = Join-Path $package 'runtime/office'
+if ([IO.Directory]::Exists($officeRoot)) {
+    $officeSpecification = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../apps/desktop/Build/office-preview-runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $officeRecord = Get-Content -LiteralPath (Join-Path $officeRoot 'runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-NativePackage ($officeRecord.version -eq $officeSpecification.version -and $officeRecord.archiveSha256 -eq $officeSpecification.sha256 -and
+        $officeRecord.executable -eq $officeSpecification.executable) 'Private Office converter matches the pinned archive identity.'
+    Assert-NativePackage ([IO.File]::Exists((Join-Path $officeRoot $officeSpecification.executable))) 'Pinned private Office converter executable is bundled.'
+    # The fixed Office archive includes help pages and sample macros, not a JS gateway.
+    # 固定 Office 归档自带帮助页与示例宏，仅放行这些确切脚本，仍拒绝其他 Node/NAPI/JS 载荷。
+    foreach ($relative in @('help/a11y-toggle.js','help/flexsearch.debug.js','help/help.js','help/help2.js','help/hid2file.js',
+        'help/languages.js','help/paginathing.js','help/polyfills.js','help/prism.js',
+        'share/Scripts/javascript/ExportSheetsToHTML/exportsheetstohtml.js','share/Scripts/javascript/HelloWorld/helloworld.js',
+        'share/Scripts/javascript/Highlight/ButtonPressHandler.js','share/Scripts/javascript/Highlight/ShowDialog.js')) {
+        [void]$officeScripts.Add('runtime/office/' + $relative)
+    }
+}
 $forbidden=@(Get-ChildItem -LiteralPath $package -File -Recurse | Where-Object {
+    $relative = $_.FullName.Substring($package.Length + 1).Replace('\','/')
     -not $_.FullName.StartsWith((Join-Path $package 'runtime/mcp')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -and
-    ($_.Name -match '^(node|npm|npx)(\.exe|\.cmd)?$' -or $_.Extension -in '.node','.mjs','.cjs','.js' -or $_.FullName -match '[\\/]node_modules[\\/]')
+    ($_.Name -match '^(node|npm|npx)(\.exe|\.cmd)?$' -or ($_.Extension -in '.node','.mjs','.cjs','.js' -and -not $officeScripts.Contains($relative)) -or
+        $_.FullName -match '[\\/]node_modules[\\/]')
 })
-Assert-NativePackage ($forbidden.Count -eq 0) 'Independent Rust backend contains no Node, NAPI or JS gateway outside the private external MCP runtime.'
+Assert-NativePackage ($forbidden.Count -eq 0) 'Independent Rust backend contains no Node, NAPI or JS gateway outside private MCP; pinned Office help/sample scripts are separate.'
 $mcpManifest=Get-Content -LiteralPath (Join-Path $package 'runtime/mcp/manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-NativePackage ($mcpManifest.coreDependsOnNode -eq $false -and $mcpManifest.downloadsAtRuntime -eq $false) 'Private MCP runtime is separate from the Rust core and performs no runtime installation.'
 $privateNode=Join-Path $package $mcpManifest.node.path

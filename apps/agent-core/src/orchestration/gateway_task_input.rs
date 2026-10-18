@@ -28,7 +28,7 @@ pub async fn accept(
             if stored.2 != fingerprint { return Err(invalid("CHAT_REQUEST_CONFLICT")); }
             let relationship = data::relationship(&root, conversation)?;
             let snapshot = &existing.scope.permission_snapshot["bindingSnapshot"];
-            if relationship["projectId"] != snapshot["projectId"] || relationship["folderPath"] != snapshot["folderPath"] {
+            if !crate::storage::workspace_mounts::validate_snapshot(snapshot, &relationship) {
                 return Err(invalid("TASK_SCOPE_CHANGED"));
             }
             return Ok(existing);
@@ -47,7 +47,7 @@ pub async fn accept(
             request_id: request.into(), goal: input["message"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or("处理用户附件 / Process user attachments").chars().take(4096).collect(),
             acceptance: vec!["Return the requested result with actual execution and verification status. / 返回请求结果及真实执行、验证状态。".into()],
             scope: TaskScope { conversation_id: conversation.into(), project_id: relationship["projectId"].as_str().map(str::to_owned),
-                permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":{"projectId":relationship["projectId"],"folderPath":relationship["folderPath"]},"requestFingerprint":fingerprint}) },
+                permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":crate::storage::workspace_mounts::snapshot(&relationship),"requestFingerprint":fingerprint}) },
             parent_task_id: None, dependency_ids: vec![], budget: TaskBudget { max_execution_ms: Some(super::budget::apply("budget.limits", &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or(json!({}))})).map_err(|_| invalid("INVALID_TASK_BUDGET"))?["maxDurationMs"].as_u64().unwrap_or(3_600_000)), ..Default::default() },
             input_reference: Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
         };

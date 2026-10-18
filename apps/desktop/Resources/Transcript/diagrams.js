@@ -10,6 +10,10 @@
   const MAX_EXPORT_PNG_BYTES = 16 * 1024 * 1024;
   const MAX_EXPORT_IMAGE_SIDE_PX = 8192;
   const MAX_EXPORT_IMAGE_PIXELS = 16000000;
+  // Diagram content is a portable white document, independent of application chrome and system theme.
+  // 图表内容是可独立保存的白底文档，与应用工具栏和系统主题分开；源码显式样式仍由 Mermaid 保留。
+  const DIAGRAM_PALETTE = Object.freeze({ main: '#ffffff', sidebar: '#ffffff', soft: '#edf2fc', accent: '#4568b2',
+    selection: '#edf2fc', text: '#24272d', secondary: '#606772', border: '#dce3ef', isDark: false, isHighContrast: false });
   const EXPORT_PREPARATION_TIMEOUT_MS = 15000;
   const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="8" width="12" height="12" rx="2.5"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/></svg>';
@@ -41,7 +45,7 @@
   const pendingExports = new Map();
   const queue = [];
   const queued = new Set();
-  let hooks = {}, palette = {}, paletteRevision = 0, renderer = null, rendererReady = null;
+  let hooks = {}, renderer = null, rendererReady = null;
   let activeRequest = null, isDraining = false, sequence = 0, blockSequence = 0, copySequence = 0, exportSequence = 0, exportGeneration = 0, viewer = null;
   const nonce = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
 
@@ -121,7 +125,7 @@
     const summary = document.createElement('summary'); summary.dataset.copyIgnore = ''; details.append(summary, source.parentElement);
     block.append(header, status, viewport, details);
     const state = { block, source, header, label, toolbar, exports, copy, copyStatus, zoomLabel, status, viewport, canvas, details, summary,
-      sourceText: null, revision: 0, renderedPaletteRevision: -1, svg: null, copyTimer: 0, exportTimer: 0, exportStatus: '', sourceWasToggled: false };
+      sourceText: null, revision: 0, svg: null, copyTimer: 0, exportTimer: 0, exportStatus: '', sourceWasToggled: false };
     state.view = createView(viewport, canvas, zoomLabel);
     details.addEventListener('toggle', () => {
       summary.textContent = translated(details.open ? 'diagramHideSource' : 'diagramSource');
@@ -189,13 +193,12 @@
           else schedule(state);
         }
       } else if (state.pendingSvg) applyResult(state, state.pendingSvg);
-      else if (ready && state.renderedPaletteRevision !== paletteRevision && !state.block.dataset.diagramError) schedule(state);
       if (state.svg) synchronizeViewportSize(state.view);
     }
   }
   function schedule(state) {
     if (!state.block.isConnected || !state.ready || sourceValidation(state.sourceText)) return;
-    if (state.inFlight?.revision === state.revision && state.inFlight.appearanceRevision === paletteRevision) return;
+    if (state.inFlight?.revision === state.revision) return;
     if (!queued.has(state)) { queued.add(state); queue.push(state); }
     if (!state.svg) setState(state, 'rendering');
     drainQueue();
@@ -207,21 +210,20 @@
       while (queue.length) {
         const state = queue.shift(); queued.delete(state);
         if (!state.block.isConnected || !state.ready) continue;
-        const revision = state.revision, appearanceRevision = paletteRevision;
-        const attempt = { revision, appearanceRevision }; state.inFlight = attempt;
+        const revision = state.revision;
+        const attempt = { revision }; state.inFlight = attempt;
         try {
           const svgText = await renderSource(state.sourceText);
           if (!state.block.isConnected || state.revision !== revision || !state.ready) continue;
-          if (appearanceRevision !== paletteRevision) { schedule(state); continue; }
           const svg = sanitizeSvg(svgText, diagramType(state.sourceText));
           if (!svg) throw new Error('invalid-svg');
-          const result = { svg, revision, appearanceRevision };
+          const result = { svg, revision };
           if (!applyResult(state, result)) state.pendingSvg = result;
         } catch {
-          if (state.block.isConnected && state.revision === revision && appearanceRevision === paletteRevision) {
+          if (state.block.isConnected && state.revision === revision) {
             // A failed repaint keeps a previously valid image and always retains its source.
             // 重绘失败时保留已有有效图像，并始终保留原始源码。
-            const result = { revision, appearanceRevision, error: 'diagramFailed' };
+            const result = { revision, error: 'diagramFailed' };
             if (!applyResult(state, result)) state.pendingSvg = result;
           }
         } finally { if (state.inFlight === attempt) state.inFlight = null; }
@@ -229,14 +231,14 @@
     } finally { isDraining = false; }
   }
   function applyResult(state, result) {
-    if (!state.block.isConnected || state.revision !== result.revision || result.appearanceRevision !== paletteRevision) return true;
+    if (!state.block.isConnected || state.revision !== result.revision) return true;
     if (hooks.beforeLayoutChange?.(state.block) === false) return false;
     if (result.error) {
-      state.pendingSvg = null; state.renderedPaletteRevision = result.appearanceRevision;
+      state.pendingSvg = null;
       setState(state, 'error', result.error); hooks.afterLayoutChange?.(state.block); return true;
     }
     const previousSvg = state.svg;
-    state.svg = result.svg; state.pendingSvg = null; state.renderedPaletteRevision = result.appearanceRevision;
+    state.svg = result.svg; state.pendingSvg = null;
     state.canvas.replaceChildren(state.svg);
     state.viewport.hidden = false;
     setViewSize(state.view, state.svg, !previousSvg);
@@ -274,7 +276,7 @@
         activeRequest = null; resetRenderer(); reject(new Error('render-timeout'));
       }, RENDER_TIMEOUT_MS);
       activeRequest = { token, resolve, reject, timer };
-      renderer.contentWindow.postMessage({ type: 'kynxa-mermaid-render', token, source, palette }, '*');
+      renderer.contentWindow.postMessage({ type: 'kynxa-mermaid-render', token, source, palette: DIAGRAM_PALETTE }, '*');
     });
   }
   window.addEventListener('message', event => {
@@ -400,11 +402,13 @@
     'dominant-baseline', 'alignment-baseline', 'paint-order', 'color', 'white-space', 'word-spacing', 'letter-spacing',
     'line-height', 'marker-start', 'marker-mid', 'marker-end', 'clip-path', 'rx', 'ry', 'text-overflow', 'overflow',
     'display', 'visibility', 'stop-color', 'stop-opacity'];
-  function exportImageSize(width, height, preferredScale) {
-    const scale = Math.min(preferredScale, MAX_EXPORT_IMAGE_SIDE_PX / width, MAX_EXPORT_IMAGE_SIDE_PX / height,
+  function exportImageSize(width, height) {
+    // Use the largest aspect-preserving raster allowed by both existing memory limits.
+    // 自动采用同时满足现有边长与总像素上限的最大等比栅格尺寸，不再让读者选择倍率。
+    const scale = Math.min(MAX_EXPORT_IMAGE_SIDE_PX / width, MAX_EXPORT_IMAGE_SIDE_PX / height,
       Math.sqrt(MAX_EXPORT_IMAGE_PIXELS / (width * height)));
     return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)),
-      reduced: scale < preferredScale - .000001 };
+      reduced: scale < 1 - .000001 };
   }
   function exportStyleValue(value, ids) {
     let invalid = false;
@@ -452,16 +456,17 @@
     }
     clone.setAttribute('xmlns', SVG_NAMESPACE); clone.setAttribute('width', String(box[2])); clone.setAttribute('height', String(box[3]));
     clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    const backgroundColor = DIAGRAM_PALETTE.main;
+    // Standalone SVG documents fit the browser viewport, retaining intrinsic attributes for image consumers.
+    // 独立 SVG 文档适应浏览器视口，同时保留原始尺寸属性供图片及 Office 等使用者读取。
+    clone.setAttribute('style', clone.getAttribute('style') + ' width: 100%; height: 100vh; display: block; background-color: ' + backgroundColor + ';');
     const background = document.createElementNS(SVG_NAMESPACE, 'rect');
     background.setAttribute('x', String(box[0])); background.setAttribute('y', String(box[1]));
     background.setAttribute('width', String(box[2])); background.setAttribute('height', String(box[3]));
-    const backgroundColor = /^#[0-9a-f]{6}$/i.test(palette.main) ? palette.main : '#ffffff';
-    background.setAttribute('fill', backgroundColor);
-    clone.insertBefore(background, clone.firstChild);
+    background.setAttribute('fill', backgroundColor); clone.insertBefore(background, clone.firstChild);
     const serialized = new XMLSerializer().serializeToString(clone), bytes = new TextEncoder().encode(serialized);
     if (bytes.byteLength > MAX_EXPORT_SVG_BYTES) throw new Error('svg-export-limit');
-    return { serialized, bytes, width: box[2], height: box[3], backgroundColor, source: state.sourceText,
-      generation: exportGeneration };
+    return { serialized, bytes, width: box[2], height: box[3], backgroundColor, source: state.sourceText, generation: exportGeneration };
   }
   function updateExportControls(state) {
     const busy = pendingExports.size > 0 || !!state.exportTask;
@@ -524,10 +529,13 @@
   }
   function pngExportBytes(task) {
     return new Promise((resolve, reject) => {
-      const dimensions = exportImageSize(task.snapshot.width, task.snapshot.height, 2);
+      const dimensions = exportImageSize(task.snapshot.width, task.snapshot.height);
       // Limit the SVG image's intrinsic raster size before decoding, not only the destination canvas.
       // 解码前就限制 SVG 图像的固有栅格尺寸，避免先分配超大图像、再缩进较小画布。
       const parsed = new DOMParser().parseFromString(task.snapshot.serialized, 'image/svg+xml');
+      // Viewport units belong to the standalone document, never to an offscreen PNG image decoder.
+      // 视口单位仅用于独立文档，PNG 离屏解码使用已经限幅的明确像素尺寸。
+      parsed.documentElement.style.removeProperty('width'); parsed.documentElement.style.removeProperty('height');
       parsed.documentElement.setAttribute('width', String(dimensions.width)); parsed.documentElement.setAttribute('height', String(dimensions.height));
       const rasterSource = new XMLSerializer().serializeToString(parsed.documentElement);
       let completed = false;
@@ -760,18 +768,6 @@
     state.copy.innerHTML = command.success === true ? SUCCESS_ICON : COPY_ICON; localizeCopy(state);
     state.copyTimer = setTimeout(() => { delete state.copy.dataset.copyState; state.copy.innerHTML = COPY_ICON; localizeCopy(state); }, 2200);
   }
-  function setAppearance(next) {
-    const nextPalette = next?.palette || next;
-    const keys = ['main', 'soft', 'accent', 'selection', 'text', 'secondary', 'border', 'sidebar'];
-    if (!nextPalette || keys.some(key => !/^#[0-9a-f]{6}$/i.test(nextPalette[key]))) return;
-    const isDark = nextPalette.isDark === true, isHighContrast = nextPalette.isHighContrast === true;
-    if (keys.every(key => palette[key] === nextPalette[key]) && palette.isDark === isDark && palette.isHighContrast === isHighContrast) return;
-    palette = { ...Object.fromEntries(keys.map(key => [key, nextPalette[key]])), isDark, isHighContrast }; paletteRevision++;
-    for (const state of records) {
-      if (!state.block.isConnected || !state.ready || sourceValidation(state.sourceText)) continue;
-      state.revision++; state.pendingSvg = null; schedule(state);
-    }
-  }
   function setLanguage(next) {
     Object.assign(strings, next?.strings || next || {});
     for (const state of records) if (state.block.isConnected) localize(state);
@@ -798,5 +794,5 @@
     // 主动定位源码与读者手动展开源码具有相同持久性，延迟图表绘制不再自动收起它。
     state.sourceWasToggled = true; state.details.open = true;
   }
-  window.kynxaDiagrams = { configure, hydrate, setAppearance, setLanguage, acknowledgeCopy, acknowledgeExport, resetExports, closeViewer, disposeDetached, revealSource };
+  window.kynxaDiagrams = { configure, hydrate, setLanguage, acknowledgeCopy, acknowledgeExport, resetExports, closeViewer, disposeDetached, revealSource };
 })();

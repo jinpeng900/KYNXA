@@ -1816,6 +1816,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_preflight_context_rejection_preserves_sources_without_a_dispatched_call() {
+        let sources = json!([{"checkpointComplete":true,"user":{"messageId":"preflight-summary-user","content":"retain original user constraints ".repeat(128),"status":"completed"},"assistant":{"messageId":"preflight-summary-assistant","replyTo":"preflight-summary-user","status":"completed","finalText":"retain original evidence navigation ".repeat(128)},"rounds":[]}]);
+        let budget = json!({"conversationId":"preflight-summary-fixture","summarySources":sources,"summaryBudgetTokens":1024,"contextWindowTokens":16384,"providerMaxInputTokens":16384});
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let executor: SummaryExecutor = Arc::new(move |_, _| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async {
+                let mut error = ModelError::new(
+                    "MODEL_CONTEXT_LIMIT_REJECTED",
+                    "Fixture preflight requires a smaller projection. / 夹具预检需要更小的投影。",
+                    409,
+                );
+                error.details = json!({"requestDispatched":false,"contextRejection":{"kind":"context","contextWindowTokens":8192,"requestTokens":12163,"verified":true}});
+                Err(error)
+            })
+        });
+        let (_owner, cancellation) = watch::channel(false);
+        let (candidate, audit) = summarize(
+            &json!({"protocol":"openai-completions"}),
+            "fixture",
+            &budget,
+            32768,
+            cancellation,
+            Some(&executor),
+        )
+        .await
+        .unwrap();
+        assert!(candidate.is_none());
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert_eq!(audit["state"], "fallback");
+        assert_eq!(audit["reason"], "MODEL_CONTEXT_LIMIT_REJECTED");
+        assert_eq!(audit["modelCalls"], 0);
+        assert_eq!(budget["summarySources"], sources);
+    }
+
+    #[tokio::test]
     async fn current_step_summary_uses_full_public_source_and_survives_a_second_checkpoint() {
         use crate::storage::gateway as data;
         let root =

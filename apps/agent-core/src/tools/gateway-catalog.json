@@ -20,10 +20,11 @@
     },
     {
       "name": "artifact.open",
-      "description": "Display an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. Write real files with existing file tools first. Returns the validated file/version and actual supported preview, including text fallback when Office page conversion is unavailable. It does not create files, claim task completion, or grant broader file access.",
+      "description": "Open an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. For a URL, opens the interactive sidebar browser and returns its actual sessionId and tabId; retain them for browser.snapshot and later interactions. Opening alone does not establish page contents or login. Write real files with existing file tools first. Files return the validated version and supported preview, including text fallback when Office page conversion is unavailable. Does not create files or grant broader file access.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": { "type": "string", "description": "Existing file path, relative to the current workspace or explicitly authorized absolute path." },
           "url": { "type": "string", "description": "Full HTTP or HTTPS webpage URL, used instead of path." },
           "title": { "type": "string", "maxLength": 1024 },
@@ -42,6 +43,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -67,6 +69,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -115,6 +118,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "minLength": 1,
@@ -167,6 +171,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -189,6 +194,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -242,6 +248,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -276,6 +283,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -311,6 +319,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -341,6 +350,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "path": {
             "type": "string",
             "description": "Relative to the linked work folder, or an absolute path with an explicit reason."
@@ -356,6 +366,12 @@
         "additionalProperties": false
       },
       "source": "builtin"
+    },
+    {
+      "name": "work.folder.list",
+      "source": "builtin",
+      "description": "List this task's currently valid work folder mounts and stable mountId values. 工作目录列表、多文件夹、挂载目录。Read-only: does not scan files, rebuild indexes or call a model. Relative paths without mountId always use the task's default root; same-named files in different mounts remain distinct.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     },
     {
       "name": "work.folder.bind",
@@ -815,7 +831,7 @@
     {
       "name": "web.search",
       "source": "builtin",
-      "description": "Search public websites using an already enabled Exa or Brave MCP provider. Preserve the requested entities, dates and scope; add disambiguating terms only from current evidence, never an assumed year. Returns concise sources, URLs and archived original-result reference. Honors per-project search mode and stage budget. Stop when evidence answers the question; use web.fetch for public page text before browser automation.",
+      "description": "Search public websites using an already enabled Exa, Parallel or Brave provider. Preserve requested entities, dates and scope; add disambiguating terms from evidence, never an assumed year. Returns concise sources, original date metadata when available, URLs and an archived original-result reference. Honors the configured search mode and provider. For a simple fact lookup, stop when reliable evidence answers it; use web.fetch for necessary original page text before browser automation. A dated snippet or partial list alone does not establish the latest release.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1170,6 +1186,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "mountId": { "type": "string", "description": "Stable mount ID from work.folder.list; omitted uses this task's default work folder." },
           "command": {
             "type": "string",
             "enum": [
@@ -1206,6 +1223,7 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
           "shell": {
             "type": "string",
             "enum": [
@@ -1249,6 +1267,81 @@
           "script",
           "reason"
         ]
+      }
+    },
+    {
+      "name": "terminal.workspace.open",
+      "source": "builtin",
+      "description": "Open or focus the right workspace embedded terminal. 右侧终端、嵌入终端、打开终端、运行命令。Shares the user's actual ConPTY session in this chat and work folder; no separate window. Defaults to reusing a running matching session; list/read it before sending input, or set newSession for an independent shell. The initial working directory is supplied by the gateway; the current shell directory must be observed. Opening a shell does not execute a command.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mountId": { "type": "string", "description": "Stable work folder mount ID from work.folder.list. Relative paths and terminal cwd use this root; omitted uses the task default." },
+          "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "newSession": { "type": "boolean" },
+          "cols": { "type": "integer", "minimum": 2, "maximum": 500 },
+          "rows": { "type": "integer", "minimum": 1, "maximum": 200 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["reason"]
+      }
+    },
+    {
+      "source": "builtin",
+      "name": "terminal.workspace.list",
+      "description": "List the user's existing embedded terminals in this chat and current work scope. 列出右侧终端、当前终端会话。Returns real session IDs and output cursors without creating a shell or running commands. Reuse one of these IDs to read output or send input; other chats' terminals are inaccessible.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mountId": { "type": "string", "description": "Optional stable workspace mount ID to filter sessions. 可选稳定挂载标识，按目录筛选会话。" }
+        }
+      }
+    },
+    {
+      "name": "terminal.workspace.read",
+      "source": "builtin",
+      "description": "Read actual output from a right workspace terminal, including user-opened sessions. 右侧终端输出、查看运行命令结果、终端读取。Uses an independent byte cursor; pass nextCursor on later reads. waitMs defaults to 1000 and may be 0 for an immediate page. exited/exitCode refer to the shell process, not each command; determine command outcomes from the real output. Never runs or replays input.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "after": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "waitMs": { "type": "integer", "minimum": 0, "maximum": 15000 }
+        },
+        "required": ["sessionId"]
+      }
+    },
+    {
+      "name": "terminal.workspace.write",
+      "source": "builtin",
+      "description": "Send input to the same real right workspace terminal the user can see. 在右侧终端运行命令、输入命令、操作已有终端。Append carriage return (\\r) to submit a PowerShell command; control characters support actions such as Ctrl+C. Read the session before writing so an interactive program is not mistaken for a shell prompt. Returns inputAccepted and an output cursor, not command completion; use terminal.workspace.read for actual results. Ask/Smart host-command approval applies; never replay an accepted command just because output is delayed.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "input": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["sessionId", "input", "reason"]
+      }
+    },
+    {
+      "name": "terminal.workspace.close",
+      "source": "builtin",
+      "description": "Close this chat's embedded right workspace terminal and its owned process tree. 关闭右侧终端、结束终端会话。Does not affect another chat or an external terminal window. Ask/Smart approval applies; this stops any program still running in that session.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["sessionId", "reason"]
       }
     },
     {
@@ -2126,7 +2219,7 @@
     },
     {
       "name": "task.document",
-      "description": "Save or reuse document findings. action=record requires resultId from an actual original read and conclusions; unresolved and outputReferences are optional. action=read requires sourceIdentity from Saved document work or list; offset/limit page its saved analysis in UTF16. Use list (offset/count) only to locate missing identities, not to recover findings already shown. Read originals only for changed versions or a specific evidence gap. Saved analysis does not certify correctness or expand permissions.",
+      "description": "Optionally save or reuse findings for substantial document work; a simple factual answer does not require a document record. action=record requires resultId from an actual original read and conclusions; unresolved and outputReferences are optional. action=read requires sourceIdentity from Saved document work or list; offset/limit page its saved analysis in UTF16. Use list (offset/count) only to locate missing identities, not to recover findings already shown. Read originals only for changed versions or a specific evidence gap. Saved analysis does not certify correctness or expand permissions.",
       "inputSchema": {
         "type": "object",
         "properties": {

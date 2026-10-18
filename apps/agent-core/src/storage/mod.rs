@@ -44,7 +44,9 @@ pub mod sqlite_schema;
 pub mod sqlite_search;
 pub mod sqlite_store;
 pub mod sqlite_vector_reads;
+pub(crate) mod tool_memory;
 pub mod tool_results;
+pub mod workspace_mounts;
 
 use serde_json::{Value, json};
 

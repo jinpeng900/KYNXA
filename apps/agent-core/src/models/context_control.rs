@@ -288,6 +288,17 @@ mod tests {
     }
 
     #[test]
+    fn tool_turns_keep_schemas_and_receipts_without_capping_prose_turns() {
+        let tool = apply("context.outputBudget", &json!({"contextWindowTokens":8192,"phase":"tool"})).unwrap();
+        let prose = apply("context.outputBudget", &json!({"contextWindowTokens":8192})).unwrap();
+        assert!(tool["inputBudgetTokens"].as_u64().unwrap() > prose["inputBudgetTokens"].as_u64().unwrap());
+        assert!(tool["maxOutputTokens"].as_u64().unwrap() >= 1024);
+        let capped = apply("context.outputBudget", &json!({"contextWindowTokens":8192,"phase":"tool","providerMaxOutputTokens":512})).unwrap();
+        assert_eq!(capped["maxOutputTokens"], 512);
+        assert_eq!(capped["outputBudgetReductionReason"], "provider_limit");
+    }
+
+    #[test]
     fn reply_links_survive_retries_without_promoting_failed_or_duplicate_turns() {
         let pairs = complete_turns(&json!({"messages": [
             {"id": "u1", "key": "u1", "role": "user", "validUserContent": true},

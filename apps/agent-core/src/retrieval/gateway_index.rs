@@ -23,6 +23,71 @@ pub fn hash(text: &str) -> String {
 pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+/// A source remains bound to its own mount; adding an unrelated mount does not revoke existing evidence.
+/// 来源只核验自身挂载；新增其他挂载不会使已有证据或向量整体失效，旧无mountId定位继续兼容。
+pub(crate) fn mounted_root(relation: &Value, locator: &Value) -> Result<String, ContractError> {
+    let mounts = relation["mounts"].as_array();
+    let found = mounts.into_iter().flatten().find(|mount| {
+        mount["path"] == locator["root"] && (locator["mountId"].is_null()
+            || (mount["id"] == locator["mountId"] && mount["bindingRevision"] == locator["mountBindingRevision"]))
+    });
+    let root = found.and_then(|mount| mount["path"].as_str()).or_else(|| {
+        (locator["mountId"].is_null() && relation["folderPath"] == locator["root"])
+            .then(|| relation["folderPath"].as_str()).flatten()
+    });
+    if relation["isArchived"] == true || relation["isFolderlessWorkspace"] == true || root.is_none_or(str::is_empty) {
+        return Err(gateway::error("来源挂载已移除或改变，旧派生内容不再使用。", "STALE_RETRIEVAL_SOURCE", 409));
+    }
+    Ok(root.unwrap().to_owned())
+}
+
+pub(crate) fn cached_work_sources(config: &GatewayConfig, scope: &str) -> Result<HashMap<String, Vec<Value>>, ContractError> {
+    initialize(config)?;
+    let (registry, _) = gateway::read_json(&config.data_root, &config.data_root.join("Retrieval/source-identities.json"), 32*1024*1024)?;
+    let registry = registry.unwrap_or(json!({"sources":{}}));
+    let mut cache: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut after = Value::Null;
+    loop {
+        let page = sqlite_queries::apply("storage.index.listSources", &arguments(config,
+            json!({"scopes":[scope],"sourceType":"work-file","afterSourceId":after})))?;
+        for row in page["rows"].as_array().into_iter().flatten() {
+            let mut source = row.clone();
+            for field in ["locator", "sourceRevision"] {
+                if let Some(raw) = source[field].as_str() {
+                    source[field] = serde_json::from_str(raw).map_err(|_| gateway::error("索引来源结构无效。", "CORRUPT_RETRIEVAL_INDEX", 409))?;
+                }
+            }
+            let record = &registry["sources"][hash(source["sourceId"].as_str().unwrap_or(""))];
+            if record["active"] != true || record["scopeKey"] != source["scopeKey"]
+                || record["contentHash"] != source["contentHash"] || record["sourceRevision"] != source["sourceRevision"] { continue; }
+            if source["parserVersion"] != super::gateway_structure::parser_version(source["locator"]["relativePath"].as_str().unwrap_or("")) { continue; }
+            source["fileMetadata"] = record["fileMetadata"].clone();
+            source["scanLimitsSignature"] = record["scanLimitsSignature"].clone();
+            source["cachedTextBytes"] = record["cachedTextBytes"].clone();
+            if let Some(path) = source["locator"]["path"].as_str() { cache.entry(path.to_owned()).or_default().push(source); }
+        }
+        if page["rows"].as_array().unwrap().len() < 256 { break; }
+        after = page["nextSourceId"].clone();
+    }
+    Ok(cache)
+}
+
+pub(crate) fn observe_files(config: &GatewayConfig, sources: &[Value]) -> Result<(), ContractError> {
+    if sources.is_empty() { return Ok(()); }
+    gateway::with_catalog(&config.data_root, |_, _| {
+        let path = config.data_root.join("Retrieval/source-identities.json");
+        let (registry, digest) = gateway::read_json(&config.data_root, &path, 32*1024*1024)?;
+        let Some(registry) = registry else { return Ok(()); };
+        let observed = sources.iter().map(|source| json!({"key":hash(source["sourceId"].as_str().unwrap_or("")),
+            "sourceId":source["sourceId"],"scopeKey":source["scopeKey"],"sourceRevision":source["sourceRevision"],
+            "contentHash":source["contentHash"],"fileMetadata":source["fileMetadata"],
+            "scanLimitsSignature":source["scanLimitsSignature"],"cachedTextBytes":source["cachedTextBytes"]})).collect::<Vec<_>>();
+        let plan = storage::index_registry::apply("storage.registry.observeFiles", &json!({"registry":registry,"sources":observed}))?;
+        if plan["changed"] == true { gateway::commit_json(&config.data_root, &path, &plan["registry"], digest.as_deref(), 32*1024*1024)?; }
+        Ok(())
+    })
+}
 pub fn database(config: &GatewayConfig) -> PathBuf {
     config.data_root.join("Index/retrieval.sqlite")
 }
@@ -493,16 +558,7 @@ pub fn publish_prepared(
                     "storage.catalog.project",
                     &json!({"current":catalog,"id":project}),
                 )?;
-                if relation["isArchived"] == true
-                    || relation["isFolderlessWorkspace"] == true
-                    || relation["folderPath"] != source["locator"]["root"]
-                {
-                    return Err(gateway::error(
-                        "工作目录已改变，旧派生内容不再发布。",
-                        "STALE_RETRIEVAL_SOURCE",
-                        409,
-                    ));
-                }
+                mounted_root(&relation, &source["locator"])?;
                 let (settings, _) = gateway::read_json(
                     &config.data_root,
                     &config
@@ -583,7 +639,9 @@ pub fn publish_prepared(
         let registrations=prepared.iter().map(|prepared|{let source=&prepared["source"];json!({"key":hash(source["sourceId"].as_str().unwrap()),"source":source,"revisionRaw":source["sourceRevision"].to_string(),
             "current":states["states"].as_array().unwrap().iter().find(|state|state["source_id"]==source["sourceId"]).cloned().unwrap_or(Value::Null),
             "record":{"sourceId":source["sourceId"],"scopeKey":source["scopeKey"],"sourceRevision":source["sourceRevision"],"contentHash":source["contentHash"],"locator":source["locator"],
-                "sourceType":source["sourceType"],"bindingRevision":source["bindingRevision"].as_u64().unwrap_or(0),"active":true,"sourceRef":reference(source,None)}})}).collect::<Vec<_>>();
+                "sourceType":source["sourceType"],"bindingRevision":source["bindingRevision"].as_u64().unwrap_or(0),
+                "fileMetadata":source["fileMetadata"],"scanLimitsSignature":source["scanLimitsSignature"],
+                "cachedTextBytes":source["cachedTextBytes"],"active":true,"sourceRef":reference(source,None)}})}).collect::<Vec<_>>();
         let plan = storage::index_registry::apply(
             "storage.registry.publish",
             &json!({"registry":registry,"sources":registrations}),
@@ -780,6 +838,181 @@ struct Graph {
 static GRAPHS: OnceLock<Mutex<HashMap<String, Arc<Graph>>>> = OnceLock::new();
 static GRAPH_BUILDS: OnceLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>> = OnceLock::new();
 static LRU: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+
+static ANN_BACKGROUND: OnceLock<Mutex<HashMap<PathBuf, super::ann_queue::AnnSession>>> =
+    OnceLock::new();
+static ANN_PARTITIONS: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
+
+fn graph_identity(descriptor: &Value, identity: &Value, epoch: &Value, options: &Value) -> Value {
+    // Older keys did not record graph quality and cannot prove their construction parameters.
+    // 旧键未记录构图质量，不能证明所用参数；新图明确绑定参数后才跨重启复用。
+    json!({"version":"rust-gateway-v2","databaseIdentity":identity,"epoch":epoch,"scopeKey":descriptor["scope_key"],"descriptor":descriptor,
+        "buildParameters":{"metric":"cos","quantization":"f32","connectivity":options["connectivity"],"expansionAdd":options["expansionAdd"],"expansionSearch":options["expansionSearch"]}})
+}
+fn background_operation(config: &GatewayConfig, operation: &str, input: Value) -> Result<Value, ContractError> {
+    let mut owners = ANN_BACKGROUND.get_or_init(Default::default).lock().unwrap();
+    let session = owners.entry(database(config)).or_default();
+    let receipt = session.apply(&format!("retrieval.ann.queue.{operation}"), &input)
+        .map_err(|_| gateway::error("ANN 后台队列不可用。", "RETRIEVAL_BUSY", 503))?;
+    if let Some(error) = receipt.get("error") {
+        return Err(gateway::error(error["message"].as_str().unwrap_or("ANN 后台队列不可用。"),
+            match error["code"].as_str() { Some("RETRIEVAL_ANN_QUEUE_FULL") => "RETRIEVAL_ANN_QUEUE_FULL", _ => "RETRIEVAL_BUSY" }, 503));
+    }
+    Ok(receipt["value"].clone())
+}
+pub(crate) fn resume_ann_background(config: &GatewayConfig) {
+    let _ = background_operation(config, "init", json!({"concurrency":1}));
+    let _ = background_operation(config, "drained", json!({}));
+}
+pub(crate) fn stop_ann_background(config: &GatewayConfig) {
+    let _ = background_operation(config, "drain", json!({}));
+}
+pub(crate) fn ann_background_pending(config: &GatewayConfig) -> bool {
+    background_operation(config, "shouldSchedule", json!({})).ok() == Some(json!(true))
+}
+
+/// One maintenance owner consumes the existing queue; request cancellation never owns the graph build.
+/// 由既有维护线程消费原有队列，图构建不继承首次查询的取消令牌；停机及迁移仍等待同一线程。
+pub(crate) fn maintain_ann(config: &GatewayConfig, stop: &Arc<std::sync::atomic::AtomicBool>) -> Result<(), ContractError> {
+    let job = background_operation(config, "start", json!({}))?;
+    if job.is_null() { return Ok(()); }
+    let id = job["id"].clone();
+    let request = &job["descriptor"];
+    let result = prepare_ann_request(config, request, stop, &id);
+    let _ = background_operation(config, "finish", json!({"id":id,"succeeded":result.is_ok(),
+        "cancelled":stop.load(std::sync::atomic::Ordering::Acquire),"aborted":result.as_ref().err().is_some_and(|error| error.code()=="RETRIEVAL_ANN_STALE_BUILD"),
+        "code":result.as_ref().err().map(ContractError::code),"now":chrono::Utc::now().timestamp_millis()}));
+    result
+}
+
+fn partitions(config: &GatewayConfig, descriptor: &Value, options: &Value) -> Result<Vec<Value>, ContractError> {
+    let per_vector = descriptor["dimensions"].as_u64().unwrap_or(384) * 4
+        + options["connectivity"].as_u64().unwrap_or(16) * 16 + 256;
+    let capacity = options["maxShardBytes"].as_u64().unwrap_or(256 * 1024 * 1024)
+        .saturating_sub(1024 * 1024).checked_div(per_vector).unwrap_or(0).max(1);
+    let segments = descriptor["count"].as_u64().unwrap().div_ceil(capacity);
+    let plan = if segments > 1 {
+        sqlite_queries::apply("storage.index.vectorPartition", &arguments(config, json!({"descriptor":descriptor,"segments":segments})))?
+    } else { json!([{"count":descriptor["count"]}]) };
+    Ok(plan.as_array().unwrap().iter().map(|part| {
+        let mut shard = descriptor.clone();
+        shard.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+        shard
+    }).collect())
+}
+fn auto_options(descriptor: &Value, options: &Value) -> Value {
+    let mut effective = options.clone();
+    let per_vector = descriptor["dimensions"].as_u64().unwrap_or(384) * 4
+        + options["connectivity"].as_u64().unwrap_or(16) * 16 + 256;
+    let capacity = options["maxShardBytes"].as_u64().unwrap_or(256 * 1024 * 1024)
+        .saturating_sub(1024 * 1024).checked_div(per_vector).unwrap_or(0).max(1);
+    let shards = descriptor["count"].as_u64().unwrap_or(0).div_ceil(capacity);
+    // The default is an idle-cache starting point, not an immutable hardware limit.
+    // 默认驻留数是空闲缓存起点；完整集合可按需上调，每片仍由资源服务实际准入。
+    if options["adaptive"] == true && options["maxCachedShards"] == 4 {
+        effective["maxCachedShards"] = json!(shards.clamp(4, 16));
+    }
+    effective
+}
+fn validate_graph_source(config: &GatewayConfig, descriptor: &Value, identity: &Value, epoch: &Value) -> Result<(), ContractError> {
+    let connection = storage::sqlite_connections::acquire(&config.data_root, &database(config), 120000)?;
+    let actual = connection.database_identity();
+    drop(connection);
+    if identity != &json!(format!("{:016x}:{:016x}", actual.0, actual.1))
+        || initialize(config)?["epoch"] != *epoch
+        || sqlite_queries::apply("storage.index.scopeGeneration", &arguments(config, json!({"scopeKey":descriptor["scope_key"]})))? != descriptor["generation"] {
+        return Err(gateway::error("ANN 来源版本已变化。", "RETRIEVAL_ANN_STALE_BUILD", 409));
+    }
+    Ok(())
+}
+fn prepare_ann_request(config: &GatewayConfig, request: &Value, stop: &Arc<std::sync::atomic::AtomicBool>, job: &Value) -> Result<(), ContractError> {
+    let descriptor = &request["sourceDescriptor"];
+    let options = &request["options"];
+    validate_graph_source(config, descriptor, &request["databaseIdentity"], &request["epoch"])?;
+    let parts = partitions(config, descriptor, options)?;
+    if parts.len() as u64 > options["maxCachedShards"].as_u64().unwrap_or(4) {
+        return Err(gateway::error("当前常驻预算无法容纳完整图集合，继续使用词法检索。", "RETRIEVAL_ANN_RESOURCE_LIMIT", 503));
+    }
+    let mut completed = 0;
+    for part in &parts {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(gateway::error("ANN 后台构建已停止。", "ABORT_ERR", 409));
+        }
+        ann(config, part, &[], &request["scopes"], &request["databaseIdentity"], &request["epoch"], options, 0, true, true)?;
+        completed += part["count"].as_u64().unwrap_or(0);
+        let _ = background_operation(config, "patch", json!({"id":job,"completedVectors":completed}));
+    }
+    let key = hash(&graph_identity(descriptor, &request["databaseIdentity"], &request["epoch"], options).to_string());
+    let mut plans = ANN_PARTITIONS.get_or_init(Default::default).lock().unwrap();
+    if plans.len() >= 64 { if let Some(old) = plans.keys().next().cloned() { plans.remove(&old); } }
+    plans.insert(key, parts.clone());
+    drop(plans);
+    let mut protected = GRAPHS.get_or_init(Default::default).lock().unwrap().iter()
+        .filter(|(_, graph)| graph.database == database(config)).map(|(key, _)| json!(key)).collect::<Vec<_>>();
+    protected.extend(parts.iter().map(|part| json!(hash(&graph_identity(part, &request["databaseIdentity"], &request["epoch"], options).to_string()))));
+    let _ = storage::ann_cache::apply("storage.ann.prune", &json!({"root":config.data_root.join("Index"),"options":options,"resident":protected}));
+    Ok(())
+}
+
+fn enqueue_ann_descriptor(config: &GatewayConfig, descriptor: &Value, scopes: &Value, identity: &Value, epoch: &Value, options: &Value) -> Result<(), ContractError> {
+    let mut queued = descriptor.clone();
+    queued["sourceDescriptor"] = descriptor.clone(); queued["options"] = options.clone();
+    queued["scopes"] = scopes.clone(); queued["databaseIdentity"] = identity.clone(); queued["epoch"] = epoch.clone();
+    queued["buildBudgetKey"] = json!([options["maxShardBytes"], options["maxCachedShards"], options["connectivity"], options["expansionAdd"], options["expansionSearch"]]);
+    let mut scheduling = graph_identity(descriptor, identity, epoch, options);
+    scheduling["descriptor"].as_object_mut().unwrap().remove("generation");
+    scheduling["descriptor"].as_object_mut().unwrap().remove("count");
+    let queue_key = hash(&scheduling.to_string());
+    background_operation(config, "enqueue", json!({"key":queue_key,"descriptor":queued,"now":chrono::Utc::now().timestamp_millis()}))?;
+    Ok(())
+}
+
+/// Queue after vector publication rather than making the first foreground search discover every cold graph.
+/// 向量发布后主动合并建图请求；首个前台搜索不再独自承担缺图发现，参数和原有后台准入保持不变。
+pub(crate) fn prepare_scope_ann(config: &GatewayConfig, scope: &str, local: &Value) -> Result<u64, ContractError> {
+    let options = storage::settings::apply("storage.settings.ann", &json!({"value":local["ann"]}))?;
+    if options["mode"] != "auto" { return Ok(0); }
+    let boot = initialize(config)?;
+    let connection = storage::sqlite_connections::acquire(&config.data_root, &database(config), 120000)?;
+    let actual = connection.database_identity(); drop(connection);
+    let identity = json!(format!("{:016x}:{:016x}", actual.0, actual.1));
+    let scopes = json!([scope]);
+    let descriptors = sqlite_queries::apply("storage.index.vectorDescriptors", &arguments(config, json!({"scopes":scopes,"allProfiles":true})))?;
+    let mut queued = 0;
+    for descriptor in descriptors.as_array().into_iter().flatten().filter(|descriptor|
+        descriptor["count"].as_u64().unwrap_or(0) > options["threshold"].as_u64().unwrap_or(50000)) {
+        enqueue_ann_descriptor(config, descriptor, &scopes, &identity, &boot["epoch"], &auto_options(descriptor, &options))?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
+fn ann_auto(config: &GatewayConfig, descriptor: &Value, vector: &[f32], scopes: &Value, identity: &Value, epoch: &Value, options: &Value, limit: usize) -> Result<Vec<Value>, ContractError> {
+    let effective = auto_options(descriptor, options);
+    let options = &effective;
+    let key = hash(&graph_identity(descriptor, identity, epoch, options).to_string());
+    let parts = ANN_PARTITIONS.get_or_init(Default::default).lock().unwrap().get(&key).cloned();
+    if let Some(parts) = parts.filter(|parts| parts.len() as u64 <= options["maxCachedShards"].as_u64().unwrap_or(4)) {
+        let mut rows = Vec::new();
+        let mut complete = true;
+        for part in parts {
+            match ann(config, &part, vector, scopes, identity, epoch, options, limit, false, false) {
+                Ok(found) => rows.extend(found),
+                Err(error) if error.code() == "RETRIEVAL_ANN_BUILD_PENDING" => { complete = false; break; }
+                Err(error) => return Err(error),
+            }
+        }
+        // Return a complete shard set only; missing shards must not silently reduce semantic coverage.
+        // 仅返回完整分片集合，缺图时不能静默降低语义覆盖范围。
+        if complete { return Ok(rows); }
+    }
+    enqueue_ann_descriptor(config, descriptor, scopes, identity, epoch, options)?;
+    Err(gateway::error("ANN 正在后台准备，当前使用可用检索。", "RETRIEVAL_ANN_BUILD_PENDING", 503))
+}
+fn graph_page_interrupted(started: std::time::Instant) -> bool {
+    crate::service_cancellation::is_cancelled()
+        || started.elapsed() >= std::time::Duration::from_secs(120)
+}
 fn ann(
     config: &GatewayConfig,
     descriptor: &Value,
@@ -789,14 +1022,19 @@ fn ann(
     epoch: &Value,
     options: &Value,
     limit: usize,
+    allow_prepare: bool,
+    background: bool,
 ) -> Result<Vec<Value>, ContractError> {
-    let descriptor_identity = json!({"version":"rust-gateway-v1","databaseIdentity":identity,"epoch":epoch,"scopeKey":descriptor["scope_key"],"descriptor":descriptor});
+    let descriptor_identity = graph_identity(descriptor, identity, epoch, options);
     let key = hash(&descriptor_identity.to_string());
     let generation = descriptor["generation"].as_u64().unwrap();
     let dimensions = descriptor["dimensions"].as_u64().unwrap() as usize;
     let count = descriptor["count"].as_u64().unwrap() as usize;
     let cache = GRAPHS.get_or_init(Default::default);
     let resident = cache.lock().unwrap().get(&key).cloned();
+    if resident.is_none() && !allow_prepare {
+        return Err(gateway::error("ANN 正在后台准备。", "RETRIEVAL_ANN_BUILD_PENDING", 503));
+    }
     let build_owner = if resident.is_none() {
         let mut builds = GRAPH_BUILDS.get_or_init(Default::default).lock().unwrap();
         builds.retain(|_, owner| owner.strong_count() > 0);
@@ -849,7 +1087,7 @@ fn ann(
             }
             let token = crate::service_cancellation::current_token()
                 .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
-            let lease = super::gateway_embedding::reserve_graph(estimate, &token)?;
+            let lease = super::gateway_embedding::reserve_graph(estimate, &token, background)?;
             if lease.allocation["memoryBytes"].as_u64().unwrap_or(0) < estimate {
                 return Err(gateway::error(
                     "图资源实际授额不足。",
@@ -903,6 +1141,13 @@ fn ann(
                     let mut last_id = 0;
                     loop {
                         storage::sqlite_store::cancelled()?;
+                        if background {
+                            // SQL pages retain a bounded deadline; native graph progress renews the next page's budget.
+                            // 每页SQL保留有限执行期限；原生建图取得进展后为下一页续期，不共享前台总等待时间。
+                            let page_started = std::time::Instant::now();
+                            connection.progress_handler(1000, Some(move || graph_page_interrupted(page_started)))
+                                .map_err(storage::sqlite_store::failure)?;
+                        }
                         let args = json!({"descriptor":descriptor,"scopes":scopes,"binaryRequiredScope":true,"lastId":last_id});
                         let Some((sql, parameters)) =
                             storage::sqlite_vector_reads::vector_page_query(&connection, &args)?
@@ -919,6 +1164,7 @@ fn ann(
                             .map_err(storage::sqlite_store::failure)?;
                         let mut seen = 0;
                         for row in rows {
+                            storage::sqlite_store::cancelled()?;
                             let (id, bytes) = row.map_err(storage::sqlite_store::failure)?;
                             last_id = id;
                             seen += 1;
@@ -981,7 +1227,9 @@ fn ann(
                         &json!({"root":config.data_root.join("Index"),"key":key,"temporary":temporary}),
                     )?;
                 }
+                receipt?;
             }
+            validate_graph_source(config, descriptor, identity, epoch)?;
             let graph = Arc::new(Graph {
                 index,
                 database: database(config),
@@ -1005,10 +1253,10 @@ fn ann(
             409,
         ));
     }
-    let matches = graph
-        .index
-        .search(vector, limit)
-        .map_err(|_| gateway::error("ANN 查询失败。", "RETRIEVAL_ANN_FAILED", 500))?;
+    let matches = if limit > 0 {
+        Some(graph.index.search(vector, limit)
+            .map_err(|_| gateway::error("ANN 查询失败。", "RETRIEVAL_ANN_FAILED", 500))?)
+    } else { None };
     let mut lru = LRU.get_or_init(Default::default).lock().unwrap();
     lru.retain(|entry| entry != &key);
     lru.push_back(key);
@@ -1021,12 +1269,8 @@ fn ann(
             cache.lock().unwrap().remove(&old);
         }
     }
-    Ok(matches
-        .keys
-        .iter()
-        .zip(matches.distances)
-        .map(|(id, distance)| json!({"id":id,"distance":distance,"identity":descriptor}))
-        .collect())
+    Ok(matches.map(|matches| matches.keys.iter().zip(matches.distances)
+        .map(|(id, distance)| json!({"id":id,"distance":distance,"identity":descriptor})).collect()).unwrap_or_default())
 }
 pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractError> {
     let boot = initialize(config)?;
@@ -1070,6 +1314,7 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         } else {
             None
         };
+        let mut ann_pending = false;
         if let Some(vector) = &vector {
             if prepared["vectorsReady"] != true {
                 let mut matches = Vec::new();
@@ -1080,6 +1325,16 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                             && descriptor["count"].as_u64().unwrap()
                                 > options["threshold"].as_u64().unwrap());
                     if approximate {
+                        if options["mode"] == "auto" {
+                            match ann_auto(config, descriptor, vector, &input["scopeKeys"],
+                                &prepared["databaseIdentity"], &boot["epoch"], &options,
+                                begin["candidateLimit"].as_u64().unwrap() as usize) {
+                                Ok(rows) => { matches.extend(rows); semantic = Some("ann"); }
+                                Err(error) if ["RETRIEVAL_ANN_BUILD_PENDING", "RETRIEVAL_ANN_QUEUE_FULL", "RETRIEVAL_ANN_RESOURCE_LIMIT"].contains(&error.code()) => { ann_pending = true; }
+                                Err(error) => return Err(error),
+                            }
+                            continue;
+                        }
                         let dimensions = descriptor["dimensions"].as_u64().unwrap_or(384);
                         let connectivity = options["connectivity"].as_u64().unwrap_or(16);
                         let per_vector = dimensions * 4 + connectivity * 16 + 256;
@@ -1117,6 +1372,8 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
                                 &boot["epoch"],
                                 &options,
                                 begin["candidateLimit"].as_u64().unwrap() as usize,
+                                true,
+                                false,
                             ) {
                                 Ok(rows) => {
                                     matches.extend(rows);
@@ -1171,6 +1428,13 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         response["strategy"] = finalized["strategy"].clone();
         response["semanticBackend"] = json!(semantic);
         response["vectorAvailable"] = json!(config.vector_extension.is_file());
+        if options["mode"] == "auto" {
+            let mut background = background_operation(config, "status", json!({"now":chrono::Utc::now().timestamp_millis()}))?;
+            background["state"] = json!(if ann_pending {
+                if background["buildErrorCode"] == "RETRIEVAL_ANN_RESOURCE_LIMIT" { "resource_limited" } else { "preparing" }
+            } else if semantic == Some("ann") { "ready" } else { "idle" });
+            response["annBackground"] = background;
+        }
         Ok(response)
     })();
     if result.is_err() {
@@ -1195,4 +1459,119 @@ fn public_chunk(row: &Value) -> Result<Value, ContractError> {
 pub fn status(config: &GatewayConfig) -> Result<Value, ContractError> {
     initialize(config)?;
     sqlite_queries::apply("storage.index.status", &arguments(config, json!({})))
+}
+
+#[cfg(all(test, windows))]
+mod ann_background_tests {
+    use super::*;
+
+    #[test]
+    fn graph_page_deadline_renews_without_removing_cancellation() {
+        let previous = std::time::Instant::now() - std::time::Duration::from_secs(121);
+        assert!(graph_page_interrupted(previous));
+        assert!(!graph_page_interrupted(std::time::Instant::now()));
+        let cancellation = crate::service_cancellation::CancellationLease::acquire(&gateway::new_id()).unwrap();
+        let _scope = cancellation.enter();
+        cancellation.token.store(true, std::sync::atomic::Ordering::Release);
+        assert!(graph_page_interrupted(std::time::Instant::now()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires KYNXA_TEST_RESOURCE_SERVICE pointing to the isolated native resource helper"]
+    async fn auto_ann_cold_query_background_reuse_restart_and_update() {
+        let helper = std::env::var_os("KYNXA_TEST_RESOURCE_SERVICE")
+            .expect("set KYNXA_TEST_RESOURCE_SERVICE to the independently built resource helper");
+        let service = crate::resources::gateway::ResourceService::start(std::path::Path::new(&helper))
+            .await.unwrap();
+        crate::resources::gateway::install(service.clone());
+        super::super::gateway_embedding::install_runtime(tokio::runtime::Handle::current());
+        let root = std::env::temp_dir().join(format!("kynxa-ann-background-{}", gateway::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = GatewayConfig {
+            data_home: root.join("Models"), data_root: root.join("Data"),
+            extension_root: root.join("Extensions"), application_root: root.clone(), port: 0,
+            toolhost_exe: root.join("unused-toolhost.exe"), vector_extension: root.join("unused-vec0.dll"),
+            inference_library: root.join("unused-ort.dll"),
+        };
+        for directory in [&config.data_home, &config.data_root, &config.extension_root] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let fixture = config.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let source = |index: usize, revision: u64| json!({"sourceId":format!("fixture-{index}"),
+                    "scopeKey":"project:fixture","sourceType":"document","title":format!("Alpha {index}"),
+                    "locator":{},"sourceRevision":revision,"text":format!("alpha physics evidence {index} revision {revision}"),
+                    "embeddingProfileId":"fixture","embeddingModelVersion":"fixture-v1","embeddingSpaceId":"fixture-space"});
+                let prepared = (0..8).map(|index| prepare_source(&source(index, 1),
+                    Some(&[vec![1.0, (index as f32 + 1.0) / 10.0]])).unwrap()).collect::<Vec<_>>();
+                publish_prepared(&fixture, &prepared).unwrap();
+                resume_ann_background(&fixture);
+                let query = json!({"query":"alpha","scopeKeys":["project:fixture"],"queryVector":[1.0,0.1],
+                    "embeddingProfileId":"fixture","embeddingModelVersion":"fixture-v1","embeddingSpaceId":"fixture-space",
+                    "ann":{"mode":"auto","threshold":1,"exactScanLimit":1,"maxShardBytes":1049600}});
+                let first = search(&fixture, &query).unwrap();
+                assert_eq!(first["semanticBackend"], Value::Null);
+                assert_eq!(first["annBackground"]["state"], "preparing");
+                assert!(!first["items"].as_array().unwrap().is_empty());
+                search(&fixture, &query).unwrap();
+                let queued = background_operation(&fixture, "status", json!({"now":0})).unwrap();
+                assert_eq!(queued["pendingBuilds"], 1, "Repeated cold queries share one queued build.");
+                assert!(GRAPHS.get_or_init(Default::default).lock().unwrap().values()
+                    .all(|graph| graph.database != database(&fixture)), "Cold queries do not construct graphs.");
+
+                let cancellation = crate::service_cancellation::CancellationLease::acquire(&gateway::new_id()).unwrap();
+                let _scope = cancellation.enter();
+                maintain_ann(&fixture, &cancellation.token).unwrap();
+                let warm = search(&fixture, &query).unwrap();
+                assert_eq!(warm["semanticBackend"], "ann");
+                assert_eq!(warm["annBackground"]["state"], "ready");
+                assert_eq!(GRAPHS.get().unwrap().lock().unwrap().values()
+                    .filter(|graph| graph.database == database(&fixture)).count(), 8,
+                    "Adaptive admission retains the complete set beyond the old four-shard default.");
+                let other = search(&fixture, &json!({"query":"alpha","scopeKeys":["project:other"],"queryVector":[1.0,0.1],
+                    "embeddingProfileId":"fixture","ann":{"mode":"auto","threshold":1}})).unwrap();
+                assert!(other["items"].as_array().unwrap().is_empty());
+
+                let saved = std::fs::read_dir(fixture.data_root.join("Index/ann")).unwrap()
+                    .map(|entry| entry.unwrap().path()).filter(|path| path.extension().is_some_and(|extension| extension == "usearch"))
+                    .map(|path| { let modified = path.metadata().unwrap().modified().unwrap(); (path, modified) }).collect::<Vec<_>>();
+                assert_eq!(saved.len(), 8);
+                GRAPHS.get().unwrap().lock().unwrap().retain(|_, graph| graph.database != database(&fixture));
+                ANN_PARTITIONS.get().unwrap().lock().unwrap().clear();
+                assert_eq!(search(&fixture, &query).unwrap()["annBackground"]["state"], "preparing");
+                maintain_ann(&fixture, &cancellation.token).unwrap();
+                assert_eq!(search(&fixture, &query).unwrap()["semanticBackend"], "ann");
+                for (path, modified) in saved { assert_eq!(path.metadata().unwrap().modified().unwrap(), modified,
+                    "Restart preparation loads the published graph rather than rebuilding it."); }
+
+                let updated = prepare_source(&source(0, 2), Some(&[vec![0.1, 1.0]])).unwrap();
+                publish_prepared(&fixture, &[updated]).unwrap();
+                let changed = search(&fixture, &query).unwrap();
+                assert_eq!(changed["annBackground"]["state"], "preparing");
+                assert_eq!(changed["semanticBackend"], Value::Null);
+                maintain_ann(&fixture, &cancellation.token).unwrap();
+                assert_eq!(search(&fixture, &query).unwrap()["semanticBackend"], "ann");
+
+                let mut constrained = query.clone();
+                constrained["ann"]["adaptive"] = json!(false);
+                constrained["ann"]["maxCachedShards"] = json!(1);
+                // Discard only this fixture's resident plans to exercise a genuinely constrained cold request.
+                // 仅清除此夹具驻留计划，检查明确自定义预算不足时不会循环完成无用构图。
+                ANN_PARTITIONS.get().unwrap().lock().unwrap().clear();
+                search(&fixture, &constrained).unwrap();
+                let limited = maintain_ann(&fixture, &cancellation.token).unwrap_err();
+                assert_eq!(limited.code(), "RETRIEVAL_ANN_RESOURCE_LIMIT");
+                assert_eq!(search(&fixture, &constrained).unwrap()["annBackground"]["state"], "resource_limited");
+                assert!(!ann_background_pending(&fixture));
+            }))
+        }).await.unwrap();
+        stop_ann_background(&config);
+        GRAPHS.get_or_init(Default::default).lock().unwrap().retain(|_, graph| graph.database != database(&config));
+        storage::sqlite_connections::close(&config.data_root, &database(&config)).unwrap();
+        service.close().await;
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(&root).unwrap();
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    }
 }

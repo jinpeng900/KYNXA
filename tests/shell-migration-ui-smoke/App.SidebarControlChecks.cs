@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Layout;
@@ -19,6 +21,16 @@ public partial class App
     private async Task CheckSidebarControlsAsync()
     {
         if (ActiveId is null) await SearchAndSelectAsync(_gateway.WorkChatId, "Work fixture");
+        // Wait for the legitimate latest-history read before taking the immutable row snapshot used by all sidebar checks.
+        // 所有侧栏检查共用的原始行快照，必须在合法的最近历史读取完成之后取得。
+        await WaitAsync(() =>
+        {
+            if (_gateway.Failure is not null) throw new InvalidOperationException("Sidebar fixture history failed before native control checks.", _gateway.Failure);
+            var histories = ShellField<System.Collections.IDictionary>("_historyPages");
+            object? state = ActiveId is Guid chatId ? histories[chatId] : null;
+            return state is not null && (bool)state.GetType().GetProperty("Initialized")!.GetValue(state)! &&
+                !(bool)state.GetType().GetProperty("Loading")!.GetValue(state)!;
+        }, "the selected fixture history settles before native sidebar snapshots and pointer input");
         var layout = ShellField<LayoutState>("_layout");
         double originalWidth = layout.SidebarWidth;
         bool originallyCollapsed = layout.SidebarCollapsed;
@@ -32,6 +44,9 @@ public partial class App
         var originalRows = _shell.ActiveMessages.ToArray();
         string originalMessages = JsonSerializer.Serialize(originalRows.Select(row => row.Message).ToArray());
         var originalSize = Window.AppWindow.Size;
+        var originalPosition = Window.AppWindow.Position;
+        nint ownedWindow = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        if (!GetCursorPos(out NativePoint originalPointer)) throw new InvalidOperationException("Cannot save the sidebar fixture pointer position.");
         const string draft = "SIDEBAR_CONTROLS_UNSENT_DRAFT 中文 $x^2$";
         var observations = new Dictionary<string, object>();
         var pane = Element<Grid>("SidebarPane");
@@ -53,6 +68,7 @@ public partial class App
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= ShellLayoutMetrics.CompactSidebarBreakpoint,
                 "sidebar control checks begin in the actual wide native layout");
+            await ActivateOwnedShortcutWindowAsync();
             foreach (string language in new[] { "zh-CN", "en" })
             {
                 UiText.Initialize(language);
@@ -64,6 +80,7 @@ public partial class App
                     await SettleAsync();
                     string key = language + "-" + width;
                     CheckSidebarHeaderGeometry(key, width, observations);
+                    await CheckSidebarGripOverlapHitTestsAsync(key, observations);
                     if (language == "zh-CN" && width == ShellLayoutMetrics.SidebarDefault)
                         await CapturePresentedAsync("shell-sidebar-controls-wide.png");
                     if (language == "en" && width == ShellLayoutMetrics.SidebarMin)
@@ -71,6 +88,8 @@ public partial class App
                 }
             }
             CheckContext("localized default, minimum and maximum header layouts preserve draft, active messages and the formal catalog");
+            await CheckSidebarNavigationFeedbackAsync(observations);
+            CheckContext("native navigation hover, pressed feedback and themed keyboard focus preserve draft, messages and the formal catalog");
 
             UiText.Initialize("zh-CN");
             layout.SidebarWidth = 318;
@@ -101,6 +120,7 @@ public partial class App
             AppearanceService.ApplyPreferences(originalPalette, "dark", originalFontSize, originalAccent);
             await SettleAsync();
             CheckSidebarHeaderGeometry("wide-dark-318", 318, observations);
+            await CheckSidebarGripOverlapHitTestsAsync("wide-dark-318", observations);
             await CapturePresentedAsync("shell-sidebar-controls-wide-dark.png");
             NativeUi.Invoke(collapse);
             await WaitAsync(() => NativeUi.IsVisible(expand), "the themed native collapse button closes the dark sidebar");
@@ -219,16 +239,216 @@ public partial class App
             layout.SidebarWidth = originalWidth;
             layout.SidebarCollapsed = originallyCollapsed;
             SetShellField("_temporarySidebarOpen", false);
-            Window.AppWindow.Resize(originalSize);
+            Window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(originalPosition.X, originalPosition.Y,
+                originalSize.Width, originalSize.Height));
             Call("ApplyLayout");
             Call("SaveLayout");
             NativeUi.SetText(Prompt, originalDraft);
+            if (GetForegroundWindow() == ownedWindow) SetCursorPos(originalPointer.X, originalPointer.Y);
             await SettleAsync();
         }
     }
 
+    private async Task CheckSidebarNavigationFeedbackAsync(Dictionary<string, object> observations)
+    {
+        string palette = AppearanceService.Current.Id;
+        string mode = AppearanceService.Mode;
+        double fontSize = AppearanceService.ChatFontSize;
+        string? accent = AppearanceService.CustomAccent;
+        var originalPosition = Window.AppWindow.Position;
+        var originalSize = Window.AppWindow.Size;
+        nint windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        if (!GetCursorPos(out NativePoint originalPointer)) throw new InvalidOperationException("Cannot read the original navigation pointer position.");
+        var style = (Style)Current.Resources["KynxaNavigationButtonStyle"];
+        var buttons = NativeUi.Descendants<Button>(Element<Grid>("SidebarPane"))
+            .Where(button => ReferenceEquals(button.Style, style)).ToArray();
+        var selection = AppearanceService.GetBrush("KynxaSelectionBrush");
+        var focus = AppearanceService.GetBrush("KynxaFocusBrush");
+        ContentPresenter? lastHovered = null;
+        var pixelTraces = new List<SidebarNavigationPixelTrace>();
+        Check(buttons.Length == 5, "all five actual sidebar navigation entries use the shared navigation style");
+        var themes = new[]
+        {
+            (Key: "dark", Palette: "violet", Mode: "dark", Accent: (string?)null),
+            (Key: "light", Palette: AppearanceService.DefaultPaletteId, Mode: "light", Accent: (string?)null),
+            (Key: "custom-dark", Palette: "teal", Mode: "dark", Accent: (string?)"#C02070"),
+            (Key: "custom-light", Palette: "teal", Mode: "light", Accent: (string?)"#C02070")
+        };
+        try
+        {
+            await ActivateOwnedShortcutWindowAsync();
+            foreach (var theme in themes)
+            {
+                // Keep the last hovered entry under the pointer while changing the live palette.
+                // 切换实时配色时保留上次入口的指针位置，核对已悬停背景也能立即更新。
+                AppearanceService.ApplyPreferences(theme.Palette, theme.Mode, fontSize, theme.Accent);
+                await SettleAsync();
+                Check(ReferenceEquals(selection, AppearanceService.GetBrush("KynxaSelectionBrush")) &&
+                    ReferenceEquals(Element<Border>("PrimaryModeSelectionPill").Background, selection) &&
+                    selection.Color == AppearanceService.ParseColor(AppearanceService.Current.Soft),
+                    theme.Key + " keeps navigation feedback and the mode selection on the same live palette brush");
+                if (lastHovered is not null)
+                    Check(ReferenceEquals(lastHovered.Background, selection),
+                        theme.Key + " updates the already hovered navigation surface without recreating its brush");
+                foreach (var button in buttons)
+                {
+                    var presenter = NativeUi.ByName<ContentPresenter>(button, "NavigationPresenter");
+                    var common = VisualStateManager.GetVisualStateGroups(presenter).Single(group => group.Name == "CommonStates");
+                    string label = NativeUi.Descendants<TextBlock>(button).Single().Text;
+                    string key = "navigation-" + theme.Key + "-" + label;
+                    Prompt.Focus(FocusState.Programmatic);
+                    MovePointerInside(Element<Grid>("ShellGrid"), 0.75, 0.025);
+                    await WaitAsync(() => common.CurrentState?.Name == "Normal" &&
+                        presenter.Background is SolidColorBrush idle && idle.Color.A == 0,
+                        key + " returns to its actual transparent native normal state");
+                    await Task.Delay(120);
+                    Check(button.Focus(FocusState.Keyboard) && button.FocusState == FocusState.Keyboard &&
+                        ReferenceEquals(FocusManager.GetFocusedElement(_shell.XamlRoot), button) && button.UseSystemFocusVisuals &&
+                        ReferenceEquals(button.FocusVisualPrimaryBrush, focus),
+                        key + " keeps native keyboard focus and the current palette focus ring");
+                    Prompt.Focus(FocusState.Programmatic);
+                    var enter = await SampleSidebarNavigationPixelsAsync(button, key, "enter", selection.Color.ToString(),
+                        () => MovePointerInside(button), pixelTraces);
+                    await WaitAsync(() => common.CurrentState?.Name == "PointerOver" && ReferenceEquals(presenter.Background, selection),
+                        key + " receives real mouse hover and paints the current palette soft accent");
+                    CheckSidebarNavigationPixelTransition(enter);
+                    Check(ReferenceEquals(presenter.Foreground, AppearanceService.GetBrush("KynxaTextBrush")) &&
+                        presenter.CornerRadius.Equals(button.CornerRadius),
+                        key + " retains themed text and the same rounded surface while hovered");
+                    var leave = await SampleSidebarNavigationPixelsAsync(button, key, "leave", AppearanceService.Current.Sidebar,
+                        () => MovePointerInside(Element<Grid>("ShellGrid"), 0.75, 0.025), pixelTraces);
+                    await WaitAsync(() => common.CurrentState?.Name == "Normal" &&
+                        presenter.Background is SolidColorBrush idle && idle.Color.A == 0,
+                        key + " returns to normal after the observed native pointer leave");
+                    CheckSidebarNavigationPixelTransition(leave);
+                    var reenter = await SampleSidebarNavigationPixelsAsync(button, key, "reenter", selection.Color.ToString(),
+                        () => MovePointerInside(button), pixelTraces);
+                    await WaitAsync(() => common.CurrentState?.Name == "PointerOver" && ReferenceEquals(presenter.Background, selection),
+                        key + " restores its actual hover brush after native pointer reentry");
+                    CheckSidebarNavigationPixelTransition(reenter);
+                    // Inspect the real pressed visual state without invoking a navigation action.
+                    // 进入真实按下视觉状态核对画刷，不点击或执行任何导航动作。
+                    Check(VisualStateManager.GoToState(button, "Pressed", false), key + " exposes its native pressed visual state");
+                    await WaitAsync(() => common.CurrentState?.Name == "Pressed" && ReferenceEquals(presenter.Background, selection),
+                        key + " uses the same palette feedback while pressed");
+                    observations[key] = new
+                    {
+                        label, theme.Palette, theme.Mode, theme.Accent,
+                        background = selection.Color.ToString(), foreground = ((SolidColorBrush)presenter.Foreground).Color.ToString(),
+                        focus = focus.Color.ToString(), presenter.CornerRadius, realMouseHover = true, pressedVisualState = true,
+                        renderedEnterLeaveReentry = true
+                    };
+                    Check(VisualStateManager.GoToState(button, "PointerOver", false), key + " restores hover after its pressed visual check");
+                    lastHovered = presenter;
+                }
+                await CapturePresentedAsync("shell-sidebar-navigation-" + theme.Key + ".png");
+            }
+        }
+        finally
+        {
+            Prompt.Focus(FocusState.Programmatic);
+            AppearanceService.ApplyPreferences(palette, mode, fontSize, accent);
+            Window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(originalPosition.X, originalPosition.Y,
+                originalSize.Width, originalSize.Height));
+            if (GetForegroundWindow() == windowHandle) SetCursorPos(originalPointer.X, originalPointer.Y);
+            await SettleAsync();
+        }
+    }
+
+    private sealed record SidebarNavigationPixelSample(double ElapsedMs, double R, double G, double B, double Brightness);
+    private sealed record SidebarNavigationPixelTrace(string Key, string Phase, int ScreenX, int ScreenY,
+        double RasterizationScale, string ExpectedBrushColor, string? FinalVisualState,
+        SidebarNavigationPixelSample Before, List<SidebarNavigationPixelSample> Frames);
+
+    private static double SidebarNavigationPixelDifference(SidebarNavigationPixelSample first, SidebarNavigationPixelSample second) =>
+        Math.Max(Math.Abs(first.R - second.R), Math.Max(Math.Abs(first.G - second.G), Math.Abs(first.B - second.B)));
+
+    private async Task<SidebarNavigationPixelTrace> SampleSidebarNavigationPixelsAsync(Button button, string key, string phase,
+        string expectedBrushColor, Action movePointer, List<SidebarNavigationPixelTrace> traces)
+    {
+        RequireFixtureForeground();
+        if (button.ActualWidth < 80 || button.ActualHeight < 28)
+            throw new InvalidOperationException("The navigation pixel probe has no empty interior patch: " + key);
+        // Read one empty interior pixel below the text; repeated GetPixel calls would delay delivery of native hover input.
+        // 读取文字下方的单个空白内部像素；反复调用 GetPixel 会延迟原生悬停输入的处理。
+        Point point = button.TransformToVisual((FrameworkElement)Window.Content)
+            .TransformPoint(new Point(button.ActualWidth - 24, button.ActualHeight - 6));
+        double scale = _shell.XamlRoot.RasterizationScale;
+        var screen = new NativePoint { X = (int)Math.Round(point.X * scale), Y = (int)Math.Round(point.Y * scale) };
+        nint owned = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        if (!ClientToScreen(owned, ref screen) || GetAncestor(WindowFromPoint(screen), 2) != owned)
+            throw new InvalidOperationException("The navigation pixel probe is outside the visible owned window: " + key);
+        nint screenDc = GetSidebarScreenDc(0);
+        if (screenDc == 0) throw new InvalidOperationException("Cannot acquire the composed desktop pixels for " + key);
+        var frames = new List<SidebarNavigationPixelSample>();
+        try
+        {
+            SidebarNavigationPixelSample ReadPixel(Stopwatch? observationClock = null)
+            {
+                RequireFixtureForeground();
+                if (GetAncestor(WindowFromPoint(screen), 2) != owned)
+                    throw new InvalidOperationException("The owned navigation pixel probe became covered: " + key);
+                uint pixel = GetSidebarScreenPixel(screenDc, screen.X, screen.Y);
+                if (pixel == uint.MaxValue) throw new InvalidOperationException("Cannot read a composed navigation pixel: " + key);
+                double red = pixel & 255, green = (pixel >> 8) & 255, blue = (pixel >> 16) & 255;
+                return new(observationClock?.Elapsed.TotalMilliseconds ?? -1, red, green, blue, .2126 * red + .7152 * green + .0722 * blue);
+            }
+            var before = ReadPixel();
+            var elapsed = Stopwatch.StartNew();
+            movePointer();
+            frames.Add(ReadPixel(elapsed));
+            // Yield to XAML between screen reads; no settle delay or composition flush can hide the first transition frames.
+            // 屏幕读取之间让出 UI 线程；不先等待稳定或刷新合成，避免跳过最早的过渡帧。
+            while (elapsed.Elapsed.TotalMilliseconds < 600 &&
+                (elapsed.Elapsed.TotalMilliseconds < 200 || frames.Count < 8 ||
+                 !frames.TakeLast(3).All(frame => SidebarNavigationPixelDifference(frame, frames[^1]) <= 3)))
+            {
+                await Task.Delay(8);
+                frames.Add(ReadPixel(elapsed));
+            }
+            var presenter = NativeUi.ByName<ContentPresenter>(button, "NavigationPresenter");
+            var common = VisualStateManager.GetVisualStateGroups(presenter).Single(group => group.Name == "CommonStates");
+            var trace = new SidebarNavigationPixelTrace(key, phase, screen.X, screen.Y, scale, expectedBrushColor,
+                common.CurrentState?.Name, before, frames);
+            traces.Add(trace);
+            // Persist every observed frame before checking it so a failing baseline retains the actual transient colors.
+            // 断言前保存每个已观察帧，让失败的基线也保留真实瞬态颜色。
+            File.WriteAllText(Path.Combine(_directory, "shell-sidebar-navigation-pixels.json"), JsonSerializer.Serialize(new
+            {
+                targetIntervalMs = 8, minimumObservationMs = 200, maximumObservationMs = 600,
+                patch = "one composed screen pixel", endpointTolerance = 3, traces
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            return trace;
+        }
+        finally { ReleaseSidebarScreenDc(0, screenDc); }
+    }
+
+    private void CheckSidebarNavigationPixelTransition(SidebarNavigationPixelTrace trace)
+    {
+        const double tolerance = 3;
+        var final = trace.Frames[^1];
+        Check(trace.Frames.Count >= 8 && final.ElapsedMs >= 200 &&
+            trace.Frames.TakeLast(3).All(frame => SidebarNavigationPixelDifference(frame, final) <= tolerance),
+            trace.Key + " " + trace.Phase + " reaches a stable actually rendered endpoint after immediate native pointer input");
+        // Bounds come from displayed idle/hover endpoints, so screen color conversion cannot create a false flash result.
+        // 边界取自实际显示的空闲／悬停端点，避免屏幕颜色转换被误判为闪白。
+        bool Within(double value, double first, double last) => value >= Math.Min(first, last) - tolerance &&
+            value <= Math.Max(first, last) + tolerance;
+        Check(trace.Frames.All(frame => Within(frame.R, trace.Before.R, final.R) &&
+            Within(frame.G, trace.Before.G, final.G) && Within(frame.B, trace.Before.B, final.B) &&
+            frame.Brightness <= Math.Max(trace.Before.Brightness, final.Brightness) + tolerance),
+            trace.Key + " " + trace.Phase + " has no transient white or brightness flash outside actual idle/hover endpoints; " +
+            JsonSerializer.Serialize(new { trace.Before, final, peakBrightness = trace.Frames.Max(frame => frame.Brightness),
+                evidence = "shell-sidebar-navigation-pixels.json" }));
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetDC")] private static extern nint GetSidebarScreenDc(nint windowHandle);
+    [DllImport("user32.dll", EntryPoint = "ReleaseDC")] private static extern int ReleaseSidebarScreenDc(nint windowHandle, nint deviceContext);
+    [DllImport("gdi32.dll", EntryPoint = "GetPixel")] private static extern uint GetSidebarScreenPixel(nint deviceContext, int x, int y);
+
     private void CheckSidebarHeaderGeometry(string key, double expectedWidth, Dictionary<string, object> observations)
     {
+        var shell = Element<Grid>("ShellGrid");
         var pane = Element<Grid>("SidebarPane");
         var header = Element<Grid>("GlobalSidebarHeader");
         var switcher = Element<Border>("ChatWorkSwitcher");
@@ -237,6 +457,13 @@ public partial class App
         var shellBrush = Element<Grid>("ShellGrid").Background as SolidColorBrush;
         var sidebarBrush = pane.Background as SolidColorBrush;
         var mainBrush = Element<Grid>("MainRegion").Background as SolidColorBrush;
+        var grip = Element<ResizeGrip>("SidebarGrip");
+        var footer = Element<Grid>("SidebarFooter");
+        var settings = NativeUi.Descendants<Button>(footer).Single(button =>
+            AutomationProperties.GetName(button) == UiText.Get("设置"));
+        var settingsIcon = (ThemeIcon)settings.Content;
+        var monitorIcon = NativeUi.Descendants<ThemeIcon>(Element<Button>("ModelStatusButton"))
+            .Single(icon => icon.IconKey == "IconDeviceStatus");
         Rect Bounds(FrameworkElement element, FrameworkElement relativeTo) => element.TransformToVisual(relativeTo)
             .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
         bool Inside(FrameworkElement element, FrameworkElement relativeTo)
@@ -247,6 +474,25 @@ public partial class App
         }
         Check(Math.Abs(pane.ActualWidth - expectedWidth) < 1 && NativeUi.IsVisible(collapse) && NativeUi.IsVisible(switcher) &&
             !NativeUi.IsVisible(expand), key + " has the requested actual pane width and mutually exclusive visible controls");
+        Rect paneBounds = Bounds(pane, shell), mainBounds = Bounds(Element<Grid>("MainRegion"), shell);
+        Rect gripBounds = Bounds(grip, shell), settingsBounds = Bounds(settingsIcon, shell), monitorBounds = Bounds(monitorIcon, shell);
+        double leftFooterGap = settingsBounds.Left - paneBounds.Left;
+        double rightFooterGap = mainBounds.Left - monitorBounds.Right;
+        // Wide mode reserves a grip gutter; the compact drawer overlays the unchanged collapsed main-content origin.
+        // 宽布局预留拖动留白；紧凑抽屉覆盖正文，不改变其折叠模式起点。
+        if (!ShellField<bool>("_isCompactLayout"))
+        {
+            Check(Math.Abs(paneBounds.Left) < .5 && Math.Abs(mainBounds.Left - expectedWidth - 4) < .5 &&
+                Math.Abs(gripBounds.Width - 8) < .5 && Math.Abs(gripBounds.Left - expectedWidth + 2) < .5 &&
+                Math.Abs(gripBounds.Right - expectedWidth - 6) < .5 &&
+                Math.Abs(paneBounds.Right - gripBounds.Left - 2) < .5 && Math.Abs(gripBounds.Right - mainBounds.Left - 2) < .5 &&
+                Canvas.GetZIndex(grip) > Canvas.GetZIndex(pane),
+                key + " reserves only four DIPs before main content while the eight-DIP grip overlaps both adjacent regions by two DIPs");
+            Check(Math.Abs(settingsBounds.Left - 20) < .5 && Math.Abs(settingsBounds.Right - 40) < .5 &&
+                Math.Abs(monitorBounds.Left - expectedWidth + 36) < .5 && Math.Abs(monitorBounds.Right - expectedWidth + 16) < .5 &&
+                Math.Abs(leftFooterGap - 20) < .5 && Math.Abs(rightFooterGap - 20) < .5 && Math.Abs(leftFooterGap - rightFooterGap) < .5,
+                key + " preserves both original footer icon anchors and equal twenty-DIP actual outer margins");
+        }
         Check(shellBrush is not null && sidebarBrush is not null && mainBrush is not null &&
             shellBrush.Color.A == 255 && shellBrush.Color == sidebarBrush.Color && mainBrush.Color.A == 255,
             key + " fills the transparent grip column with the sidebar color while the main region retains its own opaque background");
@@ -282,6 +528,8 @@ public partial class App
         observations[key] = new
         {
             pane = new { pane.ActualWidth, pane.ActualHeight }, header = Bounds(header, pane),
+            main = mainBounds, grip = gripBounds, footer = new { settings = settingsBounds, monitor = monitorBounds,
+                leftOuterGap = leftFooterGap, rightOuterGap = rightFooterGap },
             backgrounds = new { shell = shellBrush?.Color.ToString(), sidebar = sidebarBrush?.Color.ToString(), main = mainBrush?.Color.ToString() },
             switcher = Bounds(switcher, header), collapse = Bounds(collapse, header),
             work = Bounds(Element<Button>("WorkModeButton"), header), chat = Bounds(Element<Button>("ChatModeButton"), header),
@@ -291,6 +539,65 @@ public partial class App
                     .Select(text => new { text.Text, bounds = Bounds(text, header) }).ToArray()
             }).ToArray()
         };
+    }
+
+    private async Task CheckSidebarGripOverlapHitTestsAsync(string key, Dictionary<string, object> observations)
+    {
+        // Layout and window resizing do not guarantee foreground ownership; activate immediately before native input.
+        // 布局和窗口尺寸更新不保证前台归属；原生输入前重新激活已核验的自有窗口。
+        try
+        {
+            await ActivateOwnedShortcutWindowAsync();
+            RequireFixtureForeground();
+        }
+        catch
+        {
+            nint foreground = GetForegroundWindow();
+            GetSettingsWindowProcessId(foreground, out uint foregroundProcessId);
+            File.WriteAllText(Path.Combine(_directory, "shell-sidebar-grip-foreground.json"), JsonSerializer.Serialize(new
+            {
+                key, ownedWindow = WinRT.Interop.WindowNative.GetWindowHandle(Window).ToInt64(),
+                ownedProcessId = Environment.ProcessId, foregroundWindow = foreground.ToInt64(), foregroundProcessId
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            throw;
+        }
+        var grip = Element<ResizeGrip>("SidebarGrip");
+        var shell = Element<Grid>("ShellGrid");
+        var windowRoot = (FrameworkElement)Window.Content;
+        var pointerOver = typeof(ResizeGrip).GetField("_pointerOver", PrivateInstance)!;
+        var dragging = typeof(ResizeGrip).GetField("_dragging", PrivateInstance)!;
+        bool IsOver() => (bool)pointerOver.GetValue(grip)!;
+        Rect pane = Element<Grid>("SidebarPane").TransformToVisual(shell)
+            .TransformBounds(new Rect(0, 0, Element<Grid>("SidebarPane").ActualWidth, Element<Grid>("SidebarPane").ActualHeight));
+        Rect main = Element<Grid>("MainRegion").TransformToVisual(shell)
+            .TransformBounds(new Rect(0, 0, Element<Grid>("MainRegion").ActualWidth, Element<Grid>("MainRegion").ActualHeight));
+        var hits = new List<object>();
+        // Move into each two-DIP overlap from outside the grip; real PointerEntered must reach the grip above both neighbors.
+        // 从拖动区外侧分别移入两个 2 DIP 重叠区；真实 PointerEntered 必须穿过相邻区域并到达上层拖动控件。
+        foreach (var side in new[] { (Name: "sidebar", Fraction: .125), (Name: "main", Fraction: .875) })
+        {
+            MovePointerInside(shell, .75, .025);
+            await WaitAsync(() => !IsOver(), key + " leaves the real sidebar grip before testing its " + side.Name + " overlap");
+            MovePointerInside(grip, side.Fraction, .5);
+            await WaitAsync(IsOver, key + " receives a real pointer enter inside its two-DIP " + side.Name + " overlap");
+            if (!GetCursorPos(out NativePoint actual)) throw new InvalidOperationException("Cannot read the actual grip overlap pointer.");
+            var origin = new NativePoint();
+            nint owned = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+            if (!ClientToScreen(owned, ref origin)) throw new InvalidOperationException("Cannot locate the sidebar overlap client origin.");
+            double scale = _shell.XamlRoot.RasterizationScale;
+            Point clientPoint = new((actual.X - origin.X) / scale, (actual.Y - origin.Y) / scale);
+            Point shellPoint = windowRoot.TransformToVisual(shell).TransformPoint(clientPoint);
+            bool inOverlap = side.Name == "sidebar"
+                ? shellPoint.X > pane.Right - 2 && shellPoint.X < pane.Right
+                : shellPoint.X > main.Left && shellPoint.X < main.Left + 2;
+            Check(inOverlap && !(bool)dragging.GetValue(grip)! && GetAncestor(WindowFromPoint(actual), 2) == owned,
+                key + " hits the actual " + side.Name + " overlap screen point without pressing or dragging");
+            hits.Add(new { side.Name, side.Fraction, screen = new { actual.X, actual.Y }, clientPoint, shellPoint,
+                scale, realPointerEntered = IsOver(), dragging = false });
+        }
+        MovePointerInside(shell, .75, .025);
+        await WaitAsync(() => !IsOver(), key + " clears native grip hover after both overlap probes");
+        observations[key + "-grip-overlap-hits"] = hits;
     }
 
     private void CheckCollapsedSidebarGeometry(string key, Dictionary<string, object> observations)

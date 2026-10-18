@@ -11,6 +11,8 @@ public interface ITasksApi
         CancellationToken cancellationToken = default);
     Task<TaskPausedResponse> PausedAsync(Guid conversationId, Guid? projectId = null,
         CancellationToken cancellationToken = default);
+    Task<TaskListResponse> RecoverableAsync(Guid conversationId, Guid? projectId = null, Guid? afterTaskId = null,
+        CancellationToken cancellationToken = default);
     Task<TaskDetailResponse> GetAsync(Guid conversationId, Guid taskId, Guid? projectId = null,
         CancellationToken cancellationToken = default);
     Task<TaskEventsResponse> EventsAsync(Guid conversationId, Guid taskId, ulong afterSequence,
@@ -72,6 +74,27 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         {
             Validate(task, conversationId, projectId);
             if (task.ParentTaskId is not null || task.State != "paused") throw Invalid();
+        }
+        if (result.Tasks.Select(task => task.TaskId).Distinct().Count() != result.Tasks.Length) throw Invalid();
+        return result;
+    }
+
+    public async Task<TaskListResponse> RecoverableAsync(Guid conversationId, Guid? projectId = null,
+        Guid? afterTaskId = null, CancellationToken cancellationToken = default)
+    {
+        using var deadline = CreateDeadline(cancellationToken, 30);
+        cancellationToken = deadline.Token;
+        string path = $"/api/tasks/recoverable?conversationId={ValidId(conversationId):D}&limit=50";
+        if (projectId is Guid project) path += $"&projectId={ValidId(project):D}";
+        if (afterTaskId is Guid after) path += $"&afterTaskId={ValidId(after):D}";
+        await _ensureReady(cancellationToken);
+        var result = await ReadProjectionAsync<TaskListResponse>(path, cancellationToken);
+        if (result.Tasks is null || result.Tasks.Length > 50 || result.HasMore && result.NextTaskId is null ||
+            result.NextTaskId is Guid next && (next == Guid.Empty || next == afterTaskId)) throw Invalid();
+        foreach (var task in result.Tasks)
+        {
+            Validate(task, conversationId, projectId);
+            if (task.ParentTaskId is not null || !TaskStates.CanResume(task.State)) throw Invalid();
         }
         if (result.Tasks.Select(task => task.TaskId).Distinct().Count() != result.Tasks.Length) throw Invalid();
         return result;

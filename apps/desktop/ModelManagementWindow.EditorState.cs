@@ -82,7 +82,7 @@ public sealed partial class ModelManagementWindow
         };
         _discardDialog = dialog;
         UpdateDiscardDialogLanguage();
-        try { return await dialog.ShowAsync() == ContentDialogResult.Primary && !_closed; }
+        try { return await DialogPresentation.ShowAsync(dialog) == ContentDialogResult.Primary && !_closed; }
         catch (Exception)
         {
             if (!_closed) SetStatus("暂时无法显示确认窗口，请关闭其他弹窗后重试。", true);

@@ -38,7 +38,7 @@ public sealed partial class RetrievalSettingsWindow
                         { invalid = string.Format(UiText.Get("第 {0} 个链接不是有效的 HTTP(S) 地址。"), index + 1); break; }
                 if (invalid is not null) { error.Text = invalid; args.Cancel = true; }
             };
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary || _closed) return;
+            if (await DialogPresentation.ShowAsync(dialog) != ContentDialogResult.Primary || _closed) return;
             var failures = new List<string>();
             int importedCount = 0;
             string? latestJobId = null;

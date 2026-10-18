@@ -1,6 +1,9 @@
 //! Project saved attachments into the current model turn without changing the user's original text.
 //! 将已保存附件投影到当前模型轮次，保留用户原文；附件正文始终作为资料而非指令。
 
+use std::sync::OnceLock;
+
+use regex::Regex;
 use serde_json::{Value, json};
 
 pub(crate) fn user_message(text: &str, message_id: &str, prepared: &Value) -> Value {
@@ -103,27 +106,135 @@ pub(crate) fn remove_images(history: &mut [Value]) -> bool {
     removed
 }
 
-pub(crate) fn image_rejection(status: u16, message: &str, details: &Value) -> bool {
+/// Apply known owned-model capabilities only to a request projection; unknown API capabilities remain unchanged.
+/// 已知自管模型能力仅作用于本次请求投影；API或未知能力保持原合同，正式附件与历史不变。
+pub(crate) fn project_text_only_model(connection: &Value, history: &mut [Value]) -> bool {
+    let managed = connection["providerId"]
+        .as_str()
+        .is_some_and(|provider| provider.starts_with("kynxa-local-"));
+    let known_text_only = connection["capabilities"]
+        .as_array()
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| capability == "text")
+                && !capabilities.iter().any(|capability| capability == "vision")
+        });
+    managed && known_text_only && remove_images(history)
+}
+
+/// Classify explicit upstream image refusals without publishing their body or arbitrary provider metadata.
+/// 仅识别上游明确的图片拒绝；原始正文和任意供应商元数据不进入公开诊断。
+pub(crate) fn classify_image_rejection(status: u16, body: &Value) -> Value {
     if ![400, 415, 422, 500].contains(&status) {
-        return false;
+        return Value::Null;
     }
-    let text = format!("{message} {details}").to_ascii_lowercase();
-    (text.contains("image") || text.contains("vision") || text.contains("multimodal"))
-        && [
-            "not support",
-            "unsupported",
-            "does not",
-            "only text",
-            "invalid",
-            "not allowed",
-        ]
-        .iter()
-        .any(|part| text.contains(part))
+    let message = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .or_else(|| body["message"].as_str())
+        .unwrap_or("");
+    if message.len() > 65_536 {
+        return Value::Null;
+    }
+    let code = body["error"]["code"]
+        .as_str()
+        .or_else(|| body["error"]["type"].as_str())
+        .or_else(|| body["code"].as_str())
+        .unwrap_or("");
+    static UNSUPPORTED: OnceLock<Regex> = OnceLock::new();
+    static INVALID: OnceLock<Regex> = OnceLock::new();
+    let unsupported = UNSUPPORTED.get_or_init(|| Regex::new(r"(?i)(?:\b(?:does|do)\s+not\s+support\b[^\n]{0,80}\b(?:images?|image_url|vision|multimodal)\b|\b(?:images?|image_url|vision|multimodal)\b[^\n]{0,80}\b(?:not\s+supported|unsupported|not\s+allowed)\b|\bunsupported\s+(?:images?|image_url|vision|multimodal)\b)").unwrap());
+    let invalid = INVALID.get_or_init(|| Regex::new(r"(?i)(?:\binvalid\s+(?:images?|image_url|vision|multimodal)\b|\b(?:image|image_url|vision|multimodal)\s+(?:input|format|data|url|content)\b[^\n]{0,60}\binvalid\b|\b(?:failed|unable)\s+to\s+(?:decode|load|parse)\s+(?:the\s+)?image\b)").unwrap());
+    let reason = if matches!(
+        code,
+        "unsupported_image" | "unsupported_image_input" | "vision_not_supported"
+    ) || unsupported.is_match(message)
+    {
+        "unsupported"
+    } else if matches!(
+        code,
+        "invalid_image" | "invalid_image_format" | "invalid_image_url" | "image_parse_error"
+    ) || invalid.is_match(message)
+    {
+        "invalid"
+    } else {
+        return Value::Null;
+    };
+    json!({"kind":"image-input","reason":reason,"verified":true})
+}
+
+pub(crate) fn image_rejection(status: u16, _message: &str, details: &Value) -> bool {
+    // The gateway's public 502 is distinct from the provider rejection that authorizes this text fallback.
+    // 网关公开的502与供应商实际拒绝不同；只有已核验的图片分类允许文字回退。
+    let upstream_status = details["upstreamStatus"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(status);
+    [400, 415, 422, 500].contains(&upstream_status)
+        && details["imageRejection"]["kind"] == "image-input"
+        && details["imageRejection"]["verified"] == true
+        && matches!(
+            details["imageRejection"]["reason"].as_str(),
+            Some("unsupported" | "invalid")
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_text_only_projection_preserves_saved_content_and_unknown_routes() {
+        let original = vec![json!({"role":"user","attachmentMessageId":"message",
+            "content":[{"type":"text","text":"用户问题和现有文档文字"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]})];
+        let mut projected = original.clone();
+        let text = json!({"providerId":"kynxa-local-fixture","capabilities":["text","tools"]});
+        assert!(project_text_only_model(&text, &mut projected));
+        assert_eq!(projected[0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(projected[0]["content"][0]["text"], "用户问题和现有文档文字");
+        assert_eq!(projected[0]["attachmentMessageId"], "message");
+        assert_eq!(original[0]["content"].as_array().unwrap().len(), 2);
+        assert!(!project_text_only_model(&text, &mut projected));
+        for route in [
+            json!({"providerId":"cloud","capabilities":["text"]}),
+            json!({"providerId":"external-local","baseUrl":"http://127.0.0.1:18080","capabilities":["text"]}),
+            json!({"providerId":"kynxa-local-fixture"}),
+            json!({"providerId":"kynxa-local-fixture","capabilities":[]}),
+            json!({"providerId":"kynxa-local-fixture","capabilities":["text","vision"]}),
+        ] {
+            let mut unchanged = original.clone();
+            assert!(!project_text_only_model(&route, &mut unchanged));
+            assert_eq!(unchanged, original);
+        }
+    }
+
+    #[test]
+    fn upstream_image_classification_is_explicit_private_and_works_through_gateway_status() {
+        for (message, reason) in [
+            ("This model does not support image inputs. fixture-secret", "unsupported"),
+            ("Image inputs are not supported fixture-secret", "unsupported"),
+            ("Invalid image format fixture-secret", "invalid"),
+            ("failed to decode the image fixture-secret", "invalid"),
+        ] {
+            let classification = classify_image_rejection(400, &json!({"error":{"message":message}}));
+            assert_eq!(classification, json!({"kind":"image-input","reason":reason,"verified":true}));
+            assert!(!classification.to_string().contains("fixture-secret"));
+            let details = json!({"upstreamStatus":400,"imageRejection":classification});
+            assert!(image_rejection(502, "模型拒绝了图片输入。", &details));
+            assert!(!image_rejection(502, "", &json!({"upstreamStatus":401,"imageRejection":classification})));
+        }
+        for body in [
+            json!({"error":{"message":"Invalid API key for image model"}}),
+            json!({"error":{"message":"request (12163 tokens) exceeds the available context size (8192 tokens)"}}),
+            json!({"error":{"message":"Unsupported parameter: tools"}}),
+        ] {
+            assert!(classify_image_rejection(400, &body).is_null());
+        }
+        assert!(classify_image_rejection(401, &json!({"error":"unsupported image"})).is_null());
+        assert!(!image_rejection(400, "unsupported image", &Value::Null));
+        assert!(!image_rejection(400, "", &json!({"imageRejection":{"kind":"image-input","verified":false,"reason":"invalid"}})));
+    }
+
     #[test]
     fn projection_keeps_question_and_paged_evidence_when_vision_is_removed() {
         let prepared = json!({"attachments":[{"id":"a","name":"作业.docx"}],

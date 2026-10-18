@@ -34,7 +34,7 @@ public sealed record TaskEvent(Guid TaskId, ulong Sequence, string EventId, stri
 public sealed record TaskEventsResponse(Guid TaskId, TaskEvent[] Events, ulong ThroughSequence, bool HasMore);
 public sealed record TaskControlRequest(Guid ConversationId, ulong ExpectedVersion, string Action);
 public sealed record TaskControlResponse(TaskRecord Task, Guid[] AffectedTaskIds, bool ReconnectRequired = false,
-    Guid? ReplyMessageId = null);
+    Guid? ReplyMessageId = null, JsonElement? Recovery = null);
 public sealed record TaskSteeringRequest(Guid ConversationId, ulong ExpectedVersion, Guid UserMessageId,
     string Message, string Action, Guid? ReplyMessageId = null, ChatAttachment[]? Attachments = null);
 

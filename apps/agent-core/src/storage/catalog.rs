@@ -291,6 +291,7 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             if !value["FolderPath"].is_null() && !value["FolderPath"].is_string() {
                 return Err(invalid("会话文本格式无效，原文件已保留。"));
             }
+            super::workspace_mounts::project(value)?;
             return Ok(Value::Null);
         }
         "storage.catalog.unique" => {
@@ -470,9 +471,12 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
             .flatten()
             .find(|project| key(&project["Id"]).ok().as_ref() == Some(&id))
             .ok_or_else(|| ContractError::new("工作不存在。", "PROJECT_NOT_FOUND", 404))?;
-        return Ok(
-            json!({"projectId": project["Id"], "name": project["Name"], "folderPath": project["FolderPath"], "isFolderlessWorkspace": truthy(&project["IsFolderlessWorkspace"]), "isArchived": truthy(&project["IsArchived"])}),
-        );
+        let mut result = super::workspace_mounts::relationship(project)?;
+        result["projectId"] = project["Id"].clone();
+        result["name"] = project["Name"].clone();
+        result["isFolderlessWorkspace"] = json!(truthy(&project["IsFolderlessWorkspace"]));
+        result["isArchived"] = json!(truthy(&project["IsArchived"]));
+        return Ok(result);
     }
     let mut next = arguments["next"].clone();
     if arguments["expectedRevision"] != current["Revision"] {

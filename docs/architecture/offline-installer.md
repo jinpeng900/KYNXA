@@ -1,12 +1,14 @@
 # KYNXA 1.5 离线安装与多来源下载
 
-当前完整安装文件为 `KYNXA-1.5.2-windows-x64-setup.exe`，从 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2)获取。安装程序包含桌面、自包含 .NET/WinUI、原生网关与资源服务、文档解析组件、私有 Node/MCP、Chromium、E5/BGE 以及 WebView2 离线先决组件。基础安装读取本地载荷，不要求用户安装 SDK，也不因模型网站不可用而中断。
+当前完整安装文件为 `KYNXA-1.5.3-windows-x64-setup.exe`，从 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3)获取。安装程序包含桌面、自包含 .NET/WinUI、原生网关与资源服务、文档解析组件、私有 Node/MCP、Chromium、E5/BGE 以及 WebView2 离线先决组件。基础安装读取本地载荷，不要求用户安装 SDK，也不因模型网站不可用而中断。
+
+> 1.5.3 目前为本地源码与发行准备，安装文件尚未发布；最终发布状态见 [版本说明](../releases/1.5.3.md)。
 
 可选对话模型不默认打入基础包。用户勾选后，软件首次启动把下载交给原有 Rust 模型管理器，界面和 API 聊天可以先使用。未勾选时不下载对话模型。
 
 ## 在线版与离线版
 
-`KYNXA-1.5.2-windows-x64-online-setup.exe` 是小型在线入口：显示实际下载进度，自动下载完整安装包，完成校验后打开同一套安装界面。关闭下载窗口会保留断点；再次运行继续下载。用户不需要选择来源或运行 PowerShell 命令。
+`KYNXA-1.5.3-windows-x64-online-setup.exe` 是小型在线入口：显示实际下载进度，自动下载完整安装包，完成校验后打开同一套安装界面。关闭下载窗口会保留断点；再次运行继续下载。用户不需要选择来源或运行 PowerShell 命令。
 
 下载缓存优先放在在线 EXE 旁的专用文件夹；该目录不可写时使用当前用户的安装下载缓存。同目录已经存在完整离线安装包时直接复用。在线下载阶段不创建软件安装记录；正式安装仍由完整安装器处理。
 
@@ -58,11 +60,11 @@ GitHub 上的软件安装包和运行资源使用 Release 附件分发；源码�
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Build -Configuration Release
 ```
 
-该命令只编译源码，不生成安装器；`-Action Run` 用于构建并启动。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 生成安装器，当前包版本参数为 `1.5.2`。
+该命令只编译源码，不生成安装器；`-Action Run` 用于构建并启动。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 生成安装器，当前包版本参数为 `1.5.3`。
 
 发行脚本的 `-ModelDownloadSourcesPath` 选择发布给用户的模型来源配置，`-DownloadSourcesPath` 配置构建机资源来源；两者分开，避免把构建机配置或认证带进产品。源码构建入口的 `-Offline` 需要已准备对应 SDK 和依赖缓存，完整离线 EXE 的用户安装无需此参数。
 
-完整包发布并把 `installer-release.json` 中的下载来源标记为 `available` 后，维护者可在发行工作区使用 `apps/desktop/Build/build-online-installer.ps1`，以版本 `1.5.2` 单独生成在线入口。
+完整包发布并把 `installer-release.json` 中的下载来源标记为 `available` 后，维护者可在发行工作区使用 `apps/desktop/Build/build-online-installer.ps1`，以版本 `1.5.3` 单独生成在线入口。
 
 此入口只打包下载窗口、下载模块和现有发布清单，不重编 Rust、C# 或完整离线包。正常构建拒绝全部来源仍为 `pending` 的清单；维护者的 `-AllowUnpublished` 仅用于编译未发布模板，构建记录会标明不可直接下载。
 

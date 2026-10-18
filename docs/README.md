@@ -1,13 +1,15 @@
 # KYNXA 1.5 文档
 
-当前安装发行版为 **1.5.2**，安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2)分发，修正内容见 [1.5.2 更新说明](releases/1.5.2.md)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
+当前安装发行版为 **1.5.3**，安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3)分发，修正内容见 [1.5.3 更新说明](releases/1.5.3.md)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
+
+> 1.5.3 目前为本地源码与发行准备，安装文件尚未发布；最终发布状态见版本说明。
 
 ## 使用与开发入口
 
 | 内容 | 入口 |
 | --- | --- |
 | 项目介绍、快速开始 | [项目 README](../README.md) |
-| 本版变化与验证范围 | [1.5 系列总览](releases/1.5.md)、[1.5.2 更新说明](releases/1.5.2.md) |
+| 本版变化与验证范围 | [1.5 系列总览](releases/1.5.md)、[1.5.3 更新说明](releases/1.5.3.md) |
 | 源码环境、增量构建与启动 | [桌面构建说明](../apps/desktop/Build/README.md) |
 | EXE 安装器、目录与发布载荷 | [安装器说明](../apps/desktop/Build/Installer/README.md) |
 | 完整离线安装、原站／GitHub／国内源与断点恢复 | [离线安装与多来源下载](architecture/offline-installer.md) |

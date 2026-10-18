@@ -57,3 +57,10 @@ node_modules/
 # Machine-specific benchmark inputs, indexes and results remain local; portable runners live in tools/development.
 # 本机评测输入、索引与结果保留本地；可移植的评测入口位于 tools/development。
 /test/
+
+# Local design archives and generated design documents stay outside the source repository.
+# 本机设计归档和生成的设计文档保留本地，不进入源码仓库。
+/docs/design/
+/*.zip
+/*.7z
+/*.rar

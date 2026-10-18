@@ -8,6 +8,11 @@ namespace KYNXA_Desktop.Services;
 /// </summary>
 internal sealed record PausedTaskSelection(Guid? TaskId, bool IsAmbiguous)
 {
+    internal static bool CanResumeInContext(TaskRecord task, Guid? conversationId, Guid? projectId,
+        bool hasActiveReply, Guid? activeTaskId, bool activeReplyPaused) =>
+        task.ParentTaskId is null && task.Scope.ConversationId == conversationId && task.Scope.ProjectId == projectId &&
+        (!hasActiveReply || activeReplyPaused && activeTaskId == task.TaskId);
+
     internal static PausedTaskSelection From(TaskPausedResponse response) => response.Tasks.Length switch
     {
         0 => new(null, false),

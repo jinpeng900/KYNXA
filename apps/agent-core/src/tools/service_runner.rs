@@ -8,6 +8,9 @@ use super::local_files::{absolute_path, inspect, path_text, within};
 use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::{array, string, truthy};
 
+pub(super) const SANDBOX_JOB_MEMORY_BYTES: u64 = 768 * 1024 * 1024;
+const SANDBOX_HELPER_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+
 fn failure(code: &str, message: &str) -> ServiceError {
     ServiceError::new(code, message, 400)
 }
@@ -149,7 +152,7 @@ impl RunnerState {
             "runner.resourcePlan" => {
                 let kind = string(&arguments["kind"]);
                 let request = &arguments["request"];
-                let mut requirements = json!({"cpuThreads":if kind=="desktop"{1}else{2},"memoryBytes":if kind=="desktop"{if request["action"]=="screenshot"{192*1024*1024}else{32*1024*1024}}else{64*1024*1024}});
+                let mut requirements = json!({"cpuThreads":if kind=="desktop"{1}else if kind=="sandbox"{request["resourceLimits"]["cpuThreads"].as_u64().unwrap_or(2)}else{2},"memoryBytes":if kind=="desktop"{if request["action"]=="screenshot"{192*1024*1024}else{32*1024*1024}}else if kind=="sandbox"{SANDBOX_JOB_MEMORY_BYTES+SANDBOX_HELPER_MEMORY_BYTES}else{64*1024*1024}});
                 if kind == "host" {
                     requirements["kind"] = json!(if request["operation"] == "host_terminal_job" {
                         "background"
@@ -158,7 +161,7 @@ impl RunnerState {
                     });
                 }
                 Ok(
-                    json!({"required":(!["desktop_capabilities","host_terminal_capabilities","capabilities"].contains(&string(&request["operation"]))),"requirements":requirements,"maximumWaitMs":request["timeoutMs"].as_u64().unwrap_or(0)+if kind=="sandbox"{30000}else{10000}}),
+                    json!({"required":(!["desktop_capabilities","host_terminal_capabilities","capabilities"].contains(&string(&request["operation"]))),"requirements":requirements,"sandboxJobMemoryBytes":if kind=="sandbox"{json!(SANDBOX_JOB_MEMORY_BYTES)}else{Value::Null},"maximumWaitMs":request["timeoutMs"].as_u64().unwrap_or(0)+if kind=="sandbox"{30000}else{10000}}),
                 )
             }
             "runner.hostBegin" => {
@@ -427,6 +430,45 @@ impl RunnerState {
                 Ok(Value::Null)
             }
             "runner.sandboxVerified" => Ok(json!(self.verified_sandbox)),
+            "runner.sandboxResourceLimits" => {
+                let controls = &arguments["capabilities"]["resourceControls"];
+                if controls["version"] != 1 || controls["cpuRateControl"] != true
+                    || controls["maxJobMemoryBytes"].as_u64().unwrap_or(0) < SANDBOX_JOB_MEMORY_BYTES
+                {
+                    return Err(ServiceError::new(
+                        "SANDBOX_RESOURCE_CONTROLS_UNAVAILABLE",
+                        "原生助手未声明可核验的沙箱资源限制，请更新助手后重试。",
+                        503,
+                    ));
+                }
+                let local_threads = arguments["logicalCpuThreads"].as_u64().unwrap_or(1).clamp(1, 4096);
+                let maximum_threads = controls["maxCpuThreads"].as_u64().unwrap_or(local_threads).clamp(1, 4096);
+                Ok(json!({"version":1,"cpuThreads":2u64.min(local_threads).min(maximum_threads),
+                    "jobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES}))
+            }
+            "runner.sandboxAllocatedResources" => {
+                let requested = &arguments["requested"];
+                let allocation = &arguments["allocation"];
+                let memory = allocation["memoryBytes"].as_u64().unwrap_or(0);
+                if requested["version"] != 1
+                    || !integer(&requested["cpuThreads"], 1, 4096)
+                    || requested["jobMemoryBytes"] != SANDBOX_JOB_MEMORY_BYTES
+                    || allocation["status"] != "granted"
+                    || !integer(&allocation["cpuThreads"], 1, requested["cpuThreads"].as_u64().unwrap_or(0))
+                    || memory < SANDBOX_HELPER_MEMORY_BYTES + 64 * 1024 * 1024
+                    || memory > SANDBOX_HELPER_MEMORY_BYTES + SANDBOX_JOB_MEMORY_BYTES
+                {
+                    return Err(ServiceError::new(
+                        "SANDBOX_RESOURCE_GRANT_INVALID",
+                        "沙箱资源授予与已核验的执行配置不匹配，未派发命令。",
+                        503,
+                    ));
+                }
+                // The helper also needs admission; its allowance is not part of the child job's memory ceiling.
+                // 助手自身也需预约；该预算不计入子作业内存上限，不能把整个授予值传给沙箱。
+                Ok(json!({"version":1,"cpuThreads":allocation["cpuThreads"],
+                    "jobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES.min(memory-SANDBOX_HELPER_MEMORY_BYTES)}))
+            }
             "runner.sandboxCapabilities" => {
                 let status = &arguments["value"];
                 self.verified_sandbox = status["protocolVersion"] == 1
@@ -485,6 +527,23 @@ impl RunnerState {
                         "SANDBOX_START_FAILED",
                         "The native helper did not verify isolated execution and process cleanup.",
                     ));
+                }
+                if let Some(expected) = arguments.get("resourceLimits") {
+                    let limits = &result["limits"];
+                    if expected["version"] != 1 || limits["resourceVersion"] != 1
+                        || limits["cpuRateControl"] != true
+                        || !integer(&limits["cpuRate"], 1, 10000)
+                        || limits["cpuThreads"] != expected["cpuThreads"]
+                        || limits["jobMemoryBytes"] != expected["jobMemoryBytes"]
+                        || !integer(&limits["processMemoryBytes"], 1, expected["jobMemoryBytes"].as_u64().unwrap_or(0))
+                        || !integer(&limits["processCount"], 1, 16)
+                    {
+                        return Err(ServiceError::new(
+                            "SANDBOX_RESOURCE_RECEIPT_INVALID",
+                            "沙箱回执未证明落实本次授予的 CPU 与内存限制；结果保留为待核验，不能重放。",
+                            502,
+                        ));
+                    }
                 }
                 if !truthy(&result["cancelled"]) {
                     if let Some(stage) = result["stagingDirectory"].as_str() {
@@ -1194,5 +1253,67 @@ impl ProtocolState {
                 ]
                 .contains(&string(&error["code"]));
         Ok(json!({"action":"failure","failure":failure.value(),"uncertain":unconfirmed&&uncertain}))
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_resource_plan_accounts_for_the_job_and_helper_separately() {
+        let mut runner = RunnerState::default();
+        let plan = runner.apply("runner.resourcePlan", &json!({
+            "kind":"sandbox","request":{"operation":"run","resourceLimits":{"cpuThreads":1}}
+        })).unwrap();
+        assert_eq!(plan["requirements"]["cpuThreads"], 1);
+        assert_eq!(plan["requirements"]["memoryBytes"], 832 * 1024 * 1024u64);
+        assert_eq!(plan["sandboxJobMemoryBytes"], SANDBOX_JOB_MEMORY_BYTES);
+        let host = runner.apply("runner.resourcePlan", &json!({"kind":"host","request":{"operation":"host_terminal_job"}})).unwrap();
+        assert_eq!(host["requirements"]["kind"], "background");
+        assert_eq!(host["requirements"]["memoryBytes"], 64 * 1024 * 1024u64);
+    }
+
+    #[test]
+    fn sandbox_resource_controls_reject_legacy_helpers_and_honor_actual_grants() {
+        let mut runner = RunnerState::default();
+        assert!(runner.apply("runner.sandboxResourceLimits", &json!({"capabilities":{"available":true}})).is_err());
+        let limits = runner.apply("runner.sandboxResourceLimits", &json!({
+            "capabilities":{"resourceControls":{"version":1,"cpuRateControl":true,"maxCpuThreads":1,"maxJobMemoryBytes":SANDBOX_JOB_MEMORY_BYTES}},
+            "logicalCpuThreads":8
+        })).unwrap();
+        assert_eq!(limits["cpuThreads"], 1);
+        assert_eq!(limits["jobMemoryBytes"], SANDBOX_JOB_MEMORY_BYTES);
+        let allocation = json!({"status":"granted","cpuThreads":1,"memoryBytes":192 * 1024 * 1024u64});
+        let granted = runner.apply("runner.sandboxAllocatedResources", &json!({"requested":limits,"allocation":allocation})).unwrap();
+        assert_eq!(granted["cpuThreads"], 1);
+        assert_eq!(granted["jobMemoryBytes"], 128 * 1024 * 1024u64);
+        assert!(runner.apply("runner.sandboxAllocatedResources", &json!({
+            "requested":limits,"allocation":{"status":"granted","cpuThreads":2,"memoryBytes":832*1024*1024u64}
+        })).is_err());
+        assert!(runner.apply("runner.sandboxAllocatedResources", &json!({
+            "requested":limits,"allocation":{"status":"granted","cpuThreads":1,"memoryBytes":64*1024*1024u64}
+        })).is_err());
+    }
+
+    #[test]
+    fn sandbox_receipt_rejects_missing_or_mismatched_applied_resource_limits() {
+        let mut runner = RunnerState::default();
+        let expected = json!({"version":1,"cpuThreads":1,"jobMemoryBytes":128*1024*1024u64});
+        let receipt = json!({"protocolVersion":1,"sandbox":"appcontainer","tokenVerified":true,
+            "workspaceCopy":true,"activeProcessesAfterExit":0,"limits":{
+                "resourceVersion":1,"cpuThreads":1,"cpuRate":2500,"cpuRateControl":true,
+                "jobMemoryBytes":128*1024*1024u64,"processMemoryBytes":128*1024*1024u64,"processCount":16
+            }});
+        assert!(runner.apply("runner.sandboxReceipt", &json!({"result":receipt,"resourceLimits":expected})).is_ok());
+        for (field, value) in [("resourceVersion", json!(0)), ("cpuThreads", json!(2)),
+            ("cpuRate", json!(10001)), ("jobMemoryBytes", json!(256*1024*1024u64)), ("cpuRateControl", json!(false))] {
+            let mut invalid = receipt.clone();
+            invalid["limits"][field] = value;
+            assert!(runner.apply("runner.sandboxReceipt", &json!({"result":invalid,"resourceLimits":expected})).is_err(), "{field}");
+        }
+        let mut legacy = receipt;
+        legacy.as_object_mut().unwrap().remove("limits");
+        assert!(runner.apply("runner.sandboxReceipt", &json!({"result":legacy,"resourceLimits":expected})).is_err());
     }
 }

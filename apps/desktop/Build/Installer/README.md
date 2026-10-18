@@ -1,10 +1,12 @@
 # KYNXA EXE 安装器
 
-当前产品系列为 **1.5**，安装发行版为 **1.5.2**，正式安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2)分发。当前版本修正见 [1.5.2 更新说明](../../../../docs/releases/1.5.2.md)。源码工程与安装包的版本字段分别维护；更新安装文件需要维护者重新生成载荷。
+当前产品系列为 **1.5**，安装发行版为 **1.5.3**，正式安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3)分发。当前版本修正见 [1.5.3 更新说明](../../../../docs/releases/1.5.3.md)。源码工程与安装包的版本字段分别维护；更新安装文件需要维护者重新生成载荷。
+
+> 1.5.3 目前为本地源码与发行准备，安装文件尚未发布；最终发布状态见版本说明。
 
 基础资源直接随完整 EXE 提供，基础安装无需联网。可选模型下载由后台自动选择原站、国内镜像及已配置的 GitHub 资产来源，失败时自动切换并保留断点；安装界面不要求用户选择站点。来源清单保存在实际模型目录中，升级保留已有自定义映射和下载断点，完整机制见[离线安装与多来源下载](../../../../docs/architecture/offline-installer.md)。
 
-完整包名为 `KYNXA-1.5.2-windows-x64-setup.exe`，另提供小型在线入口 `KYNXA-1.5.2-windows-x64-online-setup.exe`。用户双击后看到下载窗口，完整包下载并校验成功才进入正式安装界面。在线入口支持暂停、继续及失败重试，不创建独立卸载项；不要求用户选择来源。普通用户无需运行下载脚本。
+完整包名为 `KYNXA-1.5.3-windows-x64-setup.exe`，另提供小型在线入口 `KYNXA-1.5.3-windows-x64-online-setup.exe`。用户双击后看到下载窗口，完整包下载并校验成功才进入正式安装界面。在线入口支持暂停、继续及失败重试，不创建独立卸载项；不要求用户选择来源。普通用户无需运行下载脚本。
 
 `KYNXA.iss` 由发布入口使用 Inno Setup 6.4 或更新版本编译，只接收经过整理的 Windows x64 Release 暂存目录。安装器本身不依赖用户已有的 Node、Rust、.NET SDK、Python、Git 或编译工具。
 
@@ -16,7 +18,7 @@
 |---|---|
 | `PayloadRoot` | 必填，已准备好的 Release 软件载荷 |
 | `PackageOutputDir` | 输出目录，默认项目内 `artifacts/installer/output`，可传入独立分发目录 |
-| `PackageVersion` | 安装发行版本，生成当前包时显式使用 `1.5.2` |
+| `PackageVersion` | 安装发行版本，生成当前包时显式使用 `1.5.3` |
 | `LauncherFile` | 相对软件根目录的启动器，默认 `KYNXA.Desktop.exe` |
 | `IconFile`、`BrandImageFile` | 可选，安装器图标和项目 PNG 标识 |
 

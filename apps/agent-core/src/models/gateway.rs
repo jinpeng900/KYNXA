@@ -34,6 +34,24 @@ pub struct ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_connection_and_retryable_provider_rejections_remain_distinct() {
+        for (status, body, code) in [
+            (402, json!({"error":{"message":"private balance detail"}}), "MODEL_CREDIT_EXHAUSTED"),
+            (429, json!({"error":{"code":"insufficient_quota"}}), "MODEL_CREDIT_EXHAUSTED"),
+            (401, json!({"error":{"message":"private key detail"}}), "MODEL_AUTHENTICATION_FAILED"),
+            (429, json!({"error":{"code":"rate_limit_exceeded"}}), "MODEL_RATE_LIMITED"),
+            (400, json!({"error":{"message":"Unsupported parameter private detail"}}), "MODEL_REQUEST_REJECTED"),
+            (404, json!({}), "MODEL_ENDPOINT_NOT_FOUND"),
+        ] {
+            let error = upstream_rejection(status, &body);
+            assert_eq!(error.code, code);
+            assert_eq!(error.details["upstreamStatus"], status);
+            assert!(!error.message.contains("private"));
+            assert!(!error.details.to_string().contains("private"));
+        }
+    }
     use axum::{
         Router,
         body::Body,
@@ -223,6 +241,49 @@ mod tests {
             server.abort();
         }
     }
+
+    #[tokio::test]
+    async fn llama_context_and_image_http_refusals_keep_safe_recovery_facts() {
+        for (message, expected_code) in [
+            ("request (12163 tokens) exceeds the available context size (8192 tokens), try increasing it fixture-secret", "MODEL_CONTEXT_LIMIT_REJECTED"),
+            ("This model does not support image inputs fixture-secret", "MODEL_IMAGE_INPUT_REJECTED"),
+            ("Unsupported parameter: fixture-secret", "MODEL_REQUEST_REJECTED"),
+        ] {
+            let (connection, server) = fixture(
+                json!({"error":{"message":message}}).to_string(),
+                "application/json",
+                StatusCode::BAD_REQUEST,
+                Duration::ZERO,
+            ).await;
+            let (_owner, cancel) = watch::channel(false);
+            let error = request(&connection, json!({"model":"fixture","stream":false}), cancel, None)
+                .await.unwrap_err();
+            assert_eq!(error.code, expected_code);
+            assert_eq!(error.status_code, 502);
+            assert_eq!(error.details["upstreamStatus"], 400);
+            assert_eq!(error.details["requestDispatched"], true);
+            assert!(!error.details.to_string().contains("fixture-secret"));
+            assert!(!error.message.contains("fixture-secret"));
+            match expected_code {
+                "MODEL_CONTEXT_LIMIT_REJECTED" => {
+                    assert_eq!(error.details["contextRejection"]["contextWindowTokens"], 8192);
+                    assert_eq!(error.details["contextRejection"]["requestTokens"], 12163);
+                    assert!(error.details.get("imageRejection").is_none());
+                }
+                "MODEL_IMAGE_INPUT_REJECTED" => {
+                    assert!(super::super::message_attachments::image_rejection(
+                        error.status_code, &error.message, &error.details));
+                    assert!(error.details.get("contextRejection").is_none());
+                }
+                _ => {
+                    assert!(error.details.get("imageRejection").is_none());
+                    assert!(error.details.get("contextRejection").is_none());
+                }
+            }
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn request_cancel_timeout_and_error_bodies_preserve_private_boundaries() {
         let (connection, server) = fixture(
@@ -261,7 +322,7 @@ mod tests {
         let failure = super::request(&connection, json!({}), cancel, None)
             .await
             .unwrap_err();
-        assert_eq!(failure.code, "MODEL_HTTP_ERROR");
+        assert_eq!(failure.code, "MODEL_AUTHENTICATION_FAILED");
         assert_eq!(failure.details["upstreamStatus"], 401);
         assert!(!failure.message.contains("fixture-secret"));
         assert!(!failure.details.to_string().contains("fixture-secret"));
@@ -490,6 +551,71 @@ impl fmt::Display for ModelError {
 }
 impl std::error::Error for ModelError {}
 
+/// Preserve only bounded recovery facts from provider refusals; raw error bodies remain private.
+/// 供应商拒绝仅保留受限恢复事实；原始错误正文不进入公开诊断或模型上下文。
+pub(crate) fn upstream_rejection(status: u16, rejected: &Value) -> ModelError {
+    let provider_code = rejected["error"]["code"].as_str()
+        .or_else(|| rejected["error"]["type"].as_str()).unwrap_or("").to_ascii_lowercase();
+    let exhausted = status == 402 || matches!(provider_code.as_str(),
+        "insufficient_quota" | "insufficient_balance" | "balance_insufficient"
+            | "credit_balance_too_low" | "billing_hard_limit_reached");
+    let rejection = recovery::calculate(
+        "models.recovery.contextRejection",
+        &json!({"body":rejected}),
+    )
+    .unwrap_or(Value::Null);
+    let grammar = super::protocol::calculate(
+        "models.protocol.grammarRejection",
+        &json!({"status":status,"body":rejected}),
+    )
+    .unwrap_or(Value::Null);
+    let image = super::message_attachments::classify_image_rejection(status, rejected);
+    let mut error = if exhausted {
+        ModelError::new("MODEL_CREDIT_EXHAUSTED", "模型账户余额或可用额度不足。", 402)
+    } else if matches!(status, 401 | 403) {
+        ModelError::new("MODEL_AUTHENTICATION_FAILED", "模型连接认证未通过，请检查连接配置。", 502)
+    } else if status == 404 {
+        ModelError::new("MODEL_ENDPOINT_NOT_FOUND", "模型接口或所选模型不可用。", 502)
+    } else if !grammar.is_null() {
+        ModelError::new(
+            "MODEL_LOCAL_TOOL_GRAMMAR_REJECTED",
+            "模型无法解析本次工具声明；此步骤未派发工具。",
+            502,
+        )
+    } else if !rejection.is_null() {
+        ModelError::new(
+            "MODEL_CONTEXT_LIMIT_REJECTED",
+            "模型拒绝了超出实际上下文额度的请求。",
+            502,
+        )
+    } else if !image.is_null() {
+        ModelError::new(
+            "MODEL_IMAGE_INPUT_REJECTED",
+            "模型拒绝了本次图片输入，将保留原附件并尝试文字解析。",
+            502,
+        )
+    } else if status == 429 {
+        ModelError::new("MODEL_RATE_LIMITED", "模型服务暂时繁忙，等待后继续。", 429)
+    } else if matches!(status, 400 | 413 | 415 | 422) {
+        ModelError::new("MODEL_REQUEST_REJECTED", "正在调整模型请求的兼容格式。", 502)
+    } else {
+        ModelError::new(
+            "MODEL_HTTP_ERROR",
+            &format!("模型接口返回 HTTP {status}。"),
+            502,
+        )
+    };
+    error.details["upstreamStatus"] = json!(status);
+    if !grammar.is_null() {
+        error.details["toolGrammarRejection"] = grammar;
+    } else if !rejection.is_null() {
+        error.details["contextRejection"] = rejection;
+    } else if !image.is_null() {
+        error.details["imageRejection"] = image;
+    }
+    error
+}
+
 pub(crate) fn client() -> Result<Client, ModelError> {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
@@ -642,6 +768,23 @@ async fn execute_request(
             gateway_protocol::request_path(connection)
         )
     };
+    // Local input_tokens uses the same template and tokenizer without running generation or consuming a model call.
+    // 本地计数复用实际模板与分词器，不执行生成；超限交回请求工厂压缩，不把错误请求发给生成接口。
+    if let Some(measured) = super::gateway_local_engine::count_request_tokens(
+        connection,
+        body["model"].as_str().unwrap_or(""),
+        &body,
+        cancellation.clone(),
+    )
+    .await?
+    {
+        gateway_protocol::validate_measured_request(
+            connection,
+            &body,
+            measured.input_tokens,
+            measured.context_window_tokens,
+        )?;
+    }
     let client = client()?;
     let request = authenticated(&client, connection, Method::POST, &url)
         .header(header::ACCEPT, "text/event-stream, application/json")
@@ -667,42 +810,7 @@ async fn execute_request(
             Err(error) if error.code == "ABORT_ERR" => return Err(error),
             result => result.unwrap_or(Value::Null),
         };
-        let rejection = recovery::calculate(
-            "models.recovery.contextRejection",
-            &json!({"body":rejected}),
-        )
-        .unwrap_or(Value::Null);
-        let grammar = super::protocol::calculate(
-            "models.protocol.grammarRejection",
-            &json!({"status":status,"body":rejected}),
-        )
-        .unwrap_or(Value::Null);
-        let mut error = if !grammar.is_null() {
-            ModelError::new(
-                "MODEL_LOCAL_TOOL_GRAMMAR_REJECTED",
-                "模型无法解析本次工具声明；此步骤未派发工具。",
-                502,
-            )
-        } else if !rejection.is_null() {
-            ModelError::new(
-                "MODEL_CONTEXT_LIMIT_REJECTED",
-                "模型拒绝了超出实际上下文额度的请求。",
-                502,
-            )
-        } else {
-            ModelError::new(
-                "MODEL_HTTP_ERROR",
-                &format!("模型接口返回 HTTP {status}。"),
-                502,
-            )
-        };
-        error.details = json!({"upstreamStatus":status});
-        if !grammar.is_null() {
-            error.details["toolGrammarRejection"] = grammar;
-        } else if !rejection.is_null() {
-            error.details["contextRejection"] = rejection;
-        }
-        return Err(error);
+        return Err(upstream_rejection(status, &rejected));
     }
     let content_type = response
         .headers()

@@ -290,6 +290,9 @@ const READ_TOOLS: &[&str] = &[
     "memory.propose",
     "web.search",
     "terminal.host.read",
+    "terminal.workspace.list",
+    "work.folder.list",
+    "terminal.workspace.read",
 ];
 const REVERSIBLE_TOOLS: &[&str] = &[
     "task.delegate",

@@ -54,6 +54,16 @@ transport.Reply = _ => Reply(new TaskPausedResponse([task, task with { TaskId = 
 var ambiguous = PausedTaskSelection.From(await api.PausedAsync(conversation, project));
 Check(ambiguous.IsAmbiguous && ambiguous.TaskId is null,
     "Multiple paused roots require explicit task selection and cannot silently start a new task.");
+Check(PausedTaskSelection.CanResumeInContext(task, conversation, project, false, null, false) &&
+    PausedTaskSelection.CanResumeInContext(task, conversation, project, true, taskId, true),
+    "An explicit selection can resume in its original chat with no reply or its confirmed paused observer.");
+Check(!PausedTaskSelection.CanResumeInContext(task, conversation, project, true, nextId, false) &&
+    !PausedTaskSelection.CanResumeInContext(task, conversation, project, true, null, false) &&
+    !PausedTaskSelection.CanResumeInContext(task, conversation, project, true, taskId, false),
+    "A new active reply, unregistered pending reply or old stream still closing blocks a stale resume decision.");
+Check(!PausedTaskSelection.CanResumeInContext(task, Guid.NewGuid(), project, false, null, false) &&
+    !PausedTaskSelection.CanResumeInContext(task, conversation, Guid.NewGuid(), false, null, false),
+    "Navigation and project moves invalidate a paused selection before it can control the old task.");
 transport.Reply = _ => Reply(new TaskPausedResponse([sameWorkChat]));
 await Reject(() => api.PausedAsync(conversation, project));
 transport.Reply = _ => Reply(new TaskPausedResponse([task with { Scope = new(conversation, Guid.NewGuid()) }]));
@@ -78,6 +88,24 @@ catch (GatewayApiException) { checks++; }
 Check(transport.Requests == beforeRecoveryFailure + 2 && transport.Path!.StartsWith("/api/tasks/paused?"),
     "A transient recovery failure retries only the read once; it never dispatches a chat request.");
 
+var hiddenRecovery = task with { DisplayInTaskList = false, Title = "恢复资料整理" };
+var waitingRecovery = task with { TaskId = nextId, State = "waiting-verification", Title = "核实上次写入" };
+transport.Reply = _ => Reply(new TaskListResponse([hiddenRecovery, waitingRecovery], true, nextId));
+var recoverablePage = await api.RecoverableAsync(conversation, project);
+Check(recoverablePage.Tasks.Length == 2 && recoverablePage.Tasks[0].DisplayInTaskList == false &&
+    recoverablePage.Tasks[1].State == "waiting-verification" && recoverablePage.Tasks[1].Title == "核实上次写入",
+    "Recovery lists retain hidden paused roots and verification-waiting roots with their real titles and states.");
+Check(transport.Path == $"/api/tasks/recoverable?conversationId={conversation:D}&limit=50&projectId={project:D}",
+    "Recovery choices use the same-chat endpoint rather than the project's ordinary task list.");
+transport.Reply = _ => Reply(new TaskListResponse([hiddenRecovery], false, null));
+await api.RecoverableAsync(conversation, project, nextId);
+Check(transport.Path!.EndsWith($"&afterTaskId={nextId:D}"), "Recovery choices can load every page without truncating to the ambiguous shortcut's two roots.");
+foreach (var invalidRoot in new[] { sameWorkChat, task with { State = "completed" }, task with { ParentTaskId = nextId } })
+{
+    transport.Reply = _ => Reply(new TaskListResponse([invalidRoot], false, null));
+    await Reject(() => api.RecoverableAsync(conversation, project));
+}
+
 var child = task with { TaskId = Guid.NewGuid(), RequestId = "child:stable-request-deduplication-key", ParentTaskId = taskId, Goal = "读取文档" };
 transport.Reply = _ => Reply(new TaskDetailResponse(task, [child], [], null, []));
 Check((await api.GetAsync(conversation, taskId, project)).Children[0].RequestId == child.RequestId,
@@ -92,6 +120,16 @@ using (var body = JsonDocument.Parse(transport.Body!))
         && body.RootElement.GetProperty("conversationId").GetGuid() == conversation
         && body.RootElement.GetProperty("action").GetString() == "resume", "Explicit controls carry the bound chat and observed version.");
 Check(controlled.Task.Version == 4, "Only the gateway changes authoritative task versions.");
+var waitingEvidence = JsonSerializer.SerializeToElement(new
+{
+    resolvedOperations = 1, resolvedReservations = 0,
+    pending = new[] { new { code = "MODEL_REQUEST_UNKNOWN", message = "上次请求结果仍待核实。" } }
+});
+transport.Reply = _ => Reply(new TaskControlResponse(waitingRecovery, [nextId], Recovery: waitingEvidence));
+var notYetResumed = await api.ControlAsync(conversation, nextId, waitingRecovery.Version, "resume", project);
+Check(notYetResumed.Task.TaskId == nextId && notYetResumed.Task.State == "waiting-verification" &&
+    notYetResumed.Recovery!.Value.GetProperty("pending")[0].GetProperty("message").GetString() == "上次请求结果仍待核实。",
+    "An explicit root selection retains its identity and unresolved recovery evidence without reporting a successful resume.");
 var steeringMessage = Guid.NewGuid();
 transport.Reply = _ => Reply(new TaskControlResponse(task with { State = "queued", Version = 5 }, [taskId], true));
 var steered = await api.SteerAsync(conversation, taskId, 4, steeringMessage, "保留已有结果，只补缺少的实验", "update", project);

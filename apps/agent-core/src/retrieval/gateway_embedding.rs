@@ -39,6 +39,7 @@ pub fn install_runtime(runtime: tokio::runtime::Handle) {
 pub fn reserve_graph(
     memory_bytes: u64,
     cancel: &Arc<AtomicBool>,
+    background: bool,
 ) -> Result<ResourceLease, ContractError> {
     let service = hardware::global().ok_or_else(|| {
         gateway::error(
@@ -50,7 +51,7 @@ pub fn reserve_graph(
     let token = cancel.clone();
     runtime()?.block_on(async move{
         let(sender,receiver)=tokio::sync::watch::channel(false);let monitor=tokio::spawn(async move{while !token.load(Ordering::Acquire){tokio::time::sleep(Duration::from_millis(25)).await;}let _=sender.send(true);});
-        let result=service.acquire(json!({"taskId":gateway::new_id(),"workspaceId":"local","kind":"foreground","cpuThreads":0,"memoryBytes":memory_bytes,"gpuMemoryBytes":0,"ttlMs":30000,"waitMs":5000}),receiver).await;monitor.abort();
+        let result=service.acquire(json!({"taskId":gateway::new_id(),"workspaceId":"local","kind":if background{"background"}else{"foreground"},"cpuThreads":0,"memoryBytes":memory_bytes,"gpuMemoryBytes":0,"ttlMs":30000,"waitMs":if background{20000}else{5000}}),receiver).await;monitor.abort();
         result.map_err(|error|gateway::error(&error.message,"RETRIEVAL_ANN_RESOURCE_LIMIT",error.status))
     })
 }
@@ -585,6 +586,16 @@ pub fn embed(
 }
 pub fn retire_idle_models(config: &GatewayConfig) -> Result<Value, ContractError> {
     retire_after(config, Duration::ZERO)
+}
+
+/// Warm only the active project's embedding owner under existing background leases; never load a reranker here.
+/// 仅在当前项目需要时用既有后台租约预热嵌入模型；单飞所有者复用同一会话，不预热重排模型。
+pub fn warm(config: &GatewayConfig, local: &Value, cancel: Arc<AtomicBool>) -> Result<bool, ContractError> {
+    let current = status(config, local);
+    if current["loaded"] == true { return Ok(true); }
+    if current["available"] != true { return Ok(false); }
+    embed(config, &["Local project search readiness".into()], EmbedKind::Query, local, cancel, true)
+        .map(|batch| batch.is_some())
 }
 pub fn retire_after(
     config: &GatewayConfig,

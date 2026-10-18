@@ -1,5 +1,44 @@
 # 正式 Shell UI 迁移隔离验收
 
+## 原生对话框主题、圆角及连接入口
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario dialogs
+```
+
+`App.DialogChecks.cs` 点击生产定时任务入口，以实际 F1 打开键盘操作帮助，并核对浅色、深色及自定义强调色在同一个已打开原生 ContentDialog 上即时生效。真实 SDK 模板中的外层 `BackgroundElement` 与内层 `DialogSpace` 均需为 16 DIP 圆角；表面、边框及文字引用应用共享画刷。逐状态读取真实按钮呈现层，核对默认操作和普通取消／拒绝操作的 Normal、PointerOver、Pressed 背景、前景、至少 4.5:1 文字对比度和 8 DIP 按钮圆角。状态检查调用原生 VisualStateManager，不声称对话框按钮使用了真实鼠标按下。
+
+单操作对话框还比较实际按钮与 `BackgroundElement` 的水平中心，误差不超过 1 DIP，覆盖中英文定时／帮助及项目错误提示。短按钮为 130×36 DIP、左右内边距各 24 DIP；中文“知道了”原文保持不变，文字本地字距为 180，并核对实际排版宽度增加，避免只读取继承属性而误计生效。同一生产定时弹窗临时使用较长标签，验证宽度在 202 DIP 上限内自然增长，随后恢复原文和尺寸；英语及其他标签恢复原生内容模板和字距。多操作的重命名、审批、检索窗口保留分列与间隔。实际文字／按钮边界、模板和间距写入 `shell-dialog-action-layout.json`，英文及长标签另保存截图。
+
+场景还核对实际 Escape 关闭、关闭后的主题订阅生命周期、中文及英文连接入口打开既有管理窗口并选中工具页、重命名的空名称禁用及取消结果、工具审批无默认批准及明确拒绝。连接窗口仅使用四个隔离只读接口，关闭后返回原主窗口；不显示未开发占位。生产检索窗口中的添加链接弹窗保留自己的 XamlRoot，空链接验证仍取消提交，切换主题和取消导入仍保持原操作生命周期。草稿、会话 ID、消息对象及模拟网关零写入必须保持；不访问正式数据或调用模型。
+
+截图为 `shell-dialog-schedule-light.png`、`shell-dialog-schedule-dark.png`、`shell-dialog-keyboard-custom-light.png`、`shell-dialog-keyboard-custom-dark.png`、`shell-dialog-schedule-long-action-zh.png` 和 `shell-dialog-rename-dark.png`。集中入口成功标记为 `PASS: ... production Shell native dialog checks.`；默认完整入口也包含这组。文档列出验收条件，不替代本轮原生运行结果。
+
+## 功能窗口首次呈现与原生关闭背景
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario window-presentation
+```
+
+`App.WindowPresentationChecks.cs` 在浅色与深色模式中，通过真实 MainWindow 更多菜单、侧栏、输入区模型选择器、底部模型状态和设置内链接，打开模型管理、工具与技能及设置。9 条入口分别检查首次创建、复用及最小化恢复；另检查窄窗抽屉中的三个入口与收起侧栏的设置齿轮，每条分别首次创建及复用。保留知识库深浅色首次打开与关闭，共 72 次打开观察。UI Automation Invoke 使用实际按钮及菜单项的生产事件链，不代表物理鼠标按下／释放状态验收。
+
+原生后台采样在触发入口之前就绪，不额外调用目标窗口的 Show、Activate 或置顶。记录首次可见事件与稳定尺寸，检查设置窗口没有显示后再扩大的尺寸变化；更多菜单观察原 MenuFlyoutPresenter.Unloaded，模型选择器观察原 FlyoutBase.Closed，比较内容卸载与窗口展示顺序。Popup.Closed 单独记录为诊断，它可异步晚到，不能用其回调时间代替实际渲染完成。原菜单边缘在点击前及关闭过程中也采样，新窗口遮挡后跳过该点。显示采样核验精确 PID、GUI 线程、窗口类、HWND 和屏幕点归属，只读取自有窗口。原生后台不读取 WinUI 对象；隐藏／销毁后停止读取附属窗口，改在其原位置读取所属窗口。实际时间戳、采样耗时／间隔、最大间隔及窗口事件写入 `window-presentation-frames.json`，不把目标采样间隔称作覆盖每个显示刷新帧。
+
+同一文件的 `EraseContracts` 单列真实 `WM_DESTROY` 阶段的离屏背景擦除验证：使用自有 8×8 内存 DC／bitmap 向原生 subclass 链下方调用 `WM_ERASEBKGND`，比较实际绘制颜色与关闭前的当前配色。它验证清除 XAML 内容后的原生背景合同，不冒充屏幕上捕获的自然白帧。回调异常隔离，GDI 对象及测试钩子结束时释放；工具页使用严格的四个只读 GET 模拟响应，其他请求仍被拒绝。保留模拟网关零写入、原草稿和会话。自然像素采样只能判断指定位置和实际采样时刻，不据此声称所有页面或系统动画都已逐帧检查。
+
+设置窗口采样左侧 24 DIP 内容留白，避开默认右侧 ScrollBar 的白色箭头；打开、稳定和原生关闭共用该空白点。浅色模式验证稳定后的实际 Main 背景，允许 Windows 显示动画的初始混色；深色仍检查全部已采到的背景像素，不放宽白色判定。运行前须通过自有前台窗口与原生命中校验；前台被切换或指针目标变化时报告失败，不向其他应用继续发送输入。
+
+## 消息发送与输入专项
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -Scenario prompt-send
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -Scenario workspace-auto-open
+```
+
+`App.PromptSendChecks.cs` 检查发送链路：暂停恢复请求被挂起时用户消息和真实 Transcript DOM 已出现、输入框已清空；释放后完成模拟 SSE 回复，保留准备期间输入的新草稿。真实 Enter 只发送一次且不残留换行，Shift+Enter 保留换行，并用受控组合状态检查输入法确认保护。截图专项使用真实 WinRT 剪贴板和生产粘贴处理，核对 PNG 暂存于应用私有数据之外；模拟首次接收失败时不调用模型、保留源文件，重试使用相同消息及附件 ID，收到带摘要的接收回执后才调用模拟模型并删除临时源文件。即使描述符默认为 ready 也必须完成导入。该场景仅为虚构聊天开放流回复、目录保存和附件接收接口，不访问正式数据或上游模型；其他场景继续拒绝写入。
+
+`workspace-auto-open` 只验证右侧网页自动派发：历史回执恢复标签但不启动；实时完成回执进入生产 `AcceptToolActivity` 后立即移除 pending，仍自动选中、激活并向回环网关发送打开请求，重复回执不重复派发。夹具返回明确的 HTTP 503，不启动 Chrome、访问外站或调用模型；该结果证明展示链路已派发，不代表实际网页绘制通过。
+
 ## 设置窗口布局、下拉滚轮与正文查找
 
 ```powershell
@@ -60,11 +99,14 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 ```powershell
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario appearance-transfer
 ```
 
 新的脚本入口使用 VS Full MSBuild / Framework C# 编译器，独立 obj、bin、临时数据和 WebView2 目录；构建期可选单逻辑处理器兼容参数，运行前恢复进程调度范围。`-Scenario all` 包含完整主窗口回归；专项目录的原始 obj/bin 显式排除，不能因自定义中间目录将旧生成 XAML 再次作为源码编译。
 
 在既有五套配色回归上，`App.AppearanceReadingChecks.cs` 验证浅色／深色／跟随系统、13～22 px 半像素步进、HEX 与真实 ColorPicker。选色只更新待应用 HEX，点击应用后才保存。重新加载临时布局文件、迁移守卫和真实原子保存失败分别验证持久化与回滚；打开的设置页、主窗口及 Transcript 同步，选区、草稿、正式消息和模拟网关写入保持不变。
+
+`appearance-transfer` 只运行本批外观文件功能的定向检查：生产按钮和本地提示、版本 1 的六字段 JSON、16 KiB 大小限制、重复或额外键及无效值拒绝、真实 StorageFile 导入导出、尚未应用的 HEX 不导出、取消、真实布局原子保存失败回滚、语言切换、400 DIP 窄窗和窗口关闭后的晚到选择。文件选择由本夹具的委托提供临时文件，随后使用生产读取、校验、保存与应用链路；不声称自动化了 Windows 文件选择器内部交互，也不读取日常用户数据。成功标记为 `PASS: ... production Shell appearance import/export checks.`。
 
 新增 `App.ThemeIconChecks.cs` 验证实际 Shell 图标的共享语义画刷、原始尺寸与固定路径、权限切换、26 个图标键及品牌位图保留。极端自定义强调色验证主要背景上的文字对比度；系统变化采用当前值读取及自有 HWND 通知路径，不修改系统主题。每项以当前结果文件为准。
 
@@ -92,7 +134,13 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 `App.SidebarControlChecks.cs` 使用真实生产页与原生 `NativeUi.Invoke` 按钮自动化，在中文、英文的默认 240、最小 200、最大 360 DIP 侧栏中测量实际模式按钮、文本、图标和收起按钮边界，核对没有截断或交叠。展开和收起按钮互斥出现，点击隐藏原按钮后焦点应进入当前可见的对应按钮；宽窗的宽度及折叠偏好通过真实临时 `layout.json` 读取验证。
 
+五个侧栏导航入口还在浅色、深色、自定义浅色和自定义深色四组配色下接受实际 `SendInput` 鼠标悬停，核对当前主题强调色的浅色反馈背景。原生按下视觉状态及键盘焦点使用同一组真实控件，检查文字、圆角和焦点画刷，并在保持上次悬停时切换配色。截图为 `shell-sidebar-navigation-light.png`、`shell-sidebar-navigation-dark.png`、`shell-sidebar-navigation-custom-light.png` 和 `shell-sidebar-navigation-custom-dark.png`。
+
+移入、移出与再次移入还即时读取按钮空白处的实际合成屏幕像素，以约 8 ms 的异步目标间隔观察至少 200 ms，直至至少八个样本及末尾三次稳定，最长 600 ms。每次只读取一个像素以减少 GDI 同步阻塞，JSON 保留实际采样时间；不声称采集了显示器每一个刷新帧。全部颜色必须处于实际空闲／悬停端点的 RGB 包络及亮度范围内，容差为 3，防止只检查最终画刷而漏掉亮色闪帧。采样前后及每次读取均验证前台和准确的自有窗口命中，证据为 `shell-sidebar-navigation-pixels.json`。
+
 收起按钮使用现有 `IconSidebarToggle` 与共享主题画刷，原生按钮继续拥有提示、命中与键盘焦点。浅色／深色宽窗、紧凑窗及返回宽窗后，检查展开与设置图标中心仍距左侧24 DIP，正文左缘为48 DIP，两侧留白相等且没有闲置拖动列；再展开时恢复原8 DIP拖动区域。深色展开与收起截图供实际视觉复核。
+
+展开状态只预留 4 DIP 拖动列，底部图标原坐标保留，比较最左设置与最右状态图标到可见侧栏边缘的实际空白均为 20 DIP。完整 8 DIP `SidebarGrip` 跨越较窄预留列，两侧各覆盖 2 DIP；实际 MOVE 进入两处覆盖范围并等待 `PointerEntered`，核对坐标、层级及未开始拖动。原拖动、保存、取消、复位的控件接线检查继续执行。
 
 800 DIP 紧凑模式分别以新收起按钮、原遮罩按钮和生产 `TryDismissCompactSidebar` 的 Escape 处理路径关闭临时抽屉，核对焦点及保存偏好，再恢复宽窗。测试同时覆盖原本展开和原本折叠两种宽窗偏好。Escape 在本场景调用生产处理方法，不发送系统按键；真实按钮使用原生 Invoke，而非直接调用点击方法，因此不要求键盘输入获得前台焦点。
 

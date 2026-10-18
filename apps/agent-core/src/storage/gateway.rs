@@ -189,13 +189,13 @@ fn relationship_from_catalog(document: &Value, id: &str) -> ContractResult {
     )?;
     // Resolve the work folder from the same authoritative catalog snapshot as its scope identity.
     // 从范围身份对应的同一正式目录快照读取工作路径；不能因缺少路径字段误用聊天沙箱。
-    relation["folderPath"] = document["Projects"]
+    let project = document["Projects"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|project| project["Id"] == relation["projectId"])
-        .map(|project| project["FolderPath"].clone())
-        .unwrap_or(Value::Null);
+        .find(|project| project["Id"] == relation["projectId"]);
+    let mounts = super::workspace_mounts::relationship(project.unwrap_or(&Value::Null))?;
+    for key in ["folderPath", "mounts", "defaultMountId"] { relation[key] = mounts[key].clone(); }
     Ok(relation)
 }
 
@@ -489,6 +489,7 @@ fn validate_catalog(mut document: Value) -> ContractResult {
             &json!({"value":project,"nameType":if project["Name"].is_string(){"string"}else{"object"}}),
         )?;
         project["Id"] = super::identity(&project["Id"])?;
+        *project = super::workspace_mounts::project(project)?;
         for field in ["IsPinned", "IsArchived", "IsFolderlessWorkspace"] {
             if project[field].is_null() {
                 project[field] = json!(false);
@@ -513,11 +514,10 @@ fn validate_catalog(mut document: Value) -> ContractResult {
     }
     Ok(document)
 }
-fn ensure_layout(root: &Path, document: &Value) -> ContractResult {
-    let current = layout::apply(
-        "storage.layout.inspect",
-        &json!({"root":root,"document":document}),
-    )?;
+fn prepare_layout_plan(
+    document: &Value,
+    current: &Value,
+) -> Result<(Value, Value, String), ContractError> {
     let settings = current["raw"]
         .as_str()
         .map(|raw| serde_json::from_str::<Value>(&raw_json::scalar_projection(raw)))
@@ -528,11 +528,19 @@ fn ensure_layout(root: &Path, document: &Value) -> ContractResult {
         "storage.layout.plan",
         &json!({"document":document,"current":settings,"storeId":new_id(),"now":now()}),
     )?;
-    // Reuse scaffolding work only; every call above still checks the complete layout and links.
-    // 仅复用已完成的目录准备，每次仍执行上方完整布局及链接检查，缓存不替代路径授权。
     let plan_hash = managed_files::digest(
         &serde_json::to_vec(&json!({"plan":plan,"chats":document["Chats"].as_array().into_iter().flatten().map(|chat|&chat["Id"]).collect::<Vec<_>>() })).unwrap(),
     );
+    Ok((settings, plan, plan_hash))
+}
+fn ensure_layout(root: &Path, document: &Value) -> ContractResult {
+    let current = layout::apply(
+        "storage.layout.inspect",
+        &json!({"root":root,"document":document}),
+    )?;
+    let (settings, plan, plan_hash) = prepare_layout_plan(document, &current)?;
+    // Full catalog operations still inspect every path; this cache only avoids repeated scaffolding.
+    // 完整目录操作仍检查全部路径；缓存仅避免重复创建目录框架。
     let manifest_versions = layout_manifest_versions(root, &plan)?;
     if LAYOUT_SNAPSHOTS
         .lock()
@@ -579,49 +587,39 @@ fn layout_manifest_versions(
     root: &Path,
     plan: &Value,
 ) -> Result<Vec<Option<String>>, ContractError> {
-    use std::io::Read;
     plan["manifests"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|manifest| {
-            let path = root
-                .join("Projects")
-                .join(manifest["id"].as_str().unwrap())
-                .join("project.json");
-            let Some(mut reader) = managed_files::open_reader(root, &path, 8 * 1024 * 1024)? else {
-                return Ok(None);
-            };
-            let token = reader.version_token()?;
-            let version = match &token {
-                Some(version) => version.clone(),
-                None => {
-                    let mut bytes = Vec::new();
-                    Read::by_ref(&mut reader.file)
-                        .take(8 * 1024 * 1024 + 1)
-                        .read_to_end(&mut bytes)
-                        .map_err(conversation_logs::io_error)?;
-                    if bytes.len() > 8 * 1024 * 1024 {
-                        return Err(error(
-                            "项目清单超过容量，原文件已保留。",
-                            "INVALID_DATA_LAYOUT",
-                            409,
-                        ));
-                    }
-                    managed_files::digest(&bytes)
-                }
-            };
-            reader.verify()?;
-            if reader.version_token()? != token {
-                return Err(error(
-                    "项目清单读取期间已改变。",
-                    "INVALID_DATA_LAYOUT",
-                    409,
-                ));
-            }
-            Ok(Some(version))
-        })
+        .map(|manifest| layout_manifest_version(root, manifest["id"].as_str().unwrap()))
         .collect()
+}
+fn layout_manifest_version(root: &Path, project_id: &str) -> Result<Option<String>, ContractError> {
+    use std::io::Read;
+    let path = root.join("Projects").join(project_id).join("project.json");
+    let Some(mut reader) = managed_files::open_reader(root, &path, 8 * 1024 * 1024)? else {
+        return Ok(None);
+    };
+    let token = reader.version_token()?;
+    let version = match &token {
+        Some(version) => version.clone(),
+        None => {
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut reader.file)
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(conversation_logs::io_error)?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err(error("项目清单超过容量，原文件已保留。", "INVALID_DATA_LAYOUT", 409));
+            }
+            managed_files::digest(&bytes)
+        }
+    };
+    reader.verify()?;
+    if reader.version_token()? != token {
+        return Err(error("项目清单读取期间已改变。", "INVALID_DATA_LAYOUT", 409));
+    }
+    Ok(Some(version))
 }
 pub(crate) fn commit_catalog(
     root: &Path,
@@ -630,7 +628,7 @@ pub(crate) fn commit_catalog(
     moves: &[Value],
     writes: &[Value],
 ) -> ContractResult {
-    let next = validate_catalog(next.clone())?;
+    let mut next = validate_catalog(next.clone())?;
     layout::apply(
         "storage.layout.inspect",
         &json!({"root":root,"document":next}),
@@ -641,6 +639,13 @@ pub(crate) fn commit_catalog(
                 .map_err(|_| error("正式目录编码无效。", "CORRUPT_STORAGE", 409))
         })
         .transpose()?;
+    if let Some(previous) = original.as_ref().and_then(|raw|serde_json::from_str::<Value>(&raw_json::scalar_projection(raw)).ok()) {
+        for project in next["Projects"].as_array_mut().unwrap() {
+            if let Some(old) = previous["Projects"].as_array().into_iter().flatten().find(|old|old["Id"] == project["Id"]) {
+                *project = super::workspace_mounts::preserve_versions(project,old)?;
+            }
+        }
+    }
     let encoded = encode_preserving(&next, &original.as_deref().into_iter().collect::<Vec<_>>());
     let transaction = format!(
         "{{\"Version\":1,\"NextCatalog\":{encoded},\"Moves\":{},\"Writes\":{}}}",
@@ -1159,24 +1164,94 @@ fn migrate_legacy_at(root: &Path, legacy: &Path, models: &Path) -> ContractResul
     ensure_layout(root, &document)?;
     Ok(document)
 }
+fn catalog_owner(root: &Path) -> Result<Arc<Mutex<()>>, ContractError> {
+    let mut owners = OWNERS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
+    Ok(owners
+        .entry(root.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
 pub(crate) fn with_catalog<T>(
     root: &Path,
     operation: impl FnOnce(&Value, Option<&str>) -> Result<T, ContractError>,
 ) -> Result<T, ContractError> {
-    let owner = {
-        let mut owners = OWNERS
-            .get_or_init(Default::default)
-            .lock()
-            .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
-        owners
-            .entry(root.to_path_buf())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    };
+    let owner = catalog_owner(root)?;
     let _guard = owner
         .lock()
         .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
     let (document, hash) = initialize(root)?;
+    operation(&document, hash.as_deref())
+}
+
+/// Reuse only completed preparation for unchanged layout inputs, never scope or filesystem authorization.
+/// 仅复用布局输入未变时已完成的准备工作，范围与文件系统授权每次重新核对。
+fn prepared_conversation_catalog(
+    root: &Path,
+    conversation_id: &str,
+) -> Result<(Value, Option<String>), ContractError> {
+    let pending = managed_files::inspect(
+        root,
+        &root.join(".catalog-transaction.json"),
+        false,
+        true,
+        64 * 1024 * 1024,
+    )?;
+    if !pending {
+        if let (Some(document), hash) = read_catalog_snapshot(root)? {
+            // Root settings/version and shared layout paths remain live checks, independent of the cache.
+            // 根设置、结构版本及共享布局路径仍即时检查，不以缓存代替。
+            let current = layout::apply("storage.layout.inspect", &json!({"root":root}))?;
+            let (_, _, plan_hash) = prepare_layout_plan(&document, &current)?;
+            let manifests = LAYOUT_SNAPSHOTS
+                .lock()
+                .map_err(|_| error("布局缓存锁失效。", "STORAGE_IO_FAILED", 500))?
+                .iter()
+                .find(|cached| cached.root == root && cached.plan == plan_hash)
+                .map(|cached| cached.manifests.clone());
+            if let Some(manifests) = manifests {
+                let location = locate(&document, conversation_id)?;
+                layout::inspect_conversation(root, &location)?;
+                let project_matches = if let Some(project_id) = location["ProjectId"].as_str() {
+                    let position = document["Projects"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .position(|project| project["Id"].as_str() == Some(project_id));
+                    match position {
+                        Some(position) => {
+                            manifests.get(position) == Some(&layout_manifest_version(root, project_id)?)
+                        }
+                        None => false,
+                    }
+                } else {
+                    true
+                };
+                if project_matches {
+                    return Ok((document, hash));
+                }
+            }
+        }
+    }
+    // Cold starts, pending canonical transactions and changed layout inputs retain the full recovery path.
+    // 首次使用、未完成正式事务及布局输入变化仍走完整初始化与恢复流程。
+    let (document, hash) = initialize(root)?;
+    layout::inspect_conversation(root, &locate(&document, conversation_id)?)?;
+    Ok((document, hash))
+}
+
+fn with_conversation_catalog<T>(
+    root: &Path,
+    conversation_id: &str,
+    operation: impl FnOnce(&Value, Option<&str>) -> Result<T, ContractError>,
+) -> Result<T, ContractError> {
+    let owner = catalog_owner(root)?;
+    let _guard = owner
+        .lock()
+        .map_err(|_| error("数据所有者锁失效。", "STORAGE_IO_FAILED", 500))?;
+    let (document, hash) = prepared_conversation_catalog(root, conversation_id)?;
     operation(&document, hash.as_deref())
 }
 pub fn load_catalog(root: &Path) -> ContractResult {
@@ -1279,7 +1354,7 @@ fn upsert_message_internal(
     input: &Value,
     original_content_raw: Option<&str>,
 ) -> ContractResult {
-    let mut result = with_catalog(root, |document, _| {
+    let mut result = with_conversation_catalog(root, id, |document, _| {
         let location = locate(document, id)?;
         let message_id = super::identity(&input["Id"])?;
         let ids =
@@ -1451,7 +1526,7 @@ pub fn save_tool_result(
     };
     let id = new_id();
     let digest = archive_hash(integrity.as_bytes());
-    with_catalog(root, |document, _| {
+    with_conversation_catalog(root, conversation_id, |document, _| {
         let (relationship, directory) =
             scoped_result_directory(root, document, conversation_id, true)?;
         let mut archived = json!({"version":version,"id":id,"conversationId":relationship["conversationId"],"requestId":request_id,
@@ -1534,6 +1609,43 @@ fn public_archive(document: &Value) -> Result<(), ContractError> {
 pub fn load_private_tool_result(root: &Path, conversation_id: &str, id: &str) -> ContractResult {
     with_catalog(root, |document, _| {
         load_result_at(root, document, conversation_id, id, false)
+    })
+}
+
+/// Recovery may locate a unique original receipt after dispatch, never infer execution from a working file.
+/// 恢复仅查找派发后的唯一原始回执，不通过工作文件的现状推断历史执行成功。
+pub(crate) fn find_recovery_tool_result(
+    root: &Path,
+    conversation_id: &str,
+    request_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+    dispatched_at_ms: i64,
+) -> ContractResult {
+    with_catalog(root, |document, _| {
+        let (_, directory) = scoped_result_directory(root, document, conversation_id, false)?;
+        if !managed_files::inspect(root, &directory, false, false, 0)? { return Ok(Value::Null); }
+        let mut matched = Value::Null;
+        for entry in std::fs::read_dir(&directory).map_err(|_| error("恢复回执目录不可读。", "TOOL_RESULT_READ_FAILED", 503))? {
+            let entry = entry.map_err(|_| error("恢复回执目录读取失败。", "TOOL_RESULT_READ_FAILED", 503))?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") { continue; }
+            let Some(bytes) = managed_files::read(root, &path, 8 * 1024 * 1024 + 8192)? else { continue; };
+            let archived: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| error("恢复回执归档损坏。", "CORRUPT_TOOL_RESULT", 500))?;
+            if archived["requestId"] != request_id || archived["toolCallId"] != tool_call_id
+                || archived["toolName"] != tool_name || archived["conversationId"] != conversation_id
+            { continue; }
+            let created = archived["createdAt"].as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|date| date.timestamp_millis());
+            if created.is_none_or(|created| created < dispatched_at_ms) { continue; }
+            if !matched.is_null() {
+                return Err(error("同一派发存在多个原始回执，须明确原件引用后核验。", "TASK_RECOVERY_RECEIPT_AMBIGUOUS", 409));
+            }
+            matched = load_result_at(root, document, conversation_id, archived["id"].as_str().unwrap_or(""), false)?;
+        }
+        Ok(matched)
     })
 }
 fn object_at_mut<'a>(value: &'a mut Value, path: &[Value]) -> Option<&'a mut Value> {
@@ -2102,6 +2214,142 @@ mod gateway_tests {
             b"corrupt external catalog"
         );
     }
+    #[test]
+    fn scoped_writes_skip_unrelated_layout_and_keep_target_path_and_version_checks() {
+        let workspace = Workspace::new();
+        let root = workspace.0.join("Data");
+        let target = new_id();
+        let unrelated = new_id();
+        ensure_conversation(&root, &target, "active task").unwrap();
+        ensure_conversation(&root, &unrelated, "unrelated task").unwrap();
+        let mut message = json!({"Id":new_id(),"Role":"assistant","Status":"streaming","Content":"before"});
+        upsert_message(&root, &target, &message).unwrap();
+        let unrelated_attachments = root.join("Chats").join(&unrelated).join("attachments");
+        std::fs::remove_dir(&unrelated_attachments).unwrap();
+        std::fs::write(&unrelated_attachments, b"unrelated invalid directory").unwrap();
+
+        // Only the current scope is touched, while explicit full catalog reads retain their old validation.
+        // 仅访问当前范围；显式读取完整目录仍保留原来的全布局校验。
+        message["Content"] = json!("saved while another chat needs repair");
+        assert_eq!(upsert_message(&root, &target, &message).unwrap()["appended"], true);
+        let request = new_id();
+        let call = json!({"id":"read-1","name":"filesystem.read"});
+        let canonical = json!({"success":true,"text":"original result"});
+        let receipt = save_tool_result(&root, &target, &request, &call, &canonical, None).unwrap();
+        let catalog = read_current_catalog(&root).unwrap().unwrap();
+        let archived = load_result_at(&root, &catalog, &target, receipt["id"].as_str().unwrap(), false).unwrap();
+        assert_eq!(archived["canonical"], canonical);
+        assert_eq!(archived["requestId"], request);
+        assert_eq!(load_catalog(&root).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+
+        let target_directory = root.join("Chats").join(&target);
+        let attachments = target_directory.join("attachments");
+        std::fs::remove_dir(&attachments).unwrap();
+        std::fs::write(&attachments, b"invalid current directory").unwrap();
+        assert_eq!(upsert_message(&root, &target, &message).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        assert_eq!(save_tool_result(&root, &target, &request, &call, &canonical, None).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        std::fs::remove_file(&attachments).unwrap();
+        std::fs::create_dir(&attachments).unwrap();
+
+        // An externally substituted hard-linked source must still fail the actual opened-file checks.
+        // 外部替换为硬链接的原件仍须被实际打开文件检查拒绝。
+        let events = target_directory.join("events.jsonl");
+        let held_events = workspace.0.join("held-events.jsonl");
+        let original = std::fs::read(&events).unwrap();
+        std::fs::rename(&events, &held_events).unwrap();
+        std::fs::hard_link(&held_events, &events).unwrap();
+        assert_eq!(upsert_message(&root, &target, &message).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        assert_eq!(save_tool_result(&root, &target, &request, &call, &canonical, None).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        assert_eq!(std::fs::read(&held_events).unwrap(), original);
+        std::fs::remove_file(&events).unwrap();
+        std::fs::rename(&held_events, &events).unwrap();
+
+        let settings_path = root.join("settings.json");
+        let original_settings = std::fs::read(&settings_path).unwrap();
+        let mut settings: Value = serde_json::from_slice(&original_settings).unwrap();
+        settings["Storage"]["LayoutVersion"] = json!(2);
+        std::fs::write(&settings_path, settings.to_string()).unwrap();
+        assert_eq!(upsert_message(&root, &target, &message).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        assert_eq!(save_tool_result(&root, &target, &request, &call, &canonical, None).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+        std::fs::write(&settings_path, original_settings).unwrap();
+        std::fs::remove_file(&unrelated_attachments).unwrap();
+        std::fs::create_dir(&unrelated_attachments).unwrap();
+        load_catalog(&root).unwrap();
+    }
+
+    #[test]
+    fn scoped_writes_initialize_cold_layout_and_reconcile_changed_project_inputs() {
+        let workspace = Workspace::new();
+        let seed = workspace.0.join("SeedData");
+        let root = workspace.0.join("ColdData");
+        let target = new_id();
+        ensure_conversation(&seed, &target, "cold task").unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::copy(seed.join("catalog.json"), root.join("catalog.json")).unwrap();
+        let message = json!({"Id":new_id(),"Role":"assistant","Status":"streaming","Content":"cold append"});
+        upsert_message(&root, &target, &message).unwrap();
+        assert!(root.join("settings.json").is_file());
+        assert!(root.join("Knowledge").is_dir());
+        assert!(root.join("Chats").join(&target).join("attachments").is_dir());
+
+        // New catalog layout inputs must prepare their new paths before the hot path can be reused.
+        // 正式目录出现新的布局输入时，先准备新增路径，再允许复用热路径。
+        let project = new_id();
+        let project_chat = new_id();
+        let mut catalog = load_catalog(&root).unwrap();
+        catalog["Projects"].as_array_mut().unwrap().push(json!({
+            "Id":project,"Name":"new project","FolderPath":null,"IsFolderlessWorkspace":true,
+            "Chats":[{"Id":project_chat,"Title":"project task"}]
+        }));
+        catalog["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
+        std::fs::write(root.join("catalog.json"), catalog.to_string()).unwrap();
+        upsert_message(&root, &target, &message).unwrap();
+        let project_directory = root.join("Projects").join(&project);
+        let manifest = project_directory.join("project.json");
+        assert!(manifest.is_file());
+        assert!(project_directory.join("Sessions").join(&project_chat).join("attachments").is_dir());
+        let project_message = json!({"Id":new_id(),"Role":"assistant","Status":"streaming","Content":"project append"});
+        upsert_message(&root, &project_chat, &project_message).unwrap();
+        std::fs::write(&manifest, b"changed derived projection").unwrap();
+        upsert_message(&root, &project_chat, &project_message).unwrap();
+        let repaired: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(repaired["Id"], project);
+        assert_eq!(repaired["Sessions"][0], project_chat);
+        let memory = project_directory.join("Memory");
+        std::fs::remove_dir(&memory).unwrap();
+        std::fs::write(&memory, b"invalid current project directory").unwrap();
+        assert_eq!(upsert_message(&root, &project_chat, &project_message).unwrap_err().code(), "INVALID_DATA_LAYOUT");
+    }
+
+    #[test]
+    fn scoped_writes_recover_pending_transactions_before_archiving_and_appending() {
+        let workspace = Workspace::new();
+        let root = workspace.0.join("Data");
+        let target = new_id();
+        ensure_conversation(&root, &target, "pending task").unwrap();
+        let mut next = load_catalog(&root).unwrap();
+        next["Revision"] = json!(next["Revision"].as_u64().unwrap() + 1);
+        next["Chats"][0]["Title"] = json!("recovered task");
+        let recovered = json!({"Id":new_id(),"Role":"assistant","Status":"streaming","CreatedAt":now(),"Content":"durable pending message"});
+        let journal = root.join(".catalog-transaction.json");
+        std::fs::write(&journal, json!({
+            "Version":1,"NextCatalog":next,"Moves":[],
+            "Writes":[{"Location":locate(&next,&target).unwrap(),"Message":recovered}]
+        }).to_string()).unwrap();
+        let request = new_id();
+        let canonical = json!({"success":true,"text":"after recovery"});
+        let receipt = save_tool_result(&root, &target, &request,
+            &json!({"id":"read-recovered","name":"filesystem.read"}), &canonical, None).unwrap();
+        assert!(!journal.exists());
+        let archived = load_private_tool_result(&root, &target, receipt["id"].as_str().unwrap()).unwrap();
+        assert_eq!(archived["canonical"], canonical);
+        assert_eq!(archived["requestId"], request);
+        upsert_message(&root, &target, &json!({"Id":new_id(),"Role":"assistant","Status":"streaming","Content":"continued"})).unwrap();
+        let messages = read_model_messages(&root, &target).unwrap();
+        assert_eq!(messages.iter().filter(|message| message["Id"] == recovered["Id"]).count(), 1);
+        assert_eq!(load_catalog(&root).unwrap()["Chats"][0]["Title"], "recovered task");
+    }
+
     #[test]
     fn history_pages_skip_unrelated_layout_and_recheck_target_scope_and_path() {
         let workspace = Workspace::new();

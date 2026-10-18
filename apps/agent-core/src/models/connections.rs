@@ -193,6 +193,16 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
                 .map(|key| json!({"found": true, "value": key}))
                 .unwrap_or(json!({"found": false}))
         }
+        "models.connections.removePlan" => {
+            let mut document = args["document"].clone();
+            let providers = array(&document["providers"])
+                .iter()
+                .filter(|provider| provider["providerId"] != args["providerId"])
+                .cloned()
+                .collect::<Vec<_>>();
+            document["providers"] = json!(providers);
+            json!({"document": document})
+        }
         "models.connections.savePlan" => {
             let connection = &args["connection"];
             let mut document = args["document"].clone();
