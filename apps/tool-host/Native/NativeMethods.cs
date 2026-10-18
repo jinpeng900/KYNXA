@@ -89,6 +89,12 @@ internal static class NativeMethods
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct JobCpuRateControlInformation
+    {
+        public uint ControlFlags, CpuRate;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct JobBasicAccountingInformation
     {
         public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
@@ -206,6 +212,23 @@ internal static class NativeMethods
         out JobBasicAccountingInformation information,
         uint length,
         IntPtr returnLength);
+
+    // Distinct managed names keep existing accounting calls with out var unambiguous.
+    // 使用不同托管名称，避免既有 out var 作业记账调用出现重载歧义。
+    [DllImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetJobCpuRateControlInformation(
+        IntPtr job, int informationClass, ref JobCpuRateControlInformation information, uint length);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool QueryJobCpuRateControlInformation(
+        IntPtr job, int informationClass, out JobCpuRateControlInformation information, uint length, IntPtr returnLength);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool QueryJobExtendedLimitInformation(
+        IntPtr job, int informationClass, out JobExtendedLimitInformation information, uint length, IntPtr returnLength);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

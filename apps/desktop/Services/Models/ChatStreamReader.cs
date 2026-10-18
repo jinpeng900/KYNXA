@@ -87,7 +87,7 @@ public static class ChatStreamReader
                             var segment = streamEvent.Segment!;
                             if (assistantSegments.TryGetValue(segment.Id, out var previous))
                             {
-                                if (previous.Round != segment.Round || previous.Order != segment.Order || previous.Status != "streaming")
+                                if (!IsValidSegmentUpdate(previous, segment))
                                     throw InvalidSegment();
                             }
                             else
@@ -102,15 +102,16 @@ public static class ChatStreamReader
                         case "tool_result":
                         case "approval_required":
                             ValidateToolEvent(streamEvent);
-                            // Context maintenance is display-only and may precede this round's model output.
-                            // 上下文维护只是展示活动，可以发生在本轮模型输出前；真实工具仍须等待该轮输出完成。
+                            // Context maintenance is display-only, including recovery after the latest interrupted step.
+                            // 上下文维护只是展示活动，也可以接在最新中断步骤后恢复；真实工具仍须等待该轮输出完成。
                             bool isContextActivity = streamEvent.Tool!.Name == "context.compact";
                             if (isContextActivity && (streamEvent.Type == "approval_required" ||
                                 streamEvent.Tool.Arguments!.Value.EnumerateObject().Any()))
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             if (assistantSegments.Count > 0 && (streamEvent.Tool.Round is null || !assistantSegments.Values.Any(value =>
                                 value.Round == streamEvent.Tool.Round && value.Phase == "commentary" && value.Order < streamEvent.Tool.Order &&
-                                (value.Status == "completed" || isContextActivity && value.Status == "streaming"))))
+                                (value.Status == "completed" || isContextActivity && (value.Status == "streaming" ||
+                                    value.Status == "interrupted" && value.Round == assistantSegments.Values.Max(known => known.Round))))))
                                 throw InvalidSegment();
                             string toolCallId = streamEvent.Tool!.ToolCallId;
                             string toolName = streamEvent.Tool.Name;
@@ -133,6 +134,14 @@ public static class ChatStreamReader
                                 streamEvent.Terminal.Sequence <= terminalOutputSequences.GetValueOrDefault(streamEvent.Terminal.ToolCallId))
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             terminalOutputSequences[streamEvent.Terminal.ToolCallId] = streamEvent.Terminal.Sequence;
+                            break;
+                        case "workspace_terminal_open":
+                            // The gateway already owns this PTY; the event attaches its renderer, never creates a second session.
+                            // 网关已拥有此伪终端；事件只挂接渲染视图，不能再建立第二个会话。
+                            if (string.IsNullOrWhiteSpace(streamEvent.SessionId) || streamEvent.SessionId.Length > 200 ||
+                                streamEvent.SessionId.Any(char.IsControl) || streamEvent.Cols is not (>= 2 and <= 500) ||
+                                streamEvent.Rows is not (>= 1 and <= 200))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
                         case "mcp_status":
                             // A service discovery diagnostic does not settle the model reply or its active tools.
@@ -229,6 +238,20 @@ public static class ChatStreamReader
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
     }
 
+    private static bool IsValidSegmentUpdate(AssistantSegment previous, AssistantSegment segment)
+    {
+        if (previous.Id != segment.Id || previous.Round != segment.Round || previous.Order != segment.Order)
+            return false;
+        if (previous.Phase == "final_answer" && segment.Phase != "final_answer") return false;
+        if (previous.Status == "streaming") return true;
+
+        // Closing a round is idempotent. Later classification may promote its phase or mark an answer continuation.
+        // 同轮结束事件可幂等重放；后续分类可确定最终阶段或正文续写标记，不得借此改写已关闭的正文与摘要。
+        return previous.Status == segment.Status && previous.Content == segment.Content &&
+            previous.Reasoning == segment.Reasoning && previous.ReasoningDurationMs <= segment.ReasoningDurationMs &&
+            (!previous.IsAnswerContinuation || segment.IsAnswerContinuation || segment.Phase == "final_answer");
+    }
+
     private static void ValidateTerminalSegments(ChatStreamEvent streamEvent, Dictionary<string, AssistantSegment> knownSegments)
     {
         if (streamEvent.AssistantSegments is not { } assistantSegments)
@@ -238,7 +261,8 @@ public static class ChatStreamReader
         }
         if (streamEvent.ToolStreamProtocol != 3 || !AssistantSegmentRules.IsValidSequence(assistantSegments))
             throw InvalidSegment();
-        if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment => !knownSegments.TryGetValue(segment.Id, out var prior) || prior.Round != segment.Round || prior.Order != segment.Order)))
+        if (knownSegments.Count > 0 && (assistantSegments.Length != knownSegments.Count || assistantSegments.Any(segment =>
+            !knownSegments.TryGetValue(segment.Id, out var prior) || !IsValidSegmentUpdate(prior, segment))))
             throw InvalidSegment();
         // An interrupted model step may recover into a complete final answer; it remains a truthful commentary trace.
         // 中断的模型步骤可以恢复并得到完整最终回答；先前中断段仍保留为真实的过程轨迹。

@@ -86,6 +86,34 @@ fn name<'a>(node: tree_sitter::Node<'a>, text: &'a str) -> Option<&'a str> {
         .ok()
         .filter(|name| !name.is_empty() && name.len() <= 1024)
 }
+
+/// Read the actual declaration header; this optional preview does not change chunk or embedding identities.
+/// 提取真实声明头部；可选预览不改变分块和向量身份，旧缓存缺少该字段仍然有效。
+fn signature(node: tree_sitter::Node<'_>, text: &str) -> String {
+    let end = node.child_by_field_name("body").map_or(node.end_byte(), |body| body.start_byte());
+    let header = text.get(node.start_byte()..end).unwrap_or("").trim();
+    let mut characters = header.chars();
+    let preview = characters.by_ref().take(320).collect::<String>();
+    if characters.next().is_some() { format!("{preview}…") } else { preview }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    #[test]
+    fn code_signature_is_the_original_header_without_function_body() {
+        let text = "pub fn 合计(\n    value: usize,\n) -> usize {\n value + 1\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        let node = tree.root_node().named_child(0).unwrap();
+        let actual = signature(node, text);
+        assert_eq!(actual, "pub fn 合计(\n    value: usize,\n) -> usize");
+        assert!(!actual.contains("value + 1"));
+        assert_eq!(parser_version("main.rs"), "rust-tree-sitter-v1");
+    }
+}
 fn utf16_index(text: &str) -> Vec<usize> {
     let mut offsets = vec![0; text.len() + 1];
     let mut count = 0;
@@ -148,7 +176,7 @@ pub fn parse(text: &str, path: &str) -> Result<Value, ContractError> {
                     .as_ref()
                     .map(|parent| format!("{parent}.{symbol}"))
                     .unwrap_or(symbol.to_string());
-                declarations.push(json!({"depth":depth,"unit":{"kind":kind,"symbolName":symbol,"qualifiedName":qualified,"parentSymbol":parent,
+                declarations.push(json!({"depth":depth,"unit":{"kind":kind,"symbolName":symbol,"qualifiedName":qualified,"parentSymbol":parent,"signature":signature(node, text),
                     "startOffset":offsets[node.start_byte()],"endOffset":offsets[node.end_byte()],"startLine":node.start_position().row+1,"endLine":node.end_position().row+1}}));
                 next_parent = Some(qualified);
             }

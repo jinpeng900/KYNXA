@@ -21,7 +21,8 @@ public sealed partial class ShellPage
     private void UpdateMountedWorkspacePresentation()
     {
         var project = ViewModel.IsChatMode ? null : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
-        MountedWorkspace.ShowProject(project?.Id, UserMountedFolder(project));
+        MountedWorkspace.ShowProject(project?.Id, UserMountedFolder(project), project?.Mounts);
+        NotifyActiveRetrievalProject(project);
         ApplyLayout();
     }
 

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::intent::{js_trim, matches};
 use super::service_error::{ServiceError, ServiceResult};
@@ -20,6 +20,48 @@ const SOURCE_FIELDS: &[&str] = &[
     "excerpt",
     "excerpts",
 ];
+
+const TEMPORAL_FIELDS: &[&str] = &[
+    "publishedAt",
+    "publishedDate",
+    "published_date",
+    "datePublished",
+    "publicationDate",
+    "publishedTime",
+    "published_time",
+    "updatedAt",
+    "updatedDate",
+    "dateModified",
+    "lastModified",
+    "last_modified",
+    "modifiedAt",
+    "date",
+    "age",
+    "page_age",
+    "firstCrawledDate",
+    "lastCrawledDate",
+    "indexedDate",
+];
+
+fn temporal_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Some(json!(slice(text.trim(), 0, 256))),
+        Value::Number(_) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Preserve provider date labels as evidence; retrieval time never becomes publication time.
+/// 保留来源原有时间字段及含义；不能把本次检索时间当成文章发布日期。
+pub(crate) fn preserve_temporal_metadata(source: &Value, target: &mut Value) {
+    for field in TEMPORAL_FIELDS {
+        if target[*field].is_null() {
+            if let Some(value) = temporal_value(&source[*field]) {
+                target[*field] = value;
+            }
+        }
+    }
+}
 
 struct Sources<'a> {
     nodes: HashMap<u64, &'a Value>,
@@ -106,7 +148,7 @@ impl<'a> Sources<'a> {
         }
         String::new()
     }
-    fn add(&mut self, url: &Value, title: &str, excerpt: &str) {
+    fn add(&mut self, url: &Value, title: &str, excerpt: &str, metadata: &Value) {
         let Ok(url) = public_url(url) else {
             return;
         };
@@ -120,9 +162,11 @@ impl<'a> Sources<'a> {
             if string(&previous["excerpt"]).is_empty() && !excerpt.is_empty() {
                 previous["excerpt"] = json!(excerpt);
             }
+            preserve_temporal_metadata(metadata, previous);
         } else if self.sources.len() < self.maximum {
-            self.sources
-                .push(json!({"url":url,"title":title,"excerpt":excerpt}));
+            let mut source = json!({"url":url,"title":title,"excerpt":excerpt});
+            preserve_temporal_metadata(metadata, &mut source);
+            self.sources.push(source);
         }
     }
     fn text(&mut self, text: &str) {
@@ -131,14 +175,23 @@ impl<'a> Sources<'a> {
         let body =
             regex::Regex::new(r"(?i)^\s*(?:Content|Text|Highlights|Summary|Description):\s*(.*)$")
                 .unwrap();
+        let date = regex::Regex::new(
+            r"(?i)^\s*(Published(?: Date| Time)?|Date|(?:Last )?Updated(?: Date)?|Modified(?: Date)?|Last Modified):\s*(.*)$",
+        )
+        .unwrap();
         let mut labelled = false;
-        let mut current: Option<(String, String, Vec<String>, bool)> = None;
+        let mut current: Option<(String, String, Vec<String>, bool, Map<String, Value>)> = None;
         let mut sources = Vec::new();
-        let finish = |current: &mut Option<(String, String, Vec<String>, bool)>,
-                      sources: &mut Vec<(String, String, String)>| {
-            if let Some((title, url, lines, _)) = current.take() {
+        let finish = |current: &mut Option<(String, String, Vec<String>, bool, Map<String, Value>)>,
+                      sources: &mut Vec<(String, String, String, Value)>| {
+            if let Some((title, url, lines, _, metadata)) = current.take() {
                 if !url.is_empty() {
-                    sources.push((url, title, js_trim(&lines.join("\n")).into()));
+                    sources.push((
+                        url,
+                        title,
+                        js_trim(&lines.join("\n")).into(),
+                        Value::Object(metadata),
+                    ));
                 }
             }
         };
@@ -154,32 +207,50 @@ impl<'a> Sources<'a> {
                     String::new(),
                     Vec::new(),
                     false,
+                    Map::new(),
                 ));
             } else if let Some(captures) = url.captures(line) {
                 labelled = true;
                 if current
                     .as_ref()
-                    .is_some_and(|(_, url, _, _)| !url.is_empty())
+                    .is_some_and(|(_, url, _, _, _)| !url.is_empty())
                 {
                     finish(&mut current, &mut sources);
                 }
-                let current = current
-                    .get_or_insert_with(|| (String::new(), String::new(), Vec::new(), false));
+                let current = current.get_or_insert_with(|| {
+                    (String::new(), String::new(), Vec::new(), false, Map::new())
+                });
                 current.1 = js_trim(&captures[1]).into();
             } else if matches(r"^\s*(?:---+|\*\*\*+)\s*$", line) {
                 finish(&mut current, &mut sources);
-            } else if let Some((_, url, lines, has_body)) = &mut current {
+            } else if let Some((_, url, lines, has_body, metadata)) = &mut current {
                 if url.is_empty() {
                     continue;
+                }
+                if !*has_body {
+                    if let Some(captures) = date.captures(line) {
+                        let label = captures[1].to_ascii_lowercase();
+                        let field = if label.starts_with("published") {
+                            "publishedDate"
+                        } else if label.contains("updated") {
+                            "updatedAt"
+                        } else if label.contains("modified") {
+                            "lastModified"
+                        } else {
+                            "date"
+                        };
+                        if let Some(value) = temporal_value(&json!(&captures[2])) {
+                            metadata.entry(field).or_insert(value);
+                        }
+                        continue;
+                    }
                 }
                 if let Some(captures) = body.captures(line) {
                     *has_body = true;
                     if !captures[1].is_empty() {
                         lines.push(captures[1].into());
                     }
-                } else if !*has_body
-                    && matches(r"(?i)^\s*(?:Published(?: Date)?|Author|Date):", line)
-                {
+                } else if !*has_body && matches(r"(?i)^\s*Author:", line) {
                     continue;
                 } else {
                     if !js_trim(line).is_empty() {
@@ -191,8 +262,8 @@ impl<'a> Sources<'a> {
         }
         finish(&mut current, &mut sources);
         if labelled {
-            for (url, title, excerpt) in sources {
-                self.add(&json!(url), &title, &excerpt);
+            for (url, title, excerpt, metadata) in sources {
+                self.add(&json!(url), &title, &excerpt, &metadata);
             }
             return;
         }
@@ -200,13 +271,14 @@ impl<'a> Sources<'a> {
         let link = regex::Regex::new(r#"https?://[^\s<>"\]\)]+"#).unwrap();
         for line in text.split('\n') {
             for capture in markdown.captures_iter(line) {
-                self.add(&json!(&capture[2]), &capture[1], "");
+                self.add(&json!(&capture[2]), &capture[1], "", &Value::Null);
             }
             for capture in link.find_iter(line) {
                 self.add(
                     &json!(capture.as_str().trim_end_matches(['.', ',', ';'])),
                     "",
                     "",
+                    &Value::Null,
                 );
             }
         }
@@ -271,7 +343,19 @@ impl<'a> Sources<'a> {
                     break;
                 }
             }
-            self.add(&url["text"], &title, &excerpt);
+            let metadata = TEMPORAL_FIELDS
+                .iter()
+                .filter_map(|field| {
+                    let value = self.resolve(self.field(value, field));
+                    let value = match string(&value["kind"]) {
+                        "string" => &value["text"],
+                        "number" => &value["value"],
+                        _ => &Value::Null,
+                    };
+                    temporal_value(value).map(|value| ((*field).to_owned(), value))
+                })
+                .collect::<Map<_, _>>();
+            self.add(&url["text"], &title, &excerpt, &Value::Object(metadata));
         }
         for field in array(&value["fields"]) {
             let name = string(&field[0]);
@@ -340,7 +424,7 @@ impl<'a> Sources<'a> {
                 (!text.trim().is_empty()).then_some(text)
             })
             .unwrap_or_default();
-            self.add(&value["url"], title, &excerpt);
+            self.add(&value["url"], title, &excerpt, value);
         }
         for (field, item) in fields {
             if *remaining == 0 || self.sources.len() >= self.maximum {
@@ -400,5 +484,71 @@ pub fn apply(operation: &str, arguments: &Value) -> ServiceResult<Value> {
             "Unknown web source operation.",
             400,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_sources_preserve_publication_and_modification_dates_separately() {
+        let sources = normalize_result(&json!({"results":[{
+            "url":"https://example.org/news", "title":"News", "excerpts":["Original evidence"],
+            "publishedDate":"2024-01-02", "dateModified":"2026-10-17", "age":"yesterday",
+            "fetchedAt":"2026-10-18T09:00:00Z", "unknownMetadata":"omit"
+        }]}), 6);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["publishedDate"], "2024-01-02");
+        assert_eq!(sources[0]["dateModified"], "2026-10-17");
+        assert_eq!(sources[0]["age"], "yesterday");
+        assert_eq!(sources[0]["excerpt"], "Original evidence");
+        assert!(sources[0].get("publishedAt").is_none());
+        assert!(sources[0].get("fetchedAt").is_none());
+        assert!(sources[0].get("unknownMetadata").is_none());
+    }
+
+    #[test]
+    fn labelled_sources_retain_dates_without_confusing_generic_date_with_publication() {
+        let sources = normalize_result(&json!({"content":[{"type":"text","text":
+            "Title: First article\nURL: https://example.org/first\nPublished Date: 2024-01-02\nLast Updated: 2026-10-17\nText: Original first evidence\n---\nTitle: Second article\nURL: https://example.org/second\nDate: 2025-03-04\nText: Original second evidence"
+        }]}), 6);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0]["publishedDate"], "2024-01-02");
+        assert_eq!(sources[0]["updatedAt"], "2026-10-17");
+        assert_eq!(sources[0]["excerpt"], "Original first evidence");
+        assert_eq!(sources[1]["date"], "2025-03-04");
+        assert!(sources[1].get("publishedDate").is_none());
+    }
+
+    #[test]
+    fn repeated_source_only_fills_missing_dates_and_missing_metadata_stays_unknown() {
+        let sources = normalize_result(&json!({"results":[
+            {"url":"https://example.org/news","publishedAt":"2024-01-02","text":"Original"},
+            {"url":"https://example.org/news","publishedAt":"2026-10-18","updatedAt":"2026-10-17"},
+            {"url":"https://example.org/undated","publishedAt":{},"age":false}
+        ]}), 6);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0]["publishedAt"], "2024-01-02");
+        assert_eq!(sources[0]["updatedAt"], "2026-10-17");
+        assert!(sources[1].get("publishedAt").is_none());
+        assert!(sources[1].get("age").is_none());
+    }
+
+    #[test]
+    fn graph_sources_preserve_provider_dates_without_relabelling_them() {
+        let source = json!({"id":1,"kind":"object","fields":[
+            ["url",{"kind":"string","text":"https://example.org/news"}],
+            ["publishedAt",{"kind":"string","text":"2024-01-02"}],
+            ["lastCrawledDate",{"kind":"string","text":"2026-10-17"}],
+            ["excerpt",{"kind":"string","text":"Original evidence"}]
+        ]});
+        let normalized = apply(
+            "sources.normalize",
+            &json!({"maximum":6,"graph":{"root":source,"nodes":[]}}),
+        ).unwrap();
+        assert_eq!(normalized[0]["publishedAt"], "2024-01-02");
+        assert_eq!(normalized[0]["lastCrawledDate"], "2026-10-17");
+        assert_eq!(normalized[0]["excerpt"], "Original evidence");
     }
 }

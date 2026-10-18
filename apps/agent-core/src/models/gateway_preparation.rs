@@ -1,5 +1,5 @@
 //! Bounded startup preparation reuses provider transport and native resource admission without generation.
-//! 有界启动准备复用供应商通信及原生资源准入，不发送计费生成，不读取桌面偏好或启动外部模型进程。
+//! 有界启动准备复用供应商通信及原生资源准入，不发送计费生成；仅按策略启动已选中的自管本地模型。
 
 use super::{
     connections,
@@ -460,6 +460,21 @@ impl PreparationService {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, ModelError>> + Send + 'a>>
     {
         Box::pin(async move {
+            if super::gateway_local_engine::is_managed(connection) {
+                let metadata = super::gateway_local_models::enabled_model(&self.config.data_home, model).await?;
+                let policy = metadata["loadPolicy"].as_str().unwrap_or("auto");
+                if !selected || policy == "on-demand" {
+                    let running = super::gateway_local_engine::refresh_status(&self.config.data_home, connection, model).await?;
+                    let mut prepared = super::gateway_local_engine::preparation_status(&running);
+                    prepared["loadPolicy"] = json!(policy);
+                    return Ok(prepared);
+                }
+                super::gateway_local_engine::ensure(&self.config.data_home, connection, model, token).await?;
+                let running = super::gateway_local_engine::status(&self.config.data_home, model);
+                let mut prepared = super::gateway_local_engine::preparation_status(&running);
+                prepared["loadPolicy"] = json!(policy);
+                return Ok(prepared);
+            }
             let observed =
                 gateway_config::observe_local_fresh(connection, model, None, token.clone()).await?;
             if observed["backend"] == "ollama" && observed["loaded"] == true {
@@ -1106,9 +1121,18 @@ mod tests {
             state.phase = "preparing";
             state.entries = vec![
                 json!({"providerId":"fixture","modelId":"fixture-model","selected":true,"local":true,"state":"queued"}),
+                json!({"providerId":"api-fixture","modelId":"api-model","selected":true,"local":false,"state":"preparing"}),
             ];
         }
         let (_owner, token) = watch::channel(false);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                service.wait_model("api-fixture", "api-model", token.clone())
+            )
+            .await
+            .expect("API generation must not join model-list discovery")
+        );
         assert!(
             service
                 .wait_model("other", "fixture-model", token.clone())

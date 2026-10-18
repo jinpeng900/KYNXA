@@ -326,6 +326,9 @@
         "main.rs",
         "models/gateway.rs",
         "models/gateway_config.rs",
+        "models/gateway_local_models.rs",
+        "models/gateway_local_download.rs",
+        "models/gateway_local_engine.rs",
         "models/gateway_preparation.rs",
         "models/gateway_context.rs",
         "models/gateway_inference.rs",
@@ -339,6 +342,7 @@
         "retrieval/gateway_message_attachments.rs",
         "retrieval/gateway_embedding.rs",
         "retrieval/gateway_index.rs",
+        "retrieval/gateway_watch.rs",
         "retrieval/gateway_structure.rs",
         "retrieval/gateway_tools.rs",
         "retrieval/gateway_history.rs",
@@ -369,6 +373,7 @@
         "storage/sqlite_store.rs",
         "storage/sqlite_vector_reads.rs",
         "storage/tool_results.rs",
+        "storage/tool_memory.rs",
         "tools/gateway.rs",
         "tools/gateway_document_read.rs",
         "tools/gateway_workspace_preview.rs",
@@ -378,6 +383,7 @@
         "tools/gateway_browser.rs",
         "tools/gateway_browser_permissions.rs",
         "tools/gateway_mcp.rs",
+        "tools/gateway_tool_memory.rs",
         "tools/gateway_mcp_budget.rs",
         "tools/gateway_process.rs",
         "tools/gateway_search.rs",
@@ -555,6 +561,27 @@
           "purpose": "Formal connection config and actual local observations / 正式连接配置与真实本地模型观察"
         },
         {
+          "path": "models/gateway_local_models.rs",
+          "allowedDomains": [
+            "storage",
+            "resources"
+          ],
+          "purpose": "Managed local model installation and connection registration / 本地模型安装与连接注册"
+        },
+        {
+          "path": "models/gateway_local_download.rs",
+          "allowedDomains": [],
+          "purpose": "Resumable pinned local model transfers / 可恢复的固定本地模型下载"
+        },
+        {
+          "path": "models/gateway_local_engine.rs",
+          "allowedDomains": [
+            "resources",
+            "tools"
+          ],
+          "purpose": "Private GGUF engine lifecycle and process ownership / 私有 GGUF 引擎生命周期与进程归属"
+        },
+        {
           "path": "models/gateway_preparation.rs",
           "allowedDomains": [
             "resources",
@@ -591,7 +618,8 @@
         {
           "path": "tools/gateway.rs",
           "allowedDomains": [
-            "models"
+            "models",
+            "storage"
           ],
           "purpose": "Authoritative tool execution and exact model wire-name loading / 正式工具执行与精确模型协议名称加载"
         },
@@ -615,6 +643,13 @@
             "resources"
           ],
           "purpose": "Owned ToolHost and subprocess effects / 拥有的 ToolHost 与子进程效果"
+        },
+        {
+          "path": "tools/gateway_tool_memory.rs",
+          "allowedDomains": [
+            "storage"
+          ],
+          "purpose": "Persistent capability hints and derived usage experience without permission or execution ownership / 持久能力提示与使用经验汇总，不拥有权限或执行账本"
         },
         {
           "path": "tools/gateway_mcp.rs",
@@ -681,6 +716,13 @@
             "resources"
           ],
           "purpose": "Actual SQLite/vector/source indexing under native resource leases / 原生资源租约内的真实 SQLite 向量来源索引执行"
+        },
+        {
+          "path": "retrieval/gateway_watch.rs",
+          "allowedDomains": [
+            "tools"
+          ],
+          "purpose": "Owned native directory notifications reuse source exclusions / 拥有生命周期的原生目录通知复用来源排除规则"
         },
         {
           "path": "retrieval/gateway_embedding.rs",
@@ -862,7 +904,8 @@
           "allowedDomains": [
             "models",
             "storage",
-            "tools"
+            "tools",
+            "retrieval"
           ],
           "purpose": "cfg(test)-only native Worker integration fixtures / 仅 cfg(test) 编译的原生 Worker 集成夹具"
         },

@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -59,29 +59,155 @@ pub struct RequestRun {
     pub native_cancellation: crate::service_cancellation::CancellationLease,
     pub cancellation_key: String,
     pub events: broadcast::Sender<Value>,
+    emission: Mutex<()>,
     replay: Mutex<ReplayState>,
     pub finished: AtomicBool,
     pub suspending: AtomicBool,
     pub result: Mutex<Option<Value>>,
+    observed_context_limits: std::sync::Mutex<Value>,
     pub created: Instant,
+    pub resource_wait_ms: AtomicU64,
 }
 impl RequestRun {
+    /// Model-step retries share learned limits only while the verified connection identity stays unchanged.
+    /// 仅在核验连接身份不变时跨模型步骤复用已学额度；请求重建不能恢复已被拒绝的预算。
+    pub(crate) fn observed_model_limits(&self, origin: &str) -> Value {
+        let observed = self.observed_context_limits.lock().unwrap();
+        if observed["origin"].as_str() == Some(origin) { observed["limits"].clone() } else { Value::Null }
+    }
+
+    pub(crate) fn retain_model_limits(&self, origin: &str, limits: &Value) {
+        let mut observed = self.observed_context_limits.lock().unwrap();
+        let previous = if observed["origin"].as_str() == Some(origin) { &observed["limits"] } else { &Value::Null };
+        *observed = json!({"origin":origin,"limits":crate::models::recovery::retain_numeric_limits(previous, limits)});
+    }
+
+    /// Resource admission is suspended execution, not time spent running the accepted task.
+    /// 资源准入等待属于执行挂起，不消耗已接受任务的实际执行时限。
+    pub fn active_elapsed(&self, start: Instant) -> Duration {
+        start.elapsed().saturating_sub(Duration::from_millis(
+            self.resource_wait_ms.load(Ordering::Acquire),
+        ))
+    }
+
     pub fn cancel(&self) {
         self.native_cancellation
             .token
             .store(true, Ordering::Release);
         self.cancellation.send_replace(true);
     }
+
+    /// Keep one queued control across temporary storage pressure without cancelling its accepted task.
+    /// 临时持久化拥塞时保留同一控制事件，等待原批次落盘，不取消已接受任务或重派副作用。
+    async fn persist_event(
+        &self,
+        journal: &Arc<super::gateway_task_journal::TaskJournal>,
+        kind: &str,
+        durable: &Value,
+        terminal: bool,
+    ) -> Result<(), GatewayError> {
+        let mut queued = false;
+        let mut cancellation = self.cancellation.subscribe();
+        let mut delay = Duration::from_millis(100);
+        let mut waiting_since = None;
+        let result = loop {
+            if !queued {
+                match journal.emit_control(kind, durable) {
+                    Ok(()) => queued = true,
+                    Err(error) if error.code == "TASK_EVENT_BACKPRESSURE" => {
+                        waiting_since.get_or_insert_with(Instant::now);
+                    }
+                    Err(error) => break Err(error),
+                }
+            }
+            if queued && !terminal {
+                break Ok(());
+            }
+            match journal.flush().await {
+                Ok(()) if queued => break Ok(()),
+                Ok(()) => continue,
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "TASK_STORAGE_FAILED" | "TASK_EVENT_FLUSH_FAILED"
+                    ) =>
+                {
+                    waiting_since.get_or_insert_with(Instant::now);
+                    if *cancellation.borrow() || self.suspending.load(Ordering::Acquire) {
+                        break Err(error);
+                    }
+                    // Flush owns stable event IDs; retrying storage never repeats a model or tool call.
+                    // flush 持有稳定事件 ID；存储重试不重复模型请求或工具调用，用户取消仍立即唤醒。
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {},
+                        _ = cancellation.changed() => break Err(error),
+                    }
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        if let Some(started) = waiting_since {
+            self.resource_wait_ms.fetch_add(
+                started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                Ordering::AcqRel,
+            );
+        }
+        result
+    }
+
     pub async fn emit(&self, mut event: Value) {
-        let mut replay = self.replay.lock().await;
+        let _emission = self.emission.lock().await;
+        let replay = self.replay.lock().await;
         if self.finished.load(Ordering::Acquire) {
             return;
         }
-        replay.sequence += 1;
         event["conversationId"] = json!(self.conversation_id);
         event["requestId"] = json!(self.request_id);
         event["createdAt"] = json!(now_iso8601());
-        event["eventSequence"] = json!(replay.sequence);
+        event["eventSequence"] = json!(replay.sequence + 1);
+        if event["replyMessageId"].is_null() {
+            event["replyMessageId"] = replay.reply_anchor.as_ref()
+                .map(|anchor| anchor["replyMessageId"].clone())
+                .unwrap_or_else(||json!(self.request_id));
+        }
+        drop(replay);
+        // Persist compact deltas and formal references; never re-encode the growing full reply per token.
+        // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
+        if let Some(journal) = &self.journal {
+            if event["taskId"].is_null() {
+                event["taskId"] = json!(journal.task_id());
+            }
+            event["rootRequestTaskId"] = json!(journal.task_id());
+            let durable = if terminal_event(&event) {
+                json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":event["replyMessageId"],"taskCompletion":event["taskCompletion"]})
+            } else if event["type"] == "assistant_segment" {
+                json!({"type":"assistant_segment","segmentId":event["segment"]["id"],"phase":event["segment"]["phase"],"status":event["segment"]["status"]})
+            } else if event.to_string().len() <= 24 * 1024 {
+                event.clone()
+            } else {
+                json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
+            };
+            if !journal.is_released() {
+                if let Err(error) = self
+                    .persist_event(
+                        journal,
+                        event["type"].as_str().unwrap_or("progress"),
+                        &durable,
+                        terminal_event(&event),
+                    )
+                    .await
+                {
+                    // Ownership/invariant failures stay diagnostic; they are never forged into a user cancellation.
+                    // 执行权或不变量错误继续保留诊断，不伪装成用户取消；后续派发仍须通过正式日志围栏。
+                    event["persistenceError"] = json!({"code":error.code,"message":error.message});
+                }
+            }
+        }
+        // Publish replay watermarks only after persistence has stopped waiting.
+        // 持久化等待结束后才推进回放水位，避免新观察者提前终结或跳过尚未发布的事件。
+        let mut replay = self.replay.lock().await;
+        replay.sequence = event["eventSequence"].as_u64().unwrap();
         if event["type"] == "reply_anchor" {
             // A new reply changes only replay/display ownership; the durable task journal keeps earlier receipts.
             // 新回复仅切换回放与展示归属；正式任务日志继续保留此前调用回执。
@@ -92,11 +218,6 @@ impl RequestRun {
             replay.bytes = 0;
             replay.unavailable = false;
             replay.reply_anchor = Some(event.clone());
-        }
-        if event["replyMessageId"].is_null() {
-            event["replyMessageId"] = replay.reply_anchor.as_ref()
-                .map(|anchor| anchor["replyMessageId"].clone())
-                .unwrap_or_else(||json!(self.request_id));
         }
         if !replay.unavailable {
             match event["type"].as_str() {
@@ -133,6 +254,12 @@ impl RequestRun {
                         None
                     };
                 }
+                Some("content_snapshot") => {
+                    // Recovery may replace a reply projection before new deltas; later observers need that same base.
+                    // 恢复可在新增量前替换回复投影；后续观察者必须取得相同的正文基线。
+                    replay.content = event["content"].as_str().unwrap_or("").to_owned();
+                    replay.reasoning = event["reasoning"].as_str().unwrap_or("").to_owned();
+                }
                 Some("completed" | "interrupted") => {
                     if let Some(content) = event["content"].as_str() {
                         replay.content = content.to_owned();
@@ -165,39 +292,6 @@ impl RequestRun {
                 replay.content.clear();
                 replay.reasoning.clear();
                 replay.active_segment = None;
-            }
-        }
-        // Persist compact deltas and formal references; never re-encode the growing full reply per token.
-        // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
-        if let Some(journal) = &self.journal {
-            if event["taskId"].is_null() {
-                event["taskId"] = json!(journal.task_id());
-            }
-            event["rootRequestTaskId"] = json!(journal.task_id());
-            let durable = if terminal_event(&event) {
-                json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":event["replyMessageId"],"taskCompletion":event["taskCompletion"]})
-            } else if event["type"] == "assistant_segment" {
-                json!({"type":"assistant_segment","segmentId":event["segment"]["id"],"phase":event["segment"]["phase"],"status":event["segment"]["status"]})
-            } else if event.to_string().len() <= 24 * 1024 {
-                event.clone()
-            } else {
-                json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
-            };
-            if !journal.is_released() {
-                if let Err(error) =
-                    journal.emit_control(event["type"].as_str().unwrap_or("progress"), &durable)
-                {
-                    // An unavailable durable journal stops future dispatch rather than silently accepting untracked effects.
-                    // 日志不可写时停止后续派发，不静默接受无法追踪的副作用。
-                    self.cancel();
-                    event["persistenceError"] = json!({"code":error.code,"message":error.message});
-                }
-                if terminal_event(&event) {
-                    if let Err(error) = journal.flush().await {
-                        event["persistenceError"] =
-                            json!({"code":error.code,"message":error.message});
-                    }
-                }
             }
         }
         // Publish the final reply before waking either HTTP reader; emit/finish cannot leave a lost wakeup.
@@ -277,11 +371,14 @@ impl RequestRun {
             .unwrap(),
             cancellation_key,
             events,
+            emission: Default::default(),
             replay: Default::default(),
             finished: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
+            observed_context_limits: Default::default(),
             created: Instant::now(),
+            resource_wait_ms: AtomicU64::new(0),
         })
     }
 }
@@ -308,7 +405,6 @@ pub struct GatewayRuntime {
     approvals: Mutex<HashMap<String, Approval>>,
     execution_tasks: AtomicUsize,
     extension_prewarm_scheduled: AtomicBool,
-    model_selection_received: watch::Sender<bool>,
     background_cancellation: watch::Sender<bool>,
 }
 impl GatewayRuntime {
@@ -330,7 +426,6 @@ impl GatewayRuntime {
             approvals: Default::default(),
             execution_tasks: AtomicUsize::new(0),
             extension_prewarm_scheduled: AtomicBool::new(false),
-            model_selection_received: watch::channel(false).0,
             background_cancellation: watch::channel(false).0,
         })
     }
@@ -357,30 +452,24 @@ impl GatewayRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let mut cancellation = runtime.background_cancellation.subscribe();
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(3)) => {},
-                _ = cancellation.changed() => return,
-            }
             if *cancellation.borrow() {
                 return;
             }
             // Prefer model connection/loading before optional MCP work; none of this joins the UI readiness wait.
             // 模型连接与装载优先于可选 MCP；整个准备过程不加入界面就绪或消息发送等待。
-            let mut selection = runtime.model_selection_received.subscribe();
-            if !*selection.borrow_and_update() {
-                // Give the activated desktop a bounded chance to submit its saved selection before fallback warmup.
-                // 窗口激活后有界等待桌面提交保存的选择；独立网关无桌面时仍可开始缺省准备。
-                tokio::select! {
-                    _ = selection.changed() => {},
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-                    _ = cancellation.changed() => return,
-                }
-            }
+            // An empty selection reuses the saved choice, or observes unselected local models without loading them.
+            // 空选择沿用已有明确选择；尚未收到选择时，本地模型只观察不加载，API 连接无需空等桌面。
             let _ = runtime.prepare_models(Value::Null).await;
             runtime
                 .model_preparation
                 .wait_idle(cancellation.clone(), Duration::from_secs(90))
                 .await;
+            // Delay only optional extensions; the model connection has already started independently.
+            // 仅延后可选扩展，模型连接已独立开始准备。
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {},
+                _ = cancellation.changed() => return,
+            }
             if *cancellation.borrow() {
                 return;
             }
@@ -409,7 +498,6 @@ impl GatewayRuntime {
         });
     }
     pub async fn prepare_models(self: &Arc<Self>, selection: Value) -> Result<Value, GatewayError> {
-        self.model_selection_received.send_replace(true);
         let status = self
             .model_preparation
             .schedule(
@@ -589,13 +677,16 @@ impl GatewayRuntime {
             cancellation,
             steering: watch::channel(0).0,
             events,
+            emission: Default::default(),
             native_cancellation,
             cancellation_key,
             replay: Default::default(),
             finished: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
+            observed_context_limits: Default::default(),
             created: Instant::now(),
+            resource_wait_ms: AtomicU64::new(0),
         });
         self.task_runs
             .lock()
@@ -651,9 +742,25 @@ impl GatewayRuntime {
             .filter(|run| run.conversation_id == conversation)
             .cloned()?;
         let result = run.result.lock().await.clone();
+        let reply_anchor = run.replay.lock().await.reply_anchor.clone();
         Some(
-            json!({"requestId":request,"conversationId":conversation,"status":if run.finished.load(Ordering::Acquire){"completed"}else{"running"},"result":result}),
+            json!({"requestId":request,"conversationId":conversation,"status":if run.finished.load(Ordering::Acquire){"completed"}else{"running"},"result":result,"replyAnchor":reply_anchor}),
         )
+    }
+    /// Reattach only to an already accepted request in this exact conversation.
+    /// 仅重新连接当前聊天中已接受的原请求；观察不创建任务，也不重复发送用户消息。
+    pub async fn observe_request(
+        &self,
+        conversation: &str,
+        request: &str,
+    ) -> Result<Arc<RequestRun>, GatewayError> {
+        self.runs
+            .lock()
+            .await
+            .get(request)
+            .filter(|run| run.conversation_id == conversation)
+            .cloned()
+            .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404))
     }
     /// Attach to an existing task execution; observing a stream never starts or replays an operation.
     /// 连接已有任务执行，观察事件流不启动模型，也不重放操作；等待恢复执行者登记有界。
@@ -741,11 +848,14 @@ impl GatewayRuntime {
             .map_err(|code| GatewayError::new(code, "子任务取消状态无法创建。", 503))?,
             cancellation_key,
             events,
+            emission: Default::default(),
             replay: Default::default(),
             finished: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
+            observed_context_limits: Default::default(),
             created: Instant::now(),
+            resource_wait_ms: AtomicU64::new(0),
         });
         let mut runs = self.task_runs.lock().map_err(|_| {
             GatewayError::new("TASK_RUN_LOCK_FAILED", "子任务执行者登记失败。", 503)
@@ -819,7 +929,8 @@ impl GatewayRuntime {
             permission_mode: permission.to_owned(),
             conversation_id: conversation.to_owned(),
             project_id: relationship["projectId"].as_str().map(str::to_owned),
-            authorized_roots: vec![workdir],
+            authorized_roots: relationship["mounts"].as_array().into_iter().flatten()
+                .filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).chain(std::iter::once(workdir)).collect(),
             cancellation,
             runtime: self.tools.clone(),
             config,
@@ -827,18 +938,24 @@ impl GatewayRuntime {
             events: None,
             external_execute: None,
         };
-        let mut saved = crate::tools::gateway::get_config(&context).await?;
-        saved["trustedUserText"] = json!(text);
-        saved["officialToolsRoot"] = json!(self.config.application_root.join("official-tools"));
-        saved["bindingSnapshot"] =
-            json!({"projectId":relationship["projectId"],"folderPath":relationship["folderPath"]});
         let config = self.config.clone();
         let project = context.project_id.clone();
-        saved["retrieval"] = tokio::task::spawn_blocking(move || {
-            crate::retrieval::gateway::effective(&config, project.as_deref())
-        })
-        .await
-        .map_err(|_| GatewayError::new("RETRIEVAL_WORKER_FAILED", "检索设置读取失败。", 500))??;
+        // Independent preparation shares this request's lifetime; await both before publishing its context.
+        // 独立准备共享本次请求生命周期，两项均完成后再发布上下文，不额外创建后台任务。
+        let (saved, retrieval) = tokio::join!(
+            crate::tools::gateway::get_config(&context),
+            tokio::task::spawn_blocking(move || {
+                crate::retrieval::gateway::effective(&config, project.as_deref())
+            })
+        );
+        let mut saved = saved?;
+        saved["trustedUserText"] = json!(text);
+        saved["officialToolsRoot"] = json!(self.config.application_root.join("official-tools"));
+        saved["bindingSnapshot"] = crate::storage::workspace_mounts::snapshot(&relationship);
+        saved["workspaceMounts"] = relationship["mounts"].clone();
+        saved["defaultMountId"] = relationship["defaultMountId"].clone();
+        saved["retrieval"] = retrieval
+            .map_err(|_| GatewayError::new("RETRIEVAL_WORKER_FAILED", "检索设置读取失败。", 500))??;
         context.config = saved;
         Ok(context)
     }
@@ -1053,6 +1170,8 @@ impl GatewayRuntime {
         self.tasks.quiesce().await?;
         self.background_cancellation.send_replace(true);
         self.model_preparation.shutdown().await;
+        crate::models::gateway_local_models::shutdown(&self.config.data_home).await?;
+        crate::models::gateway_local_engine::shutdown_for(&self.config.data_home).await;
         // Released attempts may still own a batched writer; drain it before moving the root.
         // 已释放的尝试可能仍拥有批量写入者；移动根目录前等待其实际退场。
         let journals = self
@@ -1126,6 +1245,8 @@ impl GatewayRuntime {
         }
         self.tasks.shutdown().await;
         self.model_preparation.shutdown().await;
+        let _ = crate::models::gateway_local_models::shutdown(&self.config.data_home).await;
+        crate::models::gateway_local_engine::shutdown().await;
         let (_owner, cancellation) = watch::channel(false);
         let context = GatewayToolContext {
             data_home: self.config.data_root.clone(),
@@ -1168,6 +1289,18 @@ pub fn checked_id(value: &Value, field: &str) -> Result<String, GatewayError> {
 mod approval_tests {
     use super::*;
 
+    #[test]
+    fn model_recovery_retains_narrowed_limits_only_for_the_original_connection() {
+        let run = RequestRun::test_run(4);
+        run.retain_model_limits("origin-a", &json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":4800}));
+        run.retain_model_limits("origin-a", &json!({"contextWindowTokens":16384,"estimatedInputBudgetTokens":3600}));
+        assert_eq!(run.observed_model_limits("origin-a"), json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":3600}));
+        assert!(run.observed_model_limits("origin-b").is_null());
+        run.retain_model_limits("origin-b", &json!({"contextWindowTokens":32768}));
+        assert_eq!(run.observed_model_limits("origin-b"), json!({"contextWindowTokens":32768}));
+        assert!(run.observed_model_limits("origin-a").is_null());
+    }
+
     fn runtime() -> (Arc<GatewayRuntime>, PathBuf) {
         let root = std::env::temp_dir().join(format!("kynxa-approval-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1183,6 +1316,199 @@ mod approval_tests {
         });
         (runtime, root)
     }
+
+    fn durable_run(runtime: &GatewayRuntime) -> Arc<RequestRun> {
+        use crate::storage::task_repository::{NewTask, TaskBudget, TaskScope};
+        let mut run = RequestRun::test_run(16);
+        let journal = super::super::gateway_task_journal::TaskJournal::begin(
+            &runtime.config.data_root,
+            &NewTask {
+                request_id: run.request_id.clone(),
+                goal: "Read-only stream recovery fixture".into(),
+                acceptance: vec![],
+                scope: TaskScope {
+                    project_id: None,
+                    conversation_id: run.conversation_id.clone(),
+                    permission_snapshot: json!({"permissionMode":"full"}),
+                },
+                parent_task_id: None,
+                dependency_ids: vec![],
+                budget: TaskBudget::default(),
+                input_reference: None,
+            },
+            "stream-fixture",
+            60_000,
+        )
+        .unwrap();
+        Arc::get_mut(&mut run).unwrap().journal = Some(journal);
+        run
+    }
+
+    #[tokio::test]
+    async fn pending_terminal_persistence_keeps_replay_watermark_unpublished() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let blocker = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let operation = run.clone();
+        let finishing = tokio::spawn(async move {
+            operation.finish(json!({"type":"completed","content":"durable final","reasoning":""})).await;
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while run.emission.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let replay = tokio::time::timeout(Duration::from_millis(100), run.recovery(0)).await;
+        let prematurely_finished = run.finished.load(Ordering::Acquire);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        tokio::time::timeout(Duration::from_secs(5), finishing).await.unwrap().unwrap();
+        let replay = replay.unwrap().unwrap();
+        assert_eq!(replay.through, 0);
+        assert!(replay.events.is_empty());
+        assert!(!prematurely_finished);
+        assert!(run.finished.load(Ordering::Acquire));
+        run.journal.as_ref().unwrap().finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_journal_finalization_is_idempotent_and_preserves_actual_outcome() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let first = journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        assert!(journal.is_released());
+        let repeated = journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        assert_eq!(first.version, repeated.version);
+        assert_eq!(first.execution_version, repeated.execution_version);
+        assert_eq!(journal.finish(TaskState::WaitingVerification, Some("different-outcome")).await.unwrap_err().code,
+            "TASK_FINAL_STATE_CONFLICT");
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_snapshot_remains_the_base_of_later_reconnect_deltas() {
+        let run = RequestRun::test_run(16);
+        run.emit(json!({"type":"text_delta","delta":"superseded content"})).await;
+        run.emit(json!({"type":"reply_anchor","replyMessageId":new_id(),"userMessageId":new_id()})).await;
+        run.emit(json!({"type":"content_snapshot","content":"preserved progress","reasoning":"preserved reasoning"})).await;
+        run.emit(json!({"type":"text_delta","delta":" and continuation"})).await;
+        let replay = run.recovery(0).await.unwrap();
+        let snapshot = replay.events.iter().find(|event| event["type"] == "content_snapshot").unwrap();
+        assert_eq!(snapshot["content"], "preserved progress and continuation");
+        assert_eq!(snapshot["reasoning"], "preserved reasoning");
+        assert!(!*run.cancellation.borrow());
+        assert!(!run.finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn event_backpressure_flushes_original_controls_without_cancelling_task() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let mut queued = 0;
+        loop {
+            match journal.emit_control("fixture.pending", &json!({"index":queued,"padding":"x".repeat(16 * 1024)})) {
+                Ok(()) => queued += 1,
+                Err(error) => {
+                    assert_eq!(error.code, "TASK_EVENT_BACKPRESSURE");
+                    break;
+                }
+            }
+        }
+        assert!(queued > 0);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run.emit(json!({"type":"task_progress","phase":"working","summary":"original request continues"})),
+        )
+        .await
+        .unwrap();
+        assert!(!*run.cancellation.borrow());
+        assert!(!run.finished.load(Ordering::Acquire));
+        journal.flush().await.unwrap();
+        let mut after = 0;
+        let mut progress = 0;
+        let mut saved_pending = 0;
+        loop {
+            let events = journal.repository().read_events(journal.task_id(), after, 512).unwrap();
+            if events.is_empty() { break; }
+            after = events.last().unwrap().sequence;
+            progress += events.iter().filter(|event| event.kind == "task_progress").count();
+            saved_pending += events.iter().filter(|event| event.kind == "fixture.pending").count();
+        }
+        assert_eq!(progress, 1);
+        assert_eq!(saved_pending, queued);
+        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_chat_reconnect_retains_original_run_scope_anchor_and_task() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        runtime.runs.lock().await.insert(run.request_id.clone(), run.clone());
+        let reply = new_id();
+        let user_message = new_id();
+        run.emit(json!({"type":"started"})).await;
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":user_message,"supersededReplyMessageId":run.request_id})).await;
+        run.emit(json!({"type":"text_delta","segmentId":"fixture-segment","delta":"saved progress"})).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = crate::gateway::router(runtime.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let client = reqwest::Client::new();
+        let query = format!("conversationId={}&requestId={}", run.conversation_id, run.request_id);
+        let status: Value = client.get(format!("http://{address}/api/chat/status?{query}"))
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(status["status"], "running");
+        assert_eq!(status["replyAnchor"]["replyMessageId"], reply);
+        assert_eq!(status["replyAnchor"]["userMessageId"], user_message);
+        let stream = client.get(format!("http://{address}/api/chat/stream?{query}"))
+            .send().await.unwrap().error_for_status().unwrap();
+        assert_eq!(stream.headers()["content-type"], "text/event-stream");
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert!(!*run.cancellation.borrow());
+        assert!(!run.finished.load(Ordering::Acquire));
+        for endpoint in ["status", "stream"] {
+            let response = client.get(format!("http://{address}/api/chat/{endpoint}?conversationId={}&requestId={}", new_id(), run.request_id))
+                .send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 404);
+        }
+        run.finish(json!({"type":"completed","content":"saved progress","reasoning":"","replyMessageId":reply,"taskCompletion":{"completionState":"complete"}})).await;
+        let body = client.get(format!("http://{address}/api/chat/stream?{query}"))
+            .send().await.unwrap().error_for_status().unwrap().text().await.unwrap();
+        assert!(body.contains("content_snapshot"));
+        assert!(body.contains("saved progress"));
+        let status: Value = client.get(format!("http://{address}/api/chat/status?{query}"))
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(status["status"], "completed");
+        assert_eq!(status["result"]["replyMessageId"], reply);
+        assert!(Arc::ptr_eq(&run, &runtime.observe_request(&run.conversation_id, &run.request_id).await.unwrap()));
+        assert_eq!(runtime.runs.lock().await.len(), 1);
+        server.abort();
+        run.journal.as_ref().unwrap().finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn formal_approval_expires_and_task_deadline_interrupts_waiting() {
         let (runtime, root) = runtime();

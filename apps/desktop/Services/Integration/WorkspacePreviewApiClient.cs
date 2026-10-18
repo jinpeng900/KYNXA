@@ -25,13 +25,13 @@ public sealed class WorkspacePreviewApiClient : IDisposable
     }
 
     public async Task<WorkspacePreviewTarget> ReadAsync(Guid conversationId, string path, int offset = 0, bool userSelected = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Guid? mountId = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(90));
         await _ensureReady(deadline.Token);
         using var response = await _http.PostAsJsonAsync("/agent/workspace/preview",
-            new { conversationId, path, offset, maxChars = 64000, userSelected }, JsonOptions, deadline.Token);
+            new { conversationId, path, offset, maxChars = 64000, userSelected, mountId }, JsonOptions, deadline.Token);
         return await GatewayResponseReader.ReadAsync<WorkspacePreviewTarget>(response,
             UiText.Get("文件预览返回为空。"), UiText.Get("文件预览请求失败（HTTP {0}）。"), deadline.Token, JsonOptions);
     }
@@ -46,12 +46,14 @@ public sealed class WorkspacePreviewApiClient : IDisposable
         return address;
     }
 
-    public async Task<WorkspacePreviewTarget> ReadChangesAsync(Guid conversationId, CancellationToken cancellationToken = default)
+    public async Task<WorkspacePreviewTarget> ReadChangesAsync(Guid conversationId, CancellationToken cancellationToken = default, Guid? mountId = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(45));
         await _ensureReady(deadline.Token);
-        using var response = await _http.GetAsync($"/api/agent/workspace/changes?conversationId={conversationId:D}", deadline.Token);
+        string query = $"/api/agent/workspace/changes?conversationId={conversationId:D}";
+        if (mountId is { } id) query += $"&mountId={id:D}";
+        using var response = await _http.GetAsync(query, deadline.Token);
         return await GatewayResponseReader.ReadAsync<WorkspacePreviewTarget>(response,
             UiText.Get("工作区变更返回为空。"), UiText.Get("工作区变更读取失败（HTTP {0}）。"), deadline.Token, JsonOptions);
     }

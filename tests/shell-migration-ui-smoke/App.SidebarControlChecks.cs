@@ -184,6 +184,8 @@ public partial class App
                 "opening the compact drawer focuses its visible close button without saving temporary state");
             CheckSidebarHeaderGeometry("compact-zh-CN-318", 318, observations);
             await CapturePresentedAsync("shell-sidebar-controls-compact.png");
+            await CheckCompactSidebarScrimFeedbackAsync(observations);
+            CheckContext("compact scrim pointer feedback and native dismissals preserve the draft, messages and formal catalog in both themes");
             NativeUi.Invoke(collapse);
             await WaitAsync(() => NativeUi.IsVisible(expand) && !NativeUi.IsVisible(scrim) && !NativeUi.IsVisible(collapse),
                 "the new close button dismisses the compact drawer");
@@ -247,6 +249,117 @@ public partial class App
             if (GetForegroundWindow() == ownedWindow) SetCursorPos(originalPointer.X, originalPointer.Y);
             await SettleAsync();
         }
+    }
+
+    private async Task CheckCompactSidebarScrimFeedbackAsync(Dictionary<string, object> observations)
+    {
+        string palette = AppearanceService.Current.Id;
+        string mode = AppearanceService.Mode;
+        double fontSize = AppearanceService.ChatFontSize;
+        string? accent = AppearanceService.CustomAccent;
+        var scrim = Element<Button>("SidebarScrim");
+        var pane = Element<Grid>("SidebarPane");
+        var expand = Element<Button>("CompactSidebarButton");
+        var collapse = Element<Button>("CollapseSidebarButton");
+        try
+        {
+            await ActivateOwnedShortcutWindowAsync();
+            foreach (string theme in new[] { "dark", "light" })
+            {
+                AppearanceService.ApplyPreferences(palette, theme, fontSize, accent);
+                MovePointerInside(pane, .5, .1);
+                await SettleAsync();
+                var presenter = NativeUi.Descendants<ContentPresenter>(scrim).First();
+                var common = NativeUi.Descendants<FrameworkElement>(scrim)
+                    .SelectMany(VisualStateManager.GetVisualStateGroups).Single(group => group.Name == "CommonStates");
+                await WaitAsync(() => common.CurrentState?.Name == "Normal", theme + " scrim starts outside real pointer hover");
+                var normal = (SolidColorBrush)presenter.Background;
+                var normalColor = normal.Color;
+                uint[] before = ReadCompactSidebarContentPixels();
+                Check(normalColor.A < 255 && NativeUi.IsVisible(Prompt) && NativeUi.IsVisible(Element<ConversationTranscript>("ConversationMessages")) &&
+                    before.Select(pixel => (int)(pixel & 255)).Max() - before.Select(pixel => (int)(pixel & 255)).Min() > 20,
+                    theme + " compact scrim initially preserves actually rendered draft-text contrast beneath its translucent surface");
+                MovePointerInside(scrim, .85, .35);
+                await WaitAsync(() => common.CurrentState?.Name == "PointerOver", theme + " compact scrim receives real SendInput pointer hover");
+                await CapturePresentedAsync("shell-sidebar-scrim-" + theme + "-hover.png");
+                uint[] hovered = ReadCompactSidebarContentPixels();
+                var hoverColor = (presenter.Background as SolidColorBrush)?.Color;
+                // Observe the SDK pressed state without executing the dismiss action until the later real mouse click.
+                // 先观察 SDK 的按下状态；稍后再以真实鼠标单击执行关闭，避免提前中断悬停验证。
+                Check(VisualStateManager.GoToState(scrim, "Pressed", false), theme + " scrim exposes a native pressed state");
+                await CapturePresentedAsync("shell-sidebar-scrim-" + theme + "-pressed.png");
+                uint[] pressed = ReadCompactSidebarContentPixels();
+                var pressedColor = (presenter.Background as SolidColorBrush)?.Color;
+                bool SamePixels(uint[] actual) => before.Zip(actual).All(pair =>
+                    Math.Abs((int)(pair.First & 255) - (int)(pair.Second & 255)) <= 3 &&
+                    Math.Abs((int)((pair.First >> 8) & 255) - (int)((pair.Second >> 8) & 255)) <= 3 &&
+                    Math.Abs((int)((pair.First >> 16) & 255) - (int)((pair.Second >> 16) & 255)) <= 3);
+                observations["compact-scrim-" + theme] = new
+                {
+                    normal = normalColor.ToString(), hover = hoverColor?.ToString(), pressed = pressedColor?.ToString(),
+                    realMouseHover = true, before, hovered, pressedPixels = pressed
+                };
+                File.WriteAllText(Path.Combine(_directory, "shell-sidebar-scrim-feedback.json"),
+                    JsonSerializer.Serialize(observations, new JsonSerializerOptions { WriteIndented = true }));
+                Check(hoverColor == normalColor && pressedColor == normalColor && SamePixels(hovered) && SamePixels(pressed),
+                    theme + " hover and press retain translucency and the actual draft-text pixels instead of painting an opaque content-sized tile");
+                MovePointerInside(pane, .5, .1);
+                await WaitAsync(() => common.CurrentState?.Name == "Normal", theme + " native pointer leave returns the scrim to normal");
+                MovePointerInside(scrim, .85, .35);
+                RequireFixtureForeground();
+                SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0002 } } },
+                    new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }]);
+                await WaitAsync(() => !NativeUi.IsVisible(scrim) && NativeUi.IsVisible(expand), theme + " real scrim click dismisses the temporary drawer");
+                Check(ReferenceEquals(FocusManager.GetFocusedElement(_shell.XamlRoot), expand), theme + " native scrim dismissal restores the visible expand-button focus");
+                NativeUi.Invoke(expand);
+                await WaitAsync(() => NativeUi.IsVisible(scrim) && NativeUi.IsVisible(collapse), theme + " compact drawer reopens after the real scrim click");
+            }
+        }
+        finally
+        {
+            AppearanceService.ApplyPreferences(palette, mode, fontSize, accent);
+            await SettleAsync();
+        }
+    }
+
+    private uint[] ReadCompactSidebarContentPixels()
+    {
+        RequireFixtureForeground();
+        var root = (FrameworkElement)Window.Content;
+        var pane = Element<Grid>("SidebarPane");
+        Rect paneBounds = pane.TransformToVisual(root).TransformBounds(new Rect(0, 0, pane.ActualWidth, pane.ActualHeight));
+        Rect promptBounds = Prompt.TransformToVisual(root).TransformBounds(new Rect(0, 0, Prompt.ActualWidth, Prompt.ActualHeight));
+        double left = Math.Max(promptBounds.Left + 2, paneBounds.Right + 12);
+        double right = promptBounds.Right - 4;
+        Check(right - left > 80 && promptBounds.Height >= 16, "the compact drawer leaves an actual draft-text patch exposed to the right of its pane");
+        double scale = _shell.XamlRoot.RasterizationScale;
+        nint owned = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        var origin = new NativePoint();
+        if (!ClientToScreen(owned, ref origin)) throw new InvalidOperationException("Cannot locate compact draft pixels on screen.");
+        nint screenDc = GetSidebarScreenDc(0);
+        if (screenDc == 0) throw new InvalidOperationException("Cannot read compact drawer content pixels.");
+        try
+        {
+            var samples = new List<uint>();
+            // Sample the visible first text line, including glyphs and gaps; a solid overlay cannot preserve this contrast.
+            // 采样可见首行的字形及间隙；不透明整块遮挡无法保留这些实际文字对比。
+            for (int row = 0; row < 8; row++)
+            for (int column = 0; column < 32; column++)
+            {
+                RequireFixtureForeground();
+                var point = new NativePoint
+                {
+                    X = origin.X + (int)Math.Round((left + (right - left) * (column + .5) / 32) * scale),
+                    Y = origin.Y + (int)Math.Round((promptBounds.Top + 2 + Math.Min(22, promptBounds.Height - 4) * (row + .5) / 8) * scale)
+                };
+                if (GetAncestor(WindowFromPoint(point), 2) != owned) throw new InvalidOperationException("Compact draft pixel is covered by an unrelated window.");
+                uint pixel = GetSidebarScreenPixel(screenDc, point.X, point.Y);
+                if (pixel == uint.MaxValue) throw new InvalidOperationException("Cannot read a composed compact draft pixel.");
+                samples.Add(pixel);
+            }
+            return samples.ToArray();
+        }
+        finally { ReleaseSidebarScreenDc(0, screenDc); }
     }
 
     private async Task CheckSidebarNavigationFeedbackAsync(Dictionary<string, object> observations)

@@ -107,6 +107,9 @@ async fn workspace_view_context(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| runtime.config.data_root.join("Sandboxes").join(conversation));
     let (_owner, cancellation) = tokio::sync::watch::channel(false);
+    let mut authorized_roots = relationship["mounts"].as_array().into_iter().flatten()
+        .filter_map(|mount| mount["path"].as_str().map(std::path::PathBuf::from)).collect::<Vec<_>>();
+    if authorized_roots.is_empty() { authorized_roots.push(workdir.clone()); }
     Ok(crate::tools::gateway::GatewayToolContext {
         data_home: runtime.config.data_root.clone(),
         extension_root: runtime.config.extension_root.clone(),
@@ -115,12 +118,14 @@ async fn workspace_view_context(
         permission_mode: "ask".to_owned(),
         conversation_id: conversation.to_owned(),
         project_id: relationship["projectId"].as_str().map(str::to_owned),
-        authorized_roots: vec![workdir],
+        authorized_roots,
         cancellation,
         runtime: runtime.tools.clone(),
         config: json!({
             "officialToolsRoot":runtime.config.application_root.join("official-tools"),
-            "bindingSnapshot":{"projectId":relationship["projectId"],"folderPath":relationship["folderPath"]},
+            "bindingSnapshot":crate::storage::workspace_mounts::snapshot(&relationship),
+            "workspaceMounts":relationship["mounts"],
+            "defaultMountId":relationship["defaultMountId"],
             "deferredDocumentSettings":true,
         }),
         approved: false,
@@ -357,6 +362,30 @@ impl RequestEventStream {
     }
 }
 
+async fn request_stream_response(run: Arc<RequestRun>) -> Response {
+    let events = match RequestEventStream::new(run.clone()).await {
+        Ok(events) => events,
+        Err(error) => return response(Err(error)),
+    };
+    let owner = StreamOwner(run);
+    let source = stream::unfold((events, owner), |(mut events, owner)| async move {
+        let event = events.next().await?;
+        let event = crate::storage::gateway::normalize_transport_numbers(event);
+        Some((
+            Ok::<_, Infallible>(Event::default().data(event.to_string())),
+            (events, owner),
+        ))
+    });
+    let mut result = Sse::new(source)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response();
+    result.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    result
+}
+
 async fn handle(
     State(lifecycle): State<Arc<crate::gateway_storage::StorageLifecycle>>,
     method: Method,
@@ -452,6 +481,35 @@ async fn handle_request(
     let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
+    if method == Method::GET && ["/api/chat/status", "/api/chat/stream"].contains(&path) {
+        // Recovery reads attach by both stable IDs; GET never repeats the accepted user request.
+        // 恢复读取按两个稳定 ID 重新连接；GET 不重新提交已接受的用户请求。
+        let identifier = |name| {
+            crate::orchestration::gateway_runtime::checked_id(
+                &json!(crate::storage::gateway::query_value(&query, name).unwrap_or("")),
+                name,
+            )
+        };
+        let conversation = match identifier("conversationId") {
+            Ok(id) => id,
+            Err(error) => return response(Err(error)),
+        };
+        let request = match identifier("requestId") {
+            Ok(id) => id,
+            Err(error) => return response(Err(error)),
+        };
+        if path == "/api/chat/status" {
+            return response(
+                runtime.run_status(&conversation, &request).await
+                    .map(|status| (200, status))
+                    .ok_or_else(|| GatewayError::new("CHAT_RUN_NOT_FOUND", "任务不存在。", 404)),
+            );
+        }
+        return match runtime.observe_request(&conversation, &request).await {
+            Ok(run) => request_stream_response(run).await,
+            Err(error) => response(Err(error)),
+        };
+    }
     if let Some(tail) = path.strip_prefix("/api/conversations/") {
         let parts = tail.split('/').collect::<Vec<_>>();
         if parts.get(1) == Some(&"attachments") {
@@ -487,7 +545,8 @@ async fn handle_request(
         let conversation = arguments["conversationId"].as_str().unwrap_or("");
         let lightweight_view = matches!((method.as_str(), workspace_path),
             ("POST", "/agent/workspace/chrome" | "/agent/workspace/chrome/action" | "/agent/workspace/preview")
-            | ("GET", "/agent/workspace/content"));
+            | ("GET", "/agent/workspace/content" | "/agent/workspace/files" | "/agent/workspace/changes")
+            | ("POST", "/agent/workspace/files"));
         let context = match if lightweight_view {
             let closing = workspace_path == "/agent/workspace/chrome/action" && arguments["action"] == "close";
             workspace_view_context(&runtime, conversation, closing).await
@@ -497,7 +556,15 @@ async fn handle_request(
             Ok(context) => context,
             Err(error) => return response(Err(error)),
         };
+        let context = if matches!(workspace_path, "/agent/workspace/preview" | "/agent/workspace/content" | "/agent/workspace/changes") {
+            match crate::tools::gateway::select_workspace_context(&context, &arguments).await {
+                Ok(selected) => selected,
+                Err(error) => return response(Err(error)),
+            }
+        } else { context };
         return match (method.as_str(), workspace_path) {
+            ("GET" | "POST", "/agent/workspace/files") => response(
+                crate::tools::gateway::workspace_files(&arguments, &context).await.map(|value| (200, value))),
             ("POST", "/agent/workspace/preview") => response(
                 crate::tools::gateway_workspace_preview::preview(arguments, &context).await.map(|value| (200, value))),
             ("GET", "/agent/workspace/changes") => response(
@@ -538,29 +605,7 @@ async fn handle_request(
             Ok(run) => run,
             Err(error) => return response(Err(error)),
         };
-        let events = match RequestEventStream::new(run.clone()).await {
-            Ok(events) => events,
-            Err(error) => return response(Err(error)),
-        };
-        let owner = StreamOwner(run);
-        let source =
-            stream::unfold((events, owner), |(mut events, owner)| async move {
-                let event = events.next().await?;
-                Some((
-                    Ok::<_, Infallible>(Event::default().data(
-                        crate::storage::gateway::normalize_transport_numbers(event).to_string(),
-                    )),
-                    (events, owner),
-                ))
-            });
-        let mut result = Sse::new(source)
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response();
-        result.headers_mut().insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
-        );
-        return result;
+        return request_stream_response(run).await;
     }
     if let Some(result) = crate::orchestration::gateway_task_http::handle(
         &runtime,
@@ -583,28 +628,7 @@ async fn handle_request(
                 if path == "/api/chat" {
                     reply_response(wait_reply(&run).await)
                 } else {
-                    let events = match RequestEventStream::new(run.clone()).await {
-                        Ok(events) => events,
-                        Err(error) => return response(Err(error)),
-                    };
-                    let owner = StreamOwner(run.clone());
-                    let source =
-                        stream::unfold((events, owner), |(mut events, owner)| async move {
-                            let event = events.next().await?;
-                            let event = crate::storage::gateway::normalize_transport_numbers(event);
-                            Some((
-                                Ok::<_, Infallible>(Event::default().data(event.to_string())),
-                                (events, owner),
-                            ))
-                        });
-                    let mut result = Sse::new(source)
-                        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-                        .into_response();
-                    result.headers_mut().insert(
-                        header::CACHE_CONTROL,
-                        header::HeaderValue::from_static("no-cache"),
-                    );
-                    result
+                    request_stream_response(run).await
                 }
             }
         };
@@ -630,6 +654,31 @@ async fn handle_request(
         if method == Method::GET {
             return response(Ok((200, runtime.model_preparation.snapshot().await)));
         }
+    }
+    if path.starts_with("/api/local-models") {
+        let result: Result<(u16, Value), GatewayError> = async {
+            let home = &runtime.config.data_home;
+            let affected = crate::models::gateway_local_models::affected_models(home, path, &body).await?;
+            // Keep model mutation fenced until its registry and connection updates have settled.
+            // 安装清单和连接更新完成前保持模型变更围栏，避免删除后又被并发生成重新加载。
+            let mut suspended = Vec::new();
+            for id in affected {
+                suspended.push(crate::models::gateway_local_engine::suspend(home, &id).await?);
+            }
+            let Some(result) = crate::models::gateway_local_models::handle(method.as_str(), path, body.clone(), home).await else {
+                return Err(GatewayError::new("LOCAL_MODEL_ROUTE_NOT_FOUND", "本地模型管理接口不存在。", 404));
+            };
+            let (status, mut snapshot) = result?;
+            if let Some(models) = snapshot["models"].as_array_mut() {
+                for model in models {
+                    if let Some(id) = model["id"].as_str().map(str::to_owned) {
+                        model["runtime"] = crate::models::gateway_local_engine::status(home, &id);
+                    }
+                }
+            }
+            Ok((status, snapshot))
+        }.await;
+        return response(result);
     }
     if path.starts_with("/api/models") {
         if let Some(result) = crate::models::gateway_config::handle_models(

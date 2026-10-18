@@ -1,7 +1,7 @@
 //! Conversation-owned ConPTY sessions expose only terminal input, output and dimensions.
 //! 聊天自有 ConPTY 会话只提供终端输入、输出与尺寸，工作目录由正式聊天归属解析。
 
-use super::gateway::{GatewayToolContext, ToolRuntime, failure};
+use super::gateway::{GatewayToolContext, ToolRuntime, check_cancelled, emit, failure};
 use crate::gateway_contract::GatewayError;
 use serde_json::{Value, json};
 use std::{
@@ -102,6 +102,7 @@ pub(crate) struct TerminalSession {
     conversation_id: String,
     project_id: Option<String>,
     workdir: PathBuf,
+    mount: Value,
     output: Arc<TerminalOutput>,
     closed: AtomicBool,
     #[cfg(windows)]
@@ -115,16 +116,30 @@ fn dimensions(arguments: &Value) -> (i16, i16) {
     )
 }
 
+pub(crate) async fn session_mount(context: &GatewayToolContext, id: &str) -> Result<Value, GatewayError> {
+    let session = context.runtime.terminals.lock().await.get(id).cloned()
+        .filter(|session|session.conversation_id == context.conversation_id && session.project_id == context.project_id)
+        .ok_or_else(||failure("TERMINAL_SESSION_NOT_FOUND","当前聊天的终端不存在。",404))?;
+    if session.mount.is_object() && context.config["workspaceMounts"].as_array().is_some_and(|mounts|
+        !mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount))) {
+        return Err(failure("WORKSPACE_MOUNT_UNAVAILABLE","终端所在目录不在本次任务授权中。",409));
+    }
+    Ok(session.mount.clone())
+}
+
 pub(crate) async fn open(
     arguments: &Value,
     context: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    let selected = super::gateway::select_workspace_context(context,arguments).await?;
+    let context = &selected;
     #[cfg(windows)]
     {
         let (cols, rows) = dimensions(arguments);
         let conversation_id = context.conversation_id.clone();
         let project_id = context.project_id.clone();
         let workdir = context.workdir.clone();
+        let mount = context.config["activeMount"].clone();
         let session = tokio::task::spawn_blocking(move || {
             let output = Arc::new(TerminalOutput::default());
             let native = windows::NativeTerminal::open(&workdir, cols, rows, output.clone())?;
@@ -134,6 +149,7 @@ pub(crate) async fn open(
                     conversation_id,
                     project_id,
                     workdir,
+                    mount,
                     output,
                     closed: AtomicBool::new(false),
                     native: Mutex::new(native),
@@ -151,7 +167,8 @@ pub(crate) async fn open(
             .await
             .insert(id.clone(), session.0);
         Ok(
-            json!({"sessionId":id,"processId":session.1,"cols":cols,"rows":rows,"shell":"powershell","nextCursor":0}),
+            json!({"sessionId":id,"processId":session.1,"cols":cols,"rows":rows,"shell":"powershell","nextCursor":0,
+                "mountId":context.config["activeMountId"],"mountName":context.config["activeMount"]["name"],"initialWorkingDirectory":context.workdir}),
         )
     }
     #[cfg(not(windows))]
@@ -162,6 +179,104 @@ pub(crate) async fn open(
             "内嵌终端当前支持 Windows。",
             503,
         ))
+    }
+}
+
+/// Model calls share the user's registered PTY; input acceptance never certifies a command's outcome.
+/// 模型复用用户已登记的伪终端；输入被接受不代表命令已经完成或成功。
+pub(crate) async fn execute(
+    name: &str,
+    arguments: &Value,
+    context: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
+    check_cancelled(context)?;
+    match name {
+        "terminal.workspace.list" => {
+            let sessions = context.runtime.terminals.lock().await.iter()
+                .filter(|(_, session)| session.conversation_id == context.conversation_id
+                    && session.project_id == context.project_id
+                    && arguments["mountId"].as_str().is_none_or(|id|session.mount["id"] == id)
+                    && (context.config["workspaceMounts"].as_array().is_some_and(|mounts|mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount)))
+                        || session.mount.is_null() && session.workdir == context.workdir))
+                .map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
+            let mut available = Vec::new();
+            for (id, session) in sessions {
+                if verify_scope(&session, &context.data_home).await.is_ok() {
+                    let state = session.output.state.lock()
+                        .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?;
+                    available.push(json!({"sessionId":id,"initialWorkingDirectory":session.workdir,
+                        "mountId":session.mount["id"],"mountName":session.mount["name"],
+                        "shell":"powershell","exited":state.ended,"exitCode":state.exit_code,
+                        "nextCursor":state.next_cursor,"closed":session.closed.load(Ordering::Acquire),
+                        "currentWorkingDirectory":"not-observed"}));
+                }
+            }
+            available.sort_by(|left, right| left["sessionId"].as_str().cmp(&right["sessionId"].as_str()));
+            Ok(json!({"sessions":available,"presentation":"workspace"}))
+        }
+        "terminal.workspace.open" => {
+            let selected_context = super::gateway::select_workspace_context(context,arguments).await?;
+            let context = &selected_context;
+            verify_relationship(&context.conversation_id, context.project_id.as_deref(), &context.workdir, &context.data_home, &context.config["activeMount"]).await?;
+            let selected = arguments["sessionId"].as_str().filter(|id| !id.is_empty());
+            let reuse = if arguments["newSession"] == true { None } else {
+                context.runtime.terminals.lock().await.iter()
+                    .filter(|(id, session)| selected.is_none_or(|selected| selected == id.as_str())
+                        && session.conversation_id == context.conversation_id
+                        && session.project_id == context.project_id && session.workdir == context.workdir
+                        && !session.closed.load(Ordering::Acquire)
+                        && session.output.state.lock().is_ok_and(|state| !state.ended))
+                    .map(|(id, session)| (id.clone(), session.clone())).next()
+            };
+            let mut opened = if let Some((id, session)) = reuse {
+                verify_scope(&session, &context.data_home).await?;
+                let (cols, rows) = dimensions(arguments);
+                json!({"sessionId":id,"cols":cols,"rows":rows,"shell":"powershell","reused":true})
+            } else {
+                if selected.is_some() {
+                    return Err(failure("TERMINAL_SESSION_NOT_FOUND", "当前聊天中未找到指定的可用终端。", 404));
+                }
+                let mut opened = open(arguments, context).await?;
+                opened["reused"] = json!(false);
+                opened
+            };
+            opened["presentation"] = json!("workspace");
+            opened["initialWorkingDirectory"] = json!(context.workdir);
+            opened["mountId"] = context.config["activeMountId"].clone();
+            opened["mountName"] = context.config["activeMount"]["name"].clone();
+            opened["currentWorkingDirectory"] = json!("not-observed");
+            opened["title"] = arguments.get("title").cloned().unwrap_or_else(|| json!("终端"));
+            let mut event = opened.clone();
+            event["type"] = json!("workspace_terminal_open");
+            event["conversationId"] = json!(context.conversation_id);
+            event["workdir"] = json!(context.workdir);
+            event["mountId"] = context.config["activeMountId"].clone();
+            event["mountName"] = context.config["activeMount"]["name"].clone();
+            emit(context, event).await;
+            Ok(opened)
+        }
+        "terminal.workspace.read" | "terminal.workspace.write" | "terminal.workspace.close" => {
+            if name != "terminal.workspace.close" {
+                let session = context.runtime.terminals.lock().await.get(arguments["sessionId"].as_str().unwrap_or("")).cloned()
+                    .filter(|session|session.conversation_id == context.conversation_id && session.project_id == context.project_id)
+                    .ok_or_else(||failure("TERMINAL_SESSION_NOT_FOUND","当前聊天的终端不存在。",404))?;
+                if session.mount.is_object() && context.config["workspaceMounts"].as_array().is_some_and(|mounts|
+                    !mounts.iter().any(|mount|crate::storage::workspace_mounts::same_mount(&session.mount,mount))) {
+                    return Err(failure("WORKSPACE_MOUNT_UNAVAILABLE","终端所在目录不在本次任务的授权挂载中。",409));
+                }
+            }
+            let mut input = arguments.clone();
+            input["conversationId"] = json!(context.conversation_id);
+            input["action"] = json!(name.rsplit('.').next().unwrap_or(""));
+            if name == "terminal.workspace.read" && input["waitMs"].is_null() {
+                input["waitMs"] = json!(1000);
+            }
+            let mut result = action(&input, &context.runtime, &context.data_home).await?;
+            result["sessionId"] = input["sessionId"].clone();
+            result["presentation"] = json!("workspace");
+            Ok(result)
+        }
+        _ => Err(failure("TERMINAL_ACTION_INVALID", "未知的工作区终端操作。", 400)),
     }
 }
 
@@ -191,8 +306,6 @@ pub(crate) async fn action(
     // 关闭只释放此聊天自有进程，移动或删除聊天后仍应能清理；读取及输入则必须核对当前正式归属。
     if operation != "close" {
         if let Err(error) = verify_scope(&session, data_root).await {
-            runtime.terminals.lock().await.remove(id);
-            let _ = tokio::task::spawn_blocking(move || session.close()).await;
             return Err(error);
         }
     }
@@ -203,14 +316,12 @@ pub(crate) async fn action(
             tokio::pin!(changed);
             changed.as_mut().enable();
             let current = session.output.read(after)?;
-            if current["output"] != "" || current["exited"] == true {
+            let wait_ms = arguments["waitMs"].as_u64().unwrap_or(15000).min(15000);
+            if current["output"] != "" || current["exited"] == true || wait_ms == 0 {
                 return Ok(current);
             }
-            let _ = tokio::time::timeout(Duration::from_secs(15), changed).await;
+            let _ = tokio::time::timeout(Duration::from_millis(wait_ms), changed).await;
             if let Err(error) = verify_scope(&session, data_root).await {
-                runtime.terminals.lock().await.remove(id);
-                let closing = session.clone();
-                let _ = tokio::task::spawn_blocking(move || closing.close()).await;
                 return Err(error);
             }
             session.output.read(after)
@@ -227,10 +338,13 @@ pub(crate) async fn action(
                 ));
             }
             let input = input.to_owned();
+            let after = session.output.state.lock()
+                .map_err(|_| failure("TERMINAL_STATE_FAILED", "终端输出状态不可用。", 500))?.next_cursor;
             tokio::task::spawn_blocking(move || session.write(&input))
                 .await
                 .map_err(|_| failure("TERMINAL_WRITE_FAILED", "终端输入线程结束。", 500))??;
-            Ok(json!({"written":true}))
+            Ok(json!({"written":true,"inputAccepted":true,"after":after,
+                "commandCompleted":null,"completionEvidence":"Read terminal output; input acceptance is not command completion."}))
         }
         "resize" => {
             let (cols, rows) = dimensions(arguments);
@@ -255,21 +369,30 @@ pub(crate) async fn action(
 }
 
 async fn verify_scope(session: &TerminalSession, data_root: &Path) -> Result<(), GatewayError> {
+    verify_relationship(&session.conversation_id, session.project_id.as_deref(), &session.workdir, data_root, &session.mount).await
+}
+
+async fn verify_relationship(conversation: &str, project_id: Option<&str>, workdir: &Path, data_root: &Path, mount: &Value) -> Result<(), GatewayError> {
     let root = data_root.to_owned();
-    let conversation = session.conversation_id.clone();
+    let conversation_id = conversation.to_owned();
     let relationship = tokio::task::spawn_blocking(move || {
-        crate::storage::gateway::current_relationship(&root, &conversation)
+        crate::storage::gateway::current_relationship(&root, &conversation_id)
     })
     .await
     .map_err(|_| failure("TERMINAL_SCOPE_FAILED", "终端工作范围读取线程结束。", 500))??;
-    let workdir = relationship["folderPath"]
+    let expected_workdir = if mount.is_object() {
+        relationship["mounts"].as_array().into_iter().flatten()
+            .find(|current|crate::storage::workspace_mounts::same_mount(mount,current))
+            .and_then(|mount|mount["path"].as_str()).map(PathBuf::from)
+            .ok_or_else(||failure("TERMINAL_SCOPE_CHANGED", "终端所在挂载已移除或改变；原输出与会话仍保留。",409))?
+    } else { relationship["folderPath"]
         .as_str()
         .or_else(|| relationship["workspaceRoot"].as_str())
         .filter(|folder| !folder.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| data_root.join("Sandboxes").join(&session.conversation_id));
-    if relationship["projectId"].as_str() != session.project_id.as_deref()
-        || workdir != session.workdir
+        .unwrap_or_else(|| data_root.join("Sandboxes").join(conversation)) };
+    if relationship["projectId"].as_str() != project_id
+        || expected_workdir != workdir
     {
         return Err(failure(
             "TERMINAL_SCOPE_CHANGED",
@@ -348,6 +471,121 @@ pub(crate) async fn shutdown_checked(context: &GatewayToolContext) -> Result<(),
         context.runtime.terminals.lock().await.remove(&id);
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn model_terminal_uses_the_selected_mount_and_keeps_it_when_default_changes() {
+        use crate::storage::{gateway as data, workspace_mounts};
+        let (mut context, _owner) = super::super::gateway::test_context();
+        let root = context.workdir.parent().unwrap().to_owned();
+        let second = root.join("secondary terminal");
+        std::fs::create_dir_all(&second).unwrap();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let first_id = uuid::Uuid::new_v4().to_string();
+        let second_id = uuid::Uuid::new_v4().to_string();
+        data::ensure_conversation(&context.data_home,&context.conversation_id,"Terminal mounts").unwrap();
+        let old = data::load_catalog(&context.data_home).unwrap();
+        data::handle("PUT","/api/conversations/catalog",&[],&json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Terminal mounts",
+            "Mounts":[{"Id":first_id,"Name":"A","Path":context.workdir,"BindingRevision":1},{"Id":second_id,"Name":"B","Path":second,"BindingRevision":1}],
+            "DefaultMountId":first_id,"Chats":[{"Id":context.conversation_id,"Title":"Terminal","Messages":[
+                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Terminal mounts fixture","Status":"completed"}]}]}]}),&context.data_home).unwrap().unwrap();
+        let relation = data::relationship(&context.data_home,&context.conversation_id).unwrap();
+        context.project_id = Some(project_id);
+        context.permission_mode = "full".into();
+        context.config["workspaceMounts"] = relation["mounts"].clone();
+        context.config["defaultMountId"] = relation["defaultMountId"].clone();
+        context.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
+        context.authorized_roots.push(second.clone());
+        let user_opened = open(&json!({"mountId":second_id}),&context).await.unwrap();
+        let id = user_opened["sessionId"].clone();
+        assert_eq!(user_opened["mountId"],second_id);
+        let listed = execute("terminal.workspace.list",&json!({}),&context).await.unwrap();
+        assert_eq!(listed["sessions"][0]["mountId"],second_id);
+        let mut catalog = data::load_catalog(&context.data_home).unwrap();
+        catalog["Projects"][0]["DefaultMountId"] = json!(second_id);
+        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&context.data_home).unwrap().unwrap();
+        // Verify a relative write rather than comparing short and long Windows path spellings.
+        // 通过相对写入验证真实目录，避免 Windows 长短路径的不同拼写导致误判。
+        let script = "Set-Content -LiteralPath '.cwd-verification.txt' -Value 'owned-terminal-fixture'; Write-Output ('KYNXA_' + 'CWD_READY')\r";
+        let result = super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":script,"reason":"Verify the existing terminal's actual working directory"}),&context).await.unwrap();
+        assert_eq!(result["inputAccepted"],true);
+        tokio::time::timeout(Duration::from_secs(10),async {
+            let mut cursor = result["after"].as_u64().unwrap();
+            let mut text = String::new();
+            loop {
+                let page = execute("terminal.workspace.read",&json!({"sessionId":id,"after":cursor,"waitMs":1000}),&context).await.unwrap();
+                cursor = page["nextCursor"].as_u64().unwrap();
+                text.push_str(page["output"].as_str().unwrap());
+                if text.contains("KYNXA_CWD_READY") { break; }
+            }
+        }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(second.join(".cwd-verification.txt")).unwrap().trim(), "owned-terminal-fixture");
+        assert!(!context.workdir.join(".cwd-verification.txt").exists());
+        let mut catalog = data::load_catalog(&context.data_home).unwrap();
+        catalog["Projects"][0]["DefaultMountId"] = json!(first_id);
+        catalog["Projects"][0]["Mounts"].as_array_mut().unwrap().retain(|mount|mount["Id"] != second_id);
+        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&context.data_home).unwrap().unwrap();
+        assert!(super::super::gateway::execute("terminal.workspace.write",json!({"sessionId":id,"input":"echo should-not-run\r","reason":"A removed mount must reject new input"}),&context).await.is_err());
+        assert!(context.runtime.terminals.lock().await.contains_key(id.as_str().unwrap()));
+        execute("terminal.workspace.close",&json!({"sessionId":id,"reason":"Release the same owned terminal"}),&context).await.unwrap();
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_tools_share_the_user_terminal_with_real_output_and_chat_isolation() {
+        let (mut context, _owner) = super::super::gateway::test_context();
+        let root = context.workdir.parent().unwrap().to_owned();
+        crate::storage::gateway::ensure_conversation(&context.data_home, &context.conversation_id, "Terminal fixture").unwrap();
+        context.workdir = context.data_home.join("Sandboxes").join(&context.conversation_id);
+        std::fs::create_dir_all(&context.workdir).unwrap();
+        let user_terminal = open(&json!({"cols":100,"rows":30}), &context).await.unwrap();
+        let id = user_terminal["sessionId"].clone();
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        context.events = Some(events);
+        context.permission_mode = "full".into();
+        let reopened = super::super::gateway::execute("terminal.workspace.open", json!({"reason":"Use the existing right terminal"}), &context).await.unwrap();
+        assert_eq!(reopened["sessionId"], id);
+        assert_eq!(reopened["reused"], true);
+        assert_eq!(received.recv().await.unwrap()["type"], "workspace_terminal_open");
+        context.permission_mode = "ask".into();
+        let listed = super::super::gateway::execute("terminal.workspace.list", json!({}), &context).await.unwrap();
+        assert_eq!(listed["sessions"][0]["sessionId"], id);
+        let mut other_chat = context.clone();
+        other_chat.conversation_id = uuid::Uuid::new_v4().to_string();
+        let denied = super::super::gateway::execute("terminal.workspace.read", json!({"sessionId":id,"waitMs":0}), &other_chat).await.unwrap_err();
+        assert_eq!(denied.code, "TERMINAL_SESSION_NOT_FOUND");
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let marker = format!("KYNXA_PTY_{suffix}");
+        let command = format!("Write-Output ('KYNXA_' + 'PTY_{suffix}')\r");
+        let pending = super::super::gateway::execute("terminal.workspace.write", json!({"sessionId":id,"input":command,"reason":"Print a test marker"}), &context).await.unwrap();
+        assert_eq!(pending["requiresApproval"], true);
+        context.permission_mode = "full".into();
+        let written = super::super::gateway::execute("terminal.workspace.write", json!({"sessionId":id,"input":command,"reason":"Print a test marker"}), &context).await.unwrap();
+        assert_eq!(written["inputAccepted"], true);
+        assert!(written["commandCompleted"].is_null());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut after = written["after"].as_u64().unwrap();
+            let mut output = String::new();
+            loop {
+                let observed = super::super::gateway::execute("terminal.workspace.read", json!({"sessionId":id,"after":after,"waitMs":1000}), &context).await.unwrap();
+                output.push_str(observed["output"].as_str().unwrap());
+                after = observed["nextCursor"].as_u64().unwrap();
+                if output.contains(&marker) { break; }
+            }
+        }).await.unwrap();
+        let ui_output = action(&json!({"conversationId":context.conversation_id,"sessionId":id,"action":"read","after":0,"waitMs":0}), &context.runtime, &context.data_home).await.unwrap();
+        assert!(ui_output["output"].as_str().unwrap().contains(&marker));
+        let closed = super::super::gateway::execute("terminal.workspace.close", json!({"sessionId":id,"reason":"Finish the test shell"}), &context).await.unwrap();
+        assert_eq!(closed["closed"], true);
+        assert!(context.runtime.terminals.lock().await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(windows)]

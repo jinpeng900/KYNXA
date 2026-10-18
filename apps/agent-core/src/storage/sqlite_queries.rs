@@ -157,7 +157,7 @@ fn relations(connection: &Connection, arguments: &Value, scopes: &[Value]) -> Co
     let mut selected = rows(
         connection,
         &format!(
-            "SELECT e.*,s.scope_key,s.source_revision,s.content_hash,s.title,s.locator FROM source_relations e JOIN sources s ON s.source_id=e.source_id WHERE s.scope_key IN ({}) AND e.derivation_signature=s.derivation_signature {} ORDER BY CASE WHEN e.certainty='syntax' THEN 0 ELSE 1 END,e.source_id,e.start_offset,e.edge_id LIMIT ?",
+            "SELECT e.*,s.scope_key,s.source_type AS sourceType,s.source_revision,s.content_hash,s.title,s.locator FROM source_relations e JOIN sources s ON s.source_id=e.source_id WHERE s.scope_key IN ({}) AND e.derivation_signature=s.derivation_signature {} ORDER BY CASE WHEN e.certainty='syntax' THEN 0 ELSE 1 END,e.source_id,e.start_offset,e.edge_id LIMIT ?",
             placeholders(scopes),
             conditions.join(" ")
         ),

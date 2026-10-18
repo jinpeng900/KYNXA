@@ -26,7 +26,7 @@ internal static class HostTerminalRunner
             maximumProcesses = MaximumProcesses, minimumTimeoutMs = 100, maximumTimeoutMs = 120000,
             maxScriptCharacters = HostTerminalRequest.MaximumScriptCharacters,
             visibleTerminal = true, maxKeepOpenMs = 30000, defaultKeepOpenMs = 5000,
-            backgroundJobs = true, maximumJobTimeoutMs = MaximumBackgroundTimeoutMs,
+            backgroundJobs = true, maximumJobTimeoutMs = MaximumBackgroundTimeoutMs, backgroundOutputPolicy = "truncate",
             outputEvents = true,
             visibleOutput = "bounded-console-screen-snapshot",
             outputEncoding = new { cmd = "utf-8-or-oem-per-line", powershell = "utf-8" }
@@ -59,7 +59,7 @@ internal static class HostTerminalRunner
                 }
             };
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
-            var output = new BoundedOutput(jobHandle, shell == "cmd");
+            var output = new BoundedOutput(jobHandle, shell == "cmd", truncateOnOverflow: request.BackgroundJob);
             var (stdout, stderr) = StartHostShell(shell, request.Script!, cwd, jobHandle, ref processInformation, output, cancellationToken);
             started = true;
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
@@ -84,13 +84,16 @@ internal static class HostTerminalRunner
             await WaitForEmptyJobAsync(jobHandle);
             Check(GetExitCodeProcess(processInformation.Process, out uint exitCode), "Read host terminal exit code");
             await Task.WhenAll(stdout, stderr);
-            bool completed = normalExit && !output.Truncated;
+            // Log retention is independent of a negotiated background job's observed completion.
+            // 已协商后台作业的日志保留上限不改变已观测到的正常完成事实。
+            bool completed = normalExit && (request.BackgroundJob || !output.Truncated);
             return new
             {
                 protocolVersion = 1, boundary = "host-terminal", completed, outcome = completed ? "completed" : "unknown",
                 shell, cwd, exitCode = unchecked((int)exitCode), stdout = await stdout, stderr = await stderr,
                 timedOut, cancelled, processId = processInformation.ProcessId, activeProcessesAfterExit = 0,
                 outputTruncated = output.Truncated, outputLimitExceeded = output.Truncated,
+                outputOverflowPolicy = request.BackgroundJob ? "truncate" : "terminate",
                 elapsedMs = elapsed.ElapsedMilliseconds, maxOutputBytes = MaximumOutputBytes, capturedOutputBytes = output.CapturedBytes,
                 outputEncoding = shell == "cmd" ? "utf-8-or-oem-per-line" : "utf-8",
                 runtimeArguments = shell == "cmd" ? new[] { "/d", "/s", "/c" } : new[] { "-NoProfile", "-NonInteractive", "-Command" }
@@ -261,7 +264,7 @@ internal static class HostTerminalRunner
         if (!succeeded) throw new HostTerminalException("HOST_TERMINAL_START_FAILED", $"{operation}: {new Win32Exception(Marshal.GetLastWin32Error()).Message}");
     }
 
-    private sealed class BoundedOutput(IntPtr jobHandle, bool cmdOutput)
+    private sealed class BoundedOutput(IntPtr jobHandle, bool cmdOutput, bool truncateOnOverflow)
     {
         private long _bytes, _capturedBytes;
         private int _truncated;
@@ -302,7 +305,9 @@ internal static class HostTerminalRunner
                     line.Position = 0;
                 }
                 PublishDelta(channel, decoded.ToString());
-                if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0)
+                // Keep draining a background job after its retained output fills; ordinary calls retain their termination policy.
+                // 后台作业的保留日志满后仍持续排空管道；普通调用继续遵守原有的超量终止策略。
+                if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0 && !truncateOnOverflow)
                     TerminateJobObject(jobHandle, 126);
             }
             if (line.Length != 0) PublishDelta(channel, DecodeOutput(line.ToArray(), cmdOutput));

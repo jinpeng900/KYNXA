@@ -48,6 +48,12 @@ async fn execute(
         .await
         .map_err(|_| GatewayError::new("TASK_SCOPE_UNAVAILABLE", "任务范围读取失败。", 500))??;
     let project = relationship["projectId"].as_str();
+    if path == "/api/tasks/recoverable" && method == "GET" {
+        if parameter(query, "projectId") != project { return Err(denied()); }
+        let limit = parameter(query, "limit").and_then(|value| value.parse::<usize>().ok()).unwrap_or(50).clamp(1, 100);
+        return runtime.tasks.recoverable(&conversation, project, parameter(query, "afterTaskId"), limit)
+            .await.map(|value| (200, value));
+    }
     if path == "/api/tasks/paused" && method == "GET" {
         // Recovery always stays in the exact saved chat, even when its ordinary sidebar lists the whole work.
         // 恢复始终限定当前正式聊天；普通侧栏可列整个工作的语义不被更改。

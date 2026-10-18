@@ -13,13 +13,20 @@ fn normalized(value: &Value, maximum: usize) -> String {
     js_trim(&String::from_utf16_lossy(&units).nfkc().collect::<String>()).to_lowercase()
 }
 
+fn workspace_terminal_topic(text: &str) -> bool {
+    matches(
+        r"(?:右侧|右边|侧栏|工作区|内置|嵌入).{0,16}(?:终端|命令行)|(?:终端|命令行).{0,16}(?:右侧|右边|侧栏|工作区|内置)|\b(?:sidebar|workspace|embedded)\s+terminal\b",
+        text,
+    )
+}
+
 pub(super) fn category(tool: &Value) -> &'static str {
     let name = normalized(&tool["name"], 256);
     let description = normalized(&tool["description"], 2000);
     if name.starts_with("computer.") {
         return "computer";
     }
-    if name.starts_with("terminal.host.") {
+    if name.starts_with("terminal.host.") || name.starts_with("terminal.workspace.") {
         return "host-terminal";
     }
     if name == "terminal.run" {
@@ -104,6 +111,16 @@ fn aliases(tool: &Value) -> String {
         );
     }
     if category == "host-terminal" {
+        if name.starts_with("terminal.workspace.") {
+            return format!("sidebar workspace embedded interactive terminal command powershell cmd right pane 右侧终端 右边终端 工作区终端 内置终端 交互终端 命令 执行 输入 输出 会话 {}", match action {
+                "open" => "open launch 打开 创建",
+                "list" => "list existing 列出 已有",
+                "read" => "read output 读取 查看 输出",
+                "write" => "write input run command 输入 运行命令 执行命令",
+                "close" => "close stop 关闭 停止",
+                _ => "",
+            });
+        }
         let action = match action {
             "start" => "start launch 启动 运行",
             "read" => "read inspect poll output 读取 查看 输出 状态",
@@ -135,7 +152,7 @@ fn aliases(tool: &Value) -> String {
                 "read" => "读取 查看",
                 "list" => "列表 列出",
                 "search" => "搜索 查找",
-                "write" => "写入 创建",
+                "write" => "写入 创建 新建 保存",
                 "edit" => "编辑 修改",
                 "delete" => "删除",
                 "stat" => "属性 信息",
@@ -181,9 +198,21 @@ fn search_tools(arguments: &Value) -> Value {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let text = normalized(&arguments["query"], 200);
+    let text = normalized(&arguments["query"], 2000);
     let terms = query_terms(&text);
     let device = device_state_topic(&text);
+    let active = analyze_clauses(&text);
+    let active_text = active["activeText"].as_str().unwrap_or(&text);
+    let workspace_terminal = workspace_terminal_topic(active_text);
+    // Exact capability names in the active request outrank generic words in long tasks or exclusions.
+    // 当前有效请求中的完整能力名优先于长任务里的泛词；被明确排除的能力名不获得此优先级。
+    let named_tools = pattern(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)+|k_[a-z0-9_]+_[a-f0-9]{8}")
+        .find_iter(active_text)
+        .map(|found| (found.as_str(), found.start()))
+        .collect::<Vec<_>>();
+    let has_file_target = file_references(active_text).as_array().is_some_and(|files| !files.is_empty());
+    let file_read = has_file_target.then(|| pattern(r"读取|读入|阅读|\bread\b").find(active_text)).flatten();
+    let file_write = has_file_target.then(|| pattern(r"写入|创建|新建|保存|\b(?:write|create|save)\b").find(active_text)).flatten();
     let identity = matches(r"^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$", &text);
     let wire_identity = matches(r"^k_[a-z0-9_]+_[a-f0-9]{8}$", &text);
     let mut selected = Vec::new();
@@ -196,6 +225,11 @@ fn search_tools(arguments: &Value) -> Value {
             continue;
         }
         let name = normalized(&tool["name"], 256);
+        let wire_name = normalized(&tool["wireName"], 256);
+        if let Some((_, position)) = named_tools.iter().find(|(named, _)| *named == name || !wire_name.is_empty() && *named == wire_name) {
+            selected.push((index, 1_000_000usize.saturating_sub(*position)));
+            continue;
+        }
         if identity && !name.contains(&text) {
             continue;
         }
@@ -214,7 +248,21 @@ fn search_tools(arguments: &Value) -> Value {
         } else {
             0
         };
-        if device == Some("device") && name == "terminal.host.run" {
+        // A named file plus an explicit read/write action beats incidental local/keyboard vocabulary.
+        // 明确文件目标及读写动作优先于偶然出现的本地或键盘词；此处只排序，不扩大执行权限。
+        if let Some(action) = match name.as_str() {
+            "filesystem.read" => file_read.as_ref(),
+            "filesystem.write" => file_write.as_ref(),
+            _ => None,
+        } {
+            score += 20_000usize.saturating_sub(action.start());
+        }
+        // A right-side command must keep its visible session instead of preferring hidden host diagnostics.
+        // 右侧命令优先保留可见会话，不能被通用本机诊断排序改成隐藏的宿主终端。
+        if workspace_terminal && name.starts_with("terminal.workspace.") {
+            score += 6000;
+        }
+        if !workspace_terminal && device == Some("device") && name == "terminal.host.run" {
             score += 5000;
         }
         if description.contains(&text) || alias.contains(&text) {
@@ -367,7 +415,7 @@ pub(super) fn selection_signals(arguments: &Value) -> Value {
                 && subject["desktop"] != true
                 && signals["browser"] != true
                 && signals["desktop"] != true;
-            for key in ["desktop", "browser", "hostTerminal", "docs", "web"] {
+            for key in ["desktop", "browser", "hostTerminal", "workspaceTerminal", "docs", "web"] {
                 if subject[key] == true {
                     signals[key] = json!(true);
                 }
@@ -394,7 +442,10 @@ pub(super) fn selection_signals(arguments: &Value) -> Value {
                 }
                 match category {
                     "computer" => signals["desktop"] = json!(true),
-                    "host-terminal" => signals["hostTerminal"] = json!(true),
+                    "host-terminal" => {
+                        signals["hostTerminal"] = json!(true);
+                        if name.starts_with("terminal.workspace.") { signals["workspaceTerminal"] = json!(true); }
+                    }
                     "browser" => signals["browser"] = json!(true),
                     _ => {}
                 }
@@ -428,6 +479,9 @@ fn catalog_score(tool: &Value, signals: &Value) -> i32 {
     let name = tool["name"].as_str().unwrap_or("").to_lowercase();
     let description = tool["description"].as_str().unwrap_or("").to_lowercase();
     let yes = |key: &str| signals[key] == true;
+    if name.starts_with("terminal.workspace.") {
+        return if yes("workspaceTerminal") { 80 } else { 0 };
+    }
     if name.starts_with("computer.") {
         if name == "computer.launch" && yes("browser") && signals["browserPresentation"] == "workspace" {
             return 0;
@@ -777,7 +831,8 @@ fn current_signals(message: &str) -> Value {
                 "本机|本地|我的电脑|\\blocal (?:computer|machine|device)\\b",
                 text,
             ));
-    let mut signals = json!({"terms":terms,
+    let workspace_terminal = workspace_terminal_topic(text);
+    let mut signals = json!({"terms":terms,"workspaceTerminal":workspace_terminal,
     "web": matches("最新|最近|当前|现在|今天|今日|新闻|官网|官方|上线|发布|搜索|查询|查证|联网|搜一下|是谁|什么时候|什么时间|多少钱", text) ||
       matches("\\b(?:latest|current|recent|today|news|official|released?|announced?|search|who|when|price|weather)\\b|\\blook\\s+up\\b", text),
     "docs": matches("文档|接口|代码|编程|开发|框架|库的|库怎么", text) ||
@@ -791,7 +846,7 @@ fn current_signals(message: &str) -> Value {
       matches("(?:本机|本地).{0,30}(?:登录|界面|窗口|软件|应用)", text) ||
       matches("\\b(?:screenshot|desktop|mouse|browser|notepad|calculator|launch|computer)\\b", text),
     "browser":browser, "browserPresentation":super::intent::browser_presentation(text), "remoteBrowser":remote_browser, "deviceState":device_state,
-    "hostTerminal": matches("本机终端|本地终端|本机命令|本地命令|宿主终端|conda|powershell|cmd|命令提示符", text) ||
+    "hostTerminal": workspace_terminal || matches("本机终端|本地终端|本机命令|本地命令|宿主终端|conda|powershell|cmd|命令提示符", text) ||
       matches("后台.{0,12}(?:终端|进程|任务)|(?:终端|进程).{0,12}(?:后台|监控)|\\b(?:background|persistent)\\s+(?:terminal|process|job)\\b", text) ||
       matches("\\b(?:host|local|visible)\\b.*\\b(?:terminal|command)\\b|\\bterminal\\b.*\\b(?:window|visible)\\b", text) ||
       matches("(?:打开|显示|可见|可以看到|看得到).{0,20}终端|终端.{0,20}(?:窗口|可见|可以看到|看得到)", text),
@@ -888,5 +943,70 @@ mod search_score_tests {
                 assert_eq!(search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":include_scores})), json!([]));
             }
         }
+    }
+
+    #[test]
+    fn exact_requested_capabilities_outrank_generic_task_vocabulary() {
+        let descriptors = json!([
+            {"name":"computer.key","description":"Use computer keys and enter local text."},
+            {"name":"terminal.host.run","description":"Run local tasks; create, read and write files."},
+            {"name":"filesystem.read","description":"Read a local file."},
+            {"name":"filesystem.write","description":"Atomically write UTF-8 text."}
+        ]);
+        let query = "Use filesystem.write and filesystem.read for this real multi-step task. Do not use terminal or computer tools. Original password: ORIGINAL. First create receipt.txt exactly once; read every SECRET KEY from note-1.txt through note-8.txt and write the final summary.";
+        let hits = search_tools(&json!({"query":query,"descriptors":descriptors}));
+        assert_eq!(hits[0], 3);
+        assert_eq!(hits[1], 2);
+        let excluded = search_tools(&json!({"query":"不要使用 filesystem.write。改用 filesystem.read 读取内容。","descriptors":descriptors,"includeScores":true}));
+        assert_eq!(excluded[0]["index"], 2);
+        assert!(excluded.as_array().unwrap().iter().filter(|hit| hit["index"] == 3)
+            .all(|hit| hit["score"].as_u64().unwrap() < 1_000_000 - 2000));
+    }
+
+    #[test]
+    fn exact_capabilities_near_the_end_of_a_task_remain_visible() {
+        let descriptors = json!([
+            {"name":"filesystem.read","description":"Read a local file."},
+            {"name":"filesystem.reader","description":"Inspect reader metadata."},
+            {"name":"terminal.host.run","wireName":"k_terminal_host_run_725f3f35","description":"Run a local command."}
+        ]);
+        let query = format!("{} Use filesystem.read to inspect the current file.", "Retain already completed work. ".repeat(10));
+        let hits = search_tools(&json!({"query":query,"descriptors":descriptors,"includeScores":true}));
+        assert_eq!(hits[0]["index"], 0);
+        assert!(hits[0]["score"].as_u64().unwrap() > 900_000);
+        assert!(hits.as_array().unwrap().iter().filter(|hit| hit["index"] == 1)
+            .all(|hit| hit["score"].as_u64().unwrap() < 900_000));
+        let wire = search_tools(&json!({"query":"Use k_terminal_host_run_725f3f35 to inspect the current command.","descriptors":descriptors}));
+        assert_eq!(wire[0], 2);
+    }
+
+    #[test]
+    fn chinese_file_steps_do_not_prefer_incidental_local_or_key_terms() {
+        let descriptors = json!([
+            {"name":"computer.key","description":"Send KEY on the local computer."},
+            {"name":"terminal.host.run","description":"Run local tasks."},
+            {"name":"filesystem.read","description":"Read a local file."},
+            {"name":"filesystem.write","description":"Atomically write UTF-8 text."}
+        ]);
+        let hits = search_tools(&json!({"query":"这是实际本地模型长任务测试。先新建 receipt.txt，内容是原始口令；再逐个读取 note-1.txt 到 note-8.txt，记录每个 SECRET KEY，最后保存 summary.md。","descriptors":descriptors}));
+        assert_eq!(hits[0], 3);
+        assert_eq!(hits[1], 2);
+    }
+
+    #[test]
+    fn right_terminal_commands_keep_workspace_selection_and_followup_context() {
+        let descriptors = json!([
+            {"name":"terminal.host.run","description":"Run a host command"},
+            {"name":"terminal.workspace.open","description":"Open an embedded terminal"},
+            {"name":"terminal.workspace.write","description":"Send input to a terminal"}
+        ]);
+        let right = search_tools(&json!({"query":"在右侧终端运行 ipconfig 查看我的ip","descriptors":descriptors}));
+        assert_ne!(right[0], 0);
+        let host = search_tools(&json!({"query":"查看我的ip","descriptors":descriptors}));
+        assert_eq!(host[0], 0);
+        let followup = super::selection_signals(&json!({"message":"继续", "historySignals":["在右侧终端运行命令"],
+            "previousToolNames":["terminal.workspace.write"]}));
+        assert_eq!(followup["workspaceTerminal"], true);
+        assert_eq!(followup["hostTerminal"], true);
     }
 }

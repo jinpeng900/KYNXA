@@ -15,6 +15,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "apps/desktop/Build/RuntimeDownloads.psm1"
+INSTALLER_HELPER = REPOSITORY_ROOT / "apps/desktop/Build/Installer/Get-KynxaInstaller.ps1"
 BODY = bytes(range(256)) * 1024
 BODY_SHA256 = hashlib.sha256(BODY).hexdigest()
 PARTIAL_BYTES = 65536
@@ -44,6 +45,13 @@ class DownloadFixture(BaseHTTPRequestHandler):
             return
         if route.startswith("/mirror-good/"):
             self.send_body(200, BODY)
+            return
+        if route == "/source-checkpoint" and len(records) == 2:
+            self.send_response(503)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
             return
 
         # The first attempt leaves a useful prefix, rather than a zero-byte placeholder.
@@ -118,6 +126,17 @@ def assert_pinned(destination):
     assert not Path(str(destination) + ".part").exists()
 
 
+def run_installer_helper(manifest, root, offline=False):
+    process = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALLER_HELPER),
+         "-ManifestPath", str(manifest), "-DestinationDirectory", str(root)] + (["-Offline"] if offline else []),
+        capture_output=True,
+        timeout=30,
+    )
+    if process.returncode:
+        raise AssertionError(process.stdout.decode("utf-8", errors="replace") + process.stderr.decode("utf-8", errors="replace"))
+
+
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), DownloadFixture)
     server.requests = {}
@@ -164,6 +183,37 @@ def main():
             assert server.requests["/mirror-good/asset.bin"][0]["range"] is None
             assert_pinned(destination)
             results.append("mirror-fallback-and-pinned-sha")
+
+            # An interrupted mirror must not replace the original server's saved range.
+            # 镜像中断不能覆盖原始来源保存的断点，再次运行应继续原来源。
+            destination = root / "source-checkpoints.bin"
+            origin = f"{base_url}/source-checkpoint"
+            run_download(origin, destination, expect_success=False)
+            prefix = Path(str(destination) + ".part").read_bytes()
+            sources.write_text(json.dumps({"mirrors": {origin: [f"{base_url}/mirror-checkpoint"]}}), encoding="utf-8")
+            run_download(origin, destination, sources, expect_success=False)
+            assert Path(str(destination) + ".part").read_bytes() == prefix
+            assert len(list(root.glob("source-checkpoints.bin.part.*.json"))) == 1
+            run_download(origin, destination, sources)
+            assert server.requests["/source-checkpoint"][2]["range"] == f"bytes={len(prefix)}-"
+            assert_pinned(destination)
+            assert not list(root.glob("source-checkpoints.bin.part*"))
+            results.append("per-source-checkpoints-survive-mirror-interruption")
+
+            # Exercise distribution with fixture bytes, never by running a real installer.
+            # 分发入口仅下载夹具字节，不运行真实安装器。
+            manifest = root / "installer-release.json"
+            manifest.write_text(json.dumps({"schemaVersion": 1, "fileName": "installer-fixture.bin", "bytes": len(BODY),
+                                            "sha256": BODY_SHA256,
+                                            "sources": [{"id": "official", "url": f"{base_url}/installer-helper", "status": "available"},
+                                                        {"id": "github", "url": f"{base_url}/must-not-be-requested", "status": "pending"}]}), encoding="utf-8")
+            run_installer_helper(manifest, root)
+            assert_pinned(root / "installer-fixture.bin")
+            request_count = len(server.requests["/installer-helper"])
+            run_installer_helper(manifest, root, offline=True)
+            assert len(server.requests["/installer-helper"]) == request_count
+            assert "/must-not-be-requested" not in server.requests
+            results.append("installer-download-resume-and-offline-reuse-without-execution")
         print(json.dumps({"passed": len(results), "checks": results, "shell": "Windows PowerShell 5.1"}, ensure_ascii=False))
     finally:
         server.shutdown()

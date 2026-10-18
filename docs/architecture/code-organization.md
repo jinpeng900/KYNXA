@@ -1,8 +1,10 @@
 # 当前代码组织与维护边界
 
-当前入口（2026-10-12）为 WinUI/WebView2 → Windows 原生 Rust HTTP/SSE 网关，后端不启动或发货 Node/NAPI；WebView 前端及开发守卫保留。当前六领域、逐文件 I/O 接线名单、纯规则依赖限制与构建见 [原生网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [主责清单](../team/module-ownership.json)。
+当前版本为 1.5.0 的源码配置（文档更新于 2026-10-16），入口为 WinUI/WebView2 → Windows 原生 Rust HTTP/SSE 网关。核心不依赖 Node/NAPI；随包私有 Node 只服务扩展 MCP 与已核验的 JS Skill，WebView 前端及开发守卫保留。当前六领域、逐文件 I/O 接线名单、纯规则依赖限制与构建见 [原生网关](native-gateway.md)、[团队边界](team-boundaries.md) 和 [主责清单](../team/module-ownership.json)。新成员优先查看[文档索引](../README.md)。
 
-下文为 2026-10-11 及更早的目录/混合版迁移历史，旧 Node 路径、SDK 分工与当时验证命令不作为当前入口；原有说明保留供追溯。历史基线中 C#/WinUI → Node.js SDK/传输适配器保留实际第三方模型、MCP、文档/代码解析和向量 SDK；任务控制、模型状态、工具业务、索引调度及正式日志/SQLite/资料事务迁入 [Rust Agent 核心历史说明](rust-agent-control.md)。根 README 中的独立 Rust 权限 Authority、持久任务图和跨崩溃精确续跑仍是后续设计，不等同于此迁移。
+下文为 2026-10-11 及更早的目录/混合版迁移历史，旧 Node 路径、SDK 分工与当时验证命令不作为当前入口；原有说明保留供追溯。历史基线中 C#/WinUI → Node.js SDK/传输适配器保留实际第三方模型、MCP、文档/代码解析和向量 SDK；任务控制、模型状态、工具业务、索引调度及正式日志/SQLite/资料事务迁入 [Rust Agent 核心历史说明](rust-agent-control.md)。当前持久任务与恢复合同见 [持久任务](durable-tasks.md)，不以旧设计中的独立 Authority 或任意副作用精确续跑替代实际实现。
+
+## 历史目录与迁移记录
 
 ## 目录与职责
 
@@ -88,7 +90,7 @@ tests/                       隔离数据、模拟模型和自有窗口的回归
 
 原始记录不因界面隐藏或上下文预算删除；身份、来源隔离、审批快照和版本冲突保持原合同。开发与回归只使用临时数据和模拟凭据。正式安装、真实账号浏览器、付费模型效果及所有第三方软件的前台行为需要各自验收，不由模拟测试代替。
 
-验证命令见 [验证与协作](../../.agents/skills/kynxa-development/references/validation.md)、[网关结果](../../apps/model-gateway/README.md#当前验证与后续接口) 和 [打包说明](../../apps/desktop/Build/README.md)。代码组织、规范化和运行回归不是安全认证，也不表示已实现后续完整 Host 架构。
+历史引用的 Node 网关指南已经退役。当前验证入口见 [验证与协作](../../.agents/skills/kynxa-development/references/validation.md)、[原生核心指南](../../apps/agent-core/README.md) 和 [打包说明](../../apps/desktop/Build/README.md)。代码组织、规范化和运行回归不是安全认证，也不表示已实现后续完整 Host 架构。
 
 ## 此前记录：2026-10-05 代码书写规范化验收
 

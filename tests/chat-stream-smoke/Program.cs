@@ -70,6 +70,26 @@ foreach (var malformed in new[] { unavailableMcp with { ServerId = null }, unava
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(unavailableMcp with { ConversationId = Guid.NewGuid() })),
     "MCP status bypassed conversation identity.");
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(Event("unregistered_status"))), "Unregistered event accepted.");
+var workspaceTerminal = Event("workspace_terminal_open") with
+{
+    SessionId = Guid.NewGuid().ToString("D"), Cols = 100, Rows = 30, Title = "项目终端", Workdir = @"D:\fixture\workspace"
+};
+var terminalContinued = await Read(prefix + Frame(workspaceTerminal) + Frame(workspaceTerminal)
+    + Frame(Event("text_delta", "继续操作同一个终端。")) + Frame(Event("completed", content: "已读取真实输出。")));
+Check(terminalContinued.Count == 5 && terminalContinued[1].SessionId == workspaceTerminal.SessionId &&
+    terminalContinued[2].Title == "项目终端" && terminalContinued[1].Workdir == workspaceTerminal.Workdir &&
+    terminalContinued[^1].Content == "已读取真实输出。", "A workspace terminal attachment interrupted the reply or lost its existing session identity.");
+foreach (var dimensions in new[] { (Cols: 2, Rows: 1), (Cols: 500, Rows: 200) })
+{
+    var attached = await Read(prefix + Frame(workspaceTerminal with { Cols = dimensions.Cols, Rows = dimensions.Rows })
+        + Frame(Event("completed", content: "终端已挂接。")));
+    Check(attached[1].Cols == dimensions.Cols && attached[1].Rows == dimensions.Rows && attached[^1].Type == "completed",
+        "A valid Rust workspace-terminal dimension boundary interrupted the reply.");
+}
+foreach (var malformed in new[] { workspaceTerminal with { SessionId = null }, workspaceTerminal with { Cols = null },
+    workspaceTerminal with { Cols = 1 }, workspaceTerminal with { Cols = 501 }, workspaceTerminal with { Rows = 0 },
+    workspaceTerminal with { Rows = 201 } })
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(malformed)), "Incomplete workspace terminal attachment accepted.");
 // Child events are a separate task projection, not replayed main-agent tools or final replies.
 // 子任务事件单独投影，不重放为主代理工具，也不能提前结束主回复。
 Guid rootTaskId = Guid.NewGuid(), childTaskId = Guid.NewGuid();
@@ -216,6 +236,36 @@ await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(f
 await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(continuedTerminal with
     { AssistantSegments = [continuedFirst, finalSegment with { IsAnswerContinuation = true }] })),
     "The final phase was incorrectly accepted as another continuation");
+// A completed round can be classified after task verification, with idempotent replays and a stable public body.
+// 已完成轮次可在任务核验后补定阶段；重复关闭事件幂等，公开正文和摘要保持不变。
+var promotedFinal = firstCompleted with { Phase = "final_answer", ReasoningDurationMs = 1200 };
+var promotedTerminal = Event("completed", content: promotedFinal.Content) with
+{ AssistantSegments = [promotedFinal], ToolStreamProtocol = 3 };
+var promotedEvents = await Read(prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted))
+    + Frame(SegmentEvent(firstCompleted)) + Frame(SegmentEvent(promotedFinal)) + Frame(SegmentEvent(promotedFinal))
+    + Frame(promotedTerminal));
+Check(promotedEvents[^1].AssistantSegments!.Single() == promotedFinal
+    && promotedEvents[^1].Content == firstCompleted.Content,
+    "Task verification promotion or duplicate closed segments interrupted the final reply");
+var markedEvents = await Read(prefix + Frame(SegmentEvent(firstSegment)) + Frame(SegmentEvent(firstCompleted))
+    + Frame(SegmentEvent(continuedFirst)) + Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment))
+    + Frame(continuedTerminal));
+Check(markedEvents[^1].AssistantSegments![0].IsAnswerContinuation,
+    "A closed output-limit continuation could not be classified without reopening its round");
+foreach (var invalidClosedUpdate in new[] { promotedFinal with { Content = "覆盖已完成正文" },
+    promotedFinal with { Reasoning = "覆盖已完成摘要" }, promotedFinal with { ReasoningDurationMs = 999 },
+    promotedFinal with { Status = "streaming" }, promotedFinal with { Status = "interrupted" },
+    promotedFinal with { Round = 2 }, promotedFinal with { Order = 1 } })
+    await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(firstSegment))
+        + Frame(SegmentEvent(firstCompleted)) + Frame(SegmentEvent(invalidClosedUpdate))),
+        "A closed segment changed public content, identity, timing, or terminal status");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(firstSegment))
+    + Frame(SegmentEvent(promotedFinal)) + Frame(SegmentEvent(firstCompleted))),
+    "A finalized answer regressed into commentary");
+await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(SegmentEvent(firstSegment))
+    + Frame(SegmentEvent(firstCompleted)) + Frame(promotedTerminal with
+        { AssistantSegments = [promotedFinal with { Content = "终态覆盖已完成正文" }] })),
+    "The terminal snapshot silently rewrote a closed segment body");
 // A repaired model step keeps its interrupted trace while the final answer must be complete.
 // 已修复模型步骤保留中断轨迹，最终回答自身仍必须完整结束。
 var repairedSegment = firstCompleted with { Status = "interrupted" };
@@ -251,6 +301,32 @@ await ExpectAsync<InvalidDataException>(() => Read(compactStart + Frame(Event("a
     "Display-only context maintenance requested execution approval");
 await ExpectAsync<InvalidDataException>(() => Read(compactStart + Frame(Event("tool_call") with { Tool = contextActivity }) +
     Frame(compactTerminal)), "An unfinished context activity was accepted as a completed request");
+// Request repair may compact after the failed step is closed, then continue in a separate model round.
+// 请求修复可在失败步骤关闭后整理上下文，再以独立模型轮次接续，先前中断正文仍保留。
+string repairStart = compactStart + Frame(SegmentEvent(repairedSegment));
+var repairCompactEvents = await Read(repairStart + Frame(SegmentEvent(repairedSegment))
+    + Frame(Event("tool_call") with { Tool = contextActivity })
+    + Frame(Event("tool_result") with { Tool = contextActivity with { Status = "completed", Result = "上下文整理完成，继续原任务。" } })
+    + Frame(SegmentEvent(secondSegment)) + Frame(SegmentEvent(finalSegment)) + Frame(repairedTerminal));
+Check(repairCompactEvents[^1].AssistantSegments![0] == repairedSegment
+    && repairCompactEvents[^1].Content == finalSegment.Content
+    && repairCompactEvents.Count(value => value.Type == "tool_result") == 1,
+    "Compaction after an interrupted model step cut off the recovered final answer or lost earlier output");
+foreach (var invalidRepairActivity in new[] {
+    contextActivity with { Name = "filesystem.read", Arguments = JsonSerializer.SerializeToElement(new { path = "fixture.md" }) },
+    contextActivity with { Arguments = JsonSerializer.SerializeToElement(new { path = "unexpected" }) },
+    contextActivity with { Order = 0 }, contextActivity with { Round = 2 } })
+    await ExpectAsync<InvalidDataException>(() => Read(repairStart + Frame(Event("tool_call") with { Tool = invalidRepairActivity })),
+        "Repair display compatibility accepted a real tool or changed its round/order requirements");
+await ExpectAsync<InvalidDataException>(() => Read(repairStart + Frame(Event("approval_required") with
+    { Tool = contextActivity with { Status = "approval-required", ApprovalId = Guid.NewGuid() } })),
+    "Repair compaction improperly requested execution approval");
+await ExpectAsync<InvalidDataException>(() => Read(repairStart + Frame(Event("tool_call") with
+    { Tool = contextActivity, ConversationId = Guid.NewGuid() })),
+    "Repair compaction bypassed conversation identity");
+await ExpectAsync<InvalidDataException>(() => Read(repairStart + Frame(SegmentEvent(secondSegment))
+    + Frame(Event("tool_call") with { Tool = contextActivity with { Order = 3 } })),
+    "Repair compaction was rebound to an older interrupted step after another round began");
 using (var timelineArguments = JsonDocument.Parse("{\"url\":\"https://example.invalid\"}"))
 {
     var timelineTool = new ToolActivity("timeline-call", "mcp.fixture.navigate", timelineArguments.RootElement.Clone(), "running", "Navigate", Round: 1, Order: 1);
@@ -431,7 +507,7 @@ async Task Handle(HttpListenerContext context)
         Check(context.Request.Headers["Accept"] == "text/event-stream", "Missing SSE accept header");
         if (incoming.Message == "http-error")
         {
-            context.Response.StatusCode = 503;
+            context.Response.StatusCode = 401;
             context.Response.ContentType = "application/json";
             await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"error\":\"fixture unavailable\"}"));
             return;
@@ -512,6 +588,8 @@ finally
     await Task.WhenAll(handlers);
     listener.Stop();
 }
+await ModelStreamRecoveryChecks.RunAsync();
+await GatewayRecoveryStreamChecks.RunAsync();
 Console.WriteLine("PASS: fragmented Unicode/multiline SSE, v2 compatibility, v3 public-round/tool/final validation, cancellation, round persistence/crash recovery, real HTTP incremental and timeline delivery, error handling.");
 
 sealed class FragmentedStream(byte[] data) : MemoryStream(data)

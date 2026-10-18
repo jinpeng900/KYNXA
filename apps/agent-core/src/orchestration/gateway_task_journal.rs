@@ -132,7 +132,9 @@ impl TaskJournal {
     }
 
     async fn renew_while_owned(weak: Weak<Self>, lease_ms: u64, stop: Arc<Notify>) {
-        let delay = Duration::from_millis((lease_ms / 3).clamp(1_000, 5_000));
+        let normal_delay = Duration::from_millis((lease_ms / 3).clamp(1_000, 5_000));
+        let mut delay = normal_delay;
+        let mut retry_delay = Duration::from_millis(100);
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {},
@@ -149,8 +151,22 @@ impl TaskJournal {
             let renewed =
                 tokio::task::spawn_blocking(move || repository.renew_attempt(&token, lease_ms))
                     .await;
-            if !matches!(renewed, Ok(Ok(_))) {
-                break;
+            match renewed {
+                Ok(Ok(_)) => {
+                    delay = normal_delay;
+                    retry_delay = Duration::from_millis(100);
+                }
+                Ok(Err(error)) if error.code() == "TASK_STORAGE_FAILED" => {
+                    // Retry a transient writer failure while the repository still owns lease validation.
+                    // 临时存储失败继续尝试续租；仓储仍核验有效期与执行权，不续活过期或已取消尝试。
+                    delay = retry_delay;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
+                }
+                Err(_) => {
+                    delay = retry_delay;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
+                }
+                Ok(Err(_)) => break,
             }
         }
     }
@@ -540,6 +556,12 @@ impl TaskJournal {
         dispatched: bool,
         usage: &TaskUsage,
     ) -> Result<ModelRequestReservation> {
+        // The real I/O outcome precedes accounting, so a crash between the two retains verifiable settlement facts.
+        // 真实 I/O 结果先于计量结算落盘，使两步之间崩溃后仍有可核验的精确结果。
+        self.repository.append_events(&self.token, &[(
+            format!("model-receipt:{id}"), "task.model.receipt".into(),
+            json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage}),
+        )])?;
         Ok(self
             .repository
             .settle_model_request(&self.token, id, dispatched, usage)?)
@@ -557,6 +579,12 @@ impl TaskJournal {
         result_reference: Option<Value>,
         verification_reference: Option<Value>,
     ) -> Result<TaskOperation> {
+        let operation = self.repository.operation(self.task_id(), id)?
+            .ok_or_else(|| GatewayError::new("TASK_OPERATION_NOT_FOUND", "待结算操作不存在。", 404))?;
+        self.repository.append_events(&self.token, &[(
+            uuid::Uuid::new_v4().to_string(), "task.operation.receipt".into(),
+            json!({"intent":operation.intent,"state":state,"resultReference":result_reference,"verificationReference":verification_reference}),
+        )])?;
         Ok(self.repository.finish_operation(
             &self.token,
             id,
@@ -565,7 +593,211 @@ impl TaskJournal {
             verification_reference,
         )?)
     }
+
+    /// Settle only native I/O evidence already persisted before interruption; this never calls a model or repeats a tool.
+    /// 只结算中断前已落盘的原生 I/O 证据，不调用模型，也不重做工具操作。
+    pub async fn reconcile_receipts(&self) -> Result<Value> {
+        let task = self.load_current()?;
+        let events = self.repository.recovery_receipts(self.task_id())?;
+        let mut resolved_operations = 0u64;
+        let mut resolved_reservations = 0u64;
+        let mut pending = Vec::new();
+        for reservation in self.repository.model_reservations(self.task_id())?.into_iter()
+            .filter(|reservation| matches!(reservation.state, ModelReservationState::Unknown | ModelReservationState::Reserved))
+        {
+            let witness = events.iter().rev().find(|event| event.kind == "task.model.receipt"
+                && event.payload["reservationId"] == reservation.reservation_id
+                && event.payload["attemptId"] == reservation.attempt_id);
+            if let Some(witness) = witness {
+                if let (Some(dispatched), Ok(usage)) = (witness.payload["dispatched"].as_bool(),
+                    serde_json::from_value::<TaskUsage>(witness.payload["usage"].clone()))
+                {
+                    self.repository.reconcile_model_request(&self.token, &reservation.reservation_id, dispatched, &usage,
+                        json!({"kind":"task-event","taskId":self.task_id(),"eventId":witness.event_id,"sequence":witness.sequence}))?;
+                    resolved_reservations += 1;
+                    continue;
+                }
+            }
+            pending.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,
+                "code":"MODEL_DISPATCH_EVIDENCE_REQUIRED","message":"模型请求尚无可核验的派发与用量回执。需核对供应商请求记录；不会假定未发送、伪造用量或重新发送原请求。"}));
+        }
+        for operation in self.repository.operations(self.task_id())?.into_iter()
+            .filter(|operation| matches!(operation.state, OperationState::Unknown | OperationState::Dispatched))
+        {
+            match self.reconcile_operation(&task, &operation, &events).await {
+                Ok(true) => resolved_operations += 1,
+                // Missing observation receipts never become unknown mutations or block task recovery.
+                // 观察操作缺少回执不等于未知写入，也不能因此阻塞任务恢复。
+                _ if operation.intent.effect == OperationEffect::Observation => {},
+                Ok(false) => pending.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
+                    "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name,
+                    "code":"TOOL_RECEIPT_EVIDENCE_REQUIRED","message":"未找到与原始参数、派发时间及调用身份匹配的唯一真实工具回执。请核对原操作的实际结果；不会自动重做该操作。"})),
+                Err(error) => pending.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
+                    "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name,
+                    "code":error.code,"message":error.message})),
+            }
+        }
+        Ok(json!({"resolvedOperations":resolved_operations,"resolvedReservations":resolved_reservations,"pending":pending}))
+    }
+
+    async fn recovery_call(&self, task: &TaskRecord, operation: &TaskOperation) -> Result<Option<Value>> {
+        let mut candidates = Vec::new();
+        if task.parent_task_id.is_none() {
+            let root = self.root.clone();
+            let conversation = task.scope.conversation_id.clone();
+            let messages = tokio::task::spawn_blocking(move || crate::storage::gateway::read_model_messages(&root, &conversation))
+                .await.map_err(|_| GatewayError::new("TASK_RECOVERY_READ_FAILED", "原始调用记录读取失败。", 503))??;
+            for message in messages.iter().filter(|message| message["Role"] == "assistant"
+                && (message["RequestId"] == task.request_id || message["Id"] == task.request_id))
+            {
+                for round in message["ModelTranscript"]["rounds"].as_array().into_iter().flatten() {
+                    if operation.intent.input_reference.as_ref().is_some_and(|reference|
+                        reference["conversationId"] != task.scope.conversation_id || reference["requestId"] != task.request_id
+                        || reference["round"] != round["round"])
+                    { continue; }
+                    for call in round["calls"].as_array().into_iter().flatten() {
+                        let mut call = call.clone();
+                        call["round"] = round["round"].clone();
+                        candidates.push(call);
+                    }
+                }
+            }
+        } else if let Some(checkpoint) = self.latest_checkpoint()? {
+            let checkpoint: Value = serde_json::from_slice(&self.read_blob(&checkpoint.context_reference).await?)
+                .map_err(|_| GatewayError::new("INVALID_TASK_CHECKPOINT", "子任务原始调用检查点损坏。", 409))?;
+            candidates.extend(checkpoint["pending"]["calls"].as_array().into_iter().flatten().cloned());
+        }
+        let mut matched = Vec::new();
+        for call in candidates.into_iter().filter(|call| call["id"] == operation.intent.tool_call_id) {
+            // Steering copies the transcript into the new assistant; identical copies are one original call.
+            // 插话会把调用记录复制到新回复；完全相同的副本仍是同一次原始调用。
+            if !matched.contains(&call) { matched.push(call); }
+        }
+        if matched.len() != 1 { return Ok(None); }
+        let call = matched.pop().unwrap();
+        let input = if task.parent_task_id.is_none() { call["arguments"].to_string() }
+            else { json!({"name":call["name"],"arguments":call["arguments"]}).to_string() };
+        Ok((call["name"] == operation.intent.tool_name
+            && managed_files::digest(input.as_bytes()) == operation.intent.input_sha256).then_some(call))
+    }
+
+    async fn reconcile_operation(&self, task: &TaskRecord, operation: &TaskOperation, events: &[TaskEvent]) -> Result<bool> {
+        let Some(call) = self.recovery_call(task, operation).await? else { return Ok(false); };
+        let witness = events.iter().rev().find(|event| event.kind == "task.operation.receipt"
+            && event.payload["intent"] == serde_json::to_value(&operation.intent).unwrap_or(Value::Null)
+            && matches!(event.payload["state"].as_str(), Some("succeeded" | "failed")));
+        let mut result_reference = witness.map(|event| event.payload["resultReference"].clone())
+            .or_else(|| operation.result_reference.clone()).unwrap_or(Value::Null);
+        let mut child_receipt = Value::Null;
+        if result_reference["kind"] == "task-blob" {
+            child_receipt = serde_json::from_slice(&self.read_blob(&result_reference).await?)
+                .map_err(|_| GatewayError::new("INVALID_TASK_RECEIPT", "原始子任务回执损坏。", 409))?;
+            result_reference = child_receipt["resultRef"].clone();
+        }
+        let request = if task.parent_task_id.is_some() { task.task_id.clone() } else { task.request_id.clone() };
+        let root = self.root.clone();
+        let conversation = task.scope.conversation_id.clone();
+        let archive = if let Some(id) = result_reference["id"].as_str() {
+            let id = id.to_owned();
+            tokio::task::spawn_blocking(move || crate::storage::gateway::load_private_tool_result(&root, &conversation, &id))
+                .await.map_err(|_| GatewayError::new("TASK_RECOVERY_READ_FAILED", "原始工具回执读取失败。", 503))??
+        } else {
+            let Some(dispatch) = events.iter().find(|event| event.kind == "task.operation.dispatched"
+                && event.payload["operationId"] == operation.intent.operation_id) else { return Ok(false); };
+            let call_id = operation.intent.tool_call_id.clone();
+            let tool_name = operation.intent.tool_name.clone();
+            let request = request.clone();
+            let dispatched_at = dispatch.created_at_ms;
+            tokio::task::spawn_blocking(move || crate::storage::gateway::find_recovery_tool_result(
+                &root, &conversation, &request, &call_id, &tool_name, dispatched_at))
+                .await.map_err(|_| GatewayError::new("TASK_RECOVERY_READ_FAILED", "原始工具回执查找失败。", 503))??
+        };
+        if archive.is_null() { return Ok(false); }
+        if archive["requestId"] != request || archive["conversationId"] != task.scope.conversation_id
+            || archive["toolCallId"] != operation.intent.tool_call_id || archive["toolName"] != operation.intent.tool_name
+            || !result_reference.is_null() && (archive["sha256"] != result_reference["sha256"] || archive["bytes"] != result_reference["bytes"])
+        { return Err(GatewayError::new("TASK_RECOVERY_RECEIPT_MISMATCH", "原始回执与待核验调用不匹配。", 409)); }
+        let canonical = &archive["canonical"];
+        if canonical["status"] == "unknown" || canonical["outcome"] == "unknown"
+            || canonical["code"].as_str().is_some_and(|code| code.contains("UNKNOWN"))
+        { return Ok(false); }
+        let failed = canonical["isError"] == true || canonical.get("error").is_some_and(|error| !error.is_null())
+            || matches!(canonical["status"].as_str(), Some("error" | "failed"));
+        let outcome = if failed { OperationState::Failed } else { OperationState::Succeeded };
+        if witness.is_some_and(|event| event.payload["state"] != serde_json::to_value(&outcome).unwrap_or(Value::Null))
+        { return Err(GatewayError::new("TASK_RECOVERY_RECEIPT_MISMATCH", "回执结果与持久化结算证据不一致。", 409)); }
+        let archive_reference = json!({"id":archive["id"],"sha256":archive["sha256"],"bytes":archive["bytes"]});
+        let receipt = json!({"status":if failed {"error"} else {"completed"},"isError":failed,"content":canonical,"resultRef":archive_reference});
+        let owned_reference = if task.parent_task_id.is_some() {
+            if child_receipt.is_object() && child_receipt["content"] != *canonical { return Ok(false); }
+            self.save_blob("worker-log", &serde_json::to_vec(&receipt).map_err(|_| GatewayError::new("INVALID_TASK_RECEIPT", "核验回执无法编码。", 409))?).await?
+        } else {
+            self.publish_recovered_root_receipt(task, &call, &receipt).await?;
+            archive_reference.clone()
+        };
+        self.finish_operation(&operation.intent.operation_id, outcome, Some(owned_reference),
+            Some(json!({"kind":"verified-tool-receipt","taskId":self.task_id(),"inputSha256":operation.intent.input_sha256,"resultRef":archive_reference})))?;
+        Ok(true)
+    }
+
+    async fn publish_recovered_root_receipt(&self, task: &TaskRecord, call: &Value, receipt: &Value) -> Result<()> {
+        self.repository.check_receipt_attempt(&self.token)?;
+        let root = self.root.clone();
+        let task = task.clone();
+        let call = call.clone();
+        let receipt = receipt.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut messages = crate::storage::gateway::read_model_messages(&root, &task.scope.conversation_id)?;
+            let mut published = false;
+            for message in messages.iter_mut().rev().filter(|message| message["Role"] == "assistant"
+                && (message["RequestId"] == task.request_id || message["Id"] == task.request_id))
+            {
+                let mut patched = false;
+                for round in message["ModelTranscript"]["rounds"].as_array_mut().into_iter().flatten()
+                    .filter(|round| round["round"] == call["round"])
+                {
+                    let mut observations = round["observations"].as_array().cloned().unwrap_or_default();
+                    observations.retain(|observation| observation["id"] != call["id"]);
+                    observations.push(json!({"id":call["id"],"name":call["name"],"status":receipt["status"],"ref":receipt["resultRef"]}));
+                    round["observations"] = json!(observations);
+                    patched = true;
+                }
+                if !patched { continue; }
+                let mut activities = message["ToolActivities"].as_array().cloned().unwrap_or_default();
+                let index = activities.iter().position(|activity| activity["toolCallId"] == call["id"] && activity["round"] == call["round"]);
+                let mut activity = index.map(|index| activities[index].clone()).unwrap_or_else(|| json!({"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"round":call["round"],"order":activities.len()+1}));
+                activity["status"] = receipt["status"].clone();
+                activity["resultRef"] = receipt["resultRef"].clone();
+                activity["summary"] = json!("原始回执已核验");
+                if let Some(index) = index { activities[index] = activity; } else { activities.push(activity); }
+                message["ToolActivities"] = json!(activities);
+                message["RecoveredReceiptVersion"] = json!(task.event_sequence);
+                crate::storage::gateway::upsert_message(&root, &task.scope.conversation_id, message)?;
+                published = true;
+                break;
+            }
+            if !published {
+                return Err(crate::storage::ContractError::new("原始助手轮次不存在，核验回执尚未发布。", "TASK_RECOVERY_PROJECTION_MISSING", 409));
+            }
+            Ok::<(), crate::storage::ContractError>(())
+        }).await.map_err(|_| GatewayError::new("TASK_RECOVERY_SAVE_FAILED", "核验后的调用记录保存失败。", 503))??;
+        Ok(())
+    }
     pub async fn finish(&self, state: TaskState, reason: Option<&str>) -> Result<TaskRecord> {
+        if self.is_released() {
+            // The final state and release may already be committed when draining was interrupted.
+            // 最终状态与释放可能已提交、仅后台收尾被中断；重试不能再次使用已结束的尝试写入。
+            self.drain_background().await?;
+            let task = self.load_current()?;
+            if task.state == state || matches!(task.state, TaskState::Paused | TaskState::Cancelled) {
+                return Ok(task);
+            }
+            return Err(GatewayError::new(
+                "TASK_FINAL_STATE_CONFLICT",
+                "Task final state changed after release. / 任务释放后的最终状态与预期不一致。",
+                409,
+            ));
+        }
         self.flush().await?;
         let task = self.load_current()?;
         if task.state.is_terminal() || task.state == TaskState::Paused {

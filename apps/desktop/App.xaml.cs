@@ -30,6 +30,7 @@ public partial class App : Application
 
     private static void ConfigurePersistentStorage()
     {
+        if (Services.ApplicationPaths.TryConfigureInstallation()) return;
         // Isolated package previews explicitly opt into a portable application root.
         // 独立包预览显式指定便携应用根目录，不读取正式应用的用户指针。
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT"))) return;
@@ -74,6 +75,7 @@ public partial class App : Application
         // Start transport preparation independently of shell construction and catalog rendering.
         // 模型连接准备与主窗口构造、目录渲染并行，不能等界面线程空闲后才启动。
         _ = Task.Run(WarmUpModelGatewayAsync);
+        _ = Task.Run(Services.InstallerModelPreparation.RunAsync);
         Window = new MainWindow();
         Window.Activate();
     }

@@ -41,7 +41,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     // Each open resource owns preparation; selection only controls which completed view is presented.
     // 每份资源独立持有准备过程，标签选择只决定展示哪个视图，不取消其他资源。
     private sealed class DocumentWork(string key, Guid conversationId, string path, string? title, bool userSelected,
-        string? requestedVersion, bool changes, Guid? messageId, ChatAttachment? attachment)
+        string? requestedVersion, bool changes, Guid? messageId, ChatAttachment? attachment, Guid? mountId)
     {
         public string Key { get; } = key;
         public Guid ConversationId { get; } = conversationId;
@@ -52,6 +52,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         public bool IsChanges { get; } = changes;
         public Guid? MessageId { get; } = messageId;
         public ChatAttachment? Attachment { get; } = attachment;
+        public Guid? MountId { get; } = mountId;
         public CancellationTokenSource Cancellation { get; } = new();
         public TaskCompletionSource Completion { get; set; } = NewReady();
         public WorkspacePreviewTarget? Preview { get; set; }
@@ -117,6 +118,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     private bool _userSelected, _isWebsite, _isChanges, _showSource, _enabled = true, _disposed;
     private bool _websiteActivationRequested, _clearingWebsiteData;
     private Guid? _attachmentMessageId;
+    private Guid? _mountId;
     private ChatAttachment? _attachment;
     private long _generation;
 
@@ -174,13 +176,13 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         SetToolbarMode(false); ApplyAppearance();
     }
 
-    public void ShowResource(Guid conversationId, string path, string? title = null, bool userSelected = false, string? version = null)
+    public void ShowResource(Guid conversationId, string path, string? title = null, bool userSelected = false, string? version = null, Guid? mountId = null)
     {
         if (_disposed || conversationId == Guid.Empty || string.IsNullOrWhiteSpace(path)) return;
         string key = $"{conversationId:D}:file:{path}";
         if (_activeKey == key && !_isWebsite && _requestedVersion == version) return;
         SaveViewState(); RememberDocument();
-        _isChanges = false; _attachment = null; _attachmentMessageId = null;
+        _isChanges = false; _attachment = null; _attachmentMessageId = null; _mountId = mountId;
         _conversationId = conversationId; _path = path; _title = title; _userSelected = userSelected;
         _requestedVersion = version; _activeKey = key; _isWebsite = false; _showSource = false; _current = null;
         _contentAddress = null;
@@ -193,19 +195,19 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         string key = $"{conversationId:D}:attachment:{messageId:D}/{attachment.Id:D}";
         if (_activeKey == key && _requestedVersion == attachment.Sha256) return;
         SaveViewState(); RememberDocument();
-        _conversationId = conversationId; _attachmentMessageId = messageId; _attachment = attachment;
+        _conversationId = conversationId; _attachmentMessageId = messageId; _attachment = attachment; _mountId = null;
         _isChanges = false; _isWebsite = false; _path = attachment.Name; _title = attachment.Name;
         _requestedVersion = attachment.Sha256; _activeKey = key; _showSource = false; _current = null; _contentAddress = null;
         OpenCachedOrRead();
     }
 
-    public void ShowChanges(Guid conversationId)
+    public void ShowChanges(Guid conversationId, Guid? mountId = null)
     {
         if (_disposed || conversationId == Guid.Empty) return;
-        string key = $"{conversationId:D}:changes";
+        string key = $"{conversationId:D}:changes:{mountId:D}";
         if (_activeKey == key) return;
         SaveViewState(); RememberDocument();
-        _conversationId = conversationId; _activeKey = key; _isChanges = true; _isWebsite = false;
+        _conversationId = conversationId; _activeKey = key; _isChanges = true; _isWebsite = false; _mountId = mountId;
         _attachment = null; _attachmentMessageId = null; _path = "changes.diff"; _title = UiText.Get("工作区变更");
         _requestedVersion = null; _showSource = false; _current = null; _contentAddress = null;
         OpenCachedOrRead();
@@ -223,7 +225,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         }
         if (work is null)
         {
-            work = new(key, _conversationId, _path, _title, _userSelected, _requestedVersion, _isChanges, _attachmentMessageId, _attachment);
+            work = new(key, _conversationId, _path, _title, _userSelected, _requestedVersion, _isChanges, _attachmentMessageId, _attachment, _mountId);
             if (_documents.TryGetValue(key, out var cached)
                 && (_requestedVersion is null || cached.RequestedVersion == _requestedVersion || cached.Preview.Version == _requestedVersion))
             {
@@ -407,8 +409,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             {
                 work.Preview = work.Attachment is { } attachment && work.MessageId is { } messageId
                     ? await _attachments.ReadPreviewAsync(work.ConversationId, messageId, attachment, cancellationToken: token)
-                    : work.IsChanges ? await _api.ReadChangesAsync(work.ConversationId, token)
-                    : await _api.ReadAsync(work.ConversationId, work.Path, userSelected: work.UserSelected, cancellationToken: token);
+                    : work.IsChanges ? await _api.ReadChangesAsync(work.ConversationId, token, work.MountId)
+                    : await _api.ReadAsync(work.ConversationId, work.Path, userSelected: work.UserSelected, cancellationToken: token, mountId: work.MountId);
                 if (!IsLive(work)) return;
                 work.ContentAddress = ContentAddress(work, work.Preview.ContentUrl);
                 CacheDocument(work);
@@ -441,7 +443,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             _more.IsEnabled = false;
             var next = work.Attachment is { } attachment && work.MessageId is { } messageId
                 ? await _attachments.ReadPreviewAsync(work.ConversationId, messageId, attachment, offset, work.Cancellation.Token)
-                : await _api.ReadAsync(work.ConversationId, work.Path, offset, work.UserSelected, work.Cancellation.Token);
+                : await _api.ReadAsync(work.ConversationId, work.Path, offset, work.UserSelected, work.Cancellation.Token, work.MountId);
             if (!IsLive(work)) return;
             if (next.Version != previous.Version) { if (IsSelected(work)) BeginRead(); return; }
             if (IsSelected(work)) SaveViewState();

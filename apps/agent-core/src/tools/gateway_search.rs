@@ -237,6 +237,16 @@ fn cacheable(value: &Value) -> bool {
     serde_json::to_writer(LimitedSize(0), value).is_ok()
 }
 
+fn brave_source(source: &Value) -> Value {
+    let mut projected = json!({
+        "title": source["title"],
+        "url": source["url"],
+        "snippet": source["description"],
+    });
+    super::service_web_sources::preserve_temporal_metadata(source, &mut projected);
+    projected
+}
+
 async fn search_provider(
     input: &Value,
     server: &Value,
@@ -318,13 +328,7 @@ async fn search_provider(
             .into_iter()
             .flatten()
             .take(count as usize)
-            .map(|source| {
-                json!({
-                    "title": source["title"],
-                    "url": source["url"],
-                    "snippet": source["description"],
-                })
-            })
+            .map(brave_source)
             .collect::<Vec<_>>();
         return Ok(json!({
             "query": query,
@@ -353,6 +357,7 @@ async fn search_provider(
             },
             "language": ctx.config["retrieval"]["web"]["language"].as_str().unwrap_or("auto"),
             "query": query,
+            "reason": input["reason"],
             "conversationId": ctx.conversation_id,
             "limit": count,
         }),
@@ -445,6 +450,7 @@ async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, G
         "roots":ctx.authorized_roots,"workdir":ctx.workdir,
         "approved":ctx.approved,"provider":selected,"servers":servers.iter().map(SearchState::configuration_key).collect::<Vec<_>>(),
         "query":input["query"],"limit":input["limit"].as_u64().unwrap_or(10).clamp(1,20),
+        "objective":input["reason"].as_str().filter(|reason| !reason.trim().is_empty()).unwrap_or_else(||input["query"].as_str().unwrap_or("")),
         "language":ctx.config["retrieval"]["web"]["language"],"depth":ctx.config["retrieval"]["web"]["depth"],
     }));
     let request = ctx.runtime.web_search.shared(key);
@@ -673,6 +679,19 @@ pub(crate) async fn search(input: Value, ctx: &GatewayToolContext) -> Result<Val
 mod tests {
     use super::*;
 
+    #[test]
+    fn brave_projection_preserves_provider_dates_without_inventing_publication_time() {
+        let source = brave_source(&json!({
+            "url":"https://example.org/news", "title":"News", "description":"Original snippet",
+            "age":"2 days ago", "page_age":"2026-10-15T08:00:00Z", "fetchedAt":"2026-10-18T09:00:00Z"
+        }));
+        assert_eq!(source["age"], "2 days ago");
+        assert_eq!(source["page_age"], "2026-10-15T08:00:00Z");
+        assert_eq!(source["snippet"], "Original snippet");
+        assert!(source.get("publishedAt").is_none());
+        assert!(source.get("fetchedAt").is_none());
+    }
+
     struct SearchFixture {
         server: Value,
         calls: Arc<AtomicUsize>,
@@ -714,6 +733,12 @@ mod tests {
                         "name":if state.kind=="parallel"{"web_search"}else{"web_search_exa"},
                         "inputSchema":if state.kind=="parallel" {
                             json!({"type":"object","properties":{"objective":{"type":"string"},"search_queries":{"type":"array"},"session_id":{"type":"string"}},"required":["objective","search_queries"]})
+                        } else if state.kind == "exa-objective" {
+                            json!({"type":"object","properties":{
+                                "query":{"type":"string","minLength":1},
+                                "numResults":{"type":"number"},
+                                "objective":{"type":"string","minLength":1,"maxLength":4096}
+                            },"required":["query","objective"],"additionalProperties":false})
                         } else {json!({"type":"object","properties":{"query":{"type":"string"},"numResults":{"type":"integer"}},"required":["query"]})}
                     }]}),
                     "tools/call" => {
@@ -789,6 +814,25 @@ mod tests {
         super::super::gateway_mcp::shutdown(ctx).await;
         let root = ctx.workdir.parent().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exa_search_dispatches_required_objective_from_actual_mcp_schema() {
+        let exa = SearchFixture::start("exa-objective", 0, 200, 0).await;
+        let (mut ctx, _cancel) = super::super::gateway::test_context();
+        ctx.config["mcpServers"] = json!([exa.server]);
+        let result = search(json!({
+            "query":"original entity and date", "reason":"Verify the current official release"
+        }), &ctx).await.unwrap();
+        assert_eq!(result["providerId"], "official-exa-objective");
+        assert_eq!(exa.calls.load(Ordering::Acquire), 1);
+        let arguments = exa.arguments.lock().unwrap();
+        assert_eq!(arguments[0]["query"], "original entity and date");
+        assert_eq!(arguments[0]["objective"], "Verify the current official release");
+        assert!(arguments[0].get("reason").is_none());
+        assert!(arguments[0].get("type").is_none());
+        drop(arguments);
+        cleanup_search(&ctx).await;
     }
 
     #[tokio::test]

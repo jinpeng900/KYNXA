@@ -1265,6 +1265,43 @@ pub(crate) fn configuration_generation(ctx: &GatewayToolContext) -> u64 {
     ctx.runtime.mcp_lifecycle.generation.load(Ordering::Acquire)
 }
 
+/// Durable definitions are discovery candidates; live dispatch still reconnects and validates the actual schema.
+/// 持久定义只参与能力发现；真正执行仍重新连接并核对实际定义，发现不启动或等待服务。
+pub(crate) fn reusable_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
+    let generation = configuration_generation(ctx);
+    let mut candidates = ctx.runtime.schemas.try_read().map(|schemas| schemas.clone()).unwrap_or_default();
+    candidates.extend(super::gateway_tool_memory::cached_catalog(ctx));
+    let clients = ctx.runtime.mcp.try_lock().ok();
+    let mut reusable = Vec::new();
+    let mut names = HashSet::new();
+    for tool in candidates.iter().filter(|tool| super::gateway::executable_descriptor(tool)) {
+        let Some(name) = tool["name"].as_str().filter(|name| name.starts_with("mcp.")) else { continue; };
+        let Ok(server) = authorized_server(name, ctx) else { continue; };
+        let id = server["id"].as_str().unwrap_or("");
+        if server["trusted"] == false
+            || server["transport"] == "stdio" && server["trusted"] != true
+            || ctx.runtime.mcp_lifecycle.check(id, generation).is_err()
+        {
+            continue;
+        }
+        let fingerprint = super::gateway_tool_memory::server_fingerprint(&server);
+        let persisted = tool["configurationFingerprint"] == fingerprint;
+        let live = clients.as_ref().and_then(|clients| clients.get(id)).and_then(|client| client.try_lock().ok());
+        let reusable_definition = if let Some(client) = live {
+            client.configuration == server.to_string() && !*client.close.borrow()
+                && client.tools.iter().any(|actual| actual["name"] == tool["toolName"]
+                    && actual["inputSchema"] == tool["originalInputSchema"])
+        } else {
+            persisted
+        };
+        if reusable_definition && names.insert(name.to_owned()) {
+            reusable.push(tool.clone());
+        }
+    }
+    if configuration_generation(ctx) != generation { reusable.clear(); }
+    reusable
+}
+
 fn invocation_generation(ctx: &GatewayToolContext) -> u64 {
     ctx.config["mcpConfigurationGeneration"]
         .as_u64()
@@ -1781,10 +1818,42 @@ pub(crate) async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, Gate
     catalog_selected(ctx, servers(ctx)).await
 }
 
+/// Synchronize the actual handshake catalog before learning an invocation outcome.
+/// 在学习调用结果前，把本次真实握手目录同步到内存和持久发现视图；不在连接锁内执行磁盘操作。
+async fn remember_actual_catalog(
+    server: &Value,
+    actual: &[Value],
+    generation: u64,
+    ctx: &GatewayToolContext,
+) -> Result<Vec<Value>, GatewayError> {
+    let id = server["id"].as_str().unwrap_or("");
+    let fingerprint = super::gateway_tool_memory::server_fingerprint(server);
+    let discovered = actual.iter().map(|tool| json!({
+        "name":format!("mcp.{id}.{}",tool["name"].as_str().unwrap_or("")),
+        "description":tool["description"],"source":format!("mcp:{id}"),"serverId":id,"toolName":tool["name"],
+        "configurationFingerprint":fingerprint,"originalInputSchema":tool["inputSchema"],
+        "inputSchema":{"type":"object","properties":{"arguments":tool["inputSchema"],
+            "policy":{"type":"object","properties":{"reason":{"type":"string","minLength":1,"maxLength":2000}}}},
+            "required":["arguments","policy"],"additionalProperties":false}
+    })).collect::<Vec<_>>();
+    let enabled = discovered.iter().filter(|tool| !server["disabledTools"].as_array()
+        .is_some_and(|disabled| disabled.contains(&tool["toolName"]))).cloned().collect::<Vec<_>>();
+    {
+        let mut schemas = ctx.runtime.schemas.write().await;
+        super::gateway::check_configuration_generation(ctx)?;
+        ctx.runtime.mcp_lifecycle.check(id, generation)?;
+        schemas.retain(|tool| tool["serverId"] != id);
+        schemas.extend(enabled.iter().cloned());
+    }
+    super::gateway_tool_memory::remember_catalog(&format!("mcp:{id}"), &fingerprint, discovered, ctx).await;
+    Ok(enabled)
+}
+
 pub(crate) async fn catalog_selected(
     ctx: &GatewayToolContext,
     servers: Vec<Value>,
 ) -> Result<Vec<Value>, GatewayError> {
+    let generation = invocation_generation(ctx);
     refresh_budget(ctx).await;
     let concurrency = ctx.runtime.mcp_lifecycle.starts.limit();
     let mut all = Vec::new();
@@ -1801,17 +1870,8 @@ pub(crate) async fn catalog_selected(
                     .lock()
                     .await
                     .remove(server["id"].as_str().unwrap_or(""));
-                for tool in &client.lock().await.tools {
-                    if server["disabledTools"]
-                        .as_array()
-                        .is_some_and(|disabled| disabled.contains(&tool["name"]))
-                    {
-                        continue;
-                    }
-                    all.push(json!({"name":format!("mcp.{}.{}",server["id"].as_str().unwrap_or(""),tool["name"].as_str().unwrap_or("")),
-                    "description":tool["description"],"source":format!("mcp:{}",server["id"].as_str().unwrap_or("")),"serverId":server["id"],"toolName":tool["name"],
-                    "originalInputSchema":tool["inputSchema"],"inputSchema":{"type":"object","properties":{"arguments":tool["inputSchema"],"policy":{"type":"object","properties":{"reason":{"type":"string","minLength":1,"maxLength":2000}}}},"required":["arguments","policy"],"additionalProperties":false}}));
-                }
+                let actual = client.lock().await.tools.clone();
+                all.extend(remember_actual_catalog(&server, &actual, generation, ctx).await?);
             }
             Err(error) => {
                 ctx.runtime.mcp_errors.lock().await.insert(
@@ -1861,29 +1921,27 @@ pub(crate) async fn execute(
     let generation = invocation_generation(ctx);
     let client = connection_with_priority(&server, ctx, false, Some(generation)).await?;
     let lifecycle = &ctx.runtime.mcp_lifecycle;
+    let actual = {
+        let connected = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
+        connected.tools.clone()
+    };
+    remember_actual_catalog(&server, &actual, generation, ctx).await?;
     // Keep one exchange per connection, while independent services share a dynamically resized quota.
     // 单连接保持一次完整协议交换，不同服务共用动态可收缩的调用额度；排队取消尚未派发副作用。
-    let mut client = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
-    if !client.tools.iter().any(|entry| entry["name"] == tool) {
-        return Err(failure(
+    let descriptor = actual.iter().find(|entry| entry["name"] == tool).ok_or_else(|| failure(
             "MCP_TOOL_NOT_FOUND",
             "MCP 工具不存在于实际服务目录。",
             404,
-        ));
-    }
-    let descriptor = client
-        .tools
-        .iter()
-        .find(|entry| entry["name"] == tool)
-        .cloned()
-        .unwrap();
+        ))?;
     let arguments = args.get("arguments").cloned().unwrap_or(args);
+    super::gateway::validate_schema(&descriptor["inputSchema"], &arguments, name)?;
     let operation = descriptor["operation"].as_str().unwrap_or("tools/call");
     let params = if operation == "tools/call" {
         json!({"name":tool,"arguments":arguments})
     } else {
         arguments
     };
+    let mut client = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
     let _permit = tokio::select! {permit=lifecycle.calls.acquire_owned()=>permit,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
     let _buffers = admit_buffers(ctx, id, generation, false).await?;
     super::gateway::check_configuration_generation(ctx)?;
@@ -2131,6 +2189,85 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn durable_mcp_catalog_survives_runtime_restart_without_connecting() {
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let server = json!({"id":"durable","enabled":true,"trusted":true,"transport":"streamable-http",
+            "url":"http://127.0.0.1:9/mcp","disabledTools":[]});
+        ctx.config["mcpServers"] = json!([server.clone()]);
+        super::super::gateway_tool_memory::synchronize(&ctx).await;
+        let schema = json!({"type":"object","properties":{}});
+        remember_actual_catalog(&server, &[json!({"name":"echo","inputSchema":schema}),
+            json!({"name":"retired","inputSchema":schema})], configuration_generation(&ctx), &ctx).await.unwrap();
+        let updated = json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"]});
+        remember_actual_catalog(&server, &[json!({"name":"echo","inputSchema":updated})],
+            configuration_generation(&ctx), &ctx).await.unwrap();
+        let current = ctx.runtime.schemas.read().await;
+        assert_eq!(current.iter().filter(|tool| tool["serverId"] == "durable").count(), 1,
+            "Refreshing a server withdraws its old tool definitions.");
+        assert_eq!(current.iter().find(|tool| tool["name"] == "mcp.durable.echo").unwrap()["originalInputSchema"], updated);
+        drop(current);
+        ctx.runtime = Arc::new(super::super::gateway::ToolRuntime::default());
+        super::super::gateway_tool_memory::synchronize(&ctx).await;
+        assert!(ctx.runtime.mcp.try_lock().unwrap().is_empty());
+        assert_eq!(reusable_catalog(&ctx).len(), 1, "A persisted definition does not require a live MCP connection.");
+        ctx.config["mcpServers"][0]["disabledTools"] = json!(["echo"]);
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"][0] = server.clone();
+        ctx.config["mcpServers"][0]["url"] = json!("http://127.0.0.1:9/new-version");
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"][0] = server.clone();
+        ctx.config["mcpServers"][0]["trusted"] = json!(false);
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"] = json!([]);
+        assert!(reusable_catalog(&ctx).is_empty());
+        assert!(ctx.runtime.mcp.try_lock().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_catalog_reuses_only_current_enabled_connection_definitions() {
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let server = json!({"id":"cached","enabled":true,"transport":"streamable-http",
+            "url":"http://127.0.0.1:9/mcp","disabledTools":[]});
+        ctx.config["mcpServers"] = json!([server.clone()]);
+        let schema = json!({"type":"object","properties":{}});
+        let tool = json!({"name":"mcp.cached.echo","toolName":"echo","source":"mcp:cached","serverId":"cached",
+            "inputSchema":schema,"originalInputSchema":schema});
+        let (owner, close) = tokio::sync::watch::channel(false);
+        let client = Arc::new(Mutex::new(McpClient {
+            transport:Transport::Http { client:reqwest::Client::new(), url:url::Url::parse("http://127.0.0.1:9/mcp").unwrap(),
+                headers:HeaderMap::new(),session:None },
+            sequence:0,protocol:PROTOCOL.into(),tools:vec![json!({"name":"echo","inputSchema":schema})],
+            configuration:server.to_string(),close,resources:false,diagnostic_id:0,
+            last_used:tokio::time::Instant::now(),subscriptions:HashSet::new(),external_node:false,
+            background_task:false,memory_observation:Value::Null,
+        }));
+        ctx.runtime.mcp.lock().await.insert("cached".into(), client.clone());
+        ctx.runtime.schemas.write().await.push(tool);
+        assert_eq!(reusable_catalog(&ctx).len(), 1);
+        ctx.conversation_id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(reusable_catalog(&ctx).len(), 1, "Definitions can cross chats without starting another connection.");
+        ctx.config["mcpServers"][0]["disabledTools"] = json!(["echo"]);
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"][0] = server.clone();
+        ctx.config["mcpServers"][0]["url"] = json!("http://127.0.0.1:9/changed");
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"][0] = server.clone();
+        ctx.config["mcpServers"][0]["enabled"] = json!(false);
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.config["mcpServers"][0] = server;
+        { let _busy = client.lock().await; assert!(reusable_catalog(&ctx).is_empty(), "Busy connections do not delay selection."); }
+        ctx.runtime.mcp_lifecycle.stopped.lock().unwrap().insert("cached".into());
+        assert!(reusable_catalog(&ctx).is_empty());
+        ctx.runtime.mcp_lifecycle.stopped.lock().unwrap().clear();
+        owner.send_replace(true);
+        assert!(reusable_catalog(&ctx).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn browser_mcp_prewarm_leaves_processes_unstarted_until_requested() {

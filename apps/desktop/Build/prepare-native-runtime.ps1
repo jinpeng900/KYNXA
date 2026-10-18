@@ -6,7 +6,9 @@ param(
     [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
     [string]$ResourcePackRoot = $env:KYNXA_RESOURCE_PACK_ROOT,
     [switch]$AssetsOnly,
-    [switch]$Offline
+    [switch]$Offline,
+    [switch]$VerifyResources,
+    [switch]$Rebuild
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -20,6 +22,17 @@ if ($RuntimeIdentifier -ne 'win-x64' -or -not [Environment]::Is64BitProcess) {
 }
 [IO.Directory]::CreateDirectory($runtimeRoot) | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+$nativePreparedCache = if ($VerifyResources) { $null } else { Get-KynxaPreparedFileCache -Root $runtimeRoot -Component 'native-assets' }
+$nativePreparedRecords = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+
+function Remember-NativePreparedFile([string]$Path, $Specification) {
+    $prefix = $runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return }
+    $relative = $Path.Substring($prefix.Length).Replace('\', '/')
+    if ($relative.StartsWith('runtime/', [StringComparison]::Ordinal) -and $relative -notmatch '\.extract-') {
+        $nativePreparedRecords[$relative] = @{path=$relative;bytes=$Specification.bytes;sha256=$Specification.sha256}
+    }
+}
 
 function Get-NativeFileHash([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
@@ -42,13 +55,14 @@ function Get-NativeOutputPath([string]$RelativePath) {
     return $path
 }
 function Test-NativeFile([string]$Path, $Specification) {
-    if (-not [IO.File]::Exists($Path)) { return $false }
-    $file = Get-Item -LiteralPath $Path
-    return -not ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $file.Length -eq $Specification.bytes -and (Get-NativeFileHash $Path) -eq $Specification.sha256
+    $valid = Test-KynxaPreparedFile -Root $runtimeRoot -Path $Path -Bytes $Specification.bytes -Sha256 $Specification.sha256 -Cache $nativePreparedCache
+    if ($valid) { Remember-NativePreparedFile $Path $Specification }
+    return $valid
 }
 function Save-NativePinnedFile([string]$Url, [string]$Destination, $Specification) {
     if (Test-NativeFile $Destination $Specification) { return }
     Save-KynxaPinnedDownload -Url $Url -Destination $Destination -Sha256 $Specification.sha256 -ExpectedBytes $Specification.bytes -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+    Remember-NativePreparedFile $Destination $Specification
 }
 function Copy-NativeFile([string]$Source, [string]$RelativePath, [switch]$ConfigurationText) {
     $destination = Get-NativeOutputPath $RelativePath
@@ -59,6 +73,7 @@ function Copy-NativeFile([string]$Source, [string]$RelativePath, [switch]$Config
     if (-not $matches) {
         Copy-Item -LiteralPath $Source -Destination $destination -Force
     }
+    Remember-NativePreparedFile $destination @{bytes=([IO.FileInfo]::new($destination)).Length;sha256=(Get-NativeFileHash $destination)}
     [void]$bundle.Add($RelativePath.Replace('\', '/'))
 }
 
@@ -79,13 +94,19 @@ try {
 $bundle = [Collections.Generic.List[string]]::new()
 $nativeManifestPath = Join-Path $PSScriptRoot 'native-assets/native-runtime.json'
 $nativeManifest = Get-Content -LiteralPath $nativeManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$localGenerationManifestPath = Join-Path $PSScriptRoot 'native-assets/local-generation.json'
+$localGenerationManifest = Get-Content -LiteralPath $localGenerationManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($ResourcePackRoot) {
     # Import a versioned local pack first; partial downloads and compiler caches are not runtime resources.
     # 优先导入版本匹配的本地资源包；下载断点与编译器缓存不属于随包运行资源。
-    & (Join-Path $PSScriptRoot 'prepare-resource-pack.ps1') -Action Import -ArchivePath $ResourcePackRoot -DestinationRoot $runtimeRoot
+    & (Join-Path $PSScriptRoot 'prepare-resource-pack.ps1') -Action Import -ArchivePath $ResourcePackRoot -DestinationRoot $runtimeRoot -VerifyResources:$VerifyResources
 }
 Write-Host "[Runtime] Preparing $Profile resources (offline: $([bool]$Offline))."
-foreach ($package in $nativeManifest.packages) {
+# Optional generation engines extend a Full payload without invalidating existing retrieval resource packs.
+# 可选生成引擎扩展 Full 载荷，保留已有检索资源包的兼容与缓存复用。
+$nativePackages = @($nativeManifest.packages)
+if ($Profile -eq 'Full') { $nativePackages += @($localGenerationManifest.packages) }
+foreach ($package in $nativePackages) {
     if ($Profile -eq 'Core' -and -not @($package.files | Where-Object { $_.path -eq 'runtime/native/vec0.dll' }).Count) { continue }
     $missingAssets = @($package.files | Where-Object { -not (Test-NativeFile (Get-NativeOutputPath $_.path) $_) })
     if ($missingAssets.Count -eq 0) {
@@ -122,6 +143,7 @@ foreach ($package in $nativeManifest.packages) {
                     }
                     if (-not (Test-NativeFile $pending $asset)) { throw 'Extracted native DLL or license failed integrity verification.' }
                     Move-Item -LiteralPath $pending -Destination $destination -Force
+                    Remember-NativePreparedFile $destination $asset
                 }
                 finally { if ([IO.File]::Exists($pending)) { Remove-Item -LiteralPath $pending } }
             }
@@ -137,6 +159,14 @@ foreach ($asset in $nativeManifest.localFiles) {
 }
 Copy-NativeFile $nativeManifestPath 'runtime/native/licenses/native-runtime-manifest.json' -ConfigurationText
 Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/licenses/sources.json') 'runtime/native/licenses/upstream-license-sources.json'
+if ($Profile -eq 'Full') {
+    foreach ($asset in $localGenerationManifest.localFiles) {
+        $source = Join-Path (Split-Path -Parent $localGenerationManifestPath) $asset.source
+        if (-not (Test-NativeFile $source $asset)) { throw 'Local generation engine license failed integrity verification.' }
+        Copy-NativeFile $source $asset.path
+    }
+    Copy-NativeFile $localGenerationManifestPath 'runtime/local-llm/manifest.json' -ConfigurationText
+}
 
 # A private fixed Node serves optional MCP/skill execution only; npm runs on the build machine, never startup.
 # 私有固定 Node 仅供 MCP/技能执行；npm 只在构建机运行，软件启动不下载依赖。
@@ -144,7 +174,10 @@ if ($Profile -eq 'Full') {
     # Include the current source notice before MCP records its payload integrity, avoiding a second npm preparation.
     # 在 MCP 记录资源完整性前放入当前来源清单，避免随后修改载荷导致二次 npm 准备。
     Copy-NativeFile (Join-Path $PSScriptRoot 'native-assets/mcp-runtime.json') 'runtime/mcp/licenses/source-manifest.json' -ConfigurationText
-    & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+    & (Join-Path $PSScriptRoot 'prepare-mcp-runtime.ps1') -BundleRoot $runtimeRoot -RuntimeIdentifier $RuntimeIdentifier -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath -VerifyResources:$VerifyResources
+    foreach ($preparedFile in (Read-KynxaPreparedComponent -Root $runtimeRoot -Component 'mcp')['files']) {
+        $nativePreparedRecords[$preparedFile['path']] = $preparedFile
+    }
     foreach ($mcpFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'mcp-files.txt'), $utf8)) {
         if (-not $mcpFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'MCP bundle file escaped its selected root.' }
         [void]$bundle.Add($mcpFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
@@ -168,7 +201,10 @@ if ($Profile -eq 'Full') {
     # Office layout preview is optional for an older/offline pack; extracted text remains available.
     # 旧资源包或离线环境缺少 Office 转换器时保留正文预览，不阻断核心构建与聊天。
     try {
-        & (Join-Path $PSScriptRoot 'prepare-office-preview-runtime.ps1') -BundleRoot $runtimeRoot -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
+        & (Join-Path $PSScriptRoot 'prepare-office-preview-runtime.ps1') -BundleRoot $runtimeRoot -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath -VerifyResources:$VerifyResources
+        foreach ($preparedFile in (Read-KynxaPreparedComponent -Root $runtimeRoot -Component 'office')['files']) {
+            $nativePreparedRecords[$preparedFile['path']] = $preparedFile
+        }
         foreach ($officeFile in [IO.File]::ReadAllLines((Join-Path $runtimeRoot 'office-preview-files.txt'), $utf8)) {
             if (-not $officeFile.StartsWith($runtimeRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Office preview payload escaped its selected root.' }
             [void]$bundle.Add($officeFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
@@ -177,6 +213,10 @@ if ($Profile -eq 'Full') {
     catch { Write-Warning ('Office page preview is unavailable; document text preview remains enabled. ' + $_.Exception.Message) }
 }
 else { Write-Host '[Runtime] Core development profile skips optional models and MCP/browser preparation; release packages use Full.' }
+$assetInputHash = Get-KynxaNativeAssetsInputHash -Profile $Profile -RuntimeIdentifier $RuntimeIdentifier
+# Compiled executables are siblings of these resources; rebuilding them must not invalidate unchanged assets.
+# 编译产物与资源分开记录，重建程序不能使未变化的依赖资源失效。
+Save-KynxaPreparedComponent -Root $runtimeRoot -Component 'native-assets' -InputHash $assetInputHash -Files @($nativePreparedRecords.Values) -Scope @('runtime/native', 'runtime/mcp', 'runtime/embedding', 'runtime/rerank', 'runtime/office')
 
 function Get-NativeSourceHash([string]$Directory) {
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -260,7 +300,7 @@ function Build-NativeExecutable([string]$DirectoryName, [string]$ExecutableName,
     $destination = Get-NativeOutputPath ($BundleDirectory + '/' + $ExecutableName + '.exe')
     $buildRecord = Get-NativeOutputPath ($BundleDirectory + '/build.json')
     $existing = if ([IO.File]::Exists($buildRecord)) { Get-Content -LiteralPath $buildRecord -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
-    if (-not $existing -or $existing.sourceHash -ne $hash -or -not [IO.File]::Exists($destination) -or $existing.sha256 -ne (Get-NativeFileHash $destination)) {
+    if ($Rebuild -or -not $existing -or $existing.sourceHash -ne $hash -or -not [IO.File]::Exists($destination) -or $existing.sha256 -ne (Get-NativeFileHash $destination)) {
         $arguments = @('build', '--locked', '--manifest-path', (Join-Path $source 'Cargo.toml'), '--bin', $ExecutableName)
         $arguments += $script:cargoNetworkArguments
         if ($Configuration -eq 'Release') { $arguments += '--release' }
@@ -380,7 +420,9 @@ if (-not $AssetsOnly) {
         }
     }
 }
-$bundleFiles = @($bundle | Sort-Object -Unique | ForEach-Object { Get-NativeOutputPath $_ })
+# Component preparation already checked each path; publication must not repeat an ancestor walk for every MCP/Office file.
+# 各组件已检查过所属路径，发布清单时不再为每个 MCP/Office 文件重复遍历祖先目录。
+$bundleFiles = @($bundle | Sort-Object -Unique | ForEach-Object { [IO.Path]::GetFullPath([IO.Path]::Combine($runtimeRoot, $_)) })
 [IO.File]::WriteAllLines((Join-Path $runtimeRoot $(if ($AssetsOnly) {'asset-files.txt'} else {'bundle-files.txt'})), [string[]]$bundleFiles, $utf8)
 Write-Output "Native Windows payload ready ($Profile): $($bundleFiles.Count) verified files."
 }

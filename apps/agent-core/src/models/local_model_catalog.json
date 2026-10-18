@@ -1,0 +1,2173 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-10-16",
+  "models": [
+    {
+      "id": "q3-0p6b-q80",
+      "name": "Qwen3 0.6B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "0.6B",
+      "quantization": "Q8_0",
+      "downloadBytes": 639446688,
+      "recommendedRamGb": 4,
+      "recommendedVramGb": 3,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF",
+      "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+      "files": [
+        {
+          "name": "Qwen3-0.6B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+          "bytes": 639446688,
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-1p7b-q80",
+      "name": "Qwen3 1.7B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "1.7B",
+      "quantization": "Q8_0",
+      "downloadBytes": 1834426016,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+      "revision": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+      "files": [
+        {
+          "name": "Qwen3-1.7B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/90862c4b9d2787eaed51d12237eafdfe7c5f6077/Qwen3-1.7B-Q8_0.gguf",
+          "bytes": 1834426016,
+          "sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-4b-q4km",
+      "name": "Qwen3 4B Q4_K_M",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "4B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2497280256,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 5,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+      "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "files": [
+        {
+          "name": "Qwen3-4B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q4_K_M.gguf",
+          "bytes": 2497280256,
+          "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-4b-q80",
+      "name": "Qwen3 4B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "4B",
+      "quantization": "Q8_0",
+      "downloadBytes": 4280404704,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 6,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+      "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "files": [
+        {
+          "name": "Qwen3-4B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q8_0.gguf",
+          "bytes": 4280404704,
+          "sha256": "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-8b-q4km",
+      "name": "Qwen3 8B Q4_K_M",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "8B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 5027783488,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 7,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
+      "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "files": [
+        {
+          "name": "Qwen3-8B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf",
+          "bytes": 5027783488,
+          "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-8b-q80",
+      "name": "Qwen3 8B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "8B",
+      "quantization": "Q8_0",
+      "downloadBytes": 8709518112,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 11,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
+      "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "files": [
+        {
+          "name": "Qwen3-8B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q8_0.gguf",
+          "bytes": 8709518112,
+          "sha256": "408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-14b-q4km",
+      "name": "Qwen3 14B Q4_K_M",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "14B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 9001752960,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 11,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-14B-GGUF",
+      "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+      "files": [
+        {
+          "name": "Qwen3-14B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/530227a7d994db8eca5ab5ced2fb692b614357fd/Qwen3-14B-Q4_K_M.gguf",
+          "bytes": 9001752960,
+          "sha256": "500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-14b-q80",
+      "name": "Qwen3 14B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "14B",
+      "quantization": "Q8_0",
+      "downloadBytes": 15698533728,
+      "recommendedRamGb": 20,
+      "recommendedVramGb": 17,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-14B-GGUF",
+      "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+      "files": [
+        {
+          "name": "Qwen3-14B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/530227a7d994db8eca5ab5ced2fb692b614357fd/Qwen3-14B-Q8_0.gguf",
+          "bytes": 15698533728,
+          "sha256": "a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-a3b-q4km",
+      "name": "Qwen3 30B-A3B Q4_K_M",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "30B-A3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 18556685824,
+      "recommendedRamGb": 24,
+      "recommendedVramGb": 20,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF",
+      "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/e4d4bafdfb96a411a163846265362aceb0b9c63a/Qwen3-30B-A3B-Q4_K_M.gguf",
+          "bytes": 18556685824,
+          "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-a3b-q80",
+      "name": "Qwen3 30B-A3B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "30B-A3B",
+      "quantization": "Q8_0",
+      "downloadBytes": 32483931648,
+      "recommendedRamGb": 36,
+      "recommendedVramGb": 33,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF",
+      "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/e4d4bafdfb96a411a163846265362aceb0b9c63a/Qwen3-30B-A3B-Q8_0.gguf",
+          "bytes": 32483931648,
+          "sha256": "4ad960d180b16f56024f5b704697e5dd5b0837167c2e515ef0569abfc599743c",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-32b-q4km",
+      "name": "Qwen3 32B Q4_K_M",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "32B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 19762149024,
+      "recommendedRamGb": 24,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-32B-GGUF",
+      "revision": "938a7432affaec9157f883a87164e2646ae17555",
+      "files": [
+        {
+          "name": "Qwen3-32B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-32B-GGUF/resolve/938a7432affaec9157f883a87164e2646ae17555/Qwen3-32B-Q4_K_M.gguf",
+          "bytes": 19762149024,
+          "sha256": "efd971561896866f0e910cce52761ca77b1b138090c7f15fe284676d57d1f689",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-32b-q80",
+      "name": "Qwen3 32B Q8_0",
+      "family": "Qwen3",
+      "category": "general",
+      "parameters": "32B",
+      "quantization": "Q8_0",
+      "downloadBytes": 34817718912,
+      "recommendedRamGb": 36,
+      "recommendedVramGb": 35,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-32B-GGUF",
+      "revision": "938a7432affaec9157f883a87164e2646ae17555",
+      "files": [
+        {
+          "name": "Qwen3-32B-Q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-32B-GGUF/resolve/938a7432affaec9157f883a87164e2646ae17555/Qwen3-32B-Q8_0.gguf",
+          "bytes": 34817718912,
+          "sha256": "2c50eb8aad05047dbf24fa014eb621adf552e14176cabe0c5db4ef38c91e2169",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-0p5b-q4km",
+      "name": "Qwen2.5 0.5B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "0.5B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 491400032,
+      "recommendedRamGb": 4,
+      "recommendedVramGb": 3,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+      "files": [
+        {
+          "name": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+          "bytes": 491400032,
+          "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-0p5b-q80",
+      "name": "Qwen2.5 0.5B Q8_0",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "0.5B",
+      "quantization": "Q8_0",
+      "downloadBytes": 675710816,
+      "recommendedRamGb": 4,
+      "recommendedVramGb": 3,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+      "files": [
+        {
+          "name": "qwen2.5-0.5b-instruct-q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q8_0.gguf",
+          "bytes": 675710816,
+          "sha256": "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-1p5b-q4km",
+      "name": "Qwen2.5 1.5B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "1.5B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 1117320736,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+      "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+      "files": [
+        {
+          "name": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+          "bytes": 1117320736,
+          "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-1p5b-q80",
+      "name": "Qwen2.5 1.5B Q8_0",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "1.5B",
+      "quantization": "Q8_0",
+      "downloadBytes": 1894532128,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+      "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+      "files": [
+        {
+          "name": "qwen2.5-1.5b-instruct-q8_0.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q8_0.gguf",
+          "bytes": 1894532128,
+          "sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-3b-q4km",
+      "name": "Qwen2.5 3B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2104932768,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "other",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF",
+      "revision": "7dabda4d13d513e3e842b20f0d435c732f172cbe",
+      "files": [
+        {
+          "name": "qwen2.5-3b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/7dabda4d13d513e3e842b20f0d435c732f172cbe/qwen2.5-3b-instruct-q4_k_m.gguf",
+          "bytes": 2104932768,
+          "sha256": "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-7b-q4km",
+      "name": "Qwen2.5 7B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "7B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 4683073632,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 7,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF",
+      "revision": "bb5d59e06d9551d752d08b292a50eb208b07ab1f",
+      "files": [
+        {
+          "name": "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+          "bytes": 3993201344,
+          "sha256": "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+          "bytes": 689872288,
+          "sha256": "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-14b-q4km",
+      "name": "Qwen2.5 14B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "14B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 8988110496,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 11,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF",
+      "revision": "b466e1f8c07172155743e8e1307507d8a4f91fbd",
+      "files": [
+        {
+          "name": "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/b466e1f8c07172155743e8e1307507d8a4f91fbd/qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
+          "bytes": 3991999872,
+          "sha256": "a09ea5e7b1eafb1b30b241726c3cc3c905c96f14ad41e246ffa5f44e53904f68",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-14b-instruct-q4_k_m-00002-of-00003.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/b466e1f8c07172155743e8e1307507d8a4f91fbd/qwen2.5-14b-instruct-q4_k_m-00002-of-00003.gguf",
+          "bytes": 3989373504,
+          "sha256": "21b9457d079680d284e90ef69607c4b2d8ef64a09d4729cb7b5e1357bdba41ae",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-14b-instruct-q4_k_m-00003-of-00003.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/b466e1f8c07172155743e8e1307507d8a4f91fbd/qwen2.5-14b-instruct-q4_k_m-00003-of-00003.gguf",
+          "bytes": 1006737120,
+          "sha256": "c8d37006760a387a35216e070e6664d7da927f10be8eb870fef2e3d4833d9976",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-32b-q4km",
+      "name": "Qwen2.5 32B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "32B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 19851336384,
+      "recommendedRamGb": 24,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF",
+      "revision": "a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d",
+      "files": [
+        {
+          "name": "qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF/resolve/a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d/qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",
+          "bytes": 3961498272,
+          "sha256": "403434e5c845452c013661d586b97d5a53cf207462d180a07c301eafa9390d05",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-32b-instruct-q4_k_m-00002-of-00005.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF/resolve/a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d/qwen2.5-32b-instruct-q4_k_m-00002-of-00005.gguf",
+          "bytes": 3948996064,
+          "sha256": "7371e5c5d717a8c20f526dbfce5d3f201dc3f02140d1c836314cd0756e02e8d7",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-32b-instruct-q4_k_m-00003-of-00005.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF/resolve/a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d/qwen2.5-32b-instruct-q4_k_m-00003-of-00005.gguf",
+          "bytes": 3993478688,
+          "sha256": "f023ccc294c3bd3b2eac5b2dd40dea3aa4ca1d06c7460ead67c36386cd62e8fc",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-32b-instruct-q4_k_m-00004-of-00005.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF/resolve/a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d/qwen2.5-32b-instruct-q4_k_m-00004-of-00005.gguf",
+          "bytes": 3950347744,
+          "sha256": "05fe76d941454390cd7aa0de3b342f83a1d1226a959479af85bbfae7cd93e771",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-32b-instruct-q4_k_m-00005-of-00005.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-32B-Instruct-GGUF/resolve/a15e3cc10f8bbb2c0af6f8f1f34a32e3b060c09d/qwen2.5-32b-instruct-q4_k_m-00005-of-00005.gguf",
+          "bytes": 3997015616,
+          "sha256": "8c2e8ecc686129c37821bd9f3b3e251e6ae80deadd3d3348f7e3e84492a63c24",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25-72b-q4km",
+      "name": "Qwen2.5 72B Q4_K_M",
+      "family": "Qwen2.5",
+      "category": "general",
+      "parameters": "72B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 44010465472,
+      "recommendedRamGb": 44,
+      "recommendedVramGb": 43,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "other",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF",
+      "revision": "7ca3bc388f97b264c4283bc9bf1055e2abc38441",
+      "files": [
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00001-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00001-of-00012.gguf",
+          "bytes": 3986869120,
+          "sha256": "3531a90691b5f4edb4bdf488246d72ce0b5d40cacfab1489718a662cec386e43",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00002-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00002-of-00012.gguf",
+          "bytes": 3877864544,
+          "sha256": "a4cfb079461591e2c23ef73953aeba4b2520a9b93afaa841f31adf4e480647ab",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00003-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00003-of-00012.gguf",
+          "bytes": 3963622720,
+          "sha256": "c67c3641d018b7ca646e7c37b50152687d4b52ce6ab6bf170b006a756b52778d",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00004-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00004-of-00012.gguf",
+          "bytes": 3941463040,
+          "sha256": "92f5149d685ad5c5ab0fc30f5e0725d95a746d9a8e54d8397707b97dc435cd76",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00005-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00005-of-00012.gguf",
+          "bytes": 3963688384,
+          "sha256": "f5abb6ecd7f3ec4438a4e89ae704acd43405182a0477776d5e8aa35a71a5ecdc",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00006-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00006-of-00012.gguf",
+          "bytes": 3941463040,
+          "sha256": "ead67a4ac2648b0f7b71fea755f910ed208f3f8b881b55c208fc3fdca67359ee",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00007-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00007-of-00012.gguf",
+          "bytes": 3826849152,
+          "sha256": "f7b168a5fdf78695736a6441dc846b19251339750ea78bf993057b7bf499671d",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00008-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00008-of-00012.gguf",
+          "bytes": 3983901792,
+          "sha256": "4ab253ada85c14097597546ac13cfb1426cb175d1d8da520b7a2904d0c323e32",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00009-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00009-of-00012.gguf",
+          "bytes": 3921183968,
+          "sha256": "51661b80af773b488e807a03fc7ea31bb64630c50e3ee77fbb5e37bdd9ff9979",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00010-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00010-of-00012.gguf",
+          "bytes": 3995005888,
+          "sha256": "fcc180433606a81e2137ba1f088defe3ad51ec9353f5d129a7209614597e16f9",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00011-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00011-of-00012.gguf",
+          "bytes": 3586683584,
+          "sha256": "57b9437649f12062bdbed6c623c3f6adc6924a3d2f4e7aabdd3ab32883f5485d",
+          "role": "model"
+        },
+        {
+          "name": "qwen2.5-72b-instruct-q4_k_m-00012-of-00012.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF/resolve/7ca3bc388f97b264c4283bc9bf1055e2abc38441/qwen2.5-72b-instruct-q4_k_m-00012-of-00012.gguf",
+          "bytes": 1021870240,
+          "sha256": "60ae16428f9edb62b60e6c8657ba9344c6fae6ef44c497845dc6a6fd002e4d5b",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-0p5b-q4km",
+      "name": "Qwen2.5-Coder 0.5B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "0.5B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 491400064,
+      "recommendedRamGb": 4,
+      "recommendedVramGb": 3,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+      "revision": "ebb2015119c907b064c512bf053e945850b5875f",
+      "files": [
+        {
+          "name": "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/ebb2015119c907b064c512bf053e945850b5875f/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+          "bytes": 491400064,
+          "sha256": "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-1p5b-q4km",
+      "name": "Qwen2.5-Coder 1.5B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "1.5B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 1117320768,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+      "revision": "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
+      "files": [
+        {
+          "name": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+          "bytes": 1117320768,
+          "sha256": "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-3b-q4km",
+      "name": "Qwen2.5-Coder 3B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2104932800,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "other",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+      "revision": "f74adce6aa16316c625447af059dbebe4983757c",
+      "files": [
+        {
+          "name": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/f74adce6aa16316c625447af059dbebe4983757c/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+          "bytes": 2104932800,
+          "sha256": "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-7b-q4km",
+      "name": "Qwen2.5-Coder 7B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "7B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 4683073536,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 7,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "revision": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
+      "files": [
+        {
+          "name": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/13fb94bfda8c8cf22497dc57b78f391a9acb426a/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+          "bytes": 4683073536,
+          "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-14b-q4km",
+      "name": "Qwen2.5-Coder 14B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "14B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 8988110272,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 11,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+      "revision": "d0a692ef765eefbf2fabb130b3cb2e8917e3d225",
+      "files": [
+        {
+          "name": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/d0a692ef765eefbf2fabb130b3cb2e8917e3d225/qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+          "bytes": 8988110272,
+          "sha256": "c1e659736d89ac1065fb495330fb824d94001974a4bfa78e7270e43476a8d940",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25c-32b-q4km",
+      "name": "Qwen2.5-Coder 32B Q4_K_M",
+      "family": "Qwen2.5-Coder",
+      "category": "coding",
+      "parameters": "32B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 19851335872,
+      "recommendedRamGb": 24,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
+      "revision": "9d3053fce650fe1cdbdb75998c2a87add9d178ef",
+      "files": [
+        {
+          "name": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF/resolve/9d3053fce650fe1cdbdb75998c2a87add9d178ef/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+          "bytes": 19851335872,
+          "sha256": "4d64b316b5e6319d9613e0d97935d9ebd631fc7e334da400d00085eca749d085",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q25vl-3b-q4km",
+      "name": "Qwen2.5-VL 3B Q4_K_M",
+      "family": "Qwen2.5-VL",
+      "category": "vision",
+      "parameters": "3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2774658784,
+      "recommendedRamGb": 8,
+      "recommendedVramGb": 5,
+      "capabilities": [
+        "text",
+        "tools",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
+      "revision": "5037fcf163dd95d1e41d1974465f0898ed108ca2",
+      "files": [
+        {
+          "name": "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+          "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+          "bytes": 1929901056,
+          "sha256": "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
+          "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
+          "bytes": 844757728,
+          "sha256": "980c9b2f78c04e6cff93d277ada09e768394f112d75db3b4e9dea8a69f9fb904",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "q25vl-7b-q4km",
+      "name": "Qwen2.5-VL 7B Q4_K_M",
+      "family": "Qwen2.5-VL",
+      "category": "vision",
+      "parameters": "7B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 5536191744,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 8,
+      "capabilities": [
+        "text",
+        "tools",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+      "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6",
+      "files": [
+        {
+          "name": "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+          "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/508edd0afaa66bb9e9f40587acc2184f02daf1f6/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+          "bytes": 4683072032,
+          "sha256": "9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf",
+          "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/508edd0afaa66bb9e9f40587acc2184f02daf1f6/mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf",
+          "bytes": 853119712,
+          "sha256": "2ddb555391bae966e412deab9e07b58afa18bcc06930ba0f1c78a3695ab9e506",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "phi4-14b-q4k",
+      "name": "Phi-4 14B Q4_K",
+      "family": "Phi-4",
+      "category": "general",
+      "parameters": "14B",
+      "quantization": "Q4_K",
+      "downloadBytes": 9053114560,
+      "recommendedRamGb": 24,
+      "recommendedVramGb": 14,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "mit",
+      "sourceUrl": "https://huggingface.co/microsoft/phi-4-gguf",
+      "revision": "6edc2ef6664b739a8e11e62f2672ff6afe0c15ac",
+      "files": [
+        {
+          "name": "phi-4-Q4_K.gguf",
+          "url": "https://huggingface.co/microsoft/phi-4-gguf/resolve/6edc2ef6664b739a8e11e62f2672ff6afe0c15ac/phi-4-Q4_K.gguf",
+          "bytes": 9053114560,
+          "sha256": "5652b9be0ea4ae2842130d04fe31bc869fcb99a2b7106c53b4e754a343fd688f",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-4b-q4km-vision",
+      "name": "Gemma 3 4B Q4_K_M Vision",
+      "family": "Gemma 3",
+      "category": "vision",
+      "parameters": "4B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 3341008960,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 6,
+      "capabilities": [
+        "text",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
+      "files": [
+        {
+          "name": "gemma-3-4b-it-Q4_K_M.gguf",
+          "url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/d0976223747697cb51e056d85c532013931fe52e/gemma-3-4b-it-Q4_K_M.gguf",
+          "bytes": 2489757856,
+          "sha256": "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-model-f16.gguf",
+          "url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/d0976223747697cb51e056d85c532013931fe52e/mmproj-model-f16.gguf",
+          "bytes": 851251104,
+          "sha256": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-1b-q4km",
+      "name": "Gemma 3 1B Q4_K_M",
+      "family": "Gemma 3",
+      "category": "general",
+      "parameters": "1B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 806058240,
+      "recommendedRamGb": 4,
+      "recommendedVramGb": 2,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF",
+      "revision": "f9c28bcd85737ffc5aef028638d3341d49869c27",
+      "files": [
+        {
+          "name": "gemma-3-1b-it-Q4_K_M.gguf",
+          "url": "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/f9c28bcd85737ffc5aef028638d3341d49869c27/gemma-3-1b-it-Q4_K_M.gguf",
+          "bytes": 806058240,
+          "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-r1-7b-q4km",
+      "name": "DeepSeek R1 Distill Qwen 7B Q4_K_M",
+      "family": "DeepSeek R1",
+      "category": "reasoning",
+      "parameters": "7B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 4683073504,
+      "recommendedRamGb": 12,
+      "recommendedVramGb": 8,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "mit",
+      "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+      "revision": "361004151d4f4f6b446dc5e6d46fbf4422a80d5f",
+      "files": [
+        {
+          "name": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/361004151d4f4f6b446dc5e6d46fbf4422a80d5f/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+          "bytes": 4683073504,
+          "sha256": "731ece8d06dc7eda6f6572997feb9ee1258db0784827e642909d9b565641937b",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "llama32-3b-instruct-q4km",
+      "name": "Llama 3.2 3B Instruct Q4_K_M",
+      "family": "Llama 3.2",
+      "category": "general",
+      "parameters": "3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2019377696,
+      "recommendedRamGb": 6,
+      "recommendedVramGb": 4,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "llama3.2",
+      "sourceUrl": "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF",
+      "revision": "5ab33fa94d1d04e903623ae72c95d1696f09f9e8",
+      "files": [
+        {
+          "name": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/5ab33fa94d1d04e903623ae72c95d1696f09f9e8/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+          "bytes": 2019377696,
+          "sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-4b-i2507-q4km",
+      "name": "Qwen3 4B Instruct 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "4B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2497281120,
+      "recommendedRamGb": 16,
+      "recommendedVramGb": 6,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF",
+      "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+      "files": [
+        {
+          "name": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "bytes": 2497281120,
+          "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-4b-t2507-q4km",
+      "name": "Qwen3 4B Thinking 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "reasoning",
+      "parameters": "4B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 2497281152,
+      "recommendedRamGb": 16,
+      "recommendedVramGb": 6,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-4B-Thinking-2507-GGUF",
+      "revision": "f40adb104d4d44aee52f398b60597c5866a973a3",
+      "files": [
+        {
+          "name": "Qwen3-4B-Thinking-2507-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-4B-Thinking-2507-GGUF/resolve/f40adb104d4d44aee52f398b60597c5866a973a3/Qwen3-4B-Thinking-2507-Q4_K_M.gguf",
+          "bytes": 2497281152,
+          "sha256": "ddd52e18200baab281c5c46f70d544ce4d4fe4846eab1608f2fff48a64554212",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-i2507-q4km",
+      "name": "Qwen3 30B-A3B Instruct 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "30B-A3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 18556686752,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+      "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/eea7b2be5805a5f151f8847ede8e5f9a9284bf77/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
+          "bytes": 18556686752,
+          "sha256": "6c997b8af17debdfb01d890214400ccbab00db6acc0ba8da5de1cc906c4774d0",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-i2507-q80",
+      "name": "Qwen3 30B-A3B Instruct 2507 Q8_0",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "30B-A3B",
+      "quantization": "Q8_0",
+      "downloadBytes": 32483932576,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 34,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+      "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Instruct-2507-Q8_0.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/eea7b2be5805a5f151f8847ede8e5f9a9284bf77/Qwen3-30B-A3B-Instruct-2507-Q8_0.gguf",
+          "bytes": 32483932576,
+          "sha256": "47514861adaa7ae7f32818fe54595c7cbed2753417ba78df53054fcf7b9dcd88",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-t2507-q4km",
+      "name": "Qwen3 30B-A3B Thinking 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "reasoning",
+      "parameters": "30B-A3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 18556686752,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
+      "revision": "a9b37aaac12b2bd0098783a443429543dd76a14d",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF/resolve/a9b37aaac12b2bd0098783a443429543dd76a14d/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf",
+          "bytes": 18556686752,
+          "sha256": "b7380c816fca5a03b746be3d42773fb9a1c4b3bb4b3a1f3d9c2aeb10a720cba6",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-30b-t2507-q80",
+      "name": "Qwen3 30B-A3B Thinking 2507 Q8_0",
+      "family": "Qwen3 2507",
+      "category": "reasoning",
+      "parameters": "30B-A3B",
+      "quantization": "Q8_0",
+      "downloadBytes": 32483932576,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 34,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
+      "revision": "a9b37aaac12b2bd0098783a443429543dd76a14d",
+      "files": [
+        {
+          "name": "Qwen3-30B-A3B-Thinking-2507-Q8_0.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF/resolve/a9b37aaac12b2bd0098783a443429543dd76a14d/Qwen3-30B-A3B-Thinking-2507-Q8_0.gguf",
+          "bytes": 32483932576,
+          "sha256": "6326967c7bad05e9820421a593d48e315416b214cef56f1ca3c1f9d9a6e0f1c6",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3c-30b-q4km",
+      "name": "Qwen3-Coder 30B-A3B Instruct Q4_K_M",
+      "family": "Qwen3-Coder",
+      "category": "coding",
+      "parameters": "30B-A3B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 18556689568,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 21,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
+      "files": [
+        {
+          "name": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/b17cb02dd882d5b6ab62fc777ad2995f19668350/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+          "bytes": 18556689568,
+          "sha256": "fadc3e5f8d42bf7e894a785b05082e47daee4df26680389817e2093056f088ad",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3c-30b-q80",
+      "name": "Qwen3-Coder 30B-A3B Instruct Q8_0",
+      "family": "Qwen3-Coder",
+      "category": "coding",
+      "parameters": "30B-A3B",
+      "quantization": "Q8_0",
+      "downloadBytes": 32483935392,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 34,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350",
+      "files": [
+        {
+          "name": "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/b17cb02dd882d5b6ab62fc777ad2995f19668350/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf",
+          "bytes": 32483935392,
+          "sha256": "4ff1cff607804037bf6d2168249c570baa4e1621292b159c0e06591e0d7c3066",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-235b-i2507-q4km",
+      "name": "Qwen3 235B-A22B Instruct 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "235B-A22B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 142154074880,
+      "recommendedRamGb": 192,
+      "recommendedVramGb": 136,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+      "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
+      "files": [
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00001-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q4_K_M/Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00001-of-00003.gguf",
+          "bytes": 49944699040,
+          "sha256": "5dc744396d0b116215e0b97fbfb74b3e0945f24857ba976c258e4edd15eed558",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00002-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q4_K_M/Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00002-of-00003.gguf",
+          "bytes": 49930349824,
+          "sha256": "a9a9213792b6f56663cab014b958909c986cafd8ba59c1fef9257858dc879683",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00003-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q4_K_M/Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00003-of-00003.gguf",
+          "bytes": 42279026016,
+          "sha256": "b12aa8ceb940f0ccfd3aa00dbbe6d2faf3792185758a1cad08f8ffba2124d8bc",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-235b-i2507-q6k",
+      "name": "Qwen3 235B-A22B Instruct 2507 Q6_K",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "235B-A22B",
+      "quantization": "Q6_K",
+      "downloadBytes": 193015495552,
+      "recommendedRamGb": 256,
+      "recommendedVramGb": 184,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+      "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
+      "files": [
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q6_K-00001-of-00004.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q6_K/Qwen3-235B-A22B-Instruct-2507-Q6_K-00001-of-00004.gguf",
+          "bytes": 49384706752,
+          "sha256": "25d43df1415f8e848025983f96a7a4af292d5a204d33228ce766eec11326fce7",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q6_K-00002-of-00004.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q6_K/Qwen3-235B-A22B-Instruct-2507-Q6_K-00002-of-00004.gguf",
+          "bytes": 49737461088,
+          "sha256": "813e8e645701396d196bb177736bdb98be593601f559238305a421daca1ee3b5",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q6_K-00003-of-00004.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q6_K/Qwen3-235B-A22B-Instruct-2507-Q6_K-00003-of-00004.gguf",
+          "bytes": 49678952384,
+          "sha256": "251290db5699ec6c2efb0f93f0a7e2502cff8192d1041fce8654d8ce0d47a88d",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q6_K-00004-of-00004.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q6_K/Qwen3-235B-A22B-Instruct-2507-Q6_K-00004-of-00004.gguf",
+          "bytes": 44214375328,
+          "sha256": "1277560371a5e8a9925b028f7009f50c83b86b68d3664d27818613989a037045",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-235b-i2507-q80",
+      "name": "Qwen3 235B-A22B Instruct 2507 Q8_0",
+      "family": "Qwen3 2507",
+      "category": "general",
+      "parameters": "235B-A22B",
+      "quantization": "Q8_0",
+      "downloadBytes": 249940106336,
+      "recommendedRamGb": 256,
+      "recommendedVramGb": 238,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+      "revision": "437d6915c5c512869e4cf8b16b840bbe3fb172bc",
+      "files": [
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00001-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00001-of-00006.gguf",
+          "bytes": 49866313504,
+          "sha256": "137e844fcd7c0f828737edb4bb00431127bba8282618016950e7ce5a7488ec01",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00002-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00002-of-00006.gguf",
+          "bytes": 49395663968,
+          "sha256": "4fdc40d2f686535529ab826831014eb7348ce045b0f32e6137ed447dc967d586",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00003-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00003-of-00006.gguf",
+          "bytes": 49319886528,
+          "sha256": "8f3bd22078dd11f9b0150048503c7756782a81b7352bc99bb93660964f770949",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00004-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00004-of-00006.gguf",
+          "bytes": 49393550304,
+          "sha256": "c5679d93a325ef244b77be10c2e9189c25c5c339580feba1774258dc3da20f24",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00005-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00005-of-00006.gguf",
+          "bytes": 49395663968,
+          "sha256": "f94a3e9cc85760e2f0fe7fe2f40e8d3df65f0f7870fdcd24475510ffcbd39da4",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Instruct-2507-Q8_0-00006-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF/resolve/437d6915c5c512869e4cf8b16b840bbe3fb172bc/Q8_0/Qwen3-235B-A22B-Instruct-2507-Q8_0-00006-of-00006.gguf",
+          "bytes": 2569028064,
+          "sha256": "6a7f6dc543a29cf417907262f92b5260abc10e64259df8d46204f985a461dad8",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-235b-t2507-q4km",
+      "name": "Qwen3 235B-A22B Thinking 2507 Q4_K_M",
+      "family": "Qwen3 2507",
+      "category": "reasoning",
+      "parameters": "235B-A22B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 142154074880,
+      "recommendedRamGb": 192,
+      "recommendedVramGb": 136,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF",
+      "revision": "3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81",
+      "files": [
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00001-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q4_K_M/Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00001-of-00003.gguf",
+          "bytes": 49944699040,
+          "sha256": "e943eaf1d0c59e220915bfad7a5236303ec051de63aa1327f7a3378b44d1bae0",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00002-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q4_K_M/Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00002-of-00003.gguf",
+          "bytes": 49930349824,
+          "sha256": "cb6d0629fac10258ada1a4358d48c4b5473f564d8288ce11c2df9f8b6eb69ab6",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00003-of-00003.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q4_K_M/Qwen3-235B-A22B-Thinking-2507-Q4_K_M-00003-of-00003.gguf",
+          "bytes": 42279026016,
+          "sha256": "049d971ef0732eb5168a6f421b63ad2b742d82511f32f39735862e60edbb5f4b",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3-235b-t2507-q80",
+      "name": "Qwen3 235B-A22B Thinking 2507 Q8_0",
+      "family": "Qwen3 2507",
+      "category": "reasoning",
+      "parameters": "235B-A22B",
+      "quantization": "Q8_0",
+      "downloadBytes": 249940106368,
+      "recommendedRamGb": 256,
+      "recommendedVramGb": 238,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF",
+      "revision": "3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81",
+      "files": [
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00001-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00001-of-00006.gguf",
+          "bytes": 49866313536,
+          "sha256": "17a49655d1fe564c20d8776c04c54b0b612736adc065e6ea0be6fde5ead8017e",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00002-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00002-of-00006.gguf",
+          "bytes": 49395663968,
+          "sha256": "f8ff27e0630f0f2ab44be8efea6699c50a040023542c9b4a0c26ffc9a0bc8d51",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00003-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00003-of-00006.gguf",
+          "bytes": 49319886528,
+          "sha256": "1f2548b087c08d8896bc2be18faad7cab7fc85af74490d3c9b42d22af5c9b01c",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00004-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00004-of-00006.gguf",
+          "bytes": 49393550304,
+          "sha256": "caaaf3fa192401c3f99b5a376803b87fefccd7233d0e2c10b58e8454f799cd3f",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00005-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00005-of-00006.gguf",
+          "bytes": 49395663968,
+          "sha256": "2b6d735b76a6c5f8ae6b2c219c3f0d1c47af3eede844412472a9e5021df03865",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-235B-A22B-Thinking-2507-Q8_0-00006-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF/resolve/3eba50b4e3ea2c0df1c43e8c8f5ce2db22645e81/Q8_0/Qwen3-235B-A22B-Thinking-2507-Q8_0-00006-of-00006.gguf",
+          "bytes": 2569028064,
+          "sha256": "aee31064653da5917538cf54daf4dba889b20271ec20ab9b88f83eef0da1e3a2",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3c-480b-q4km",
+      "name": "Qwen3-Coder 480B-A35B Instruct Q4_K_M",
+      "family": "Qwen3-Coder",
+      "category": "coding",
+      "parameters": "480B-A35B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 290058826208,
+      "recommendedRamGb": 512,
+      "recommendedVramGb": 276,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+      "revision": "b86deeefd82f1a3374c5536dfc1dd0ce27ac092d",
+      "files": [
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00001-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00001-of-00006.gguf",
+          "bytes": 49973553312,
+          "sha256": "47c7a389014e2b355d8a7d22cb9a1e7a3e8d320d2c41478f9f22b57e385c24c2",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00002-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00002-of-00006.gguf",
+          "bytes": 49768927168,
+          "sha256": "2ed1501a15c36be304e7599f9e02e6bd16ecd67a1e59c35144a63d5f77cf924a",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00003-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00003-of-00006.gguf",
+          "bytes": 48862488352,
+          "sha256": "3cae399c40bdc4873e326a0c4f2e6d48f6fccb11eedddaf894436526984cebfe",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00004-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00004-of-00006.gguf",
+          "bytes": 48952192064,
+          "sha256": "966ff0058ea3f5e849cb2161b5ce90d9cbee478ccb8f142ac54f14c1fd58bb12",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00005-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00005-of-00006.gguf",
+          "bytes": 49721298176,
+          "sha256": "e896375ba530a21fd526ad0b8ede091501ea3361cd02d134aea32428c75614bf",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00006-of-00006.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00006-of-00006.gguf",
+          "bytes": 42780367136,
+          "sha256": "6722d06717918499719e125206b3b5d4ff886dd532acf5a1a0749d59803d3ddb",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "q3c-480b-q80",
+      "name": "Qwen3-Coder 480B-A35B Instruct Q8_0",
+      "family": "Qwen3-Coder",
+      "category": "coding",
+      "parameters": "480B-A35B",
+      "quantization": "Q8_0",
+      "downloadBytes": 510351879264,
+      "recommendedRamGb": 512,
+      "recommendedVramGb": 485,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+      "revision": "b86deeefd82f1a3374c5536dfc1dd0ce27ac092d",
+      "files": [
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00001-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00001-of-00011.gguf",
+          "bytes": 48512115136,
+          "sha256": "f417357851da57f6358267ecb9370c37c59e27f3dcba7afa9cfdc0e33466c306",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00002-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00002-of-00011.gguf",
+          "bytes": 49196345856,
+          "sha256": "915ebf2b83f4842f00023099e28fd712ab870079b769b664ff8d988b6d2a8dff",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00003-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00003-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "7ca01400d31199cdfbfb1dfdd4838885963cc2fbea52b4356b90c77332af5d7a",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00004-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00004-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "b260d51bb6aaa31869e07968c296f7b5c87ec62b5916dd21f83d8d6ec8c4f6aa",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00005-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00005-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "398166c9a35933cb70fdb4a5995c1d5775ea3d88f27e129fbf90bb1e3a76d7a3",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00006-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00006-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "591c01b1f9ce3d0975d612ed241bf6808fef54e142e83e41f6161f582a018f38",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00007-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00007-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "b748032c6cd3db9147f289dde327bd257e6cef8e4b2b17b658deddd89192c4ad",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00008-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00008-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "9c381c3b48128b6641b344970a5cf5ab02399f44c3bdcb446d73d2d985ca7d90",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00009-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00009-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "4912670adacda50c9141191c5d2ca0962d95964cb9484e80bb8a3c73369dddd0",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00010-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00010-of-00011.gguf",
+          "bytes": 49196345920,
+          "sha256": "4ce64bcd5fdd468dfb592c1ceddb29cdd0719de036820dd4cfd6439727c02a7d",
+          "role": "model"
+        },
+        {
+          "name": "Qwen3-Coder-480B-A35B-Instruct-Q8_0-00011-of-00011.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/resolve/b86deeefd82f1a3374c5536dfc1dd0ce27ac092d/Q8_0/Qwen3-Coder-480B-A35B-Instruct-Q8_0-00011-of-00011.gguf",
+          "bytes": 19072650912,
+          "sha256": "613e8446c919e9dbf9baef93614333b4b29568b82bba3d0a7acf7a92a8443ae0",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-12b-q4km-vision",
+      "name": "Gemma 3 12B IT Q4_K_M Vision",
+      "family": "Gemma 3",
+      "category": "vision",
+      "parameters": "12B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 8154978784,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 11,
+      "capabilities": [
+        "text",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
+      "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+      "files": [
+        {
+          "name": "gemma-3-12b-it-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/gemma-3-12b-it-Q4_K_M.gguf",
+          "bytes": 7300778336,
+          "sha256": "15b8fd9d8672cd4240c178c217ca781409291f34e353d2e913b29c7602ceb3ff",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/mmproj-F16.gguf",
+          "bytes": 854200448,
+          "sha256": "5de4ccfc379faa4cbf608dd365c028aa41f9774cdb1191d148d88910d1014f71",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-12b-q80-vision",
+      "name": "Gemma 3 12B IT Q8_0 Vision",
+      "family": "Gemma 3",
+      "category": "vision",
+      "parameters": "12B",
+      "quantization": "Q8_0",
+      "downloadBytes": 13364413024,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 16,
+      "capabilities": [
+        "text",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF",
+      "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+      "files": [
+        {
+          "name": "gemma-3-12b-it-Q8_0.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/gemma-3-12b-it-Q8_0.gguf",
+          "bytes": 12510212576,
+          "sha256": "a774cd9c6f289a6159f4a3f92a7ebca887e15073f92016d53c3593cb440a5982",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/resolve/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/mmproj-F16.gguf",
+          "bytes": 854200448,
+          "sha256": "5de4ccfc379faa4cbf608dd365c028aa41f9774cdb1191d148d88910d1014f71",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-27b-q4km-vision",
+      "name": "Gemma 3 27B IT Q4_K_M Vision",
+      "family": "Gemma 3",
+      "category": "vision",
+      "parameters": "27B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 17404428128,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 20,
+      "capabilities": [
+        "text",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF",
+      "revision": "7cd0121f2530b00e42c4df952d4cad4418c0b3c1",
+      "files": [
+        {
+          "name": "gemma-3-27b-it-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF/resolve/7cd0121f2530b00e42c4df952d4cad4418c0b3c1/gemma-3-27b-it-Q4_K_M.gguf",
+          "bytes": 16546688736,
+          "sha256": "f1b699659942c777bd3ec0bcb527d6ebf34ae14ca76e3af103d58d0c9cbdadee",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF/resolve/7cd0121f2530b00e42c4df952d4cad4418c0b3c1/mmproj-F16.gguf",
+          "bytes": 857739392,
+          "sha256": "debe2545831a2566dcec81992b9aa8fa8381c5a0a3588c0b59a41cc9c610cfe7",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "gemma3-27b-q80-vision",
+      "name": "Gemma 3 27B IT Q8_0 Vision",
+      "family": "Gemma 3",
+      "category": "vision",
+      "parameters": "27B",
+      "quantization": "Q8_0",
+      "downloadBytes": 29565711584,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 31,
+      "capabilities": [
+        "text",
+        "vision"
+      ],
+      "contextTokens": 8192,
+      "license": "gemma",
+      "sourceUrl": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF",
+      "revision": "7cd0121f2530b00e42c4df952d4cad4418c0b3c1",
+      "files": [
+        {
+          "name": "gemma-3-27b-it-Q8_0.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF/resolve/7cd0121f2530b00e42c4df952d4cad4418c0b3c1/gemma-3-27b-it-Q8_0.gguf",
+          "bytes": 28707972192,
+          "sha256": "4f8cb99283aa9ed7926280a372e0b04224d2be0b790a03b5ad85d25a18906499",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-3-27b-it-GGUF/resolve/7cd0121f2530b00e42c4df952d4cad4418c0b3c1/mmproj-F16.gguf",
+          "bytes": 857739392,
+          "sha256": "debe2545831a2566dcec81992b9aa8fa8381c5a0a3588c0b59a41cc9c610cfe7",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "llama33-70b-q4km",
+      "name": "Llama 3.3 70B Instruct Q4_K_M",
+      "family": "Llama 3.3",
+      "category": "general",
+      "parameters": "70B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 42520398816,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 43,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "llama3.3",
+      "sourceUrl": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF",
+      "revision": "b6c5c9f176f3279204034e1d16d393105e95cb88",
+      "files": [
+        {
+          "name": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/b6c5c9f176f3279204034e1d16d393105e95cb88/Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+          "bytes": 42520398816,
+          "sha256": "32df3baccb556f9840059b2528b2dee4d3d516b24afdfb9d0c56ff5f63e3a664",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "llama33-70b-q80",
+      "name": "Llama 3.3 70B Instruct Q8_0",
+      "family": "Llama 3.3",
+      "category": "general",
+      "parameters": "70B",
+      "quantization": "Q8_0",
+      "downloadBytes": 74975055008,
+      "recommendedRamGb": 96,
+      "recommendedVramGb": 73,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "llama3.3",
+      "sourceUrl": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF",
+      "revision": "b6c5c9f176f3279204034e1d16d393105e95cb88",
+      "files": [
+        {
+          "name": "Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf",
+          "url": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/b6c5c9f176f3279204034e1d16d393105e95cb88/Llama-3.3-70B-Instruct-Q8_0/Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf",
+          "bytes": 39927004064,
+          "sha256": "0c4ec5083aec2efa104269e8b63e2d9f3322e2fa50511184314093a7b4697878",
+          "role": "model"
+        },
+        {
+          "name": "Llama-3.3-70B-Instruct-Q8_0-00002-of-00002.gguf",
+          "url": "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/b6c5c9f176f3279204034e1d16d393105e95cb88/Llama-3.3-70B-Instruct-Q8_0/Llama-3.3-70B-Instruct-Q8_0-00002-of-00002.gguf",
+          "bytes": 35048050944,
+          "sha256": "e5c8858f5feafdc56200bbcbb3c4fadb07cb323c8ed13548dfb798dd1fb24255",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "dsr1-qwen32b-q4km",
+      "name": "DeepSeek R1 Distill Qwen 32B Q4_K_M",
+      "family": "DeepSeek R1",
+      "category": "reasoning",
+      "parameters": "32B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 19851335840,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 22,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "mit (base: apache-2.0)",
+      "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+      "revision": "1dc8cf9ffa5dd333057ea1b09ccf4772d8726dec",
+      "files": [
+        {
+          "name": "DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF/resolve/1dc8cf9ffa5dd333057ea1b09ccf4772d8726dec/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+          "bytes": 19851335840,
+          "sha256": "bed9b0f551f5b95bf9da5888a48f0f87c37ad6b72519c4cbd775f54ac0b9fc62",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "dsr1-llama70b-q4km",
+      "name": "DeepSeek R1 Distill Llama 70B Q4_K_M",
+      "family": "DeepSeek R1",
+      "category": "reasoning",
+      "parameters": "70B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 42520395936,
+      "recommendedRamGb": 64,
+      "recommendedVramGb": 43,
+      "capabilities": [
+        "text"
+      ],
+      "contextTokens": 8192,
+      "license": "mit (base: llama3.3)",
+      "sourceUrl": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-70B-GGUF",
+      "revision": "1842c5f7280f933ead58adf8afd078672c9f6cd0",
+      "files": [
+        {
+          "name": "DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-70B-GGUF/resolve/1842c5f7280f933ead58adf8afd078672c9f6cd0/DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf",
+          "bytes": 42520395936,
+          "sha256": "181a82a1d6d2fa24fe4db83a68eee030384986bdbdd4773ba76424e3a6eb9fd8",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "mistral31-24b-q4km-vision",
+      "name": "Mistral Small 3.1 24B Instruct Q4_K_M Vision",
+      "family": "Mistral Small 3.1",
+      "category": "vision",
+      "parameters": "24B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 15211964032,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 18,
+      "capabilities": [
+        "text",
+        "vision",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF",
+      "revision": "d63ca9416f5db4f54a78145fb9a025317a57289f",
+      "files": [
+        {
+          "name": "Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
+          "url": "https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF/resolve/d63ca9416f5db4f54a78145fb9a025317a57289f/Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
+          "bytes": 14333910592,
+          "sha256": "6d670773c3908584349d41a5048d1472226b593c881fd394e8ac196c802e81e2",
+          "role": "model"
+        },
+        {
+          "name": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF/resolve/d63ca9416f5db4f54a78145fb9a025317a57289f/mmproj-F16.gguf",
+          "bytes": 878053440,
+          "sha256": "402640c0a0e4e00cdb1e94349adf7c2289acab05fee2b20ee635725ef588f994",
+          "role": "mmproj"
+        }
+      ]
+    },
+    {
+      "id": "mistral-123b-q4km",
+      "name": "Mistral Large 123B Instruct 2407 Q4_K_M",
+      "family": "Mistral Large",
+      "category": "general",
+      "parameters": "123B",
+      "quantization": "Q4_K_M",
+      "downloadBytes": 73219626880,
+      "recommendedRamGb": 96,
+      "recommendedVramGb": 72,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "mistral-research-license-0.1",
+      "sourceUrl": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF",
+      "revision": "948e70cf583002c3b3218d88be46fcb960b7d661",
+      "files": [
+        {
+          "name": "Mistral-Large-Instruct-2407-Q4_K_M-00001-of-00002.gguf",
+          "url": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF/resolve/948e70cf583002c3b3218d88be46fcb960b7d661/Mistral-Large-Instruct-2407-Q4_K_M/Mistral-Large-Instruct-2407-Q4_K_M-00001-of-00002.gguf",
+          "bytes": 39965180608,
+          "sha256": "fbb8f14d7af39355c93ec98001cbde60f63ad2396331f240e6daaeef65c44d92",
+          "role": "model"
+        },
+        {
+          "name": "Mistral-Large-Instruct-2407-Q4_K_M-00002-of-00002.gguf",
+          "url": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF/resolve/948e70cf583002c3b3218d88be46fcb960b7d661/Mistral-Large-Instruct-2407-Q4_K_M/Mistral-Large-Instruct-2407-Q4_K_M-00002-of-00002.gguf",
+          "bytes": 33254446272,
+          "sha256": "0b4558293226dd4e24a1d757c8f174fb245f582c2d3d891062b6c852bb7c8de5",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "mistral-123b-q6k",
+      "name": "Mistral Large 123B Instruct 2407 Q6_K",
+      "family": "Mistral Large",
+      "category": "general",
+      "parameters": "123B",
+      "quantization": "Q6_K",
+      "downloadBytes": 100586280928,
+      "recommendedRamGb": 128,
+      "recommendedVramGb": 97,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "mistral-research-license-0.1",
+      "sourceUrl": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF",
+      "revision": "948e70cf583002c3b3218d88be46fcb960b7d661",
+      "files": [
+        {
+          "name": "Mistral-Large-Instruct-2407-Q6_K-00001-of-00003.gguf",
+          "url": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF/resolve/948e70cf583002c3b3218d88be46fcb960b7d661/Mistral-Large-Instruct-2407-Q6_K/Mistral-Large-Instruct-2407-Q6_K-00001-of-00003.gguf",
+          "bytes": 39784834752,
+          "sha256": "873196e5c5777d04daaf21aa439bf4441cff657aca46bba1d40b86402ab9de77",
+          "role": "model"
+        },
+        {
+          "name": "Mistral-Large-Instruct-2407-Q6_K-00002-of-00003.gguf",
+          "url": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF/resolve/948e70cf583002c3b3218d88be46fcb960b7d661/Mistral-Large-Instruct-2407-Q6_K/Mistral-Large-Instruct-2407-Q6_K-00002-of-00003.gguf",
+          "bytes": 39742851584,
+          "sha256": "f400ae3a0450b05ad071efa4c4d0c6b786fc3c12645c05192ff5b3941a2e0c56",
+          "role": "model"
+        },
+        {
+          "name": "Mistral-Large-Instruct-2407-Q6_K-00003-of-00003.gguf",
+          "url": "https://huggingface.co/bartowski/Mistral-Large-Instruct-2407-GGUF/resolve/948e70cf583002c3b3218d88be46fcb960b7d661/Mistral-Large-Instruct-2407-Q6_K/Mistral-Large-Instruct-2407-Q6_K-00003-of-00003.gguf",
+          "bytes": 21058594592,
+          "sha256": "c100ce52c15a62df99e203a6e2fc977c5f47a4921c316bcb06a6f52c884b8fba",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "gptoss-20b-mxfp4",
+      "name": "GPT-OSS 20B MXFP4",
+      "family": "GPT-OSS",
+      "category": "reasoning",
+      "parameters": "20B",
+      "quantization": "MXFP4",
+      "downloadBytes": 12109566624,
+      "recommendedRamGb": 32,
+      "recommendedVramGb": 15,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF",
+      "revision": "ef9b12f2ff56c69cf32153a02784e7a3c88bf524",
+      "files": [
+        {
+          "name": "gpt-oss-20b-MXFP4.gguf",
+          "url": "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/ef9b12f2ff56c69cf32153a02784e7a3c88bf524/gpt-oss-20b-MXFP4.gguf",
+          "bytes": 12109566624,
+          "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+          "role": "model"
+        }
+      ]
+    },
+    {
+      "id": "gptoss-120b-mxfp4",
+      "name": "GPT-OSS 120B MXFP4",
+      "family": "GPT-OSS",
+      "category": "reasoning",
+      "parameters": "120B",
+      "quantization": "MXFP4",
+      "downloadBytes": 63387346208,
+      "recommendedRamGb": 96,
+      "recommendedVramGb": 63,
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "contextTokens": 8192,
+      "license": "apache-2.0",
+      "sourceUrl": "https://huggingface.co/ggml-org/gpt-oss-120b-GGUF",
+      "revision": "238abdd290bb874b90a5da1b4549881b7d05c091",
+      "files": [
+        {
+          "name": "gpt-oss-120b-MXFP4.gguf",
+          "url": "https://huggingface.co/ggml-org/gpt-oss-120b-GGUF/resolve/238abdd290bb874b90a5da1b4549881b7d05c091/gpt-oss-120b-MXFP4.gguf",
+          "bytes": 63387346208,
+          "sha256": "582bd40f6886200101f4c4ed9f25f3fe80cc14c86e9e2b37746cd8904a0c622d",
+          "role": "model"
+        }
+      ]
+    }
+  ]
+}

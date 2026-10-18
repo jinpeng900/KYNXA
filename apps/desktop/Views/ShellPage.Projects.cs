@@ -191,14 +191,17 @@ public sealed partial class ShellPage
     private async Task OpenProjectFolderAsync(ProjectState project)
     {
         if (!IsAvailableProject(project)) return;
-        if (string.IsNullOrWhiteSpace(project.FolderPath))
+        string? path = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId)?.Path ?? project.FolderPath;
+        if (string.IsNullOrWhiteSpace(path))
         {
-            string? previous = project.FolderPath;
-            project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
-            try { await SaveProjectsAndRenderAsync(); }
-            catch { project.FolderPath = previous; throw; }
+            // A blank project keeps its managed runtime directory without turning it into an external mount.
+            // 空白项目保留运行时托管目录，不为打开资源管理器而新建并写入虚假的外部挂载。
+            var chat = project.Chats.FirstOrDefault(chat => chat.Id == ActiveChatId && chat.IsPersisted) ??
+                project.Chats.FirstOrDefault(chat => chat.IsPersisted);
+            if (chat is null) { ShowActionFeedback(UiText.Get("先在项目中发送消息，再打开工作文件夹。")); return; }
+            using var api = new WorkspaceFilesApiClient();
+            path = (await api.ListAsync(chat.Id, null, null, _historyLifetime.Token)).Path;
         }
-        string path = project.FolderPath ?? throw new DirectoryNotFoundException(UiText.Get("关联工作文件夹"));
         if (!Directory.Exists(path)) throw new DirectoryNotFoundException(string.Format(UiText.Get("关联文件夹不存在：{0}"), path));
         var folder = await StorageFolder.GetFolderFromPathAsync(path);
         if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) throw new IOException(UiText.Get("无法打开文件资源管理器。"));
@@ -213,9 +216,17 @@ public sealed partial class ShellPage
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null || !IsAvailableProject(project)) return;
         string? previous = project.FolderPath;
-        project.FolderPath = folder.Path;
+        var previousMounts = project.Mounts.ToList();
+        Guid? previousDefault = project.DefaultMountId;
+        var original = project.Mounts.FirstOrDefault(mount => mount.Id == project.DefaultMountId);
+        var replacement = original is null ? new ProjectMountState(Guid.NewGuid(), folder.DisplayName, folder.Path)
+            : original with { Name = folder.DisplayName, Path = folder.Path, BindingRevision = original.BindingRevision + 1 };
+        project.Mounts.RemoveAll(mount => mount.Id == replacement.Id);
+        project.Mounts.Add(replacement);
+        project.DefaultMountId = replacement.Id;
+        project.FolderPath = replacement.Path;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; throw; }
+        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
         ProjectNotice.Message = string.Format(UiText.Get("“{0}”已关联到 {1}，聊天和原文件夹内容保持不变。"), project.Name, folder.Path);
         ProjectNotice.IsOpen = true;
     }
@@ -224,9 +235,13 @@ public sealed partial class ShellPage
     {
         if (!IsAvailableProject(project) || string.IsNullOrWhiteSpace(project.FolderPath)) return;
         string? previous = project.FolderPath;
-        project.FolderPath = null;
+        var previousMounts = project.Mounts.ToList();
+        Guid? previousDefault = project.DefaultMountId;
+        project.Mounts.RemoveAll(mount => mount.Id == project.DefaultMountId);
+        project.DefaultMountId = project.Mounts.FirstOrDefault()?.Id;
+        project.FolderPath = project.Mounts.FirstOrDefault()?.Path;
         try { await SaveProjectsAndRenderAsync(); }
-        catch { project.FolderPath = previous; throw; }
+        catch { project.FolderPath = previous; project.Mounts = previousMounts; project.DefaultMountId = previousDefault; throw; }
         ProjectNotice.Message = string.Format(UiText.Get("“{0}”已取消文件夹关联，聊天和文件保持不变。"), project.Name);
         ProjectNotice.IsOpen = true;
     }
@@ -249,49 +264,40 @@ public sealed partial class ShellPage
     private async void MountedWorkspaceUnmountRequested(object? sender, MountedWorkspaceRequest request) =>
         await RunMountedWorkspaceActionAsync(request, UnmountProjectFolderAsync);
 
-    private async void NewBlankProject_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
+    private async void NewBlankProject_Click(object sender, RoutedEventArgs e)
     {
         if (await CreateBlankProjectAsync() is not { } project) return;
         ShowProjects();
         SelectWorkspaceProject(project);
         RevealProject(project);
-    });
-
-    private async Task<ProjectState?> CreateBlankProjectAsync()
-    {
-        string? name = await AskProjectNameAsync(UiText.Get("新建空白项目"), "", UiText.Get("创建"));
-        if (name is null) return null;
-        var project = new ProjectState { Name = name };
-        project.FolderPath = _projectStore.CreateManagedFolder(project.Id);
-        _projects.Insert(0, project);
-        await SaveProjectsAndRenderAsync();
-        return project;
     }
 
-    private async void UseExistingProjectFolder_Click(object sender, RoutedEventArgs e) => await RunProjectActionAsync(async () =>
+    private Task<ProjectState?> CreateBlankProjectAsync() => ShowProjectCreationAsync();
+
+    private async void UseExistingProjectFolder_Click(object sender, RoutedEventArgs e)
     {
         if (await PickProjectFolderAsync() is not { } project) return;
         ShowProjects();
         SelectWorkspaceProject(project);
         RevealProject(project);
-    });
+    }
 
     private async Task<ProjectState?> PickProjectFolderAsync()
     {
+        Guid? originalChat = ActiveChatId, originalProject = _selectedWorkProjectId;
+        bool originalMode = ViewModel.IsChatMode;
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
         picker.FileTypeFilter.Add("*");
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
         StorageFolder? folder = await picker.PickSingleFolderAsync();
-        if (folder is null) return null;
-        var project = _projects.FirstOrDefault(candidateProject => candidateProject.FolderPath is not null && string.Equals(
-            Path.TrimEndingDirectorySeparator(candidateProject.FolderPath), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
-        if (project is null)
-        {
-            project = new ProjectState { Name = folder.DisplayName, FolderPath = folder.Path };
-            _projects.Insert(0, project);
-        }
-        project.IsArchived = false;
-        await SaveProjectsAndRenderAsync();
+        if (folder is null || _projectViewClosed || _chatClosing || _savingOnClose || ActiveChatId != originalChat ||
+            _selectedWorkProjectId != originalProject || ViewModel.IsChatMode != originalMode) return null;
+        var project = _projects.FirstOrDefault(candidate => candidate.Mounts.Any(mount =>
+            string.Equals(Path.TrimEndingDirectorySeparator(mount.Path), Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase)) ||
+            candidate.FolderPath is not null && string.Equals(Path.TrimEndingDirectorySeparator(candidate.FolderPath),
+                Path.TrimEndingDirectorySeparator(folder.Path), StringComparison.OrdinalIgnoreCase));
+        if (project is null) return await ShowProjectCreationAsync(folder);
+        await RunProjectActionAsync(async () => { project.IsArchived = false; await SaveProjectsAndRenderAsync(); });
         return project;
     }
 

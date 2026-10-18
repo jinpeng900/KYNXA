@@ -28,6 +28,14 @@ terminals.ShowConversation(chatB, []);
 terminals.ShowConversation(chatA, [terminalOne, terminalTwo]);
 Check(terminals.SelectedTab?.Key == terminalTwo.Key && terminals.OpenItems.Count == 1,
     "Returning to the conversation retains its surviving terminal and closed-tab choice.");
+var sharedTerminal = ConversationWorkspaceSources.Terminal(chatA, "existing-session", "项目终端");
+var renamedSharedTerminal = ConversationWorkspaceSources.Terminal(chatA, "existing-session", "已执行查询");
+var sharedTerminals = new ConversationWorkTabState();
+sharedTerminals.ShowConversation(chatA, [sharedTerminal]);
+sharedTerminals.ShowConversation(chatA, [renamedSharedTerminal]);
+Check(sharedTerminals.Items.Count == 1 && sharedTerminals.SelectedTab?.Key == sharedTerminal.Key &&
+    sharedTerminals.SelectedTab.Version == "existing-session" && sharedTerminals.SelectedTab.Title == "已执行查询",
+    "The same gateway PTY retains one logical terminal tab across duplicate attachments and title updates.");
 
 Check(!state.ShowConversation(null, []) && !state.HasItems && !state.HasOpenTabs && state.SelectedTab is null,
     "No active chat exposes neither tabs nor another chat's selection.");
@@ -118,7 +126,7 @@ var absentClosures = new ConversationWorkTabState();
 var closedHistory = Enumerable.Range(0, ConversationWorkTabState.MaximumAbsentClosedTabs + 1)
     .Select(index => new ConversationWorkTab("screenshot/history/" + index, "screenshot", "Screenshot " + index)).ToArray();
 absentClosures.ShowConversation(chatA, closedHistory);
-foreach (var item in closedHistory) absentClosures.Close(item.Key);
+foreach (var item in closedHistory) { absentClosures.Reopen(item.Key); absentClosures.Close(item.Key); }
 absentClosures.ShowConversation(chatA, []);
 absentClosures.ShowConversation(chatA, [closedHistory[0], closedHistory[^1]]);
 Check(absentClosures.OpenItems.Count == 1 && absentClosures.SelectedTab?.Key == closedHistory[0].Key,
@@ -202,6 +210,11 @@ var redirectedWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
 Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, redirectedWebsite) is { Kind: "browser", Title: "Article" }
     && ConversationWorkspaceSources.FromTool(write with { Name = "computer.launch" }, redirectedWebsite) is { Kind: "browser" },
     "Actual workspace browser receipts open sidebar tabs even when the model initially selected an application tool.");
+var pendingWebsite = System.Text.Json.JsonSerializer.SerializeToElement(new
+    { presentation = "workspace", url = "about:blank", path = "https://example.org/loading", navigationCommitted = false });
+Check(ConversationWorkspaceSources.FromTool(write with { Name = "browser.open" }, pendingWebsite)
+    is { Kind: "browser", Target: "https://example.org/loading" },
+    "An already opened page still loading its first URL remains an activatable browser tab.");
 Check(ConversationWorkspaceSources.FromTool(write with { Name = "computer.launch" },
     System.Text.Json.JsonSerializer.SerializeToElement(new { url = "https://example.org/article" })) is null,
     "An ordinary external browser launch cannot create a sidebar tab without a workspace presentation receipt.");
@@ -216,6 +229,73 @@ Check(documentTabs.SelectedTab is null && documentTabs.OpenItems.Count == 2,
     "Routine refreshes keep the explicit home view and preserve closed file choices.");
 Check(documentTabs.Select(browser.Key) && documentTabs.SelectedTab?.Key == browser.Key,
     "Selecting a retained browser tab leaves the home view and resumes that resource.");
+
+var automaticTabs = new ConversationWorkTabState();
+var savedOutput = ConversationWorkspaceSources.FromTool(write, fileReceipt)!;
+automaticTabs.ShowConversation(chatA, [savedOutput]);
+Check(savedOutput.PresentationPriority == WorkspacePresentationPriority.CatalogOnly &&
+    automaticTabs.Items.Count == 1 && !automaticTabs.HasOpenTabs,
+    "Saving an ordinary output catalogs its real path without opening a preview.");
+automaticTabs.ShowConversation(chatA, [savedOutput with { Version = "next-version" }]);
+Check(automaticTabs.Items.Count == 1 && automaticTabs.Items[0].Version == "next-version" && !automaticTabs.HasOpenTabs,
+    "Repeated intermediate writes update the one catalog entry without creating or opening tabs.");
+automaticTabs.Reopen(savedOutput.Key);
+var presentationOutputs = Enumerable.Range(0, 12).Select(index => ConversationWorkspaceSources.FromTool(
+    write with { ToolCallId = "present-report-" + index, Name = "artifact.open" },
+    System.Text.Json.JsonSerializer.SerializeToElement(new { path = $@"D:\work\output-{index}.md", title = "报告 " + index }))!).ToArray();
+automaticTabs.ShowConversation(chatA, [savedOutput, .. presentationOutputs]);
+Check(automaticTabs.OpenItems.Count == presentationOutputs.Length + 1 && automaticTabs.OpenItems.Count > 4 &&
+    automaticTabs.SelectedTab?.Key == savedOutput.Key && automaticTabs.Items.Count == 13,
+    "More than four useful reports can be presented together without displacing the user's explicitly opened file.");
+var recentOutput = presentationOutputs[^1];
+Check(automaticTabs.Select(recentOutput.Key), "A visible background output can become a protected user selection.");
+var delivered = ConversationWorkspaceSources.PrioritizeDeliveredOutputs([savedOutput, .. presentationOutputs],
+    "最终成果：[成品](<D:/work/成品.docx>)；[报告](output-0.md)。");
+automaticTabs.ShowConversation(chatA, delivered);
+Check(automaticTabs.OpenItems.Any(tab => tab.Key == presentationOutputs[0].Key) &&
+    automaticTabs.SelectedTab?.Key == recentOutput.Key &&
+    delivered.Single(tab => tab.Key == presentationOutputs[0].Key).PresentationPriority == WorkspacePresentationPriority.Final,
+    "A delivered file outside the recent batch is promoted and shown without displacing the user's selected output.");
+Check(automaticTabs.OpenItems.Select(tab => tab.Key).ToHashSet().SetEquals(delivered.Select(tab => tab.Key)),
+    "Prioritizing final deliverables does not discard other relevant summaries or reports by count.");
+automaticTabs.Close(presentationOutputs[0].Key);
+automaticTabs.ShowConversation(chatA, delivered);
+Check(automaticTabs.OpenItems.All(tab => tab.Key != presentationOutputs[0].Key),
+    "A refreshed final-delivery link cannot undo an explicit close choice.");
+
+var actualFinal = ConversationWorkspaceSources.FromTool(write with { ToolCallId = "final-write" },
+    System.Text.Json.JsonSerializer.SerializeToElement(new { path = @"D:\work\deliveries\最终报告.md", sha256 = "final-version" }))!;
+var finalProjection = ConversationWorkspaceSources.PrioritizeDeliveredOutputs([actualFinal, savedOutput],
+    "结果：[最终报告](<D:/work/deliveries/最终报告.md>)；[不存在](missing.md)。");
+var deliveryState = new ConversationWorkTabState();
+deliveryState.ShowConversation(chatA, finalProjection);
+Check(finalProjection.Length == 2 && deliveryState.OpenItems.Count == 1 &&
+    deliveryState.SelectedTab?.Key == actualFinal.Key &&
+    finalProjection.Single(tab => tab.Key == savedOutput.Key).PresentationPriority == WorkspacePresentationPriority.CatalogOnly,
+    "Only a known delivered file is opened; links do not invent missing files or expose intermediate outputs.");
+var ambiguous = ConversationWorkspaceSources.PrioritizeDeliveredOutputs([
+    ConversationWorkspaceSources.File(@"D:\work\a\same.md") with { PresentationPriority = WorkspacePresentationPriority.CatalogOnly },
+    ConversationWorkspaceSources.File(@"D:\work\b\same.md") with { PresentationPriority = WorkspacePresentationPriority.CatalogOnly }],
+    "[报告](same.md)");
+Check(ambiguous.All(tab => tab.PresentationPriority == WorkspacePresentationPriority.CatalogOnly),
+    "An ambiguous relative delivery link cannot promote an arbitrary file with the same name.");
+
+var automaticReader = new ConversationWorkTabState();
+automaticReader.ShowConversation(chatB, [presentationOutputs[0]]);
+automaticReader.ShowConversation(chatB, presentationOutputs);
+Check(automaticReader.OpenItems.Count == presentationOutputs.Length &&
+    automaticReader.SelectedTab?.Key == presentationOutputs[0].Key &&
+    automaticReader.OpenItems.Any(tab => tab.Key == presentationOutputs[^1].Key),
+    "Later batches preserve the active reader and every requested output without a fixed first-N cutoff.");
+var requestedPages = presentationOutputs.Select(tab => tab with { PresentationPriority = WorkspacePresentationPriority.Requested }).ToArray();
+var mixedPresentations = new ConversationWorkTabState();
+mixedPresentations.ShowConversation(chatB, [requestedPages[0]]);
+mixedPresentations.ShowConversation(chatB, [.. requestedPages, finalProjection[0]]);
+Check(mixedPresentations.OpenItems.Count == requestedPages.Length + 1 &&
+    mixedPresentations.OpenItems.Any(tab => tab.Key == actualFinal.Key) &&
+    mixedPresentations.OpenItems.Any(tab => tab.Key == requestedPages[^1].Key) &&
+    mixedPresentations.SelectedTab?.Key == requestedPages[0].Key,
+    "Final delivery and all requested presentations coexist without stealing the active reader.");
 
 Check(WorkspaceNavigationAddress.TryResolve("  https://example.org/article?q=physics  ", out var directAddress)
     && directAddress.AbsoluteUri == "https://example.org/article?q=physics"

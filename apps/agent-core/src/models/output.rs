@@ -62,7 +62,15 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     }
     // Output reservation and provider input/output caps are separate contracts.
     // 输出预留与供应商输入、输出硬上限是不同合同，均必须落实到最终额度。
-    let share = if window <= 32768.0 { 0.5 } else { 0.3 };
+    // Tool turns reserve room for the next schema and receipts; prose turns retain their normal output share.
+    // 工具阶段为下一步定义及回执留出空间；正文阶段仍使用原有输出比例，不增加固定字数上限。
+    let share = if args["phase"] == "tool" {
+        0.2
+    } else if window <= 32768.0 {
+        0.5
+    } else {
+        0.3
+    };
     let context_output = (usable * share).floor().min(usable - required);
     let output = requested.min(provider_output).min(context_output);
     if output < 256.0 {

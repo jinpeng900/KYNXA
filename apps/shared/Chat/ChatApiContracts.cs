@@ -34,7 +34,9 @@ public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid Requ
     int? ToolStreamProtocol = null, long DurationMs = 0, HostTerminalOutput? Terminal = null, JsonElement? TaskCompletion = null,
     string? ServerId = null, bool? Ready = null, string? Code = null, string? Message = null, Guid? TaskId = null,
     Guid? RootRequestTaskId = null, string? Phase = null, int? Round = null, Guid? ApprovalId = null,
-    Guid? ReplyMessageId = null, Guid? UserMessageId = null, Guid? SupersededReplyMessageId = null);
+    Guid? ReplyMessageId = null, Guid? UserMessageId = null, Guid? SupersededReplyMessageId = null,
+    string? SessionId = null, int? Cols = null, int? Rows = null, string? Title = null, string? Workdir = null,
+    Guid? MountId = null, string? MountName = null);
 
 public static class ChatDurationRules
 {

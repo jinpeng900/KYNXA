@@ -1,9 +1,37 @@
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::chunking;
+
+/// A bounded map describes only the selected current code evidence, never an exhaustive language-service graph.
+/// 有界代码地图只描述已选中的当前代码证据，不扫描仓库，也不冒充语言服务的完整调用关系。
+pub fn navigation(items: &[Value], maximum_tokens: u64) -> Value {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut omitted = 0usize;
+    for item in items {
+        let structure = &item["structure"];
+        let Some(symbol) = structure["qualifiedName"].as_str().or_else(|| structure["symbolName"].as_str())
+            .filter(|symbol| !symbol.is_empty()) else { continue; };
+        if structure["domain"] != "code" || structure["parseStatus"] == "unavailable" { continue; }
+        let path = item["locator"]["relativePath"].as_str().unwrap_or("");
+        let key = (item["locator"].to_string(), symbol.to_owned(), structure["unitStartOffset"].to_string());
+        if !seen.insert(key) { continue; }
+        let mut entry = json!({"sourceRef":item["sourceRef"],"path":path,"mountId":item["locator"]["mountId"],
+            "symbol":symbol,"kind":structure["kind"],"startLine":item["startLine"],"endLine":item["endLine"]});
+        if let Some(signature) = structure["signature"].as_str().filter(|signature| !signature.is_empty()) {
+            entry["signature"] = json!(signature.chars().take(321).collect::<String>());
+        }
+        entries.push(entry);
+        if crate::text_metrics::estimate_tokens(&json!(&entries).to_string()) > maximum_tokens {
+            entries.pop();
+            omitted += 1;
+        }
+    }
+    json!({"entries":entries,"omitted":omitted,"coverage":"selected-current-evidence", "resolvedCallGraph":false})
+}
 
 /// A sweep assigns each AST span to its deepest declaration without treating syntactic ownership as resolved references.
 /// 扫描线把 AST 区间分配给最深声明；语法归属不等于已经解析的引用或真实调用关系。
@@ -122,4 +150,30 @@ pub fn select(args: &Value) -> Result<Value, String> {
     }
     finish(&mut fragment);
     Ok(json!({"units":units,"limited":limited.get()}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_navigation_keeps_mounts_distinct_and_reuses_split_declarations() {
+        let first = json!({"sourceRef":"e1","locator":{"relativePath":"src/main.rs","mountId":"frontend"},
+            "startLine":2,"endLine":8,"structure":{"domain":"code","kind":"function","qualifiedName":"App.start",
+                "unitStartOffset":12,"signature":"fn start(value: usize) -> bool"}});
+        let mut repeated = first.clone();
+        repeated["sourceRef"] = json!("e2");
+        let mut other = first.clone();
+        other["sourceRef"] = json!("e3");
+        other["locator"]["mountId"] = json!("backend");
+        let view = navigation(&[first.clone(), repeated, other], 1024);
+        assert_eq!(view["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(view["entries"][0]["sourceRef"], "e1");
+        assert_eq!(view["entries"][1]["mountId"], "backend");
+        assert_eq!(view["resolvedCallGraph"], false);
+        let tiny = navigation(&[first], 0);
+        assert!(tiny["entries"].as_array().unwrap().is_empty());
+        assert_eq!(tiny["omitted"], 1);
+        assert!(navigation(&[json!({"structure":{"domain":"knowledge"}})], 1024)["entries"].as_array().unwrap().is_empty());
+    }
 }

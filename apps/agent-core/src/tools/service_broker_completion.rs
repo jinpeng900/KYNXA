@@ -155,6 +155,9 @@ fn failure_plan(arguments: &Value) -> ServiceResult<Value> {
             "terminal.host.run",
             "terminal.host.start",
             "terminal.host.stop",
+            "terminal.workspace.open",
+            "terminal.workspace.write",
+            "terminal.workspace.close",
             "skill.run",
         ]
         .contains(&name)

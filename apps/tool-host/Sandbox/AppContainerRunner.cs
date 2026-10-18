@@ -13,11 +13,14 @@ internal static class AppContainerRunner
     private const int MaximumOutputBytes = 256 * 1024;
     private const int MaximumProcessCount = 16;
     private const long MaximumProcessMemoryBytes = 256L * 1024 * 1024;
-    private const long MaximumJobMemoryBytes = 768L * 1024 * 1024;
+    internal const long MaximumJobMemoryBytes = 768L * 1024 * 1024;
+    private const long MinimumJobMemoryBytes = 64L * 1024 * 1024;
+    private const uint JobCpuRateControlFlags = 0x1 | 0x4;
 
     internal static async Task<object> RunAsync(SandboxRequest request, CancellationToken cancellationToken)
     {
         Validate(request);
+        var resources = ResolveResourceLimits(request.ResourceLimits, Environment.ProcessorCount);
         string workspaceRoot = Path.GetFullPath(request.WorkspaceRoot!);
         string profileName = "kynxa.run." + Guid.NewGuid().ToString("N");
         string runDirectory = Path.Combine(Path.GetTempPath(), "kynxa-tool-sandbox", Guid.NewGuid().ToString("N"));
@@ -61,12 +64,26 @@ internal static class AppContainerRunner
                     LimitFlags = 0x2000 | 0x8 | 0x100 | 0x200 | 0x400,
                     ActiveProcessLimit = MaximumProcessCount
                 },
-                ProcessMemoryLimit = (UIntPtr)MaximumProcessMemoryBytes,
-                JobMemoryLimit = (UIntPtr)MaximumJobMemoryBytes
+                ProcessMemoryLimit = (UIntPtr)resources.ProcessMemoryBytes,
+                JobMemoryLimit = (UIntPtr)resources.JobMemoryBytes
             };
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "SetInformationJobObject");
+            var cpuLimits = new JobCpuRateControlInformation { ControlFlags = JobCpuRateControlFlags, CpuRate = resources.CpuRate };
+            Check(SetJobCpuRateControlInformation(jobHandle, 15, ref cpuLimits, (uint)Marshal.SizeOf<JobCpuRateControlInformation>()), "Set sandbox CPU hard cap");
+            // Query the actual Job before creating/resuming a child; requested limits alone are not evidence.
+            // 创建或恢复子进程前回读真实 Job；请求中的额度本身不代表限制已经生效。
+            Check(QueryJobExtendedLimitInformation(jobHandle, 9, out var appliedLimits,
+                (uint)Marshal.SizeOf<JobExtendedLimitInformation>(), IntPtr.Zero), "Query sandbox memory limits");
+            Check(QueryJobCpuRateControlInformation(jobHandle, 15, out var appliedCpuLimits,
+                (uint)Marshal.SizeOf<JobCpuRateControlInformation>(), IntPtr.Zero), "Query sandbox CPU hard cap");
+            if (appliedLimits.BasicLimitInformation.LimitFlags != limits.BasicLimitInformation.LimitFlags ||
+                appliedLimits.BasicLimitInformation.ActiveProcessLimit != MaximumProcessCount ||
+                appliedLimits.ProcessMemoryLimit.ToUInt64() != (ulong)resources.ProcessMemoryBytes ||
+                appliedLimits.JobMemoryLimit.ToUInt64() != (ulong)resources.JobMemoryBytes ||
+                appliedCpuLimits.ControlFlags != JobCpuRateControlFlags || appliedCpuLimits.CpuRate != resources.CpuRate)
+                throw new SandboxException("SANDBOX_RESOURCE_CONTROL_FAILED", "Windows did not apply the requested bounded sandbox resource controls.");
 
-            var output = new BoundedOutput(jobHandle, isCmd);
+            var output = new BoundedOutput(isCmd);
             string[] commandArguments = request.Skill is null ? request.Args : [Path.Combine(skillDirectory, request.Skill.Script.Replace('/', Path.DirectorySeparatorChar)), .. request.Args];
             // Resolve modules only within the link-free snapshot; no access to host ancestor directories is added.
             // 模块解析限定在已核验无链接快照中，不为 Node 探测宿主祖先目录扩大权限。
@@ -109,7 +126,8 @@ internal static class AppContainerRunner
                 outputTruncated = output.Truncated, outputLimitExceeded = output.Truncated,
                 snapshot = new { files = snapshot.Files, bytes = snapshot.Bytes, skipped = snapshot.Skipped },
                 limits = new { timeoutMs = request.TimeoutMs, outputBytes = MaximumOutputBytes,
-                    processCount = MaximumProcessCount, processMemoryBytes = MaximumProcessMemoryBytes, jobMemoryBytes = MaximumJobMemoryBytes },
+                    processCount = MaximumProcessCount, processMemoryBytes = resources.ProcessMemoryBytes, jobMemoryBytes = resources.JobMemoryBytes,
+                    resourceVersion = 1, cpuThreads = resources.CpuThreads, cpuRate = resources.CpuRate, cpuRateControl = true },
                 network = false, tokenVerified = true, elapsedMs = elapsed.ElapsedMilliseconds,
                 skillExecution = request.Skill is null ? null : new
                 {
@@ -132,6 +150,23 @@ internal static class AppContainerRunner
             if (profileCreated) DeleteAppContainerProfile(profileName);
             if (!keepWorkspace) WorkspaceSnapshot.DeleteOwnedRun(runDirectory);
         }
+    }
+
+    /// <summary>Validate broker-selected resource budgets without expanding the original sandbox ceilings.</summary>
+    /// <remarks>校验代理分配的资源预算，不扩大原有沙箱上限；额度不是 AppContainer 权限边界。</remarks>
+    internal static (int CpuThreads, uint CpuRate, long ProcessMemoryBytes, long JobMemoryBytes) ResolveResourceLimits(
+        SandboxResourceLimits? requested, int logicalProcessors)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(logicalProcessors, 1);
+        requested ??= new SandboxResourceLimits { Version = 1,
+            CpuThreads = Math.Min(2, logicalProcessors), JobMemoryBytes = MaximumJobMemoryBytes };
+        if (requested.Version != 1 || requested.CpuThreads < 1 || requested.CpuThreads > logicalProcessors ||
+            requested.JobMemoryBytes < MinimumJobMemoryBytes || requested.JobMemoryBytes > MaximumJobMemoryBytes)
+            throw new SandboxException("SANDBOX_INVALID_REQUEST", "Sandbox resource limits exceed the supported version, local CPU count or memory bounds.");
+        uint cpuRate = checked((uint)((long)requested.CpuThreads * 10000 / logicalProcessors));
+        if (cpuRate is < 1 or > 10000)
+            throw new SandboxException("SANDBOX_INVALID_REQUEST", "Sandbox CPU rate cannot be represented within Windows Job bounds.");
+        return (requested.CpuThreads, cpuRate, Math.Min(MaximumProcessMemoryBytes, requested.JobMemoryBytes), requested.JobMemoryBytes);
     }
 
     private static void Validate(SandboxRequest request)
@@ -363,9 +398,10 @@ internal static class AppContainerRunner
         throw new SandboxException("SANDBOX_CLEANUP_FAILED", "The job still reports live processes after termination.");
     }
 
-    private sealed class BoundedOutput(IntPtr jobHandle, bool cmdOutput)
+    private sealed class BoundedOutput(bool cmdOutput)
     {
-        private int _bytes, _truncated;
+        private long _bytes;
+        private int _truncated;
         internal bool Truncated => Volatile.Read(ref _truncated) != 0;
 
         internal Task<string> ReadAsync(IntPtr handle) => Task.Run(() =>
@@ -376,11 +412,12 @@ internal static class AppContainerRunner
             int count;
             while ((count = stream.Read(buffer)) != 0)
             {
-                int total = Interlocked.Add(ref _bytes, count);
-                int accepted = Math.Clamp(MaximumOutputBytes - (total - count), 0, count);
+                long total = Interlocked.Add(ref _bytes, count);
+                int accepted = (int)Math.Clamp(MaximumOutputBytes - (total - count), 0L, count);
                 stored.Write(buffer, 0, accepted);
-                if (total > MaximumOutputBytes && Interlocked.Exchange(ref _truncated, 1) == 0)
-                    TerminateJobObject(jobHandle, 126);
+                // Continue draining after bounded capture fills; verbose logs must not terminate useful work.
+                // 有界保留区满后仍持续排空；日志量大不能终止仍在正常推进的任务。
+                if (total > MaximumOutputBytes) Interlocked.Exchange(ref _truncated, 1);
             }
             byte[] bytes = stored.ToArray();
             // /u produces UTF-16 for cmd builtins. Child programs and TYPE may emit plain UTF-8 bytes.

@@ -93,6 +93,8 @@ internal static class Program
                     protocolVersion = 1, available = OperatingSystem.IsWindowsVersionAtLeast(6, 2),
                     sandbox = "appcontainer", commands = nodeAvailable ? new[] { "cmd", "node" } : new[] { "cmd" }, network = false,
                     workspaceCopy = true, failClosed = true, checksChildToken = true,
+                    resourceControls = new { version = 1, cpuRateControl = true,
+                        maxCpuThreads = Environment.ProcessorCount, maxJobMemoryBytes = AppContainerRunner.MaximumJobMemoryBytes },
                     skillExecution = nodeAvailable ? new { manifestVersion = 1, readOnlyPackage = true, hashChecked = true } : (object?)null,
                     limitations = new[] { "cmd is restricted compatibility: echo/type/redirection; DIR may be denied; use filesystem.list/search.", "JavaScript skills use only the pinned private Node in an offline AppContainer; npm/npx downloads and unconfigured language runtimes are unavailable." }
                 }, JsonOptions));
@@ -179,6 +181,14 @@ internal sealed record SandboxRequest
     public bool TrustedManagedWorkspace { get; init; }
     public string? ConversationWorkspaceHome { get; init; }
     public SandboxSkill? Skill { get; init; }
+    public SandboxResourceLimits? ResourceLimits { get; init; }
+}
+
+internal sealed record SandboxResourceLimits
+{
+    public int Version { get; init; }
+    public int CpuThreads { get; init; }
+    public long JobMemoryBytes { get; init; }
 }
 
 internal sealed class SandboxException(string code, string message) : Exception(message)

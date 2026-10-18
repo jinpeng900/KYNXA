@@ -12,7 +12,13 @@ indent_size = 4
 [apps/desktop/Build/{prepare-vc-runtime,prepare-node-runtime,prepare-toolhost-notices,filter-runtime-pri-layout}.ps1]
 charset = utf-8-bom
 
-[apps/desktop/Build/{build-desktop,prepare-resource-pack}.ps1]
+[apps/desktop/Build/{build-desktop,build-installer,build-online-installer,prepare-resource-pack}.ps1]
+charset = utf-8-bom
+
+[apps/desktop/Build/{AtomicFiles,DesktopBuild,DevelopmentEnvironment}.psm1]
+charset = utf-8-bom
+
+[apps/desktop/Build/LaunchDesktop.ps1]
 charset = utf-8-bom
 
 [apps/desktop/Build/{prepare-native-runtime,prepare-mcp-runtime}.ps1]
@@ -21,7 +27,7 @@ charset = utf-8-bom
 [apps/desktop/Build/check-deployment-paths.ps1]
 charset = utf-8-bom
 
-[tests/native-runtime-smoke/{check-mcp-cache,check-deployment-paths}.ps1]
+[tests/native-runtime-smoke/{check-mcp-cache,check-deployment-paths,check-build-entry}.ps1]
 charset = utf-8-bom
 
 [apps/desktop/Build/RuntimeDownloads.psm1]
@@ -87,4 +93,10 @@ dotnet_diagnostic.IDE1006.severity = none
 [docs/design/r3-refined/build.ps1]
 # Preserve Windows PowerShell 5.1 decoding of the existing Chinese execution strings.
 # 保留 Windows PowerShell 5.1 对该历史脚本中文执行字符串的正确解码。
+charset = utf-8-bom
+
+[apps/desktop/Build/Installer/*.ps1]
+charset = utf-8-bom
+
+[apps/desktop/Build/Installer/*.iss]
 charset = utf-8-bom

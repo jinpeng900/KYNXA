@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:KYNXA_Desktop.Controls">
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:KYNXA_Desktop.Controls" xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives">
     <!-- Use the Latin UI face first so mixed labels keep Segoe for English and YaHei UI for Chinese.
          拉丁界面字体放在前面，使混排标签中的英文使用 Segoe，中文回退到微软雅黑 UI。
     -->
@@ -28,21 +28,34 @@
     <Style TargetType="TextBox">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
+    <Style x:Key="KynxaPopupSearchBoxStyle" TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}">
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+    </Style>
     <Style TargetType="PasswordBox">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
     <Style TargetType="RichEditBox">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
-    <Style TargetType="ComboBox">
+    <!-- Inherit modern SDK templates so rounded backplates, selection indicators and keyboard behavior stay together.
+         继承现代 SDK 模板，使圆角背景、选中指示和键盘行为保持一致。
+    -->
+    <Style x:Key="KynxaComboBoxItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource DefaultComboBoxItemStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Margin" Value="{StaticResource KynxaComboBoxItemMargin}" />
     </Style>
-    <Style TargetType="controls:ScrollSafeComboBox">
+    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource KynxaComboBoxItemStyle}" />
+    <Style x:Key="KynxaComboBoxStyle" TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="primitives:ComboBoxHelper.KeepInteriorCornersSquare" Value="False" />
+        <Setter Property="ItemContainerStyle" Value="{StaticResource KynxaComboBoxItemStyle}" />
     </Style>
-    <Style TargetType="ComboBoxItem">
-        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
-    </Style>
+    <Style TargetType="ComboBox" BasedOn="{StaticResource KynxaComboBoxStyle}" />
+    <Style x:Key="KynxaScrollSafeComboBoxStyle" TargetType="controls:ScrollSafeComboBox" BasedOn="{StaticResource KynxaComboBoxStyle}" />
+    <Style TargetType="controls:ScrollSafeComboBox" BasedOn="{StaticResource KynxaScrollSafeComboBoxStyle}" />
     <Style TargetType="CheckBox">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
@@ -58,20 +71,33 @@
     <Style TargetType="PivotHeaderItem">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
-    <Style TargetType="MenuFlyoutPresenter">
+    <Style x:Key="KynxaMenuPresenterStyle" TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource DefaultMenuFlyoutPresenterStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
+        <Setter Property="Padding" Value="6" />
     </Style>
-    <Style TargetType="MenuFlyoutItem">
+    <Style TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource KynxaMenuPresenterStyle}" />
+    <Style x:Key="KynxaMenuItemStyle" TargetType="MenuFlyoutItem" BasedOn="{StaticResource DefaultMenuFlyoutItemStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Margin" Value="{StaticResource KynxaPopupItemMargin}" />
     </Style>
-    <Style TargetType="MenuFlyoutSubItem">
+    <Style TargetType="MenuFlyoutItem" BasedOn="{StaticResource KynxaMenuItemStyle}" />
+    <Style x:Key="KynxaSubMenuItemStyle" TargetType="MenuFlyoutSubItem" BasedOn="{StaticResource DefaultMenuFlyoutSubItemStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Margin" Value="{StaticResource KynxaPopupItemMargin}" />
     </Style>
-    <Style TargetType="ToggleMenuFlyoutItem">
+    <Style TargetType="MenuFlyoutSubItem" BasedOn="{StaticResource KynxaSubMenuItemStyle}" />
+    <Style x:Key="KynxaToggleMenuItemStyle" TargetType="ToggleMenuFlyoutItem" BasedOn="{StaticResource DefaultToggleMenuFlyoutItemStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Margin" Value="{StaticResource KynxaPopupItemMargin}" />
     </Style>
-    <Style TargetType="FlyoutPresenter">
+    <Style TargetType="ToggleMenuFlyoutItem" BasedOn="{StaticResource KynxaToggleMenuItemStyle}" />
+    <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource DefaultFlyoutPresenterStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
     </Style>
     <!-- Set tracking on the text itself at creation; inherited button tracking can keep WinUI's fast text path.
          创建文字时直接设置字间距；仅从按钮继承时，WinUI 可能仍沿用忽略字距的快速排版路径。
@@ -216,10 +242,53 @@
     <Style x:Key="KynxaComposerSendButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
         <Setter Property="Width" Value="40" />
         <Setter Property="Height" Value="40" />
+        <Setter Property="MinWidth" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
         <Setter Property="Padding" Value="9" />
         <Setter Property="CornerRadius" Value="20" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="Background" Value="{StaticResource KynxaSendBrush}" />
         <Setter Property="Foreground" Value="{StaticResource KynxaOnAccentBrush}" />
+        <!-- Paint a true circle in every state while keeping the native Button input and focus behavior.
+             所有状态直接绘制正圆底板，保留原生 Button 的输入与焦点行为。
+        -->
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid Background="Transparent">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="SendBackground.Fill" Value="{ThemeResource ButtonBackgroundPointerOver}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="SendBackground.Fill" Value="{ThemeResource ButtonBackgroundPressed}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="SendBackground.Fill" Value="{ThemeResource ButtonBackgroundDisabled}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                        <Ellipse x:Name="SendBackground" Fill="{TemplateBinding Background}" IsHitTestVisible="False" />
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          ContentTransitions="{TemplateBinding ContentTransitions}"
+                                          Padding="{TemplateBinding Padding}" Foreground="{TemplateBinding Foreground}"
+                                          CornerRadius="{TemplateBinding CornerRadius}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          AutomationProperties.AccessibilityView="Raw" Control.IsTemplateFocusTarget="True" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
     <Style x:Key="KynxaConversationButtonStyle" TargetType="Button">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
@@ -342,7 +411,7 @@
             </Setter.Value>
         </Setter>
     </Style>
-    <Style x:Key="KynxaProjectMenuPresenterStyle" TargetType="MenuFlyoutPresenter">
+    <Style x:Key="KynxaProjectMenuPresenterStyle" TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource KynxaMenuPresenterStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="MinWidth" Value="220" />
         <Setter Property="Padding" Value="6" />
@@ -351,14 +420,14 @@
         <Setter Property="BorderBrush" Value="{StaticResource KynxaDividerBrush}" />
         <Setter Property="BorderThickness" Value="1" />
     </Style>
-    <Style x:Key="KynxaWorkMenuItemStyle" TargetType="MenuFlyoutItem">
+    <Style x:Key="KynxaWorkMenuItemStyle" TargetType="MenuFlyoutItem" BasedOn="{StaticResource KynxaMenuItemStyle}">
         <Setter Property="Height" Value="{StaticResource KynxaMenuRowHeight}" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
     </Style>
-    <Style x:Key="KynxaWorkSubMenuItemStyle" TargetType="MenuFlyoutSubItem">
+    <Style x:Key="KynxaWorkSubMenuItemStyle" TargetType="MenuFlyoutSubItem" BasedOn="{StaticResource KynxaSubMenuItemStyle}">
         <Setter Property="Height" Value="36" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
@@ -381,10 +450,10 @@
         <Setter Property="HorizontalAlignment" Value="Left" />
         <Setter Property="Foreground" Value="{StaticResource KynxaSecondaryTextBrush}" />
     </Style>
-    <Style x:Key="KynxaFlyoutPresenterStyle" TargetType="FlyoutPresenter">
+    <Style x:Key="KynxaFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource DefaultFlyoutPresenterStyle}">
         <Setter Property="Width" Value="264" />
         <Setter Property="Padding" Value="6" />
-        <Setter Property="CornerRadius" Value="12" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="Background" Value="{StaticResource KynxaSurfaceBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource KynxaDividerBrush}" />
@@ -392,18 +461,18 @@
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Stretch" />
     </Style>
-    <Style x:Key="KynxaModelListItemStyle" TargetType="ListViewItem">
+    <Style x:Key="KynxaModelListItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
         <Setter Property="Height" Value="{StaticResource KynxaPickerHeight}" />
         <Setter Property="MinHeight" Value="{StaticResource KynxaPickerHeight}" />
         <Setter Property="Padding" Value="12,0,16,0" />
         <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="Margin" Value="0" />
+        <Setter Property="Margin" Value="{StaticResource KynxaPopupListItemMargin}" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
         <Setter Property="FontSize" Value="{StaticResource KynxaBodyFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
-        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
     </Style>
     <Style x:Key="KynxaWorkspaceFlyoutPresenterStyle" TargetType="FlyoutPresenter" BasedOn="{StaticResource KynxaFlyoutPresenterStyle}">
         <Setter Property="Width" Value="264" />
@@ -430,7 +499,7 @@
     <Style x:Key="KynxaMenuActionButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaPickerButtonStyle}">
         <Setter Property="Margin" Value="0" />
         <Setter Property="Padding" Value="12,0" />
-        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
         <Setter Property="HorizontalAlignment" Value="Stretch" />
         <Setter Property="HorizontalContentAlignment" Value="Left" />
     </Style>

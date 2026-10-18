@@ -417,10 +417,33 @@ pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// Confirm the owned process tree stopped before returning its reservation; unknown cleanup keeps the existing lease debt.
+/// 自有进程树确认退出后才归还预约；清理无法核验时保留原租约债务，不伪造释放或重派操作。
+async fn finish_helper_resources(
+    owned: &OwnedProcessJob,
+    lease: &mut Option<crate::resources::gateway::ResourceLease>,
+    independent_launch: bool,
+) -> Result<(), GatewayError> {
+    if !independent_launch {
+        if let Err(error) = owned.terminate_and_wait().await {
+            if let Some(lease) = lease.as_mut() {
+                lease.retain_unknown_on_drop();
+            }
+            return Err(error);
+        }
+    }
+    if let Some(mut lease) = lease.take() {
+        if lease.release_confirmed().await.is_err() {
+            lease.retain_unknown_on_drop();
+        }
+    }
+    Ok(())
+}
+
 /// Dispatch one owned helper, retain streamed facts, then release its job and resource lease.
 /// 派发一个自有助手、保留流式事实，最后释放作业及资源租约；缺失最终回执保留未知状态。
 async fn invoke(
-    request: Value,
+    mut request: Value,
     timeout_ms: u64,
     ctx: &GatewayToolContext,
     job_id: Option<&str>,
@@ -437,12 +460,12 @@ async fn invoke(
         ctx,
         "runner.resourcePlan",
         json!({
-            "kind": if request["operation"] == "desktop" { "desktop" } else { "host" },
+            "kind": if request["operation"] == "desktop" { "desktop" } else if request["operation"] == "run" { "sandbox" } else { "host" },
             "request": request
         }),
     )
     .await?;
-    let lease = if resource_plan["required"] == true {
+    let mut lease = if resource_plan["required"] == true {
         if let Some(service) = crate::resources::gateway::global() {
             let mut requirements = resource_plan["requirements"].clone();
             requirements["taskId"] = json!(uuid::Uuid::new_v4().to_string());
@@ -458,7 +481,7 @@ async fn invoke(
             requirements["ttlMs"] = json!(30000);
             Some(
                 service
-                    .acquire(requirements, ctx.cancellation.clone())
+                    .acquire_waiting(requirements, ctx.cancellation.clone())
                     .await?,
             )
         } else {
@@ -467,6 +490,24 @@ async fn invoke(
     } else {
         None
     };
+    if request["operation"] == "run" {
+        if let Some(lease) = &lease {
+            request["resourceLimits"] = native(ctx, "runner.sandboxAllocatedResources", json!({
+                "requested":request["resourceLimits"],"allocation":lease.allocation
+            })).await?;
+        }
+    }
+    let granted = lease.is_some();
+    let independent_launch = request["operation"] == "desktop" && request["action"] == "launch";
+    let encoded = serde_json::to_vec(&request)
+        .map_err(|_| failure("INVALID_TOOL_ARGUMENTS", "原生请求编码失败。", 400))?;
+    if encoded.len() > 128 * 1024 {
+        return Err(failure(
+            "TOOL_REQUEST_TOO_LARGE",
+            "原生请求超过传输限额。",
+            400,
+        ));
+    }
     let mut command = Command::new(&ctx.toolhost_exe);
     hide(&mut command);
     let mut child = command
@@ -477,6 +518,11 @@ async fn invoke(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| failure("TOOLHOST_START_FAILED", "原生工具助手启动失败。", 503))?;
+    // Once a helper exists, every early return keeps admission until native cleanup is explicitly confirmed.
+    // 助手已创建后，所有提前退出先保留预约，只有原生清理明确完成才释放。
+    if let Some(lease) = lease.as_mut() {
+        lease.retain_unknown_on_drop();
+    }
     let owned_job = if request["operation"] == "desktop" && request["action"] == "launch" {
         OwnedProcessJob::attach_for_launch(&child)
     } else {
@@ -486,36 +532,37 @@ async fn invoke(
         Ok(job) => job,
         Err(error) => {
             terminate(&mut child).await;
+            // No request bytes were submitted, so this failed registration could not dispatch the command.
+            // 登记失败时尚未提交任何请求字节，不会派发命令；助手已退出后归还准入。
+            if let Some(mut lease) = lease.take() {
+                if lease.release_confirmed().await.is_err() {
+                    lease.retain_unknown_on_drop();
+                }
+            }
             return Err(error);
         }
     };
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| failure("TOOLHOST_PIPE_FAILED", "助手输入管道不可用。", 500))?;
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            terminate(&mut child).await;
+            let _ = finish_helper_resources(&_owned, &mut lease, independent_launch).await;
+            return Err(failure("TOOLHOST_PIPE_FAILED", "助手输入管道不可用。", 500));
+        }
+    };
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let stderr = child.stderr.take().unwrap();
     let diagnostic = tokio::spawn(async move {
         let mut bytes = Vec::new();
         let _ = stderr.take(64 * 1024).read_to_end(&mut bytes).await;
     });
-    let encoded = serde_json::to_vec(&request)
-        .map_err(|_| failure("INVALID_TOOL_ARGUMENTS", "原生请求编码失败。", 400))?;
-    if encoded.len() > 128 * 1024 {
-        terminate(&mut child).await;
-        diagnostic.abort();
-        return Err(failure(
-            "TOOL_REQUEST_TOO_LARGE",
-            "原生请求超过传输限额。",
-            400,
-        ));
-    }
     if stdin.write_all(&encoded).await.is_err()
         || stdin.write_all(b"\n").await.is_err()
         || stdin.flush().await.is_err()
     {
         terminate(&mut child).await;
         diagnostic.abort();
+        let _ = finish_helper_resources(&_owned, &mut lease, independent_launch).await;
         return Err(failure(
             "TOOLHOST_EXECUTION_UNKNOWN",
             "原生助手请求发送未确认；可能已有部分字节提交，不能直接重放。",
@@ -552,12 +599,14 @@ async fn invoke(
         if value["event"].is_string() {
             if let Some(id) = job_id {
                 if value["event"] == "host_terminal_started" {
-                    native(
+                    if native(
                         ctx,
                         "host.started",
                         json!({"jobId":id,"processId":value["processId"]}),
                     )
-                    .await?;
+                    .await.is_err() {
+                        break;
+                    }
                 }
                 if value["event"] == "host_terminal_output" {
                     let units = value["delta"]
@@ -566,12 +615,14 @@ async fn invoke(
                         .unwrap_or("")
                         .encode_utf16()
                         .collect::<Vec<_>>();
-                    native(
+                    if native(
                         ctx,
                         "host.append",
                         json!({"jobId":id,"units":units,"replace":value["replace"]}),
                     )
-                    .await?;
+                    .await.is_err() {
+                        break;
+                    }
                 }
             }
             if value["event"] == "host_terminal_output" {
@@ -624,8 +675,24 @@ async fn invoke(
         terminate(&mut child).await;
     }
     diagnostic.abort();
-    if let Some(lease) = lease {
-        lease.release().await;
+    // A helper's exit alone does not certify its descendants stopped; retire the same owned job before releasing admission.
+    // 助手退出不等于子孙进程已结束；先核验同一个自有作业树，再释放准入，已批准的独立应用保持原例外。
+    if let Err(error) = finish_helper_resources(&_owned, &mut lease, independent_launch).await {
+        let value = receipt.get_or_insert_with(|| json!({"protocolVersion":1}));
+        value["completed"] = json!(false);
+        value["outcome"] = json!("unknown");
+        value["status"] = json!("unknown");
+        value["isError"] = json!(true);
+        value["code"] = json!(error.code);
+        value["error"] = json!({"code":error.code,"message":error.message});
+    }
+    if request["operation"] == "run" {
+        if let Some(receipt) = receipt.as_mut() {
+            receipt["resourceAdmission"] = json!({
+                "state":if granted{"granted"}else{"default-limits-without-lease"},
+                "limits":request["resourceLimits"]
+            });
+        }
     }
     Ok(receipt.unwrap_or_else(|| {
         json!({
@@ -768,6 +835,38 @@ async fn host_receipt(
     Ok(receipt)
 }
 
+async fn observe_host_start(
+    id: &str,
+    ctx: &GatewayToolContext,
+    maximum_wait: Duration,
+) -> Result<Value, GatewayError> {
+    let deadline = tokio::time::Instant::now() + maximum_wait;
+    loop {
+        if *ctx.cancellation.borrow() {
+            if let Some(job) = ctx.runtime.jobs.lock().await.get(id) {
+                let _ = job.cancel.send(true);
+            }
+            return Ok(unknown_job(id, "后台任务启动等待已取消；已请求终止自有进程。"));
+        }
+        let state = native(
+            ctx,
+            "host.view",
+            json!({"context":{"conversationId":ctx.conversation_id},"jobId":id}),
+        ).await?;
+        if state["status"] != "starting" {
+            return Ok(if state["status"] == "unknown" {
+                unknown_job(id, "后台任务派发结果未知；请读取该自有任务状态，不能直接重放。")
+            } else { state });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // A queued job keeps its original handle; ending this observation never cancels admission or invents a dispatch.
+            // 排队任务保留原句柄；结束本次观察不取消准入，也不能虚构已经派发的未知操作。
+            return Ok(state);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Route terminal and desktop tools without duplicating the native runner's policy or job state.
 /// 接线终端与桌面工具，复用原生执行器的策略和任务状态，不另建执行账本。
 pub(crate) async fn execute(
@@ -840,44 +939,7 @@ pub(crate) async fn execute(
             *job.result.lock().await = Some(value);
             let _ = finished_tx.send(true);
         });
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if *ctx.cancellation.borrow() {
-                if let Some(job) = ctx.runtime.jobs.lock().await.get(&id) {
-                    let _ = job.cancel.send(true);
-                }
-                return Ok(unknown_job(
-                    &id,
-                    "后台任务启动等待已取消；已请求终止自有进程。",
-                ));
-            }
-            let state = native(
-                ctx,
-                "host.view",
-                json!({"context":{"conversationId":ctx.conversation_id},"jobId":id}),
-            )
-            .await?;
-            if state["status"] != "starting" {
-                return Ok(if state["status"] == "unknown" {
-                    unknown_job(
-                        &id,
-                        "后台任务派发结果未知；请读取该自有任务状态，不能直接重放。",
-                    )
-                } else {
-                    state
-                });
-            }
-            if tokio::time::Instant::now() >= deadline {
-                if let Some(job) = ctx.runtime.jobs.lock().await.get(&id) {
-                    let _ = job.cancel.send(true);
-                }
-                return Ok(unknown_job(
-                    &id,
-                    "后台任务尚未确认启动；已请求取消，不会重放。",
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        return observe_host_start(&id, ctx, Duration::from_secs(15)).await;
     }
     if name == "terminal.host.read" || name == "terminal.host.stop" {
         let id = input["jobId"].as_str().unwrap_or("");
@@ -951,6 +1013,10 @@ pub(crate) async fn execute(
                 503,
             ));
         }
+        input["resourceLimits"] = native(ctx, "runner.sandboxResourceLimits", json!({
+            "capabilities":caps,
+            "logicalCpuThreads":std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1)
+        })).await?;
         input["operation"] = json!("run");
         input["workspaceRoot"] = json!(ctx.workdir);
         // Node selection is application-owned, never accepted from the tool arguments or system PATH.
@@ -981,9 +1047,14 @@ pub(crate) async fn execute(
         };
         super::gateway::check_configuration_generation(ctx)?;
         let mut result = invoke(input, 130_000, ctx, None).await?;
+        if result["completed"] == false && result["outcome"] == "unknown" {
+            return Ok(result);
+        }
         // Verify the helper's isolation and descendant cleanup before accepting a receipt.
         // 收据必须证明隔离与子进程清理；不能把成功读取 JSON 当成沙箱执行已核验。
-        native(ctx, "runner.sandboxReceipt", json!({"result":result})).await?;
+        native(ctx, "runner.sandboxReceipt", json!({
+            "result":result,"resourceLimits":result["resourceAdmission"]["limits"]
+        })).await?;
         let completion = native(
             ctx,
             "broker.completion.sandboxReceipt",
@@ -1285,6 +1356,88 @@ pub(crate) async fn capabilities(kind: &str, ctx: &GatewayToolContext) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observing_queued_host_start_keeps_the_same_job_without_cancelling_admission() {
+        let (ctx, _sender) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let plan = native(&ctx, "host.start", json!({
+            "context":{"conversationId":ctx.conversation_id},
+            "request":{"shell":"cmd","cwd":ctx.workdir,"command":"echo fixture"},
+            "startedAt":"2026-10-18T00:00:00Z"
+        })).await.unwrap();
+        let id = plan["jobId"].as_str().unwrap();
+        let (cancel, receiver) = watch::channel(false);
+        let (_finished_tx, finished) = watch::channel(false);
+        ctx.runtime.jobs.lock().await.insert(id.into(), HostJob {
+            conversation_id:ctx.conversation_id.clone(),cancel,
+            result:Arc::new(Mutex::new(None)),finished,
+        });
+        let view = observe_host_start(id, &ctx, Duration::ZERO).await.unwrap();
+        assert_eq!(view["jobId"], id);
+        assert_eq!(view["status"], "starting");
+        assert_eq!(view["running"], true);
+        assert!(!*receiver.borrow());
+        assert!(ctx.runtime.jobs.lock().await.contains_key(id));
+        assert!(view.get("isError").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn real_toolhost_applies_sandbox_limits_and_large_output_keeps_both_commands_running() {
+        let Some(executable) = std::env::var_os("KYNXA_TEST_TOOLHOST_EXE") else { return; };
+        let (mut ctx, _sender) = super::super::gateway::test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        ctx.toolhost_exe = executable.into();
+        ctx.approved = true;
+        let output = "(for /L %i in (1,1,5000) do @echo 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789)";
+        let script = format!("{output} & echo sandbox-complete> sandbox-output-complete.txt & exit /b 0");
+        let sandbox = execute("terminal.run", json!({"command":"cmd","args":["/d","/c",script],"timeoutMs":15000}), &ctx).await.unwrap();
+        assert_eq!(sandbox["exitCode"], 0, "{sandbox}");
+        assert_eq!(sandbox["isError"], false);
+        assert_eq!(sandbox["tokenVerified"], true);
+        assert_eq!(sandbox["activeProcessesAfterExit"], 0);
+        assert_eq!(sandbox["outputTruncated"], true);
+        assert_eq!(sandbox["limits"]["resourceVersion"], 1);
+        assert_eq!(sandbox["limits"]["cpuRateControl"], true);
+        assert!((1..=10000).contains(&sandbox["limits"]["cpuRate"].as_u64().unwrap()));
+        assert_eq!(sandbox["limits"]["cpuThreads"], sandbox["resourceAdmission"]["limits"]["cpuThreads"]);
+        assert_eq!(sandbox["limits"]["jobMemoryBytes"], sandbox["resourceAdmission"]["limits"]["jobMemoryBytes"]);
+        assert!(!ctx.workdir.join("sandbox-output-complete.txt").exists());
+        let stage = std::path::Path::new(sandbox["stagingDirectory"].as_str().unwrap());
+        // The isolated command processor uses /u, including redirected marker files.
+        // 隔离命令处理器使用 /u，重定向的标记文件同样需要按 UTF-16LE 解码。
+        let marker = std::fs::read(stage.join("sandbox-output-complete.txt")).unwrap();
+        assert_eq!(marker.len() % 2, 0);
+        let marker = String::from_utf16(&marker.chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>()).unwrap();
+        assert_eq!(marker.trim_start_matches('\u{feff}').trim(), "sandbox-complete");
+
+        let script = format!("{output} & echo host-complete> host-output-complete.txt & exit /b 0");
+        let started = execute("terminal.host.start", json!({
+            "shell":"cmd","script":script,"cwd":ctx.workdir,"timeoutMs":15000,
+            "reason":"Isolated output-overflow and resource receipt verification"
+        }), &ctx).await.unwrap();
+        let id = started["jobId"].as_str().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let completed = loop {
+            let view = execute("terminal.host.read", json!({"jobId":id,"limit":1}), &ctx).await.unwrap();
+            if !["starting","running"].contains(&view["status"].as_str().unwrap_or("")) { break view; }
+            assert!(tokio::time::Instant::now() < deadline, "{view}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(completed["status"], "completed", "{completed}");
+        assert_eq!(completed["receipt"]["completed"], true);
+        assert_eq!(completed["receipt"]["exitCode"], 0);
+        assert_eq!(completed["receipt"]["outputTruncated"], true);
+        assert_eq!(completed["receipt"]["outputOverflowPolicy"], "truncate");
+        assert_eq!(std::fs::read_to_string(ctx.workdir.join("host-output-complete.txt")).unwrap().trim(), "host-complete");
+        shutdown_checked(&ctx).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn receipt_desktop_discovery_and_launch_preserve_native_identity() {
         let (ctx, _sender) = super::super::gateway::test_context();
@@ -1540,7 +1693,7 @@ mod tests {
         // Windows 可能创建自有控制台辅助进程；采样边界是已核验的作业树，不固定为一个进程。
         assert!(sample.processes >= 1);
         assert!(sample.private_bytes > 0 && sample.working_set_bytes > 0);
-        owned.terminate_and_wait().await.unwrap();
+        finish_helper_resources(&owned, &mut None, false).await.unwrap();
         child.wait().await.unwrap();
         assert_eq!(owned.memory_usage().unwrap().processes, 0);
         assert!(!owned.has_running_processes().unwrap());

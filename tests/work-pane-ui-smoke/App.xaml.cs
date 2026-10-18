@@ -247,7 +247,7 @@ public partial class App : Application
     private async Task CheckHeaderLifecycleAsync()
     {
         var headers = Enumerable.Range(0, 16).Select(index =>
-            new ConversationWorkTab("shared-key-" + index, "terminal", "Long synthetic terminal resource " + index)).ToArray();
+            new ConversationWorkTab("shared-key-" + index, "terminal", "Long synthetic terminal resource " + index, UserSelected: true)).ToArray();
         _tabs.ShowConversation(_chatA, headers); await SettleAsync();
         var scroll = Element<ScrollViewer>(_tabs, "WorkTabsScroll");
         scroll.ChangeView(190, null, null, true);

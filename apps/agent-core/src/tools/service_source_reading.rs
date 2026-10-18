@@ -9,6 +9,12 @@ use std::sync::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
+/// Notifications share the scanner's built-in directory exclusions; full ignore evaluation stays in the scanner.
+/// 通知复用扫描器的内置目录排除；自定义gitignore及权限仍由正式扫描器最终核验。
+pub(crate) fn watch_path_relevant(path: &Path) -> bool {
+    !path.components().any(|part| part.as_os_str().to_str().is_some_and(|name| IGNORED.contains(&name.to_ascii_lowercase().as_str())))
+}
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -614,7 +620,12 @@ impl SourceReadingState {
                 Ok(Value::Null)
             }
             "scanNext" => self.next(token),
-            "scanStats" => Ok(self.stats.clone()),
+            "scanStats" => {
+                let mut stats = self.stats.clone();
+                stats["publishedSources"] = json!(self.window_count);
+                stats["publishedTextBytes"] = json!(self.bytes);
+                Ok(stats)
+            },
             "scanClose" => {
                 self.directories.clear();
                 self.entries.clear();

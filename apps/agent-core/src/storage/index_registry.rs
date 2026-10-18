@@ -24,6 +24,23 @@ pub fn apply(operation: &str, arguments: &Value) -> ContractResult {
     if operation == "storage.registry.validate" {
         return Ok(registry);
     }
+    if operation == "storage.registry.observeFiles" {
+        let mut changed = false;
+        for source in arguments["sources"].as_array().into_iter().flatten() {
+            let Some(id) = source["sourceId"].as_str() else { continue; };
+            let Some(key) = source["key"].as_str().filter(|_| hash(&source["key"])) else { continue; };
+            let record = &mut registry["sources"][key];
+            if record["active"] == true && record["sourceId"] == id && record["scopeKey"] == source["scopeKey"]
+                && record["sourceRevision"] == source["sourceRevision"] && record["contentHash"] == source["contentHash"]
+                && source["fileMetadata"].is_object()
+                && ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"].iter().any(|field| record[*field] != source[*field]) {
+                for field in ["fileMetadata", "scanLimitsSignature", "cachedTextBytes"] { record[field] = source[field].clone(); }
+                changed = true;
+            }
+        }
+        if changed { registry["revision"] = json!(registry["revision"].as_u64().unwrap() + 1); }
+        return Ok(json!({"registry":registry,"changed":changed}));
+    }
     if operation == "storage.registry.retireChat" {
         let id = super::identity(&arguments["conversationId"])?;
         let scope = format!("chat:{}", id.as_str().unwrap().to_ascii_lowercase());

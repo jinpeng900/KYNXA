@@ -12,6 +12,8 @@ pub mod gateway;
 pub mod gateway_config;
 pub mod gateway_context;
 pub mod gateway_inference;
+pub mod gateway_local_engine;
+pub mod gateway_local_models;
 pub mod gateway_preparation;
 pub mod gateway_protocol;
 pub mod gateway_stream;

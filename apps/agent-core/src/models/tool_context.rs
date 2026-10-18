@@ -157,6 +157,29 @@ mod checkpoint_evidence_tests {
     }
 
     #[test]
+    fn small_archived_checkpoints_release_repeated_metadata_before_facts_and_unknown_effects() {
+        let source_ref = archive();
+        let mut summary = json!({"facts":[{"resultId":source_ref["id"],"text":"Verified key: NOTE1."}],
+            "sources":[],"completedSources":1,"partialSources":0,"unprocessedSources":0,"metadataOnlySources":0});
+        summary["archive"] = json!({"verified":true,"resultRef":archive(),"summaryHash":working_summary_hash(&summary)});
+        let mut plan = json!({"public":[],"receipts":[],"checkpointEvidence":[],"omittedEvidence":0,
+            "checkpointCapabilities":{"loadableNames":[]},"checkpointSemanticSummary":summary});
+        let projection = json!({"resultRef":archive(),"latestPublicText":""});
+        let fit = semantic_checkpoint_fit(&plan, &projection, &summary, 407);
+        assert_eq!(fit["fits"], true, "{fit}");
+        assert_eq!(fit["archivedFactsPreserved"], true, "{fit}");
+        assert_eq!(fit["formalSidecarPreserved"], true);
+        assert_eq!(fit["unknownEffectsPreserved"], true);
+        assert!(fit["projectedTokens"].as_u64().unwrap() <= 407);
+        plan["checkpointEvidence"] = json!([{"kind":"effect","tool":"filesystem.write","status":"unknown",
+            "callId":"unconfirmed-write","resultRef":source_ref,"arguments":{"path":"unconfirmed.txt"}}]);
+        let too_small = semantic_checkpoint_fit(&plan, &projection, &summary, 180);
+        assert_eq!(too_small["fits"], false);
+        assert_eq!(too_small["unknownEffectsPreserved"], true);
+        assert_eq!(too_small["formalSidecarPreserved"], true);
+    }
+
+    #[test]
     fn direct_document_evidence_preserves_distinct_pdf_page_windows() {
         let source = json!({"callId":"document-page","name":"document.read","status":"completed",
             "executed":true,"observation":true,"resultRef":archive(),"arguments":{"path":"paper.pdf"},
@@ -1952,6 +1975,17 @@ impl ToolContextState {
                         content.as_object_mut().unwrap().remove("capabilities");
                     } else if content.get("notice").is_some() {
                         content.as_object_mut().unwrap().remove("notice");
+                    } else if content.get("workingCoverage").is_some() {
+                        content.as_object_mut().unwrap().remove("workingCoverage");
+                    } else if content.get("workingFactsNotice").is_some() {
+                        content.as_object_mut().unwrap().remove("workingFactsNotice");
+                    } else if content["workingSummaryArchive"].get("navigation").is_some() {
+                        // Small windows keep the verified archive and read arguments, not repeated prose metadata.
+                        // 小窗口保留核验归档及读取参数，先移除重复说明；不裁掉引用、非指令标记或未知操作。
+                        let archive = content["workingSummaryArchive"].as_object_mut().unwrap();
+                        for field in ["kind", "offsetUnit", "navigation"] { archive.remove(field); }
+                    } else if content["recentPublicText"] == "" {
+                        content.as_object_mut().unwrap().remove("recentPublicText");
                     } else if let Some(index) = content["evidence"].as_array().and_then(|records| {
                         records.iter().rposition(|record| {
                             record["kind"] != "effect" || record["status"] == "completed"

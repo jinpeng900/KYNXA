@@ -25,7 +25,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     private int? _revision;
     private JsonElement? _catalogMetadata;
     private JsonElement? _savedCatalogMetadata;
-    private Dictionary<Guid, string?> _folderPaths = [];
+    private Dictionary<Guid, JsonElement> _workBindings = [];
     private IReadOnlyList<ProjectState> _loadedProjects = [];
     private readonly HashSet<(Guid Chat, Guid Message)> _knownUserMessages = [];
     private readonly object _knownUserMessagesLock = new();
@@ -91,6 +91,15 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     }
 
     /// <summary>
+    /// Acknowledge the user's stable ID only after the gateway confirms its durable submission.
+    /// 网关确认正式提交后再确认稳定用户消息 ID，后续目录保存无需再次上传；仅 started 事件不足以确认。
+    /// </summary>
+    internal void AcceptSubmittedMessage(Guid conversationId, Guid userMessageId)
+    {
+        lock (_knownUserMessagesLock) _knownUserMessages.Add((conversationId, userMessageId));
+    }
+
+    /// <summary>
     /// Projection eviction cannot drop user submissions that have not reached durable storage.
     /// 展示缓存淘汰不能丢弃尚未进入正式存储的用户消息。
     /// </summary>
@@ -127,6 +136,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
     private List<ProjectState> SnapshotProjects(IReadOnlyList<ProjectState> projects) => projects.Select(project => new ProjectState
         {
             Id = project.Id, Name = project.Name, FolderPath = project.FolderPath,
+            Mounts = project.Mounts.ToList(), DefaultMountId = project.DefaultMountId,
             IsPinned = project.IsPinned, IsArchived = project.IsArchived, IsFolderlessWorkspace = project.IsFolderlessWorkspace,
             Chats = project.Chats.Where(chat => chat.CanPersist).Select(SnapshotChat).ToList()
         }).ToList();
@@ -182,7 +192,7 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         _revision = catalog.Revision;
         _catalogMetadata = CatalogMetadata(catalog);
         _savedCatalogMetadata = CatalogMetadata(catalog, includeFolders: true);
-        _folderPaths = catalog.Projects.ToDictionary(project => project.Id, project => project.FolderPath);
+        _workBindings = catalog.Projects.ToDictionary(project => project.Id, WorkBinding);
         lock (_knownUserMessagesLock)
             foreach (var chat in catalog.Chats.Concat(catalog.Projects.SelectMany(project => project.Chats)))
                 foreach (var message in chat.Messages.Where(message => message.Role == "user"))
@@ -199,9 +209,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             if (unchangedMetadata is { } snapshot && _savedCatalogMetadata is { } savedMetadata && JsonElement.DeepEquals(snapshot, savedMetadata)) return;
             await ModelGatewayService.EnsureReadyAsync(cancellationToken);
             if (_revision is null) throw new InvalidOperationException(UiText.Get("会话目录尚未加载，请重新打开 KYNXA。"));
-            var snapshotFolders = projects?.EnumerateArray().ToDictionary(project => project.GetProperty("Id").GetGuid(),
-                project => project.GetProperty("FolderPath").ValueKind == JsonValueKind.Null ? null : project.GetProperty("FolderPath").GetString())
-                ?? new Dictionary<Guid, string?>(_folderPaths);
+            var snapshotBindings = projects?.EnumerateArray().Select(project => project.Deserialize<ProjectState>(JsonOptions)!)
+                .ToDictionary(project => project.Id, WorkBinding) ?? new Dictionary<Guid, JsonElement>(_workBindings);
             var payload = new Dictionary<string, object> { ["Revision"] = _revision.Value };
             if (projects is { } projectData) payload["Projects"] = projectData;
             if (chats is { } chatData) payload["Chats"] = chatData;
@@ -219,12 +228,13 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
                 catalog = await ReadAsync(retry, cancellationToken);
             }
             else catalog = await ReadAsync(response, cancellationToken);
-            // Update only references still carrying the submitted folder; edits made while awaiting stay local.
-            // 只更新仍保留已提交目录值的展示引用，等待期间用户的新目录修改不能被晚到结果覆盖。
-            var savedFolders = catalog.Projects.ToDictionary(project => project.Id, project => project.FolderPath);
+            // Apply canonical mount receipts only to unchanged submitted bindings; late replies cannot erase newer local edits.
+            // 规范挂载回执只更新未再编辑的提交值；晚到响应不能覆盖等待期间新增的根或默认目录修改。
+            var savedBindings = catalog.Projects.ToDictionary(project => project.Id);
             foreach (var project in projectReferences ?? _loadedProjects)
-                if (snapshotFolders.TryGetValue(project.Id, out var submitted) && project.FolderPath == submitted &&
-                    savedFolders.TryGetValue(project.Id, out var saved)) project.FolderPath = saved;
+                if (snapshotBindings.TryGetValue(project.Id, out var submitted) && JsonElement.DeepEquals(WorkBinding(project), submitted) &&
+                    savedBindings.TryGetValue(project.Id, out var saved))
+                { project.FolderPath = saved.FolderPath; project.Mounts = saved.Mounts.ToList(); project.DefaultMountId = saved.DefaultMountId; }
             if (projectReferences is not null) _loadedProjects = projectReferences;
             AcceptCatalog(catalog);
             // A successful metadata receipt also acknowledges submitted user IDs, without retransferring every history.
@@ -248,19 +258,23 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
         if (_catalogMetadata is not { } baseline || !JsonElement.DeepEquals(baseline, CatalogMetadata(latest))) return null;
         if (projects is null) return JsonSerializer.SerializeToElement(Array.Empty<object>());
         var next = JsonNode.Parse(projects.Value.GetRawText())!.AsArray();
-        var latestFolders = latest.Projects.ToDictionary(project => project.Id, project => project.FolderPath);
+        var latestBindings = latest.Projects.ToDictionary(project => project.Id, WorkBinding);
         foreach (var node in next)
         {
             var project = node!.AsObject();
             var id = project["Id"]!.GetValue<Guid>();
-            if (!_folderPaths.TryGetValue(id, out var original) || !latestFolders.TryGetValue(id, out var current) || original == current)
+            if (!_workBindings.TryGetValue(id, out var original) || !latestBindings.TryGetValue(id, out var current) || JsonElement.DeepEquals(original, current))
                 continue;
-            var proposed = project["FolderPath"]?.GetValue<string>();
-            if (proposed != original && proposed != current) return null;
-            project["FolderPath"] = current;
+            var proposed = WorkBinding(project.Deserialize<ProjectState>(JsonOptions)!);
+            if (!JsonElement.DeepEquals(proposed, original) && !JsonElement.DeepEquals(proposed, current)) return null;
+            foreach (string key in new[] { "FolderPath", "Mounts", "DefaultMountId" })
+                project[key] = JsonNode.Parse(current.GetProperty(key).GetRawText());
         }
         return JsonSerializer.SerializeToElement(next, JsonOptions);
     }
+
+    private static JsonElement WorkBinding(ProjectState project) => JsonSerializer.SerializeToElement(new
+    { project.FolderPath, project.Mounts, project.DefaultMountId }, JsonOptions);
 
     private static JsonElement CatalogMetadata(ConversationCatalog catalog, bool includeFolders = false)
     {
@@ -272,6 +286,8 @@ public sealed class ProjectStore(string dataDirectory) : IDisposable
             {
                 project.Id, project.Name, project.IsPinned, project.IsArchived, project.IsFolderlessWorkspace,
                 FolderPath = includeFolders ? project.FolderPath : null,
+                Mounts = includeFolders ? project.Mounts : null,
+                DefaultMountId = includeFolders ? project.DefaultMountId : null,
                 Chats = project.Chats.Select(ChatMetadata)
             }),
             Chats = catalog.Chats.Select(ChatMetadata)

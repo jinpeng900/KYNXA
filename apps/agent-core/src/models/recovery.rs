@@ -15,6 +15,22 @@ fn valid_limit(value: &Value) -> Option<u64> {
         .filter(|value| (2048..=2_000_000).contains(value))
 }
 
+/// Retain only bounded numeric observations, narrowing each limit without copying provider payloads.
+/// 仅保留有界数值观察，各项额度只收紧；不复制供应商正文、凭据或其他请求字段。
+pub(crate) fn retain_numeric_limits(previous: &Value, observed: &Value) -> Value {
+    let mut retained = serde_json::Map::new();
+    for field in ["contextWindowTokens", "providerMaxInputTokens", "providerMaxOutputTokens", "estimatedInputBudgetTokens"] {
+        let minimum = if field == "contextWindowTokens" { 2048 } else { 256 };
+        let valid = |value: &Value| value.as_u64().filter(|value| (minimum..=2_000_000).contains(value));
+        let limit = match (valid(&previous[field]), valid(&observed[field])) {
+            (Some(previous), Some(observed)) => Some(previous.min(observed)),
+            (previous, observed) => previous.or(observed),
+        };
+        if let Some(limit) = limit { retained.insert(field.to_owned(), json!(limit)); }
+    }
+    Value::Object(retained)
+}
+
 fn expression(pattern: &str) -> Regex {
     // JavaScript whitespace excludes NEL and includes BOM; provider-message parsing preserves that contract.
     // JavaScript 空白字符排除 NEL、包含 BOM；供应商错误消息解析保持相同合同。
@@ -37,9 +53,11 @@ fn context_rejection(body: &Value) -> Value {
         .unwrap_or("")
         .to_lowercase();
     static CONTEXT: OnceLock<Regex> = OnceLock::new();
+    static LLAMA_CONTEXT: OnceLock<Regex> = OnceLock::new();
     static INPUT: OnceLock<Regex> = OnceLock::new();
     static OUTPUT: OnceLock<Regex> = OnceLock::new();
     let context = CONTEXT.get_or_init(|| expression(r"(?i)(?:maximum|max)\s+context\s+(?:length|window)(?:\s+(?:is|of))?\s*[:=]?\s*([0-9,]+)\s*tokens?"));
+    let llama_context = LLAMA_CONTEXT.get_or_init(|| expression(r"(?i)\brequest\s*\(\s*([0-9,]+)\s+tokens?\s*\)\s+exceeds\s+the\s+available\s+context\s+size\s*\(\s*([0-9,]+)\s+tokens?\s*\)"));
     let input = INPUT.get_or_init(|| expression(r"(?i)(?:prompt|input)\s+is\s+too\s+long\s*:\s*[0-9,]+\s*tokens?\s*>\s*([0-9,]+)\s*(?:maximum|max)"));
     let output = OUTPUT.get_or_init(|| expression(r"(?i)(?-u:\b)max_(?:output_tokens|completion_tokens|tokens)(?-u:\b)[^\n]{0,120}?(?:at most|less than or equal to|between\s+[0-9]+\s+and|<=)\s*([0-9,]+)"));
     let captured = |pattern: &Regex| {
@@ -47,6 +65,18 @@ fn context_rejection(body: &Value) -> Value {
             .captures(message)
             .and_then(|captures| captures[1].replace(',', "").parse::<u64>().ok())
     };
+    // llama.cpp reports the rendered prompt count; retain only verified numeric limits, never its body.
+    // llama.cpp 报告的是完整模板输入计数；仅保留可信数值与额度，不把上游正文带入诊断。
+    if let Some(captures) = llama_context.captures(message) {
+        let request_tokens = captures[1].replace(',', "").parse::<u64>().ok();
+        let maximum = captures[2].replace(',', "").parse::<u64>().ok();
+        if let (Some(request_tokens), Some(maximum)) = (request_tokens, maximum) {
+            if (2048..=2_000_000).contains(&maximum) && request_tokens > maximum {
+                return json!({"kind":"context","contextWindowTokens":maximum,
+                    "requestTokens":request_tokens,"verified":true});
+            }
+        }
+    }
     if let Some(maximum) = captured(output).filter(|maximum| (256..=2_000_000).contains(maximum)) {
         return json!({"kind":"output","providerMaxOutputTokens":maximum,"verified":true});
     }
@@ -115,8 +145,41 @@ fn recovery_limits(args: &Value) -> Value {
                 .as_u64()
                 .unwrap_or(previous / 2)
                 .min(previous);
-            if !(2048..=2_000_000).contains(&maximum) || maximum >= previous {
+            if !(2048..=2_000_000).contains(&maximum) {
                 return Value::Null;
+            }
+            if maximum >= previous {
+                let rejected_input_limit = rejection["inputLimitTokens"].as_u64()
+                    .filter(|limit| (256..=maximum).contains(limit))
+                    .unwrap_or(maximum);
+                let Some(request_tokens) = rejection["requestTokens"]
+                    .as_u64()
+                    .filter(|tokens| *tokens > rejected_input_limit && rejection["verified"] == true)
+                else {
+                    return Value::Null;
+                };
+                let previous_input = current["inputBudgetTokens"]
+                    .as_u64()
+                    .or_else(|| current["providerMaxInputTokens"].as_u64())
+                    .unwrap_or(maximum)
+                    .min(maximum);
+                let estimated_input = rejection["estimatedInputTokens"].as_u64()
+                    .filter(|tokens| *tokens > 0 && *tokens <= previous_input)
+                    .unwrap_or(previous_input);
+                let allowed_input = maximum
+                    .saturating_sub(current["maxOutputTokens"].as_u64().unwrap_or(0))
+                    .min(rejected_input_limit)
+                    .min(current["providerMaxInputTokens"].as_u64().unwrap_or(maximum));
+                // Equal windows can still reject underestimated template input; narrow the estimated budget.
+                // 窗口相同仍可能低估模板输入；按实际计数收紧估算预算，不能提高实际窗口或重发相同请求。
+                let input_limit = ((u128::from(estimated_input) * u128::from(allowed_input) * 9)
+                    / u128::from(request_tokens) / 10) as u64;
+                if input_limit < 256 || input_limit >= previous_input {
+                    return Value::Null;
+                }
+                return json!({"kind":"context","contextWindowTokens":maximum,
+                    "estimatedInputBudgetTokens":input_limit,"requestTokens":request_tokens,
+                    "budgetAdjusted":true,"verified":true});
             }
             json!({"kind":"context","contextWindowTokens":maximum,"verified":rejection["verified"]==true})
         }
@@ -162,6 +225,9 @@ fn context_recovery_plan(args: &Value) -> Value {
                 limits["contextWindowTokens"].clone(),
             );
             cache_entry.insert("verified".to_owned(), limits["verified"].clone());
+            if let Some(input_limit) = limits["estimatedInputBudgetTokens"].as_u64() {
+                cache_entry.insert("estimatedInputBudgetTokens".to_owned(), json!(input_limit));
+            }
         }
         Some("input") => {
             cache_entry.insert(
@@ -215,6 +281,76 @@ mod tests {
             "canRebuildContext":true,"recoveryAttempts":0,"rejection":{"kind":"context","verified":false},
             "current":{"contextWindowTokens":32768},"cacheKey":"provider:model:credential",
             "cacheKeys":[],"now":1000})
+    }
+
+    #[test]
+    fn retained_numeric_limits_never_restore_a_rejected_budget_or_provider_payload() {
+        let first = retain_numeric_limits(&Value::Null, &json!({"contextWindowTokens":8192,
+            "estimatedInputBudgetTokens":4800,"providerMaxOutputTokens":1024,"apiKey":"fixture-secret"}));
+        let next = retain_numeric_limits(&first, &json!({"contextWindowTokens":16384,
+            "estimatedInputBudgetTokens":3600,"providerMaxOutputTokens":2048,"providerMaxInputTokens":0,
+            "message":"fixture-private"}));
+        assert_eq!(next, json!({"contextWindowTokens":8192,"estimatedInputBudgetTokens":3600,"providerMaxOutputTokens":1024}));
+        assert_eq!(retain_numeric_limits(&next, &json!({"estimatedInputBudgetTokens":9999999})), next);
+        assert!(!next.to_string().contains("fixture"));
+    }
+
+    #[test]
+    fn llama_rendered_context_rejection_keeps_only_verified_numeric_observations() {
+        for message in [
+            "request (12163 tokens) exceeds the available context size (8192 tokens), try increasing it fixture-secret",
+            "request (12,163 tokens) exceeds the available context size (8,192 tokens)",
+        ] {
+            let rejection = context_rejection(&json!({"error":{"message":message}}));
+            assert_eq!(rejection, json!({"kind":"context","contextWindowTokens":8192,
+                "requestTokens":12163,"verified":true}));
+            assert!(!rejection.to_string().contains("fixture-secret"));
+        }
+        for message in [
+            "request (4096 tokens) exceeds the available context size (8192 tokens)",
+            "request (12163 tokens) exceeds the available context size (0 tokens)",
+            "invalid tools parameter; context size is 8192 tokens",
+            "request (fixture tokens) exceeds the available context size (8192 tokens)",
+        ] {
+            assert!(context_rejection(&json!({"error":{"message":message}})).is_null());
+        }
+    }
+
+    #[test]
+    fn same_actual_window_narrows_underestimated_input_without_changing_the_window() {
+        let mut args = plan_arguments();
+        args["current"] = json!({"contextWindowTokens":8192,"inputBudgetTokens":5039,
+            "maxOutputTokens":1474});
+        args["rejection"] = json!({"kind":"context","contextWindowTokens":8192,
+            "requestTokens":12163,"verified":true});
+        args["cacheEntry"] = json!({"providerMaxInputTokens":8192});
+        let plan = context_recovery_plan(&args);
+        let input_limit = 5039_u64 * (8192 - 1474) * 9 / 12163 / 10;
+        assert_eq!(plan["limits"]["contextWindowTokens"], 8192);
+        assert_eq!(plan["limits"]["estimatedInputBudgetTokens"], input_limit);
+        assert!(plan["limits"].get("providerMaxInputTokens").is_none());
+        assert!(input_limit < 5039);
+        assert_eq!(plan["limits"]["budgetAdjusted"], true);
+        assert_eq!(plan["cacheEntry"]["contextWindowTokens"], 8192);
+        assert_eq!(plan["cacheEntry"]["estimatedInputBudgetTokens"], input_limit);
+        assert_eq!(plan["cacheEntry"]["providerMaxInputTokens"], 8192);
+        for (field, value) in [
+            ("verified", json!(false)),
+            ("requestTokens", Value::Null),
+            ("requestTokens", json!(8192)),
+        ] {
+            let mut unverified = args.clone();
+            unverified["rejection"][field] = value;
+            assert!(context_recovery_plan(&unverified).is_null());
+        }
+        args["rejection"]["requestTokens"] = json!(7000);
+        args["rejection"]["inputLimitTokens"] = json!(6000);
+        args["rejection"]["estimatedInputTokens"] = json!(4500);
+        let measured = context_recovery_plan(&args);
+        assert_eq!(measured["limits"]["estimatedInputBudgetTokens"], 4500 * 6000 * 9 / 7000 / 10);
+        assert_eq!(measured["limits"]["contextWindowTokens"], 8192);
+        args["rejection"]["requestTokens"] = json!(6000);
+        assert!(context_recovery_plan(&args).is_null());
     }
 
     #[test]

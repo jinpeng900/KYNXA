@@ -4,7 +4,6 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
@@ -40,41 +39,29 @@ public sealed partial class ShellPage
     private void TaskRegionGrip_ResetRequested(object? sender, EventArgs args)
     { _layout.WorkTaskRatio = 0; UpdateTaskRegionLayout(); SaveLayout(); }
 
-    private async void OpenWorkspaceFile()
-    {
-        if (_chatClosing || ActiveChatId is not Guid conversation) return;
-        try
-        {
-            var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-            picker.FileTypeFilter.Add("*");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-            var file = await picker.PickSingleFileAsync();
-            if (file is not null && !_chatClosing) AddWorkspaceTab(conversation,
-                ConversationWorkspaceSources.File(file.Path, userSelected: true), select: true);
-        }
-        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or InvalidOperationException or UnauthorizedAccessException)
-        { if (!_chatClosing) ShowActionFeedback(UiText.Get("文件打开失败，请重试。")); }
-    }
+    private async void OpenWorkspaceFile() => await BrowseWorkspaceFilesAsync();
 
-    private string? CurrentWorkspaceDirectory() => ActiveChatId is Guid conversation
-        ? FindChat(conversation).Project?.FolderPath
-        : WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId)?.FolderPath;
+    private string? CurrentWorkspaceDirectory() => CurrentWorkspaceMount()?.Path ?? CurrentWorkspaceProject()?.FolderPath;
 
     private void OpenWorkspaceChanges()
     {
         if (_chatClosing || ActiveChatId is not Guid conversation) return;
-        AddWorkspaceTab(conversation, new("changes/" + conversation.ToString("D"), "changes", UiText.Get("未提交变更"),
-            conversation.ToString("D")), select: true);
+        var mount = CurrentWorkspaceMount();
+        string title = UiText.Get("未提交变更") + (mount is null ? "" : " · " + mount.Name);
+        AddWorkspaceTab(conversation, new($"changes/{conversation:D}/{mount?.Id:D}", "changes", title,
+            conversation.ToString("D"), MountId: mount?.Id), select: true);
     }
 
     private void OpenWorkspaceTerminal()
     {
-        if (_chatClosing || ActiveChatId is not Guid conversation || CurrentWorkspaceDirectory() is null) return;
+        if (_chatClosing || ActiveChatId is not Guid conversation) return;
         int number = ResourcesFor(conversation).Items.Values.Count(item => item.Tab.Kind == "terminal") + 1;
+        var mount = CurrentWorkspaceMount();
+        string title = $"{UiText.Get("终端")} {number}" + (mount is null ? "" : $" · {mount.Name}");
         // A tab owns one PTY; opening another terminal must not select or replace the conversation's first session.
         // 每个标签拥有独立伪终端；再次新建不能选回或替换聊天中的第一个会话。
-        AddWorkspaceTab(conversation, new($"terminal/{conversation:D}/{Guid.NewGuid():N}", "terminal", $"{UiText.Get("终端")} {number}",
-            conversation.ToString("D")), select: true);
+        AddWorkspaceTab(conversation, new($"terminal/{conversation:D}/{Guid.NewGuid():N}", "terminal", title,
+            conversation.ToString("D"), MountId: mount?.Id), select: true);
     }
 
     private void AddWebsiteTab(string url, Guid? conversationId = null)

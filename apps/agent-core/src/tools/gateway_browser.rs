@@ -189,7 +189,7 @@ async fn client(socket: &str, ctx: &GatewayToolContext) -> Result<Arc<CdpClient>
             429,
         ));
     }
-    let connected = CdpClient::connect(socket).await?;
+    let connected = Box::pin(CdpClient::connect(socket)).await?;
     if !socket.contains("/devtools/browser/") {
         for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
             connected.call(method, json!({}), ctx).await?;
@@ -466,7 +466,7 @@ async fn start_workspace_browser(ctx: &GatewayToolContext) -> Result<WorkspaceBr
     let version = http_endpoint(&endpoint, "/json/version").await?;
     let socket = version["webSocketDebuggerUrl"].as_str()
         .ok_or_else(|| failure("BROWSER_INVALID_ENDPOINT", "随包浏览器窗口连接尚未就绪。", 502))?.to_owned();
-    let client = CdpClient::connect(&socket).await?;
+    let client = Box::pin(CdpClient::connect(&socket)).await?;
     // DevTools can listen before the app's first page exists; consume that page instead of creating a second window.
     // DevTools 可能先于应用首页就绪；等待并接管这个页面，不能误建第二个窗口留下孤窗。
     let initial_target = loop {
@@ -797,7 +797,7 @@ pub(crate) async fn workspace_action(
         else { session.child.as_ref().and_then(Child::id) };
     Ok(
         json!({"sessionId":id,"tabId":tab,"processId":process_id,"endpoint":session.endpoint,
-        "url":current_url,"title":current_title,"canGoBack":index>0 || session.workspace_page_index>0,
+        "url":current_url,"requestedUrl":session.workspace_address,"title":current_title,"canGoBack":index>0 || session.workspace_page_index>0,
         "canGoForward":index+1<entries.len() || session.workspace_page_index+1<session.workspace_pages.len(),
         "windowId":window["windowId"],"windowBounds":window["bounds"],
         "viewport":page_state["viewport"],
@@ -1008,15 +1008,15 @@ pub(crate) fn descriptors() -> Vec<Value> {
     for (name, description, properties, required) in [
         (
             "open",
-            "Open a browser for interaction. Reuses this chat's attached sidebar browser when available; otherwise opens isolated native Chromium in background. Returns actual sessionId and tabId.",
+            "Connect to this chat's current right-workspace page without a URL, or open the requested URL there. An unchanged URL preserves the current page. Returns actual sessionId and tabId; inspect with browser.snapshot.",
             json!({"url":{"type":"string"},"foreground":{"type":"boolean"},"browserPath":{"type":"string"},"cdpEndpoint":{"type":"string","description":"Explicit HTTP(S) DevTools endpoint of an already authorized browser; never launches or kills that external process."}}),
             vec!["reason"],
         ),
         (
             "tabs",
-            "List verified tabs in this chat's owned browser session.",
+            "Discover this chat's registered browser sessions when sessionId is omitted or empty; returns actual sessionId/tabId. With a sessionId, refresh its tabs. Discovery is not page-content observation; use browser.snapshot to inspect.",
             json!({"sessionId":{"type":"string"}}),
-            vec!["sessionId", "reason"],
+            vec!["reason"],
         ),
         (
             "navigate",
@@ -1253,6 +1253,19 @@ fn executable(input: &Value, ctx: &GatewayToolContext) -> Result<PathBuf, Gatewa
                 503,
             )
         })
+}
+
+/// A pending page can already own an embeddable window; its presentation path is not a navigation receipt.
+/// 页面未提交时仍可能已有可嵌入窗口；展示路径可用请求地址，不能改写真实导航回执。
+fn workspace_presentation_path(state: &Value) -> Value {
+    if state["url"].as_str().is_some_and(|text| url::Url::parse(text)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https")))
+    {
+        state["url"].clone()
+    } else {
+        state.get("requestedUrl").filter(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned().unwrap_or_else(|| state["url"].clone())
+    }
 }
 
 fn allowed_url(input: &str) -> Result<url::Url, GatewayError> {
@@ -1694,11 +1707,48 @@ async fn stage_upload(
     }
 }
 
+/// Runtime identities are chat-scoped navigation hints, never durable memory or page evidence.
+/// 运行时身份只提供当前聊天的导航线索，不进入长期记忆，也不冒充页面内容观测。
+async fn known_sessions(ctx: &GatewayToolContext) -> Value {
+    let handles = ctx.runtime.browsers.lock().await.iter()
+        .map(|(id, handle)| (id.clone(), handle.clone())).collect::<Vec<_>>();
+    let mut sessions = Vec::new();
+    let mut busy = false;
+    for (id, handle) in handles {
+        let Ok(session) = handle.try_lock() else { busy = true; continue; };
+        if session.closed || session.conversation_id != ctx.conversation_id { continue; }
+        let tab = session.embedded_target.as_ref().or(session.active_tab.as_ref());
+        let url = session.workspace_current_address.as_deref()
+            .or(session.workspace_address.as_deref()).unwrap_or("");
+        sessions.push((session.workspace_last_active, json!({"sessionId":id,"tabId":tab,
+            "url":url.chars().take(1024).collect::<String>(),"embedded":session.embedded_target.is_some(),
+            "state":"registered","pageContentObserved":false})));
+    }
+    sessions.sort_by(|left, right| right.0.cmp(&left.0));
+    let values = sessions.into_iter().map(|(_, value)| value).collect::<Vec<_>>();
+    let active = values.first().cloned().unwrap_or(Value::Null);
+    json!({"sessions":values,"sessionId":active["sessionId"],"activeSessionId":active["sessionId"],
+        "tabId":active["tabId"],"activeTabId":active["tabId"],
+        "coverage":if busy{"busy-or-unobserved"}else{"current-chat"},"complete":!busy,
+        "pageContentObserved":false})
+}
+
+pub(crate) async fn prompt_context(ctx: &GatewayToolContext) -> String {
+    let mut known = known_sessions(ctx).await;
+    let entries = known["sessions"].as_array_mut().unwrap();
+    if entries.is_empty() { return String::new(); }
+    entries.truncate(4);
+    format!("Current chat browser identities (runtime hints, not page contents): {known}. Use these IDs with browser.snapshot to inspect the existing page; browser.tabs without sessionId discovers this chat's sessions. Do not reopen or navigate merely to inspect the page.")
+}
+
 pub(crate) async fn execute(
     name: &str,
     input: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    if name == "browser.tabs" && input["sessionId"].as_str().is_none_or(|id| id.trim().is_empty()) {
+        return Ok(known_sessions(ctx).await);
+    }
     if name == "browser.open" {
         if let Some(endpoint) = input["cdpEndpoint"].as_str() {
             let endpoint = url::Url::parse(endpoint).map_err(|_| {
@@ -1815,17 +1865,20 @@ pub(crate) async fn execute(
                     continue;
                 }
                 if session.workspace_browser.is_some() {
+                    let navigate = input["url"].as_str().is_some_and(|url|
+                        session.workspace_address.as_deref() != Some(url)
+                            && session.workspace_current_address.as_deref() != Some(url));
                     let tab = session.embedded_target.as_deref().unwrap_or("");
-                    if let Some(socket) = session.tabs.get(tab) {
+                    if let Some(socket) = session.tabs.get(tab).filter(|_| navigate) {
                         if let Some(handoff) = inspect_verification_handoff(socket, input["url"].as_str(), ctx).await? {
                             return Ok(json!({"sessionId":id,"tabId":tab,"value":handoff,"executionEnvironment":environment(&session)}));
                         }
                     }
                     drop(session);
                     let mut opened = workspace_action(&json!({"sessionId":id,
-                        "action":if input["url"].is_string() { "navigate" } else { "state" },"url":input["url"]}), ctx).await?;
+                        "action":if navigate { "navigate" } else { "state" },"url":input["url"]}), ctx).await?;
                     opened["kind"] = json!("browser"); opened["presentation"] = json!("workspace");
-                    opened["path"] = opened["url"].clone(); opened["mimeType"] = json!("text/html"); opened["version"] = json!("live");
+                    opened["path"] = workspace_presentation_path(&opened); opened["mimeType"] = json!("text/html"); opened["version"] = json!("live");
                     return Ok(opened);
                 }
                 let tabs = update_tabs(&mut session, ctx).await?;
@@ -1850,7 +1903,7 @@ pub(crate) async fn execute(
             let mut opened = Box::pin(workspace_open(&input, ctx)).await?;
             opened["kind"] = json!("browser");
             opened["presentation"] = json!("workspace");
-            opened["path"] = opened["url"].clone();
+            opened["path"] = workspace_presentation_path(&opened);
             opened["mimeType"] = json!("text/html");
             opened["version"] = json!("live");
             return Ok(opened);
@@ -2369,6 +2422,19 @@ pub(crate) async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), Gat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_workspace_page_keeps_requested_presentation_path_without_claiming_navigation() {
+        let mut state = json!({"url":"about:blank","requestedUrl":"https://example.org/requested", "navigationCommitted":false});
+        assert_eq!(workspace_presentation_path(&state), "https://example.org/requested");
+        assert_eq!(state["url"], "about:blank");
+        assert_eq!(state["navigationCommitted"], false);
+        state["url"] = json!("https://example.org/redirected");
+        assert_eq!(workspace_presentation_path(&state), "https://example.org/redirected");
+        state["url"] = Value::Null;
+        assert_eq!(workspace_presentation_path(&state), "https://example.org/requested");
+    }
+
     #[cfg(windows)]
     fn use_bundled_fixture(ctx: &mut GatewayToolContext) -> bool {
         let bundle = std::env::var_os("KYNXA_BROWSER_BUNDLE_ROOT").map(PathBuf::from)
@@ -2394,8 +2460,10 @@ mod tests {
                 .route("/popup", get(|| async { Html("<title>Video page</title><h1>popup</h1>") }))
                 .route("/opened", get(|| async { Html("<title>Opened page</title><h1>opened</h1>") }))).await.unwrap();
         });
-        let opened = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx).await.unwrap();
+        let opened = super::super::gateway::execute("artifact.open",
+            json!({"url":format!("http://{address}/"),"title":"First"}), &ctx).await.unwrap();
         assert!(opened["processId"].as_u64().is_some());
+        assert_eq!(opened["requestedUrl"], format!("http://{address}/"));
         {
             let browser = ctx.runtime.workspace_browser.lock().await.as_ref().unwrap().clone();
             let targets = browser.lock().await.client.call("Target.getTargets", json!({}), &ctx).await.unwrap();
@@ -2403,9 +2471,23 @@ mod tests {
                 "The startup blank page must be consumed, not left behind in another window.");
         }
         let id = opened["sessionId"].as_str().unwrap();
+        let discovered = execute("browser.tabs", json!({"reason":"Find the current sidebar page"}), &ctx).await.unwrap();
+        assert_eq!(discovered["sessionId"], id);
+        assert_eq!(discovered["tabId"], opened["tabId"]);
+        assert!(prompt_context(&ctx).await.contains(id));
+        let socket = ctx.runtime.browsers.lock().await.get(id).unwrap().clone()
+            .lock().await.tabs[opened["tabId"].as_str().unwrap()].clone();
+        evaluate(&socket, "window.sidebarContinuity='preserved';true".into(), &ctx).await.unwrap();
+        let mut approved = ctx.clone();
+        approved.approved = true;
+        let connected = super::super::gateway::execute("browser.open",
+            json!({"url":format!("http://{address}/"),"reason":"Inspect the existing page"}), &approved).await.unwrap();
+        assert_eq!(connected["sessionId"], id);
+        assert_eq!(evaluate(&socket, "window.sidebarContinuity".into(), &ctx).await.unwrap(), "preserved");
         let duplicate = workspace_open(&json!({"url":format!("http://{address}/")}), &ctx).await.unwrap();
         assert_eq!(duplicate["sessionId"], id);
         let mut foreign = ctx.clone(); foreign.conversation_id = uuid::Uuid::new_v4().to_string();
+        assert!(execute("browser.tabs", json!({"reason":"Discover only this chat"}), &foreign).await.unwrap()["sessions"].as_array().unwrap().is_empty());
         assert_eq!(workspace_action(&json!({"sessionId":id,"action":"state"}), &foreign).await.unwrap_err().code, "BROWSER_SESSION_NOT_FOUND");
         assert_eq!(workspace_action(&json!({"sessionId":id,"action":"evaluate"}), &ctx).await.unwrap_err().code, "WORKSPACE_BROWSER_ACTION_INVALID");
         workspace_action(&json!({"sessionId":id,"action":"navigate","url":format!("http://{address}/next")}), &ctx).await.unwrap();

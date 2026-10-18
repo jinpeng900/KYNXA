@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "preferred": "auto",
+  "mirrors": {
+    "https://huggingface.co/": [
+      "https://hf-mirror.com/"
+    ]
+  },
+  "assets": {}
+}

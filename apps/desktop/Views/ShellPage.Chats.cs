@@ -63,9 +63,11 @@ public sealed partial class ShellPage
             return;
         }
 
-        if (_promptCompositionActive || _suppressComposingEnter)
+        if (_promptCompositionActive) return;
+        if (_suppressComposingEnter)
         {
             _suppressComposingEnter = false;
+            e.Handled = true;
             return;
         }
 
@@ -175,6 +177,8 @@ public sealed partial class ShellPage
         if (ConversationMessages is null) return;
         var chat = ViewModel.IsChatMode ? _activeStandaloneChat : _activeProjectChat;
         PositionConversationComposer(chat);
+        if (chat is { IsPersisted: true } && !IsReplyInProgress(chat.Id))
+            _ = GetPausedTaskRecovery(chat, FindChat(chat.Id).Project?.Id);
         if (chat is not null) _ = EnsureRecentHistoryAsync(chat);
         else _historyConversationId = null;
         if (chat is null || ActiveMessages.Count > 0 && ActiveMessages[0].ConversationId != chat.Id)
@@ -229,7 +233,6 @@ public sealed partial class ShellPage
     {
         if (TryQueuePrompt()) return;
         if (_sendingPrompt || _savingOnClose || _chatClosing || IsReplyInProgress(ActiveChatId)) return;
-        if (await TrySteerPausedTaskAsync()) return;
         string originalDraft = PromptTextBox.Text;
         string text = originalDraft.Trim();
         string attachmentDraftKey = AttachmentDraftKey;
@@ -322,7 +325,15 @@ public sealed partial class ShellPage
             _sendingPrompt = false;
             UpdateSendButtonState();
         }
-        if (preparedReply is not null) await ReceiveReplyAsync(preparedReply);
+        if (preparedReply is not null)
+        {
+            // Give the accepted input and cleared composer their UI turn before preparing network requests.
+            // 先让已接受的消息与清空后的输入框完成本轮界面更新，再准备网络请求。
+            var presented = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () => presented.TrySetResult()))
+                await presented.Task;
+            await ReceiveReplyAsync(preparedReply);
+        }
     }
 
     private void ChatHeader_PointerEntered(object sender, PointerRoutedEventArgs e)

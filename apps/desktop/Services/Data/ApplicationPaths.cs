@@ -12,6 +12,8 @@ public static class ApplicationPaths
     private static string? _packagedPointerDirectory;
     private static string? _legacyModelHome;
     private static string? _legacyDesktopDirectory;
+    private static string? _installedDataRoot;
+    private static string? _installedExtensionRoot;
 
     public static string Root => Path.TrimEndingDirectorySeparator(Path.GetFullPath(
         Environment.GetEnvironmentVariable("KYNXA_APPLICATION_ROOT") is string configured && !string.IsNullOrWhiteSpace(configured)
@@ -20,8 +22,8 @@ public static class ApplicationPaths
     public static string StateRoot => _packagedStateRoot ?? Root;
     public static bool UsesPackagedStorage => _packagedStateRoot is not null;
     public static string PointerDirectory => _packagedPointerDirectory ?? Root;
-    public static string DefaultDataRoot => Path.Combine(StateRoot, "Data");
-    public static string DefaultExtensionRoot => Path.Combine(StateRoot, "Extensions");
+    public static string DefaultDataRoot => _installedDataRoot ?? Path.Combine(StateRoot, "Data");
+    public static string DefaultExtensionRoot => _installedExtensionRoot ?? Path.Combine(StateRoot, "Extensions");
     public static string StoragePointerPath => Environment.GetEnvironmentVariable("KYNXA_STORAGE_POINTER") is string pointer && !string.IsNullOrWhiteSpace(pointer)
         ? Resolve(pointer) : Path.Combine(PointerDirectory, "storage.json");
     public static string MigrationLockPath => Environment.GetEnvironmentVariable("KYNXA_STORAGE_MIGRATION_LOCK") is string marker && !string.IsNullOrWhiteSpace(marker)
@@ -59,6 +61,25 @@ public static class ApplicationPaths
         _packagedPointerDirectory = Resolve(pointerDirectory);
         _legacyModelHome = legacyModelHome is null ? null : Resolve(legacyModelHome);
         _legacyDesktopDirectory = legacyDesktopDirectory is null ? null : Resolve(legacyDesktopDirectory);
+    }
+
+    /// <summary>
+    /// Resolve installer-owned defaults before packaged storage chooses its legacy fallback.
+    /// 安装器路径优先于包身份的旧目录回退；可迁移指针放在用户选择的可写数据目录中。
+    /// </summary>
+    public static bool TryConfigureInstallation()
+    {
+        string path = Path.Combine(Root, "kynxa-installation.json");
+        if (!File.Exists(path)) return false;
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var configuration = document.RootElement;
+        if (!configuration.TryGetProperty("version", out var version) || version.GetInt32() != 1)
+            throw new InvalidDataException("KYNXA 安装位置配置版本无效。");
+        _installedDataRoot = Resolve(configuration.GetProperty("dataRoot").GetString()!);
+        _installedExtensionRoot = Resolve(configuration.GetProperty("extensionRoot").GetString()!);
+        _packagedPointerDirectory = configuration.TryGetProperty("pointerDirectory", out var pointer)
+            ? Resolve(pointer.GetString()!) : Path.Combine(_installedDataRoot, "Installer");
+        return true;
     }
 
     public static string ResolveDataRoot(string applicationRoot, string? environmentRoot = null, string? modelHome = null,

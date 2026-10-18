@@ -339,6 +339,34 @@ impl ModelConfigStore {
             .filter(|_| result["found"] == true)
             .map(str::to_owned))
     }
+    /// Remove one connection under the existing writer gate, preserving all other providers and credentials.
+    /// 复用已有写入锁移除单个连接，保留其他供应商及其凭据。
+    pub async fn remove(&self, provider_id: &str) -> Result<(), ModelError> {
+        let _save = SAVE_GATE
+            .get_or_init(|| Arc::new(Mutex::new(())))
+            .lock()
+            .await;
+        let plan = connection_contract(
+            "models.connections.removePlan",
+            json!({"document":self.document().await?,"providerId":provider_id}),
+        )?;
+        let bytes = serde_json::to_vec_pretty(&plan["document"])
+            .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置无法编码。", 500))?;
+        let home = self.home.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::storage::managed_files::atomic_write(
+                &home,
+                &home.join("connections.json"),
+                &bytes,
+                MAXIMUM_CONFIGURATION_BYTES,
+            )
+        })
+        .await
+        .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置保存任务未完成。", 500))?
+        .map_err(|_| ModelError::new("MODEL_CONFIGURATION_WRITE_FAILED", "模型配置保存失败；原记录已保留。", 500))?;
+        Ok(())
+    }
+
     pub async fn save(&self, input: Value) -> Result<Value, ModelError> {
         let _save = SAVE_GATE
             .get_or_init(|| Arc::new(Mutex::new(())))

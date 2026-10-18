@@ -61,7 +61,9 @@ public sealed partial class ShellPage : Page
                 if (node == ConversationMessages) return;
             ConversationMessages.ClearSelection();
         }), handledEventsToo: true);
-        PromptTextBox.AddHandler(UIElement.KeyDownEvent,
+        // Preview runs before TextBox inserts a return; bubbling KeyDown runs after its editing handler.
+        // 预览阶段先拦截发送键，避免 TextBox 在普通 KeyDown 之前已经插入换行。
+        PromptTextBox.AddHandler(UIElement.PreviewKeyDownEvent,
             new KeyEventHandler(PromptTextBox_KeyDown), handledEventsToo: true);
         PromptTextBox.AddHandler(UIElement.KeyUpEvent,
             new KeyEventHandler(PromptTextBox_KeyUp), handledEventsToo: true);
@@ -499,7 +501,15 @@ public sealed partial class ShellPage : Page
         return null;
     }
 
-    private void ModelManagementButton_Click(object sender, RoutedEventArgs e) => OpenModelManagement();
+    private void ModelManagementButton_Click(object sender, RoutedEventArgs e)
+    {
+        // Finish the navigation button's focus/visual-state stack before presenting a second native window.
+        // 导航按钮完成焦点与可视状态调用栈后，再呈现第二个原生窗口，与菜单入口的排队时序保持一致。
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (IsLoaded && !_chatClosing) OpenModelManagement();
+        });
+    }
 
     private void OpenModelManagement(bool customModels = false)
     {

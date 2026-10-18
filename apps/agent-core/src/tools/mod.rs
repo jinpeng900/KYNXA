@@ -105,6 +105,7 @@ pub(crate) mod gateway_workspace_preview;
 pub(crate) mod gateway_browser;
 mod gateway_browser_permissions;
 mod gateway_mcp;
+mod gateway_tool_memory;
 mod gateway_mcp_budget;
 mod gateway_search;
 pub(crate) mod gateway_process;

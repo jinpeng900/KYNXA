@@ -15,8 +15,36 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private Window? _storageSettingsWindow;
+    private LocalModelsPage? _localModelsPage;
+    private ContentControl? _settingsPageHost;
+    private ScrollViewer? _settingsHome;
     private sealed record StorageHealth(int StorageProtocol, int ActiveRequests, bool Migrating, string? ModelDataHome,
         bool MigrationReady = false, string? RuntimeCleanupError = null);
+
+    private void OpenLocalModels()
+    {
+        if (_chatClosing || _savingOnClose || _projectViewClosed || StoragePaths.IsMigrating) return;
+        if (_localModelsPage is not null || _storageSettingsWindow is not { } window ||
+            _settingsPageHost is not { } host || _settingsHome is not { } home) return;
+        var page = new LocalModelsPage(window);
+        _localModelsPage = page;
+        void RefreshChoices(object? sender, EventArgs args)
+        {
+            if (!_chatClosing && !_projectViewClosed && !_closeApproved) _ = RefreshModelPickerAsync();
+        }
+        page.ModelsChanged += RefreshChoices;
+        page.BackRequested += (_, _) =>
+        {
+            // Retain the same settings controls and scroll position while the subpage is open.
+            // 子页面打开期间保留设置首页原控件及滚动位置，返回时不重建首页。
+            host.Content = home;
+            page.ModelsChanged -= RefreshChoices;
+            page.Dispose();
+            _localModelsPage = null;
+            RefreshChoices(null, EventArgs.Empty);
+        };
+        host.Content = page;
+    }
 
     private void StorageSettings_Click(object sender, RoutedEventArgs args)
     {
@@ -122,6 +150,19 @@ public sealed partial class ShellPage
         retrievalRow.Children.Add(retrievalButton);
         content.Children.Add(retrievalRow);
         retrievalButton.Click += (_, _) => OpenRetrievalSettings();
+        var localModelsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
+        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        localModelsRow.Children.Add(LocalizedLabel("本地对话模型"));
+        var localModelsButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6),
+            CornerRadius = new CornerRadius(8), Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
+        UiLocalization.Bind(localModelsButton, Button.ContentProperty, "管理");
+        AutomationProperties.SetAutomationId(localModelsButton, "LocalModelsSettingsButton");
+        Grid.SetColumn(localModelsButton, 1);
+        localModelsRow.Children.Add(localModelsButton);
+        content.Children.Add(localModelsRow);
+        localModelsButton.Click += (_, _) => OpenLocalModels();
         var section = LocalizedLabel("存储", 13);
         section.Opacity = 0.6;
         content.Children.Add(section);
@@ -152,8 +193,12 @@ public sealed partial class ShellPage
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalContentAlignment = HorizontalAlignment.Stretch };
         AutomationProperties.SetAutomationId(scroll, "SettingsScrollViewer");
-        Grid.SetRow(scroll, 1);
-        root.Children.Add(titleBar); root.Children.Add(scroll);
+        var pageHost = new ContentControl { Content = scroll, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch };
+        _settingsPageHost = pageHost;
+        _settingsHome = scroll;
+        Grid.SetRow(pageHost, 1);
+        root.Children.Add(titleBar); root.Children.Add(pageHost);
         window.Content = root;
         window.ExtendsContentIntoTitleBar = true;
         window.SetTitleBar(titleBar);
@@ -217,6 +262,10 @@ public sealed partial class ShellPage
             UiText.LanguageChanged -= UpdateSettingsTitle;
             appearanceSection.Dispose();
             storageControls.Close();
+            _localModelsPage?.Dispose();
+            _localModelsPage = null;
+            _settingsPageHost = null;
+            _settingsHome = null;
             _storageSettingsWindow = null;
         };
         extensionRow.ChangeButton.Click += async (_, _) => await ChangeExtensionStorageAsync(storageControls);

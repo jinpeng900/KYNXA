@@ -13,7 +13,8 @@ use std::sync::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) use super::gateway_mcp::{foreground, prewarm};
+pub(crate) use super::gateway_mcp::{foreground, prewarm, reusable_catalog as reusable_mcp_catalog};
+pub(crate) use super::gateway_tool_memory::rank_tool_hints;
 use super::service::ToolSession;
 use crate::gateway_contract::GatewayError;
 
@@ -22,6 +23,12 @@ pub type ExternalTool = Arc<
         + Send
         + Sync,
 >;
+
+#[derive(Clone)]
+struct CachedSkillHeader {
+    version: super::local_files::FileVersion,
+    metadata: Option<Value>,
+}
 
 pub struct ToolRuntime {
     pub(crate) native: Arc<Mutex<ToolSession>>,
@@ -35,8 +42,10 @@ pub struct ToolRuntime {
     pub(crate) cdp: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_browser::CdpClient>>>,
     pub(crate) jobs: tokio::sync::Mutex<HashMap<String, super::gateway_process::HostJob>>,
     pub(crate) schemas: tokio::sync::RwLock<Vec<Value>>,
+    pub(crate) tool_memory: super::gateway_tool_memory::ToolMemoryRuntime,
     searches: Mutex<HashMap<String, Arc<Mutex<ToolSession>>>>,
     code_versions: Mutex<HashMap<String, Arc<Mutex<super::service_code_versions::CodeVersions>>>>,
+    skill_headers: Mutex<HashMap<PathBuf, CachedSkillHeader>>,
     pub(crate) mcp_errors: tokio::sync::Mutex<HashMap<String, Value>>,
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
@@ -59,8 +68,10 @@ impl Default for ToolRuntime {
             cdp: Default::default(),
             jobs: Default::default(),
             schemas: Default::default(),
+            tool_memory: Default::default(),
             searches: Default::default(),
             code_versions: Default::default(),
+            skill_headers: Default::default(),
             mcp_errors: Default::default(),
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
@@ -392,7 +403,7 @@ pub async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, GatewayErro
     Ok(tools)
 }
 
-fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), GatewayError> {
+pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), GatewayError> {
     let invalid = || {
         failure(
             "INVALID_TOOL_ARGUMENTS",
@@ -463,6 +474,92 @@ fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), Gat
     Ok(())
 }
 
+pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
+    name.starts_with("filesystem.") || ["document.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.host.run","terminal.host.start"].contains(&name)
+        || name == "artifact.open" && !arguments["url"].is_string()
+}
+
+pub(crate) fn operation_mount_binding(ctx: &GatewayToolContext, arguments: &Value) -> Result<Value, GatewayError> {
+    let mounts = ctx.config["workspaceMounts"].as_array().or_else(||ctx.config["bindingSnapshot"]["mounts"].as_array());
+    let Some(mounts) = mounts else { return Ok(Value::Null); };
+    let requested_id = arguments["mountId"].as_str().or_else(||ctx.config["activeMountId"].as_str());
+    if mounts.is_empty() && requested_id.is_none() {
+        return Ok(Value::Null);
+    }
+    if let Some(id) = requested_id {
+        return mounts.iter().find(|mount|mount["id"] == id).cloned()
+            .ok_or_else(||failure("WORKSPACE_MOUNT_UNAVAILABLE", "该目录不在本次任务的已授权挂载中。", 409));
+    }
+    if let Some(path) = arguments["path"].as_str().or_else(||arguments["cwd"].as_str()).filter(|path|Path::new(path).is_absolute()) {
+        return Ok(mounts.iter().filter(|mount|mount["path"].as_str().is_some_and(|root|super::local_files::within(Path::new(root),Path::new(path))))
+            .max_by_key(|mount|mount["path"].as_str().unwrap_or("").len()).cloned()
+            .unwrap_or(Value::Null));
+    }
+    Ok(mounts.iter().find(|mount|mount["id"] == ctx.config["defaultMountId"]).cloned().unwrap_or(Value::Null))
+}
+
+/// Freeze a resumed task's original mounts; catalog additions never silently enlarge its authority.
+/// 固定续接任务原有的挂载授权；目录列表新增不能悄悄扩大该任务的访问范围。
+pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot: &Value) -> Result<(), GatewayError> {
+    if !snapshot.is_object() { return Ok(()); }
+    if let Some(mounts) = snapshot["mounts"].as_array() {
+        ctx.config["workspaceMounts"] = json!(mounts);
+        ctx.config["defaultMountId"] = snapshot["defaultMountId"].clone();
+        ctx.config["bindingSnapshot"] = snapshot.clone();
+        ctx.authorized_roots = mounts.iter().filter_map(|mount|mount["path"].as_str().map(PathBuf::from)).collect();
+    } else if let Some(folder) = snapshot["folderPath"].as_str() {
+        let mounts = ctx.config["workspaceMounts"].as_array().into_iter().flatten()
+            .filter(|mount|mount["path"] == folder).cloned().collect::<Vec<_>>();
+        ctx.config["defaultMountId"] = mounts.first().map(|mount|mount["id"].clone()).unwrap_or(Value::Null);
+        ctx.config["workspaceMounts"] = json!(mounts);
+        ctx.authorized_roots = vec![PathBuf::from(folder)];
+    }
+    if let Some(folder) = snapshot["folderPath"].as_str().filter(|folder|!folder.is_empty()) {
+        ctx.workdir = PathBuf::from(folder);
+        if !ctx.authorized_roots.contains(&ctx.workdir) { ctx.authorized_roots.push(ctx.workdir.clone()); }
+    }
+    Ok(())
+}
+
+pub(crate) async fn select_workspace_context(ctx: &GatewayToolContext, arguments: &Value) -> Result<GatewayToolContext, GatewayError> {
+    let selected = if arguments["input"].is_string() && arguments["sessionId"].is_string() {
+        super::gateway_workspace_terminal::session_mount(ctx,arguments["sessionId"].as_str().unwrap()).await?
+    } else { operation_mount_binding(ctx, arguments)? };
+    if selected.is_null() { return Ok(ctx.clone()); }
+    let root = ctx.data_home.clone();
+    let conversation = ctx.conversation_id.clone();
+    let relation = tokio::task::spawn_blocking(move ||crate::storage::gateway::current_relationship(&root,&conversation)).await
+        .map_err(|_|failure("WORKSPACE_SCOPE_FAILED", "工作挂载核验线程结束。", 503))??;
+    if relation["projectId"].as_str() != ctx.project_id.as_deref()
+        || !relation["mounts"].as_array().into_iter().flatten().any(|mount|crate::storage::workspace_mounts::same_mount(&selected,mount)) {
+        return Err(failure("WORKSPACE_MOUNT_CHANGED", "该挂载已移除或改变；任务进度已保留，请核对后继续。", 409));
+    }
+    let mut selected_context = ctx.clone();
+    selected_context.workdir = PathBuf::from(selected["path"].as_str().unwrap());
+    selected_context.authorized_roots = vec![selected_context.workdir.clone()];
+    selected_context.config["activeMountId"] = selected["id"].clone();
+    selected_context.config["activeMount"] = selected;
+    if let Some(path) = arguments["path"].as_str().or_else(||arguments["cwd"].as_str()) {
+        let (_, outside) = canonical_authorized(&selected_context,path,true)?;
+        if outside {
+            if arguments["mountId"].is_string() { return Err(failure("WORKSPACE_PATH_OUTSIDE", "文件路径不属于指定挂载。", 403)); }
+            return Ok(ctx.clone());
+        }
+    }
+    Ok(selected_context)
+}
+
+pub(crate) async fn workspace_files(arguments: &Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    let selected = select_workspace_context(ctx,arguments).await?;
+    let path = arguments["path"].as_str().unwrap_or(".");
+    let (absolute_path, outside) = canonical_authorized(&selected,path,false)?;
+    if outside { return Err(failure("WORKSPACE_PATH_OUTSIDE", "文件列表只能浏览选定挂载。", 403)); }
+    let mut value = filesystem("filesystem.list", json!({"path":path}), &selected).await?;
+    value["mountId"] = selected.config["activeMountId"].clone();
+    value["path"] = json!(absolute_path);
+    Ok(value)
+}
+
 pub(crate) fn canonical_authorized(
     ctx: &GatewayToolContext,
     requested: &str,
@@ -478,10 +575,27 @@ pub(crate) fn canonical_authorized(
     let roots = ctx
         .authorized_roots
         .iter()
-        .chain(std::iter::once(&ctx.workdir));
-    let inside = roots
-        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .chain(std::iter::once(&ctx.workdir))
+        .filter_map(|root| std::fs::canonicalize(root).ok()).collect::<Vec<_>>();
+    let originally_inside = roots.iter().any(|root|super::local_files::within(root,&path));
+    let current_roots = if let Some(mounts) = ctx.config["workspaceMounts"].as_array() {
+        let relation = crate::storage::gateway::current_relationship(&ctx.data_home,&ctx.conversation_id)?;
+        if relation["projectId"].as_str() != ctx.project_id.as_deref() {
+            return Err(failure("WORKSPACE_MOUNT_CHANGED","当前聊天的工作归属已变化。",409));
+        }
+        let mut allowed = mounts.iter().filter(|old|relation["mounts"].as_array().into_iter().flatten()
+            .any(|new|crate::storage::workspace_mounts::same_mount(old,new)))
+            .filter_map(|mount|mount["path"].as_str().and_then(|path|std::fs::canonicalize(path).ok())).collect::<Vec<_>>();
+        if mounts.is_empty() {
+            if let Ok(sandbox) = std::fs::canonicalize(ctx.data_home.join("Sandboxes").join(&ctx.conversation_id)) { allowed.push(sandbox); }
+        }
+        roots.iter().filter(|root|allowed.contains(root)).cloned().collect::<Vec<_>>()
+    } else { roots };
+    let inside = current_roots.iter()
         .any(|root| super::local_files::within(&root, &path));
+    if originally_inside && !inside {
+        return Err(failure("WORKSPACE_MOUNT_CHANGED","原授权挂载已移除或改变，不能继续读取或修改。",409));
+    }
     Ok((path, !inside))
 }
 
@@ -772,16 +886,27 @@ async fn execute_inner(
     };
     if let Some(descriptor) = descriptors
         .iter()
-        .find(|descriptor| descriptor["name"] == tool_name)
+        .find(|descriptor| descriptor["name"] == tool_name && !tool_name.starts_with("mcp."))
     {
         validate_schema(&descriptor["inputSchema"], &args, tool_name)?;
     }
     if tool_name == "work.folder.bind" {
         return bind_work(args, ctx).await;
     }
+    if tool_name == "work.folder.list" {
+        let root = ctx.data_home.clone();
+        let chat = ctx.conversation_id.clone();
+        let relation = tokio::task::spawn_blocking(move ||crate::storage::gateway::current_relationship(&root,&chat)).await
+            .map_err(|_|failure("WORKSPACE_SCOPE_FAILED", "工作挂载读取线程结束。", 503))??;
+        let allowed = ctx.config["workspaceMounts"].as_array();
+        let mounts = relation["mounts"].as_array().into_iter().flatten().filter(|mount|
+            allowed.is_none_or(|allowed|allowed.iter().any(|old|crate::storage::workspace_mounts::same_mount(old,mount))))
+            .cloned().collect::<Vec<_>>();
+        return Ok(json!({"mounts":mounts,"defaultMountId":ctx.config.get("defaultMountId").unwrap_or(&relation["defaultMountId"]),"managedWorkspace":mounts.is_empty(),"workspaceRoot":ctx.workdir}));
+    }
     if tool_name == "computer.launch" {
         if let Some(target) = workspace_launch_target(&args, ctx)? {
-            let mut opened = super::gateway_browser::workspace_open(&target, ctx).await?;
+            let mut opened = Box::pin(super::gateway_browser::workspace_open(&target, ctx)).await?;
             for (field, value) in target.as_object().unwrap() {
                 if !opened.get(field).is_some_and(|value| !value.is_null()) {
                     opened[field] = value.clone();
@@ -795,7 +920,9 @@ async fn execute_inner(
     if tool_name.starts_with("mcp.") {
         super::gateway_mcp::authorized_server(tool_name, ctx)?;
     }
-    let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop"].contains(&tool_name) || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
+    let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop",
+        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.close"].contains(&tool_name)
+        || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
         &json!({"name":tool_name,"permissionMode":ctx.permission_mode,"options":options}),
@@ -820,7 +947,16 @@ async fn execute_inner(
         return Ok(approval(tool_name, &args, ctx));
     }
     if tool_name == "artifact.open" && args["url"].is_string() {
-        return super::gateway_workspace_preview::web_target(&args);
+        let target = super::gateway_workspace_preview::web_target(&args)?;
+        let mut opened = Box::pin(super::gateway_browser::workspace_open(&target, ctx)).await?;
+        opened["currentUrl"] = opened["url"].clone();
+        for (field, value) in target.as_object().unwrap() {
+            if matches!(field.as_str(), "url" | "path" | "title" | "kind" | "mimeType" | "version") {
+                opened[field] = value.clone();
+            }
+        }
+        opened["presentation"] = json!("workspace");
+        return Ok(opened);
     }
     if tool_name == "attachment.read" {
         return super::gateway_attachment_read::read(args, ctx).await;
@@ -836,11 +972,14 @@ async fn execute_inner(
     if tool_name.starts_with("filesystem.") || ["document.read", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
+    if tool_name.starts_with("terminal.workspace.") {
+        return Box::pin(super::gateway_workspace_terminal::execute(tool_name, &args, ctx)).await;
+    }
     if tool_name.starts_with("terminal.") || tool_name.starts_with("computer.") {
         return super::gateway_process::execute(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("browser.") {
-        return super::gateway_browser::execute(tool_name, args, ctx).await;
+        return Box::pin(super::gateway_browser::execute(tool_name, args, ctx)).await;
     }
     if tool_name.starts_with("mcp.") {
         return super::gateway_mcp::execute(tool_name, args, ctx).await;
@@ -859,6 +998,7 @@ async fn execute_inner(
         if tool_name == "tool.load" {
             let mut known = all.clone();
             known.extend(ctx.runtime.schemas.read().await.iter().cloned());
+            known.extend(reusable_mcp_catalog(ctx));
             // Resolve exact known wire aliases only; model spelling or a guessed hash cannot invent a capability.
             // 只归一化已知工具的精确协议别名；模型拼写或猜出的哈希不能创造能力。
             let names: Vec<Value> = args["names"]
@@ -915,19 +1055,23 @@ async fn execute_inner(
                 .filter(|tool| tool["serverId"].is_string())
                 .cloned(),
         );
+        for tool in reusable_mcp_catalog(ctx) {
+            if !all.iter().any(|existing| existing["name"] == tool["name"]) {
+                all.push(tool);
+            }
+        }
         all.extend(super::gateway_mcp::servers(ctx).iter().map(|server|json!({"name":format!("mcp.{}",server["id"].as_str().unwrap_or("")),"description":format!("MCP service {}. Load this group to discover its actual enabled tools; configured does not imply ready.",server["name"].as_str().unwrap_or("")),"source":format!("mcp:{}",server["id"].as_str().unwrap_or("")),"serverId":server["id"]})));
         // Keep native aliases and ranking authoritative; transport code must not reinterpret intent.
         // 别名与排序仍由既有原生规则负责；传输接线不重新实现另一套语义识别。
         let indexes = super::discovery::calculate(
             "tools.searchTools",
-            &json!({"descriptors":all,"query":args["query"]}),
+            &json!({"descriptors":all,"query":args["query"],"includeScores":true}),
         )
         .map_err(|message| failure("TOOL_DISCOVERY_FAILED", &message, 500))?;
-        let matching = indexes
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|index| index.as_u64())
+        let mut indexes = indexes.as_array().cloned().unwrap_or_default();
+        rank_tool_hints(ctx, &all, &mut indexes);
+        let matching = indexes.iter()
+            .filter_map(|hit| hit.as_u64().or_else(|| hit["index"].as_u64()))
             .filter_map(|index| all.get(index as usize))
             .collect::<Vec<_>>();
         let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -1083,6 +1227,10 @@ pub async fn execute(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    let selected = if workspace_path_tool(tool_name,&args) {
+        Some(select_workspace_context(ctx,&args).await?)
+    } else { None };
+    let ctx = selected.as_ref().unwrap_or(ctx);
     let checked = if tool_name.starts_with("skill.")
         || tool_name.starts_with("mcp.")
         || tool_name == "tool.load"
@@ -1093,7 +1241,16 @@ pub async fn execute(
         None
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
-    let mut result = execute_inner(tool_name, args, ctx).await?;
+    // Keep the largest native dispatch branch off the caller's async frame.
+    // 将较大的原生执行分支放到堆上，避免调试构建的浏览器握手层层占用线程栈。
+    let started = std::time::Instant::now();
+    let outcome = Box::pin(execute_inner(tool_name, args, ctx)).await;
+    super::gateway_tool_memory::remember_outcome(tool_name, &outcome, started.elapsed(), ctx).await;
+    let mut result = outcome?;
+    if result.is_object() && ctx.config["activeMount"].is_object() {
+        result["mountId"] = ctx.config["activeMountId"].clone();
+        result["mountName"] = ctx.config["activeMount"]["name"].clone();
+    }
     let server = if let Some(suffix) = tool_name.strip_prefix("mcp.") {
         let id = suffix.split('.').next().unwrap_or("");
         super::gateway_mcp::servers(ctx)
@@ -1108,6 +1265,80 @@ pub async fn execute(
         object.insert("executionEnvironment".into(), environment);
     }
     Ok(result)
+}
+
+/// Cache only discovery metadata; reading or running a skill always obtains its current original body.
+/// 只缓存发现元信息；读取或运行技能始终取得当前原文，缓存不提供执行或权限依据。
+async fn skill_metadata(
+    path: &Path,
+    version: super::local_files::FileVersion,
+    include_body: bool,
+    ctx: &GatewayToolContext,
+) -> Result<Option<Value>, GatewayError> {
+    if !include_body {
+        if let Some(cached) = ctx.runtime.skill_headers.lock().ok()
+            .and_then(|cache| cache.get(path).filter(|entry| entry.version == version).cloned())
+        {
+            return Ok(cached.metadata);
+        }
+    }
+    let source = path.to_owned();
+    let (text, hash) = tokio::task::spawn_blocking(move || {
+        let bytes = super::local_files::read_checked(
+            &source, 2 * 1024 * 1024, false, "APP_SKILL_CHANGED",
+        )
+        .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| failure("INVALID_APP_SKILL", "技能正文不是 UTF-8。", 400))?
+            .trim_start_matches('\u{feff}')
+            .to_owned();
+        Ok::<_, GatewayError>((text, super::local_files::sha256(&bytes)))
+    })
+    .await
+    .map_err(|_| failure("TOOL_WORKER_FAILED", "技能读取线程退出。", 500))??;
+    let header = text.strip_prefix("---")
+        .and_then(|text| text.split_once("\n---").map(|(header, _)| header))
+        .and_then(|header| serde_yaml::from_str::<Value>(header).ok())
+        .filter(|header| header["name"].as_str().is_some_and(|name| !name.is_empty())
+            && header["description"].as_str().is_some_and(|description| !description.is_empty()));
+    let mut metadata = header.map(|header| json!({
+        "name":header["name"],"description":header["description"],
+        "sha256":hash,"standardCompliant":true,
+    }));
+    if let Ok(mut cache) = ctx.runtime.skill_headers.lock() {
+        if cache.len() >= 512 { cache.clear(); }
+        cache.insert(path.to_owned(), CachedSkillHeader { version, metadata:metadata.clone() });
+    }
+    if include_body {
+        if let Some(metadata) = &mut metadata { metadata["content"] = json!(text); }
+    }
+    Ok(metadata)
+}
+
+/// Select task-related skill headers without loading their bodies or executing a discovery tool call.
+/// 按当前任务选择技能头，不加载正文、不额外派发发现工具；普通聊天无需调用此入口。
+pub(crate) async fn relevant_skill_headers(
+    ctx: &GatewayToolContext,
+    query: &str,
+) -> Result<Vec<Value>, GatewayError> {
+    if query.trim().is_empty() { return Ok(Vec::new()); }
+    let checked = checked_configuration(ctx).await?;
+    let inventory = skills("skill.list", json!({}), &checked).await?;
+    let headers = inventory["skills"].as_array().cloned().unwrap_or_default();
+    // Reuse bilingual task signals so Chinese requests can find the shipped English skill names.
+    // 复用双语任务信号，使中文要求也能找到随包英文技能名，不增加模型判断调用。
+    let signals = super::discovery::selection_signals(&json!({"message":query}));
+    let topics = [
+        ("web", "web-research"), ("browser", "browser-workflow"),
+        ("desktop", "desktop-workflow"), ("hostTerminal", "terminal-workflow"),
+        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect safe-file-edit"),
+    ].into_iter().filter(|(signal, _)| signals[*signal] == true)
+        .map(|(_, topic)| topic).collect::<Vec<_>>().join(" ");
+    let query = format!("{topics} {query}");
+    let indices = super::discovery::calculate("tools.searchTools", &json!({"query":query,"descriptors":headers}))
+        .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
+    Ok(indices.as_array().into_iter().flatten().filter_map(Value::as_u64)
+        .filter_map(|index| headers.get(index as usize).cloned()).take(6).collect())
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1144,7 +1375,10 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
                 break;
             }
             let path = entry.path().join("SKILL.md");
-            if !path.is_file() || super::local_files::inspect(&path, false, false).is_err() {
+            let Ok(Some(metadata)) = super::local_files::inspect(&path, false, false) else {
+                continue;
+            };
+            if !metadata.is_file() {
                 continue;
             }
             // A selected skill needs only its own body; unrelated packages must not slow or break that read.
@@ -1164,41 +1398,15 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
             {
                 continue;
             }
-            let source = path.clone();
-            let (text, hash) = tokio::task::spawn_blocking(move || {
-                let bytes = super::local_files::read_checked(
-                    &source,
-                    2 * 1024 * 1024,
-                    false,
-                    "APP_SKILL_CHANGED",
-                )
-                .map_err(|error| failure(&error.code, &error.message, error.status_code))?;
-                let text = std::str::from_utf8(&bytes)
-                    .map_err(|_| failure("INVALID_APP_SKILL", "技能正文不是 UTF-8。", 400))?
-                    .trim_start_matches('\u{feff}')
-                    .to_owned();
-                Ok::<_, GatewayError>((text, super::local_files::sha256(&bytes)))
-            })
-            .await
-            .map_err(|_| failure("TOOL_WORKER_FAILED", "技能读取线程退出。", 500))??;
-            let Some(frontmatter) = text
-                .strip_prefix("---")
-                .and_then(|text| text.split_once("\n---").map(|(header, _)| header))
-            else {
+            let Ok(version) = super::local_files::file_version(&path, &metadata) else {
                 continue;
             };
-            let Ok(header) = serde_yaml::from_str::<Value>(frontmatter) else {
+            let Some(mut metadata) = skill_metadata(&path, version, name != "skill.list", ctx).await? else {
                 continue;
             };
-            if !header["name"].as_str().is_some_and(|name| !name.is_empty())
-                || !header["description"]
-                    .as_str()
-                    .is_some_and(|description| !description.is_empty())
-            {
-                continue;
-            }
-            available.push(json!({"id":id,"name":header["name"],"description":header["description"],"source":path,
-                "sha256":hash,"content":text,"standardCompliant":true}));
+            metadata["id"] = json!(id);
+            metadata["source"] = json!(path);
+            available.push(metadata);
             if name != "skill.list" {
                 break 'roots;
             }
@@ -1513,7 +1721,11 @@ pub async fn get_config(ctx: &GatewayToolContext) -> Result<Value, GatewayError>
     let presets = tokio::task::spawn_blocking(move || mcp_presets(&preset_context))
         .await
         .map_err(|_| failure("TOOL_WORKER_FAILED", "随包工具配置读取线程结束。", 500))?;
-    native(ctx,"config.initRead",json!({"root":ctx.extension_root,"presets":presets,"metadata":{"officialToolsRoot":ctx.config["officialToolsRoot"],"userToolsRoot":ctx.extension_root,"officialPackageVersion":"native-v1"}})).await
+    let config = native(ctx,"config.initRead",json!({"root":ctx.extension_root,"presets":presets,"metadata":{"officialToolsRoot":ctx.config["officialToolsRoot"],"userToolsRoot":ctx.extension_root,"officialPackageVersion":"native-v1"}})).await?;
+    let mut configured = ctx.clone();
+    configured.config = config.clone();
+    super::gateway_tool_memory::synchronize(&configured).await;
+    Ok(config)
 }
 
 pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1530,6 +1742,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
     updated.config = result.clone();
+    super::gateway_tool_memory::synchronize(&updated).await;
     super::gateway_mcp::prewarm(&updated);
     Ok(result)
 }
@@ -1840,6 +2053,74 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {
+        use crate::storage::{gateway as data, workspace_mounts};
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let second = root.join("第二个 folder");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(ctx.workdir.join("same.txt"),"DEFAULT").unwrap();
+        std::fs::write(second.join("same.txt"),"SECOND").unwrap();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let first_id = uuid::Uuid::new_v4().to_string();
+        let second_id = uuid::Uuid::new_v4().to_string();
+        data::ensure_conversation(&ctx.data_home,&ctx.conversation_id,"Mount fixture").unwrap();
+        let old = data::load_catalog(&ctx.data_home).unwrap();
+        let catalog = json!({"Revision":old["Revision"],"Chats":[],"Projects":[{"Id":project_id,"Name":"Mount fixture",
+            "Mounts":[{"Id":first_id,"Name":"Default","Path":ctx.workdir,"BindingRevision":1},{"Id":second_id,"Name":"Secondary","Path":second,"BindingRevision":1}],
+            "DefaultMountId":first_id,"Chats":[{"Id":ctx.conversation_id,"Title":"Mounts","Messages":[
+                {"Id":uuid::Uuid::new_v4().to_string(),"Role":"user","Content":"Mount fixture","Status":"completed"}]}]}]});
+        data::handle("PUT","/api/conversations/catalog",&[],&catalog,&ctx.data_home).unwrap().unwrap();
+        let relation = data::relationship(&ctx.data_home,&ctx.conversation_id).unwrap();
+        ctx.project_id = Some(project_id);
+        ctx.permission_mode = "full".into();
+        ctx.config["workspaceMounts"] = relation["mounts"].clone();
+        ctx.config["defaultMountId"] = relation["defaultMountId"].clone();
+        ctx.config["bindingSnapshot"] = workspace_mounts::snapshot(&relation);
+        ctx.authorized_roots.push(second.clone());
+        let default_read = execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap();
+        let second_read = execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap();
+        assert_ne!(default_read["sha256"],second_read["sha256"]);
+        execute("filesystem.write",json!({"mountId":second_id,"path":"same.txt","content":"SECOND UPDATED","expectedHash":second_read["sha256"]}),&ctx).await.unwrap();
+        assert_eq!(std::fs::read_to_string(ctx.workdir.join("same.txt")).unwrap(),"DEFAULT");
+        assert_eq!(std::fs::read_to_string(second.join("same.txt")).unwrap(),"SECOND UPDATED");
+        let listing = workspace_files(&json!({"mountId":second_id,"path":"."}),&ctx).await.unwrap();
+        assert!(Path::new(listing["path"].as_str().unwrap()).is_absolute());
+        assert!(listing["entries"].as_array().unwrap().iter().any(|entry|entry["name"] == "same.txt"));
+        assert!(workspace_files(&json!({"mountId":second_id,"path":".."}),&ctx).await.is_err());
+        // Explicit external file access retains its original permission/reason contract.
+        // 明确指定的外部文件仍遵循原有权限与原因合同，不因多目录支持被全面禁止。
+        std::fs::write(root.join("external.txt"),"EXTERNAL").unwrap();
+        execute("filesystem.read",json!({"path":root.join("external.txt"),"reason":"Read the explicitly selected fixture file"}),&ctx).await.unwrap();
+        let mut next = data::load_catalog(&ctx.data_home).unwrap();
+        next["Projects"][0]["Mounts"].as_array_mut().unwrap().retain(|mount|mount["Id"] != second_id);
+        data::handle("PUT","/api/conversations/catalog",&[],&next,&ctx.data_home).unwrap().unwrap();
+        assert_eq!(execute("filesystem.read",json!({"mountId":second_id,"path":"same.txt"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
+        assert_eq!(execute("filesystem.read",json!({"path":second.join("same.txt"),"reason":"An old authorization is not a live mount"}),&ctx).await.unwrap_err().code,"WORKSPACE_MOUNT_CHANGED");
+        assert_eq!(execute("filesystem.read",json!({"path":"same.txt"}),&ctx).await.unwrap()["sha256"],default_read["sha256"]);
+        assert_eq!(execute("work.folder.list",json!({}),&ctx).await.unwrap()["mounts"].as_array().unwrap().len(),1);
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn browser_dispatch_keeps_large_async_branches_off_caller_frames() {
+        fn future_bytes<F, Make: FnOnce() -> F>(_: Make) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let (ctx, _sender) = test_context();
+        let workspace_input = json!({});
+        let dispatch = future_bytes(|| execute("browser.open", json!({}), &ctx));
+        let inner = future_bytes(|| execute_inner("browser.open", json!({}), &ctx));
+        let browser = future_bytes(|| super::super::gateway_browser::execute("browser.open", json!({}), &ctx));
+        let workspace = future_bytes(|| super::super::gateway_browser::workspace_open(&workspace_input, &ctx));
+        eprintln!("async frame bytes: dispatch={dispatch}, inner={inner}, browser={browser}, workspace={workspace}");
+        std::fs::remove_dir_all(ctx.workdir.parent().unwrap()).unwrap();
+        assert!(dispatch < 64 * 1024, "Native dispatch must not inline the browser handshake frame.");
+        assert!(browser < 64 * 1024, "Browser dispatch must not inline the WebSocket handshake frame.");
+    }
 
     #[test]
     fn website_launches_target_the_workspace_unless_a_local_browser_is_explicit() {
@@ -2177,6 +2458,40 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn skill_header_cache_tracks_updates_disabling_and_deletion_without_caching_bodies() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let directory = root.join("official/Skills/web-research");
+        let path = directory.join("SKILL.md");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, "---\nname: web-research\ndescription: Search public websites\n---\nOriginal procedure.").unwrap();
+        assert!(relevant_skill_headers(&ctx, "").await.unwrap().is_empty());
+        assert!(ctx.runtime.skill_headers.lock().unwrap().is_empty());
+        let first = relevant_skill_headers(&ctx, "搜索网页").await.unwrap();
+        assert_eq!(first[0]["name"], "web-research");
+        assert!(first[0].get("content").is_none());
+        assert!(ctx.runtime.skill_headers.lock().unwrap().get(&path).unwrap()
+            .metadata.as_ref().unwrap().get("content").is_none());
+        let cached = skills("skill.list", json!({}), &ctx).await.unwrap();
+        assert_eq!(cached["skills"][0]["sha256"], first[0]["sha256"]);
+
+        std::fs::write(&path, "---\nname: web-research\ndescription: Search updated public websites and verify evidence\n---\nUpdated original procedure.").unwrap();
+        let updated = skills("skill.list", json!({}), &ctx).await.unwrap();
+        assert_eq!(updated["skills"][0]["description"], "Search updated public websites and verify evidence");
+        assert_ne!(updated["skills"][0]["sha256"], first[0]["sha256"]);
+        let id = first[0]["id"].clone();
+        let read = skills("skill.read", json!({"id":id}), &ctx).await.unwrap();
+        assert!(read["content"].as_str().unwrap().contains("Updated original procedure."));
+        ctx.config["disabledSkills"] = json!([id]);
+        assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        ctx.config["disabledSkills"] = json!([]);
+        std::fs::remove_file(&path).unwrap();
+        assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn tool_search_never_connects_a_server_to_discover_its_header() {
         let (mut ctx, _sender) = test_context();

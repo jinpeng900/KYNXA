@@ -1,5 +1,15 @@
 # 桌面运行时打包
 
+适用版本：**KYNXA 1.5**（产品版本 `1.5.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.5 版本说明](../../../docs/releases/1.5.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
+
+面向普通用户的 EXE 安装包使用 `build-installer.ps1 -OutputDirectory <输出目录>` 生成。此入口发布 Windows x64 Release 自包含应用，再编译 Inno Setup 安装器；它只生成文件，不启动或安装生成的 EXE。安装器支持软件、数据、用户工具目录及中英文界面，E5/BGE、私有 Node/MCP、Chromium 和运行依赖随基础包提供，勾选的对话模型交由首次启动后的 Rust 模型管理器下载。
+
+默认安装文件名为 `KYNXA-1.5.0-windows-x64-setup.exe`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。
+
+完整基础包不依赖安装时的外网连接；可选模型以及安装包本身的联网下载分别复用 Rust 模型管理器和 `RuntimeDownloads.psm1`，支持原站、明确发布的 GitHub 资产、国内镜像和独立来源断点。输出目录带有安装包下载入口及版本清单，详情见[离线安装与多来源下载](../../../docs/architecture/offline-installer.md)。
+
+该发行入口使用 WinUI 的无包身份部署模式，原有开发包启动链保持不变。编译器只解压在项目缓存中，WebView2 使用经过 Microsoft 发布者签名验证的离线安装程序；用户无需安装 SDK、Node 或修改 PATH。当前入口尚未配置生产代码签名，不把开发证书导入用户信任库。升级保留数据和用户工具；卸载只移除安装文件并停止本安装的进程。
+
 `KYNXA.Desktop.csproj` 定义桌面平台、依赖、共享合同和明确的发布资源清单；通过 `RuntimePackaging.targets` 接入独立执行载荷的构建流程。这里不读取用户的 Data、模型凭据或自定义扩展。
 
 原生 HTTP/SSE 网关通过 `prepare-native-runtime.ps1` 构建 `runtime/agent/kynxa-gateway.exe`，资源服务为 `runtime/resource/kynxa-resource-service.exe`；Debug/Release 都验证源码指纹及资产 SHA-256。核心不依赖 Node、NAPI 或 JavaScript 网关；安装包在独立 `runtime/mcp` 目录随附固定私有 Node 和内置 MCP 依赖，WebView2 前端脚本保留。用户不需要安装 Node、配置系统 PATH 或运行 npx。源码构建需要 Rust 1.88+ 和 MSVC，现有 dotnet run 命令继续使用。
@@ -13,7 +23,9 @@
 | `prepare-mcp-runtime.ps1` / `native-assets/mcp-runtime.json` | 构建机校验官方 Node 24.14.0 ZIP 和执行文件 SHA-256，按固定 package-lock 安装内置 MCP 与对应 Chromium；不运行依赖安装脚本，不随包携带 npm/npx |
 | `prepare-toolhost-notices.ps1` | 从实际恢复的 .NET 运行时包复制原许可证和第三方声明 |
 | `prepare-resource-pack.ps1` | 从已准备的发布白名单导出固定资源 ZIP；导入时核对当前版本清单、文件长度与 SHA-256，不包含聊天、凭据及开发依赖缓存 |
-| `build-desktop.ps1` | 将离线、资源包、下载源及 NuGet 配置贯通到现有桌面构建；不替代原有 `dotnet build/run` 入口 |
+| `build-desktop.ps1` | 统一 Setup、Build、Run、Rebuild 与 Publish；环境预检、阶段续接、依赖复用与直接启动已有产物 |
+| `DevelopmentEnvironment.psm1` | 发现正式版/Insiders VS、有效 Windows SDK、稳定 .NET 10 与兼容 Rust；仅调整调用进程的编译环境 |
+| `DesktopBuild.psm1` / `LaunchDesktop.ps1` | 构建状态、日志、增量判定和带包身份启动；不执行模型任务或修改正式数据 |
 | `vc-runtime.json` / `prepare-vc-runtime.ps1` | 从固定正式 Microsoft Redist 获取并验证 x64 app-local VC 运行库及许可；生成明确发布清单，不复制 System32 DLL |
 | `filter-runtime-pri-layout.ps1` | 将独立运行时保留为普通包载荷，不让 WinUI 把它们解释成界面资源 |
 | `remove-obsolete-backend-payload.ps1` | 仅在验证后的桌面输出中移除精确旧 Node/NAPI/网关载荷；正式数据和链接路径拒绝清理 |
@@ -27,7 +39,27 @@
 
 `runtime/mcp/manifest.json` 是小型入口清单，`payload-integrity.json` 记录完整文件校验；原始 Node 许可证及依赖包内 LICENSE/NOTICE 随清单打包。浏览器使用与固定 Playwright 对应的 Chromium，不借用或启动用户日常浏览器。固定依赖只在构建机 `npm ci --ignore-scripts`，后续复用已验证载荷；`-Offline` 要求本地缓存已齐备。此运行时包含真实浏览器及数据库依赖，磁盘体积与进程驻留分别统计，不能将其体积称为 Rust 核心的内存。
 
-复用缓存前同时验证清单 schema、非空且唯一的安全路径、文件数与总字节数、固定 Node/Chromium/服务入口，以及每个文件的实际长度和 SHA-256。配置文本的 LF/CRLF/BOM 等价规则继续保留，不放宽第三方二进制与依赖锁的原始字节校验。清单原子发布；Debug/Release 的原生载荷准备由同一缓存锁串行保护，调用者的编译环境在退出时恢复。
+首次安装按清单验证固定 Node、Chromium、模型和服务入口的版本、长度及 SHA-256，完整成功后保存组件就绪记录。再次运行先批量检查输入、文件元信息及目录变化，未变的组件跳过解压和逐文件哈希，变化部分按原始清单重新核验；需要主动完整复核时使用 `-VerifyResources`。配置文本的 LF/CRLF/BOM 等价规则继续保留，不放宽第三方二进制与依赖锁的原始字节校验。清单原子发布，失败不写就绪状态；构建锁串行保护同一项目，调用者的编译环境在退出时恢复。
+
+## 一个入口准备、构建与运行
+
+在仓库根目录执行。开发机需要 Windows x64、稳定版 .NET 10，以及包含 x64 C++ 工具和 Windows SDK 的 VS；脚本同时发现正式版和 Insiders，汇总需手动安装的缺项。兼容的已有 Rust 优先复用，缺失时在项目内补齐固定工具链。`global.json` 避免选择机器上额外安装的 .NET 11 预览版。安装成品软件的用户不需要这些源码构建步骤。
+
+```powershell
+# 首次使用自动检查、准备、构建并启动；以后相同命令直接复用成功产物。
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Run
+
+# 只准备工具链、资源和 NuGet 依赖，不编译。
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Setup
+
+# 增量构建；明确要求时重新执行构建，保留下载和依赖缓存。
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Build
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Rebuild
+```
+
+项目根目录中只有一份 `kynxa-*-resources*.zip` 时自动选用，也可显式指定 `-ResourcePackRoot <ZIP完整路径>`。`-Offline` 禁止资源与 Cargo 联网；NuGet 使用已有有效恢复结果或明确的本地源。原有 `-Configuration`、`-Profile`、下载源与 NuGet 选项保留，`Publish` 继续可用。
+
+状态与日志固定在 `artifacts/development/build/win-x64/<Debug或Release>/<Full或Core>/`，不同配置分别管理。同一项目同时只运行一份准备或构建。每阶段完成后保存状态；失败或中断不会删除已下载的工具链、资源和依赖。再次运行校验已完成步骤后接续，编译仍交给 Cargo/MSBuild 增量处理。`Run` 在输入和产物仍匹配时不再调用 `dotnet run` 或 MSBuild 的运行目标，避免重新触发整套准备流程。
 
 在仓库根目录验证：
 
@@ -66,7 +98,7 @@ powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -Resou
 dotnet build apps/desktop/KYNXA.Desktop.csproj --no-restore -p:Platform=x64 -p:KynxaOffline=true -p:KynxaResourcePackRoot=artifacts/runtime/kynxa-win-x64-resources.zip
 ```
 
-`-NuGetSource` 可指定 NuGet 源，`-NuGetConfigPath` 可指定明确的 NuGet 配置。离线时只接受本地源；有本地源时先从该源还原桌面和 ToolHost，随后使用 `--no-restore` 构建。没有本地源且没有已有 `project.assets.json` 时直接提示先还原对应项目，不自动改回网络下载。
+`-NuGetSource` 可指定 NuGet 源，`-NuGetConfigPath` 可指定明确的 NuGet 配置。离线时只接受本地源；有本地源时先从该源还原桌面和 ToolHost，随后使用 `--no-restore` 构建。未指定本地源时使用正常 NuGet 包缓存重新解析必要依赖，缺少的包会报告还原错误，不自动切回网络下载。
 
 ```powershell
 powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -NuGetSource artifacts/dependencies/nuget-feed -ResourcePackRoot artifacts/runtime/kynxa-win-x64-resources.zip

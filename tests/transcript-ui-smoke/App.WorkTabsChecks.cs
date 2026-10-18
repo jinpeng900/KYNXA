@@ -34,7 +34,7 @@ public partial class App
         try
         {
             var items = Enumerable.Range(1, 5).Select(index =>
-                new ConversationWorkTab($"document/{index}", "document", $"实验 {index} · Physics.md")).ToArray();
+                new ConversationWorkTab($"document/{index}", "document", $"实验 {index} · Physics.md", UserSelected: true)).ToArray();
             tabs.ShowConversation(Guid.NewGuid(), items);
             var scroll = WorkTabVisuals(tabs).OfType<ScrollViewer>().Single();
             var left = WorkTabVisuals(tabs).OfType<Button>().Single(button => button.Name == "WorkTabsScrollLeft");
