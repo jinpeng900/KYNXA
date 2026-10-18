@@ -28,6 +28,17 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 设置窗口采样左侧 24 DIP 内容留白，避开默认右侧 ScrollBar 的白色箭头；打开、稳定和原生关闭共用该空白点。浅色模式验证稳定后的实际 Main 背景，允许 Windows 显示动画的初始混色；深色仍检查全部已采到的背景像素，不放宽白色判定。运行前须通过自有前台窗口与原生命中校验；前台被切换或指针目标变化时报告失败，不向其他应用继续发送输入。
 
+## 消息发送与输入专项
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -Scenario prompt-send
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -Scenario workspace-auto-open
+```
+
+`App.PromptSendChecks.cs` 检查发送链路：暂停恢复请求被挂起时用户消息和真实 Transcript DOM 已出现、输入框已清空；释放后完成模拟 SSE 回复，保留准备期间输入的新草稿。真实 Enter 只发送一次且不残留换行，Shift+Enter 保留换行，并用受控组合状态检查输入法确认保护。截图专项使用真实 WinRT 剪贴板和生产粘贴处理，核对 PNG 暂存于应用私有数据之外；模拟首次接收失败时不调用模型、保留源文件，重试使用相同消息及附件 ID，收到带摘要的接收回执后才调用模拟模型并删除临时源文件。即使描述符默认为 ready 也必须完成导入。该场景仅为虚构聊天开放流回复、目录保存和附件接收接口，不访问正式数据或上游模型；其他场景继续拒绝写入。
+
+`workspace-auto-open` 只验证右侧网页自动派发：历史回执恢复标签但不启动；实时完成回执进入生产 `AcceptToolActivity` 后立即移除 pending，仍自动选中、激活并向回环网关发送打开请求，重复回执不重复派发。夹具返回明确的 HTTP 503，不启动 Chrome、访问外站或调用模型；该结果证明展示链路已派发，不代表实际网页绘制通过。
+
 ## 设置窗口布局、下拉滚轮与正文查找
 
 ```powershell
@@ -111,6 +122,14 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 实际文字检查在强制 GC 后双向切换语言，直接核对已实现的字号标题和五套配色名称，并记录 `shell-appearance-settings-400-language.json`；仅检查自动化名称或窗口几何不能证明英文已经显示。另释放一个真实原生绑定控件，确认翻译值源可被回收，防止全局本地化注册强持有窗口。
 
+深黑配色检查在现有预设与极端强调色组合中验证中性 RGB 通道、`#0C0C0C` 主背景、`#141414` 表面和悬停／按下的明度层次，并保留语义文字至少 4.5:1 的对比度要求。真实主窗口与设置窗口核对共享画刷及 WebView 实际底色；切换深浅模式后移开输入焦点，以原生 VisualStateManager 呈现普通状态并读取 ComboBox／TextBox 的真实模板背景，检查浅色不残留深黑填充。复用 `shell-appearance-dark-custom-settings.png` 和 `shell-appearance-dark-transcript.png`，该状态检查不声称使用了物理鼠标悬停。
+
+`App.PopupAppearanceChecks.cs` 在深浅主题及两种自定义强调色下实际打开生产模式／字号下拉框，读取原生弹出外框的 16 DIP 圆角、行背景的 8 DIP 圆角、内缩及选中标记；选中四态逐一核对淡强调色和至少 4.5:1 文字对比度，并使用真实 SendInput 验证选中项悬停及 Down／Enter 选择。生产工作菜单与使用隐式样式的普通／勾选／子菜单行检查悬停、按下和子菜单展开背景，箭头要求至少 3:1 对比度；菜单状态使用原生 VisualStateManager，不声称物理按下。合成系统高对比色验证 Highlight／HighlightText 资源配对，不改变 Windows 辅助设置。结果为 `shell-popup-appearance.json`；`shell-popup-{dropdown/menu}-{light/dark}-ui-render.png` 是实际原生 UI 元素渲染，并非操作系统屏幕截图，SDK 不支持渲染时保留 `.unavailable.txt`。全过程保留草稿、活动会话与正式消息，模拟网关无写入。
+
+`App.PickerPopupAppearanceChecks.cs` 补充真实字号列表与原生滚动条间距、模型选择的两个入口、会话搜索按钮及快捷键入口，以及同组权限浮层。读取实际 `ListViewItemPresenter` 和其背景 Border 的圆角、选中与交互画刷，核对搜索框的真实模板圆角及辅助文字对比度；以生产字号列表测滚动条分隔。模型／搜索结果不足以滚动时，夹具只限制该测试弹出层的列表高度以实现原生滚动条，不声称修改了正式菜单高度。项目选择器复用同一个列表工厂，本专项未单独打开验证。预览沿用原生 UI 元素渲染，实际通过结果以本轮运行日志为准。
+
+`-Scenario dropdown-spacing` 复用上述生产设置下拉检查，仅核对当前修改的 ComboBox：短列表两侧窄留白且对称、下拉外框与原选择框宽度对齐、字号高亮到展开滚动条约 4 DIP 间距，包含深浅色、原生悬停与 Down／Enter 选择。还通过真实设置中的本地模型管理入口检查加载策略与筛选两个下拉框，使用显式开启的回环空模型目录和隔离安装路径，保留策略选择、不提交设置；核对选中四态、实际悬停、强调色、圆角及无闲置留槽，并从返回按钮确认首页控件和滚动位置保留。对应元素渲染与观察保存为 `shell-popup-local-models-*`、`shell-popup-local-models.json`。该入口不重复未改动的 PickerMenu 模型和会话搜索浮层检查，也不把它的结果计为这些入口的新一轮覆盖。
+
 还核对旧版偏好缺少配色字段及未知预设值的默认回退，以及真实输入框获得和离开焦点时外框画刷的切换。证据文件为 `shell-appearance-observations.json`、`shell-appearance-settings-400-en.png`、`shell-appearance-settings-wide.png` 和 `shell-appearance-mist-blue-wide.png`。集中入口成功标记为 `PASS: ... production Shell appearance checks.`。这些是需要实际运行的验收条件，文档描述本身不代表本轮已经通过。
 
 原生输入框的选中文字为白色，逐套读取真实 `Prompt.SelectionHighlightColor`，要求不透明、与该套强调色一致且对白字对比度至少 4.5:1。另实际聚焦主输入框并全选原草稿，生成 `shell-appearance-native-selection.png/json` 核对显示效果；WebView 继续验证浅色选区与原文字选择保留，不把两种控件的选区背景混为一谈。
@@ -132,6 +151,8 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 展开状态只预留 4 DIP 拖动列，底部图标原坐标保留，比较最左设置与最右状态图标到可见侧栏边缘的实际空白均为 20 DIP。完整 8 DIP `SidebarGrip` 跨越较窄预留列，两侧各覆盖 2 DIP；实际 MOVE 进入两处覆盖范围并等待 `PointerEntered`，核对坐标、层级及未开始拖动。原拖动、保存、取消、复位的控件接线检查继续执行。
 
 800 DIP 紧凑模式分别以新收起按钮、原遮罩按钮和生产 `TryDismissCompactSidebar` 的 Escape 处理路径关闭临时抽屉，核对焦点及保存偏好，再恢复宽窗。测试同时覆盖原本展开和原本折叠两种宽窗偏好。Escape 在本场景调用生产处理方法，不发送系统按键；真实按钮使用原生 Invoke，而非直接调用点击方法，因此不要求键盘输入获得前台焦点。
+
+紧凑抽屉还在深浅两种主题下，以前台守卫和真实 SendInput 移入关闭遮罩，核对悬停时仍为半透明背景；按下外观使用原生 VisualStateManager 检查，随后另以真实鼠标单击验证关闭及焦点返回。采样侧栏右侧可见草稿首行的 256 个实际屏幕像素，检查原本字形对比存在，且悬停、按下后像素保持不变，避免不透明整块遮住内容。结果保存到 `shell-sidebar-scrim-feedback.json`，截图为 `shell-sidebar-scrim-{dark/light}-{hover/pressed}.png`；测试结束恢复原主题与侧栏偏好。
 
 透明分隔线检查读取真实 `ResizeGrip` 的悬停状态画刷、八 DIP 命中区域及 `HitTarget`，并触发该控件实例已接线的拖动、完成、取消和重置事件，验证生产宽度逻辑和保存仍可用。还核对 `ShellGrid` 与侧栏实际背景画刷颜色相同且不透明，使透明拖动列连续显示侧栏颜色，主内容区保留独立背景；宽窗与最小宽度截图供实际边界复核。这是原生控件与接线回归，不冒充实际鼠标拖动验收。整个场景保留草稿、活动聊天 ID、原消息对象和正文，模拟网关写入始终为零，结束时恢复夹具原布局及语言。
 

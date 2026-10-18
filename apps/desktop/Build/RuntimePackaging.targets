@@ -14,7 +14,8 @@
     <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
     <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
          离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
-    <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true'">Build</_KynxaToolHostTargets>
+    <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true' or '$(KynxaDependenciesPrepared)' == 'true'">Build</_KynxaToolHostTargets>
+    <_KynxaRuntimeOptions Condition="'$(KynxaRebuildNative)' == 'true'">$(_KynxaRuntimeOptions) -Rebuild</_KynxaRuntimeOptions>
   </PropertyGroup>
   <!-- VS deployment uses LayoutDir from the recipe; keep nested MCP paths below MAX_PATH.
        VS 按部署清单中的 LayoutDir 复制文件；缩短根目录，避免嵌套 MCP 路径超出限制。 -->
@@ -69,7 +70,7 @@
   <!-- Design-time evaluation must not restore or build executable payloads.
        设计时求值不能还原或构建可执行载荷，避免阻塞 IDE 的项目元数据采集。 -->
   <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
-    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)"
+    <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)" RemoveProperties="OutDir"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>
       <_KynxaToolHostNoticesDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)toolhost-notices\$(RuntimeIdentifier)'))))</_KynxaToolHostNoticesDirectory>

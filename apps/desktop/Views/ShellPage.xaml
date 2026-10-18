@@ -14,7 +14,25 @@
         -->
         <Button x:Name="SidebarScrim" Grid.ColumnSpan="3" Canvas.ZIndex="15" Visibility="Collapsed"
                 Background="#22000000" BorderThickness="0" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                Click="SidebarScrim_Click" services:UiLocalization.AutomationName="收起侧栏" />
+                Click="SidebarScrim_Click" services:UiLocalization.AutomationName="收起侧栏">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <!-- Keep the dismiss surface translucent; normal button feedback would cover the workspace.
+                         关闭遮罩始终保持半透明；普通按钮的状态背景会盖住工作区。
+                    -->
+                    <ContentPresenter x:Name="ScrimPresenter" Background="{TemplateBinding Background}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed" />
+                                <VisualState x:Name="Disabled" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Button.Template>
+        </Button>
         <Grid x:Name="SidebarPane" Grid.Column="0" Canvas.ZIndex="20" Background="{StaticResource KynxaSidebarBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="56" />
@@ -525,7 +543,9 @@
                         <controls:ComposerSurface x:Name="ComposerHost" IsFooterVisible="True" services:UiLocalization.AutomationName="对话输入区">
                             <controls:ComposerSurface.Body>
                                 <Grid>
-                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="46" /></Grid.RowDefinitions>
+                                    <!-- Let the toolbar reserve its full button height plus margin; a fixed 46 DIP row clipped the 40 DIP circle.
+                                         工具栏按完整按钮高度与边距自适应；固定 46 DIP 行会裁掉 40 DIP 圆形的上下圆弧。 -->
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                                     <controls:ConversationAttachmentDrafts x:Name="ComposerAttachments" />
                                     <TextBox x:Name="PromptTextBox" Grid.Row="1" Margin="46,8,10,0" Padding="6,2,24,2" AcceptsReturn="True" Background="Transparent" BorderThickness="0" FontSize="{StaticResource KynxaEditorFontSize}" Foreground="{StaticResource KynxaTextBrush}" PlaceholderText="{services:UiText Key='描述你想完成的工作...'}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" Text="{x:Bind ViewModel.Prompt, Mode=TwoWay}" TextChanged="PromptTextBox_TextChanged" TextCompositionStarted="PromptTextBox_TextCompositionStarted" TextCompositionEnded="PromptTextBox_TextCompositionEnded" TextWrapping="Wrap">
                                         <TextBox.Resources>

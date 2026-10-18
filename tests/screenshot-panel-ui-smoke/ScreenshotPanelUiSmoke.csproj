@@ -34,6 +34,7 @@
     <Compile Include="../../apps/desktop/Services/Integration/GatewayApiException.cs" Link="GatewayApiException.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/UiText*.cs" Exclude="../../apps/desktop/Services/Presentation/UiTextExtension.cs" Link="Services/%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Models/UI/ChatMessageState.cs" Link="ChatMessageState.cs" />
+    <Compile Include="../../apps/desktop/Models/UI/ProjectState.cs" Link="ProjectState.cs" />
     <Compile Include="../../apps/desktop/ViewModels/ConversationMessageViewModel.cs" Link="ConversationMessageViewModel.cs" />
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />

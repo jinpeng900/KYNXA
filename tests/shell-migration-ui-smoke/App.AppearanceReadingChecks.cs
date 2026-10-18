@@ -6,6 +6,7 @@ using KYNXA_Desktop.Services;
 using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Windows.UI;
 using Windows.UI.ViewManagement;
 
@@ -148,6 +149,23 @@ public partial class App
                 ReferenceEquals(nativeAccentBrush, AppearanceService.GetBrush("AccentFillColorDefaultBrush")) &&
                 nativeAccentBrush.Color == AppearanceService.ParseColor(AppearanceService.Current.Accent),
                 label + " mutates the original application and native override brush objects without reinserting or replacing their references");
+            if (AppearanceService.Current is { IsDark: true, IsHighContrast: false })
+            {
+                Check(Element<Grid>("MainRegion").Background is SolidColorBrush mainBackground &&
+                    mainBackground.Color == AppearanceService.ParseColor("#0C0C0C") &&
+                    AppearanceService.GetBrush("KynxaMainBrush").Color == mainBackground.Color,
+                    label + " presents the neutral near-black canvas on the actual native work region");
+                Check(Element<Grid>("SidebarPane").Background is SolidColorBrush sidebarBackground &&
+                    sidebarBackground.Color == AppearanceService.ParseColor("#141414") &&
+                    AppearanceService.GetBrush("KynxaSettingsCardBrush").Color == sidebarBackground.Color &&
+                    AppearanceService.GetBrush("KynxaReplySurfaceBrush").Color == sidebarBackground.Color,
+                    label + " shares the same neutral raised surface across the native sidebar, settings cards and replies");
+                string? transcriptBackground = JsonSerializer.Deserialize<string>(await transcript.Browser.ExecuteScriptAsync(
+                    "getComputedStyle(document.documentElement).backgroundColor"));
+                Check(transcript.Browser.DefaultBackgroundColor == AppearanceService.ParseColor("#0C0C0C") &&
+                    transcriptBackground == "rgb(12, 12, 12)",
+                    label + " synchronizes the rendered transcript and WebView canvas with the near-black native background");
+            }
             CheckStored(label + " reloads all applied preferences from the isolated atomic layout file");
             CheckThemeIcons(label);
         }
@@ -166,6 +184,27 @@ public partial class App
                         "follow-system resolves the current real Windows background theme without modifying OS settings");
                 }
                 await ObserveAsync("theme " + mode);
+                if (!AppearanceService.Current.IsHighContrast && mode is "dark" or "light")
+                {
+                    // Inspect the rendered SDK Normal state after focus leaves both fields; this is state verification, not physical pointer input.
+                    // 焦点离开两个字段后检查实际 SDK Normal 呈现；这是状态验证，不声称执行了真实鼠标输入。
+                    chooseColor.Focus(FocusState.Programmatic);
+                    modePicker.ApplyTemplate();
+                    accentInput.ApplyTemplate();
+                    bool choiceNormal = VisualStateManager.GoToState(modePicker, "Normal", false);
+                    bool inputNormal = VisualStateManager.GoToState(accentInput, "Normal", false);
+                    await SettleAsync();
+                    var choiceBackground = NativeUi.ByName<Border>(modePicker, "Background").Background as SolidColorBrush;
+                    var inputBackground = NativeUi.ByName<Border>(accentInput, "BorderElement").Background as SolidColorBrush;
+                    Color darkControlColor = AppearanceService.ParseColor("#141414");
+                    bool darkControls = mode == "dark";
+                    Check(choiceNormal && modePicker.FocusState == FocusState.Unfocused && choiceBackground is not null &&
+                        (choiceBackground.Color == darkControlColor) == darkControls,
+                        "theme " + mode + " updates the actual unfocused SDK ComboBox background without retaining dark-only paint in light mode");
+                    Check(inputNormal && accentInput.FocusState == FocusState.Unfocused && inputBackground is not null &&
+                        (inputBackground.Color == darkControlColor) == darkControls,
+                        "theme " + mode + " updates the actual unfocused SDK TextBox background without retaining dark-only paint in light mode");
+                }
                 if (mode == "system")
                 {
                     int systemRefreshes = 0;
@@ -329,6 +368,22 @@ public partial class App
             foreach (string accent in new[] { "#FFFFFF", "#FFFF00", "#000000", "#38BDF8" })
             {
                 var palette = AppearanceService.ResolvePalette(preset, dark, accent);
+                if (dark)
+                {
+                    // Accent-tinted selection stays separate from the neutral structural surfaces.
+                    // 强调色选中态与中性的结构表面分离，不能把工作区重新染成蓝灰色。
+                    Check(palette.Main == "#0C0C0C" && palette.Sidebar == "#141414" && palette.ReplySurface == palette.Sidebar &&
+                        palette.Border == "#353535" && palette.Text == "#ECECEC" && palette.ControlHover == "#202020" &&
+                        palette.ControlPressed == "#292929" && palette.Disabled == "#303030",
+                        preset.Id + " dark " + accent + " keeps the requested neutral near-black surface and interaction palette");
+                    Check(new[] { palette.Main, palette.Sidebar, palette.ReplySurface, palette.Border, palette.Text,
+                        palette.Secondary, palette.Muted, palette.ControlHover, palette.ControlPressed, palette.Disabled }
+                        .Select(AppearanceService.ParseColor).All(color => color.R == color.G && color.G == color.B) &&
+                        AppearanceService.ParseColor(palette.Main).R < AppearanceService.ParseColor(palette.Sidebar).R &&
+                        AppearanceService.ParseColor(palette.Sidebar).R < AppearanceService.ParseColor(palette.ControlHover).R &&
+                        AppearanceService.ParseColor(palette.ControlHover).R < AppearanceService.ParseColor(palette.ControlPressed).R,
+                        preset.Id + " dark " + accent + " retains neutral channels and visible main, raised, hover and pressed depth");
+                }
                 Check(AppearanceService.ContrastRatio(palette.Accent, palette.OnAccent) >= 4.5 &&
                     AppearanceService.ContrastRatio(palette.Text, palette.Main) >= 4.5 &&
                     AppearanceService.ContrastRatio(palette.AccentText, palette.Soft) >= 4.5 &&

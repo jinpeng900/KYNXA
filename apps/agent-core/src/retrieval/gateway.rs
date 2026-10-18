@@ -5,6 +5,7 @@ use super::gateway_index;
 pub use super::gateway_tools::{
     final_validate, handle_tool, prepare_request, project_evidence_result, release_task,
 };
+pub(crate) use super::gateway_tools::should_prepare_request;
 use crate::gateway_contract::GatewayConfig;
 use crate::storage::{
     self, ContractError,
@@ -32,6 +33,42 @@ struct BackgroundOwner {
 }
 static BACKGROUND: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<BackgroundOwner>>>> =
     OnceLock::new();
+struct ActiveProject { id: Option<String>, pending: bool, state: &'static str }
+struct InventorySnapshot {
+    inputs: String,
+    roots: Vec<std::path::PathBuf>,
+    checked: std::time::Instant,
+    files: Value,
+}
+static ACTIVE_PROJECTS: OnceLock<Mutex<HashMap<std::path::PathBuf, ActiveProject>>> = OnceLock::new();
+
+pub fn activate_project(config: &GatewayConfig, project: Option<&str>) -> Value {
+    let mut active = ACTIVE_PROJECTS.get_or_init(Default::default).lock().unwrap();
+    let entry = active.entry(config.data_root.clone()).or_insert(ActiveProject { id:None, pending:false, state:"idle" });
+    if entry.id.as_deref() != project || entry.state == "idle" {
+        entry.id = project.map(str::to_owned);
+        entry.pending = project.is_some(); entry.state = if entry.pending {"queued"}else{"idle"};
+    }
+    json!({"projectId":entry.id,"state":entry.state,"queued":entry.pending})
+}
+
+fn maintain_active_project(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
+    let project = {
+        let mut active = ACTIVE_PROJECTS.get_or_init(Default::default).lock().unwrap();
+        let Some(entry) = active.get_mut(&config.data_root).filter(|entry| entry.pending) else { return; };
+        entry.pending = false; entry.state = "preparing"; entry.id.clone()
+    };
+    let ready = (|| -> Result<bool, ContractError> {
+        let Some(project) = project.as_deref() else { return Ok(false); };
+        let settings = effective(config, Some(project))?;
+        if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off"
+            || settings["projectIndexing"]["mountedFolder"] != true { return Ok(false); }
+        super::gateway_embedding::warm(config, &settings["local"], stop.clone())
+    })();
+    if let Some(entry) = ACTIVE_PROJECTS.get().unwrap().lock().unwrap().get_mut(&config.data_root).filter(|entry| entry.id == project) {
+        entry.state = match ready { Ok(true) => "ready", Ok(false) => "idle", Err(_) => "deferred" };
+    }
+}
 struct PendingMemory {
     scope: String,
     id: String,
@@ -373,18 +410,24 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
             move |document| schedule_memory(&root, document)
         }),
     );
+    let cancellation = crate::service_cancellation::CancellationLease::acquire(&gateway::new_id())
+        .map_err(|_| gateway::error("后台维护取消令牌无法创建。", "RETRIEVAL_BUSY", 503))?;
     let owner = Arc::new(BackgroundOwner {
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: cancellation.token.clone(),
         worker: Mutex::new(None),
     });
     let config = config.clone();
     let data_root = config.data_root.clone();
     let shared = owner.clone();
+    gateway_index::resume_ann_background(&config);
     let worker = std::thread::Builder::new()
         .name("kynxa-work-maintenance".into())
         .spawn(move || {
             let _runtime = runtime.enter();
+            let _scope = cancellation.enter();
             let mut previous = HashMap::new();
+            let mut inventories: HashMap<String, InventorySnapshot> = HashMap::new();
+            let mut watches = super::gateway_watch::WatchSet::default();
             let mut deleted_cursor = 0;
             // Discovery runs inside the existing watcher, so startup never waits for full memory preparation.
             // 发现过程位于现有 watcher 内，启动不会等待全部记忆准备；待处理范围分批合并同一队列。
@@ -399,10 +442,23 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 if shared.stop.load(Ordering::Acquire) {
                     break;
                 }
+                maintain_active_project(&config, &shared.stop);
+                let _ = gateway_index::maintain_ann(&config, &shared.stop);
                 let cycle = (|| -> Result<(), ContractError> {
                     enqueue_startup_memory(&config.data_root, &mut startup_memory);
                     maintain_memory(&config, &shared.stop)?;
                     let catalog = gateway::load_catalog(&config.data_root)?;
+                    let roots = catalog["Projects"].as_array().unwrap().iter()
+                        .filter(|project| project["IsArchived"] != true && project["IsFolderlessWorkspace"] != true)
+                        .filter_map(|project| storage::workspace_mounts::relationship(project).ok())
+                        .flat_map(|relation| relation["mounts"].as_array().cloned().unwrap_or_default())
+                        .filter_map(|mount| mount["path"].as_str().filter(|path| !path.is_empty()).map(std::path::PathBuf::from))
+                        .collect::<Vec<_>>();
+                    watches.reconcile(&roots);
+                    let changed_roots = watches.take();
+                    // Preserve invalidation even while a project already has an indexing job in flight.
+                    // 已有索引任务时仍保留根目录失效状态，避免取走通知后延迟至下一轮低频核对。
+                    inventories.retain(|_, snapshot| !snapshot.roots.iter().any(|root| changed_roots.contains(root)));
                     let jobs = job_plan(&config, "read", json!({}))?["document"]["jobs"]
                         .as_array()
                         .unwrap()
@@ -448,16 +504,25 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                                 )
                             })
                             .transpose()?;
-                        let files = if settings["projectIndexing"]["mountedFolder"] == true {
-                            inventory(
-                                &config,
-                                relation.as_ref().unwrap()["folderPath"].as_str().unwrap(),
-                                &settings["local"]["indexing"],
-                                &shared.stop,
-                            )?
-                        } else {
-                            json!([])
-                        };
+                        let mounts = if settings["projectIndexing"]["mountedFolder"] == true {
+                            relation.as_ref().and_then(|relation| relation["mounts"].as_array()).cloned().unwrap_or_default()
+                        } else { Vec::new() };
+                        let mount_paths = mounts.iter().filter_map(|mount| mount["path"].as_str().map(std::path::PathBuf::from)).collect::<Vec<_>>();
+                        let inputs = gateway_index::hash(&json!([settings, relation]).to_string());
+                        let refresh = inventories.get(&key).is_none_or(|snapshot| snapshot.inputs != inputs
+                            || snapshot.checked.elapsed() >= std::time::Duration::from_secs(300)
+                            || mount_paths.iter().any(|root| !watches.watched(root)));
+                        if refresh {
+                            let mut files = Vec::new();
+                            for mount in &mounts {
+                                let Some(path) = mount["path"].as_str().filter(|path| !path.is_empty()) else { continue; };
+                                files.push(json!({"mountId":mount["id"],"path":path,"inventory":inventory(
+                                    &config, path, &settings["local"]["indexing"], &shared.stop)?}));
+                            }
+                            inventories.insert(key.clone(), InventorySnapshot { inputs, roots:mount_paths,
+                                checked:std::time::Instant::now(), files:json!(files) });
+                        }
+                        let files = &inventories[&key].files;
                         let sources = knowledge["sources"]
                             .as_array()
                             .unwrap()
@@ -503,12 +568,23 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 }
                 let _ = super::gateway_embedding::retire_after(
                     &config,
-                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(120),
                 );
                 for _ in 0..300 {
                     if shared.stop.load(Ordering::Acquire) {
                         break;
                     }
+                    if gateway_index::ann_background_pending(&config) {
+                        break;
+                    }
+                    if watches.pending() {
+                        // Coalesce editor save/rename bursts before one incremental source pass.
+                        // 编辑器保存及重命名通常形成事件簇，合并短窗口后执行一次增量来源扫描。
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        break;
+                    }
+                    if ACTIVE_PROJECTS.get().and_then(|active|active.lock().ok())
+                        .is_some_and(|active|active.get(&config.data_root).is_some_and(|entry|entry.pending)) { break; }
                     if MEMORY_PENDING
                         .get()
                         .and_then(|pending| pending.lock().ok())
@@ -529,9 +605,10 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
         .map_err(|_| gateway::error("后台维护线程未启动。", "RETRIEVAL_JOB_START_FAILED", 503))?;
     *owner.worker.lock().unwrap() = Some(worker);
     workers.insert(data_root, owner);
-    Ok(json!({"started":true,"reconcileIntervalMs":30000}))
+    Ok(json!({"started":true,"reconcileIntervalMs":30000,"nativeWatch":cfg!(windows),"inventoryFallbackIntervalMs":300000}))
 }
 pub fn stop_background(config: &GatewayConfig) -> Value {
+    gateway_index::stop_ann_background(config);
     if let Some(owners) = BACKGROUND.get() {
         if let Some(owner) = owners
             .lock()
@@ -584,8 +661,17 @@ pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
             .map_err(|_| gateway::error("索引线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503))?;
     }
     storage::gateway_memory::drain_candidates(&config.data_root)?;
+    if let Some(active) = ACTIVE_PROJECTS.get() { active.lock().unwrap().remove(&config.data_root); }
     Ok(())
 }
+fn nested_mount(root: &str, candidate: &str) -> bool {
+    if cfg!(windows) {
+        let root = root.replace('/', "\\").to_lowercase();
+        let candidate = candidate.replace('/', "\\").to_lowercase();
+        Path::new(&candidate) != Path::new(&root) && Path::new(&candidate).starts_with(&root)
+    } else { Path::new(candidate) != Path::new(root) && Path::new(candidate).starts_with(root) }
+}
+
 fn inventory(
     config: &GatewayConfig,
     path: &str,
@@ -968,8 +1054,8 @@ pub fn bind_work(
         )?;
         let mut next = catalog.clone();
         if plan["changed"] == true {
-            next["Projects"][plan["projectIndex"].as_u64().unwrap() as usize]["FolderPath"] =
-                json!(folder);
+            let index = plan["projectIndex"].as_u64().unwrap() as usize;
+            next["Projects"][index] = storage::workspace_mounts::bind_default(&next["Projects"][index], &folder)?;
             next["Revision"] = json!(catalog["Revision"].as_u64().unwrap() + 1);
             gateway::commit_catalog(&config.data_root, &next, digest, &[], &[])?;
         }
@@ -1137,19 +1223,46 @@ fn run_index(
     let mut incomplete = false;
     let mut failures = Vec::new();
     let catalog = gateway::load_catalog(&config.data_root)?;
+    let existing = gateway_index::cached_work_sources(config, &scope)?;
+    let mut observations = Vec::new();
+    let mut reused_files = 0u64;
     if let Some(project_id) = project_id {
         let project = storage::catalog::apply(
             "storage.catalog.project",
             &json!({"current":catalog,"id":project_id}),
         )?;
         if settings["projectIndexing"]["mountedFolder"] == true {
-            let root = project["folderPath"].as_str().unwrap_or("");
-            let report = scan_each(
+          let mounts = project["mounts"].as_array().cloned().unwrap_or_else(|| vec![json!({"path":project["folderPath"]})]);
+          let mut remaining_files = settings["local"]["indexing"]["maximumFiles"].as_u64().unwrap_or(20000);
+          let mut remaining_bytes = settings["local"]["indexing"]["maximumTotalBytes"].as_u64().unwrap_or(512*1024*1024);
+          let legacy_roots = existing.values().flatten().filter(|source| source["locator"]["mountId"].is_null())
+              .filter_map(|source| source["locator"]["root"].as_str()).collect::<HashSet<_>>();
+          for mount in &mounts {
+            let root = mount["path"].as_str().unwrap_or("");
+            if root.is_empty() { continue; }
+            if mounts.iter().filter_map(|other| other["path"].as_str())
+                .any(|other| legacy_roots.contains(other) && nested_mount(other, root)) { continue; }
+            if remaining_files == 0 || remaining_bytes == 0 { incomplete = true; break; }
+            let mut scan_limits = settings["local"]["indexing"].clone();
+            // The most specific mounted root owns overlapping files; all roots share one project output budget.
+            // 重叠文件归最具体的挂载根所有；全部根共享项目级输出额度，不按挂载数量放大索引容量。
+            scan_limits["mountExcludedRoots"] = json!(mounts.iter().filter_map(|other| other["path"].as_str())
+                .filter(|other| !legacy_roots.contains(root) && nested_mount(root, other)).collect::<Vec<_>>());
+            scan_limits["scopeBudget"] = json!({"files":remaining_files,"bytes":remaining_bytes});
+            let reusable = existing.iter().filter_map(|(path, sources)| {
+                let sources = sources.iter().filter(|source| source["bindingRevision"] == settings["projectIndexing"]["bindingRevision"]
+                    && source["locator"]["root"] == root && gateway_index::mounted_root(&project, &source["locator"]).is_ok()).cloned().collect::<Vec<_>>();
+                (!sources.is_empty()).then_some((path.clone(), sources))
+            }).collect::<HashMap<_, _>>();
+            let report = scan_each_cached(
                 config,
                 root,
-                &settings["local"]["indexing"],
+                &scan_limits,
                 cancel,
+                &reusable,
                 |mut source| {
+                    let reused = source["_indexReused"] == true;
+                    source.as_object_mut().unwrap().remove("_indexReused");
                     let mut identity = vec![
                         json!("work-file"),
                         json!(project_id),
@@ -1167,26 +1280,43 @@ fn run_index(
                         identity.push(json!("archive-part"));
                         identity.push(source["locator"]["archive"]["part"].clone());
                     }
-                    source["sourceId"] = json!(gateway_index::hash(&json!(identity).to_string()));
+                    if !reused { source["sourceId"] = json!(gateway_index::hash(&json!(identity).to_string())); }
                     source["scopeKey"] = json!(scope);
                     source["sourceType"] = json!("work-file");
                     source["bindingRevision"] =
                         settings["projectIndexing"]["bindingRevision"].clone();
+                    if !reused {
+                        let prior = existing.get(source["locator"]["path"].as_str().unwrap_or("")).and_then(|sources| sources.iter().find(|previous|
+                            previous["sourceId"] == source["sourceId"] && previous["contentHash"] == source["contentHash"]
+                                && previous["sourceRevision"] == source["sourceRevision"] && previous["bindingRevision"] == source["bindingRevision"]
+                                && gateway_index::mounted_root(&project, &previous["locator"]).is_ok()));
+                        if let Some(prior) = prior {
+                            // Legacy locator metadata remains valid; learning file observations must not invalidate its vectors.
+                            // 旧定位仍有效时保留其派生身份；首次补录文件元信息不会使已有向量失效或重嵌入。
+                            source["locator"] = prior["locator"].clone();
+                        } else if !mount["id"].is_null() {
+                            source["locator"]["mountId"] = mount["id"].clone();
+                            source["locator"]["mountBindingRevision"] = mount["bindingRevision"].clone();
+                        }
+                        gateway_index::publish(config, &[source.clone()])?;
+                    } else { reused_files += 1; }
                     seen.insert(source["sourceId"].as_str().unwrap().to_string());
-                    gateway_index::publish(config, &[source.clone()])?;
                     count += 1;
                     source.as_object_mut().unwrap().remove("text");
+                    observations.push(source.clone());
                     queued.push(source);
                     if count % 16 == 0 {
                         job_update(
                             config,
                             id,
-                            json!({"completedSources":count,"totalSources":count}),
+                            json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"lexical"}),
                         )?;
                     }
                     Ok(())
                 },
             )?;
+            remaining_files = remaining_files.saturating_sub(report["publishedSources"].as_u64().unwrap_or(0));
+            remaining_bytes = remaining_bytes.saturating_sub(report["publishedTextBytes"].as_u64().unwrap_or(0));
             failed += report["failedFiles"].as_u64().unwrap_or(0);
             discovered += report["scannedFiles"].as_u64().unwrap_or(count);
             incomplete |= report["incomplete"] == true;
@@ -1198,8 +1328,10 @@ fn run_index(
                     .take(1000)
                     .cloned(),
             );
+          }
         }
     }
+    gateway_index::observe_files(config, &observations)?;
     let (document, _) = registry(&config.data_root)?;
     for entry in document["sources"].as_array().unwrap() {
         if cancel.load(Ordering::Acquire) {
@@ -1245,7 +1377,7 @@ fn run_index(
     job_update(
         config,
         id,
-        json!({"completedSources":count,"totalSources":count}),
+        json!({"completedSources":count,"totalSources":count,"reusedSources":reused_files,"phase":"semantic"}),
     )?;
     // Incomplete scans retain unobserved sources; complete scans revoke deletions before later embedding work.
     // 不完整扫描保留未观察来源；完整扫描在后续向量化之前撤销删除内容。
@@ -1386,9 +1518,11 @@ fn finish_semantic(
         }
     }
     coverage["semantic"] = json!(semantic);
+    let scope = settings["projectId"].as_str().map(|id|format!("project:{id}")).unwrap_or_else(||"user".into());
+    let ann_queued = if semantic > 0 { gateway_index::prepare_scope_ann(config, &scope, &settings["local"]).unwrap_or(0) } else { 0 };
     Ok(
         json!({"completedSources":count,"totalSources":count,"failed":failed+pending+u64::from(incomplete),"semantic":{"requested":settings["local"]["semantic"]!="off","profileId":profile,"totalChunks":total_chunks,"vectorChunks":vector_chunks,"cachedChunks":cached_chunks,"skippedSources":pending,"skippedChunks":0,"diagnosticCodes":codes.into_iter().take(8).collect::<Vec<_>>(),"state":if settings["local"]["semantic"]=="off"{"disabled"}else if pending>0&&semantic==0{"unavailable"}else if pending>0{"partial"}else{"complete"}},
-        "coverage":coverage}),
+        "annQueued":ann_queued,"coverage":coverage}),
     )
 }
 fn load_queued(
@@ -1499,16 +1633,32 @@ fn scan_each(
     path: &str,
     limits: &Value,
     cancel: &Arc<AtomicBool>,
+    consume: impl FnMut(Value) -> Result<(), ContractError>,
+) -> Result<Value, ContractError> {
+    scan_each_cached(config, path, limits, cancel, &HashMap::new(), consume)
+}
+fn scan_each_cached(
+    config: &GatewayConfig,
+    path: &str,
+    limits: &Value,
+    cancel: &Arc<AtomicBool>,
+    existing: &HashMap<String, Vec<Value>>,
     mut consume: impl FnMut(Value) -> Result<(), ContractError>,
 ) -> Result<Value, ContractError> {
     use crate::tools::service_source_reading::{SourceReadingState, execute_io};
     let token = Some(cancel.clone());
     let mut scanner = SourceReadingState::default();
+    let mut stable_limits = limits.clone();
+    stable_limits.as_object_mut().unwrap().remove("scopeBudget");
+    let limits_signature = gateway_index::hash(&stable_limits.to_string());
     let mut options = limits.clone();
     options["root"] = json!(path);
     options["maximumBytes"] = limits["maximumTotalBytes"].clone();
+    if let Some(files) = limits["scopeBudget"]["files"].as_u64() { options["maximumFiles"] = json!(files); }
+    if let Some(bytes) = limits["scopeBudget"]["bytes"].as_u64() { options["maximumBytes"] = json!(bytes); }
     options["allowPartial"] = json!(true);
     options["excludedRoots"] = json!([config.data_root, config.data_home, config.extension_root]);
+    options["excludedRoots"].as_array_mut().unwrap().extend(limits["mountExcludedRoots"].as_array().into_iter().flatten().cloned());
     scanner
         .apply(
             "source.reading.scanOpen",
@@ -1536,6 +1686,22 @@ fn scan_each(
             break;
         }
         if next["failed"] == true || next["missing"] == true {
+            continue;
+        }
+        if let Some(cached) = existing.get(next["path"].as_str().unwrap_or("")).filter(|sources| {
+            !sources.is_empty() && sources.iter().all(|source| source["fileMetadata"] == next["metadata"]
+                && source["scanLimitsSignature"] == limits_signature && source["cachedTextBytes"].is_u64()
+                && source["fileMetadata"].is_object() && source["locator"]["extraction"]["complete"] != false
+                && !source["locator"]["archive"].is_object())
+        }) {
+            scanner.apply("source.reading.scanObserved", &json!({"reused":true,"size":next["metadata"]["sizeBytes"]}), &token)
+                .map_err(|failure| gateway::error(&failure.message, "RETRIEVAL_SCAN_FAILED", 422))?;
+            for source in cached {
+                let admitted = scanner.apply("source.reading.scanPublish", &json!({"textBytes":source["cachedTextBytes"],"size":next["metadata"]["sizeBytes"]}), &token)
+                    .map_err(|failure| gateway::error(&failure.message, "RETRIEVAL_SCAN_LIMIT", 422))?;
+                if admitted == false { break 'files; }
+                let mut source = source.clone(); source["_indexReused"] = json!(true); consume(source)?;
+            }
             continue;
         }
         scanner
@@ -1639,7 +1805,8 @@ fn scan_each(
                     }
                     let revision = source_revision(&digest, &locator)?;
                     consume(
-                        json!({"title":filename.file_name().unwrap().to_string_lossy(),"text":text,"contentHash":digest,"sourceRevision":revision,"fileMetadata":value["metadata"],"locator":locator}),
+                        json!({"title":filename.file_name().unwrap().to_string_lossy(),"text":text,"contentHash":digest,"sourceRevision":revision,
+                            "fileMetadata":value["metadata"],"scanLimitsSignature":limits_signature,"cachedTextBytes":text.len(),"locator":locator}),
                     )?;
                 }
             }
@@ -1748,6 +1915,13 @@ pub fn handle(
     body: &Value,
     config: &GatewayConfig,
 ) -> Option<GatewayResult> {
+    if path == "/api/retrieval/activate" && method == "POST" {
+        return Some((|| {
+            let project = body["projectId"].as_str();
+            if let Some(project) = project { storage::identity(&json!(project))?; }
+            Ok((202, activate_project(config, project)))
+        })());
+    }
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let project_settings = parts.len() == 5
         && parts[0] == "api"
@@ -1931,6 +2105,35 @@ mod gateway_tests {
             );
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn incremental_scan_reuses_unchanged_file_and_respects_shared_budget() {
+        let workspace = Workspace::new();
+        let folder = workspace.root.join("增量 文件");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "stable alpha").unwrap();
+        std::fs::write(folder.join("b.txt"), "before beta").unwrap();
+        let limits = storage::settings::apply("storage.settings.defaults", &json!({})).unwrap()["local"]["indexing"].clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut cache: HashMap<String, Vec<Value>> = HashMap::new();
+        scan_each(&workspace.config, folder.to_str().unwrap(), &limits, &cancel, |source| {
+            cache.entry(source["locator"]["path"].as_str().unwrap().to_owned()).or_default().push(source); Ok(())
+        }).unwrap();
+        std::fs::write(folder.join("b.txt"), "changed beta with a different size").unwrap();
+        let mut observed = Vec::new();
+        let report = scan_each_cached(&workspace.config, folder.to_str().unwrap(), &limits, &cancel, &cache, |source| { observed.push(source); Ok(()) }).unwrap();
+        assert_eq!(report["fileReads"], 1);
+        assert_eq!(report["reusedFiles"], 1);
+        assert_eq!(observed.iter().filter(|source| source["_indexReused"] == true).count(), 1);
+        assert_eq!(report["publishedSources"], 2);
+        let mut bounded = limits;
+        bounded["scopeBudget"] = json!({"files":1,"bytes":1024});
+        let mut published = 0;
+        let report = scan_each_cached(&workspace.config, folder.to_str().unwrap(), &bounded, &cancel, &cache, |_| { published += 1; Ok(()) }).unwrap();
+        assert_eq!(published, 1);
+        assert_eq!(report["incomplete"], true);
+        assert!(nested_mount(folder.to_str().unwrap(), folder.join("nested").to_str().unwrap()));
+        assert!(!nested_mount(folder.to_str().unwrap(), folder.with_file_name("增量 文件2").to_str().unwrap()));
     }
     #[test]
     fn scanner_honors_partial_limits_and_publishes_actual_text() {

@@ -309,11 +309,7 @@ impl TaskState {
             let valid = !has_calls
                 && !truncated
                 && string_field(reply, "source") == "model-task-state"
-                && matches!(state, "complete" | "continue" | "blocked")
-                && (state != "complete"
-                    || !string_field(reply, "reason")
-                        .trim_matches(javascript_whitespace)
-                        .is_empty());
+                && matches!(state, "complete" | "continue" | "blocked");
             if !valid {
                 return if exhausted
                     || args
@@ -367,11 +363,16 @@ impl TaskState {
         }
         if !has_calls
             && can_continue
-            && args
+            && args["supportsTaskMarkers"] != false
+            // A reply to live guidance can acknowledge work without completing the existing task.
+            // 实时插话后的正文可能只是确认调整；原任务需沿用完成核对，不能仅因没有工具调用就结束。
+            && (args
                 .get("outputContinuations")
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
                 > 0
+                || boolean_field(args, "steeredTask")
+                || boolean_field(args, "steeredToolTask"))
             && matches!(state, "unknown" | "complete")
         {
             return json!({ "action": "review", "exhaustedBudget": exhausted });
@@ -647,5 +648,61 @@ mod tests {
             state.decide(&json!({"reply":{"state":"complete"},"outputContinuations":1}))["action"],
             "review"
         );
+    }
+
+    #[test]
+    fn completion_review_accepts_the_same_empty_reason_as_a_valid_footer() {
+        let mut state = TaskState::default();
+        let reply = state.inspect(
+            "成果已保存。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"\"}</kynxa_task>",
+        );
+        assert_eq!(reply["source"], "model-task-state");
+        assert_eq!(
+            state.decide(&json!({"reply":reply,"isReview":true}))["action"],
+            "final"
+        );
+        assert_eq!(
+            state.decide(&json!({"reply":reply,"isReview":true,"outputTruncated":true}))["action"],
+            "retry-review"
+        );
+    }
+
+    #[test]
+    fn plain_text_continuation_delivers_final_text_without_requesting_a_forbidden_marker() {
+        let state = TaskState::default();
+        let args = json!({
+            "reply":{"state":"unknown","source":"legacy-response"},
+            "outputContinuations":1,
+            "supportsTaskMarkers":false,
+        });
+        assert_eq!(state.decide(&args)["action"], "final");
+        let mut truncated = args;
+        truncated["outputTruncated"] = json!(true);
+        assert_eq!(state.decide(&truncated)["action"], "resume");
+    }
+
+    #[test]
+    fn steered_text_work_reviews_unassessed_completion_without_changing_ordinary_chat() {
+        let state = TaskState::default();
+        let mut args = json!({
+            "reply":{"state":"unknown","source":"legacy-response"},
+            "outputContinuations":0,"supportsTaskMarkers":true,
+        });
+        assert_eq!(state.decide(&args)["action"], "final");
+        args["steeredTask"] = json!(true);
+        assert_eq!(state.decide(&args)["action"], "review");
+        let mut legacy = args.clone();
+        legacy.as_object_mut().unwrap().remove("steeredTask");
+        legacy["steeredToolTask"] = json!(true);
+        assert_eq!(state.decide(&legacy)["action"], "review");
+        args["reply"] = json!({"state":"complete","source":"model-task-state"});
+        assert_eq!(state.decide(&args)["action"], "review");
+        for boundary in ["hasCalls", "hasUnknownEffects", "summarizeOnly", "recoveryFinal"] {
+            let mut guarded = args.clone();
+            guarded[boundary] = json!(true);
+            assert_eq!(state.decide(&guarded)["action"], "final", "{boundary}");
+        }
+        args["reply"] = json!({"state":"blocked","source":"model-task-state"});
+        assert_eq!(state.decide(&args)["code"], "TASK_BLOCKED");
     }
 }

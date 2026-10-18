@@ -169,6 +169,19 @@ impl TaskHub {
         })
         .await
     }
+    pub async fn recoverable(&self, conversation: &str, project: Option<&str>, after: Option<&str>, limit: usize) -> Result<Value> {
+        let conversation = conversation.to_owned();
+        let project = project.map(str::to_owned);
+        let after = after.map(str::to_owned);
+        let limit = limit.clamp(1, 100);
+        self.store(move |repository| {
+            let mut tasks = repository.recoverable_roots_for_conversation(&conversation, project.as_deref(), after.as_deref(), limit + 1)?;
+            let has_more = tasks.len() > limit;
+            tasks.truncate(limit);
+            let next = if has_more { tasks.last().map(|task| task.task_id.clone()) } else { None };
+            Ok(json!({"tasks":tasks,"hasMore":has_more,"nextTaskId":next}))
+        }).await
+    }
     pub async fn detail(&self, id: &str) -> Result<Value> {
         let id = id.to_owned();
         self.store(move|repository| {
@@ -195,15 +208,20 @@ impl TaskHub {
                 .map_err(|_| failure("TASK_SCOPE_WORKER_FAILED"))??;
         let binding = &task.scope.permission_snapshot["bindingSnapshot"];
         if task.scope.project_id.as_deref() != relation["projectId"].as_str()
-            || (binding.is_object()
-                && (binding["projectId"] != relation["projectId"]
-                    || binding["folderPath"] != relation["folderPath"]))
+            || (binding.is_object() && !crate::storage::workspace_mounts::validate_snapshot(binding, &relation))
         {
             return Err(GatewayError::new(
                 "TASK_SCOPE_CHANGED",
                 "Task work scope changed; review it before continuing. / 任务工作范围已变化，请核对后继续。",
                 409,
             ));
+        }
+        for operation in self.repository().await?.operations(&task.task_id)? {
+            if let Some(mount) = operation.intent.input_reference.as_ref().and_then(|reference|reference.get("mountBinding")).filter(|mount|mount.is_object()) {
+                if !relation["mounts"].as_array().into_iter().flatten().any(|current|crate::storage::workspace_mounts::same_mount(mount,current)) {
+                    return Err(GatewayError::new("TASK_SCOPE_CHANGED", "任务使用的挂载已移除或改变；进度和回执已保留，请恢复原挂载后继续。", 409));
+                }
+            }
         }
         Ok(())
     }
@@ -239,7 +257,7 @@ impl TaskHub {
         }
         let owned = id.to_owned();
         let cloned = action.clone();
-        let changed = self
+        let mut changed = self
             .store(move |repository| repository.control(&owned, version, cloned))
             .await?;
         let mut affected = vec![changed.task_id.clone()];
@@ -252,6 +270,7 @@ impl TaskHub {
             affected.extend(children.into_iter().map(|child| child.task_id));
             index += 1;
         }
+        let mut recovery = Value::Null;
         if action != TaskControl::Resume {
             if let Ok(runners) = self.runners.lock() {
                 for id in &affected {
@@ -266,10 +285,80 @@ impl TaskHub {
                 }
             }
         } else {
-            self.schedule_root_recovery(&changed).await?;
+            recovery = self.reconcile_recovery_tree(&changed).await?;
+            changed = repository.load(id)?;
+            if recovery["pending"].as_array().is_none_or(Vec::is_empty)
+                && !changed.state.is_terminal() && changed.state != TaskState::Paused
+            {
+                self.schedule_root_recovery(&changed).await?;
+            }
         }
         self.changes.notify_waiters();
-        Ok(json!({"task":changed,"affectedTaskIds":affected}))
+        Ok(json!({"task":changed,"affectedTaskIds":affected,"recovery":recovery}))
+    }
+
+    /// Reconcile a stopped task tree under the existing execution fences; no evidence means keep waiting.
+    /// 沿已有执行围栏核验已停止任务树；没有真实证据就继续等待，不能借恢复重复派发。
+    async fn reconcile_recovery_tree(&self, selected: &TaskRecord) -> Result<Value> {
+        let _recovery = self.recovery_gate.lock().await;
+        let repository = self.repository().await?;
+        let mut root = repository.load(&selected.task_id)?;
+        for _ in 0..64 {
+            if let Some(parent) = root.parent_task_id.as_deref() { root = repository.load(parent)?; }
+            else { break; }
+        }
+        let mut tree = vec![root.clone()];
+        let mut index = 0;
+        while index < tree.len() {
+            tree.extend(repository.children(&tree[index].task_id)?);
+            index += 1;
+        }
+        let mut operations = 0u64;
+        let mut reservations = 0u64;
+        let mut pending = Vec::new();
+        for member in tree {
+            let member = repository.load(&member.task_id)?;
+            let has_pending = repository.operations(&member.task_id)?.iter().any(|operation|
+                matches!(operation.state, OperationState::Unknown | OperationState::Dispatched)
+                    && operation.intent.effect != OperationEffect::Observation)
+                || repository.model_reservations(&member.task_id)?.iter().any(|reservation|
+                    matches!(reservation.state, ModelReservationState::Unknown | ModelReservationState::Reserved));
+            if !has_pending { continue; }
+            self.validate_binding(&member).await?;
+            let current_root = repository.load(&root.task_id)?;
+            if member.state.is_terminal() || member.state == TaskState::Paused
+                || current_root.state.is_terminal() || current_root.state == TaskState::Paused
+            {
+                pending.push(json!({"taskId":member.task_id,"code":"TASK_RECOVERY_CONTROLLED",
+                    "message":"该任务或父任务已暂停或取消；不会自动恢复其执行。"}));
+                continue;
+            }
+            if repository.current_attempt(&member.task_id)?.is_some_and(|attempt|
+                attempt.ended_at_ms.is_none() && attempt.lease_expires_at_ms > chrono::Utc::now().timestamp_millis())
+            {
+                pending.push(json!({"taskId":member.task_id,"code":"TASK_RECOVERY_WORKER_ACTIVE",
+                    "message":"原执行者仍在结算；请等待原调用的实际回执，不会启动重复执行。"}));
+                continue;
+            }
+            let journal = TaskJournal::start_existing(&self.config.data_root, &member,
+                &format!("recovery:{}", std::process::id()), 30000)?;
+            let report = journal.reconcile_receipts().await.unwrap_or_else(|error|
+                json!({"pending":[{"taskId":member.task_id,"code":error.code,"message":error.message}]}));
+            operations += report["resolvedOperations"].as_u64().unwrap_or(0);
+            reservations += report["resolvedReservations"].as_u64().unwrap_or(0);
+            let waiting = report["pending"].as_array().is_some_and(|items| !items.is_empty());
+            pending.extend(report["pending"].as_array().into_iter().flatten().cloned());
+            journal.finish(if waiting { TaskState::WaitingVerification } else { TaskState::Running },
+                Some(if waiting { "recovery-evidence-required" } else { "recovery-evidence-reconciled" })).await?;
+        }
+        if !pending.is_empty() {
+            let current = repository.load(&root.task_id)?;
+            if !current.state.is_terminal() && current.state != TaskState::Paused {
+                repository.mark_unstarted_wait(&current.task_id, current.version, TaskState::WaitingVerification,
+                    "recovery-evidence-required")?;
+            }
+        }
+        Ok(json!({"resolvedOperations":operations,"resolvedReservations":reservations,"pending":pending}))
     }
     /// Amend the same executor at the next turn boundary, with a reply after the new formal user message.
     /// 在下一轮边界调整同一执行者；新回复位于正式插话之后，已暂停任务仍复用原恢复路径。
@@ -967,6 +1056,13 @@ impl TaskHub {
                 return Ok(());
             }
             self.validate_binding(&task).await?;
+            let reconciliation = self.reconcile_recovery_tree(&task).await?;
+            if reconciliation["pending"].as_array().is_some_and(|items| !items.is_empty()) {
+                self.changes.notify_waiters();
+                return Ok(());
+            }
+            let task = repository.load(&task.task_id)?;
+            if task.state.is_terminal() || task.state == TaskState::Paused { return Ok(()); }
             let mut tree = vec![task.clone()];
             let mut index = 0;
             while index < tree.len() {

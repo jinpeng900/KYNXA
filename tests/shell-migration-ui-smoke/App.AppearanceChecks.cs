@@ -219,6 +219,7 @@ public partial class App
             }
 
             await CheckAppearanceReadingSettingsAsync(settings, root, transcript);
+            await CheckPopupAppearanceAsync(settings, root);
 
             var status = NativeUi.ById<InfoBar>(root, "AppearanceSettingsStatus");
             string selectedId = AppearanceService.Current.Id;

@@ -36,6 +36,7 @@ public partial class App : Application
     private bool _shortcutTooltipOnly;
     private bool _bodySearchOnly;
     private bool _appearanceOnly;
+    private bool _dropdownSpacingOnly;
     private bool _appearanceTransferOnly;
     private bool _sidebarControlsOnly;
     private bool _sidebarRoundnessOnly;
@@ -43,6 +44,9 @@ public partial class App : Application
     private bool _settingsInteractionsOnly;
     private bool _dialogsOnly;
     private bool _windowPresentationOnly;
+
+    private bool _promptSendOnly;
+    private bool _workspaceAutoOpenOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
     private string DesktopDirectory => Path.Combine(DataDirectory, "Desktop");
     private string WebViewDirectory => Path.Combine(_directory, "WebView");
@@ -89,6 +93,9 @@ public partial class App : Application
         _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
+        _dropdownSpacingOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--dropdown-spacing-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--dropdown-spacing-only", StringComparer.Ordinal);
         _appearanceTransferOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-transfer-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-transfer-only", StringComparer.Ordinal);
@@ -110,6 +117,13 @@ public partial class App : Application
         _windowPresentationOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--window-presentation-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--window-presentation-only", StringComparer.Ordinal);
+
+        _promptSendOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--prompt-send-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--prompt-send-only", StringComparer.Ordinal);
+        _workspaceAutoOpenOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--workspace-auto-open-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--workspace-auto-open-only", StringComparer.Ordinal);
         File.WriteAllText(ResultPath, "RUNNING production MainWindow/ShellPage with temporary storage, mock HTTP and isolated WebView\n");
         UiText.Initialize("zh-CN");
         Window = new MainWindow();
@@ -449,7 +463,8 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            await CheckInitialHomeAsync();
+            if (_promptSendOnly || _workspaceAutoOpenOnly) _gateway.ReleaseInitialCatalog();
+            else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&
                 AutomationProperties.GetName(Element<Button>("ModelStatusButton")).Contains("已选择模型") &&
@@ -490,6 +505,24 @@ public partial class App : Application
                     "focused appearance transfer checks complete without formal writes, model calls or unhandled errors");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
                     $"\nPASS: {_checks.Count} production Shell appearance import/export checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_workspaceAutoOpenOnly)
+            {
+                await CheckWorkspaceAutoOpenAsync();
+                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
+                    "workspace opening dispatch stays inside the synthetic gateway without model calls or formal writes");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell workspace auto-open checks.\nArtifacts: {_directory}");
+                return;
+            }
+            if (_promptSendOnly)
+            {
+                await CheckPromptSendAsync();
+                Check(_gateway.Failure is null && _unhandled is null,
+                    "focused prompt sends complete without production storage or upstream model access");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell prompt-send checks.\nArtifacts: {_directory}");
                 return;
             }
             if (_settingsInteractionsOnly)
@@ -548,6 +581,15 @@ public partial class App : Application
                     "focused shortcut tooltip checks complete without formal data writes or unhandled errors");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
                     $"\nPASS: {_checks.Count} production Shell shortcut tooltip checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_dropdownSpacingOnly)
+            {
+                await CheckDropdownSpacingAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused dropdown spacing checks preserve formal data and complete without unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell dropdown spacing checks.\nPreviews: {_directory}");
                 return;
             }
             if (_appearanceOnly)

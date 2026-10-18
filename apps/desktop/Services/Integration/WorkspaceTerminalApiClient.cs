@@ -17,13 +17,13 @@ public sealed class WorkspaceTerminalApiClient : IDisposable
     private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
 
     public async Task<WorkspaceTerminalSession> OpenAsync(Guid conversationId, int cols, int rows,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Guid? mountId = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(45));
         await ModelGatewayService.EnsureReadyAsync(deadline.Token);
         using var response = await _http.PostAsJsonAsync("/api/agent/workspace/terminal/open",
-            new { conversationId, cols, rows }, JsonOptions, deadline.Token);
+            new { conversationId, cols, rows, mountId }, JsonOptions, deadline.Token);
         return await GatewayResponseReader.ReadAsync<WorkspaceTerminalSession>(response,
             UiText.Get("终端启动结果为空。"), UiText.Get("终端启动失败（HTTP {0}）。"), deadline.Token, JsonOptions);
     }

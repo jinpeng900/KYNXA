@@ -77,6 +77,7 @@ fn content_url(context: &GatewayToolContext, path: &Path, version: &str, convert
     query.append_pair("conversationId", &context.conversation_id)
         .append_pair("path", &super::local_files::path_text(path))
         .append_pair("version", version);
+    if let Some(mount_id) = context.config["activeMountId"].as_str() { query.append_pair("mountId", mount_id); }
     if converted { query.append_pair("representation", "pdf"); }
     format!("/agent/workspace/content?{}", query.finish())
 }
@@ -208,7 +209,8 @@ pub(super) async fn open(arguments: Value, path: PathBuf, binding: Value, contex
     let (kind, mime_type) = format(&path);
     let title = arguments["title"].as_str().filter(|title| !title.trim().is_empty())
         .map(str::to_owned).unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-    let mut result = json!({"kind":kind,"title":title,"path":super::local_files::path_text(&path),"version":version,"mimeType":mime_type});
+    let mut result = json!({"kind":kind,"title":title,"path":super::local_files::path_text(&path),"version":version,"mimeType":mime_type,
+        "mountId":context.config["activeMountId"],"mountName":context.config["activeMount"]["name"]});
     if arguments["_metadataOnly"] == true {
         // Display actions return a file reference; only the active UI preview loads its body.
         // 展示动作只返回文件引用，正文由当前活动预览读取，不重复塞入模型上下文。

@@ -403,28 +403,29 @@ public partial class App
     [DllImport("user32.dll", EntryPoint = "IsWindowVisible")] private static extern bool IsShortcutWindowVisible(nint window);
     [DllImport("user32.dll", EntryPoint = "IsIconic")] private static extern bool IsShortcutWindowIconic(nint window);
 
-    private async Task ActivateOwnedShortcutWindowAsync()
+    private async Task ActivateOwnedShortcutWindowAsync(Window? targetWindow = null)
     {
-        nint owned = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        Window window = targetWindow ?? Window;
+        nint owned = WinRT.Interop.WindowNative.GetWindowHandle(window);
         if (GetForegroundWindow() == owned) return;
         // A restored window may extend beyond the monitor before the hover checks resize it.
         // 悬停检查调整尺寸之前，恢复后的窗口可能超出屏幕；激活坐标必须先落在可达区域。
-        var workArea = DisplayArea.GetFromWindowId(Window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-        var currentSize = Window.AppWindow.Size;
-        var currentPosition = Window.AppWindow.Position;
+        var workArea = DisplayArea.GetFromWindowId(window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+        var currentSize = window.AppWindow.Size;
+        var currentPosition = window.AppWindow.Position;
         int reachableWidth = Math.Min(currentSize.Width, workArea.Width - 32);
         int reachableHeight = Math.Min(currentSize.Height, workArea.Height - 32);
         if (currentPosition.X < workArea.X || currentPosition.Y < workArea.Y ||
             currentPosition.X + currentSize.Width > workArea.X + workArea.Width ||
             currentPosition.Y + currentSize.Height > workArea.Y + workArea.Height)
         {
-            Window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(workArea.X + 16, workArea.Y + 16,
+            window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(workArea.X + 16, workArea.Y + 16,
                 reachableWidth, reachableHeight));
         }
-        Window.AppWindow.Show(activateWindow: true);
-        Window.Activate();
+        window.AppWindow.Show(activateWindow: true);
+        window.Activate();
         SetForegroundWindow(owned);
-        Window.AppWindow.MoveInZOrderAtTop();
+        window.AppWindow.MoveInZOrderAtTop();
         await SettleAsync();
         if (GetForegroundWindow() == owned) return;
         // Windows can reject background activation. Click only the verified blank title bar of this visible fixture.
@@ -434,7 +435,7 @@ public partial class App
         foreach (int key in new[] { 0x01, 0x02, 0x04, 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if ((GetAsyncKeyState(key) & 0x8000) != 0)
                 throw new InvalidOperationException("Fixture activation stopped because a mouse button or modifier is held.");
-        var presenter = Window.AppWindow.Presenter as OverlappedPresenter
+        var presenter = window.AppWindow.Presenter as OverlappedPresenter
             ?? throw new InvalidOperationException("The shortcut fixture has no overlapped presenter.");
         bool wasAlwaysOnTop = presenter.IsAlwaysOnTop;
         try
@@ -442,10 +443,11 @@ public partial class App
             // The desktop can cover a background test with an always-on-top window. Raise only this owned fixture while activating it.
             // 桌面置顶窗口可能遮挡后台夹具；激活期间仅临时提升本夹具，并在 finally 恢复原设置。
             presenter.IsAlwaysOnTop = true;
-            Window.AppWindow.MoveInZOrderAtTop();
+            window.AppWindow.MoveInZOrderAtTop();
             await SettleAsync();
-            double scale = _shell.XamlRoot.RasterizationScale;
-            var point = new NativePoint { X = (int)Math.Round(((FrameworkElement)Window.Content).ActualWidth * 0.6 * scale), Y = (int)Math.Round(24 * scale) };
+            var root = (FrameworkElement)window.Content;
+            double scale = root.XamlRoot.RasterizationScale;
+            var point = new NativePoint { X = (int)Math.Round(root.ActualWidth * 0.6 * scale), Y = (int)Math.Round(24 * scale) };
             if (!ClientToScreen(owned, ref point) || GetAncestor(WindowFromPoint(point), 2) != owned)
                 throw new InvalidOperationException("The fixture's blank title bar is covered or outside the reachable screen.");
             int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);

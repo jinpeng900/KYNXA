@@ -77,9 +77,30 @@ public partial class App
                 "startup checks restore the original empty Work mode for the remaining suite");
             await SettleAsync();
             CheckStartupDisabledSend("the restored empty Work homepage");
+            await WaitAsync(() => _gateway.ActivationRequests >= 1,
+                "the initial temporary retrieval scope receives its background activation hint");
+            var restoredFooter = new
+            {
+                FooterVisible = composer.IsFooterVisible,
+                WorkspaceVisible = NativeUi.IsVisible(workspace),
+                WorkspaceEnabled = workspace.IsEnabled,
+                ActiveConversationId = ActiveId,
+                PromptPlaceholder = Prompt.PlaceholderText,
+                ExpectedPlaceholder = UiText.Get("描述你想完成的工作..."),
+                _gateway.CatalogReads,
+                _gateway.Writes,
+                _gateway.ActivationRequests,
+                FixtureFailure = _gateway.Failure?.ToString()
+            };
+            // Record every conjunct before failing so fixture mismatches are distinguishable from production regressions.
+            // 失败前记录每项真实条件，用于区分模拟接口差异与产品回归，不放宽就绪、无写入或无新会话约束。
+            string restoredFooterJson = JsonSerializer.Serialize(restoredFooter);
+            File.WriteAllText(Path.Combine(_directory, "shell-startup-restored-footer.json"), restoredFooterJson);
             Check(composer.IsFooterVisible && NativeUi.IsVisible(workspace) && workspace.IsEnabled && ActiveId is null &&
                 Prompt.PlaceholderText == UiText.Get("描述你想完成的工作...") && _gateway.CatalogReads == 1 && _gateway.Writes == 0,
-                "the restored work footer becomes available after one read without gateway writes or a new conversation");
+                "the restored work footer becomes available after one catalog read without conversation/catalog writes or a new conversation: " + restoredFooterJson);
+            Check(_gateway.ActivationRequests == 1 && _gateway.Failure is null && ActiveId is null,
+                "unchanged startup scope activates retrieval once without creating a conversation");
             geometry["workAfterCatalog"] = ReadStartupHomeGeometry();
             CheckStartupHomeGeometry(geometry["workBeforeCatalog"], geometry["workAfterCatalog"],
                 "the restored work homepage matches its native geometry from before the catalog response");
@@ -100,6 +121,14 @@ public partial class App
     private void CheckStartupDisabledSend(string description)
     {
         var send = Element<Button>("SendButton");
+        var toolbar = Element<Grid>("ComposerToolbar");
+        Rect sendBounds = send.TransformToVisual(toolbar).TransformBounds(new Rect(0, 0, send.ActualWidth, send.ActualHeight));
+        // Equal button dimensions alone do not detect ancestor layout clipping of the circular caps.
+        // 按钮宽高相等不能证明圆弧完整；同时核对按钮边界落在工具栏可见布局范围内。
+        Check(Math.Abs(send.ActualWidth - send.ActualHeight) < .1 && sendBounds.Top >= -.1 &&
+            sendBounds.Bottom <= toolbar.ActualHeight + .1,
+            description + $" keeps the complete circular Send inside its toolbar: button={send.ActualWidth:F2}x{send.ActualHeight:F2}, " +
+            $"top={sendBounds.Top:F2}, bottom={sendBounds.Bottom:F2}, toolbarHeight={toolbar.ActualHeight:F2}");
         var background = PresentedBackground(send);
         Check(!send.IsEnabled && background is not null && background.Color == AppearanceService.ParseColor(AppearanceService.Current.Disabled) &&
             SendArrowUsesBrush("KynxaDisabledTextBrush") && Element<PathShape>("SendArrow").Visibility == Visibility.Visible,

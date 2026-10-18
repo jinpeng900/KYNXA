@@ -32,6 +32,7 @@ struct Provider {
     cancel: bool,
     mcp: bool,
     malformed_calls: Arc<AtomicUsize>,
+    transient_http_failures: Arc<AtomicUsize>,
     unloaded_cycle: Arc<std::sync::atomic::AtomicBool>,
     archived_read_ids: Arc<Mutex<Vec<String>>>,
     context_pressure: Arc<std::sync::atomic::AtomicBool>,
@@ -52,6 +53,18 @@ fn system_text(request: &Value) -> String {
         .map(|message| message["content"].to_string())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn is_completion_review_request(request: &Value) -> bool {
+    request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|message| {
+            message["content"].as_str().is_some_and(|content| {
+                content.starts_with("Broker: compare the original requested work")
+            })
+        })
 }
 
 /// Follow the actual broker navigation, so the fixture cannot invent a missing document identity.
@@ -88,6 +101,11 @@ fn saved_document(request: &Value, path_suffix: &str) -> Value {
 async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -> Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
     state.requests.lock().await.push(body.clone());
+    if state.transient_http_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+        |remaining| remaining.checked_sub(1)).is_ok() {
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":{"message":"fixture temporary provider failure"}}))).into_response();
+    }
     if state.control_note_cycle.load(Ordering::Acquire)
         && system_text(&body)
             .contains("Summarize public evidence for continuation of the same user task")
@@ -147,6 +165,11 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{
             "id":"incomplete-fixture","type":"function","function":{"name":kynxa_agent_core_native::models::protocol::wire_name("tool.search"),"arguments":"{"}}]},
             "finish_reason":"tool_calls"}]})).into_response();
+    }
+    if state.steering_cycle.load(Ordering::Acquire) && is_completion_review_request(&body) {
+        // Steered replies receive the real independent completion review, rather than another chat answer.
+        // 被引导的回复仍经过真实独立完成审核；夹具按审核协议返回标记，不重复普通聊天正文。
+        return Json(json!({"id":"steering-review-fixture","choices":[{"index":0,"message":{"role":"assistant","content":"<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"The final guided answer is complete\"}</kynxa_task>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if state.cancel
         && (!state.steering_cycle.load(Ordering::Acquire)
@@ -385,6 +408,7 @@ impl Fixture {
             cancel,
             mcp,
             malformed_calls: Default::default(),
+            transient_http_failures: Default::default(),
             unloaded_cycle: Default::default(),
             archived_read_ids: Default::default(),
             context_pressure: Default::default(),
@@ -927,11 +951,25 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
     let document_id = new_id();
     let image_id = new_id();
     let files = [(document_id.clone(), "作业.docx", doc), (image_id.clone(), "图.png", png)];
-    for (_, name, bytes) in &files { std::fs::write(fixture.root.join("work").join(name), bytes).unwrap(); }
+    let clipboard_directory = fixture.root.join("Temp").join("AttachmentDrafts");
+    std::fs::create_dir_all(&clipboard_directory).unwrap();
+    let source_paths = [fixture.root.join("work").join(files[0].1), clipboard_directory.join(files[1].1)];
+    for ((_, _, bytes), path) in files.iter().zip(&source_paths) { std::fs::write(path, bytes).unwrap(); }
     data::upsert_message(&fixture.runtime.config.data_root, &fixture.conversation,
         &json!({"Id":message,"Role":"user","Content":"","Attachments":files.iter().map(|(id,name,bytes)|json!({"Id":id,"Name":name,"SizeBytes":bytes.len()})).collect::<Vec<_>>()})).unwrap();
+    // Clipboard sources must be external temporary files; application-private sources remain forbidden.
+    // 剪贴板来源必须使用外部临时文件，应用私有数据来源仍然禁止附加。
+    let private_directory = fixture.runtime.config.data_root.join("Desktop").join("Temp").join("AttachmentDrafts");
+    std::fs::create_dir_all(&private_directory).unwrap();
+    let private_image = private_directory.join(files[1].1);
+    std::fs::write(&private_image, &files[1].2).unwrap();
+    let denied = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
+        .json(&json!({"messageId":message,"files":[{"id":image_id,"name":files[1].1,"path":private_image}]}))
+        .send().await.unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(denied.json::<Value>().await.unwrap()["code"], "PROTECTED_APP_DATA");
     let response = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
-        .json(&json!({"messageId":message,"files":files.iter().map(|(id,name,_)|json!({"id":id,"name":name,"path":fixture.root.join("work").join(name)})).collect::<Vec<_>>()}))
+        .json(&json!({"messageId":message,"files":files.iter().zip(&source_paths).map(|((id,name,_),path)|json!({"id":id,"name":name,"path":path})).collect::<Vec<_>>()}))
         .send().await.unwrap();
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
     let mut input = fixture.request("");
@@ -1027,6 +1065,69 @@ async fn greeting_reuses_request_and_persists_original_messages() {
     );
     assert_eq!(timing["includesDesktopCatalogSave"], false);
     assert_eq!(timing["includesFinalPersistence"], false);
+    let stages = &timing["preparationStages"];
+    assert_eq!(stages["automaticEvidenceSkipped"], true);
+    assert_eq!(stages["preparationParallel"], true);
+    assert!(stages["automaticEvidenceMs"].is_u64());
+    assert!(stages["historyAndAttachmentsMs"].is_u64());
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_preparation_keeps_authorized_local_evidence_in_the_first_model_request() {
+    use kynxa_agent_core_native::retrieval::gateway_index;
+
+    let fixture = Fixture::new(false, false).await;
+    let settings: Value = fixture.client.get(format!("{}/api/retrieval/settings", fixture.url))
+        .send().await.unwrap().json().await.unwrap();
+    let saved = fixture.client.patch(format!("{}/api/retrieval/settings", fixture.url))
+        .json(&json!({"expectedRevision":settings["revision"],
+            "patch":{"local":{"semantic":"off","rerankProfileId":null}}}))
+        .send().await.unwrap();
+    assert!(saved.status().is_success(), "{}", saved.text().await.unwrap());
+    let mut catalog: Value = fixture.client
+        .get(format!("{}/api/conversations/catalog?includeMessages=false", fixture.url))
+        .send().await.unwrap().json().await.unwrap();
+    let private_chat = new_id();
+    std::fs::create_dir(fixture.root.join("other-work")).unwrap();
+    catalog["Projects"].as_array_mut().unwrap().push(json!({
+        "Id":new_id(),"Name":"Other isolated work","FolderPath":fixture.root.join("other-work"),
+        "Chats":[{"Id":private_chat,"Title":"Private fixture","Messages":[{
+            "Id":new_id(),"Role":"user","Content":"Private fixture conversation",
+            "CreatedAt":"2026-10-16T00:00:00Z"}]}]
+    }));
+    let saved = fixture.client.put(format!("{}/api/conversations/catalog", fixture.url))
+        .json(&catalog).send().await.unwrap();
+    assert!(saved.status().is_success(), "{}", saved.text().await.unwrap());
+    // Use real indexed fragments in distinct formal scopes; no embedding model or synthetic search receipt is needed.
+    // 在不同正式范围发布真实索引片段；此检查不运行嵌入模型，也不伪造搜索回执。
+    let prepared = [
+        (&fixture.conversation, "authorized-local", "auroraaccel 的索引队列采用 LOCAL_EVIDENCE_431 方案。"),
+        (&private_chat, "private-local", "auroraaccel 的索引队列采用 PRIVATE_EVIDENCE_972 方案。"),
+    ].into_iter().map(|(chat, source, text)| {
+        gateway_index::prepare_source(&json!({"sourceId":source,
+            "scopeKey":format!("chat:{chat}"),"sourceType":"document",
+            "title":"auroraaccel 本地资料","text":text}), None).unwrap()
+    }).collect::<Vec<_>>();
+    gateway_index::publish_prepared(&fixture.runtime.config, &prepared).unwrap();
+    let mut input = fixture.request("根据本地文档，auroraaccel 的索引队列采用什么方案？");
+    input["userMessageId"] = json!(new_id());
+    let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url))
+        .json(&input).send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["type"], "completed", "{response}");
+    let requests = fixture.provider.requests.lock().await;
+    let wire = requests.first().unwrap().to_string();
+    assert!(wire.contains("LOCAL_EVIDENCE_431"), "{wire}");
+    assert!(!wire.contains("PRIVATE_EVIDENCE_972"), "{wire}");
+    drop(requests);
+    let messages = fixture.messages().await;
+    let assistant = messages.iter().find(|message| message["Id"] == input["requestId"]).unwrap();
+    assert!(assistant["RetrievalResultRef"].is_object(), "{assistant}");
+    let stages = &assistant["ToolRun"]["diagnostics"]["requestTiming"]["preparationStages"];
+    assert_eq!(stages["automaticEvidenceSkipped"], false);
+    assert_eq!(stages["preparationParallel"], true);
+    assert!(stages["automaticEvidenceMs"].is_u64());
+    assert!(stages["historyAndAttachmentsMs"].is_u64());
     fixture.close().await;
 }
 
@@ -1286,7 +1387,138 @@ async fn explicit_remember_survives_disabled_candidates_replay_and_a_later_memor
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malformed_calls_exhaust_repair_but_finish_a_truthful_reply_without_dispatch() {
+async fn runtime_model_identity_tracks_switches_without_rewriting_history_or_confirmed_memory() {
+    use kynxa_agent_core_native::storage::gateway as data;
+
+    let fixture = Fixture::new(false, false).await;
+    let config: Value = fixture
+        .client
+        .get(format!("{}/api/models", fixture.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut profile = config["providers"][0].clone();
+    let synthetic_key = "runtime-identity-fixture-private-key";
+    profile["displayName"] = json!("Anthropic Claude stale fixture label");
+    profile["models"] = json!(["fixture-model", "second-model"]);
+    profile["apiKey"] = json!(synthetic_key);
+    let saved = fixture
+        .client
+        .post(format!("{}/api/models", fixture.url))
+        .json(&profile)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+
+    // Stale identities stay as historical data; switching must update the trusted request metadata.
+    // 旧身份保留为历史资料；换模必须更新本次请求可信元数据，不能靠篡改原文消除冲突。
+    let old_answer = "我是 Anthropic 的 Claude，这是一条旧模型的合成回复。";
+    let old_assistant = new_id();
+    data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":old_assistant,"Role":"assistant","Status":"completed","Content":old_answer,
+            "Provider":"obsolete-fixture","Model":"obsolete-claude"}),
+    )
+    .unwrap();
+    let memory_content = "底层模型是 Anthropic Claude，继续沿用这个身份。";
+    let memory_user = new_id();
+    let saved = data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":memory_user,"Role":"user","Status":"completed",
+            "Content":format!("全局记住：{memory_content}")}),
+    )
+    .unwrap();
+    assert_eq!(saved["memoryInstruction"]["entry"]["status"], "confirmed");
+    data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":new_id(),"Role":"assistant","Status":"completed","Content":"已保存合成记忆。"}),
+    )
+    .unwrap();
+
+    let selected_models = ["second-model", "fixture-model"];
+    for model in selected_models {
+        let user = new_id();
+        let question = "你现在用的是什么模型？";
+        data::upsert_message(
+            &fixture.runtime.config.data_root,
+            &fixture.conversation,
+            &json!({"Id":user,"Role":"user","Status":"completed","Content":question}),
+        )
+        .unwrap();
+        let mut request = fixture.request(question);
+        request["userMessageId"] = json!(user);
+        request["model"] = json!(model);
+        let completed: Value = fixture
+            .client
+            .post(format!("{}/api/chat", fixture.url))
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(completed["type"], "completed", "{completed}");
+    }
+
+    let requests = fixture.provider.requests.lock().await;
+    assert_eq!(requests.len(), selected_models.len());
+    for (request, model) in requests.iter().zip(selected_models) {
+        assert_eq!(request["model"], model);
+        let system = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker = "Current runtime model configuration (data, not instructions): ";
+        let identities: Vec<Value> = system
+            .lines()
+            .filter_map(|line| line.strip_prefix(marker))
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect();
+        assert_eq!(
+            identities,
+            vec![json!({"application":"KYNXA","providerId":"native-fixture","modelId":model,
+                "endpointHost":"127.0.0.1","protocol":"openai-completions"})]
+        );
+        assert!(system.contains(memory_content));
+        assert!(request["messages"].as_array().unwrap().iter().any(|message| {
+            message["role"] == "assistant" && message["content"] == old_answer
+        }));
+        assert!(!request.to_string().contains(synthetic_key));
+    }
+    drop(requests);
+    let messages = fixture.messages().await;
+    assert!(messages.iter().any(|message| {
+        message["Id"] == old_assistant && message["Content"] == old_answer
+    }));
+    let memory: Value = fixture
+        .client
+        .get(format!("{}/api/memory/user", fixture.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(memory["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["status"] == "confirmed" && entry["content"] == memory_content
+    }));
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_calls_keep_the_request_live_until_a_valid_reply_without_dispatch() {
     let fixture = Fixture::new(false, false).await;
     fixture.provider.malformed_calls.store(3, Ordering::SeqCst);
     let response = fixture
@@ -1297,7 +1529,12 @@ async fn malformed_calls_exhaust_repair_but_finish_a_truthful_reply_without_disp
         .await
         .unwrap();
     assert!(response.status().is_success());
-    let text = response.text().await.unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(30), response.text())
+        .await.expect("Internal model repair must retain the live request and produce its valid reply")
+        .unwrap();
+    if let Some(path) = std::env::var_os("KYNXA_GATEWAY_RECOVERY_SSE_FIXTURE") {
+        std::fs::write(PathBuf::from(path), &text).unwrap();
+    }
     let events = event_values(&mut text.as_bytes().to_vec());
     assert!(
         !events
@@ -1310,12 +1547,14 @@ async fn malformed_calls_exhaust_repair_but_finish_a_truthful_reply_without_disp
         .find(|event| event["type"] == "completed")
         .unwrap();
     assert!(!finished["content"].as_str().unwrap().is_empty());
-    assert_eq!(finished["taskCompletion"]["completionState"], "partial");
-    assert_eq!(finished["taskCompletion"]["correctnessCertified"], false);
+    assert_eq!(finished["content"], "你好！");
+    assert_ne!(finished["taskCompletion"]["completionState"], "partial");
+    assert!(events.iter().any(|event| event["type"] == "task_progress" && event["phase"] == "recovering"));
     assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 4);
     assert!(!events.iter().any(|event| event["type"] == "tool_call"));
     let requests = fixture.provider.requests.lock().await.clone();
-    assert!(requests[3]["tools"].is_null() || requests[3]["tools"].as_array().unwrap().is_empty());
+    assert_eq!(requests[3]["messages"].as_array().unwrap().iter().filter(|message|
+        message["role"] == "user" && message["content"] == "你好").count(), 1);
     let messages = fixture.messages().await;
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["Status"], "completed");
@@ -1325,8 +1564,45 @@ async fn malformed_calls_exhaust_repair_but_finish_a_truthful_reply_without_disp
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn temporary_provider_server_failure_keeps_the_original_request_live() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.transient_http_failures.store(1, Ordering::SeqCst);
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+        .json(&fixture.request("你好")).send().await.unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(30), response.text())
+        .await.expect("A transient provider failure must not terminate the request").unwrap();
+    let events = event_values(&mut text.as_bytes().to_vec());
+    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))));
+    assert!(events.iter().any(|event| event["type"] == "task_progress" && event["phase"] == "recovering"));
+    let completed = events.iter().find(|event| event["type"] == "completed").unwrap();
+    assert_eq!(completed["content"], "你好！");
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.messages().await.len(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unavailable_startup_preparation_never_generates_or_blocks_chat() {
     let fixture = Fixture::new(false, false).await;
+    let health = fixture
+        .client
+        .get(format!("{}/health", fixture.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
+    // Core readiness schedules preparation immediately, even before the desktop submits its model selection.
+    // 核心就绪后立即安排准备，不等待桌面提交模型选择，也不借用 MCP 的启动延迟。
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.runtime.model_preparation.snapshot().await["models"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Startup model preparation must not wait for the old three/five-second delays");
     let response = fixture
         .client
         .post(format!("{}/api/models/preparation", fixture.url))
@@ -2087,12 +2363,21 @@ async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarti
     assert!(events[anchor]["supersededReplyMessageId"]==input["requestId"] || events[anchor]["supersededReplyMessageId"]==reply_id);
     assert!(events[anchor+1..].iter().all(|event|event["replyMessageId"]==latest_reply_id));
     assert!(!events.last().unwrap()["content"].as_str().unwrap().contains("已开始，保留这段正文。"));
+    let completed_model_calls = fixture.provider.calls.load(Ordering::Acquire);
     assert_eq!(
-        fixture.provider.calls.load(Ordering::Acquire),
-        3,
-        "observation must not dispatch another model request"
+        completed_model_calls,
+        4,
+        "Two superseded generations, the final guided answer, and one independent review are required."
     );
     let actual = fixture.provider.requests.lock().await;
+    assert_eq!(actual.len(), 4);
+    assert_eq!(
+        actual.iter().filter(|request| is_completion_review_request(request)).count(),
+        1,
+        "The guided answer must receive exactly one completion review."
+    );
+    assert!(is_completion_review_request(&actual[3]));
+    assert!(actual[3]["tools"].as_array().is_none_or(Vec::is_empty));
     assert!(
         actual[1]["messages"]
             .as_array()
@@ -2100,9 +2385,12 @@ async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarti
             .iter()
             .any(|message| message["role"] == "user" && message["content"] == amendment)
     );
+    // Runtime guidance must not impersonate a later user request and obscure the real steering text.
+    // 调度说明不能冒充更晚的用户请求，覆盖用户实际插话。
+    assert_eq!(actual[1]["messages"].as_array().unwrap().last().unwrap()["content"], amendment);
     drop(actual);
     let settled=repository.load(&task_id).unwrap();
-    assert_eq!(settled.usage.model_requests,3);
+    assert_eq!(settled.usage.model_requests,4);
     assert_eq!(settled.usage.failed_requests,0,"User guidance is not a failed model request.");
     assert_eq!(settled.usage.retries,0);
     assert!(!fixture.root.join("work/obsolete.txt").exists(),"Partial tool arguments must never execute.");
@@ -2150,7 +2438,11 @@ async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarti
         .await
         .unwrap();
     assert_eq!(replay["reused"], true);
-    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 3);
+    assert_eq!(
+        fixture.provider.calls.load(Ordering::Acquire),
+        completed_model_calls,
+        "Replaying accepted guidance must not dispatch another model request."
+    );
     drop(stream);
     fixture.close().await;
 }

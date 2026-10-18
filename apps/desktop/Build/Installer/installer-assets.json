@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "assets": {
+    "inno-setup-6.7.3": {
+      "fileName": "tools.innosetup.6.7.3.nupkg",
+      "sha256": "f780898e402ff80612cc8d9fcb8c6e02932bd1cb4c900ffdaa31f9341cfb49f4",
+      "bytes": 15256947,
+      "sources": [
+        { "id": "official", "url": "https://api.nuget.org/v3-flatcontainer/tools.innosetup/6.7.3/tools.innosetup.6.7.3.nupkg" }
+      ]
+    },
+    "webview2-offline-x64": {
+      "fileName": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+      "sha256": "3505a37b54a294c2bc423b30d6c02cd33a2e58dbcdc7e03b50d7a4112746c986",
+      "bytes": 214131448,
+      "snapshotDate": "2026-10-16",
+      "updateNote": "The official Evergreen link may change. A maintainer must verify the Microsoft-signed replacement and update this pin; never accept new bytes automatically.",
+      "sources": [
+        { "id": "official", "url": "https://go.microsoft.com/fwlink/?linkid=2124701" }
+      ]
+    }
+  }
+}

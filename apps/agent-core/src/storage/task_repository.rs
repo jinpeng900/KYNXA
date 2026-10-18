@@ -463,6 +463,22 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
+
+    /// Recovery lists the exact chat's unfinished roots; display preferences do not hide recoverable work.
+    /// 恢复列表限定当前聊天的未结束根任务，展示偏好不能隐藏可恢复工作。
+    pub fn recoverable_roots_for_conversation(
+        &self,
+        conversation_id: &str,
+        project_id: Option<&str>,
+        after_task_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskRecord>> {
+        identifier(conversation_id)?;
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        let mut query = connection.prepare_cached("SELECT document FROM tasks WHERE conversation_id=?1 AND project_id IS ?2 AND parent_task_id IS NULL AND state IN ('paused','waiting-network','waiting-config','waiting-approval','waiting-verification','waiting-children') AND task_id>?3 ORDER BY task_id LIMIT ?4").map_err(|_| failure())?;
+        let rows = query.query_map(params![conversation_id, project_id, after_task_id.unwrap_or(""), limit.clamp(1, 256) as i64], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
+        rows.map(|row| decode(row.map_err(|_| failure())?)).collect()
+    }
     pub fn find_by_request_id(
         &self,
         conversation_id: &str,
@@ -753,7 +769,10 @@ impl TaskRepository {
             let mut task=verify_fence(connection,token,false)?;
             if task.version!=expected_version {return Err(conflict("Task changed before transition. / 状态提交前任务已变化。"));}
             if state==TaskState::Completed {
-                if read_operations(connection,&task.task_id)?.iter().any(|operation|matches!(operation.state,OperationState::Dispatched|OperationState::Unknown)) {return Err(blocked("Unknown operations prevent verified completion. / 结果未知的操作阻止核验完成。"));}
+                // An unrelated interrupted observation keeps its Unknown receipt state without becoming a write barrier.
+                // 无关只读观察中断后仍保留 Unknown；任务完成不伪造只读回执，也不把它当成写入屏障。
+                if read_operations(connection,&task.task_id)?.iter().any(|operation|matches!(operation.state,OperationState::Dispatched|OperationState::Unknown) && operation.intent.effect!=OperationEffect::Observation) {return Err(blocked("Unknown effects prevent verified completion. / 结果未知的副作用阻止核验完成。"));}
+                if pending_reservations(connection,&task.task_id)?>0 {return Err(blocked("Unsettled model requests prevent verified completion. / 未结算模型请求阻止核验完成。"));}
                 if tree_has_unknown_mutation(connection,&task)? { return Err(blocked("Unknown delegated effects still require verification after a plan update. / 更新方案后，子任务未知副作用仍须核验。")); }
                 let incomplete:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id=? AND state<>'completed' AND NOT(state='cancelled' AND json_extract(document,'$.stopReason')='superseded-by-user-steering'))",[&task.task_id],|row|row.get(0)).map_err(|_|failure())?;
                 if incomplete {return Err(blocked("Child tasks remain incomplete; use a partial outcome. / 子任务未全部完成，应记录部分结果。"));}
@@ -910,6 +929,21 @@ impl TaskRepository {
     pub fn operations(&self, task_id: &str) -> Result<Vec<TaskOperation>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         read_operations(&connection, task_id)
+    }
+    pub fn operation(&self, task_id: &str, operation_id: &str) -> Result<Option<TaskOperation>> {
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        row_task(&connection, task_id)?;
+        find_operation(&connection, task_id, operation_id)
+    }
+
+    /// Read only native receipt/dispatch evidence, without replaying the task's token stream.
+    /// 仅查询原生回执与派发证据，不为核验重放整段任务 token 事件。
+    pub fn recovery_receipts(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        row_task(&connection, task_id)?;
+        let mut query = connection.prepare_cached("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind') IN ('task.model.receipt','task.operation.receipt','task.operation.dispatched') ORDER BY sequence").map_err(|_| failure())?;
+        let rows = query.query_map([task_id], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
+        rows.map(|row| decode(row.map_err(|_| failure())?)).collect()
     }
     pub fn record_operation(
         &self,

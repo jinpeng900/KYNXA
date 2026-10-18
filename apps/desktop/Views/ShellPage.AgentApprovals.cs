@@ -135,12 +135,15 @@ public sealed partial class ShellPage
         return decision;
     }
 
-    private static void AcceptToolActivity(PendingChatReply pending, ToolActivity tool)
+    private void AcceptToolActivity(PendingChatReply pending, ToolActivity tool)
     {
         var activities = pending.Message.ToolActivities;
         int index = activities.FindIndex(item => item.ToolCallId == tool.ToolCallId);
         if (index < 0) activities.Add(tool);
         else activities[index] = tool;
         pending.Dirty = true;
+        // Present live display receipts before the stream can finish and lose its pending marker.
+        // 实时展示回执先交给右栏，不等待流结束后才从历史中推断是否应该打开。
+        QueueWorkspaceResourceDiscovery(pending.ConversationId, pending.Message.Id, tool, liveReply: true);
     }
 }

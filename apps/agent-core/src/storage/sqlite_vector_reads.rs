@@ -177,8 +177,11 @@ fn identity_values(descriptor: &Value) -> Vec<SqlValue> {
     ]
 }
 fn identity_predicate() -> String {
+    identity_predicate_for_vector("c")
+}
+fn identity_predicate_for_vector(vector_alias: &str) -> String {
     format!(
-        "s.scope_key=? AND c.embedding_profile_id=? AND c.dimensions=? AND c.embedding_model_version=? AND c.embedding_space_id=? AND {DOMAIN_SQL}=? AND c.vector IS NOT NULL"
+        "s.scope_key=? AND {vector_alias}.embedding_profile_id=? AND {vector_alias}.dimensions=? AND {vector_alias}.embedding_model_version=? AND {vector_alias}.embedding_space_id=? AND {DOMAIN_SQL}=? AND {vector_alias}.vector IS NOT NULL"
     )
 }
 pub fn scope_generation(connection: &Connection, arguments: &Value) -> ContractResult {
@@ -362,23 +365,36 @@ pub(crate) fn vector_page_query(
                     .map_or(json!(9_007_199_254_740_991u64), |value| json!(value)),
             ),
         ]);
+        // Seek chunk IDs before joining vector spaces, so each page avoids sorting all remaining vectors.
+        // 先按分块 ID 范围读取，再关联向量空间，避免每页重排所有剩余向量；向量字段仍取所选空间。
+        let (source, vector_alias) = if table == "retrieval_vector_rows" {
+            (
+                "chunks c CROSS JOIN chunk_vector_spaces v ON v.chunk_id=c.chunk_id CROSS JOIN sources s ON s.source_id=c.source_id",
+                "v",
+            )
+        } else {
+            (
+                "chunks c JOIN sources s ON s.source_id=c.source_id",
+                "c",
+            )
+        };
         let columns = format!(
-            "c.id,{}c.dimensions{}",
+            "c.id,{}{vector_alias}.dimensions{}",
             if arguments["includeChunkId"] == true {
                 "c.chunk_id,"
             } else {
                 ""
             },
             if arguments["metadataOnly"] == true {
-                ""
+                String::new()
             } else {
-                ",c.vector"
+                format!(",{vector_alias}.vector")
             }
         );
         return Ok(Some((
             format!(
-                "SELECT {columns} FROM {table} c JOIN sources s ON s.source_id=c.source_id WHERE {} AND c.id>? AND c.id>=? AND c.id<=? ORDER BY c.id LIMIT 256",
-                identity_predicate()
+                "SELECT {columns} FROM {source} WHERE {} AND c.id>? AND c.id>=? AND c.id<=? ORDER BY c.id LIMIT 256",
+                identity_predicate_for_vector(vector_alias)
             ),
             parameters,
         )));
@@ -794,4 +810,129 @@ pub fn verify_matches(
         result.push(row);
     }
     Ok(json!({"items":result,"mismatch":mismatch}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_pages_seek_ids_and_preserve_selected_vector_space() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::sqlite_schema::RETRIEVAL_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(super::super::sqlite_schema::VECTOR_SPACES_SCHEMA)
+            .unwrap();
+        let projection = {
+            let mut statement = connection.prepare("PRAGMA table_info(chunks)").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|column| {
+                    let column = column.unwrap();
+                    let alias = if [
+                        "embedding_profile_id",
+                        "dimensions",
+                        "vector",
+                        "embedding_model_version",
+                        "embedding_space_id",
+                    ]
+                    .contains(&column.as_str())
+                    {
+                        "v"
+                    } else {
+                        "c"
+                    };
+                    format!("{alias}.{column}")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        connection
+            .execute_batch(&format!("CREATE VIEW retrieval_vector_rows AS SELECT {projection} FROM chunks c JOIN chunk_vector_spaces v ON v.chunk_id=c.chunk_id"))
+            .unwrap();
+        for (source, scope) in [("visible", "project:one"), ("hidden", "project:other")] {
+            connection.execute("INSERT INTO sources(source_id,scope_key,source_type,title,locator,text,content_hash,source_revision,binding_revision,active_generation,updated_at) VALUES (?,?,'document','fixture','{}','','hash','1',1,1,'now')", [source, scope]).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO scope_snapshots VALUES (?,7)",
+                    [scope],
+                )
+                .unwrap();
+        }
+        let old_vector: Vec<u8> = [0.0f32, 1.0, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut expected_ids = Vec::new();
+        for id in 1..=540i64 {
+            let source = if id % 17 == 0 { "hidden" } else { "visible" };
+            let domain = if id % 11 == 0 { "code" } else { "knowledge" };
+            let model = if id % 13 == 0 { "other-model" } else { "new-model" };
+            let chunk_id = format!("chunk-{id}");
+            connection.execute("INSERT INTO chunks(id,chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,embedding_profile_id,dimensions,vector,chunker_version,tokenizer_version,embedding_model_version,embedding_space_id,structure_domain) VALUES (?,?,?,?,'','','hash',0,0,1,1,'old-profile',3,?,'v1','v1','old-model','old-space',?)", rusqlite::params![id, chunk_id, source, id, old_vector, domain]).unwrap();
+            connection.execute("INSERT INTO chunk_vector_spaces VALUES (?,'old-profile',3,?,'old-model','old-space','now')", rusqlite::params![chunk_id, old_vector]).unwrap();
+            let selected_vector: Vec<u8> = [id as f32, 1.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            connection.execute("INSERT INTO chunk_vector_spaces VALUES (?,'new-profile',2,?,?,'new-space','now')", rusqlite::params![chunk_id, selected_vector, model]).unwrap();
+            if (11..=530).contains(&id)
+                && source == "visible"
+                && domain == "knowledge"
+                && model == "new-model"
+            {
+                expected_ids.push(id);
+            }
+        }
+        let mut arguments = json!({
+            "scopes":["project:one"],"binaryRequiredScope":true,"lastId":0,
+            "descriptor":{"scope_key":"project:one","generation":7,
+                "embedding_profile_id":"new-profile","dimensions":2,
+                "embedding_model_version":"new-model","embedding_space_id":"new-space",
+                "domain":"knowledge","minimumId":11,"maximumId":530}
+        });
+        let (sql, parameters) = vector_page_query(&connection, &arguments).unwrap().unwrap();
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(params_from_iter(parameters), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .all(|step| !(step.contains("TEMP B-TREE") && step.contains("ORDER BY"))),
+            "{plan:?}"
+        );
+        let reference_sql = format!("SELECT c.id,c.dimensions,c.vector FROM retrieval_vector_rows c JOIN sources s ON s.source_id=c.source_id WHERE {} AND c.id>? AND c.id>=? AND c.id<=? ORDER BY c.id LIMIT 256", identity_predicate());
+        let mut actual_ids = Vec::new();
+        loop {
+            let (_, parameters) = vector_page_query(&connection, &arguments).unwrap().unwrap();
+            let expected_page = rows(&connection, &reference_sql, parameters).unwrap();
+            let actual_page = vector_page(&connection, &arguments).unwrap();
+            assert_eq!(actual_page, json!(expected_page));
+            let page = actual_page.as_array().unwrap();
+            if page.is_empty() {
+                break;
+            }
+            actual_ids.extend(page.iter().map(|row| row["id"].as_i64().unwrap()));
+            arguments["lastId"] = page.last().unwrap()["id"].clone();
+        }
+        assert!(expected_ids.len() > 256);
+        assert_eq!(actual_ids, expected_ids);
+        arguments["lastId"] = json!(0);
+        arguments["metadataOnly"] = json!(true);
+        arguments["includeChunkId"] = json!(true);
+        let metadata = vector_page(&connection, &arguments).unwrap();
+        assert_eq!(metadata[0]["chunk_id"], format!("chunk-{}", expected_ids[0]));
+        assert_eq!(metadata[0]["dimensions"], 2);
+        assert!(metadata[0].get("vector").is_none());
+        arguments["scopes"] = json!(["project:other"]);
+        assert_eq!(vector_page(&connection, &arguments).unwrap_err().code, "RETRIEVAL_SOURCE_NOT_FOUND");
+        arguments["scopes"] = json!(["project:one"]);
+        arguments["descriptor"]["generation"] = json!(6);
+        assert_eq!(vector_page(&connection, &arguments).unwrap_err().code, "RETRIEVAL_ANN_STALE_BUILD");
+    }
 }

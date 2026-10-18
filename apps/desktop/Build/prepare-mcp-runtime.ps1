@@ -5,7 +5,8 @@ param(
     [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
     [string]$NpmRegistry,
     [string]$PlaywrightDownloadHost,
-    [switch]$Offline
+    [switch]$Offline,
+    [switch]$VerifyResources
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -69,6 +70,12 @@ function Write-McpJson([string]$Path, $Value) {
         else { [IO.File]::Move($pending, $Path) }
     }
     finally { if ([IO.File]::Exists($pending)) { Remove-Item -LiteralPath $pending } }
+}
+function Save-McpPreparedState($Files) {
+    $records = @($Files) + @(
+        @{path='runtime/mcp/manifest.json';sha256=(Get-McpHash $outputManifest)},
+        @{path='runtime/mcp/payload-integrity.json';sha256=(Get-McpHash $integrityPath)})
+    Save-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp' -InputHash $componentInput -Files $records -Scope 'runtime/mcp'
 }
 function Test-McpInventory($Previous, $Integrity) {
     # Cache metadata cannot redefine a complete payload as an empty or partial inventory.
@@ -141,6 +148,18 @@ while (-not $cacheLock) {
     }
 }
 try {
+    $componentInput = Get-KynxaResourceInputHash -Paths @($PSCommandPath, $manifestPath,
+        (Join-Path $sourceRoot 'package.json'), (Join-Path $sourceRoot 'package-lock.json'),
+        (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1')) -Values @($RuntimeIdentifier)
+    $preparedState = Read-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp'
+    if (-not $VerifyResources -and (Test-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp' -InputHash $componentInput -State $preparedState)) {
+        & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $bundleRootPath
+        $paths = [string[]]@($preparedState['files'] | ForEach-Object { [IO.Path]::Combine($bundleRootPath, $_['path']) })
+        [IO.File]::WriteAllLines($fileList, $paths, $utf8)
+        Write-Output "Private MCP payload reused: $($paths.Count) unchanged files; no package installation or content hashing."
+        return
+    }
+    $preparedFiles = if ($VerifyResources) { $null } else { Get-KynxaPreparedFileCache -Root $bundleRootPath -Component 'mcp' }
     if ([IO.File]::Exists($outputManifest) -and [IO.File]::Exists($integrityPath)) {
         $previous = Read-McpJson $outputManifest
         $integrity = Read-McpJson $integrityPath
@@ -150,22 +169,22 @@ try {
             (Test-McpInventory $previous $integrity)
         $verified = [Collections.Generic.List[string]]::new()
         if ($isCurrent) {
-            foreach ($directory in Get-ChildItem -LiteralPath $payloadRoot -Directory -Recurse -Force) {
-                if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cached MCP payload directories cannot contain links.' }
-            }
             foreach ($file in $integrity.files) {
                 if ($file.path.StartsWith('runtime/mcp/services/.playwright-mcp/', [StringComparison]::OrdinalIgnoreCase)) { $isCurrent = $false; break }
                 $path = [IO.Path]::GetFullPath((Join-Path $bundleRootPath $file.path))
                 if (-not $path.StartsWith($payloadRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cached MCP file escaped the verified payload tree.' }
-                if (-not [IO.File]::Exists($path) -or ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -or
-                    ([IO.FileInfo]::new($path)).Length -ne $file.bytes -or (Get-McpHash $path) -ne $file.sha256) { $isCurrent = $false; break }
                 $verified.Add($path)
+            }
+            if ($isCurrent) {
+                Write-Host "[MCP] Checking $($verified.Count) cached files; unchanged prepared files reuse their saved metadata."
+                $isCurrent = Test-KynxaResourceFiles -Root $bundleRootPath -Files @($integrity.files) -Cache $preparedFiles -Scope 'runtime/mcp'
             }
         }
         if ($isCurrent) {
             & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $bundleRootPath
             $verified.Add($outputManifest); $verified.Add($integrityPath)
             [IO.File]::WriteAllLines($fileList, [string[]]$verified, $utf8)
+            Save-McpPreparedState $integrity.files
             Write-Output "Private MCP payload reused: $($verified.Count) verified files; no package installation."
             return
         }
@@ -179,35 +198,50 @@ try {
     Save-KynxaPinnedDownload -Url $node.url -Destination $archivePath -Sha256 $node.archiveSha256 -ExpectedBytes $archiveBytes -Offline:$Offline -DownloadSourcesPath $DownloadSourcesPath
     $nodeCache = Assert-McpPath $cacheRoot (Join-Path $cacheRoot ('node-' + $node.version))
     [IO.Directory]::CreateDirectory($nodeCache) | Out-Null
-    $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
-    try {
-        $prefix = 'node-v' + $node.version + '-' + $RuntimeIdentifier + '/'
-        foreach ($entry in $archive.Entries) {
-            if (-not $entry.Name -or -not $entry.FullName.StartsWith($prefix, [StringComparison]::Ordinal)) { continue }
-            $relative = $entry.FullName.Substring($prefix.Length)
-            if ($relative -notin @('node.exe', 'LICENSE') -and -not $relative.StartsWith('node_modules/npm/', [StringComparison]::Ordinal)) { continue }
-            $path = Assert-McpPath $nodeCache (Join-Path $nodeCache $relative)
-            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
-            $input = $entry.Open(); $output = [IO.File]::Create($path)
-            try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+    $nodeInput = Get-KynxaResourceInputHash -Values @('node-extraction-v1', $node.archiveSha256, $node.executableSha256)
+    if ($VerifyResources -or -not (Test-KynxaPreparedComponent -Root $nodeCache -Component 'node' -InputHash $nodeInput)) {
+        $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+        try {
+            $prefix = 'node-v' + $node.version + '-' + $RuntimeIdentifier + '/'
+            foreach ($entry in $archive.Entries) {
+                if (-not $entry.Name -or -not $entry.FullName.StartsWith($prefix, [StringComparison]::Ordinal)) { continue }
+                $relative = $entry.FullName.Substring($prefix.Length)
+                if ($relative -notin @('node.exe', 'LICENSE') -and -not $relative.StartsWith('node_modules/npm/', [StringComparison]::Ordinal)) { continue }
+                $path = Assert-McpPath $nodeCache (Join-Path $nodeCache $relative)
+                [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
+                $input = $entry.Open(); $output = [IO.File]::Create($path)
+                try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+            }
         }
+        finally { $archive.Dispose() }
+        $nodeFiles = @(Get-ChildItem -LiteralPath $nodeCache -File -Recurse | Where-Object { -not $_.FullName.StartsWith((Join-Path $nodeCache '.prepared') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
+            @{path=$_.FullName.Substring($nodeCache.Length+1).Replace('\','/');sha256=(Get-McpHash $_.FullName)}
+        })
+        if ((Get-McpHash (Join-Path $nodeCache 'node.exe')) -ne $node.executableSha256) { throw 'Private Node executable SHA-256 mismatch.' }
+        Save-KynxaPreparedComponent -Root $nodeCache -Component 'node' -InputHash $nodeInput -Files $nodeFiles
     }
-    finally { $archive.Dispose() }
     $nodeExecutable = Join-Path $nodeCache 'node.exe'
     if ((Get-McpHash $nodeExecutable) -ne $node.executableSha256) { throw 'Private Node executable SHA-256 mismatch.' }
     $npmCli = Join-Path $nodeCache 'node_modules/npm/bin/npm-cli.js'
     $servicesRoot = Assert-McpPath $payloadRoot (Join-Path $payloadRoot 'services')
     [IO.Directory]::CreateDirectory($servicesRoot) | Out-Null
-    foreach ($name in @('package.json', 'package-lock.json')) { Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination (Join-Path $servicesRoot $name) -Force }
-    # A private configuration keeps source overrides local while npm verifies locked package integrity.
-    # 私有配置只影响随包构建源，npm 继续验证锁文件中的固定依赖完整性。
-    $npmArguments = @($npmCli, 'ci', '--prefix', $servicesRoot, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', '--cache', (Join-Path $cacheRoot 'npm-cache'), '--userconfig', (Join-Path $cacheRoot 'npmrc'), '--registry', $NpmRegistry, '--fetch-retries=3', '--fetch-retry-mintimeout=2000', '--fetch-retry-maxtimeout=15000', '--fetch-timeout=120000', '--loglevel=notice', '--progress=true')
-    [IO.File]::WriteAllText((Join-Path $cacheRoot 'npmrc'), 'registry=' + $NpmRegistry.TrimEnd('/') + '/' + [Environment]::NewLine, $utf8)
-    if ($Offline) { $npmArguments += '--offline' }
-    Write-Host "[MCP] Preparing locked npm dependencies (registry: $(([Uri]$NpmRegistry).Host), offline: $([bool]$Offline))."
-    & $nodeExecutable @npmArguments
-    if ($LASTEXITCODE -ne 0) { throw 'Pinned MCP dependency installation failed; no runtime download fallback will be shipped.' }
-    if ((Get-McpHash (Join-Path $servicesRoot 'package-lock.json')) -ne $lockHash) { throw 'npm changed the pinned dependency lock.' }
+    $servicesInput = Get-KynxaResourceInputHash -Paths @((Join-Path $sourceRoot 'package.json'), (Join-Path $sourceRoot 'package-lock.json')) -Values @('npm-ci-v1', $node.version)
+    if ($VerifyResources -or -not (Test-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp-services' -InputHash $servicesInput)) {
+        foreach ($name in @('package.json', 'package-lock.json')) { Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination (Join-Path $servicesRoot $name) -Force }
+        # A private configuration keeps source overrides local while npm verifies locked package integrity.
+        # 私有配置只影响随包构建源，npm 继续验证锁文件中的固定依赖完整性。
+        $npmArguments = @($npmCli, 'ci', '--prefix', $servicesRoot, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', '--cache', (Join-Path $cacheRoot 'npm-cache'), '--userconfig', (Join-Path $cacheRoot 'npmrc'), '--registry', $NpmRegistry, '--fetch-retries=3', '--fetch-retry-mintimeout=2000', '--fetch-retry-maxtimeout=15000', '--fetch-timeout=120000', '--loglevel=notice', '--progress=true')
+        [IO.File]::WriteAllText((Join-Path $cacheRoot 'npmrc'), 'registry=' + $NpmRegistry.TrimEnd('/') + '/' + [Environment]::NewLine, $utf8)
+        if ($Offline) { $npmArguments += '--offline' }
+        Write-Host "[MCP] Preparing locked npm dependencies (registry: $(([Uri]$NpmRegistry).Host), offline: $([bool]$Offline))."
+        & $nodeExecutable @npmArguments
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned MCP dependency installation failed; no runtime download fallback will be shipped.' }
+        if ((Get-McpHash (Join-Path $servicesRoot 'package-lock.json')) -ne $lockHash) { throw 'npm changed the pinned dependency lock.' }
+        $serviceFiles = @(Get-ChildItem -LiteralPath $servicesRoot -File -Recurse -Force | Where-Object {
+            -not $_.FullName.StartsWith((Join-Path $servicesRoot '.playwright-mcp') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object { @{path=$_.FullName.Substring($bundleRootPath.Length+1).Replace('\','/');sha256=(Get-McpHash $_.FullName)} })
+        Save-KynxaPreparedComponent -Root $bundleRootPath -Component 'mcp-services' -InputHash $servicesInput -Files $serviceFiles -Scope 'runtime/mcp/services'
+    }
     $nodeOutput = Assert-McpPath $payloadRoot (Join-Path $payloadRoot 'node')
     [IO.Directory]::CreateDirectory($nodeOutput) | Out-Null
     foreach ($name in @('node.exe', 'LICENSE')) { Copy-Item -LiteralPath (Join-Path $nodeCache $name) -Destination (Join-Path $nodeOutput $name) -Force }
@@ -274,6 +308,7 @@ try {
     & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $bundleRootPath
     $paths = @($files | ForEach-Object { Join-Path $bundleRootPath $_.path }) + @($outputManifest, $integrityPath)
     [IO.File]::WriteAllLines($fileList, [string[]]$paths, $utf8)
+    Save-McpPreparedState $files.ToArray()
     Write-Output "Private Node $($node.version) and $($services.Count) pinned MCP services ready ($($files.Count) files, $($output.totalBytes) bytes)."
 }
 finally { $cacheLock.Dispose() }

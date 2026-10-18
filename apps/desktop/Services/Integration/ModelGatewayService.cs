@@ -11,7 +11,11 @@ namespace KYNXA_Desktop.Services;
 public static class ModelGatewayService
 {
     private static readonly SemaphoreSlim StartupLock = new(1, 1);
-    private static readonly HttpClient Probe = new() { Timeout = TimeSpan.FromSeconds(1) };
+    private static readonly object ReadinessSync = new();
+    private static Task? _readinessTask;
+    private static Uri? _readinessAddress;
+    private static readonly HttpClient Probe = new(new SocketsHttpHandler { UseProxy = false })
+        { Timeout = TimeSpan.FromSeconds(1) };
     public static string? LegacyDesktopDirectory { get; set; }
     public static Uri Address => new(Environment.GetEnvironmentVariable("KYNXA_MODEL_API_URL")
         ?? "http://127.0.0.1:5218");
@@ -79,10 +83,32 @@ public static class ModelGatewayService
         }
     }
 
-    public static async Task EnsureReadyAsync(CancellationToken cancellationToken = default)
+    public static Task EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var address = Address;
-        if (address.Scheme != "http" || address.Host is not ("127.0.0.1" or "localhost")) return;
+        if (address.Scheme != "http" || address.Host is not ("127.0.0.1" or "localhost")) return Task.CompletedTask;
+        Task readiness;
+        lock (ReadinessSync)
+        {
+            // Concurrent catalog, preparation and chat requests share one check instead of queuing health round trips.
+            // 目录、预准备与聊天并发时共享一次检查，不再逐个排队探测；完成后下次请求仍核对协议和存储范围。
+            if (_readinessTask is null || _readinessTask.IsCompleted || _readinessAddress != address)
+            {
+                _readinessAddress = address;
+                _readinessTask = Task.Run(() => EnsureLocalReadyAsync(address));
+            }
+            readiness = _readinessTask;
+        }
+        // Cancelling one caller must not cancel startup required by the other callers.
+        // 单个调用方取消等待，不取消其他调用方仍需要的共享启动。
+        return readiness.WaitAsync(cancellationToken);
+    }
+
+    private static async Task EnsureLocalReadyAsync(Uri address)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        CancellationToken cancellationToken = cancellation.Token;
         await StartupLock.WaitAsync(cancellationToken);
         try
         {
