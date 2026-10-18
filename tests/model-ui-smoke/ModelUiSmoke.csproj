@@ -23,6 +23,7 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <Compile Include="../../apps/desktop/ModelManagementWindow.xaml.cs" Link="ModelManagementWindow.xaml.cs" />
     <Compile Include="../../apps/desktop/ModelManagementWindow.EditorState.cs" Link="ModelManagementWindow.EditorState.cs" />
+    <Compile Include="../../apps/desktop/Services/Presentation/DialogPresentation.cs" Link="DialogPresentation.cs" />
     <Compile Include="../../apps/desktop/ModelManagementWindow.Layout.cs" Link="ModelManagementWindow.Layout.cs" />
     <Page Include="../../apps/desktop/ModelManagementWindow.xaml" Link="ModelManagementWindow.xaml" />
     <Page Include="../../apps/desktop/Styles/*.xaml" Link="Styles/%(Filename)%(Extension)" />

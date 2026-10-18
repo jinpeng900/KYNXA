@@ -1,4 +1,4 @@
-# KYNXA 1.5.2
+# KYNXA 1.5.3
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
@@ -6,9 +6,11 @@
 
 **KYNXA** 是面向 Windows 的本地优先个人 Agent 应用，将云端与本地模型、长任务、文档检索、工具，以及文件／网页／终端工作区整合在桌面中。
 
-**当前桌面发行版本：`1.5.2` · Windows x64 · 持续开发中**
+**当前桌面发行版本：`1.5.3` · Windows x64 · 持续开发中**
 
-本版内容见 [1.5.2 补丁说明](docs/releases/1.5.2.md)与 [1.5 总览](docs/releases/1.5.md)，使用与开发入口见 [文档索引](docs/README.md)。
+> 发布准备中：1.5.3 目前记录本地源码变更，安装包和 GitHub Release 尚未发布；已发布版本仍为 [1.5.2](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2)。
+
+本版内容见 [1.5.3 补丁说明](docs/releases/1.5.3.md)与 [1.5 总览](docs/releases/1.5.md)，使用与开发入口见 [文档索引](docs/README.md)。
 
 ## 当前能力
 
@@ -16,6 +18,7 @@
 | --- | --- |
 | 聊天与模型 | 流式回复、中止、持久历史、切换服务商和模型；支持 Chat Completions、Responses、Claude Messages 与 Ollama 兼容连接。 |
 | 长任务 | 稳定任务身份、检查点、暂停恢复、消息排队、中途引导、子代理、产物及 token／耗时统计。引导后新回复接在补充消息之后，前面的输出保留。 |
+| 项目 | 一个项目关联多个文件夹，按工作范围检索代码与文件，增量更新索引，并在项目激活后后台准备。 |
 | 记忆 | 聊天、工作／项目、用户三个范围；候选、确认、修改和删除。按授权范围选择有效的已确认记忆。 |
 | 工具经验 | 持久工具目录，以及已结算调用的成败和耗时经验。配置、schema、信任、禁用或删除变化时更新相应条目；普通聊天不增加工具记忆调用。 |
 | 文档与检索 | 按路径直接读取和附件解析；支持 PDF、DOC／DOCX、PPT／PPTX、表格、Markdown／文本／代码、图像 OCR、压缩包及网站来源。后台索引、词法／向量检索、来源引用和可选重排共用有范围隔离的资料库。 |
@@ -23,6 +26,7 @@
 | 网站 | 按需启动随包 Chromium，直接输入网址或关键词，前进／后退／刷新、网页交互，以及应用持久浏览器配置。 |
 | 本地模型 | 设置中的模型目录、安装、导入、暂停／继续下载、启停、删除和存储位置选择；启用后进入正常聊天模型选择器。 |
 | 扩展 | 原生工具、stdio／Streamable HTTP MCP、应用技能，以及承担 Windows 桌面、终端、沙箱和原生执行的 ToolHost。 |
+| 资源控制 | 代理分配的沙箱 CPU／内存额度落实到 Windows Job，执行前回读核验；沙箱及宿主后台任务日志有界保留，超量后继续排空。 |
 
 文档正文提取与版式预览分别处理。提取文字不等于完整恢复排版、图表、公式、动画或嵌入对象；各格式的实际范围见 [文档解析说明](docs/architecture/document-ingestion.md)。网站登录、验证及媒体可用性仍由网站和浏览器能力共同决定。
 
@@ -30,11 +34,13 @@
 
 ## 安装与数据位置
 
-下载 [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.2/KYNXA-1.5.2-windows-x64-setup.exe)或 [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.2/KYNXA-1.5.2-windows-x64-online-setup.exe)，统一发布于 [1.5.2 下载页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2)。
+下载 [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.3/KYNXA-1.5.3-windows-x64-setup.exe)或 [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.3/KYNXA-1.5.3-windows-x64-online-setup.exe)，统一发布于 [1.5.3 下载页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3)。
 
-1.5.2 修复粘贴截图在附件导入时被拦截的问题，并向主聊天、子任务和异常后的总结回复提供本次连接的模型身份；继续保留无包身份安装所需的 WinUI 编译资源。
+1.5.3 汇总多文件夹项目、任务恢复与流式重附、本地模型管理、持久工具经验、ANN 后台准备及短网页查询准备优化，并增加沙箱 CPU／内存配额核验和高日志量下的后台续行。此前 1.5 版本的截图粘贴、模型身份和 WinUI 编译资源修正继续保留；适用边界与验证范围见 [版本说明](docs/releases/1.5.3.md)。
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5／BGE、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
+
+在线安装器自动选择已配置来源、校验完整载荷并保留可续传的下载断点，不要求用户选择镜像或运行下载脚本。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 

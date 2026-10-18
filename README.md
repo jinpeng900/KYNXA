@@ -1,4 +1,4 @@
-# KYNXA 1.5.2
+# KYNXA 1.5.3
 
 <p align="center">
   English | <a href="./README.zh.md">中文</a>
@@ -6,9 +6,11 @@
 
 **KYNXA** is a local-first personal agent application for Windows. It brings cloud and local models, durable tasks, document retrieval, tools, and a file/browser/terminal workspace into one desktop application.
 
-**Current desktop release: `1.5.2` · Windows x64 · Active development**
+**Current desktop release: `1.5.3` · Windows x64 · Active development**
 
-See the [1.5.2 patch notes](docs/releases/1.5.2.md), [1.5 overview](docs/releases/1.5.md), and [documentation index](docs/README.md) for changes and implementation details.
+> Release preparation: 1.5.3 currently describes local source changes. Its installers and GitHub Release are not published yet; the published version remains [1.5.2](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2).
+
+See the [1.5.3 patch notes](docs/releases/1.5.3.md), [1.5 overview](docs/releases/1.5.md), and [documentation index](docs/README.md) for changes and implementation details.
 
 ## What is implemented
 
@@ -16,6 +18,7 @@ See the [1.5.2 patch notes](docs/releases/1.5.2.md), [1.5 overview](docs/release
 | --- | --- |
 | Chat and models | Streaming replies, cancellation, persistent history, provider/model switching; Chat Completions, Responses, Claude Messages, and Ollama-compatible connections. |
 | Long tasks | Persistent task identities, checkpoints, pause/resume, queued messages, in-task steering, subagents, artifacts, and token/time accounting. Prior output remains visible when steering starts a new reply. |
+| Projects | Multiple folder mounts in one project, scoped code/file retrieval, incremental indexing, and background preparation when a project becomes active. |
 | Memory | Chat, work/project, and user scopes; memory candidates, confirmation, editing, and deletion. Confirmed, valid memories are selected within their authorized scope. |
 | Tool experience | Persistent tool catalogs and settled success/failure/latency experience. Configuration, schema, trust, disable, and deletion changes invalidate affected entries; ordinary chat adds no tool-memory calls. |
 | Documents and retrieval | Direct path reads and attachment parsing; PDF, DOC/DOCX, PPT/PPTX, spreadsheets, Markdown/text/code, images/OCR, archives, and website sources. Background indexing, lexical/vector search, source references, and optional reranking use the same scoped store. |
@@ -23,6 +26,7 @@ See the [1.5.2 patch notes](docs/releases/1.5.2.md), [1.5 overview](docs/release
 | Websites | On-demand bundled Chromium, address or keyword navigation, back/forward/refresh, interactive pages, and a persistent application browser profile. |
 | Local models | Settings-based catalog, installation, import, download pause/resume, enable/disable, deletion, and a configurable model directory. Enabled models enter the normal chat selector. |
 | Extensions | Native tools, stdio/Streamable HTTP MCP, application skills, and a Windows ToolHost for desktop, terminal, sandbox, and native execution. |
+| Resource controls | Broker-selected CPU and memory limits are applied to sandbox Windows Jobs and checked before execution. Sandbox and background host-job logs remain bounded without stopping work solely because capture fills. |
 
 Document extraction and visual rendering are different operations. Text extraction does not imply recovery of every layout, chart, formula, animation, or embedded object; format-specific behavior is documented in the [document guide](docs/architecture/document-ingestion.md). Website login, verification, and media availability still depend on the website and browser capabilities.
 
@@ -30,11 +34,13 @@ The multilingual **E5 embedding model** and **BGE reranker** are included in the
 
 ## Install and store your data
 
-Download the [full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.2/KYNXA-1.5.2-windows-x64-setup.exe) or [online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.2/KYNXA-1.5.2-windows-x64-online-setup.exe) from the [1.5.2 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2).
+Download the [full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.3/KYNXA-1.5.3-windows-x64-setup.exe) or [online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.5.3/KYNXA-1.5.3-windows-x64-online-setup.exe) from the [1.5.3 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3).
 
-Version 1.5.2 fixes pasted screenshots being blocked during attachment import and supplies the current connection's model identity to chat, subtasks, and recovery replies. It retains the compiled WinUI resources required by unpackaged installations.
+Version 1.5.3 brings together multi-folder projects, task recovery and stream reattachment, managed local models, persistent tool experience, background ANN preparation, and shorter web-query preparation. It adds checked sandbox CPU/memory quotas and continuous draining of verbose sandbox/background-job output. The screenshot, model-identity, and compiled WinUI resource fixes from earlier 1.5 releases remain included; see the [release notes](docs/releases/1.5.3.md) for limits and verification scope.
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5/BGE, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
+
+The online installer automatically selects configured download sources, validates the full payload, and retains resumable partial downloads. Users do not need to choose mirrors or run download scripts.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 

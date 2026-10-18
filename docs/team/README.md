@@ -1,6 +1,6 @@
 # KYNXA 五人开发分工
 
-更新日期：2026-10-12。当前正式链路为 WinUI/WebView2 → Windows 原生 Rust 网关 → 模型接口、Rust 推理/工具/存储服务及 C# ToolHost；独立资源服务提供真实硬件准入。入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包路径为 `runtime/agent/kynxa-gateway.exe`，公开 HTTP/SSE 保持桌面合同。WebView 界面 JavaScript 保留，产品后端不依赖 Node/NAPI。实际范围见 [原生架构](../architecture/native-gateway.md)。
+更新日期：2026-10-16，当前版本目标为 1.5.0。当前正式链路为 WinUI/WebView2 → Windows 原生 Rust 网关 → 模型接口、Rust 推理/工具/存储服务及 C# ToolHost；独立资源服务提供真实硬件准入。入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包路径为 `runtime/agent/kynxa-gateway.exe`，公开 HTTP/SSE 保持桌面合同。WebView 界面 JavaScript 保留，产品后端不依赖 Node/NAPI；私有 Node 只随包服务扩展 MCP 和已核验的 JS Skill。实际范围见 [原生架构](../architecture/native-gateway.md)，本版变化见 [1.5 说明](../releases/1.5.md)，全部维护入口见 [文档索引](../README.md)。
 
 | 成员 | 主责 | 可分配目录 | 任务入口 |
 |---|---|---|---|

@@ -36,10 +36,16 @@ public partial class App : Application
     private bool _shortcutTooltipOnly;
     private bool _bodySearchOnly;
     private bool _appearanceOnly;
+    private bool _appearanceTransferOnly;
     private bool _sidebarControlsOnly;
     private bool _sidebarRoundnessOnly;
     private bool _typographyOnly;
     private bool _settingsInteractionsOnly;
+    private bool _dialogsOnly;
+    private bool _windowPresentationOnly;
+
+    private bool _promptSendOnly;
+    private bool _workspaceAutoOpenOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
     private string DesktopDirectory => Path.Combine(DataDirectory, "Desktop");
     private string WebViewDirectory => Path.Combine(_directory, "WebView");
@@ -86,6 +92,9 @@ public partial class App : Application
         _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
+        _appearanceTransferOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--appearance-transfer-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--appearance-transfer-only", StringComparer.Ordinal);
         _sidebarControlsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--sidebar-controls-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--sidebar-controls-only", StringComparer.Ordinal);
@@ -98,6 +107,19 @@ public partial class App : Application
         _settingsInteractionsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--settings-interactions-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--settings-interactions-only", StringComparer.Ordinal);
+        _dialogsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--dialogs-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--dialogs-only", StringComparer.Ordinal);
+        _windowPresentationOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--window-presentation-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--window-presentation-only", StringComparer.Ordinal);
+
+        _promptSendOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--prompt-send-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--prompt-send-only", StringComparer.Ordinal);
+        _workspaceAutoOpenOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--workspace-auto-open-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--workspace-auto-open-only", StringComparer.Ordinal);
         File.WriteAllText(ResultPath, "RUNNING production MainWindow/ShellPage with temporary storage, mock HTTP and isolated WebView\n");
         UiText.Initialize("zh-CN");
         Window = new MainWindow();
@@ -437,7 +459,8 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            await CheckInitialHomeAsync();
+            if (_promptSendOnly || _workspaceAutoOpenOnly) _gateway.ReleaseInitialCatalog();
+            else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&
                 AutomationProperties.GetName(Element<Button>("ModelStatusButton")).Contains("已选择模型") &&
@@ -453,6 +476,51 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
+            if (_windowPresentationOnly)
+            {
+                await CheckWindowPresentationAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused window presentation completes without formal writes or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell window presentation checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_dialogsOnly)
+            {
+                await CheckDialogsAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused native dialog checks complete without formal writes, model calls or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell native dialog checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_appearanceTransferOnly)
+            {
+                await CheckAppearanceTransferAsync();
+                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
+                    "focused appearance transfer checks complete without formal writes, model calls or unhandled errors");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell appearance import/export checks.\nPreviews: {_directory}");
+                return;
+            }
+            if (_workspaceAutoOpenOnly)
+            {
+                await CheckWorkspaceAutoOpenAsync();
+                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
+                    "workspace opening dispatch stays inside the synthetic gateway without model calls or formal writes");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell workspace auto-open checks.\nArtifacts: {_directory}");
+                return;
+            }
+            if (_promptSendOnly)
+            {
+                await CheckPromptSendAsync();
+                Check(_gateway.Failure is null && _unhandled is null,
+                    "focused prompt sends complete without production storage or upstream model access");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell prompt-send checks.\nArtifacts: {_directory}");
+                return;
+            }
             if (_settingsInteractionsOnly)
             {
                 await CheckSettingsInteractionsAsync();
@@ -581,6 +649,7 @@ public partial class App : Application
             await CheckPanelPolishAsync();
             await CheckComprehensiveShellAsync();
             await CheckRetrievalNavigationAsync();
+            await CheckDialogsAsync();
             await CheckSidebarControlsAsync();
             await CheckSidebarRoundnessAsync();
             await CheckTypographyAsync();

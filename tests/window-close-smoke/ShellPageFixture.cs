@@ -21,6 +21,13 @@ namespace KYNXA_Desktop.Services
         public static string Get(string text) => text;
     }
 
+    // This minimal fixture exercises close/save decisions with SDK controls, without the unrelated application palette.
+    // 此最小夹具用 SDK 原生控件核验退出与保存决定，不加载无关的应用配色资源。
+    public static class DialogPresentation
+    {
+        public static Windows.Foundation.IAsyncOperation<ContentDialogResult> ShowAsync(ContentDialog dialog) => dialog.ShowAsync();
+    }
+
     public static class MessageTimePresentation
     {
         public static int FlushCalls { get; private set; }
@@ -29,6 +36,20 @@ namespace KYNXA_Desktop.Services
         {
             FlushCalls++;
             return Task.CompletedTask;
+        }
+    }
+
+    // Observe the production owner's async cleanup ordering without starting terminal or browser processes.
+    // 不启动终端或浏览器进程，仅观察生产所有者异步清理的调用与完成顺序。
+    public sealed class FakeWorkspaceCleanup
+    {
+        public int CloseCalls { get; private set; }
+        public TaskCompletionSource? CloseCompletion { get; set; }
+
+        public Task CloseAllAsync()
+        {
+            CloseCalls++;
+            return CloseCompletion?.Task ?? Task.CompletedTask;
         }
     }
 
@@ -78,6 +99,8 @@ namespace KYNXA_Desktop.Views
         private Window? _storageSettingsWindow = null;
 
         public InfoBar ProjectNotice { get; } = new();
+        public Services.FakeWorkspaceCleanup WorkspaceTerminal { get; } = new();
+        public Services.FakeWorkspaceCleanup DocumentPanel { get; } = new();
         public TextBox DraftEditor { get; } = new() { Text = "unsaved synthetic draft / 临时草稿", AcceptsReturn = true };
         public Services.FakeProjectStore Store => _projectStore;
         public int PauseCalls { get; private set; }

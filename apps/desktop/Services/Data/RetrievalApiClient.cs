@@ -84,6 +84,12 @@ public sealed class RetrievalApiClient : IRetrievalApi, IDisposable
 
     public Task<RetrievalStatus> GetStatusAsync(CancellationToken cancellationToken = default) =>
         SendAsync<RetrievalStatus>(HttpMethod.Get, "/api/retrieval/status", null, cancellationToken);
+    public async Task ActivateAsync(Guid? projectId, CancellationToken cancellationToken = default)
+    {
+        await _ensureGatewayReady(cancellationToken);
+        using var response = await _httpClient.PostAsJsonAsync("/api/retrieval/activate", new { projectId }, JsonOptions, cancellationToken);
+        await GatewayResponseReader.EnsureSuccessAsync(response, UiText.Get("检索接口返回 HTTP {0}。"), cancellationToken);
+    }
     public Task<RetrievalProvidersResponse> GetProvidersAsync(CancellationToken cancellationToken = default) =>
         SendAsync<RetrievalProvidersResponse>(HttpMethod.Get, "/api/retrieval/providers", null, cancellationToken);
     public Task<RetrievalSourcesResponse> GetSourcesAsync(Guid? projectId = null, CancellationToken cancellationToken = default) =>

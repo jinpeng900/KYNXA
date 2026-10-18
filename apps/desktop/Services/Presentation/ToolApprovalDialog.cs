@@ -34,7 +34,7 @@ public static class ToolApprovalDialog
         dialog.Opened += (_, _) => { root.Changed += RootChanged; UpdateHeight(); };
         dialog.Closed += (_, _) => root.Changed -= RootChanged;
         UpdateHeight();
-        return dialog;
+        return DialogPresentation.Prepare(dialog);
     }
 
     private static void AddStandardOperation(StackPanel content, ToolActivity tool)

@@ -7,6 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../apps/shared/Chat/TaskApiContracts.cs" Link="TaskApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="ChatApiContracts.cs" />
+    <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="AgentApiContracts.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/TasksApiClient.cs" Link="TasksApiClient.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/PausedTaskSelection.cs" Link="PausedTaskSelection.cs" />
     <Compile Include="../../apps/desktop/Services/Integration/GatewayResponseReader.cs" Link="GatewayResponseReader.cs" />

@@ -15,15 +15,44 @@ namespace KYNXA_Desktop.Views;
 public sealed partial class ShellPage
 {
     private Window? _storageSettingsWindow;
+    private LocalModelsPage? _localModelsPage;
+    private ContentControl? _settingsPageHost;
+    private ScrollViewer? _settingsHome;
     private sealed record StorageHealth(int StorageProtocol, int ActiveRequests, bool Migrating, string? ModelDataHome,
         bool MigrationReady = false, string? RuntimeCleanupError = null);
+
+    private void OpenLocalModels()
+    {
+        if (_chatClosing || _savingOnClose || _projectViewClosed || StoragePaths.IsMigrating) return;
+        if (_localModelsPage is not null || _storageSettingsWindow is not { } window ||
+            _settingsPageHost is not { } host || _settingsHome is not { } home) return;
+        var page = new LocalModelsPage(window);
+        _localModelsPage = page;
+        void RefreshChoices(object? sender, EventArgs args)
+        {
+            if (!_chatClosing && !_projectViewClosed && !_closeApproved) _ = RefreshModelPickerAsync();
+        }
+        page.ModelsChanged += RefreshChoices;
+        page.BackRequested += (_, _) =>
+        {
+            // Retain the same settings controls and scroll position while the subpage is open.
+            // 子页面打开期间保留设置首页原控件及滚动位置，返回时不重建首页。
+            host.Content = home;
+            page.ModelsChanged -= RefreshChoices;
+            page.Dispose();
+            _localModelsPage = null;
+            RefreshChoices(null, EventArgs.Empty);
+        };
+        host.Content = page;
+    }
 
     private void StorageSettings_Click(object sender, RoutedEventArgs args)
     {
         if (!_projectsReady) return;
         if (_storageSettingsWindow is { } existing)
         {
-            if (existing.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter) presenter.Restore();
+            // Window.Activate already restores an iconic HWND; use one native presentation path for reuse and restore.
+            // Window.Activate 自带最小化恢复；复用与恢复只走一次原生展示流程。
             existing.Activate();
             return;
         }
@@ -74,7 +103,8 @@ public sealed partial class ShellPage
         {
             TrySetAppearancePreferences(preferences, out string? errorKey);
             return errorKey;
-        });
+        }, () => new AppearanceTransferPreferences(_layout.AppearancePaletteId, _layout.AppearanceMode,
+            _layout.ChatFontSize, _layout.AppearanceAccent), isImport => PickAppearanceFileAsync(window, isImport));
         content.Children.Add(appearanceSection.Root);
         var moreOptions = LocalizedLabel("更多功能", 13);
         moreOptions.Opacity = 0.6;
@@ -120,6 +150,19 @@ public sealed partial class ShellPage
         retrievalRow.Children.Add(retrievalButton);
         content.Children.Add(retrievalRow);
         retrievalButton.Click += (_, _) => OpenRetrievalSettings();
+        var localModelsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
+            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
+        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        localModelsRow.Children.Add(LocalizedLabel("本地对话模型"));
+        var localModelsButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6),
+            CornerRadius = new CornerRadius(8), Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
+        UiLocalization.Bind(localModelsButton, Button.ContentProperty, "管理");
+        AutomationProperties.SetAutomationId(localModelsButton, "LocalModelsSettingsButton");
+        Grid.SetColumn(localModelsButton, 1);
+        localModelsRow.Children.Add(localModelsButton);
+        content.Children.Add(localModelsRow);
+        localModelsButton.Click += (_, _) => OpenLocalModels();
         var section = LocalizedLabel("存储", 13);
         section.Opacity = 0.6;
         content.Children.Add(section);
@@ -150,36 +193,31 @@ public sealed partial class ShellPage
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalContentAlignment = HorizontalAlignment.Stretch };
         AutomationProperties.SetAutomationId(scroll, "SettingsScrollViewer");
-        Grid.SetRow(scroll, 1);
-        root.Children.Add(titleBar); root.Children.Add(scroll);
+        var pageHost = new ContentControl { Content = scroll, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch };
+        _settingsPageHost = pageHost;
+        _settingsHome = scroll;
+        Grid.SetRow(pageHost, 1);
+        root.Children.Add(titleBar); root.Children.Add(pageHost);
         window.Content = root;
         window.ExtendsContentIntoTitleBar = true;
         window.SetTitleBar(titleBar);
-        window.AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 420));
-        var ownerBounds = App.Window.AppWindow;
-        window.AppWindow.Move(new Windows.Graphics.PointInt32(ownerBounds.Position.X + Math.Max(0, (ownerBounds.Size.Width - 720) / 2),
-            ownerBounds.Position.Y + Math.Max(0, (ownerBounds.Size.Height - 420) / 2)));
-        bool initialSizeApplied = false;
-        root.Loaded += (_, _) =>
-        {
-            if (initialSizeApplied) return;
-            initialSizeApplied = true;
-            // Native window sizes are physical pixels; size the settings page in DIP after its root is available.
-            // 原生窗口尺寸使用物理像素；根节点可用后按 DIP 设置界面并约束到工作区。
-            double scale = root.XamlRoot.RasterizationScale;
-            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
-                presenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
-            }
-            var area = DisplayArea.GetFromWindowId(App.Window.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-            int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
-            int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
-            int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
-            int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
-            window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
-        };
         AppearanceService.TrackWindow(window);
+        var ownerBounds = App.Window.AppWindow;
+        // Resolve DPI from the visible owner and apply final bounds before the first activation.
+        // 使用已显示所属窗口的 DPI，在首次激活前设置最终尺寸，避免 Loaded 后再次缩放引起跳变。
+        double scale = XamlRoot?.RasterizationScale ?? 1;
+        if (window.AppWindow.Presenter is OverlappedPresenter settingsPresenter)
+        {
+            settingsPresenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
+            settingsPresenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
+        }
+        var area = DisplayArea.GetFromWindowId(ownerBounds.Id, DisplayAreaFallback.Primary).WorkArea;
+        int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
+        int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
+        int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
+        int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
+        window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
         { storageControls.Message(text, severity); }
         if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);
@@ -224,6 +262,10 @@ public sealed partial class ShellPage
             UiText.LanguageChanged -= UpdateSettingsTitle;
             appearanceSection.Dispose();
             storageControls.Close();
+            _localModelsPage?.Dispose();
+            _localModelsPage = null;
+            _settingsPageHost = null;
+            _settingsHome = null;
             _storageSettingsWindow = null;
         };
         extensionRow.ChangeButton.Click += async (_, _) => await ChangeExtensionStorageAsync(storageControls);

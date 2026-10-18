@@ -73,8 +73,40 @@
     <Style TargetType="FlyoutPresenter">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
     </Style>
-    <Style TargetType="ContentDialog">
+    <!-- Set tracking on the text itself at creation; inherited button tracking can keep WinUI's fast text path.
+         创建文字时直接设置字间距；仅从按钮继承时，WinUI 可能仍沿用忽略字距的快速排版路径。
+    -->
+    <DataTemplate x:Key="KynxaDialogAcknowledgementTemplate">
+        <TextBlock Text="{Binding}" CharacterSpacing="{StaticResource KynxaDialogAcknowledgementCharacterSpacing}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+    </DataTemplate>
+    <Style x:Key="KynxaDialogButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Background" Value="{ThemeResource ButtonBackground}" />
+        <Setter Property="Foreground" Value="{ThemeResource ButtonForeground}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource ButtonBorderBrush}" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="MinHeight" Value="36" />
+    </Style>
+    <Style x:Key="KynxaDialogAccentButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaControlRadius}" />
+        <Setter Property="Background" Value="{ThemeResource AccentButtonBackground}" />
+        <Setter Property="Foreground" Value="{ThemeResource AccentButtonForeground}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource AccentButtonBorderBrush}" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="MinHeight" Value="36" />
+    </Style>
+    <Style TargetType="ContentDialog" BasedOn="{StaticResource DefaultContentDialogStyle}">
+        <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
+        <Setter Property="Background" Value="{StaticResource KynxaMainBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaTextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource KynxaDividerBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource KynxaMenuRadius}" />
+        <Setter Property="PrimaryButtonStyle" Value="{StaticResource KynxaDialogButtonStyle}" />
+        <Setter Property="SecondaryButtonStyle" Value="{StaticResource KynxaDialogButtonStyle}" />
+        <Setter Property="CloseButtonStyle" Value="{StaticResource KynxaDialogButtonStyle}" />
     </Style>
     <Style TargetType="ToolTip">
         <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
@@ -123,6 +155,51 @@
         <Setter Property="CornerRadius" Value="12" />
         <Setter Property="HorizontalAlignment" Value="Stretch" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Foreground" Value="{StaticResource KynxaTextBrush}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource KynxaFocusBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="Transparent" />
+        <!-- Navigation shares the mode selection's live palette brush instead of global neutral button feedback.
+             导航入口复用模式选中块的实时配色画刷，不再使用全局按钮的中性灰反馈。
+        -->
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <ContentPresenter x:Name="NavigationPresenter"
+                                      Background="{TemplateBinding Background}" BackgroundSizing="{TemplateBinding BackgroundSizing}"
+                                      Foreground="{TemplateBinding Foreground}" BorderBrush="{TemplateBinding BorderBrush}"
+                                      BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                                      Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                      ContentTransitions="{TemplateBinding ContentTransitions}" Padding="{TemplateBinding Padding}"
+                                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                      VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                      AutomationProperties.AccessibilityView="Raw" Control.IsTemplateFocusTarget="True">
+                        <!-- Apply feedback directly so transparent-white interpolation cannot flash on dark backgrounds.
+                             直接切换反馈画刷，避免透明白色参与插值时在深色背景上产生亮色闪帧。 -->
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaSelectionBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="NavigationPresenter.Background" Value="{StaticResource KynxaSelectionBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="NavigationPresenter.Opacity" Value="0.5" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
     <Style x:Key="KynxaCompactIconButtonStyle" TargetType="Button" BasedOn="{StaticResource KynxaIconButtonStyle}">
         <Setter Property="Width" Value="{StaticResource KynxaSmallIconButtonSize}" />

@@ -28,9 +28,11 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private readonly Dictionary<Guid, Expander> _realized = [];
     private readonly HashSet<Guid> _expanded = [];
     private readonly HashSet<Guid> _loadingDetails = [];
+    private readonly HashSet<Guid> _recoverableTaskIds = [], _resumingTaskIds = [];
+    private readonly Dictionary<Guid, string> _resumeMessages = [];
     private CancellationTokenSource _reads = new();
     private ITasksApi? _api;
-    private Guid? _conversationId, _projectId, _nextTaskId;
+    private Guid? _conversationId, _projectId, _nextTaskId, _nextRecoverableTaskId;
     private bool _visible, _loading, _disposed;
     private long _generation;
     private string? _noticeKey;
@@ -43,6 +45,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     public event EventHandler? TasksChanged;
     public event EventHandler<TaskArtifactRequest>? ArtifactOpenRequested;
     public event EventHandler<TaskArtifactRequest[]>? ArtifactsChanged;
+    public event EventHandler<TaskRecord>? ResumeRequested;
 
     public ConversationTaskPanel()
     {
@@ -113,7 +116,8 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     {
         if (_disposed || (_conversationId == conversationId && _projectId == projectId)) return;
         CancelReads(); _conversationId = conversationId; _projectId = projectId;
-        _rows.Clear(); _realized.Clear(); _expanded.Clear(); _nextTaskId = null;
+        _rows.Clear(); _realized.Clear(); _expanded.Clear(); _nextTaskId = null; _nextRecoverableTaskId = null;
+        _recoverableTaskIds.Clear(); _resumingTaskIds.Clear(); _resumeMessages.Clear();
         TasksChanged?.Invoke(this, EventArgs.Empty);
         _noticeKey = null; _notice.Text = ""; _section.IsEnabled = conversationId is not null;
         UpdatePolling();
@@ -146,12 +150,13 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     private void UpdatePolling()
     {
         if (CanRead) _poll.Start(); else _poll.Stop();
-        _more.IsEnabled = !_loading && _nextTaskId is not null && _rows.Count < MaximumVisibleRoots;
+        _more.IsEnabled = !_loading && (_nextRecoverableTaskId is not null ||
+            _nextTaskId is not null && _rows.Count(row => !_recoverableTaskIds.Contains(row.Record.TaskId)) < MaximumVisibleRoots);
     }
 
     private async Task RefreshAsync(bool loadMore = false)
     {
-        if (!CanRead || _loading || (loadMore && _nextTaskId is null)) return;
+        if (!CanRead || _loading || (loadMore && _nextTaskId is null && _nextRecoverableTaskId is null)) return;
         _loading = true;
         _lastRefresh = DateTimeOffset.UtcNow;
         long generation = _generation;
@@ -160,16 +165,51 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         var token = _reads.Token;
         try
         {
-            var page = await _api!.ListAsync(conversation, project, loadMore ? _nextTaskId : null, token);
+            var normalRead = !loadMore || _nextTaskId is not null
+                ? _api!.ListAsync(conversation, project, loadMore ? _nextTaskId : null, token)
+                : Task.FromResult(new TaskListResponse([], false, null));
+            var recoveryRead = !loadMore || _nextRecoverableTaskId is not null
+                ? _api!.RecoverableAsync(conversation, project, loadMore ? _nextRecoverableTaskId : null, token)
+                : Task.FromResult(new TaskListResponse([], false, null));
+            await Task.WhenAll(normalRead, recoveryRead);
+            var page = await normalRead;
+            var recoverable = await recoveryRead;
             if (!Current(generation)) return;
             if (loadMore) _nextTaskId = page.HasMore ? page.NextTaskId : null;
-            else if (_rows.Count <= page.Tasks.Length) _nextTaskId = page.HasMore ? page.NextTaskId : null;
+            else if (_nextTaskId is null || _rows.Count(row => !_recoverableTaskIds.Contains(row.Record.TaskId)) <= page.Tasks.Length)
+                _nextTaskId = page.HasMore ? page.NextTaskId : null;
+            if (loadMore || _nextRecoverableTaskId is null || _recoverableTaskIds.Count <= recoverable.Tasks.Length)
+                _nextRecoverableTaskId = recoverable.HasMore ? recoverable.NextTaskId : null;
+            if (!loadMore && !recoverable.HasMore)
+            {
+                var currentRoots = recoverable.Tasks.Select(task => task.TaskId).ToHashSet();
+                foreach (var row in _rows.Where(row => _recoverableTaskIds.Contains(row.Record.TaskId) &&
+                    !currentRoots.Contains(row.Record.TaskId) && !page.Tasks.Any(task => task.TaskId == row.Record.TaskId)).ToArray())
+                    _rows.Remove(row);
+                _recoverableTaskIds.IntersectWith(currentRoots);
+            }
+            // Recovery controls stay scoped to this chat and are available even for model-hidden root tasks.
+            // 恢复入口只面向当前聊天；模型隐藏的根任务仍能由用户明确选择，不混入同项目其他聊天。
+            int recoveryPosition = loadMore ? _rows.Count(row => _recoverableTaskIds.Contains(row.Record.TaskId)) : 0;
+            foreach (var task in recoverable.Tasks)
+            {
+                _recoverableTaskIds.Add(task.TaskId);
+                var row = _rows.FirstOrDefault(item => item.Record.TaskId == task.TaskId);
+                if (row is null) _rows.Insert(recoveryPosition, new(task));
+                else
+                {
+                    row.Update(task);
+                    int previousPosition = _rows.IndexOf(row);
+                    if (!loadMore && previousPosition != recoveryPosition) _rows.Move(previousPosition, recoveryPosition);
+                }
+                if (!loadMore || row is null) recoveryPosition++;
+            }
             // Refresh the first page in place; retained later pages keep their order and expanded controls.
             // 就地刷新第一页；已加载后续页保留顺序及展开状态，避免每次轮询重建整列。
             foreach (var task in page.Tasks.Where(task => task.ParentTaskId is null))
             {
                 var row = _rows.FirstOrDefault(item => item.Record.TaskId == task.TaskId);
-                if (task.DisplayInTaskList == false)
+                if (task.DisplayInTaskList == false && !_recoverableTaskIds.Contains(task.TaskId))
                 {
                     if (row is not null) _rows.Remove(row);
                     _expanded.Remove(task.TaskId);
@@ -177,7 +217,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
                 }
                 if (row is null)
                 {
-                    if (_rows.Count >= MaximumVisibleRoots) break;
+                    if (_rows.Count(item => !_recoverableTaskIds.Contains(item.Record.TaskId)) >= MaximumVisibleRoots) break;
                     _rows.Add(new(task));
                 }
                 else if (row.Record.Version != task.Version || row.Record.EventSequence != task.EventSequence)
@@ -188,7 +228,7 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
             if (_section.IsExpanded)
                 foreach (var pair in _realized.Where(pair => _expanded.Contains(pair.Key)).ToArray())
                     if (_rows.FirstOrDefault(row => row.Record.TaskId == pair.Key) is { } row) _ = LoadDetailsAsync(row, pair.Value);
-            Notice(_rows.Count == 0 ? "此聊天暂无任务。" : _rows.Count >= MaximumVisibleRoots
+            Notice(_rows.Count == 0 ? "此聊天暂无任务。" : _rows.Count(row => !_recoverableTaskIds.Contains(row.Record.TaskId)) >= MaximumVisibleRoots
                 ? "已显示最近 500 个任务，更早记录仍保存在任务服务。" : null);
             TasksChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -204,6 +244,17 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
     }
 
     private bool Current(long generation) => CanRead && _generation == generation;
+
+    public void SetResumePending(TaskRecord task, bool pending, string? message = null)
+    {
+        if (_conversationId != task.Scope.ConversationId) return;
+        if (pending) _resumingTaskIds.Add(task.TaskId); else _resumingTaskIds.Remove(task.TaskId);
+        if (string.IsNullOrWhiteSpace(message)) _resumeMessages.Remove(task.TaskId); else _resumeMessages[task.TaskId] = message;
+        var row = _rows.FirstOrDefault(row => row.Record.TaskId == task.TaskId);
+        row?.Update(task);
+        if (row is not null && _realized.TryGetValue(task.TaskId, out var expander) && _expanded.Contains(task.TaskId))
+            _ = LoadDetailsAsync(row, expander);
+    }
 
     private void ContainerChanged(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
@@ -262,6 +313,16 @@ public sealed class ConversationTaskPanel : Grid, IDisposable
         body.Children.Clear();
         var task = detail.Task;
         var usage = task.Usage;
+        if (task.ParentTaskId is null && task.Scope.ConversationId == _conversationId && TaskStates.CanResume(task.State))
+        {
+            var resume = new Button { Name = "ResumeTaskButton", Tag = task.TaskId, Content = UiText.Get("继续任务"),
+                MinHeight = 28, Padding = new Thickness(8, 3, 8, 3), CornerRadius = new CornerRadius(6),
+                IsEnabled = !_resumingTaskIds.Contains(task.TaskId) };
+            if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var style) && style is Style quiet) resume.Style = quiet;
+            resume.Click += (_, _) => { if (Current(generation)) ResumeRequested?.Invoke(this, task); };
+            body.Children.Add(resume);
+        }
+        if (_resumeMessages.TryGetValue(task.TaskId, out string? resumeMessage)) body.Children.Add(Label(resumeMessage));
         body.Children.Add(Label(string.Format(UiText.Get("模型调用 {0} · 重试 {1} · 压缩 {2}"),
             usage.ModelRequests, usage.Retries, usage.Compactions)));
         body.Children.Add(Label(string.Format(UiText.Get("输入 {0} · 输出 {1} tokens · 未知用量 {2} 次"),

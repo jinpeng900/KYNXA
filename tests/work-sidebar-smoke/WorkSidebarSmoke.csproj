@@ -24,5 +24,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../../apps/shared/Tools/AgentApiContracts.cs" Link="Contracts/AgentApiContracts.cs" />
+    <Compile Include="../../apps/shared/Chat/ChatApiContracts.cs" Link="Contracts/ChatApiContracts.cs" />
   </ItemGroup>
 </Project>

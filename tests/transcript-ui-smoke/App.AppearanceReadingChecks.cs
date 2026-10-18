@@ -43,6 +43,8 @@ public partial class App
                   window.__appearanceBody=document.querySelector('.message-body');
                   window.__appearanceBlock=document.querySelector('.content-block');
                   window.__appearanceCode=__appearanceBlock.querySelector('code');
+                  window.__appearanceDiagramViewport=document.querySelector('.mermaid-viewport');
+                  window.__appearanceSvg=__appearanceDiagramViewport.querySelector('svg');
                   window.__appearanceAnchor=[...__appearanceBody.querySelectorAll(':scope > p')].find(p=>p.textContent.startsWith('THEME_ANCHOR'));
                   scrollTo(0,scrollY+__appearanceAnchor.getBoundingClientRect().top);
                   __appearanceBlock.querySelector('[data-block-action=fold]').click();
@@ -58,9 +60,10 @@ public partial class App
                 {
                     AppearanceService.ApplyPreferences(preset.Id, themeMode, 15, null);
                     await WaitAppearanceAsync(AppearanceService.Current, 15);
+                    await Task.Delay(150);
                     Check(await EvalAsync<bool>("__appearanceBody===document.querySelector('.message-body') && __appearanceBlock===document.querySelector('.content-block') && __appearanceCode===document.querySelector('.content-block code') && __appearanceBlock.dataset.collapsed==='true'"), "palette/mode changes preserve existing prose/code nodes and fold preference for " + preset.Id + "/" + themeMode);
                     await CheckAppearanceColorsAsync(AppearanceService.Current);
-                    await WaitAsync("(() => { const rect=document.querySelector('.mermaid-viewport svg .node rect'); return !!rect && getComputedStyle(rect).fill===getComputedStyle(document.documentElement).getPropertyValue('--appearance-soft').trim().replace(/^#(.{2})(.{2})(.{2})$/,(m,r,g,b)=>`rgb(${parseInt(r,16)}, ${parseInt(g,16)}, ${parseInt(b,16)})`); })()", "diagram renders the latest native palette for " + preset.Id + "/" + themeMode);
+                    Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__appearanceSvg && getComputedStyle(__appearanceDiagramViewport).backgroundColor==='rgb(255, 255, 255)' && getComputedStyle(__appearanceSvg.querySelector('.node rect')).fill==='rgb(237, 242, 252)' && getComputedStyle(__appearanceSvg.querySelector('.node rect')).stroke==='rgb(69, 104, 178)' && getComputedStyle(__appearanceSvg.querySelector('.node text')).fill==='rgb(36, 39, 45)'"), "diagram retains the same fixed light SVG and white canvas for " + preset.Id + "/" + themeMode);
                     Check(await EvalAsync<bool>("Math.abs(__appearanceAnchor.getBoundingClientRect().top-__appearanceTop)<2 && !transcriptState().following"), "color-only theme change retains the reading region");
                 }
             }
@@ -73,7 +76,7 @@ public partial class App
             await CheckAppearanceDarkDiagramTypesAsync();
             await CheckAppearanceSystemAsync();
             Check(JsonSerializer.Serialize(answer.Message) == formal, "theme, font, native copy and cached navigation do not change formal source messages");
-            _metrics["appearanceReadingScope"] = "native WinUI/WebView2; 5 presets x light/dark; 13/13.5/15/18/22px; 12 complete preview lines; real message/code nodes and selected text retained; cached A/B/A anchor; safe Mermaid redraw; synthetic high-contrast system palette; actual system mode";
+            _metrics["appearanceReadingScope"] = "native WinUI/WebView2; 5 presets x light/dark; 13/13.5/15/18/22px; 12 complete preview lines; real message/code nodes and selected text retained; cached A/B/A anchor; fixed white Mermaid content and stable SVG; synthetic high-contrast application palette; actual system mode";
         }
         catch (Exception error)
         {
@@ -167,6 +170,8 @@ public partial class App
                 keyword:color(".content-block code span[style='color:#8250df']"),comment:color(".content-block code span[style='color:#576f43']"),
                 string:color(".content-block code span[style='color:#0a3069']"),number:color(".content-block code span[style='color:#0550ae']"),
                 surface:getComputedStyle(document.querySelector('.math[data-display=true]')).backgroundColor,
+                diagramHeader:getComputedStyle(document.querySelector('.mermaid-header')).backgroundColor,
+                diagramSource:getComputedStyle(document.querySelector('.mermaid-source')).backgroundColor,diagramSourceText:color('.mermaid-source code'),
                 codeSize:parseFloat(getComputedStyle(document.querySelector('.content-block code')).fontSize),
                 tableSize:parseFloat(getComputedStyle(document.querySelector('table')).fontSize),scheme:getComputedStyle(document.documentElement).colorScheme};
             })()
@@ -177,6 +182,10 @@ public partial class App
             && colors.GetProperty("table").GetString() == Rgb(palette.Text)
             && colors.GetProperty("quote").GetString() == Rgb(palette.Secondary)
             && colors.GetProperty("surface").GetString() == Rgb(palette.ReplySurface), "prose, formula, quote, table and surfaces share the effective semantic palette");
+        Check(colors.GetProperty("diagramHeader").GetString() == Rgb(palette.Sidebar)
+            && colors.GetProperty("diagramSource").GetString() == Rgb(palette.Sidebar)
+            && colors.GetProperty("diagramSourceText").GetString() == Rgb(palette.Text),
+            "diagram toolbar and original source follow the effective application palette");
         Check(colors.GetProperty("keyword").GetString() == Rgb(palette.CodeKeyword)
             && colors.GetProperty("comment").GetString() == Rgb(palette.CodeComment)
             && colors.GetProperty("string").GetString() == Rgb(palette.CodeString)
@@ -277,19 +286,22 @@ public partial class App
         await WaitAsync("document.querySelector('.mermaid-block')?.dataset.diagramState==='ready'", "the appearance selection fixture has a diagram");
         await EvalAsync<bool>("""
             (() => {
-              const svg=document.querySelector('.mermaid-viewport svg'),node=__transcriptSmoke.textNode(svg,'Start');
+              const viewport=document.querySelector('.mermaid-viewport'),svg=viewport.querySelector('svg'),node=__transcriptSmoke.textNode(svg,'Start');
               getSelection().setBaseAndExtent(node,0,node,node.textContent.length);
-              window.__appearanceDiagram={svg,node,selected:getSelection().toString()};
+              window.__appearanceDiagram={viewport,svg,node,selected:getSelection().toString(),scale:viewport.dataset.scale,
+                transform:viewport.querySelector('.mermaid-canvas').style.transform};
               return true;
             })()
             """);
         AppearanceService.ApplyPreferences("violet", "dark", 18, null);
         await WaitAppearanceAsync(AppearanceService.Current, 18);
         await Task.Delay(350);
-        Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__appearanceDiagram.svg && getSelection().anchorNode===__appearanceDiagram.node && getSelection().toString()===__appearanceDiagram.selected"), "dark/size change defers SVG replacement while a diagram label is selected");
+        Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__appearanceDiagram.svg && getSelection().anchorNode===__appearanceDiagram.node && getSelection().toString()===__appearanceDiagram.selected && __appearanceDiagram.viewport.dataset.scale===__appearanceDiagram.scale && __appearanceDiagram.viewport.querySelector('.mermaid-canvas').style.transform===__appearanceDiagram.transform && getComputedStyle(__appearanceDiagram.viewport).backgroundColor==='rgb(255, 255, 255)' && getComputedStyle(__appearanceDiagram.svg.querySelector('.node rect')).fill==='rgb(237, 242, 252)'"), "dark/size change preserves the selected diagram label, same fixed light SVG, white canvas and zoom");
         _transcript.ClearSelection();
-        await WaitAsync("document.querySelector('.mermaid-viewport svg')!==__appearanceDiagram.svg && document.querySelector('.mermaid-block').dataset.diagramState==='ready'", "clearing the selected diagram applies its latest dark theme once");
-        Check(await EvalAsync<bool>("document.querySelector('.mermaid-source code').textContent==='flowchart LR\\n  A[中文 Start] --> B[English 完成]'"), "theme redraw never changes or executes diagram source");
+        await WaitAsync("getSelection().isCollapsed", "the appearance diagram selection clears");
+        await Task.Delay(350);
+        Check(await EvalAsync<bool>("document.querySelector('.mermaid-viewport svg')===__appearanceDiagram.svg && document.querySelector('.mermaid-block').dataset.diagramState==='ready' && __appearanceDiagram.viewport.dataset.scale===__appearanceDiagram.scale && __appearanceDiagram.viewport.querySelector('.mermaid-canvas').style.transform===__appearanceDiagram.transform && getComputedStyle(__appearanceDiagram.viewport).backgroundColor==='rgb(255, 255, 255)' && getComputedStyle(__appearanceDiagram.svg.querySelector('.node rect')).fill==='rgb(237, 242, 252)'"), "clearing the selected diagram retains the same fixed light SVG, white canvas and zoom");
+        Check(await EvalAsync<bool>("document.querySelector('.mermaid-source code').textContent==='flowchart LR\\n  A[中文 Start] --> B[English 完成]'"), "appearance changes preserve the exact original diagram source");
     }
 
     private async Task CheckAppearanceHighContrastAsync()
@@ -304,6 +316,7 @@ public partial class App
         });
         // Feed a synthetic OS-resolved palette through the real host command, without toggling global accessibility.
         // 合成系统色通过真实宿主消息接入，不切换用户的全局辅助功能设置。
+        await EvalAsync<bool>("(() => { window.__appearanceHighContrastSvg=document.querySelector('.mermaid-viewport svg'); return true; })()");
         _transcript.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
         {
             type = "setAppearance", fontSize = 18,
@@ -321,7 +334,7 @@ public partial class App
         await WaitAppearanceAsync(palette, 18);
         await CheckAppearanceColorsAsync(palette);
         Check(await EvalAsync<bool>("getComputedStyle(document.documentElement).forcedColorAdjust==='none' && getComputedStyle(document.querySelector('td'),'::selection').color==='rgb(0, 0, 0)' && getComputedStyle(document.querySelector('td'),'::selection').backgroundColor==='rgb(255, 255, 0)'"), "high contrast honors system selected background/foreground without browser recoloring");
-        await WaitAsync("(() => { const rect=document.querySelector('.mermaid-viewport svg .node rect'); return !!rect && getComputedStyle(rect).fill==='rgb(0, 0, 0)' && getComputedStyle(rect).stroke==='rgb(255, 255, 0)'; })()", "high-contrast diagram uses actual system foreground/background colors");
+        Check(await EvalAsync<bool>("(() => { const viewport=document.querySelector('.mermaid-viewport'),svg=viewport.querySelector('svg'),rect=svg.querySelector('.node rect'); return svg===__appearanceHighContrastSvg && getComputedStyle(viewport).backgroundColor==='rgb(255, 255, 255)' && getComputedStyle(rect).fill==='rgb(237, 242, 252)' && getComputedStyle(rect).stroke==='rgb(69, 104, 178)' && getComputedStyle(svg.querySelector('.node text')).fill==='rgb(36, 39, 45)'; })()"), "high-contrast application colors retain the same fixed light diagram SVG and white canvas");
         await EvalAsync<bool>("(() => { document.querySelector('.mermaid-block').scrollIntoView({block:'center'}); return true; })()");
         await CaptureViewportAsync(Path.Combine(Path.GetTempPath(), "kynxa-transcript-appearance-high-contrast.png"));
     }
@@ -343,7 +356,7 @@ public partial class App
         var chat = Guid.NewGuid();
         var rows = sources.Select(source => Message(chat, "assistant", MermaidFence(source))).ToArray();
         _transcript.ShowConversation(chat, rows);
-        await WaitAsync("document.querySelectorAll('.mermaid-block').length===7 && [...document.querySelectorAll('.mermaid-block')].every(block=>block.dataset.diagramState==='ready')", "all seven supported Mermaid types render in dark mode");
+        await WaitAsync("document.querySelectorAll('.mermaid-block').length===7 && [...document.querySelectorAll('.mermaid-block')].every(block=>block.dataset.diagramState==='ready')", "all seven supported Mermaid types render in dark application mode");
         foreach (var row in rows)
         {
             Check(await EvalAsync<bool>($$"""
@@ -351,9 +364,10 @@ public partial class App
                   const block={{DiagramBlockExpression(row)}},svg=block.querySelector('.mermaid-viewport svg');
                   return !!svg && svg.querySelectorAll('text,tspan').length>0 && svg.viewBox.baseVal.width>0
                     && !svg.querySelector('foreignObject,script,image,a')
+                    && getComputedStyle(block.querySelector('.mermaid-viewport')).backgroundColor==='rgb(255, 255, 255)'
                     && block.querySelector('.mermaid-source code').textContent==={{JsonSerializer.Serialize(row.Message.Content[11..^4])}};
                 })()
-                """), "dark supported diagram keeps real text, inert SVG and exact original source");
+                """), "supported diagram in dark application mode keeps a white canvas, real text, inert SVG and exact original source");
         }
         await EvalAsync<bool>("(() => { scrollTo(0,0); return true; })()");
         await CaptureViewportAsync(Path.Combine(Path.GetTempPath(), "kynxa-transcript-appearance-dark-diagrams.png"));
@@ -361,6 +375,7 @@ public partial class App
 
     private async Task CheckAppearanceSystemAsync()
     {
+        await EvalAsync<bool>("(() => { window.__appearanceSystemSvgs=[...document.querySelectorAll('.mermaid-viewport svg')]; return true; })()");
         AppearanceService.ApplyPreferences(AppearanceService.DefaultPaletteId, "system", 15, null);
         await WaitAppearanceAsync(AppearanceService.Current, 15);
         bool expectedDark = new AccessibilitySettings().HighContrast
@@ -368,6 +383,8 @@ public partial class App
             : new UISettings().GetColorValue(UIColorType.Background).R < 128;
         Check(AppearanceService.Mode == "system" && AppearanceService.Current.IsDark == expectedDark,
             "system mode resolves the current OS scheme without changing system settings");
+        Check(await EvalAsync<bool>("(() => { const svgs=[...document.querySelectorAll('.mermaid-viewport svg')]; return svgs.length===__appearanceSystemSvgs.length && svgs.length===7 && svgs.every((svg,index)=>svg===__appearanceSystemSvgs[index] && getComputedStyle(svg.closest('.mermaid-viewport')).backgroundColor==='rgb(255, 255, 255)'); })()"),
+            "system mode keeps the same diagram SVG nodes and white content canvases");
         _transcript.JumpToLatest();
         await WaitAsync("transcriptState().following && __transcriptSmoke.bottomDistance()<4", "explicit latest remains functional after all theme and font changes");
     }

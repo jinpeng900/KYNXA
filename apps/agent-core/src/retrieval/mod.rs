@@ -20,6 +20,7 @@ pub mod gateway_spreadsheets;
 pub mod gateway_structure;
 pub mod gateway_tools;
 pub mod gateway_url_sources;
+pub mod gateway_watch;
 pub mod indexing_run;
 pub mod lexical;
 pub mod query;

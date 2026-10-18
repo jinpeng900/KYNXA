@@ -100,9 +100,12 @@ public sealed partial class ShellPage
         // A temporary drawer never changes the user's saved sidebar width or collapse preference.
         // 临时抽屉不改变用户保存的侧栏宽度或折叠偏好。
         SidebarColumn.Width = new GridLength(_isCompactLayout || !expanded ? ShellLayoutMetrics.SidebarCollapsed : preferredWidth);
-        // Remove the unused drag gutter so the closed rail stays symmetric around the unchanged icon center.
-        // 收起时移除闲置的拖动留白，让窄侧栏在原有图标中心两侧等宽。
-        SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : 8);
+        // Trim only the reserved gutter so the existing footer icons have equal outer margins without moving them.
+        // 仅缩小额外预留的拖动留白，让底栏原有图标外侧边距等宽，不移动图标。
+        SidebarGripColumn.Width = new GridLength(_isCompactLayout || !expanded ? 0 : ShellLayoutMetrics.SidebarGripGutter);
+        // Span the root grid so the full eight-DIP hit target can overlap the narrower gutter without slot clipping.
+        // 命中区跨越根网格，让完整 8 DIP 拖动范围覆盖较窄留白两侧，避免被单列布局裁剪。
+        SidebarGrip.Margin = new Thickness(preferredWidth - (SidebarGrip.Width - ShellLayoutMetrics.SidebarGripGutter) / 2, 0, 0, 0);
         SidebarPane.Width = _isCompactLayout && expanded ? preferredWidth : double.NaN;
         SidebarPane.HorizontalAlignment = _isCompactLayout && expanded ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
         Grid.SetColumnSpan(SidebarPane, _isCompactLayout && expanded ? 3 : 1);
@@ -149,7 +152,7 @@ public sealed partial class ShellPage
 
     private bool HasPresentationModal()
     {
-        if (_presentationDialogOpen) return true;
+        if (_presentationDialogOpen || _projectCreation is not null) return true;
         if (XamlRoot is null) return false;
         // Respect any dialog on this XamlRoot, including existing approvals and settings.
         // 尊重此 XamlRoot 上的所有弹窗，包括既有审批和设置。
@@ -170,11 +173,11 @@ public sealed partial class ShellPage
         _presentationDialogOpen = true;
         try
         {
-            await new ContentDialog
+            await DialogPresentation.ShowAsync(new ContentDialog
             {
                 XamlRoot = XamlRoot, Title = UiText.Get(title), Content = UiText.Get(content),
                 CloseButtonText = UiText.Get("知道了"), DefaultButton = ContentDialogButton.Close
-            }.ShowAsync();
+            });
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.COMException or InvalidOperationException)
         {
@@ -199,11 +202,33 @@ public sealed partial class ShellPage
         Add("聚焦输入 Ctrl+L", () => PromptTextBox.Focus(FocusState.Programmatic));
         Add("键盘操作", () => _ = ShowFeatureInfoAsync("键盘操作", "Enter 发送，Shift+Enter 换行；Ctrl+F 查找会话正文，Ctrl+Shift+K 搜索会话，Ctrl+L 聚焦输入，Ctrl+N 新建聊天，F1 查看帮助。查找框内 Enter／↓ 下一处、Shift+Enter／↑ 上一处；F3／Shift+F3 在任意区域切换，Esc 关闭。生成期间点击停止可取消当前回复。"));
         menu.Items.Add(new MenuFlyoutSeparator());
-        Add("模型管理", () => OpenModelManagement());
-        Add("工具与技能", () => OpenAgentTools());
-        Add("设置", () => StorageSettings_Click(anchor, new RoutedEventArgs()));
+        Add("模型管理", () => RunAfterFlyoutClosed(menu, () => OpenModelManagement()));
+        Add("工具与技能", () => RunAfterFlyoutClosed(menu, () => OpenAgentTools()));
+        Add("设置", () => RunAfterFlyoutClosed(menu, () => StorageSettings_Click(anchor, new RoutedEventArgs())));
         Add("展开或收起侧栏", () => SidebarToggle_Click(anchor, new RoutedEventArgs()));
         menu.ShowAt(anchor);
+    }
+
+    private void RunAfterFlyoutClosed(FlyoutBase flyout, Action action)
+    {
+        void EnqueueAction() => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (IsLoaded && !_chatClosing) action();
+        });
+        if (!flyout.IsOpen)
+        {
+            EnqueueAction();
+            return;
+        }
+        // Menu items invoke Click before unloading their flyout. Unwind that close stack before creating or activating another HWND.
+        // 菜单项先触发 Click，再卸载弹出层；等待实际卸载并退出关闭调用栈后再创建或激活独立窗口，避免展示和焦点恢复交叠。
+        void Closed(object? sender, object args)
+        {
+            flyout.Closed -= Closed;
+            EnqueueAction();
+        }
+        flyout.Closed += Closed;
+        flyout.Hide();
     }
 
     private void StartNewChatFromNavigation()

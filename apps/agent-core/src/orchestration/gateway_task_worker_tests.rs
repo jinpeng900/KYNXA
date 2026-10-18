@@ -4,7 +4,7 @@
 use super::*;
 use crate::{
     gateway_contract::GatewayConfig,
-    storage::task_repository::{NewTask, TaskBudget, TaskRepository, TaskScope},
+    storage::task_repository::{NewTask, TaskBudget, TaskControl, TaskRepository, TaskScope, TaskUsage},
 };
 use axum::{
     Json, Router,
@@ -23,6 +23,7 @@ struct Provider {
     requests: Arc<Mutex<Vec<Value>>>,
     delay: Arc<AtomicBool>,
     interrupted: Arc<AtomicBool>,
+    recovery_final: Arc<AtomicBool>,
 }
 async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -> Response {
     provider.calls.fetch_add(1, Ordering::SeqCst);
@@ -37,6 +38,9 @@ async fn respond(State(provider): State<Provider>, Json(request): Json<Value>) -
             format!("data: {frame}\n\n"),
         )
             .into_response();
+    }
+    if provider.recovery_final.load(Ordering::Acquire) {
+        return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"Original receipt verified; recovered task complete.\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"Original result verified, no operation repeated\"}</kynxa_task>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if request["tools"].as_array().is_none_or(Vec::is_empty) {
         return Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"Partial task history summary; actual receipt references and pending original goal remain authoritative."},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
@@ -391,6 +395,169 @@ async fn child_write_scope_and_unknown_dispatch_remain_enforced_on_restart() {
         .finish(TaskState::WaitingVerification, Some("fixture-ended"))
         .await
         .unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn recovery_reconciles_original_tool_and_model_receipts_once_without_replay() {
+    let fixture = Fixture::new().await;
+    let journal = TaskJournal::start_existing(&fixture.runtime.config.data_root, &fixture.child, "receipt-before-crash", 60000).unwrap();
+    let run = fixture.runtime.child_run(&fixture.child, journal.clone()).unwrap();
+    let call = json!({"id":"recovery-write","name":"filesystem.write","arguments":{"path":"created.txt","content":"A","expectedHash":null}});
+    let state = WorkerContext {
+        pending: Some(protocol::ModelResponse { content:String::new(), reasoning:String::new(), calls:vec![call.clone()],
+            continuation:vec![], finish:json!("tool_calls"), usage:json!({}), output_truncated:false, raw:json!({}) }),
+        ..Default::default()
+    };
+    checkpoint(&journal, &state, "model-received").await.unwrap();
+    let intent = operation_intent(&call, false, 0);
+    journal.record_operation(&intent).unwrap();
+    journal.dispatch_operation(&intent.operation_id).unwrap();
+    let canonical = tools::execute("filesystem.write", call["arguments"].clone(), &fixture.context).await.unwrap();
+    archive_receipt(&fixture.runtime, &run, &call, json!({"status":"completed","isError":false,"content":canonical})).await.unwrap();
+    journal.reserve_model_request("request-before-crash").unwrap();
+    let connection = fixture.runtime.models.connection_for("child-fixture").await.unwrap().unwrap();
+    let response = crate::models::gateway::request(&connection,
+        json!({"model":"fixture-model","messages":[{"role":"user","content":"Return one bounded summary."}],"stream":false}),
+        run.cancellation.subscribe(), None).await.unwrap();
+    let usage = TaskUsage { model_requests:1,
+        input_tokens:response.usage["prompt_tokens"].as_u64().unwrap(),
+        output_tokens:response.usage["completion_tokens"].as_u64().unwrap(), ..Default::default() };
+    // The real response is persisted, but its accounting transaction is interrupted.
+    // 真实响应已落盘，但模拟在计量结算事务前中断。
+    journal.repository().append_events(journal.token(), &[("model-receipt:request-before-crash".into(), "task.model.receipt".into(),
+        json!({"reservationId":"request-before-crash","attemptId":journal.token().attempt_id,"dispatched":true,"usage":usage}))]).unwrap();
+    journal.finish(TaskState::WaitingVerification, Some("fixture-crash-window")).await.unwrap();
+    std::fs::write(fixture.root.join("work/created.txt"), "B").unwrap();
+    let task = journal.load_current().unwrap();
+    let recovered = TaskJournal::start_existing(&fixture.runtime.config.data_root, &task, "receipt-recovery", 60000).unwrap();
+    let report = recovered.reconcile_receipts().await.unwrap();
+    assert_eq!(report["resolvedOperations"], 1, "{report}");
+    assert_eq!(report["resolvedReservations"], 1, "{report}");
+    assert!(report["pending"].as_array().unwrap().is_empty(), "{report}");
+    let replay = recovered.reconcile_receipts().await.unwrap();
+    assert_eq!(replay["resolvedOperations"], 0);
+    assert_eq!(replay["resolvedReservations"], 0);
+    assert_eq!(recovered.load_current().unwrap().usage.model_requests, 1);
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "B");
+    assert_eq!(previous_operation(&recovered, &call, 0).await.unwrap().unwrap()["reused"], true);
+    recovered.finish(TaskState::Partial, Some("fixture-ended")).await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn production_resume_reconciles_steering_copies_and_continues_the_same_root() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new().await;
+    let request_id = new_id();
+    let user_id = new_id();
+    let reply_id = new_id();
+    let input = json!({"conversationId":fixture.context.conversation_id,"requestId":request_id,"userMessageId":user_id,
+        "message":"Confirm the previously created file from its actual receipt, without writing it again.",
+        "provider":"child-fixture","model":"fixture-model","permissionMode":"full"});
+    let mut identity = Sha256::new();
+    for unit in input["message"].as_str().unwrap().encode_utf16() { identity.update(unit.to_le_bytes()); }
+    let fingerprint = crate::retrieval::gateway_index::hash(&json!([input, format!("{:x}", identity.finalize())]).to_string());
+    let task = super::super::gateway_task_input::accept(&fixture.runtime.config, &input, None, &fingerprint).await.unwrap();
+    let journal = TaskJournal::start_existing(&fixture.runtime.config.data_root, &task, "root-before-crash", 60_000).unwrap();
+    let call = json!({"id":"original-root-write","name":"filesystem.write","arguments":{"path":"created.txt","content":"A","expectedHash":null}});
+    data::upsert_message(&fixture.runtime.config.data_root, &task.scope.conversation_id,
+        &json!({"Id":user_id,"Role":"user","Content":input["message"],"CreatedAt":"2026-10-18T00:00:00Z"})).unwrap();
+    let connection = fixture.runtime.models.connection_for("child-fixture").await.unwrap().unwrap();
+    let origin = json!({"providerId":"child-fixture","model":"fixture-model","protocol":"openai-completions",
+        "connectionFingerprint":crate::retrieval::gateway_index::hash(&json!(["child-fixture","fixture-model","openai-completions",connection["baseUrl"],connection["apiKey"].as_str().unwrap_or("")]).to_string())});
+    let transcript = json!({"version":1,"origin":origin,"rounds":[{"round":1,"text":"Create the requested file.","calls":[call],"observations":[]}]});
+    // A steering reply legitimately contains the same original call as the superseded assistant.
+    // 插话后的回复合法保留旧助手的同一原始调用，核验应去重且只更新最新回复。
+    for (id, created) in [(&request_id,"2026-10-18T00:00:01Z"),(&reply_id,"2026-10-18T00:00:02Z")] {
+        data::upsert_message(&fixture.runtime.config.data_root, &task.scope.conversation_id,
+            &json!({"Id":id,"Role":"assistant","RequestId":request_id,"OriginUserMessageId":user_id,"Provider":"child-fixture","Model":"fixture-model",
+                "Content":"","CreatedAt":created,"Status":"interrupted","ModelTranscript":transcript})).unwrap();
+    }
+    let intent = crate::storage::task_repository::OperationIntent {
+        operation_id:"round-1-original-root-write".into(), tool_call_id:"original-root-write".into(), tool_name:"filesystem.write".into(),
+        input_sha256:managed_files::digest(call["arguments"].to_string().as_bytes()),
+        input_reference:Some(json!({"kind":"conversation-tool-call","conversationId":task.scope.conversation_id,"requestId":request_id,"toolCallId":call["id"],"round":1})),
+        effect:crate::storage::task_repository::OperationEffect::FileMutation,
+    };
+    journal.record_operation(&intent).unwrap();
+    journal.dispatch_operation(&intent.operation_id).unwrap();
+    let canonical = tools::execute("filesystem.write", call["arguments"].clone(), &fixture.context).await.unwrap();
+    data::save_tool_result(&fixture.runtime.config.data_root, &task.scope.conversation_id, &request_id, &call, &canonical, None).unwrap();
+    journal.reserve_model_request("root-model-before-crash").unwrap();
+    let response = crate::models::gateway::request(&connection,
+        json!({"model":"fixture-model","messages":[{"role":"user","content":"Return one bounded summary."}],"stream":false}),
+        fixture.parent.cancellation.subscribe(), None).await.unwrap();
+    let usage = TaskUsage { model_requests:1,input_tokens:response.usage["prompt_tokens"].as_u64().unwrap(),
+        output_tokens:response.usage["completion_tokens"].as_u64().unwrap(), ..Default::default() };
+    journal.repository().append_events(journal.token(), &[("model-receipt:root-model-before-crash".into(),"task.model.receipt".into(),
+        json!({"reservationId":"root-model-before-crash","attemptId":journal.token().attempt_id,"dispatched":true,"usage":usage}))]).unwrap();
+    // A read interrupted before its receipt remains observable; it must not block the recovered write.
+    // 只读操作中断且缺回执不能阻塞已有真实写入回执的恢复。
+    let read = operation_intent(&json!({"id":"old-observation","name":"filesystem.read","arguments":{"path":"created.txt"}}), true, 0);
+    journal.record_operation(&read).unwrap();
+    journal.dispatch_operation(&read.operation_id).unwrap();
+    let before_recovery = journal.load_current().unwrap();
+    assert!(journal.repository().transition(journal.token(), before_recovery.version, TaskState::Completed, None).is_err(),
+        "A dispatched write and unsettled model cost must still prevent completion.");
+    journal.finish(TaskState::WaitingVerification, Some("root-crash-window")).await.unwrap();
+    std::fs::write(fixture.root.join("work/created.txt"), "B").unwrap();
+    fixture.provider.recovery_final.store(true, Ordering::Release);
+    let current = journal.load_current().unwrap();
+    let result = fixture.runtime.tasks.control(&task.task_id, current.version, TaskControl::Resume).await.unwrap();
+    assert_eq!(result["task"]["taskId"], task.task_id, "{result}");
+    assert_ne!(result["task"]["state"], "waiting-verification", "{result}");
+    assert_eq!(result["recovery"]["resolvedOperations"], 1, "{result}");
+    assert_eq!(result["recovery"]["resolvedReservations"], 1, "{result}");
+    assert!(result["recovery"]["pending"].as_array().unwrap().is_empty(), "{result}");
+    let formal = data::read_model_messages(&fixture.runtime.config.data_root, &task.scope.conversation_id).unwrap();
+    let old = formal.iter().find(|message| message["Id"] == request_id).unwrap();
+    let latest = formal.iter().find(|message| message["Id"] == reply_id).unwrap();
+    assert!(old["ModelTranscript"]["rounds"][0]["observations"].as_array().unwrap().is_empty());
+    assert_eq!(latest["ModelTranscript"]["rounds"][0]["observations"][0]["id"], call["id"]);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let current = journal.load_current().unwrap();
+            if current.state.is_terminal() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("Same root must continue after real receipt settlement.");
+    let completed = journal.load_current().unwrap();
+    assert_eq!(completed.state, TaskState::Completed, "{completed:?}");
+    assert_eq!(completed.task_id, task.task_id);
+    assert_eq!(completed.usage.model_requests, fixture.provider.calls.load(Ordering::SeqCst) as u64);
+    let reservation = journal.repository().model_reservations(&task.task_id).unwrap().into_iter()
+        .find(|reservation| reservation.reservation_id == "root-model-before-crash").unwrap();
+    assert_eq!(reservation.usage, Some(usage));
+    assert_eq!(journal.repository().operation(&task.task_id, &intent.operation_id).unwrap().unwrap().state, OperationState::Succeeded);
+    assert_eq!(journal.repository().operation(&task.task_id, &read.operation_id).unwrap().unwrap().state, OperationState::Unknown);
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "B");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn production_resume_keeps_unknown_effects_waiting_and_reports_the_missing_evidence() {
+    let fixture = Fixture::new().await;
+    let journal = TaskJournal::start_existing(&fixture.runtime.config.data_root, &fixture.child, "missing-receipt", 60000).unwrap();
+    let call = json!({"id":"unknown-recovery-write","name":"filesystem.write","arguments":{"path":"created.txt","content":"A","expectedHash":null}});
+    let intent = operation_intent(&call, false, 0);
+    journal.record_operation(&intent).unwrap();
+    journal.dispatch_operation(&intent.operation_id).unwrap();
+    journal.reserve_model_request("unknown-model-request").unwrap();
+    journal.finish(TaskState::WaitingVerification, Some("missing-originals")).await.unwrap();
+    fixture.parent.journal.as_ref().unwrap().release("fixture-old-parent-ended").await.unwrap();
+    std::fs::write(fixture.root.join("work/created.txt"), "Existing file is not an execution receipt").unwrap();
+    let task = journal.load_current().unwrap();
+    let result = fixture.runtime.tasks.control(&task.task_id, task.version, TaskControl::Resume).await.unwrap();
+    assert_eq!(result["task"]["taskId"], task.task_id);
+    assert_eq!(result["task"]["state"], "waiting-verification", "{result}");
+    let pending = result["recovery"]["pending"].as_array().unwrap();
+    assert!(pending.iter().any(|item| item["code"] == "MODEL_DISPATCH_EVIDENCE_REQUIRED"));
+    assert!(pending.iter().any(|item| item["code"] == "TOOL_RECEIPT_EVIDENCE_REQUIRED"));
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(journal.repository().operation(&task.task_id, &intent.operation_id).unwrap().unwrap().state, OperationState::Unknown);
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/created.txt")).unwrap(), "Existing file is not an execution receipt");
     fixture.close().await;
 }
 

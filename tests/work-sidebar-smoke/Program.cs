@@ -33,6 +33,17 @@ var folderless = new ProjectState
 var unavailable = new ProjectState { Name = "Archived project", IsArchived = true, Chats = [Chat("Hidden")] };
 var projects = new List<ProjectState> { folderless, project, unavailable };
 
+var mountedProject = new ProjectState { Name = "多目录", Mounts =
+    [new(Guid.NewGuid(), "前端", @"D:\项目\前端"), new(Guid.NewGuid(), "后端", @"D:\项目\后端")] };
+var mountedRow = new ProjectTreeEntry(mountedProject);
+mountedRow.SetMountedFolderPath(mountedProject.Mounts[0].Path);
+Check(mountedRow.MountedFolderName == "前端 · 后端" && mountedRow.MountedFolderTooltip!.Contains(@"D:\项目\后端"),
+    "The project sidebar must display every authorized root with its actual directory in the tooltip.");
+mountedProject.Mounts.RemoveAt(1);
+mountedRow.SetMountedFolderPath(mountedProject.Mounts[0].Path);
+Check(mountedRow.MountedFolderName == "前端" && !mountedRow.MountedFolderTooltip!.Contains("后端"),
+    "Removing a secondary mount must refresh the row even when its default folder path did not change.");
+
 Check(WorkSidebarState.FindSelectedProject(projects, project.Id) == project,
     "A project without a folder path is still a project, not a folderless chat bucket.");
 Check(WorkSidebarState.FindSelectedProject(projects, null) is null &&

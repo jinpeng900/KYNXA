@@ -146,7 +146,7 @@ fn resolve_environment(arguments: &Value) -> Value {
     if descriptor["source"] == "builtin" {
         let (kind, origin) = if name == "web.fetch" {
             ("builtin-http", "gateway-host")
-        } else if name.starts_with("terminal.host.") {
+        } else if name.starts_with("terminal.host.") || name.starts_with("terminal.workspace.") {
             ("host-terminal", "tool-defined-unknown")
         } else if name.starts_with("computer.") {
             ("desktop-tool-host", "unknown")

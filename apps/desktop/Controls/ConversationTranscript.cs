@@ -55,6 +55,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private long _findTextRequest;
     private bool _diagramExportPending;
     private bool _openAtBottom, _dirty, _rendering, _disposed;
+    private bool _prioritizeNextProjection;
     private sealed record CachedSegmentHtml(AssistantSegment Source, string Html, string ReasoningHtml,
         TranscriptMarkdown.StreamingState? Stream = null)
     {
@@ -157,14 +158,17 @@ public sealed class ConversationTranscript : Grid, IDisposable
         // 解析更新内容期间，浏览器可先恢复最近访问过的聊天。
         if (changed) Post(new { type = "openConversation", conversationId = conversationId?.ToString() ?? "" });
         QueueRefresh();
+        bool prioritize = _prioritizeNextProjection;
+        _prioritizeNextProjection = false;
         // A navigation should not wait for the 40 ms stream batching timer.
         // 切换聊天不应等待 40 毫秒的流式合并刷新计时器。
         if (!_rendering && _ready.Task.IsCompletedSuccessfully)
         {
             _refresh.Stop();
-            // Queue projection after this input handler can submit storage; never serialize the whole page inside Send.
-            // 当前输入处理先提交保存请求，再排队投影；不在发送事件内同步编码整页聊天。
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            // Render a submitted message before background UI work, without serializing inside the send handler.
+            // 发送后的消息优先于后台界面工作投影，同时不在发送事件内同步编码聊天。
+            DispatcherQueue.TryEnqueue(prioritize ? Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal
+                : Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
                 async () => { if (!_disposed) await FlushAsync(); });
         }
     }
@@ -184,7 +188,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
         }
     }
 
-    public void BeforeSend() => Post(new { type = "beforeSend" });
+    public void BeforeSend()
+    {
+        _prioritizeNextProjection = true;
+        Post(new { type = "beforeSend" });
+    }
     public void ClearSelection() => Post(new { type = "clearSelection" });
     internal async Task<bool> IsFollowingLatestAsync(Guid conversationId)
     {

@@ -1,12 +1,13 @@
 ﻿[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Export', 'Import')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('Export', 'Import', 'Inspect')][string]$Action,
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [ValidateSet('Full', 'Core')][string]$Profile = 'Full',
     [string]$SourceRoot,
     [string]$FileListPath,
     [string]$VisualCppCacheDirectory,
-    [string]$DestinationRoot
+    [string]$DestinationRoot,
+    [switch]$VerifyResources
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -15,6 +16,7 @@ Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $ArchivePath = [IO.Path]::GetFullPath($ArchivePath)
 $utf8 = [Text.UTF8Encoding]::new($false)
+$checkedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $versionPaths = @('native-assets/native-runtime.json', 'native-assets/embedding.json',
     'native-assets/reranker.json', 'native-assets/mcp-runtime.json', 'native-assets/mcp/package-lock.json', 'vc-runtime.json')
 
@@ -31,17 +33,22 @@ function Get-ResourcePackPath([string]$Root, [string]$RelativePath) {
     }
     $ancestor = $absolutePath
     while ($ancestor -and $ancestor.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($checkedDirectories.Contains($ancestor)) { break }
         if (([IO.File]::Exists($ancestor) -or [IO.Directory]::Exists($ancestor)) -and
             ([IO.File]::GetAttributes($ancestor) -band [IO.FileAttributes]::ReparsePoint)) {
             throw 'Resource packs cannot follow reparse points.'
         }
+        if ([IO.Directory]::Exists($ancestor)) { [void]$checkedDirectories.Add($ancestor) }
         $ancestor = [IO.Path]::GetDirectoryName($ancestor)
     }
     return $absolutePath
 }
 function Get-ResourcePackVersions {
+    param([switch]$IncludeSemantic)
     return @($versionPaths | ForEach-Object {
-        @{ path = $_; sha256 = Get-ResourcePackHash (Join-Path $PSScriptRoot $_) }
+        $record = @{ path = $_; sha256 = Get-ResourcePackHash (Join-Path $PSScriptRoot $_) }
+        if ($IncludeSemantic) { $record.semanticSha256 = Get-KynxaConfigSemanticHash -Path (Join-Path $PSScriptRoot $_) }
+        $record
     })
 }
 
@@ -84,7 +91,7 @@ if ($Action -eq 'Export') {
         $records.Add(@{ path = $relativePath; bytes = $file.Length; sha256 = Get-ResourcePackHash $file.FullName })
     }
     $manifest = @{ schemaVersion = 1; runtimeIdentifier = 'win-x64'; profile = $Profile;
-        versions = Get-ResourcePackVersions; files = @($records.ToArray()) }
+        versions = Get-ResourcePackVersions -IncludeSemantic; files = @($records.ToArray()) }
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($ArchivePath)) | Out-Null
     if ([IO.File]::Exists($ArchivePath)) { throw 'The export archive already exists; choose a new ArchivePath.' }
     $archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
@@ -105,29 +112,111 @@ if ($Action -eq 'Export') {
     Write-Output "Exported $($records.Count) fixed resource files: $ArchivePath"
 }
 else {
-    if (-not $DestinationRoot) { throw 'Import requires an explicit DestinationRoot.' }
-    $DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot)
+    if ($Action -eq 'Import' -and -not $DestinationRoot) { throw 'Import requires an explicit DestinationRoot.' }
+    if ($DestinationRoot) { $DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot) }
     $archive = $null
     $packDirectory = if ([IO.Directory]::Exists($ArchivePath)) { $ArchivePath } else { $null }
     if (-not $packDirectory) { $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath) }
     try {
         if ($packDirectory) {
-            $manifest = [IO.File]::ReadAllText((Get-ResourcePackPath $packDirectory 'resource-pack.json'), $utf8) | ConvertFrom-Json
+            $manifestText = [IO.File]::ReadAllText((Get-ResourcePackPath $packDirectory 'resource-pack.json'), $utf8)
         }
         else {
             $entry = $archive.GetEntry('resource-pack.json')
             if (-not $entry) { throw 'resource-pack.json is missing.' }
             $reader = [IO.StreamReader]::new($entry.Open(), $utf8)
-            try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
         }
+        $manifest = $manifestText | ConvertFrom-Json
         if ($manifest.schemaVersion -ne 1 -or $manifest.runtimeIdentifier -ne 'win-x64' -or $manifest.profile -notin @('Full', 'Core')) { throw 'Unsupported resource pack manifest.' }
         $currentVersions = Get-ResourcePackVersions
         if (@($manifest.versions).Count -ne $currentVersions.Count) { throw 'Resource pack version list differs from this checkout.' }
         foreach ($current in $currentVersions) {
             $version = @($manifest.versions | Where-Object { $_.path -eq $current.path })
-            if ($version.Count -ne 1 -or -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256)) {
+            $semanticHash = if ($version.Count -eq 1 -and $version[0].PSObject.Properties['semanticSha256']) { [string]$version[0].semanticSha256 } else { '' }
+            if ($version.Count -eq 1 -and -not $semanticHash -and
+                -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256)) {
+                # Older packs can prove semantic identity only through their own hash-bound source configuration.
+                # 旧包仅能通过包内绑定原摘要的配置原文证明语义一致，不能从未知摘要猜测兼容版本。
+                $configEntries = @{'native-assets/native-runtime.json'='runtime/native/licenses/native-runtime-manifest.json';
+                    'native-assets/embedding.json'='runtime/embedding/builtin-multilingual/manifest.json';
+                    'native-assets/reranker.json'='runtime/rerank/builtin-multilingual-reranker/manifest.json';
+                    'native-assets/mcp-runtime.json'='runtime/mcp/licenses/source-manifest.json';
+                    'native-assets/mcp/package-lock.json'='runtime/mcp/services/package-lock.json'}
+                if ($configEntries.ContainsKey($current.path)) {
+                    $originalBytes = $null
+                    $configEntry = $configEntries[$current.path]
+                    if ($packDirectory -and [IO.File]::Exists((Get-ResourcePackPath $packDirectory $configEntry))) {
+                        $originalBytes = [IO.File]::ReadAllBytes((Get-ResourcePackPath $packDirectory $configEntry))
+                    }
+                    elseif ($archive -and ($entry = $archive.GetEntry($configEntry))) {
+                        $stream = $entry.Open(); $copy = [IO.MemoryStream]::new()
+                        try { $stream.CopyTo($copy); $originalBytes = $copy.ToArray() } finally { $stream.Dispose(); $copy.Dispose() }
+                    }
+                    if ($originalBytes -and ((Get-KynxaConfigHashVariants -Bytes $originalBytes) -contains $version[0].sha256)) {
+                        $semanticHash = Get-KynxaConfigSemanticHash -Text ($utf8.GetString($originalBytes).TrimStart([char]0xfeff))
+                    }
+                }
+            }
+            if ($version.Count -ne 1 -or -not (Test-KynxaConfigHash -Path (Join-Path $PSScriptRoot $current.path) -ExpectedHash $version[0].sha256 -SemanticHash $semanticHash)) {
                 throw "Resource pack version differs: $($current.path)."
             }
+        }
+        $componentInput = Get-KynxaResourceInputHash -Paths @($PSCommandPath,
+            (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1')) -Values @($manifestText)
+        # Inspect and import share entry/schema checks; neither needs to decompress binary payloads here.
+        # 预检与导入共用目录及结构检查，此阶段不解压二进制载荷。
+        $resourceScopes = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        if ($Action -in @('Inspect', 'Import')) {
+            $entries = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($record in $manifest.files) {
+                if (-not $record.path.StartsWith('runtime/', [StringComparison]::Ordinal) -or
+                    $record.path -match '(^|[\\/])\.\.([\\/]|$)|:' -or $record.sha256 -notmatch '^[0-9a-f]{64}$' -or
+                    $record.bytes -lt 0 -or -not $entries.Add($record.path)) { throw 'Invalid or duplicate resource pack file record.' }
+                [void]$resourceScopes.Add(($record.path -split '/', 3)[0..1] -join '/')
+                if ($packDirectory) { $length = [IO.FileInfo]::new((Get-ResourcePackPath $packDirectory $record.path)).Length }
+                else {
+                    $declaredEntry = $archive.GetEntry($record.path)
+                    if (-not $declaredEntry) { throw "Resource pack entry is missing: $($record.path)." }
+                    $length = $declaredEntry.Length
+                }
+                if ($length -ne $record.bytes) { throw "Resource pack entry size differs: $($record.path)." }
+            }
+            if ($entries.Count -eq 0) { throw 'The resource pack file list is empty.' }
+            $required = @('runtime/native/vec0.dll')
+            if ($manifest.profile -eq 'Full') { $required += @('runtime/mcp/manifest.json',
+                'runtime/embedding/builtin-multilingual/manifest.json', 'runtime/rerank/builtin-multilingual-reranker/manifest.json') }
+            foreach ($path in $required) { if (-not $entries.Contains($path)) { throw "Resource pack is missing $path." } }
+            if ($Action -eq 'Inspect') {
+                [pscustomobject]@{schemaVersion=1;runtimeIdentifier=$manifest.runtimeIdentifier;profile=$manifest.profile;
+                    archivePath=$ArchivePath;fileCount=$entries.Count;compatible=$true;inputHash=$componentInput}
+                return
+            }
+        }
+        if (-not $VerifyResources -and (Test-KynxaPreparedComponent -Root $DestinationRoot -Component 'resource-pack' -InputHash $componentInput)) {
+            & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $DestinationRoot
+            Write-Output "Resource pack reused: $(@($manifest.files).Count) unchanged files; no extraction or content hashing."
+            return
+        }
+        $preparedFiles = if ($VerifyResources) { $null } else { Get-KynxaPreparedFileCache -Root $DestinationRoot -Component 'resource-pack' }
+        if (-not $VerifyResources) {
+            # A component already verified in this cache can also satisfy the pack's exact expected file identity.
+            # 同一缓存中已验证的组件可复用，但仍须匹配本包要求的摘要、大小与修改时间。
+            foreach ($component in @('native-assets', 'mcp', 'office')) {
+                $componentFiles = Get-KynxaPreparedFileCache -Root $DestinationRoot -Component $component
+                foreach ($key in $componentFiles.Keys) {
+                    if (-not $preparedFiles.ContainsKey($key)) { $preparedFiles[$key] = $componentFiles[$key] }
+                }
+            }
+        }
+        # Upgrade a previously prepared cache with one native batch pass, then reuse its metadata on later runs.
+        # 旧缓存首次用原生批量校验补建完成记录，后续只比较元数据，避免逐文件 PowerShell 调用。
+        if (Test-KynxaResourceFiles -Root $DestinationRoot -Files @($manifest.files) -Cache $preparedFiles) {
+            [IO.File]::WriteAllText((Join-Path $DestinationRoot 'resource-pack.json'), ($manifest | ConvertTo-Json -Depth 8), $utf8)
+            & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $DestinationRoot
+            Save-KynxaPreparedComponent -Root $DestinationRoot -Component 'resource-pack' -InputHash $componentInput -Files @($manifest.files) -Scope @($resourceScopes)
+            Write-Output "Resource pack reused: $(@($manifest.files).Count) verified files; no extraction."
+            return
         }
         # Extract only listed files and commit each file after its size and digest pass.
         # 只提取白名单文件；每份文件完成大小与摘要校验后才替换目标，既有有效文件保持可用。
@@ -149,8 +238,7 @@ else {
                 if (-not $entry -or $entry.Length -ne $record.bytes) { throw "Resource pack file is missing or has a different size: $($record.path)." }
             }
             $destination = Get-ResourcePackPath $DestinationRoot $record.path
-            if ([IO.File]::Exists($destination) -and ([IO.FileInfo]::new($destination)).Length -eq $record.bytes -and
-                (Get-ResourcePackHash $destination) -eq $record.sha256) { continue }
+            if (Test-KynxaPreparedFile -Root $DestinationRoot -Path $destination -Bytes $record.bytes -Sha256 $record.sha256 -Cache $preparedFiles) { continue }
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
             $pendingPath = $destination + '.import-' + [Guid]::NewGuid().ToString('N')
             try {
@@ -164,6 +252,7 @@ else {
         }
         [IO.File]::WriteAllText((Join-Path $DestinationRoot 'resource-pack.json'), ($manifest | ConvertTo-Json -Depth 8), $utf8)
         & (Join-Path $PSScriptRoot 'prepare-browser-sandbox.ps1') -BundleRoot $DestinationRoot
+        Save-KynxaPreparedComponent -Root $DestinationRoot -Component 'resource-pack' -InputHash $componentInput -Files @($manifest.files) -Scope @($resourceScopes)
         Write-Output "Imported $(@($manifest.files).Count) verified resource files: $DestinationRoot"
     }
     finally { if ($archive) { $archive.Dispose() } }

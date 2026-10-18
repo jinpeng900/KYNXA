@@ -6,6 +6,10 @@
     <x:Double x:Key="KynxaBodyLineHeight">20</x:Double>
     <x:Double x:Key="KynxaSidebarRowHeight">40</x:Double>
     <x:Double x:Key="KynxaMenuRowHeight">36</x:Double>
+    <x:Double x:Key="KynxaDialogActionMinWidth">130</x:Double>
+    <x:Double x:Key="KynxaDialogActionMinHeight">36</x:Double>
+    <Thickness x:Key="KynxaDialogActionPadding">24,6</Thickness>
+    <x:Int32 x:Key="KynxaDialogAcknowledgementCharacterSpacing">180</x:Int32>
     <x:Double x:Key="KynxaPickerHeight">32</x:Double>
     <x:Double x:Key="KynxaWorkspacePickerHeight">30</x:Double>
     <x:Double x:Key="KynxaComposerFooterHeight">44</x:Double>

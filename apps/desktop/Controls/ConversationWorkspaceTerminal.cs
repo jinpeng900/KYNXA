@@ -47,6 +47,7 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
         public Task? PreviousClose { get; init; }
         public CancellationTokenSource? Reading { get; set; }
         public string? SessionId { get; set; }
+        public Guid? MountId { get; init; }
         public ulong Cursor { get; set; }
         public int Cols { get; set; } = 80;
         public int Rows { get; set; } = 24;
@@ -93,7 +94,26 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
 
     public void ShowConversation(Guid conversationId) => ShowSession(conversationId, $"terminal/{conversationId:D}");
 
-    public void ShowSession(Guid conversationId, string tabKey)
+    public string AttachSession(Guid conversationId, WorkspaceTerminalSession session, Guid? mountId = null)
+    {
+        var existing = _views.Values.FirstOrDefault(view => view.ConversationId == conversationId &&
+            view.SessionId == session.SessionId && !view.Closed);
+        if (existing is not null) return existing.TabKey;
+        string tabKey = ConversationWorkspaceSources.Terminal(conversationId, session.SessionId).Key;
+        if (!_disposed && !_views.ContainsKey((conversationId, tabKey)))
+        {
+            var view = new TerminalView(conversationId, tabKey)
+            {
+                SessionId = session.SessionId, MountId = mountId, Cols = session.Cols, Rows = session.Rows,
+                SentCols = session.Cols, SentRows = session.Rows
+            };
+            _views[(conversationId, tabKey)] = view;
+            _viewport.Children.Add(view.Browser);
+        }
+        return tabKey;
+    }
+
+    public void ShowSession(Guid conversationId, string tabKey, Guid? mountId = null)
     {
         if (_disposed || conversationId == Guid.Empty
             || _current is { } current && current.ConversationId == conversationId && current.TabKey == tabKey) return;
@@ -101,7 +121,7 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
         var key = (ConversationId: conversationId, TabKey: tabKey);
         if (!_views.TryGetValue(key, out var view))
         {
-            _views[key] = view = new(conversationId, tabKey) { PreviousClose = _closing.GetValueOrDefault(key) };
+            _views[key] = view = new(conversationId, tabKey) { PreviousClose = _closing.GetValueOrDefault(key), MountId = mountId };
             _viewport.Children.Add(view.Browser);
         }
         _current = view;
@@ -180,11 +200,16 @@ public sealed class ConversationWorkspaceTerminal : Grid, IDisposable
             ApplyTheme(view);
             if (view.PreviousClose is { } previousClose) await previousClose;
             if (view.Closed) return;
-            // Keep the open receipt observable even if the tab closes while Rust starts the PTY.
-            // Rust 正在启动伪终端时即使标签关闭，也等待真实接收回执后关闭对应会话。
-            var session = await _api.OpenAsync(view.ConversationId, view.Cols, view.Rows);
-            view.SessionId = session.SessionId;
-            view.SentCols = session.Cols; view.SentRows = session.Rows;
+            // An attached model session shares the existing PTY and output buffer with the user.
+            // 模型会话直接共享已有伪终端及输出缓存；仅用户新建且尚无会话时才调用启动接口。
+            if (view.SessionId is null)
+            {
+                // Keep the open receipt observable even if the tab closes while Rust starts the PTY.
+                // Rust 正在启动伪终端时即使标签关闭，也等待真实接收回执后关闭对应会话。
+                var session = await _api.OpenAsync(view.ConversationId, view.Cols, view.Rows, mountId: view.MountId);
+                view.SessionId = session.SessionId;
+                view.SentCols = session.Cols; view.SentRows = session.Rows;
+            }
             if (view.Closed) return;
             Notice(view, null);
             if (ReferenceEquals(_current, view) && _enabled) view.Browser.Focus(FocusState.Programmatic);

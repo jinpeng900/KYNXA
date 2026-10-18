@@ -12,9 +12,12 @@ function Get-KynxaDownloadSettings {
 }
 
 function Get-KynxaDownloadUrls {
-    param([string]$Url, [string]$DownloadSourcesPath)
+    param([string]$Url, [string]$DownloadSourcesPath, [string[]]$AdditionalUrls = @())
     $urls = [Collections.Generic.List[string]]::new()
     $urls.Add($Url)
+    foreach ($additional in $AdditionalUrls) {
+        if (-not [string]::IsNullOrWhiteSpace($additional) -and -not $urls.Contains($additional)) { $urls.Add($additional) }
+    }
     $settings = Get-KynxaDownloadSettings -Path $DownloadSourcesPath
     if ($settings.Contains('mirrors') -and $settings['mirrors']) {
         foreach ($property in $settings['mirrors'].PSObject.Properties | Sort-Object { $_.Name.Length } -Descending) {
@@ -59,6 +62,7 @@ function Save-KynxaPinnedDownload {
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$Sha256,
         [ValidateRange(0, [long]::MaxValue)][long]$ExpectedBytes = 0,
         [string]$DownloadSourcesPath = $env:KYNXA_DOWNLOAD_SOURCES,
+        [string[]]$SourceUrls = @(),
         [ValidateRange(1, 8)][int]$MaxAttempts = 3,
         [ValidateRange(1, 1800)][int]$TimeoutSeconds = 120,
         [switch]$Offline
@@ -68,9 +72,24 @@ function Save-KynxaPinnedDownload {
     $name = [IO.Path]::GetFileName($Destination)
     if (Test-KynxaPinnedDownload $Destination $Sha256 $ExpectedBytes) { return }
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Destination)) | Out-Null
-    $pending = $Destination + '.part'
-    $metadataPath = $pending + '.json'
-    foreach ($path in @($pending, $metadataPath, ($Destination + '.download.lock'))) {
+    $downloadUrls = if ($SourceUrls.Count -gt 0) {
+        @(Get-KynxaDownloadUrls -Url $SourceUrls[0] -AdditionalUrls $SourceUrls -DownloadSourcesPath $DownloadSourcesPath)
+    } else { @(Get-KynxaDownloadUrls -Url $Url -DownloadSourcesPath $DownloadSourcesPath) }
+    $partialPaths = @{}
+    foreach ($sourceUrl in $downloadUrls) {
+        # Keep one checkpoint per source; a failed mirror must not overwrite another source's progress.
+        # 每个来源保留独立断点，失败的镜像不能覆盖另一来源已下载的内容。
+        $suffix = ''
+        if ($sourceUrl -ne $Url) {
+            $urlHasher = [Security.Cryptography.SHA256]::Create()
+            try { $suffix = '.' + [BitConverter]::ToString($urlHasher.ComputeHash($script:DownloadUtf8.GetBytes($sourceUrl))).Replace('-', '').Substring(0, 16).ToLowerInvariant() }
+            finally { $urlHasher.Dispose() }
+        }
+        $partialPaths[$sourceUrl] = $Destination + '.part' + $suffix
+    }
+    $cachePaths = @($Destination + '.download.lock')
+    foreach ($path in $partialPaths.Values) { $cachePaths += @($path, ($path + '.json')) }
+    foreach ($path in $cachePaths) {
         if ([IO.File]::Exists($path) -and ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint)) { throw 'Download cache files cannot be links.' }
     }
     $lock = $null
@@ -83,12 +102,15 @@ function Save-KynxaPinnedDownload {
         }
     }
     $client = $null
+    $downloadCompleted = $false
     try {
-        if (Test-KynxaPinnedDownload $Destination $Sha256 $ExpectedBytes) { return }
-        if (Test-KynxaPinnedDownload $pending $Sha256 $ExpectedBytes) {
-            Move-Item -LiteralPath $pending -Destination $Destination -Force
-            if ([IO.File]::Exists($metadataPath)) { Remove-Item -LiteralPath $metadataPath }
-            return
+        if (Test-KynxaPinnedDownload $Destination $Sha256 $ExpectedBytes) { $downloadCompleted = $true; return }
+        foreach ($path in $partialPaths.Values) {
+            if (Test-KynxaPinnedDownload $path $Sha256 $ExpectedBytes) {
+                Move-Item -LiteralPath $path -Destination $Destination -Force
+                $downloadCompleted = $true
+                return
+            }
         }
         if ($Offline) { throw "Pinned asset unavailable offline: $name. Supply the prepared resource pack or complete this download online." }
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -98,7 +120,9 @@ function Save-KynxaPinnedDownload {
         $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
         $client.DefaultRequestHeaders.UserAgent.ParseAdd('KYNXA-Build/1.0')
         $lastFailure = ''
-        foreach ($sourceUrl in @(Get-KynxaDownloadUrls -Url $Url -DownloadSourcesPath $DownloadSourcesPath)) {
+        foreach ($sourceUrl in $downloadUrls) {
+            $pending = $partialPaths[$sourceUrl]
+            $metadataPath = $pending + '.json'
             $allowResume = $true
             for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
                 $request = $null; $response = $null; $input = $null; $output = $null
@@ -180,7 +204,7 @@ function Save-KynxaPinnedDownload {
                     if (($totalBytes -gt 0 -and ([IO.FileInfo]::new($pending)).Length -ne $totalBytes) -or
                         -not (Test-KynxaPinnedDownload $pending $Sha256 $ExpectedBytes)) { throw 'The file is incomplete or its pinned SHA-256 differs.' }
                     Move-Item -LiteralPath $pending -Destination $Destination -Force
-                    Remove-Item -LiteralPath $metadataPath
+                    $downloadCompleted = $true
                     Write-Host "[Download] $name complete; pinned SHA-256 verified."
                     return
                 }
@@ -201,7 +225,22 @@ function Save-KynxaPinnedDownload {
         }
         throw "Download failed: $name. $lastFailure The .part file is kept for the next build."
     }
-    finally { if ($client) { $client.Dispose() }; $lock.Dispose() }
+    finally {
+        if ($client) { $client.Dispose() }
+        if ($downloadCompleted) {
+            # After publication, only the verified final file is needed; retain checkpoints only on failure.
+            # 正式文件校验并发布后清理本次来源的重复断点，只有失败时继续保留。
+            foreach ($path in $partialPaths.Values) {
+                foreach ($cachePath in @($path, ($path + '.json'))) {
+                    if ([IO.File]::Exists($cachePath)) {
+                        try { Remove-Item -LiteralPath $cachePath -ErrorAction Stop }
+                        catch { Write-Warning "Downloaded asset is ready, but a partial cache could not be removed: $cachePath" }
+                    }
+                }
+            }
+        }
+        $lock.Dispose()
+    }
 }
 
 Export-ModuleMember -Function Get-KynxaDownloadSettings, Get-KynxaDownloadUrls, Save-KynxaPinnedDownload
