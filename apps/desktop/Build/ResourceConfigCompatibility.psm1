@@ -1,5 +1,9 @@
 ﻿Set-StrictMode -Version Latest
 
+# MSBuild invokes nested Windows PowerShell scripts with a reduced module
+# discovery path; import the inbox utility module explicitly for Get-FileHash.
+# MSBuild 嵌套调用 Windows PowerShell 时模块发现路径可能被裁剪；显式加载系统工具模块以提供 Get-FileHash。
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'AtomicFiles.psm1') -Force
 
 # Only configuration text accepts checkout formatting differences; binary payload checks remain byte-exact.
