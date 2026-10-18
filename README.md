@@ -8,9 +8,9 @@
 
 **Current desktop release: `1.5.3` · Windows x64 · Active development**
 
-> Release preparation: 1.5.3 currently describes local source changes. Its installers and GitHub Release are not published yet; the published version remains [1.5.2](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.2).
-
 See the [1.5.3 patch notes](docs/releases/1.5.3.md), [1.5 overview](docs/releases/1.5.md), and [documentation index](docs/README.md) for changes and implementation details.
+
+Version 1.5.3 validation includes 443 Rust library tests passed with 6 ignored, 4 HTTP recovery/tool checks, the chat-stream smoke, 9 focused resource checks plus 3 invalid-quota rejection checks, and 17 packaging guards. The Debug Full desktop built with no warnings or errors and started successfully with the updated gateway. Installer EXEs are built without executing installation; these checks do not certify every model, website, UI timing, or large-library ANN retrieval quality.
 
 ## What is implemented
 
