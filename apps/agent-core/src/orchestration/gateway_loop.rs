@@ -2405,7 +2405,7 @@ async fn execute(
     system.push_str("\nRecover a failed tool step using an available alternative. Reuse successful receipts; verify unknown mutations before retry. Check source freshness for current-fact questions. Saved analyses remain usable across compaction; continue to the requested output.");
     let limits = native(budget::apply(
         "budget.limits",
-        &json!({"input":input.get("runLimits").cloned().unwrap_or_else(|| json!({}))}),
+        &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or_else(|| json!({}))}),
     ))?;
     let memory_budget = (context_window / 8).clamp(512, 8192);
     let prepared_memory = native(crate::models::memory::calculate(

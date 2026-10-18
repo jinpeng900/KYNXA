@@ -568,6 +568,14 @@ fn docx(
                         .map_err(|_| failure("DOCUMENT_PARSE_FAILED"))?,
                 );
             }
+            // CDATA is legal XML content inside w:t; keep it as text without entity unescaping.
+            // w:t 内允许出现合法 XML CDATA；其内容不经过实体解码，避免丢失正文中的字面量符号。
+            quick_xml::events::Event::CData(event) if capture => {
+                let decoded = event
+                    .decode()
+                    .map_err(|_| failure("DOCUMENT_PARSE_FAILED"))?;
+                text.push_str(&decoded);
+            }
             quick_xml::events::Event::End(event) => match event.local_name().as_ref() {
                 b"t" => capture = false,
                 b"p" | b"tr" => text.push('\n'),
@@ -634,6 +642,40 @@ mod tests {
                 crate::storage::retrieval::apply("storage.retrieval.extraction", &json!({"value":first["extraction"],"textLength":first["text"].as_str().unwrap().encode_utf16().count()})).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn docx_cdata_text_is_preserved_alongside_regular_runs() {
+        use std::io::Write;
+
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t><![CDATA[CDATA & literal]]></w:t></w:r></w:p>
+    <w:p><w:r><w:t>regular text</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#,
+            )
+            .unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let result = docx(&bytes, &json!({}), &cancel, "test-hash").unwrap();
+
+        assert_eq!(
+            result["text"], "CDATA & literal\nregular text\n",
+            "CDATA and regular OOXML text should both be retained"
+        );
+        assert_eq!(result["extraction"]["rawContentHash"], "test-hash");
     }
 
     #[test]

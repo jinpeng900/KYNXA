@@ -303,7 +303,7 @@ AppContainer 是终端的系统隔离边界，Job Object 负责资源和生命�
 
 官方预设目录来自网关单一来源。Playwright 使用固定版本 `@playwright/mcp@0.0.83`、headless 和 isolated 模式；GitHub 使用官方 hosted MCP，Authorization 通过环境变量引用提供。官方预设默认启用；添加或读取配置本身不启动进程、不访问服务，再次添加复用现有配置与工具开关。缺启动程序、认证变量或必填路径的预设显示未就绪；其他运行环境按预设要求准备。已有文件操作、聊天/工作记忆和终端能力继续使用原服务，没有安装功能重叠的 filesystem/memory MCP。第三方服务器由其发行方式安装或按固定版本启动，浏览器运行时和用户凭据不会自动下载、填写或复制。
 
-应用技能来自打包的基础技能、`Extensions/Skills`（未单独配置时为 `Data/Skills`）、用户配置的技能目录，以及当前工作 `.kynxa/skills`。先提供有限的名字和用途，通过 `skill.list/read` 按需读取 SKILL.md；`skill.resource.read` 从所选技能根目录解析资源路径，支持 UTF-8 分页和二进制元数据，拒绝越界、链接、硬链接及敏感文件。`skill.inspect/check` 展示资源清单、格式、运行器和依赖诊断，检查不会执行宿主命令或安装包。来源顺序和同名冲突明确；规范化后的实际路径去重，Windows 忽略大小写并合并长短路径别名，保留优先来源 ID。`disabledSkills` 禁用项不进入模型目录，也不能绕过开关读取、运行。
+应用技能来自打包的基础技能、`Extensions/Skills`（未单独配置时为 `Data/Skills`）、用户配置的技能目录，以及当前工作 `.kynxa/skills`。先提供有限的名字和用途，通过 `skill.list/read` 按需读取 SKILL.md；`skill.list` 的网关服务会再次校验 `offset`（0–128）和 `limit`（1–128），不依赖模型 schema 放行越界值；`skill.resource.read` 从所选技能根目录解析资源路径，服务层严格校验 `offset`（0–2 MiB）和 `limit`（1–16,000），支持 UTF-8 分页和二进制元数据，拒绝越界、链接、硬链接及敏感文件。`skill.inspect/check` 展示资源清单、格式、运行器和依赖诊断，检查不会执行宿主命令或安装包。来源顺序和同名冲突明确；规范化后的实际路径去重，Windows 忽略大小写并合并长短路径别名，保留优先来源 ID。`disabledSkills` 禁用项不进入模型目录，也不能绕过开关读取、运行。
 
 内置 `workspace-inspect` 与 `safe-file-edit` 引导读取、定位和带 hash 的精确修改；`browser-workflow` 指导使用已有浏览器 MCP，`desktop-workflow`、`terminal-workflow` 与 `web-research` 分别指导本机窗口、执行边界和资料查证。复用的 Apache-2.0 `internal-comms` 保留上游许可证、固定 commit、来源和修改说明，并通过现有资源工具读取例子。技能文本属于参考资料，不授予权限。仓库 `.agents/skills/kynxa-development` 是开发本项目时使用的编码技能，属于另一个用途。
 

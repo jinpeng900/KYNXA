@@ -1231,6 +1231,14 @@ pub async fn execute(
         Some(select_workspace_context(ctx,&args).await?)
     } else { None };
     let ctx = selected.as_ref().unwrap_or(ctx);
+    // Validate the public pagination contract before configuration/schema loading or
+    // directory enumeration, so malformed pages have one stable service error.
+    // 在加载配置/模型 schema 和扫描目录前校验公开分页参数，保持统一服务错误。
+    if tool_name == "skill.list" {
+        super::service_skill_discovery::list_page(&args).map_err(|error| {
+            failure(&error.code, &error.message, error.status_code)
+        })?;
+    }
     let checked = if tool_name.starts_with("skill.")
         || tool_name.starts_with("mcp.")
         || tool_name == "tool.load"
@@ -1342,6 +1350,13 @@ pub(crate) async fn relevant_skill_headers(
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    let (list_offset, list_limit) = if name == "skill.list" {
+        super::service_skill_discovery::list_page(&args).map_err(|error| {
+            failure(&error.code, &error.message, error.status_code)
+        })?
+    } else {
+        (0, 128)
+    };
     let official = ctx.config["officialToolsRoot"]
         .as_str()
         .map(PathBuf::from)
@@ -1415,8 +1430,8 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
     if name == "skill.list" {
         available.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         return Ok(
-            json!({"skills":available.into_iter().skip(args["offset"].as_u64().unwrap_or(0) as usize)
-            .take(args["limit"].as_u64().unwrap_or(128) as usize).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }),
+            json!({"skills":available.into_iter().skip(list_offset)
+            .take(list_limit).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }),
         );
     }
     let skill = available
@@ -2492,6 +2507,38 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn skill_list_enforces_pagination_before_scanning_skill_directories() {
+        let (ctx, _sender) = test_context();
+        for (arguments, parameter) in [
+            (json!({"offset":-1}), "offset"),
+            (json!({"offset":129}), "offset"),
+            (json!({"limit":0}), "limit"),
+            (json!({"limit":129}), "limit"),
+            (json!({"limit":"8"}), "limit"),
+        ] {
+            let error = execute("skill.list", arguments, &ctx).await.unwrap_err();
+            assert_eq!(error.code, "INVALID_SKILL_LIST_PAGINATION");
+            assert!(error.message.contains(parameter), "{}", error.message);
+        }
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        for name in ["first", "second"] {
+            let skill = root.join("official/Skills").join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody."),
+            )
+            .unwrap();
+        }
+        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx)
+            .await
+            .unwrap();
+        let all = execute("skill.list", json!({}), &ctx).await.unwrap();
+        assert_eq!(page["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(page["skills"][0], all["skills"][1]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn tool_search_never_connects_a_server_to_discover_its_header() {
         let (mut ctx, _sender) = test_context();

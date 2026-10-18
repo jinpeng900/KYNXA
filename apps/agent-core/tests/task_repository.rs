@@ -790,6 +790,41 @@ fn concurrent_children_reserve_one_parent_budget_and_unsent_release_is_free() {
 }
 
 #[test]
+fn known_token_budget_blocks_future_model_reservations_after_settlement() {
+    let fixture = Fixture::new();
+    let mut input = new_task("known-token-budget");
+    input.budget.max_model_requests = 4;
+    input.budget.max_known_tokens = Some(100);
+    let task = fixture.repository.accept_task(&input).unwrap();
+    let attempt = fixture.attempt(&task);
+    fixture
+        .repository
+        .reserve_model_request(&attempt.token, "known-token-http-1")
+        .unwrap();
+    fixture
+        .repository
+        .settle_model_request(
+            &attempt.token,
+            "known-token-http-1",
+            true,
+            &TaskUsage {
+                input_tokens: 80,
+                output_tokens: 20,
+                ..TaskUsage::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .repository
+            .reserve_model_request(&attempt.token, "known-token-http-2")
+            .unwrap_err()
+            .code(),
+        "TASK_BUDGET_EXHAUSTED"
+    );
+}
+
+#[test]
 fn crash_reservation_stays_unknown_until_original_dispatch_is_verified() {
     let fixture = Fixture::new();
     let mut input = new_task("uncertain-model");

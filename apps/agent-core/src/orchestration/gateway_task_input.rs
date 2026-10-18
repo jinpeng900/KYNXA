@@ -21,6 +21,8 @@ pub async fn accept(
     tokio::task::spawn_blocking(move || {
         let conversation = input["conversationId"].as_str().unwrap_or("");
         let request = input["requestId"].as_str().unwrap_or("");
+        let limits = super::budget::apply("budget.limits", &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or(json!({}))}))
+            .map_err(|_| GatewayError::new("INVALID_TOOL_RUN_LIMITS", "任务执行额度无效。", 400))?;
         let repository = TaskRepository::open(&root)?;
         if let Some(existing) = repository.find_by_request_id(conversation, request)? {
             let reference = existing.input_reference.as_ref().ok_or_else(|| invalid("TASK_INPUT_MISSING"))?;
@@ -48,7 +50,14 @@ pub async fn accept(
             acceptance: vec!["Return the requested result with actual execution and verification status. / 返回请求结果及真实执行、验证状态。".into()],
             scope: TaskScope { conversation_id: conversation.into(), project_id: relationship["projectId"].as_str().map(str::to_owned),
                 permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":crate::storage::workspace_mounts::snapshot(&relationship),"requestFingerprint":fingerprint}) },
-            parent_task_id: None, dependency_ids: vec![], budget: TaskBudget { max_execution_ms: Some(super::budget::apply("budget.limits", &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or(json!({}))})).map_err(|_| invalid("INVALID_TASK_BUDGET"))?["maxDurationMs"].as_u64().unwrap_or(3_600_000)), ..Default::default() },
+            parent_task_id: None, dependency_ids: vec![], budget: TaskBudget {
+                max_model_requests: limits["maxModelRequests"].as_u64().unwrap_or_else(|| TaskBudget::default().max_model_requests),
+                max_known_tokens: limits["maxKnownTokens"].as_u64(),
+                // Keep the documented 30-minute default and allow the validated 60-minute
+                // override through runLimits.maxDurationMs.
+                // 保留文档约定的 30 分钟默认值，并允许通过 runLimits.maxDurationMs 使用已校验的 60 分钟上限。
+                max_execution_ms: limits["maxDurationMs"].as_u64(),
+            },
             input_reference: Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
         };
         Ok(repository.accept_task(&task)?)

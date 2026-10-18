@@ -10,6 +10,13 @@ const LIMITS: [(&str, u64, u64, u64); 4] = [
     ("maxDurationMs", 1_800_000, 1000, 3_600_000),
 ];
 
+// Optional task-tree ceilings preserve existing defaults when the caller omits them.
+// 可选任务树总额度在省略时保留旧默认，不作为每日搜索或整段聊天的固定次数限制。
+const OPTIONAL_LIMITS: [(&str, u64, u64); 2] = [
+    ("maxModelRequests", 1, 4096),
+    ("maxKnownTokens", 1, 9_007_199_254_740_991),
+];
+
 /// Budget operations are pure; caller-owned timing and cancellation remain at actual I/O boundaries.
 /// 预算操作是纯计算；计时与取消仍由调用方在真实 I/O 边界负责。
 pub fn apply(operation: &str, args: &Value) -> Result<Value, String> {
@@ -192,7 +199,8 @@ fn limits(input: &Value) -> Result<Value, String> {
     };
     if object
         .keys()
-        .any(|key| !LIMITS.iter().any(|(name, _, _, _)| name == key))
+        .any(|key| !LIMITS.iter().any(|(name, _, _, _)| name == key)
+            && !OPTIONAL_LIMITS.iter().any(|(name, _, _)| name == key))
     {
         return Err("INVALID_TOOL_RUN_LIMITS".into());
     }
@@ -206,6 +214,14 @@ fn limits(input: &Value) -> Result<Value, String> {
                 .ok_or_else(|| "INVALID_TOOL_RUN_LIMITS".to_owned())?,
         };
         result[name] = json!(value);
+    }
+    for (name, minimum, maximum) in OPTIONAL_LIMITS {
+        if let Some(value) = object.get(name) {
+            let value = value.as_u64()
+                .filter(|value| *value >= minimum && *value <= maximum)
+                .ok_or_else(|| "INVALID_TOOL_RUN_LIMITS".to_owned())?;
+            result[name] = json!(value);
+        }
     }
     Ok(result)
 }
@@ -302,6 +318,25 @@ mod tests {
             apply("budget.check", &json!({"toolCalls":257})).unwrap_err(),
             "TOOL_RUN_CALL_LIMIT"
         );
+    }
+
+    #[test]
+    fn optional_task_budgets_reject_invalid_numbers_and_preserve_legacy_defaults() {
+        let defaults = apply("budget.limits", &json!({})).unwrap();
+        assert_eq!(defaults["maxToolCalls"], 256);
+        assert!(defaults.get("maxModelRequests").is_none());
+        assert!(defaults.get("maxKnownTokens").is_none());
+        let limits = apply("budget.limits", &json!({"maxModelRequests":1,"maxKnownTokens":120})).unwrap();
+        assert_eq!(limits["maxModelRequests"], 1);
+        assert_eq!(limits["maxKnownTokens"], 120);
+        for invalid in [
+            json!({"maxModelRequests":0}), json!({"maxModelRequests":4097}),
+            json!({"maxModelRequests":1.5}), json!({"maxKnownTokens":0}),
+            json!({"maxKnownTokens":null}), json!({"maxKnownTokens":"100"}),
+            json!({"maxKnownTokens":9_007_199_254_740_992_u64}),
+        ] {
+            assert_eq!(apply("budget.limits", &invalid).unwrap_err(), "INVALID_TOOL_RUN_LIMITS");
+        }
     }
 
     #[test]

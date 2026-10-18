@@ -13,7 +13,18 @@ public static class ChatPermissionModes
 
 public sealed record ChatRequest(Guid ConversationId, string Message, string? Model = null,
     string PermissionMode = ChatPermissionModes.Ask, string? Provider = null, Guid? RequestId = null, Guid? UserMessageId = null,
-    Guid[]? AttachmentIds = null);
+    Guid[]? AttachmentIds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ChatRunLimits? RunLimits = null);
+
+/// <summary>Optional request overrides; omitted limits retain the gateway defaults and durable task budget.</summary>
+/// <remarks>可选请求额度；省略字段保留网关默认，模型请求和已知 token 通过原持久任务树累计。</remarks>
+public sealed record ChatRunLimits(
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaxRounds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaxToolCalls = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaxGeneratedTokens = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaxDurationMs = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaxModelRequests = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? MaxKnownTokens = null);
 
 /// <summary>
 /// Stable attachment references live with the user message; original bytes belong to the gateway.
