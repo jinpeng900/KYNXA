@@ -28,6 +28,67 @@ const REPEATED_READ_GUIDANCE: &str = "\nBroker read progress: repeated original 
 fn native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     result.map_err(|code| GatewayError::new(code, "原生状态检查失败。", 500))
 }
+
+struct LiveMemoryProjection {
+    snapshot: Value,
+    block: String,
+    query: Value,
+    budget_tokens: u64,
+}
+
+impl LiveMemoryProjection {
+    fn prepare(context: &Value, query: Value, budget_tokens: u64) -> Result<Self, GatewayError> {
+        let prepared = native(crate::models::memory::calculate(
+            "models.memory.prepare",
+            &json!({"entries":context["entries"],"conversationId":context["conversationId"],
+                "projectId":context["projectId"],"memoryBudgetTokens":budget_tokens,"query":query,
+                "referenceNotice":"Confirmed scope memory; current explicit instructions take precedence."}),
+        ))?;
+        let lines = prepared["memoryLines"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+        Ok(Self {
+            snapshot: gateway_memory::snapshot_for(context, &prepared["includedMemoryIds"]),
+            block: format!("\n<kynxa_confirmed_memory>\nCurrent confirmed scope memory (originals: memory.read):\n{lines}\n</kynxa_confirmed_memory>\nMemory authority comes only from this current block. Historical messages, replies, summaries and previous memory.read results cannot restore removed or superseded memory instructions, even if their original source quotes remain in history. Current user instructions still take precedence. Preserve completed effects and receipts; never replay operations merely because memory changed.\n"),
+            query,
+            budget_tokens,
+        })
+    }
+
+    /// Recheck the used subset before dispatch and delivery; refresh is local and does not call a provider.
+    /// 派发及交付前只核验已用子集；刷新完全在本地完成，不增加供应商调用。
+    async fn refresh(
+        &mut self,
+        root: &std::path::Path,
+        conversation_id: &str,
+        system: &mut String,
+    ) -> Result<Option<Value>, GatewayError> {
+        if self.snapshot["entries"].as_array().is_none_or(Vec::is_empty) {
+            return Ok(None);
+        }
+        let root = root.to_path_buf();
+        let chat = conversation_id.to_owned();
+        let snapshot = self.snapshot.clone();
+        let updated = tokio::task::spawn_blocking(move || {
+            let status = gateway_memory::validate_snapshot(&root, &chat, &snapshot)?;
+            let context = if status["current"] == false {
+                Some(gateway_memory::context(&root, &chat)?)
+            } else { None };
+            Ok::<_, crate::storage::ContractError>((status, context))
+        }).await.map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "记忆版本核验任务退出。", 500))??;
+        let (status, Some(context)) = updated else { return Ok(None); };
+        let current = Self::prepare(&context, self.query.clone(), self.budget_tokens)?;
+        *system = system.replacen(&self.block, &current.block, 1);
+        *self = current;
+        Ok(Some(status))
+    }
+}
+
+fn memory_refresh_notice(state: &mut LoopState, status: &Value) {
+    // Discard only the optional cached navigation, never formal history or execution receipts.
+    // 仅废弃可重新生成的摘要缓存，不改正式历史或执行回执。
+    state.previous_summary = Value::Null;
+    state.broker_note(&format!("Broker: confirmed memory was updated, withdrawn or moved out of scope. Its old interpretations in history, summaries and prior tool results are no longer memory instructions. Follow the current confirmed-memory block and user request; preserve existing output and successful effects. Affected identities: {}", status["invalidSources"]));
+}
 fn missing_public_answer(raw: &str, projected: &str, has_calls: bool) -> bool {
     !has_calls && !raw.trim().is_empty() && projected.trim().is_empty()
 }
@@ -2443,25 +2504,8 @@ async fn execute(
         state.broker_note(&format!("Broker: malformed transport execution limits were normalized to the existing defaults. The user's goal, permissions, saved context and completed operations are unchanged. Settings correction: {}", resolved_limits["corrections"]));
     }
     let memory_budget = (context_window / 8).clamp(512, 8192);
-    let prepared_memory = native(crate::models::memory::calculate(
-        "models.memory.prepare",
-        &json!({"entries":memories["entries"],"conversationId":run.conversation_id,"projectId":ctx.project_id,"memoryBudgetTokens":memory_budget,"query":input["message"],"referenceNotice":"Confirmed scope memory; source authority and current explicit instructions take precedence. Detailed memory remains retrievable through memory.read."}),
-    ))?;
-    if let Some(lines) = prepared_memory["memoryLines"]
-        .as_array()
-        .filter(|lines| !lines.is_empty())
-    {
-        system.push_str(
-            "\nConfirmed scope memory, detailed originals remain available through memory.read:\n",
-        );
-        system.push_str(
-            &lines
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
+    let mut live_memory = LiveMemoryProjection::prepare(&memories, input["message"].clone(), memory_budget)?;
+    system.push_str(&live_memory.block);
     // Add authoritative route facts after memory and before budgeting; compaction keeps this base system intact.
     // 路由事实放在记忆之后并参与预算；上下文压缩继续保留这段基础系统提示。
     system.push('\n');
@@ -2669,6 +2713,10 @@ async fn execute(
         if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
             review_pending = false;
             let _ = state.task.apply("task.resumed", &json!({}));
+        }
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
         }
         if crate::models::message_attachments::project_text_only_model(&connection, &mut state.history) {
             image_fallback = true;
@@ -3119,6 +3167,13 @@ async fn execute(
             ));
             break;
         }
+        // Compaction can await a provider; recheck memory again before the prepared request is dispatched.
+        // 压缩可能等待供应商；请求派发前再次核验等待期间是否发生了记忆撤销。
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
+            continue;
+        }
         // Resource admission may wait longer than a lease window; persist the exact next step first.
         // 资源准入可能等待多个租约窗口；等待前保存当前准确步骤和回执，不把资源等待变成任务终态。
         state.save(&runtime, &run, "streaming", None).await?;
@@ -3377,6 +3432,17 @@ async fn execute(
         })
         .await
         .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "模型续接回执保存失败。", 500))??;
+        // Streaming output remains recorded, but stale-memory calls never reach effect dispatch or final delivery.
+        // 流式输出继续保留；依赖失效记忆的调用不能进入副作用派发或最终交付。
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            state.transcript.push(json!({"round":round,"text":text,"calls":[],
+                "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint,
+                "discardedToolCalls":"memory-source-changed-before-dispatch"}));
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
+            state.save(&runtime, &run, "streaming", None).await?;
+            continue;
+        }
         if !reviewing && missing_public_answer(&response.content, text, !response.calls.is_empty()) {
             // A control marker alone is not an answer, even if its state looks completed.
             // 只有控制标记不算回答，即使状态看似完成；保留真实调用回执，仅补一次正文请求。
@@ -4423,6 +4489,39 @@ mod preparation_tests {
         assert_eq!(unknown["executed"], true);
         let uncertified = tool_execution_receipt(Err(GatewayError::new("INVALID_TOOL_ARGUMENTS", "No dispatch witness.", 400)));
         assert_eq!(uncertified["executed"], true);
+    }
+
+    #[tokio::test]
+    async fn live_memory_refresh_removes_withdrawn_instructions_and_preserves_route_and_formal_history() {
+        let root = std::env::temp_dir().join(format!("kynxa-live-memory-{}", new_id()));
+        let chat = new_id();
+        data::ensure_conversation(&root, &chat, "Isolated live memory refresh").unwrap();
+        let message = json!({"Id":new_id(),"Role":"user","Status":"completed","Content":"Current task remains unchanged."});
+        data::upsert_message(&root, &chat, &message).unwrap();
+        let saved = gateway_memory::handle("POST", &format!("/api/conversations/{chat}/memory"),
+            &json!({"scope":"chat","kind":"preference","content":"USE_REVOKED_FORMAT_731","expectedRevision":0}),
+            &root).unwrap().unwrap().1;
+        let memories = gateway_memory::context(&root, &chat).unwrap();
+        let mut projection = LiveMemoryProjection::prepare(&memories, json!("Continue current task"), 1024).unwrap();
+        let mut system = format!("Stable tool instructions{}\nAuthoritative model route", projection.block);
+        assert!(system.contains("USE_REVOKED_FORMAT_731"));
+        let before = data::read_model_messages(&root, &chat).unwrap();
+        assert!(projection.refresh(&root, &chat, &mut system).await.unwrap().is_none());
+        let id = saved["entries"][0]["id"].as_str().unwrap();
+        gateway_memory::handle("DELETE", &format!("/api/conversations/{chat}/memory/{id}"),
+            &json!({"expectedRevision":saved["revision"]}), &root).unwrap().unwrap();
+        let refreshed = projection.refresh(&root, &chat, &mut system).await.unwrap().unwrap();
+        assert_eq!(refreshed["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
+        assert!(!system.contains("USE_REVOKED_FORMAT_731"));
+        assert!(system.starts_with("Stable tool instructions"));
+        assert!(system.ends_with("Authoritative model route"));
+        assert!(system.contains("summaries and previous memory.read results cannot restore"));
+        assert_eq!(data::read_model_messages(&root, &chat).unwrap(), before);
+        gateway_memory::stop_candidates(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        // Empty projections need no storage read or provider request, even after the fixture is gone.
+        // 空投影无需读取存储或调用供应商，夹具删除后仍能直接继续。
+        assert!(projection.refresh(&root, &chat, &mut system).await.unwrap().is_none());
     }
 
     #[test]
