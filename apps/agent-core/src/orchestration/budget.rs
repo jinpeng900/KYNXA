@@ -210,6 +210,32 @@ fn limits(input: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
+/// Resolve transport overrides before accepting work; malformed limits never change the user goal.
+/// 接受任务前归一化传输层执行额度；参数异常不能改变用户目标或中断已接受的任务。
+pub(crate) fn resolve_request_limits(input: &Value) -> Value {
+    let object = input.as_object();
+    let mut resolved = json!({});
+    let mut corrections = Vec::new();
+    if !input.is_null() && object.is_none() {
+        corrections.push(json!({"field":"runLimits","reason":"invalid-object-using-defaults"}));
+    }
+    for (name, default, minimum, maximum) in LIMITS {
+        let requested = object.and_then(|object| object.get(name));
+        let valid = requested.and_then(Value::as_u64)
+            .filter(|value| *value >= minimum && *value <= maximum);
+        if requested.is_some_and(|value| !value.is_null()) && valid.is_none() {
+            corrections.push(json!({"field":name,"reason":"invalid-limit-using-default","effective":default}));
+        }
+        resolved[name] = json!(valid.unwrap_or(default));
+    }
+    for name in object.into_iter().flat_map(|object| object.keys()) {
+        if !LIMITS.iter().any(|(known, _, _, _)| known == name) {
+            corrections.push(json!({"field":name,"reason":"unsupported-limit-ignored"}));
+        }
+    }
+    json!({"limits":resolved,"corrections":corrections})
+}
+
 fn number_field(args: &Value, key: &str, default: f64) -> f64 {
     args.get(key)
         .and_then(Value::as_f64)
@@ -264,6 +290,24 @@ fn remove_overlap<'a>(previous: &str, text: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_limits_repair_invalid_overrides_without_adding_task_tree_ceilings() {
+        let defaults = limits(&json!({})).unwrap();
+        for omitted in [Value::Null, json!({}), json!({"maxDurationMs":null})] {
+            assert_eq!(resolve_request_limits(&omitted)["limits"], defaults);
+        }
+        let resolved = resolve_request_limits(&json!({"maxRounds":"wrong","maxToolCalls":12,
+            "maxDurationMs":0,"maxGeneratedTokens":1.5,"maxModelRequests":1,"maxKnownTokens":10}));
+        let mut expected = defaults.clone();
+        expected["maxToolCalls"] = json!(12);
+        assert_eq!(resolved["limits"], expected);
+        assert_eq!(resolved["corrections"].as_array().unwrap().len(), 5);
+        assert!(resolved["limits"].get("maxModelRequests").is_none());
+        assert!(resolved["limits"].get("maxKnownTokens").is_none());
+        assert_eq!(resolve_request_limits(&json!([1,2]))["limits"], defaults);
+        assert!(limits(&json!({"maxRounds":"wrong"})).is_err());
+    }
 
     #[test]
     fn execution_limits_reject_unknown_fields_and_keep_exact_boundary() {

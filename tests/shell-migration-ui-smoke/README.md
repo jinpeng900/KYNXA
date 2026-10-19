@@ -1,5 +1,17 @@
 # 正式 Shell UI 迁移隔离验收
 
+## 输入区上方的非模态审批
+
+```powershell
+pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario inline-approval
+```
+
+`App.InlineApprovalChecks.cs` 通过正式 `QueueToolApproval` 入口分别传入主回复和子任务的虚构审批，再使用卡片真实按钮及正式 `AgentApiClient` 向隔离回环审批端点提交。场景不启动模型流、工具或外站；没有模拟后端自动执行的声明。核对一句话摘要、详情默认收起及按需展开、没有 ContentDialog／模态状态、出现时不抢草稿焦点和选区、遮盖排队项时保留高度与输入框位置、提交后恢复相同队列对象与顺序。实际会话搜索切换 A／B 后核对各自待审批身份，不因切换作出决定。
+
+专项覆盖批准一次／当前任务全部批准／拒绝的 HTTP 身份与范围、挂起响应期间按钮及事件防重复、HTTP 503 在原卡片显示错误后重试、真实 `TOOL_RUN_TIMEOUT` 错误码移除过期审批、子任务精确关闭和回复取消移除。全部批准不会修改保存的输入区权限模式。深色宽窗、浅色窄窗及窄窗展开输入区／审批详情检查卡片比输入框窄且居中在其上方，三个操作均在卡片内，保存原生窗口截图和 `shell-inline-approval-geometry.json`。截图与结果以本轮实际执行为准，不把测试源码当成已通过。
+
+原 `dialogs`／`shortcut-tooltip`／完整入口的模态守卫改用通用 ContentDialog 夹具，继续验证其他功能弹窗对快捷键的保护；这类模态检查不再代表实际工具审批。旧独立 `agent-ui-smoke` 的模态组件检查属于兼容 helper 验证，不能替代当前 Shell 的非模态审批专项。
+
 ## 原生对话框主题、圆角及连接占位
 
 ```powershell
@@ -8,9 +20,9 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 `App.DialogChecks.cs` 点击生产定时任务与连接入口，以实际 F1 打开键盘操作帮助，并核对浅色、深色及自定义强调色在同一个已打开原生 ContentDialog 上即时生效。真实 SDK 模板中的外层 `BackgroundElement` 与内层 `DialogSpace` 均需为 16 DIP 圆角；表面、边框及文字引用应用共享画刷。逐状态读取真实按钮呈现层，核对默认操作和普通取消／拒绝操作的 Normal、PointerOver、Pressed 背景、前景、至少 4.5:1 文字对比度和 8 DIP 按钮圆角。状态检查调用原生 VisualStateManager，不声称对话框按钮使用了真实鼠标按下。
 
-单操作对话框还比较实际按钮与 `BackgroundElement` 的水平中心，误差不超过 1 DIP，覆盖中英文定时／帮助／连接及项目错误提示。短按钮为 130×36 DIP、左右内边距各 24 DIP；中文“知道了”原文保持不变，文字本地字距为 180，并核对实际排版宽度增加，避免只读取继承属性而误计生效。同一生产定时弹窗临时使用较长标签，验证宽度在 202 DIP 上限内自然增长，随后恢复原文和尺寸；英语及其他标签恢复原生内容模板和字距。多操作的重命名、审批、检索窗口保留分列与间隔。实际文字／按钮边界、模板和间距写入 `shell-dialog-action-layout.json`，英文及长标签另保存截图。
+单操作对话框还比较实际按钮与 `BackgroundElement` 的水平中心，误差不超过 1 DIP，覆盖中英文定时／帮助／连接及项目错误提示。短按钮为 130×36 DIP、左右内边距各 24 DIP；中文“知道了”原文保持不变，文字本地字距为 180，并核对实际排版宽度增加，避免只读取继承属性而误计生效。同一生产定时弹窗临时使用较长标签，验证宽度在 202 DIP 上限内自然增长，随后恢复原文和尺寸；英语及其他标签恢复原生内容模板和字距。多操作的重命名、通用模态夹具、检索窗口保留分列与间隔。实际文字／按钮边界、模板和间距写入 `shell-dialog-action-layout.json`，英文及长标签另保存截图。
 
-场景还核对实际 Escape 关闭、关闭后的主题订阅生命周期、中文及英文连接入口只显示“功能暂未开发”、重命名的空名称禁用及取消结果、工具审批无默认批准及明确拒绝。生产检索窗口中的添加链接弹窗保留自己的 XamlRoot，空链接验证仍取消提交，切换主题和取消导入仍保持原操作生命周期。草稿、会话 ID、消息对象及模拟网关零写入必须保持；不访问正式数据或调用模型。
+场景还核对实际 Escape 关闭、关闭后的主题订阅生命周期、中文及英文连接入口只显示“功能暂未开发”、重命名的空名称禁用及取消结果、通用双操作模态无默认动作及明确取消。生产检索窗口中的添加链接弹窗保留自己的 XamlRoot，空链接验证仍取消提交，切换主题和取消导入仍保持原操作生命周期。草稿、会话 ID、消息对象及模拟网关零写入必须保持；不访问正式数据或调用模型。
 
 截图为 `shell-dialog-schedule-light.png`、`shell-dialog-schedule-dark.png`、`shell-dialog-keyboard-custom-light.png`、`shell-dialog-keyboard-custom-dark.png`、`shell-dialog-schedule-long-action-zh.png`、`shell-dialog-connections-en.png` 和 `shell-dialog-rename-dark.png`。集中入口成功标记为 `PASS: ... production Shell native dialog checks.`；默认完整入口也包含这组。文档列出验收条件，不替代本轮原生运行结果。
 
@@ -64,7 +76,7 @@ dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj
 
 `App.StartupChecks.cs` 在正式页面加载前挂起模拟网关的首次目录响应，核对目录尚未返回时的工作提示、灰色禁用发送按钮、禁用箭头和44 DIP工作页脚。检查跨实际渲染帧的位置稳定，再在加载期间切换聊天并输入虚构草稿，释放响应后核对模式、草稿、发送可用状态及原生矩形坐标；恢复工作模式后的位置也应一致。挂起只作用于首次目录GET，模型列表和健康检查独立，失败和退出都会释放或取消门闩。截图为 `shell-startup-before-catalog.png`、`shell-startup-chat-after-catalog.png`，坐标保存在 `shell-startup-geometry.json`；不等待真实网关，也不读取日常数据。
 
-覆盖范围：正式页面初始化、已配置/失败/恢复模型状态，真实模型菜单按连接 ID 和模型 ID 搜索、无匹配提示、固定底部配置入口、失败后的缓存列表及重试，同名模型按连接和模型 ID 对选中，项目操作前后发送按钮恢复；会话标题搜索、聊天和工作模式间草稿恢复、稳定聊天及消息 ID、800 DIP 临时抽屉、放宽后的已保存侧栏宽度、生产工具审批弹窗对新快捷键和导航的阻止、整段会话的可见 Markdown 投影及快照。快捷键模态守卫和项目操作门控调用真实处理函数；项目操作只挂起本地测试委托，文件选择器交互不在本夹具范围。
+覆盖范围：正式页面初始化、已配置/失败/恢复模型状态，真实模型菜单按连接 ID 和模型 ID 搜索、无匹配提示、固定底部配置入口、失败后的缓存列表及重试，同名模型按连接和模型 ID 对选中，项目操作前后发送按钮恢复；会话标题搜索、聊天和工作模式间草稿恢复、稳定聊天及消息 ID、800 DIP 临时抽屉、放宽后的已保存侧栏宽度、通用 ContentDialog 对新快捷键和导航的阻止、整段会话的可见 Markdown 投影及快照。快捷键模态守卫和项目操作门控调用真实处理函数；项目操作只挂起本地测试委托，文件选择器交互不在本夹具范围。
 
 截图包含 `shell-migration-model-menu.png`、`shell-migration-drawer-search-800.png` 和 `shell-migration-wide.png`。捕获前核对搜索行的真实文本，等待弹出动画、XAML Rendered 事件和桌面合成刷新；失败时另保存 `shell-migration-failure.png`。模型选择仅保存临时 Desktop 下的 UI 偏好，模拟网关仍禁止 POST 等写入。
 
@@ -89,7 +101,7 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
 ```
 
-脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。审批 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
+脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。通用 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
 
 `body-search` 仅执行初始化、空会话查找与正文键盘专项：真实 Enter／Shift+Enter 导航、鼠标点击原生输入框后 F3／Shift+F3 导航、Ctrl+F 返回搜索框，以及原生输入框中的 Escape。通过匹配索引核对每次按键只移动一处，保留草稿与会话，受控原生输入法组合状态仍阻止快捷键。后台启动的自有窗口若被桌面置顶窗口遮挡，夹具仅在激活期间临时提高自己的置顶层级，核验标题栏命中后点击，并在 finally 恢复原设置；不操作其他应用窗口。成功标记为 `PASS: ... production Shell body-search keyboard checks.`。
 

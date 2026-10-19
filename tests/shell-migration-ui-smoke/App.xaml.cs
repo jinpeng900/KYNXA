@@ -45,6 +45,7 @@ public partial class App : Application
     private bool _dialogsOnly;
     private bool _windowPresentationOnly;
 
+    private bool _inlineApprovalOnly;
     private bool _promptSendOnly;
     private bool _workspaceAutoOpenOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
@@ -118,6 +119,9 @@ public partial class App : Application
             .Contains("--window-presentation-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--window-presentation-only", StringComparer.Ordinal);
 
+        _inlineApprovalOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--inline-approval-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--inline-approval-only", StringComparer.Ordinal);
         _promptSendOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--prompt-send-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--prompt-send-only", StringComparer.Ordinal);
@@ -419,12 +423,10 @@ public partial class App : Application
 
     private async Task CheckModalGuardAsync()
     {
-        var tool = new ToolActivity("fixture-approval", "workspace.read_file", null, "approval-required", "Read the synthetic mounted file",
-            ApprovalId: Guid.NewGuid(), WorkspaceRoot: Path.Combine(_directory, "Workspace"));
-        var dialog = ToolApprovalDialog.Create(_shell.XamlRoot, tool);
+        var dialog = CreateModalGuardFixture();
         var showing = dialog.ShowAsync();
-        await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "production approval dialog occupies the real Shell XamlRoot");
-        Check((bool)Call("HasPresentationModal")!, "modal guard sees a production approval ContentDialog, not only feature-help dialogs");
+        await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "generic modal fixture occupies the real Shell XamlRoot");
+        Check((bool)Call("HasPresentationModal")!, "modal guard sees a real generic ContentDialog, not only feature-help dialogs");
         Guid? originalId = ActiveId;
         string originalDraft = Prompt.Text;
         int retrievalReads = _gateway.RetrievalReads;
@@ -442,11 +444,11 @@ public partial class App : Application
             CurrentRetrievalWindow is null && _gateway.RetrievalReads == retrievalReads &&
             VisualTreeHelper.GetOpenPopupsForXamlRoot(_shell.XamlRoot).Where(popup => popup.IsOpen && popup.Child is not null)
                 .All(popup => !NativeUi.Descendants<TextBox>(popup.Child!).Any(text => AutomationProperties.GetAutomationId(text) == "HistorySearchBox")),
-            "production new/search/composer shortcuts, knowledge entry and navigation menu leave approval focus, identity and draft intact");
+            "production new/search/composer shortcuts, knowledge entry and navigation menu leave modal focus, identity and draft intact");
         NativeUi.InvokeDialogButton(dialog, primary: false);
         await showing;
         await SettleAsync();
-        Check(!(bool)Call("HasPresentationModal")!, "modal guard releases after closing the approval dialog");
+        Check(!(bool)Call("HasPresentationModal")!, "modal guard releases after closing the generic modal");
     }
 
     private async Task RunAsync()
@@ -480,6 +482,15 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
+            if (_inlineApprovalOnly)
+            {
+                await CheckInlineApprovalAsync();
+                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
+                    "inline approvals only reach the isolated approval endpoint without formal writes or model requests");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell inline approval checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_windowPresentationOnly)
             {
                 await CheckWindowPresentationAsync();

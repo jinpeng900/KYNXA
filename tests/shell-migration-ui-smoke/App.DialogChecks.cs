@@ -324,19 +324,17 @@ public partial class App
             current = null;
             await SettleAsync();
 
-            var tool = new ToolActivity("dialog-appearance-fixture", "workspace.read_file", null, "approval-required",
-                "Read only an isolated synthetic file", ApprovalId: Guid.NewGuid(), WorkspaceRoot: Path.Combine(_directory, "Workspace"));
-            current = ToolApprovalDialog.Create(_shell.XamlRoot, tool);
+            current = CreateModalGuardFixture();
             var decision = current.ShowAsync();
-            await WaitAsync(() => ReferenceEquals(NativeUi.OpenDialog(_shell), current), "the production approval factory opens on the same owner root");
+            await WaitAsync(() => ReferenceEquals(NativeUi.OpenDialog(_shell), current), "the generic modal fixture opens on the same owner root");
             await SettleAsync();
             Check(current.DefaultButton == ContentDialogButton.None && current.XamlRoot == _shell.XamlRoot,
-                "approval retains explicit decision semantics with no default approval");
-            CheckDialogSurface(current, "Approval");
-            await CheckDialogButtonStatesAsync(current, "PrimaryButton", accent: false, "Approval explicit primary");
-            await CheckDialogButtonStatesAsync(current, "CloseButton", accent: false, "Approval reject");
+                "the generic modal retains explicit decision semantics with no default action");
+            CheckDialogSurface(current, "Generic two-action modal");
+            await CheckDialogButtonStatesAsync(current, "PrimaryButton", accent: false, "Generic modal explicit primary");
+            await CheckDialogButtonStatesAsync(current, "CloseButton", accent: false, "Generic modal cancel");
             NativeUi.InvokeDialogButton(current, primary: false);
-            Check(await decision == ContentDialogResult.None, "the actual approval reject button returns denial");
+            Check(await decision == ContentDialogResult.None, "the generic modal cancel button returns no action");
             current = null;
             await SettleAsync();
 

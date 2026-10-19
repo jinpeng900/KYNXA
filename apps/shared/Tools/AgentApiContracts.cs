@@ -95,5 +95,8 @@ public sealed record McpPreset(string Id, string Name, string Description, McpSe
     string[]? Notes = null, string? ConfigurationTemplate = null);
 public sealed record McpCatalogResponse(McpPreset[] Presets, string[] ReusedCapabilities);
 public sealed record AgentToolsResponse(AgentTool[] Tools, string[]? Errors = null, McpConnectionDiagnostic[]? Connections = null);
-public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId, bool Approved);
-public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId);
+/// <summary>A decision bound to an exact pending call; task scope lasts only for its active root execution.</summary>
+/// <remarks>决定绑定原待审调用；task 范围仅在所属根任务的当前执行期间有效，不修改权限快照。</remarks>
+public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId,
+    bool Approved, string Scope = "once");
+public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId, string Scope = "once");
