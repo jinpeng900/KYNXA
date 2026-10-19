@@ -18,6 +18,7 @@ foreach ($line in $layoutLines) {
     $relativePath = $line.Replace('/', '\')
     if ($relativePath.StartsWith('runtime\', [StringComparison]::OrdinalIgnoreCase) -or
         $relativePath.StartsWith('ToolHost\', [StringComparison]::OrdinalIgnoreCase) -or
+        $relativePath.StartsWith('UsageMonitor\', [StringComparison]::OrdinalIgnoreCase) -or
         $relativePath.StartsWith('model-gateway\node_modules\', [StringComparison]::OrdinalIgnoreCase)) {
         $runtimePayloadPaths.Add($line)
     }

@@ -52,6 +52,7 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 |---|---|---|
 | A | `apps/agent-core/src/orchestration/`、`resources/`、网关入口及打包 | 请求身份、队列、SSE、任务循环、审批、取消、资源 IPC、集成 |
 | B | `apps/desktop/` 中展示与交互文件 | WinUI/WebView 渲染；此次不迁移展示语言 |
+| B | `apps/usage-monitor/` | 内置用量统计共用 Core 与默认关闭的 C#/WPF 桌面卡；卡片仅显示主应用快照并保存自己的位置偏好 |
 | C | `apps/agent-core/src/models/` | 请求、供应商协议、流、历史配对、压缩、模型配置与原生推理 |
 | D | `apps/agent-core/src/tools/`、`apps/tool-host/`、`apps/official-tools/` | 文件、终端、浏览器、MCP、Skill、权限与执行回执 |
 | E | `apps/agent-core/src/storage/`、`retrieval/` | 正式数据、分页、记忆、资料、索引、来源版本与后台维护 |
@@ -150,6 +151,18 @@ Google 异常流量页及已识别的 Cloudflare 人机验证页返回明确的�
 输入区支持文件选择、拖入和剪贴板图片，发送前仅保存本机草稿。发送时先显示用户消息，再通过 `POST /api/conversations/{conversationId}/attachments/import` 保存原件；正式消息的 `Attachments` 仅包含稳定 ID、名称、类型和大小。原件及解析缓存属于对应聊天目录，随聊天移动和删除，不自动进入全局记忆或共享索引。
 
 消息范围内的附件接口提供原始字节、图片及 UTF-16 解析分页。DOCX/PDF/PPT/文本与图片 OCR 复用 Rust 现有解析器；当前模型轮按上下文预算接收相关摘录，图片沿已有多模态协议发送，模型明确拒绝图片时保留文本与 `attachment.read` 回读路径继续。用户正文不改写成解析结果，队列与引导沿同一附件身份续接。用户消息上方显示图片和文档卡片，点击后在右侧打开，历史图片通过只允许当前消息附件的原生代理加载。
+
+## 内置用量统计与可选桌面卡
+
+`Services/Integration/UsageMonitorService.cs` 在 WinUI 主程序运行期间维护唯一的模型用量展示累计。输入框底栏右侧固定显示本次运行的 Token 消耗与缓存命中率，点击展开输入、输出和缓存命中明细；设置页可开启默认关闭的桌面悬浮统计卡。卡片不包含人物或消耗阈值，沿用宿主主题与语言，支持拖动、折叠、恢复右下角和置顶。
+
+桌面启动原生网关时设置 `KYNXA_USAGE_LOG`，默认路径由 `StoragePaths.DesktopDirectory/UsageMonitor/usage.jsonl` 计算。手动网关可显式配置绝对路径；未设置则不记录。`GET /health.usageTelemetry` 返回 `{protocol:1, enabled, logPath}`，主应用从健康响应取得实际日志位置；已有旧网关需要在其任务结束后更新并重启。主程序启动时从日志末尾开始收集新调用，关闭或晚开启悬浮卡不改变统计周期，二者始终显示同一份运行期快照。
+
+`UsageMonitorService.Floating.cs` 启动随包 `UsageMonitor/KYNXA.UsageMonitor.exe`，只通过继承的私有 stdin 发送有界 JSON 快照。WPF 完成真实窗口呈现后发送 `KYNXA_USAGE_MONITOR_READY_V1`；启动或互斥失败发送 `KYNXA_USAGE_MONITOR_ERROR_V1`。卡片不自行读取生产用量日志，不维护第二个累计，不读取 API Key、请求模型或写正式聊天/记忆。准确宿主进程退出、控制 stdin EOF 或显式关闭命令均结束卡片生命周期；按设置目录互斥，不按进程名终止其他实例。
+
+`models/gateway_usage.rs` 通过有界队列异步记录 `schemaVersion:1`、`event:call_completed` JSONL，每个已派发模型调用独立 `callId`，保留实际用量与状态。没有供应商用量时字段为 `null`，真实零值保持为零；错误或取消不抹去此前收到的用量。日志不包含提示词、回复、凭据、请求头或上游地址。`unrecordedCalls` 是当前网关进程内已确认入队/写入失败的累计数，跨进程启动归零；强制退出时未写出的队列记录无法证明完整。
+
+输入与输出均已知时可以相加推导 Token 消耗，输入、输出另保留各自完整性覆盖；缓存命中率按命中输入 token / 对应输入 token 加权。未知、缺失、字段冲突或采集丢失保留不完整提示，不能显示成零命中。数字只随真实调用用量快照变化而轻微滚动，不把字符长度当成供应商 token，也不声称逐 token 的实时计费。开发回放必须显式使用 `--replay` 并在窗口标注“演示 / 回放”，生产悬浮卡不接受用量日志参数。完整使用、合同与上游 MIT 归属见 [用量统计模块](../../apps/usage-monitor/README.md)。
 
 ## 检索与模型资源
 

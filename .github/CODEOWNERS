@@ -3,6 +3,7 @@
 # A domain owner OR the lead can approve; this does not require both approvals.
 # 领域负责人或队长其中一人的批准即可，不表示 GitHub 强制两人同时批准。
 * @jinpeng900
+/apps/usage-monitor/ @jinpeng900
 /apps/agent-core/src/resources/ @jinpeng900
 /apps/agent-core/src/storage/ @jinpeng900
 /apps/agent-core/src/models/ @jinpeng900
@@ -17,6 +18,8 @@
 /apps/agent-core/src/service_cancellation.rs @jinpeng900
 /apps/agent-core/src/gateway.rs @jinpeng900
 /apps/agent-core/src/gateway_contract.rs @jinpeng900
+/apps/agent-core/src/document_formats.rs @jinpeng900
+/apps/agent-core/src/gateway_storage.rs @jinpeng900
 /apps/resource-service/ @jinpeng900
 /apps/desktop-preview/ @jinpeng900
 /apps/mock-backend/ @jinpeng900

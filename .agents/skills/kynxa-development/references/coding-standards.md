@@ -21,6 +21,7 @@
 | Rust 网关与核心 | `apps/agent-core/src/bin/kynxa-gateway.rs`、`src/gateway.rs` 及六个领域目录 | HTTP/SSE、模型协议与推理、任务/上下文、工具、资源接线、正式存储和检索；源文件的跨域许可由机器清单核验 |
 | Rust 资源服务 | `apps/resource-service/src/main.rs` | 实际硬件观测、准入和租约；不由界面或扩展自报可用容量 |
 | C#/XAML 桌面 | `apps/desktop/`，启动接线为 `Services/Integration/ModelGatewayService.cs` | WinUI 控件、视图状态、API 客户端与原生网关生命周期；不直接改写正式聊天和索引 |
+| C#/WinUI 用量统计与可选 WPF 桌面卡 | `apps/usage-monitor/`，宿主接线为 `Services/Integration/UsageMonitorService.cs` | 主应用拥有本次运行的唯一累计，内置输入框统计条与默认关闭的可拖动桌面卡共享快照；卡片不自行计数，不读取模型凭据、请求模型或写正式数据 |
 | C# 共享合同与 ToolHost | `apps/shared/`、`apps/tool-host/Program.cs` 及功能目录 | 两端 DTO 和 Windows 操作；ToolHost 执行已获准动作，Rust 统一持有 MCP 生命周期 |
 | WebView JavaScript/HTML/CSS | `apps/desktop/Resources/Transcript/` | 流式 DOM、Markdown/KaTeX/Mermaid 展示、选择与复制；脚本运行于 WebView，不需要 Node 后端 |
 | PowerShell | `apps/desktop/Build/`、`tools/development/` 和现有测试启动脚本 | 准备、校验、构建及启动已有载荷；不承接任务循环或正式持久化业务 |

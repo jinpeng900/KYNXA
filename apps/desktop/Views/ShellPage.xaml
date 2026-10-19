@@ -599,6 +599,8 @@
                                 </Grid>
                             </controls:ComposerSurface.Body>
                             <controls:ComposerSurface.Footer>
+                                <Grid ColumnSpacing="8" SizeChanged="UsageFooter_SizeChanged">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                 <Button x:Name="WorkspacePickerButton" IsEnabled="False" MaxWidth="240"
                                         Style="{StaticResource KynxaWorkspacePickerButtonStyle}"
                                         Click="WorkspacePickerButton_Click" AutomationProperties.Name="{services:UiText Key='选择工作区'}" services:UiLocalization.ToolTip="选择工作区">
@@ -610,6 +612,8 @@
                                         <FontIcon Grid.Column="2" Glyph="&#xE70D;" FontSize="10" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                                     </Grid>
                                 </Button>
+                                    <controls:UsageStatisticsControl x:Name="UsageStatistics" Grid.Column="1" />
+                                </Grid>
                             </controls:ComposerSurface.Footer>
                         </controls:ComposerSurface>
                         <TextBlock services:UiLocalization.Text="Enter 发送 · Shift+Enter 换行" FontSize="11"

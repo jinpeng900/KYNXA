@@ -17,8 +17,11 @@ pub use super::gateway_protocol::{ModelResponse, append_results, build_request};
 use super::{
     gateway_protocol,
     gateway_stream::{FrameDecoder, ProviderStream},
+    gateway_usage::UsageAttempt,
     recovery,
 };
+
+pub(crate) use super::gateway_usage::telemetry_configuration;
 
 const MAXIMUM_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
@@ -509,6 +512,435 @@ mod tests {
         assert_eq!(failure.details["requestDispatched"], true);
         dropped.await.unwrap();
     }
+
+    struct UsageLogFixture(std::path::PathBuf);
+
+    impl UsageLogFixture {
+        fn new() -> Self {
+            Self(
+                std::env::temp_dir()
+                    .join(format!("kynxa-model-usage-{}.jsonl", uuid::Uuid::new_v4())),
+            )
+        }
+
+        fn attempt(&self, connection: &Value, body: &Value) -> UsageAttempt {
+            UsageAttempt::at_path(self.0.clone(), connection, body)
+        }
+
+        async fn records(&self, expected: usize) -> Vec<Value> {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let text = std::fs::read_to_string(&self.0).unwrap_or_default();
+                    let records: Vec<_> = text
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .collect();
+                    if records.len() >= expected {
+                        return records;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap()
+        }
+    }
+
+    impl Drop for UsageLogFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_covers_json_and_stream_protocols_without_private_content() {
+        let fixtures = [
+            (
+                "openai-completions",
+                json!({"id":"chat","model":"actual-model","choices":[{"message":{"content":"private-reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20,"completion_tokens_details":{"reasoning_tokens":0}}}),
+                format!(
+                    "{}data: [DONE]\n\n",
+                    sse(&[
+                        (
+                            "",
+                            json!({"model":"actual-model","choices":[{"delta":{"content":"private-reply"},"finish_reason":null}]})
+                        ),
+                        ("", json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+                        (
+                            "",
+                            json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20,"completion_tokens_details":{"reasoning_tokens":0}}})
+                        ),
+                    ])
+                ),
+                100,
+                Some(80),
+            ),
+            (
+                "anthropic-messages",
+                json!({"id":"anthropic","model":"actual-model","content":[{"type":"text","text":"private-reply"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":80,"cache_creation_input_tokens":20}}),
+                sse(&[
+                    (
+                        "message_start",
+                        json!({"type":"message_start","message":{"id":"anthropic","model":"actual-model","usage":{"input_tokens":10,"cache_read_input_tokens":80,"cache_creation_input_tokens":20}}}),
+                    ),
+                    (
+                        "content_block_start",
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"private-reply"}}),
+                    ),
+                    (
+                        "content_block_stop",
+                        json!({"type":"content_block_stop","index":0}),
+                    ),
+                    (
+                        "message_delta",
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}),
+                    ),
+                    ("message_stop", json!({"type":"message_stop"})),
+                ]),
+                110,
+                Some(80),
+            ),
+            (
+                "openai-responses",
+                json!({"id":"responses","model":"actual-model","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"private-reply"}]}],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":80},"output_tokens_details":{"reasoning_tokens":2}}}),
+                sse(&[
+                    (
+                        "response.created",
+                        json!({"type":"response.created","response":{"model":"actual-model"}}),
+                    ),
+                    (
+                        "response.output_text.delta",
+                        json!({"type":"response.output_text.delta","delta":"private-reply"}),
+                    ),
+                    (
+                        "response.completed",
+                        json!({"type":"response.completed","response":{"id":"responses","model":"actual-model","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"private-reply"}]}],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":80},"output_tokens_details":{"reasoning_tokens":2}}}}),
+                    ),
+                ]),
+                100,
+                Some(80),
+            ),
+            (
+                "ollama",
+                json!({"model":"actual-model","message":{"role":"assistant","content":"private-reply"},"done":true,"done_reason":"stop","prompt_eval_count":100,"eval_count":5}),
+                format!(
+                    "{}\n{}\n",
+                    json!({"model":"actual-model","message":{"role":"assistant","content":"private-reply"},"done":false}),
+                    json!({"model":"actual-model","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":100,"eval_count":5})
+                ),
+                100,
+                None,
+            ),
+        ];
+        for (protocol, json_response, stream_response, input, cache_hit) in fixtures {
+            for stream in [false, true] {
+                let log = UsageLogFixture::new();
+                let content_type = if !stream {
+                    "application/json"
+                } else if protocol == "ollama" {
+                    "application/x-ndjson"
+                } else {
+                    "text/event-stream"
+                };
+                let payload = if stream {
+                    stream_response.clone()
+                } else {
+                    json_response.to_string()
+                };
+                let (mut connection, server) =
+                    fixture(payload, content_type, StatusCode::OK, Duration::ZERO).await;
+                connection["protocol"] = json!(protocol);
+                let body = json!({"model":"requested-model","stream":stream,"messages":[{"role":"user","content":"private-prompt"}]});
+                let attempt = log.attempt(&connection, &body);
+                let (_owner, cancel) = watch::channel(false);
+                let response = request_observed(&connection, body, cancel, None, &[], attempt)
+                    .await
+                    .unwrap();
+                assert_eq!(response.content, "private-reply");
+                let rows = log.records(1).await;
+                assert_eq!(rows.len(), 1);
+                let row = &rows[0];
+                assert_eq!(row["schemaVersion"], 1);
+                assert_eq!(row["event"], "call_completed");
+                assert_eq!(row["status"], "completed");
+                assert_eq!(row["providerId"], "fixture");
+                assert_eq!(row["requestedModel"], "requested-model");
+                assert_eq!(row["actualModel"], "actual-model");
+                assert_eq!(row["inputTokens"], input);
+                assert_eq!(row["outputTokens"], 5);
+                assert_eq!(row["totalTokens"], input + 5);
+                assert_eq!(row["cacheHitTokens"], json!(cache_hit));
+                assert_eq!(
+                    row["cacheMissTokens"],
+                    json!(cache_hit.map(|hit| input - hit))
+                );
+                assert!(uuid::Uuid::parse_str(row["callId"].as_str().unwrap()).is_ok());
+                assert!(
+                    chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str().unwrap())
+                        .is_ok()
+                );
+                let text = std::fs::read_to_string(&log.0).unwrap();
+                for private in [
+                    "private-reply",
+                    "private-prompt",
+                    "fixture-secret",
+                    "baseUrl",
+                    "Authorization",
+                    "127.0.0.1",
+                ] {
+                    assert!(!text.contains(private), "{private}");
+                }
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_retains_received_usage_after_decode_and_http_errors() {
+        for status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            let log = UsageLogFixture::new();
+            let payload = json!({"model":"actual-model","error":{"message":"private-upstream-error"},"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10,"prompt_cache_hit_tokens":0}});
+            let (connection, server) = fixture(
+                payload.to_string(),
+                "application/json",
+                status,
+                Duration::ZERO,
+            )
+            .await;
+            let body = json!({"model":"requested-model"});
+            let attempt = log.attempt(&connection, &body);
+            let (_owner, cancel) = watch::channel(false);
+            let error = request_observed(&connection, body, cancel, None, &[], attempt)
+                .await
+                .unwrap_err();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                assert_eq!(error.code, "MODEL_RATE_LIMITED");
+                assert_eq!(error.details["upstreamStatus"], 429);
+                assert_eq!(error.details["requestDispatched"], true);
+            }
+            let rows = log.records(1).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["status"], "error");
+            assert_eq!(rows[0]["inputTokens"], 10);
+            assert_eq!(rows[0]["outputTokens"], 0);
+            assert_eq!(rows[0]["cacheHitTokens"], 0);
+            assert!(!rows[0].to_string().contains("private-upstream-error"));
+            server.abort();
+        }
+        let log = UsageLogFixture::new();
+        let payload = format!(
+            "{}data: {{malformed}}\n\n",
+            sse(&[(
+                "",
+                json!({"model":"actual-model","choices":[{"delta":{"content":"private-text"},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":0}})
+            )])
+        );
+        let (connection, server) =
+            fixture(payload, "text/event-stream", StatusCode::OK, Duration::ZERO).await;
+        let body = json!({"model":"requested-model"});
+        let attempt = log.attempt(&connection, &body);
+        let (_owner, cancel) = watch::channel(false);
+        assert!(
+            request_observed(&connection, body, cancel, None, &[], attempt)
+                .await
+                .is_err()
+        );
+        let rows = log.records(1).await;
+        assert_eq!(rows[0]["status"], "error");
+        assert_eq!(rows[0]["inputTokens"], 10);
+        assert_eq!(rows[0]["outputTokens"], 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_preserves_partial_counts_on_cancel_timeout_and_future_drop() {
+        for termination in ["cancel", "timeout", "drop"] {
+            let log = UsageLogFixture::new();
+            let server = Router::new().fallback(|| async {
+                let first = format!("data: {}\n\n",json!({"model":"actual-model","choices":[{"delta":{"content":"private-text"},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":0}}));
+                let pieces = futures_util::stream::once(async move { Ok::<_,std::io::Error>(first) }).chain(futures_util::stream::once(async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok::<_,std::io::Error>("data: [DONE]\n\n".to_owned())
+                }));
+                HttpResponse::builder().header(CONTENT_TYPE,"text/event-stream").body(Body::from_stream(pieces)).unwrap()
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let connection = json!({"providerId":"fixture","baseUrl":format!("http://{}",listener.local_addr().unwrap()),"timeoutMs":if termination == "timeout" { 150 } else { 5000 }});
+            let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+            let body = json!({"model":"requested-model"});
+            let attempt = log.attempt(&connection, &body);
+            let (owner, cancel) = watch::channel(false);
+            let (events, mut received) = mpsc::channel(4);
+            let task = tokio::spawn(async move {
+                request_observed(&connection, body, cancel, Some(events), &[], attempt).await
+            });
+            let _event = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if termination == "drop" {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                if termination == "cancel" {
+                    owner.send(true).unwrap();
+                }
+                let failure = task.await.unwrap().unwrap_err();
+                assert_eq!(
+                    failure.code,
+                    if termination == "cancel" {
+                        "ABORT_ERR"
+                    } else {
+                        "MODEL_RESPONSE_TIMEOUT"
+                    }
+                );
+            }
+            let rows = log.records(1).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0]["status"],
+                if termination == "timeout" {
+                    "error"
+                } else {
+                    "cancelled"
+                }
+            );
+            assert_eq!(rows[0]["inputTokens"], 10);
+            assert_eq!(rows[0]["outputTokens"], 2);
+            assert_eq!(rows[0]["totalTokens"], 12);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_excludes_pre_dispatch_failures_and_marks_missing_usage() {
+        for initially_cancelled in [false, true] {
+            let log = UsageLogFixture::new();
+            let connection = json!({"providerId":"fixture","baseUrl":"invalid URL"});
+            let body = json!({"model":"requested-model"});
+            let attempt = log.attempt(&connection, &body);
+            let (_owner, cancel) = watch::channel(initially_cancelled);
+            assert!(
+                request_observed(&connection, body, cancel, None, &[], attempt)
+                    .await
+                    .is_err()
+            );
+            assert!(!log.0.exists());
+        }
+        let log = UsageLogFixture::new();
+        let (connection, server) = fixture(
+            json!({"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}]}).to_string(),
+            "application/json",
+            StatusCode::OK,
+            Duration::ZERO,
+        )
+        .await;
+        let body = json!({"model":"requested-model"});
+        let attempt = log.attempt(&connection, &body);
+        let (_owner, cancel) = watch::channel(false);
+        request_observed(&connection, body, cancel, None, &[], attempt)
+            .await
+            .unwrap();
+        let rows = log.records(1).await;
+        assert_eq!(rows[0]["status"], "missing_usage");
+        for field in [
+            "inputTokens",
+            "outputTokens",
+            "totalTokens",
+            "cacheHitTokens",
+            "cacheMissTokens",
+            "reasoningTokens",
+        ] {
+            assert!(rows[0][field].is_null());
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_serializes_concurrent_attempts_once() {
+        let log = UsageLogFixture::new();
+        let (connection, server) = fixture(
+            json!({"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_cache_hit_tokens":0}}).to_string(),
+            "application/json",StatusCode::OK,Duration::ZERO,
+        ).await;
+        let mut requests = tokio::task::JoinSet::new();
+        for index in 0..24 {
+            let connection = connection.clone();
+            let body = json!({"model":format!("requested-{index}")});
+            let attempt = log.attempt(&connection, &body);
+            requests.spawn(async move {
+                let (_owner, cancel) = watch::channel(false);
+                request_observed(&connection, body, cancel, None, &[], attempt)
+                    .await
+                    .unwrap()
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            assert_eq!(result.unwrap().content, "hello");
+        }
+        let rows = log.records(24).await;
+        assert_eq!(rows.len(), 24);
+        let ids: std::collections::HashSet<_> = rows
+            .iter()
+            .map(|row| row["callId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 24);
+        assert!(
+            rows.iter()
+                .all(|row| row["totalTokens"] == 11 && row["status"] == "completed")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_write_failure_preserves_reply_and_reports_gap_after_recovery() {
+        let failed_log = UsageLogFixture::new();
+        std::fs::create_dir(&failed_log.0).unwrap();
+        let log = UsageLogFixture::new();
+        let (connection,server) = fixture(
+            json!({"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_cache_hit_tokens":0}}).to_string(),
+            "application/json",StatusCode::OK,Duration::ZERO,
+        ).await;
+        for current_log in [&failed_log, &log] {
+            let body = json!({"model":"requested-model"});
+            let attempt = current_log.attempt(&connection, &body);
+            let (_owner, cancel) = watch::channel(false);
+            let response = request_observed(&connection, body, cancel, None, &[], attempt)
+                .await
+                .unwrap();
+            assert_eq!(response.content, "hello");
+        }
+        let rows = log.records(1).await;
+        assert!(rows[0]["unrecordedCalls"].as_u64().unwrap() >= 1);
+        std::fs::remove_dir(&failed_log.0).unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn usage_telemetry_append_keeps_interrupted_old_tail_separate() {
+        let log = UsageLogFixture::new();
+        std::fs::write(&log.0, b"{\"interrupted\":").unwrap();
+        let (connection,server) = fixture(
+            json!({"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}).to_string(),
+            "application/json",StatusCode::OK,Duration::ZERO,
+        ).await;
+        let body = json!({"model":"requested-model"});
+        let attempt = log.attempt(&connection, &body);
+        let (_owner, cancel) = watch::channel(false);
+        request_observed(&connection, body, cancel, None, &[], attempt)
+            .await
+            .unwrap();
+        let rows = log.records(1).await;
+        assert_eq!(rows[0]["totalTokens"], 11);
+        let text = std::fs::read_to_string(&log.0).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(text.lines().next().unwrap(), "{\"interrupted\":");
+        server.abort();
+    }
 }
 impl ModelError {
     pub fn new(code: &str, message: &str, status_code: u16) -> Self {
@@ -707,9 +1139,21 @@ pub async fn request(
 pub async fn request_with_catalog(
     connection: &Value,
     body: Value,
+    cancellation: watch::Receiver<bool>,
+    events: Option<mpsc::Sender<Value>>,
+    catalog: &[Value],
+) -> Result<ModelResponse, ModelError> {
+    let usage = UsageAttempt::configured(connection, &body);
+    request_observed(connection, body, cancellation, events, catalog, usage).await
+}
+
+async fn request_observed(
+    connection: &Value,
+    body: Value,
     mut cancellation: watch::Receiver<bool>,
     events: Option<mpsc::Sender<Value>>,
     catalog: &[Value],
+    mut usage: UsageAttempt,
 ) -> Result<ModelResponse, ModelError> {
     let timeout_ms = connection["timeoutMs"]
         .as_u64()
@@ -720,9 +1164,24 @@ pub async fn request_with_catalog(
     let result = tokio::select! {
         biased;
         _ = cancelled(&mut lifetime) => Err(ModelError::cancelled()),
-        result = tokio::time::timeout(Duration::from_millis(timeout_ms), execute_request(connection, body, &mut cancellation, events, catalog, &dispatched)) =>
+        result = tokio::time::timeout(Duration::from_millis(timeout_ms), execute_request(connection, body, &mut cancellation, events, catalog, &dispatched, &usage)) =>
             result.unwrap_or_else(|_| Err(ModelError::new("MODEL_RESPONSE_TIMEOUT", "模型请求超时，已保留先前执行记录。", 504))),
     };
+    match &result {
+        Ok(response) => {
+            usage.observe(&response.raw, &response.usage, &response.finish);
+            usage.complete("completed").await;
+        }
+        Err(error) => {
+            usage
+                .complete(if error.code == "ABORT_ERR" {
+                    "cancelled"
+                } else {
+                    "error"
+                })
+                .await;
+        }
+    }
     result.map_err(|mut error| {
         if !error.details.is_object() {
             error.details = json!({});
@@ -739,6 +1198,7 @@ async fn execute_request(
     events: Option<mpsc::Sender<Value>>,
     catalog: &[Value],
     dispatched: &AtomicBool,
+    usage: &UsageAttempt,
 ) -> Result<ModelResponse, ModelError> {
     if *cancellation.borrow() {
         return Err(ModelError::cancelled());
@@ -796,7 +1256,9 @@ async fn execute_request(
     // Count an HTTP attempt only when its future is polled, including failed network attempts.
     // 只有 HTTP future 实际被轮询才计一次尝试；网络失败仍属于尝试，不表示供应商收费。
     let sending = std::future::poll_fn(|context| {
-        dispatched.store(true, Ordering::Relaxed);
+        if !dispatched.swap(true, Ordering::Relaxed) {
+            usage.dispatched();
+        }
         sending.as_mut().poll(context)
     });
     let response = tokio::select! {
@@ -810,6 +1272,7 @@ async fn execute_request(
             Err(error) if error.code == "ABORT_ERR" => return Err(error),
             result => result.unwrap_or(Value::Null),
         };
+        usage.observe(&rejected, &rejected["usage"], &Value::Null);
         return Err(upstream_rejection(status, &rejected));
     }
     let content_type = response
@@ -822,6 +1285,12 @@ async fn execute_request(
         && !(protocol == "ollama" && content_type.contains("ndjson"))
     {
         let raw = bounded_json(response, MAXIMUM_RESPONSE_BYTES, cancellation).await?;
+        let observed_usage = if protocol == "ollama" {
+            json!({"prompt_tokens":raw["prompt_eval_count"],"completion_tokens":raw["eval_count"]})
+        } else {
+            raw["usage"].clone()
+        };
+        usage.observe(&raw, &observed_usage, &Value::Null);
         let result = gateway_protocol::decode_response(protocol, raw, catalog, Value::Null)?;
         if let Some(events) = events {
             events.send(json!({"type":"content_snapshot","content":result.content,"reasoning":result.reasoning})).await
@@ -849,7 +1318,9 @@ async fn execute_request(
             .map_err(|_| ModelError::new("MODEL_RESPONSE_READ_FAILED", "模型流连接中断。", 502))?
             .unwrap_or_default();
         for frame in frames.push(&bytes, protocol == "ollama", end)? {
-            let decoded = decoder.frame(&frame)?;
+            let decoded = decoder.frame(&frame);
+            usage.observe_frame(&frame, &decoder.usage);
+            let decoded = decoded?;
             if let Some(events) = &events {
                 for event in decoded["events"].as_array().into_iter().flatten() {
                     tokio::select! { _ = cancelled(cancellation) => return Err(ModelError::cancelled()),

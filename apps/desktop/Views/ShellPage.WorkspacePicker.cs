@@ -19,8 +19,10 @@ public sealed partial class ShellPage
 
     private void UpdateWorkspacePickerVisibility()
     {
-        ComposerHost.IsFooterVisible = !ViewModel.IsChatMode && _activeProjectChat is null;
-        WorkspacePickerButton.Visibility = ComposerHost.IsFooterVisible ? Visibility.Visible : Visibility.Collapsed;
+        // Usage stays visible in both modes; only the workspace picker follows work-mode visibility.
+        // 两种模式均保留用量统计，仅工作区选择器按工作模式切换可见性。
+        ComposerHost.IsFooterVisible = true;
+        WorkspacePickerButton.Visibility = !ViewModel.IsChatMode && _activeProjectChat is null ? Visibility.Visible : Visibility.Collapsed;
         WorkspacePickerButton.IsEnabled = _projectsReady;
         var project = KYNXA_Desktop.Services.WorkSidebarState.FindSelectedProject(_projects, _selectedWorkProjectId);
         WorkspacePickerLabel.Text = project?.Name ?? (_workWithoutFolder ? UiText.Get("不使用文件夹") : UiText.Get("选择项目"));
