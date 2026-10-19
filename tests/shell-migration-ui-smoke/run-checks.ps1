@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('appearance', 'appearance-transfer', 'dropdown-spacing', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions', 'dialogs', 'window-presentation', 'prompt-send', 'workspace-auto-open')]
+    [ValidateSet('inline-approval', 'appearance', 'appearance-transfer', 'dropdown-spacing', 'all', 'typography', 'shortcut-tooltip', 'body-search', 'sidebar-controls', 'sidebar-roundness', 'settings-interactions', 'dialogs', 'window-presentation', 'prompt-send', 'workspace-auto-open')]
     [string]$Scenario = 'appearance',
     [switch]$BuildOnly,
     [switch]$Rebuild,

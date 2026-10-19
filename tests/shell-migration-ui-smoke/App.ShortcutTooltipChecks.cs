@@ -225,16 +225,13 @@ public partial class App
             Check(Prompt.Text == draft && ActiveId == chatId && !HasBareShortcutTooltip(),
                 "native Ctrl+L preserves the draft and does not recreate a page tooltip");
 
-            var tool = new ToolActivity("fixture-shortcut-approval", "workspace.read_file", null,
-                "approval-required", "Read the synthetic mounted file", ApprovalId: Guid.NewGuid(),
-                WorkspaceRoot: Path.Combine(_directory, "Workspace"));
-            var dialog = ToolApprovalDialog.Create(_shell.XamlRoot, tool);
+            var dialog = CreateModalGuardFixture();
             var showing = dialog.ShowAsync();
             try
             {
-                await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "the real approval dialog opens before native shortcut guards");
+                await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "the generic modal fixture opens before native shortcut guards");
                 await WaitAsync(() => Prompt.FocusState == FocusState.Unfocused && FocusManager.GetFocusedElement(_shell.XamlRoot) is not null,
-                    "the real approval dialog takes focus before native shortcut guards");
+                    "the generic modal fixture takes focus before native shortcut guards");
                 object? dialogFocus = FocusManager.GetFocusedElement(_shell.XamlRoot);
                 DispatchShortcut(0x46);
                 await SettleAsync();
@@ -246,7 +243,7 @@ public partial class App
                 Check(!HasPopup<TextBox>("HistorySearchBox") && Prompt.FocusState == FocusState.Unfocused &&
                     ReferenceEquals(FocusManager.GetFocusedElement(_shell.XamlRoot), dialogFocus) &&
                     Prompt.Text == draft && ActiveId == chatId,
-                    "actual Ctrl+F, Ctrl+Shift+K and Ctrl+L respect the approval modal and preserve its focus and the original draft");
+                    "actual Ctrl+F, Ctrl+Shift+K and Ctrl+L respect the generic modal and preserve its focus and the original draft");
             }
             finally
             {

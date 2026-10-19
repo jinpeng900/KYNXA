@@ -1044,6 +1044,56 @@ fn decorate_snapshot(
     Ok(result)
 }
 pub fn context(root: &Path, conversation_id: &str) -> ContractResult {
+    context_selected(root, conversation_id, None)
+}
+
+/// Validate only injected identities; unrelated memories never trigger historical source reads.
+/// 仅校验实际注入的记忆身份；无关记忆不触发历史来源读取。
+pub fn snapshot_for(context: &Value, included_ids: &Value) -> Value {
+    let selected: HashSet<&str> = included_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let entries = context["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| selected.contains(entry["id"].as_str().unwrap_or("")))
+        .map(|entry| json!({"memoryId":entry["id"],"scope":entry["scope"],
+            "scopeId":entry["scopeId"],"identity":entry_identity(entry)}))
+        .collect::<Vec<_>>();
+    json!({"conversationId":context["conversationId"],"projectId":context["projectId"],
+        "isFolderlessWorkspace":context["isFolderlessWorkspace"],"entries":entries})
+}
+
+pub fn validate_snapshot(root: &Path, conversation_id: &str, snapshot: &Value) -> ContractResult {
+    let selected: HashSet<String> = snapshot["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["memoryId"].as_str().map(str::to_owned))
+        .collect();
+    if selected.is_empty() {
+        return Ok(json!({"current":true,"checked":0,"invalidSources":[],"freshnessOnly":true}));
+    }
+    let current = context_selected(root, conversation_id, Some(&selected))?;
+    let entries = current["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| json!({"id":entry["id"],"identity":entry_identity(entry)}))
+        .collect::<Vec<_>>();
+    memory_service::apply("storage.memoryService.snapshot", &json!({
+        "conversationId":conversation_id,"snapshot":snapshot,"current":current,"entries":entries}))
+}
+
+fn context_selected(
+    root: &Path,
+    conversation_id: &str,
+    selected: Option<&HashSet<String>>,
+) -> ContractResult {
     let catalog = gateway::load_catalog(root)?;
     let relationship = super::catalog::apply(
         "storage.catalog.related",
@@ -1062,7 +1112,12 @@ pub fn context(root: &Path, conversation_id: &str) -> ContractResult {
             conversation_id
         };
         let (scope_id, path) = location(root, &catalog, scope, id, Some(conversation_id))?;
-        let (document, hash) = read_scope(root, &path, scope, &scope_id)?;
+        let (mut document, hash) = read_scope(root, &path, scope, &scope_id)?;
+        if let Some(selected) = selected {
+            document["entries"].as_array_mut().unwrap().retain(|entry| {
+                selected.contains(entry["id"].as_str().unwrap_or(""))
+            });
+        }
         documents.push((document, path, hash));
     }
     let mut entries = Vec::new();
@@ -1917,6 +1972,32 @@ mod candidate_transition_tests {
     }
 
     #[test]
+    fn live_memory_snapshot_detects_update_and_deletion_without_invalidating_unrelated_entries() {
+        let fixture = Fixture::new();
+        let create = |content: &str, revision: &Value| {
+            handle("POST", &format!("/api/conversations/{}/memory", fixture.chat),
+                &json!({"scope":"chat","kind":"preference","content":content,"expectedRevision":revision}),
+                &fixture.root).unwrap().unwrap().1
+        };
+        let first = create("Use concise test output.", &json!(0));
+        let id = first["entries"][0]["id"].as_str().unwrap();
+        let initial = context(&fixture.root, &fixture.chat).unwrap();
+        let snapshot = snapshot_for(&initial, &json!([id]));
+        assert_eq!(snapshot["entries"].as_array().unwrap().len(), 1);
+        let second = create("Use readable figure captions.", &first["revision"]);
+        assert_eq!(validate_snapshot(&fixture.root, &fixture.chat, &snapshot).unwrap()["current"], true);
+        let changed = fixture.patch(id, &second["revision"], json!({"content":"Use detailed test output."}));
+        let status = validate_snapshot(&fixture.root, &fixture.chat, &snapshot).unwrap();
+        assert_eq!(status["current"], false);
+        assert_eq!(status["invalidSources"][0]["code"], "MEMORY_SOURCE_CHANGED");
+        let updated = snapshot_for(&context(&fixture.root, &fixture.chat).unwrap(), &json!([id]));
+        fixture.delete(id, &changed["revision"]);
+        let deleted = validate_snapshot(&fixture.root, &fixture.chat, &updated).unwrap();
+        assert_eq!(deleted["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
+        assert_eq!(deleted["checked"], 1);
+    }
+
+    #[test]
     fn saved_assistant_completion_creates_draft_then_confirmation_crud_preserves_batch_dismissals()
     {
         let fixture = Fixture::new();
@@ -2175,6 +2256,8 @@ mod candidate_transition_tests {
             entries.insert(scope, saved["entry"]["id"].clone());
         }
         let same_work = context(&fixture.root, &sibling).unwrap();
+        let project_snapshot = snapshot_for(&context(&fixture.root, &fixture.chat).unwrap(), &json!([entries["project"]]));
+        let sibling_snapshot = snapshot_for(&same_work, &json!([entries["project"]]));
         let same_entries = same_work["entries"].as_array().unwrap();
         assert_eq!(same_entries.len(), 2);
         assert!(
@@ -2223,6 +2306,8 @@ mod candidate_transition_tests {
         )
         .unwrap()
         .unwrap();
+        assert_eq!(validate_snapshot(&fixture.root, &fixture.chat, &project_snapshot).unwrap()["invalidSources"][0]["code"], "MEMORY_SCOPE_CHANGED");
+        assert_eq!(validate_snapshot(&fixture.root, &sibling, &sibling_snapshot).unwrap()["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
         let old_work = read_index_document(&fixture.root, "project", &first_work).unwrap();
         assert_eq!(old_work["entries"][0]["active"], false);
         assert_eq!(old_work["entries"][0]["sourceAvailable"], true);

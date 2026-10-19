@@ -49,6 +49,7 @@ public sealed partial class ShellPage : Page
         InitializeWorkTabs();
         InitializeTaskPanel();
         InitializePromptQueue();
+        InitializeInlineApprovals();
         InitializeMessageAttachments();
         MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
@@ -160,7 +161,8 @@ public sealed partial class ShellPage : Page
     }
 
     private double GetComposerHeightMaximum() =>
-        ShellLayoutMetrics.GetComposerHeightMaximum(PrimaryContentSlot.ActualHeight, ComposerHost.FooterHeight);
+        Math.Min(ShellLayoutMetrics.GetComposerHeightMaximum(PrimaryContentSlot.ActualHeight, ComposerHost.FooterHeight),
+            _approvalComposerHeightLimit);
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
 

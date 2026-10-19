@@ -25,6 +25,15 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private TaskCompletionSource? _initialCatalogGate;
     private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads, _agentReads;
 
+    private readonly List<AgentApprovalRequest> _approvalRequests = [];
+    private TaskCompletionSource? _approvalGate;
+    public bool EnableApprovals { get; set; }
+    public int NextApprovalStatus { get; set; }
+    public string? NextApprovalCode { get; set; }
+    public AgentApprovalRequest[] ApprovalRequests { get { lock (_sync) return _approvalRequests.ToArray(); } }
+    public void HoldApprovals() { lock (_sync) _approvalGate = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+    public void ReleaseApprovals() { lock (_sync) { _approvalGate?.TrySetResult(); _approvalGate = null; } }
+
     private TaskCompletionSource? _pausedRecoveryGate;
     private int _pausedReads, _streamRequests;
     private int _chromeOpenRequests;
@@ -169,6 +178,39 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         return true;
     }
 
+    private async Task RespondToApprovalAsync(HttpListenerContext context)
+    {
+        var request = await JsonSerializer.DeserializeAsync<AgentApprovalRequest>(context.Request.InputStream,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web), _shutdown.Token)
+            ?? throw new InvalidDataException("An approval request is required.");
+        if (request.ConversationId != WorkChatId && request.ConversationId != StandaloneChatId ||
+            request.RequestId == Guid.Empty || request.ApprovalId == Guid.Empty || string.IsNullOrWhiteSpace(request.ToolCallId) ||
+            request.Scope is not ("once" or "task") || request.Scope == "task" && !request.Approved)
+            throw new InvalidDataException("Approval escaped its synthetic scope or exact call identity.");
+        Task gate;
+        int status;
+        string? code;
+        lock (_sync)
+        {
+            _approvalRequests.Add(request);
+            gate = _approvalGate?.Task ?? Task.CompletedTask;
+            status = NextApprovalStatus;
+            code = NextApprovalCode;
+            NextApprovalStatus = 0;
+            NextApprovalCode = null;
+        }
+        // Hold only this owned response to observe production busy state and retries without a real model or tool.
+        // 仅挂起自有审批响应，观察生产提交状态和重试，不调用真实模型或工具。
+        await gate.WaitAsync(_shutdown.Token);
+        context.Response.StatusCode = status == 0 ? 200 : status;
+        context.Response.ContentType = "application/json";
+        object result = status == 0
+            ? new AgentApprovalResponse(request.Approved, request.ApprovalId, request.ToolCallId, request.Scope)
+            : new { error = status == 409 ? "Approval expired." : "Synthetic approval unavailable.", code };
+        await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(result,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
+    }
+
     private async Task ListenAsync()
     {
         try
@@ -190,6 +232,11 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         {
             object result;
             string path = context.Request.Url!.AbsolutePath;
+            if (EnableApprovals && context.Request.HttpMethod == "POST" && path == "/api/agent/approvals")
+            {
+                await RespondToApprovalAsync(context);
+                return;
+            }
             if (context.Request.HttpMethod == "POST" && path == "/api/retrieval/activate")
             {
                 await ActivateRetrievalAsync(context);

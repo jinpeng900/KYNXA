@@ -10,6 +10,7 @@ pub struct GatewayError {
     pub message: String,
     pub status: u16,
     pub retry_after_ms: Option<u64>,
+    pub details: Value,
 }
 
 impl GatewayError {
@@ -19,6 +20,7 @@ impl GatewayError {
             message: message.into(),
             status,
             retry_after_ms: None,
+            details: Value::Null,
         }
     }
 
@@ -27,11 +29,21 @@ impl GatewayError {
         if let Some(milliseconds) = self.retry_after_ms {
             response["retryAfterMs"] = json!(milliseconds);
         }
+        if !self.details.is_null() {
+            response["details"] = self.details.clone();
+        }
         response
     }
 
     pub fn with_retry_after(mut self, milliseconds: Option<u64>) -> Self {
         self.retry_after_ms = milliseconds;
+        self
+    }
+
+    /// Producers retain only safe machine diagnostics, never credentials or untrusted error bodies.
+    /// 生产者仅保留安全机器诊断，不在详情中放入凭据或不受信任的错误正文。
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = details;
         self
     }
 }

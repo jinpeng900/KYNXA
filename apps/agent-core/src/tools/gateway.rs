@@ -151,11 +151,23 @@ pub(crate) fn failure(code: &str, message: &str, status: u16) -> GatewayError {
 pub(crate) fn decode_native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     let value = result.map_err(|message| failure("TOOL_NATIVE_FAILED", &message, 500))?;
     if let Some(error) = value.get("error") {
-        return Err(failure(
+        let mut mapped = failure(
             error["code"].as_str().unwrap_or("TOOL_FAILED"),
             error["message"].as_str().unwrap_or("工具执行失败。"),
             error["statusCode"].as_u64().unwrap_or(500) as u16,
-        ));
+        );
+        // Only copy the safe pagination contract, never arbitrary native error bodies.
+        // 仅保留安全的分页纠错合同，不将任意原生错误正文带入模型上下文。
+        if ["INVALID_SKILL_LIST_PAGINATION", "INVALID_SKILL_RESOURCE_PAGINATION"].contains(&mapped.code.as_str()) {
+            let mut details = serde_json::Map::new();
+            for field in ["tool", "parameter", "type", "minimum", "maximum", "executed", "requestDispatched", "recoverable"] {
+                if let Some(value) = error.get(field) {
+                    details.insert(field.into(), value.clone());
+                }
+            }
+            mapped.details = Value::Object(details);
+        }
+        return Err(mapped);
     }
     Ok(value.get("value").cloned().unwrap_or(value))
 }
@@ -405,11 +417,20 @@ pub async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, GatewayErro
 
 pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), GatewayError> {
     let invalid = || {
+        let mut details = json!({"parameter":label,"executed":false,"requestDispatched":false,"recoverable":true});
+        // Parameter rejection precedes dispatch; do not record it as an executed tool or retry a side effect.
+        // 参数校验发生在派发前，不将其记作工具已执行，也不因此重试任何副作用。
+        for field in ["type", "minimum", "maximum", "minLength", "maxLength", "maxItems", "required"] {
+            if let Some(value) = schema.get(field) {
+                details[field] = value.clone();
+            }
+        }
         failure(
             "INVALID_TOOL_ARGUMENTS",
             &format!("工具参数 {label} 不符合声明。"),
             400,
         )
+        .with_details(details)
     };
     if let Some(options) = schema["enum"].as_array() {
         if !options.contains(value) {
@@ -801,8 +822,26 @@ pub(super) async fn filesystem(
 }
 
 fn approval(name: &str, args: &Value, ctx: &GatewayToolContext) -> Value {
+    // A task-wide decision cannot silently authorize another directory or disclose a sensitive file.
+    // 任务级决定不能悄悄授权另一个目录或披露敏感文件；这些调用仍逐次绑定明确审批。
+    let task_eligible = name != "work.folder.bind"
+        && (!workspace_path_tool(name, args)
+            || canonical_authorized(
+                ctx,
+                args["path"]
+                    .as_str()
+                    .or_else(|| args["cwd"].as_str())
+                    .unwrap_or("."),
+                true,
+            )
+            .is_ok_and(|(path, outside)| {
+                !outside
+                    && !super::service_skills::private_resource(&super::local_files::path_text(
+                        &path,
+                    ))
+            }));
     json!({"requiresApproval":true,"status":"not-dispatched","invocation":{"id":uuid::Uuid::new_v4().to_string(),"name":name,
-        "arguments":args,"conversationId":ctx.conversation_id,"projectId":ctx.project_id}})
+        "arguments":args,"conversationId":ctx.conversation_id,"projectId":ctx.project_id},"taskApprovalEligible":task_eligible})
 }
 
 async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1227,6 +1266,17 @@ pub async fn execute(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    // Invalid read pages are correctable before configuration, discovery or schema execution.
+    // 错误读取分页在配置、发现和通用 schema 校验前返回可纠正回执，不扫描目录或改变读取游标。
+    let pagination = match tool_name {
+        "skill.list" => super::service_skill_discovery::list_page(&args).map(|_| ()),
+        "skill.resource.read" => super::service_skills::resource_page(&args).map(|_| ()),
+        _ => Ok(()),
+    };
+    pagination.map_err(|error| {
+        failure(&error.code, &error.message, error.status_code)
+            .with_details(Value::Object(error.details))
+    })?;
     let selected = if workspace_path_tool(tool_name,&args) {
         Some(select_workspace_context(ctx,&args).await?)
     } else { None };
@@ -1342,6 +1392,14 @@ pub(crate) async fn relevant_skill_headers(
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    let (list_offset, list_limit) = if name == "skill.list" {
+        super::service_skill_discovery::list_page(&args).map_err(|error| {
+            failure(&error.code, &error.message, error.status_code)
+                .with_details(Value::Object(error.details))
+        })?
+    } else {
+        (0, 128)
+    };
     let official = ctx.config["officialToolsRoot"]
         .as_str()
         .map(PathBuf::from)
@@ -1415,8 +1473,8 @@ async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Val
     if name == "skill.list" {
         available.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         return Ok(
-            json!({"skills":available.into_iter().skip(args["offset"].as_u64().unwrap_or(0) as usize)
-            .take(args["limit"].as_u64().unwrap_or(128) as usize).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }),
+            json!({"skills":available.into_iter().skip(list_offset)
+            .take(list_limit).map(|mut entry| {entry.as_object_mut().unwrap().remove("content");entry}).collect::<Vec<_>>() }),
         );
     }
     let skill = available
@@ -2055,6 +2113,50 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn task_approval_receipts_preserve_directory_sensitive_and_binding_boundaries() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        ctx.permission_mode = "ask".into();
+        ctx.project_id = Some(uuid::Uuid::new_v4().to_string());
+        std::fs::write(root.join("outside.txt"), "not read by approval fixture").unwrap();
+        std::fs::write(ctx.workdir.join(".env"), "SYNTHETIC=NOT_A_SECRET").unwrap();
+        let inside = execute(
+            "filesystem.write",
+            json!({"path":"new.txt","content":"not dispatched","expectedHash":null}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(inside["taskApprovalEligible"], true);
+        assert!(!ctx.workdir.join("new.txt").exists());
+        let outside = execute(
+            "filesystem.read",
+            json!({"path":root.join("outside.txt"),"reason":"fixture only"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outside["taskApprovalEligible"], false);
+        let sensitive = execute("filesystem.read", json!({"path":".env"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(sensitive["taskApprovalEligible"], false);
+        let binding = execute(
+            "work.folder.bind",
+            json!({"path":ctx.workdir,"reason":"fixture only"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(binding["taskApprovalEligible"], false);
+        assert_eq!(
+            approval("terminal.host.run", &json!({"cwd":root}), &ctx)["taskApprovalEligible"],
+            false
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {
         use crate::storage::{gateway as data, workspace_mounts};
         let (mut ctx, _sender) = test_context();
@@ -2490,6 +2592,76 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn skill_pagination_is_correctable_before_configuration_or_directory_scanning() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let missing = root.join("never-created-skill-directory");
+        ctx.config["officialToolsRoot"] = json!(missing);
+        for (name, arguments, code, parameter, maximum) in [
+            ("skill.list", json!({"offset":-1}), "INVALID_SKILL_LIST_PAGINATION", "offset", 128),
+            ("skill.list", json!({"limit":129}), "INVALID_SKILL_LIST_PAGINATION", "limit", 128),
+            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","offset":2_097_153}),
+                "INVALID_SKILL_RESOURCE_PAGINATION", "offset", 2_097_152),
+            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","limit":"8"}),
+                "INVALID_SKILL_RESOURCE_PAGINATION", "limit", 16_000),
+        ] {
+            let error = execute(name, arguments, &ctx).await.unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.details["tool"], name);
+            assert_eq!(error.details["parameter"], parameter);
+            assert_eq!(error.details["maximum"], maximum);
+            assert_eq!(error.details["executed"], false);
+            assert_eq!(error.details["recoverable"], true);
+            assert_eq!(error.response()["details"], error.details);
+        }
+        assert!(!missing.exists());
+        assert!(ctx.runtime.skill_headers.lock().unwrap().is_empty());
+        let official = root.join("official/Skills");
+        ctx.config["officialToolsRoot"] = json!(root.join("official"));
+        for name in ["first", "second"] {
+            let skill = official.join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody.")).unwrap();
+        }
+        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx).await.unwrap();
+        let all = execute("skill.list", json!({}), &ctx).await.unwrap();
+        assert_eq!(page["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(page["skills"][0], all["skills"][1]);
+        shutdown(&ctx).await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skill_pagination_native_diagnostics_keep_only_safe_correction_fields() {
+        let error = decode_native(Ok(json!({"error":{
+            "code":"INVALID_SKILL_RESOURCE_PAGINATION","message":"invalid page","statusCode":400,
+            "tool":"skill.resource.read","parameter":"limit","minimum":1,"maximum":16000,
+            "executed":false,"requestDispatched":false,"recoverable":true,"privateBody":"must not propagate"
+        }}))).unwrap_err();
+        assert_eq!(error.details["parameter"], "limit");
+        assert_eq!(error.details["maximum"], 16000);
+        assert_eq!(error.details["recoverable"], true);
+        assert!(error.details.get("privateBody").is_none());
+    }
+
+    #[test]
+    fn schema_argument_validation_is_recoverable_without_dispatch() {
+        let error = validate_schema(
+            &json!({"type":"integer","minimum":1,"maximum":128}),
+            &json!(0),
+            "skill.list.limit",
+        ).unwrap_err();
+        assert_eq!(error.code, "INVALID_TOOL_ARGUMENTS");
+        assert_eq!(error.details["parameter"], "skill.list.limit");
+        assert_eq!(error.details["minimum"], 1);
+        assert_eq!(error.details["maximum"], 128);
+        assert_eq!(error.details["executed"], false);
+        assert_eq!(error.details["requestDispatched"], false);
+        assert_eq!(error.details["recoverable"], true);
     }
 
     #[tokio::test]

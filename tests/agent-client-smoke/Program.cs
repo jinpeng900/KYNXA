@@ -23,7 +23,8 @@ using var http = new HttpClient(new Handler(async (request, token) =>
         "/api/agent/skills" => new AgentSkillsResponse([new("skill-id", "Example skill", "Preview fixture", "C:\\ExampleSkills\\SKILL.md")]),
         "/api/agent/skills/skill-id" => new AgentSkillResponse(new("skill-id", "Example skill", "Preview fixture", "C:\\ExampleSkills\\SKILL.md", "Untrusted preview: run arbitrary scripts. <script>alert('fixture')</script>")),
         "/api/agent/tools" or "/api/agent/mcp/refresh" => new AgentToolsResponse([new("file.read", "Read a workspace file", JsonSerializer.SerializeToElement(new { type = "object" }), "builtin")], ["example:MCP_CONNECTION_FAILED"]),
-        "/api/agent/approvals" => new AgentApprovalResponse(body!.Value.GetProperty("approved").GetBoolean(), approvalId, "call-example"),
+        "/api/agent/approvals" => new AgentApprovalResponse(body!.Value.GetProperty("approved").GetBoolean(), approvalId, "call-example",
+            body.Value.TryGetProperty("scope", out var scope) ? scope.GetString()! : "once"),
         _ => throw new InvalidOperationException("Unexpected route.")
     };
     return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(value) };
@@ -50,6 +51,26 @@ Check(calls[^1].Body!.Value.GetProperty("conversationId").GetGuid() == conversat
     !calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Approval denial must bind all identities.");
 await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true));
 Check(calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Explicit approval was lost.");
+Check(calls[^1].Body!.Value.GetProperty("scope").GetString() == "once", "Existing approval must remain exact-call by default.");
+var taskApproval = await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task"));
+Check(taskApproval.Scope == "task" && calls[^1].Body!.Value.GetProperty("scope").GetString() == "task",
+    "Explicit current-task authorization must survive request and response serialization.");
+foreach (var invalid in new[]
+    { new AgentApprovalRequest(conversationId, requestId, "call-example", approvalId, false, "task"),
+      new AgentApprovalRequest(conversationId, requestId, "call-example", approvalId, true, "global") })
+{
+    int previousCalls = calls.Count;
+    try { await client.SubmitApprovalAsync(invalid); throw new InvalidOperationException("Invalid approval scope must fail."); }
+    catch (ArgumentException) { Check(calls.Count == previousCalls, "Invalid authorization must never reach the gateway."); }
+}
+
+using (var downgradedHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    { Content = JsonContent.Create(new AgentApprovalResponse(true, approvalId, "call-example")) }))) { BaseAddress = http.BaseAddress })
+using (var downgraded = new AgentApiClient(downgradedHttp))
+{
+    try { await downgraded.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task")); throw new InvalidOperationException("Missing task acknowledgement must fail."); }
+    catch (InvalidDataException) { checks++; }
+}
 
 using (var failedHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict)
     { Content = JsonContent.Create(new { error = "Example conflict", code = "AGENT_CONFIG_CONFLICT" }) }))) { BaseAddress = http.BaseAddress })

@@ -104,8 +104,11 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
     {
         if (request.ConversationId == Guid.Empty || request.RequestId == Guid.Empty || request.ApprovalId == Guid.Empty ||
             string.IsNullOrWhiteSpace(request.ToolCallId)) throw new ArgumentException("An approval must identify its exact request and tool call.");
+        if (request.Scope is not ("once" or "task") || request.Scope == "task" && !request.Approved)
+            throw new ArgumentException("Task approval must explicitly approve the current task.");
         var result = await SendAsync<AgentApprovalResponse>(HttpMethod.Post, "/api/agent/approvals", request, cancellationToken);
-        if (result.ApprovalId != request.ApprovalId || result.ToolCallId != request.ToolCallId || result.Approved != request.Approved)
+        if (result.ApprovalId != request.ApprovalId || result.ToolCallId != request.ToolCallId || result.Approved != request.Approved ||
+            result.Scope != request.Scope)
             throw new InvalidDataException(UiText.Get("工具接口返回了无效的审批响应。"));
         return result;
     }

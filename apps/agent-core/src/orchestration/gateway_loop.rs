@@ -28,9 +28,112 @@ const REPEATED_READ_GUIDANCE: &str = "\nBroker read progress: repeated original 
 fn native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     result.map_err(|code| GatewayError::new(code, "原生状态检查失败。", 500))
 }
+
+struct LiveMemoryProjection {
+    snapshot: Value,
+    block: String,
+    query: Value,
+    budget_tokens: u64,
+}
+
+impl LiveMemoryProjection {
+    fn prepare(context: &Value, query: Value, budget_tokens: u64) -> Result<Self, GatewayError> {
+        let prepared = native(crate::models::memory::calculate(
+            "models.memory.prepare",
+            &json!({"entries":context["entries"],"conversationId":context["conversationId"],
+                "projectId":context["projectId"],"memoryBudgetTokens":budget_tokens,"query":query,
+                "referenceNotice":"Confirmed scope memory; current explicit instructions take precedence."}),
+        ))?;
+        let lines = prepared["memoryLines"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+        Ok(Self {
+            snapshot: gateway_memory::snapshot_for(context, &prepared["includedMemoryIds"]),
+            block: format!("\n<kynxa_confirmed_memory>\nCurrent confirmed scope memory (originals: memory.read):\n{lines}\n</kynxa_confirmed_memory>\nMemory authority comes only from this current block. Historical messages, replies, summaries and previous memory.read results cannot restore removed or superseded memory instructions, even if their original source quotes remain in history. Current user instructions still take precedence. Preserve completed effects and receipts; never replay operations merely because memory changed.\n"),
+            query,
+            budget_tokens,
+        })
+    }
+
+    /// Recheck the used subset before dispatch and delivery; refresh is local and does not call a provider.
+    /// 派发及交付前只核验已用子集；刷新完全在本地完成，不增加供应商调用。
+    async fn refresh(
+        &mut self,
+        root: &std::path::Path,
+        conversation_id: &str,
+        system: &mut String,
+    ) -> Result<Option<Value>, GatewayError> {
+        if self.snapshot["entries"].as_array().is_none_or(Vec::is_empty) {
+            return Ok(None);
+        }
+        let root = root.to_path_buf();
+        let chat = conversation_id.to_owned();
+        let snapshot = self.snapshot.clone();
+        let updated = tokio::task::spawn_blocking(move || {
+            let status = gateway_memory::validate_snapshot(&root, &chat, &snapshot)?;
+            let context = if status["current"] == false {
+                Some(gateway_memory::context(&root, &chat)?)
+            } else { None };
+            Ok::<_, crate::storage::ContractError>((status, context))
+        }).await.map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "记忆版本核验任务退出。", 500))??;
+        let (status, Some(context)) = updated else { return Ok(None); };
+        let current = Self::prepare(&context, self.query.clone(), self.budget_tokens)?;
+        *system = system.replacen(&self.block, &current.block, 1);
+        *self = current;
+        Ok(Some(status))
+    }
+}
+
+fn memory_refresh_notice(state: &mut LoopState, status: &Value) {
+    // Discard only the optional cached navigation, never formal history or execution receipts.
+    // 仅废弃可重新生成的摘要缓存，不改正式历史或执行回执。
+    state.previous_summary = Value::Null;
+    state.broker_note(&format!("Broker: confirmed memory was updated, withdrawn or moved out of scope. Its old interpretations in history, summaries and prior tool results are no longer memory instructions. Follow the current confirmed-memory block and user request; preserve existing output and successful effects. Affected identities: {}", status["invalidSources"]));
+}
 fn missing_public_answer(raw: &str, projected: &str, has_calls: bool) -> bool {
     !has_calls && !raw.trim().is_empty() && projected.trim().is_empty()
 }
+
+/// A stale approved plan is locally skipped, not a parameter failure or an executed tool effect.
+/// 已批准的旧计划在本地跳过，不属于参数错误，也不能记为工具已执行。
+fn memory_replanning_result() -> Value {
+    json!({"isError":true,"executed":false,"requestDispatched":false,"recoverable":true,
+        "code":"TASK_MEMORY_UPDATED",
+        "notice":"Not dispatched: confirmed memory changed while waiting for approval. Replan the remaining work from the current confirmed-memory block and user request within this same task. Retain prior output and successful receipts; do not replay successful operations or reuse this superseded batch of tool calls."})
+}
+
+fn tool_execution_receipt(result: Result<Value, GatewayError>) -> Value {
+    match result {
+        Ok(value) => {
+            let unknown = value["status"] == "unknown"
+                || value["outcome"] == "unknown"
+                || value["code"].as_str().is_some_and(|code| code.contains("UNKNOWN"));
+            json!({"status":if unknown{"unknown"}else if value["isError"]==true{"error"}else{"completed"},
+                "executed":unknown || value["executed"]!=false,"isError":value["isError"]==true||unknown,
+                "code":value["code"],"recoveryHandle":value["recoveryHandle"],"content":value})
+        }
+        Err(error) => {
+            let unknown = error.code.contains("UNKNOWN")
+                || error.details["status"] == "unknown"
+                || error.details["outcome"] == "unknown";
+            let parameter_error = error.code == "INVALID_TOOL_ARGUMENTS"
+                || error.code.starts_with("INVALID_SKILL_");
+            // Only trusted pre-dispatch validation may certify that no tool effect occurred.
+            // 只有内部派发前校验的明确回执能证明未产生工具副作用，未知结果不能被参数码覆盖。
+            let not_dispatched = !unknown && parameter_error
+                && error.details["executed"] == false
+                && error.details["requestDispatched"] == false;
+            let mut content = error.response();
+            if not_dispatched {
+                content["executed"] = json!(false);
+                content["requestDispatched"] = json!(false);
+                content["correction"] = json!("This call was rejected before execution. Keep the current task, prior output and successful receipts. Correct only the reported parameter using the declared tool schema and supplied bounds, then issue a new valid call. Do not repeat successful operations or guess permissions, paths, resource IDs, commands or write contents.");
+            }
+            json!({"status":if unknown{"unknown"}else{"error"},"executed":!not_dispatched,
+                "isError":true,"code":error.code,"content":content})
+        }
+    }
+}
+
 pub(crate) fn is_read_only_tool(name: &str) -> bool {
     // Execution policy owns read classification; discovery and context maintenance have no external effects.
     // 执行策略统一维护只读分类；发现控制和上下文维护没有外部副作用。
@@ -2403,30 +2506,14 @@ async fn execute(
         system.push_str("\nThis model answers directly in visible natural language. Answer the user's actual question; do not output internal task markers or status JSON. No native tools are available for this model; do not claim to have performed external actions.");
     }
     system.push_str("\nRecover a failed tool step using an available alternative. Reuse successful receipts; verify unknown mutations before retry. Check source freshness for current-fact questions. Saved analyses remain usable across compaction; continue to the requested output.");
-    let limits = native(budget::apply(
-        "budget.limits",
-        &json!({"input":input.get("runLimits").cloned().unwrap_or_else(|| json!({}))}),
-    ))?;
-    let memory_budget = (context_window / 8).clamp(512, 8192);
-    let prepared_memory = native(crate::models::memory::calculate(
-        "models.memory.prepare",
-        &json!({"entries":memories["entries"],"conversationId":run.conversation_id,"projectId":ctx.project_id,"memoryBudgetTokens":memory_budget,"query":input["message"],"referenceNotice":"Confirmed scope memory; source authority and current explicit instructions take precedence. Detailed memory remains retrievable through memory.read."}),
-    ))?;
-    if let Some(lines) = prepared_memory["memoryLines"]
-        .as_array()
-        .filter(|lines| !lines.is_empty())
-    {
-        system.push_str(
-            "\nConfirmed scope memory, detailed originals remain available through memory.read:\n",
-        );
-        system.push_str(
-            &lines
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+    let resolved_limits = budget::resolve_request_limits(input.get("runLimits").unwrap_or(&Value::Null));
+    let limits = resolved_limits["limits"].clone();
+    if resolved_limits["corrections"].as_array().is_some_and(|corrections| !corrections.is_empty()) {
+        state.broker_note(&format!("Broker: malformed transport execution limits were normalized to the existing defaults. The user's goal, permissions, saved context and completed operations are unchanged. Settings correction: {}", resolved_limits["corrections"]));
     }
+    let memory_budget = (context_window / 8).clamp(512, 8192);
+    let mut live_memory = LiveMemoryProjection::prepare(&memories, input["message"].clone(), memory_budget)?;
+    system.push_str(&live_memory.block);
     // Add authoritative route facts after memory and before budgeting; compaction keeps this base system intact.
     // 路由事实放在记忆之后并参与预算；上下文压缩继续保留这段基础系统提示。
     system.push('\n');
@@ -2634,6 +2721,10 @@ async fn execute(
         if apply_user_steering(&runtime, &run, &mut state, &mut ctx).await? > 0 {
             review_pending = false;
             let _ = state.task.apply("task.resumed", &json!({}));
+        }
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
         }
         if crate::models::message_attachments::project_text_only_model(&connection, &mut state.history) {
             image_fallback = true;
@@ -3084,6 +3175,13 @@ async fn execute(
             ));
             break;
         }
+        // Compaction can await a provider; recheck memory again before the prepared request is dispatched.
+        // 压缩可能等待供应商；请求派发前再次核验等待期间是否发生了记忆撤销。
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
+            continue;
+        }
         // Resource admission may wait longer than a lease window; persist the exact next step first.
         // 资源准入可能等待多个租约窗口；等待前保存当前准确步骤和回执，不把资源等待变成任务终态。
         state.save(&runtime, &run, "streaming", None).await?;
@@ -3342,6 +3440,17 @@ async fn execute(
         })
         .await
         .map_err(|_| GatewayError::new("DATA_WORKER_FAILED", "模型续接回执保存失败。", 500))??;
+        // Streaming output remains recorded, but stale-memory calls never reach effect dispatch or final delivery.
+        // 流式输出继续保留；依赖失效记忆的调用不能进入副作用派发或最终交付。
+        if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+            state.transcript.push(json!({"round":round,"text":text,"calls":[],
+                "nativeContinuationRef":continuation_ref,"prefixFingerprint":prefix_fingerprint,
+                "discardedToolCalls":"memory-source-changed-before-dispatch"}));
+            memory_refresh_notice(&mut state, &status);
+            review_pending = false;
+            state.save(&runtime, &run, "streaming", None).await?;
+            continue;
+        }
         if !reviewing && missing_public_answer(&response.content, text, !response.calls.is_empty()) {
             // A control marker alone is not an answer, even if its state looks completed.
             // 只有控制标记不算回答，即使状态看似完成；保留真实调用回执，仅补一次正文请求。
@@ -3580,6 +3689,7 @@ async fn execute(
             evidence_changed: summarized_work_changed,
             ..Default::default()
         };
+        let mut memory_plan_invalidated = false;
         for call in &response.calls {
             if run.active_elapsed(state.started).as_millis() as u64
                 >= limits["maxDurationMs"].as_u64().unwrap_or(1800000)
@@ -3595,13 +3705,19 @@ async fn execute(
                 stopped = Some(GatewayError::new("ABORT_ERR", "任务已取消。", 499));
                 break;
             }
-            if steering_pending(&run, &ctx) {
-                // Pair undispatched calls with an explicit skipped result before applying the user's correction.
-                // 应用用户调整前，为未派发调用补齐明确跳过结果；保持协议配对，不执行旧计划。
+            if memory_plan_invalidated || steering_pending(&run, &ctx) {
+                // Pair the remaining stale calls without dispatch after memory refresh or user steering.
+                // 记忆刷新或用户调整后，为余下旧调用补齐未派发回执，保持协议配对而不执行旧计划。
                 for skipped in &response.calls {
                     if !results.iter().any(|result:&Value|result["call"]["id"]==skipped["id"]) {
+                        let skipped_receipt = if memory_plan_invalidated {
+                            tool_execution_receipt(Ok(memory_replanning_result()))
+                        } else {
+                            json!({"status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED",
+                                "content":{"notice":"Not dispatched: the user amended the current task. Continue with the new requirements and retain completed receipts."}})
+                        };
                         results.push(json!({"call":skipped,"observation":is_read_only_tool(skipped["name"].as_str().unwrap_or("")),
-                            "result":{"status":"error","executed":false,"isError":true,"code":"TASK_PLAN_UPDATED","content":{"notice":"Not dispatched: the user amended the current task. Continue with the new requirements and retain completed receipts."}}}));
+                            "result":skipped_receipt}));
                     }
                 }
                 break;
@@ -3663,7 +3779,7 @@ async fn execute(
                 .push(activity.clone());
             state.save(&runtime, &run, "streaming", None).await?;
             let mut definition_failure = workspace_failure.map(|error|json!({"status":"error","executed":false,"isError":true,
-                "code":error.code,"content":{"error":error.message,"code":error.code}}));
+                "code":error.code,"content":error.response()}));
             if call["unavailable"] == true
                 && definition_failure.is_none()
                 && saved.is_null()
@@ -3691,8 +3807,10 @@ async fn execute(
                             }
                         }
                         Err(error) => {
+                            let mut content = error.response();
+                            content["requestedName"] = json!(name);
                             definition_failure = Some(json!({"status":"error","executed":false,"isError":true,"code":error.code,
-                                "content":{"error":error.message,"code":error.code,"requestedName":name}}));
+                                "content":content}));
                         }
                     }
                 } else {
@@ -3761,21 +3879,30 @@ async fn execute(
                             .await
                         {
                             Ok(true) => {
-                                ctx.approved = true;
-                                let dispatched_at = Instant::now();
-                                ctx.config["approvedInvocation"] = result["invocation"].clone();
-                                let result =
-                                    tools::execute(name, call["arguments"].clone(), &ctx).await;
-                                tool_execution_ms = tool_execution_ms.saturating_add(
-                                    dispatched_at.elapsed().as_millis().min(u64::MAX as u128)
-                                        as u64,
-                                );
-                                ctx.approved = false;
-                                ctx.config
-                                    .as_object_mut()
-                                    .unwrap()
-                                    .remove("approvedInvocation");
-                                result
+                                // Approval can wait minutes; it does not restore memory withdrawn during that wait.
+                                // 审批可能等待数分钟；批准不能恢复等待期间已撤回的记忆，须先核验再重派发。
+                                if let Some(status) = live_memory.refresh(&runtime.config.data_root, &run.conversation_id, &mut system).await? {
+                                    memory_refresh_notice(&mut state, &status);
+                                    review_pending = false;
+                                    memory_plan_invalidated = true;
+                                    Ok(memory_replanning_result())
+                                } else {
+                                    ctx.approved = true;
+                                    let dispatched_at = Instant::now();
+                                    ctx.config["approvedInvocation"] = result["invocation"].clone();
+                                    let result =
+                                        tools::execute(name, call["arguments"].clone(), &ctx).await;
+                                    tool_execution_ms = tool_execution_ms.saturating_add(
+                                        dispatched_at.elapsed().as_millis().min(u64::MAX as u128)
+                                            as u64,
+                                    );
+                                    ctx.approved = false;
+                                    ctx.config
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .remove("approvedInvocation");
+                                    result
+                                }
                             }
                             Ok(false) => Err(GatewayError::new(
                                 "TOOL_APPROVAL_DENIED",
@@ -3787,19 +3914,7 @@ async fn execute(
                     }
                     result => result,
                 };
-                match result {
-                    Ok(value) => {
-                        let unknown = value["status"] == "unknown"
-                            || value["outcome"] == "unknown"
-                            || value["code"]
-                                .as_str()
-                                .is_some_and(|code| code.contains("UNKNOWN"));
-                        json!({"status":if unknown{"unknown"}else if value["isError"]==true{"error"}else{"completed"},"isError":value["isError"]==true||unknown,"code":value["code"],"recoveryHandle":value["recoveryHandle"],"content":value})
-                    }
-                    Err(error) => {
-                        json!({"status":if error.code.contains("UNKNOWN"){"unknown"}else{"error"},"isError":true,"code":error.code,"content":{"error":error.message,"code":error.code}})
-                    }
-                }
+                tool_execution_receipt(result)
             };
             let canonical = receipt["content"].clone();
             let root = runtime.config.data_root.clone();
@@ -4023,7 +4138,7 @@ async fn execute(
             } else {
                 public_text
             };
-            let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":receipt["status"],"summary":if receipt["isError"]==true{"执行受阻"}else{"已完成"},"result":public_text,"resultRef":reference,"round":round,"order":tool_order,"code":receipt["code"]});
+            let activity = json!({"toolCallId":call["id"],"name":name,"arguments":call["arguments"],"status":receipt["status"],"summary":if receipt["isError"]==true{"执行受阻"}else{"已完成"},"result":public_text,"resultRef":reference,"round":round,"order":tool_order,"code":receipt["code"],"executed":receipt["executed"]!=false});
             if let Some(existing) = state.assistant["ToolActivities"]
                 .as_array_mut()
                 .unwrap()
@@ -4367,6 +4482,97 @@ async fn execute(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
+
+    #[test]
+    fn correctable_parameter_receipts_preserve_successful_effects_and_unknown_outcomes() {
+        let mut effects = EffectLedger::default();
+        let completed = json!({"id":"saved-write","name":"filesystem.write",
+            "arguments":{"path":"/work/result.txt","content":"Previously saved output"}});
+        let success = json!({"status":"completed","isError":false,"executed":true,"content":{"saved":true}});
+        effects.apply("effects.observe", &json!({"call":completed,"result":success,
+            "observation":false,"workspaceRoot":"/work"})).unwrap();
+        effects.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        for code in ["INVALID_TOOL_ARGUMENTS", "INVALID_SKILL_LIST_PAGINATION", "INVALID_SKILL_RESOURCE_PAGINATION"] {
+            let error = GatewayError::new(code, "Fixture parameter requires correction.", 400)
+                .with_details(json!({"parameter":"offset","minimum":0,"executed":false,
+                    "requestDispatched":false,"recoverable":true}));
+            let receipt = tool_execution_receipt(Err(error));
+            assert_eq!(receipt["status"], "error");
+            assert_eq!(receipt["executed"], false);
+            assert!(receipt["content"]["correction"].as_str().unwrap().contains("Do not repeat successful operations"));
+            let failed = json!({"id":code,"name":"filesystem.write",
+                "arguments":{"path":"/work/result.txt","content":"Never executed"}});
+            effects.apply("effects.observe", &json!({"call":failed,"result":receipt,
+                "observation":false,"workspaceRoot":"/work"})).unwrap();
+        }
+        let previous = effects.apply("effects.previous", &json!({"call":completed,"observation":false})).unwrap();
+        assert_eq!(previous["result"], success);
+        let unknown = tool_execution_receipt(Err(GatewayError::new("TOOL_EXECUTION_UNKNOWN", "Unknown effect.", 409)
+            .with_details(json!({"executed":false,"requestDispatched":false}))));
+        assert_eq!(unknown["status"], "unknown");
+        assert_eq!(unknown["executed"], true);
+        let uncertified = tool_execution_receipt(Err(GatewayError::new("INVALID_TOOL_ARGUMENTS", "No dispatch witness.", 400)));
+        assert_eq!(uncertified["executed"], true);
+    }
+
+    #[test]
+    fn memory_replanning_is_undispatched_without_parameter_correction_or_effect_invalidation() {
+        let mut effects = EffectLedger::default();
+        let completed = json!({"id":"saved-before-approval","name":"filesystem.write",
+            "arguments":{"path":"/work/result.txt","content":"Previously saved output"}});
+        let success = json!({"status":"completed","isError":false,"executed":true,"content":{"saved":true}});
+        effects.apply("effects.observe", &json!({"call":completed,"result":success,
+            "observation":false,"workspaceRoot":"/work"})).unwrap();
+        effects.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        let receipt = tool_execution_receipt(Ok(memory_replanning_result()));
+        assert_eq!(receipt["status"], "error");
+        assert_eq!(receipt["executed"], false);
+        assert_eq!(receipt["content"]["executed"], false);
+        assert_eq!(receipt["content"]["requestDispatched"], false);
+        assert_eq!(receipt["content"]["recoverable"], true);
+        assert_eq!(receipt["code"], "TASK_MEMORY_UPDATED");
+        assert!(receipt["content"].get("correction").is_none());
+        let skipped = json!({"id":"superseded-delete","name":"filesystem.delete",
+            "arguments":{"path":"/work/result.txt"}});
+        effects.apply("effects.observe", &json!({"call":skipped,"result":receipt,
+            "observation":false,"workspaceRoot":"/work"})).unwrap();
+        let previous = effects.apply("effects.previous", &json!({"call":completed,"observation":false})).unwrap();
+        assert_eq!(previous["result"], success);
+        assert_eq!(effects.apply("effects.state", &json!({})).unwrap()["hasUnknownEffects"], false);
+    }
+
+    #[tokio::test]
+    async fn live_memory_refresh_removes_withdrawn_instructions_and_preserves_route_and_formal_history() {
+        let root = std::env::temp_dir().join(format!("kynxa-live-memory-{}", new_id()));
+        let chat = new_id();
+        data::ensure_conversation(&root, &chat, "Isolated live memory refresh").unwrap();
+        let message = json!({"Id":new_id(),"Role":"user","Status":"completed","Content":"Current task remains unchanged."});
+        data::upsert_message(&root, &chat, &message).unwrap();
+        let saved = gateway_memory::handle("POST", &format!("/api/conversations/{chat}/memory"),
+            &json!({"scope":"chat","kind":"preference","content":"USE_REVOKED_FORMAT_731","expectedRevision":0}),
+            &root).unwrap().unwrap().1;
+        let memories = gateway_memory::context(&root, &chat).unwrap();
+        let mut projection = LiveMemoryProjection::prepare(&memories, json!("Continue current task"), 1024).unwrap();
+        let mut system = format!("Stable tool instructions{}\nAuthoritative model route", projection.block);
+        assert!(system.contains("USE_REVOKED_FORMAT_731"));
+        let before = data::read_model_messages(&root, &chat).unwrap();
+        assert!(projection.refresh(&root, &chat, &mut system).await.unwrap().is_none());
+        let id = saved["entries"][0]["id"].as_str().unwrap();
+        gateway_memory::handle("DELETE", &format!("/api/conversations/{chat}/memory/{id}"),
+            &json!({"expectedRevision":saved["revision"]}), &root).unwrap().unwrap();
+        let refreshed = projection.refresh(&root, &chat, &mut system).await.unwrap().unwrap();
+        assert_eq!(refreshed["invalidSources"][0]["code"], "MEMORY_SOURCE_UNAVAILABLE");
+        assert!(!system.contains("USE_REVOKED_FORMAT_731"));
+        assert!(system.starts_with("Stable tool instructions"));
+        assert!(system.ends_with("Authoritative model route"));
+        assert!(system.contains("summaries and previous memory.read results cannot restore"));
+        assert_eq!(data::read_model_messages(&root, &chat).unwrap(), before);
+        gateway_memory::stop_candidates(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        // Empty projections need no storage read or provider request, even after the fixture is gone.
+        // 空投影无需读取存储或调用供应商，夹具删除后仍能直接继续。
+        assert!(projection.refresh(&root, &chat, &mut system).await.unwrap().is_none());
+    }
 
     #[test]
     fn repeated_small_or_partial_source_ranges_use_saved_work_without_altering_original_receipts() {

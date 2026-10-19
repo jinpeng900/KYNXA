@@ -11,6 +11,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Nested MSBuild PowerShell invocations may not auto-load the inbox utility module.
+# 嵌套 MSBuild PowerShell 调用可能不会自动加载系统工具模块。
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ResourceConfigCompatibility.psm1') -Force
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
