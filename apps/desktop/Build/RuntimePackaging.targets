@@ -12,9 +12,11 @@
     <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
     <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
     <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
+    <_KynxaUsageMonitorTargets>Restore;Publish</_KynxaUsageMonitorTargets>
     <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
          离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
     <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true' or '$(KynxaDependenciesPrepared)' == 'true'">Build</_KynxaToolHostTargets>
+    <_KynxaUsageMonitorTargets Condition="'$(KynxaOffline)' == 'true' or '$(KynxaDependenciesPrepared)' == 'true'">Publish</_KynxaUsageMonitorTargets>
     <_KynxaRuntimeOptions Condition="'$(KynxaRebuildNative)' == 'true'">$(_KynxaRuntimeOptions) -Rebuild</_KynxaRuntimeOptions>
   </PropertyGroup>
   <!-- VS deployment uses LayoutDir from the recipe; keep nested MCP paths below MAX_PATH.
@@ -89,6 +91,22 @@
                CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
     </ItemGroup>
   </Target>
+  <Target Name="IncludeUsageMonitorRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <_KynxaUsageMonitorPublishDirectory>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)usage-monitor-payload\$(Configuration)\$(RuntimeIdentifier)'))))</_KynxaUsageMonitorPublishDirectory>
+    </PropertyGroup>
+    <!-- The optional card is self-contained and shares the owner's usage projection; offline/prepared builds skip restore.
+         可选悬浮卡以自包含方式随包提供并共享宿主统计；离线或依赖已准备的构建不重复还原。 -->
+    <MSBuild Projects="..\usage-monitor\KYNXA.UsageMonitor.csproj" Targets="$(_KynxaUsageMonitorTargets)" RemoveProperties="OutDir"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true;PublishReadyToRun=false;PublishTrimmed=false;PublishDir=$(_KynxaUsageMonitorPublishDirectory)" />
+    <ItemGroup>
+      <_KynxaUsageMonitorFiles Include="$(_KynxaUsageMonitorPublishDirectory)\**\*"
+                               Exclude="$(_KynxaUsageMonitorPublishDirectory)\**\*.pdb;$(_KynxaUsageMonitorPublishDirectory)\**\*.tmp" />
+      <Content Include="@(_KynxaUsageMonitorFiles)"
+               Link="UsageMonitor\%(_KynxaUsageMonitorFiles.RecursiveDir)%(_KynxaUsageMonitorFiles.Filename)%(_KynxaUsageMonitorFiles.Extension)"
+               CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
   <Target Name="ExcludeToolHostLibrariesFromWinUiPri" BeforeTargets="_GeneratePrisForPortableLibraries">
     <ItemGroup Condition="'@(_LibrariesUnfiltered)' == '' and '@(CreatedResWFiles)' == '' and '$(NetCoreGeneratePrisForPortableLibraries)' != 'true'">
       <_LibrariesUnfiltered Include="@(PackagingOutputs)" Exclude="@(_KynxaToolHostFiles);@(_KynxaToolHostFiles->'%(FullPath)')" Condition="'%(Extension)' == '.dll'" />
@@ -100,6 +118,7 @@
       -->
       <_LibrariesUnfiltered Remove="@(_KynxaNativeRuntimeFiles);@(_KynxaNativeRuntimeFiles->'%(FullPath)')" />
       <_LibrariesUnfiltered Remove="@(_KynxaVisualCppFiles);@(_KynxaVisualCppFiles->'%(FullPath)')" />
+      <_LibrariesUnfiltered Remove="@(_KynxaUsageMonitorFiles);@(_KynxaUsageMonitorFiles->'%(FullPath)')" />
     </ItemGroup>
   </Target>
   <Target Name="KeepExecutableRuntimePayloadsOutsideWinUiPri"

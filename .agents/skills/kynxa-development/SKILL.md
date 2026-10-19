@@ -1,6 +1,6 @@
 ---
 name: kynxa-development
-description: "开发、修改、重构和审查 KYNXA Windows x64 项目时使用，按当前 Rust 原生网关与资源服务、C#/WinUI/ToolHost、WebView2 和 PowerShell 的职责维护代码、接口、测试与打包。保持模块边界、交互和数据兼容；不是应用内模型 Skill，不用于无关项目或纯聊天。"
+description: "开发、修改、重构和审查 KYNXA Windows x64 项目时使用，按当前 Rust 原生网关与资源服务、C#/WinUI/WPF 用量卡/ToolHost、WebView2 和 PowerShell 的职责维护代码、接口、测试与打包。保持模块边界、交互和数据兼容；不是应用内模型 Skill，不用于无关项目或纯聊天。"
 ---
 
 # KYNXA 项目开发

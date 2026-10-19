@@ -34,9 +34,10 @@ try {
     $state = Read-KynxaBuildState $statePath
     $desktopProject = Join-Path $repositoryRoot 'apps/desktop/KYNXA.Desktop.csproj'
     $toolHostProject = Join-Path $repositoryRoot 'apps/tool-host/KYNXA.ToolHost.csproj'
+    $usageMonitorProject = Join-Path $repositoryRoot 'apps/usage-monitor/KYNXA.UsageMonitor.csproj'
     $runtimeRoot = Join-Path $repositoryRoot 'artifacts/runtime/native-desktop/win-x64'
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    $inputDirectories = @('apps/desktop','apps/shared','apps/tool-host','apps/agent-core/src','apps/resource-service/src','apps/official-tools','tools/development')
+    $inputDirectories = @('apps/desktop','apps/shared','apps/tool-host','apps/usage-monitor','apps/agent-core/src','apps/resource-service/src','apps/official-tools','tools/development')
     $inputFiles = @('global.json','Directory.Build.props','Directory.Build.targets','NuGet.Config','apps/agent-core/Cargo.toml','apps/agent-core/Cargo.lock','apps/resource-service/Cargo.toml','apps/resource-service/Cargo.lock')
     foreach ($name in @('DownloadSourcesPath','NuGetConfigPath','ResourcePackRoot')) {
         $value = Get-Variable -Name $name -ValueOnly
@@ -48,7 +49,7 @@ try {
     }
     foreach ($path in @($DownloadSourcesPath,$NuGetConfigPath,$ResourcePackRoot)) { if ($path) { $inputFiles += $path } }
     $options = @($Configuration,$Profile,'win-x64',$DownloadSourcesPath,$ResourcePackRoot,$NuGetSource,$NuGetConfigPath)
-    $outputFiles = @('KYNXA.Desktop.exe','KYNXA.Desktop.dll','KYNXA.Desktop.deps.json','KYNXA.Desktop.runtimeconfig.json','resources.pri','AppxManifest.xml','runtime/agent/kynxa-gateway.exe')
+    $outputFiles = @('KYNXA.Desktop.exe','KYNXA.Desktop.dll','KYNXA.Desktop.deps.json','KYNXA.Desktop.runtimeconfig.json','resources.pri','AppxManifest.xml','runtime/agent/kynxa-gateway.exe','UsageMonitor/KYNXA.UsageMonitor.exe','UsageMonitor/KYNXA.UsageMonitor.dll','UsageMonitor/coreclr.dll')
     $signature = Get-KynxaBuildSignature $repositoryRoot $inputDirectories $inputFiles $options
     if ($state.ContainsKey('repositoryRoot') -and $state.repositoryRoot -ne $repositoryRoot -and $state.ContainsKey('build')) {
         foreach ($name in @('output','recipe','applicationRoot','intermediate')) {
@@ -143,11 +144,11 @@ try {
         if ($ResourcePackRoot) { $vcArguments += @('-ResourcePackRoot',$ResourcePackRoot) }
         Invoke-KynxaBuildCommand $windowsPowerShell $vcArguments $repositoryRoot $logPath '准备 VC 运行库'
     } | Out-Null
-    $restoreFiles = @('apps/desktop/KYNXA.Desktop.csproj','apps/tool-host/KYNXA.ToolHost.csproj','global.json','Directory.Build.props','Directory.Build.targets','NuGet.Config')
+    $restoreFiles = @('apps/desktop/KYNXA.Desktop.csproj','apps/tool-host/KYNXA.ToolHost.csproj','apps/usage-monitor/KYNXA.UsageMonitor.csproj','apps/usage-monitor/Core/KYNXA.UsageMonitor.Core.csproj','global.json','Directory.Build.props','Directory.Build.targets','NuGet.Config')
     if ($NuGetConfigPath) { $restoreFiles += $NuGetConfigPath }
     $restoreSignature = Get-KynxaBuildSignature $repositoryRoot @() $restoreFiles @('win-x64',$environment.DotNet.SdkVersion,$NuGetSource,$NuGetConfigPath)
     Invoke-KynxaBuildStage 4 '恢复必要依赖并预先检查许可证' dependencies $state $statePath {
-        $assets = @((Join-Path $repositoryRoot 'apps/desktop/obj/project.assets.json'),(Join-Path $repositoryRoot 'apps/tool-host/obj/project.assets.json'))
+        $assets = @((Join-Path $repositoryRoot 'apps/desktop/obj/project.assets.json'),(Join-Path $repositoryRoot 'apps/tool-host/obj/project.assets.json'),(Join-Path $repositoryRoot 'apps/usage-monitor/obj/project.assets.json'))
         $reuse = $state.ContainsKey('restore') -and $state.restore.signature -eq $restoreSignature
         foreach ($path in $assets) { if (-not (Test-KynxaNuGetAssets $path)) { $reuse = $false } }
         if ($reuse) { Write-Host '[依赖] 清单与恢复结果有效，跳过 NuGet restore。' }
@@ -164,6 +165,7 @@ try {
             if ($NuGetConfigPath) { $common += @('--configfile',$NuGetConfigPath) }
             Invoke-KynxaBuildCommand $environment.DotNet.Path ($common + @($desktopProject,'-p:Platform=x64')) $repositoryRoot $logPath '恢复桌面依赖'
             Invoke-KynxaBuildCommand $environment.DotNet.Path ($common + @($toolHostProject,'-p:SelfContained=true')) $repositoryRoot $logPath '恢复 ToolHost 依赖'
+            Invoke-KynxaBuildCommand $environment.DotNet.Path ($common + @($usageMonitorProject,'-p:SelfContained=true')) $repositoryRoot $logPath '恢复用量悬浮卡依赖'
         }
         & (Join-Path $PSScriptRoot 'prepare-toolhost-notices.ps1') -AssetsPath $assets[1] -RuntimeIdentifier win-x64 -OutputDirectory (Join-Path $repositoryRoot 'apps/tool-host/obj/prepared-notices/win-x64') | Write-Host
         $state.restore = @{ signature = $restoreSignature; sdk = $environment.DotNet.SdkVersion }

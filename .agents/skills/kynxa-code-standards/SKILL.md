@@ -7,7 +7,7 @@ description: "编写、审查或整理 KYNXA 原生 Rust 网关与资源服务�
 
 本 Skill 定义 KYNXA 的代码书写规则，与 [kynxa-development](../kynxa-development/SKILL.md) 的模块、交互和验证约定配合使用。用户当前要求优先；规范化不授予发布权限，也不要求整仓重写。
 
-按[当前原生架构](../../../docs/architecture/native-gateway.md)选择语言与文件：Rust 承担 HTTP/SSE、Agent、模型与工具 I/O、检索和正式存储；C# 承担 WinUI、API 客户端与 Windows ToolHost；WebView JavaScript 承担浏览器内渲染；PowerShell 承担启动与构建。安装包的私有 Node 仅运行外部 MCP 和已核验的 JS Skill，不恢复 JS/NAPI 网关。命名或排版整理不改变这些职责。
+按[当前原生架构](../../../docs/architecture/native-gateway.md)选择语言与文件：Rust 承担 HTTP/SSE、Agent、模型与工具 I/O、检索和正式存储；C# 承担 WinUI、内置用量统计、可选 WPF 桌面卡、API 客户端与 Windows ToolHost；WebView JavaScript 承担浏览器内渲染；PowerShell 承担启动与构建。安装包的私有 Node 仅运行外部 MCP 和已核验的 JS Skill，不恢复 JS/NAPI 网关。命名或排版整理不改变这些职责。
 
 ## 工作入口
 

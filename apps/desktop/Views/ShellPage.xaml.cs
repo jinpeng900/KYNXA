@@ -37,6 +37,7 @@ public sealed partial class ShellPage : Page
     public ShellPage()
     {
         InitializeComponent();
+        InitializeUsageMonitor();
         InitializePresentationActions();
         Unloaded += (_, _) => DetachLanguageUpdates();
         ConversationMessages.RetryRequested += Transcript_RetryRequested;

@@ -78,6 +78,7 @@ public partial class App : Application
         _ = Task.Run(Services.InstallerModelPreparation.RunAsync);
         Window = new MainWindow();
         Window.Activate();
+        Services.UsageMonitorService.Initialize(Window);
     }
 
     private static async Task WarmUpModelGatewayAsync()

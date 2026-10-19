@@ -5,7 +5,7 @@
 | 成员 | 主责 | 可分配目录 | 任务入口 |
 |---|---|---|---|
 | A | 编排、基础合同、集成与打包 | agent-core gateway/组合/orchestration/resources；desktop Services/Integration | [A](A-队长与任务编排.md) |
-| B | WinUI/WebView2 展示与交互 | desktop Views/Controls/ViewModels/资源/Services/Presentation | [B](B-桌面前端.md) |
+| B | WinUI/WebView2、内置用量统计与可选桌面卡展示交互 | desktop Views/Controls/ViewModels/资源/Services/Presentation；usage-monitor | [B](B-桌面前端.md) |
 | C | 模型、协议、流式、预算、请求上下文 | agent-core models；desktop Services/Models；shared Chat | [C](C-模型与本地推理.md) |
 | D | 工具、权限、MCP/Skill、浏览器与原生执行 | agent-core tools；official-tools；desktop Services/Tools；shared Tools；tool-host 功能目录 | [D](D-权限与工具执行.md) |
 | E | 会话、记忆、索引、路径与迁移 | agent-core retrieval/storage；desktop Services/Data；shared Memory | [E](E-数据与验证.md) |

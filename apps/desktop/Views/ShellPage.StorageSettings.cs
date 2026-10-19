@@ -109,6 +109,7 @@ public sealed partial class ShellPage
         var moreOptions = LocalizedLabel("更多功能", 13);
         moreOptions.Opacity = 0.6;
         content.Children.Add(moreOptions);
+        content.Children.Add(CreateUsageMonitorSettings(font));
         var memoryRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
             Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         memoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

@@ -225,7 +225,8 @@ pub fn health() -> Value {
         "toolStreamProtocol": 3,
         "retrievalProtocol": 1,
         "taskProtocol": 1,
-        "documentParsingProtocol": 2
+        "documentParsingProtocol": 2,
+        "usageTelemetry": crate::models::gateway::telemetry_configuration()
     })
 }
 

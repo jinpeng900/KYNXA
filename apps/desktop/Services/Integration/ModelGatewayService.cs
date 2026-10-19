@@ -120,6 +120,8 @@ public static class ModelGatewayService
             };
             start.Environment["KYNXA_APPLICATION_ROOT"] = ApplicationPaths.Root;
             start.Environment["KYNXA_MODEL_API_PORT"] = address.Port.ToString();
+            start.Environment["KYNXA_USAGE_LOG"] = Environment.GetEnvironmentVariable("KYNXA_USAGE_LOG")
+                ?? UsageMonitorService.DefaultUsageLogPath;
             ConfigureNativeRuntime(start);
             if (!string.IsNullOrWhiteSpace(LegacyDesktopDirectory))
                 start.Environment["KYNXA_LEGACY_DESKTOP_HOME"] = LegacyDesktopDirectory;

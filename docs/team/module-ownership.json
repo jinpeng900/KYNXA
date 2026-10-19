@@ -15,7 +15,8 @@
     "apps/tool-host",
     "apps/resource-service",
     "apps/agent-core",
-    "apps/official-tools"
+    "apps/official-tools",
+    "apps/usage-monitor"
   ],
   "sourceExtensions": [
     ".mjs",
@@ -37,6 +38,10 @@
     ".git"
   ],
   "ownershipRules": [
+    {
+      "prefix": "apps/usage-monitor/",
+      "role": "B"
+    },
     {
       "prefix": "apps/agent-core/src/resources/",
       "role": "A"
@@ -325,6 +330,7 @@
         "gateway.rs",
         "main.rs",
         "models/gateway.rs",
+        "models/gateway_usage.rs",
         "models/gateway_config.rs",
         "models/gateway_local_models.rs",
         "models/gateway_local_download.rs",
@@ -551,6 +557,11 @@
           "path": "models/gateway.rs",
           "allowedDomains": [],
           "purpose": "Provider HTTP and cancellation / 供应商 HTTP 与取消"
+        },
+        {
+          "path": "models/gateway_usage.rs",
+          "allowedDomains": [],
+          "purpose": "Opt-in bounded provider usage telemetry / 可选有界供应商用量遥测"
         },
         {
           "path": "models/gateway_config.rs",

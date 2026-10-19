@@ -40,6 +40,7 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
+    <ProjectReference Include="..\usage-monitor\Core\KYNXA.UsageMonitor.Core.csproj" />
     <!-- Official resources are static data; runtime tool execution is provided by Rust.
          官方资源仅为静态资料；工具实际执行由 Rust 提供，不再分发后端 JavaScript。 -->
     <Content Include="..\official-tools\**\*" Exclude="..\official-tools\**\*.js;..\official-tools\**\*.mjs;..\official-tools\**\*.cjs"

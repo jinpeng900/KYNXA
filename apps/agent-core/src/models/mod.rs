@@ -17,6 +17,7 @@ pub mod gateway_local_models;
 pub mod gateway_preparation;
 pub mod gateway_protocol;
 pub mod gateway_stream;
+mod gateway_usage;
 pub mod history;
 pub mod history_service;
 pub mod inference;
