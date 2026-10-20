@@ -518,13 +518,16 @@ async fn handle_request(
             return match (method.as_str(), parts.as_slice()) {
                 ("POST", [_, "attachments", "import"]) => response(crate::orchestration::gateway_attachments::import(&runtime, conversation, &body).await.map(|value| (200, value))),
                 ("GET", [_, "attachments"]) => response(crate::orchestration::gateway_attachments::list(&runtime, conversation, message).await.map(|value| (200, value))),
-                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content(&runtime, conversation, message, attachment).await {
-                    Ok(content) => {
-                        if crate::storage::gateway::query_value(&query, "version").is_some_and(|version| version != content.sha256) {
-                            response(Err(GatewayError::new("ATTACHMENT_VERSION_CHANGED", "附件预览版本已变化，请重新打开。", 409)))
-                        } else { binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers) }
-                    },
+                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content_representation(&runtime, conversation, message, attachment,
+                    crate::storage::gateway::query_value(&query, "version"), crate::storage::gateway::query_value(&query, "representation")).await {
+                    Ok(content) => binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers),
                     Err(error) => response(Err(error)),
+                },
+                ("GET", [_, "attachments", attachment, "preview"]) => {
+                    let offset = crate::storage::gateway::query_value(&query, "offset").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+                    let arguments = json!({"version":crate::storage::gateway::query_value(&query, "version"),
+                        "representation":crate::storage::gateway::query_value(&query, "representation"),"offset":offset});
+                    response(crate::orchestration::gateway_attachments::preview(&runtime, conversation, message, attachment, &arguments).await.map(|value| (200, value)))
                 },
                 ("GET", [_, "attachments", attachment, "text"]) => {
                     let number = |name, fallback| crate::storage::gateway::query_value(&query, name).and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);

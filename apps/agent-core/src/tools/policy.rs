@@ -298,6 +298,7 @@ const REVERSIBLE_TOOLS: &[&str] = &[
     "task.delegate",
     "task.control",
     "filesystem.write",
+    "document.create",
     "filesystem.edit",
     "filesystem.mkdir",
     "work.folder.bind",

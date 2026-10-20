@@ -109,7 +109,13 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 
 右栏复用 `ConversationWorkTabs`，任务区默认折叠为 28 DIP 标题，用户展开后才轮询进度，整个展开区域仍受可用高度限制；收起不暂停后端任务。下方标签与预览使用剩余空间，标签文件名固定 190 DIP，名称及关闭按钮共用同色背景，高度 26 DIP。截图、真实成功文件回执、任务产物与文件选择器共用标签入口；同一路径更新同一标签，关闭视图不删除文件或取消任务。模型可通过 `artifact.open` 选择展示现有文件或 HTTP(S) 网页，并提供标题；文件生成和命名仍通过正式文件工具完成，不从助手正文猜测产物。
 
-`POST /agent/workspace/preview`（同义 `/api/agent/workspace/preview`）按当前 conversationId 的真实工作范围读取预览；`GET /agent/workspace/content` 返回带版本校验的 PDF、图片或受限 HTML 原始内容并支持 Range。系统文件选择器可为当前聊天授予单文件预览许可，该许可不扩大模型工具权限，也不放开正式 Data。Markdown、公式和 Mermaid 复用离线资源；文本按 UTF-16 分页；DOC/DOCX/PPT/PPTX 等由私有 LibreOffice 转换成缓存 PDF。完整资源构建准备 `runtime/office/`；旧离线资源缺少转换器或转换失败时显示提取正文与原因，不阻断对话。
+`POST /agent/workspace/preview`（同义 `/api/agent/workspace/preview`）按当前 conversationId 的真实工作范围读取预览；`GET /agent/workspace/content` 返回带版本校验的 DOCX、PPTX、XLSX、PDF、图片或受限 HTML 原始内容并支持 Range。系统文件选择器可为当前聊天授予单文件预览许可，该许可不扩大模型工具权限，也不放开正式 Data。Markdown、公式和 Mermaid 复用离线资源；文本按 UTF-16 分页。普通 DOCX、PPTX 和 XLSX 在有界 ZIP/XML 特征检查后直接展示：DOCX 使用随包固定版本的 docx-preview；PPTX 使用原生 WebView 渲染模块，按原始 EMU 坐标保留页面比例，展示文字、常用形状、图片、表格和基本母版背景，支持翻页、页码、键盘与缩放；XLSX 使用原生表格模块切换工作表、按可见区域展示单元格及已有公式缓存，不执行重算。OOXML 解压复用随包 JSZip，不使用运行时 CDN，也不将这些预览描述为完整 Office 兼容。
+
+只有实际不支持的内容（如嵌入对象、复杂图表、SmartArt 或透视表）和真实渲染失败才切换为同一原件版本的缓存 PDF；前端通过 `representation=pdf` 请求，沿用私有 LibreOffice 转换缓存。旧 DOC/PPT/XLS 等格式继续使用既有转换路径；PDF、图片、SVG、HTML 和文本不为此增加转换。完整资源构建准备 `runtime/office/`；旧离线资源缺少转换器或转换失败时显示提取正文与具体原因，不阻断对话。登记回执中的 `previewStatus=registered` 或 `rendered=false` 仅说明标签已登记、尚未确认显示，不能据此判定失败、声称文本回退或要求用户安装外部 Office。
+
+DOCX、PPTX、XLSX 原件由 C# 经既有授权内容接口读取，并以当前视图绑定的单文件代理地址交给统一 Office 预览入口；代理使用独立于静态资源目录映射的固定域，仅允许可信预览页读取，页面不能借代理读取其他文件或任意网关接口。DOCX 和 PPTX 排版内容放在禁脚本、禁外部网络的隔离 iframe 中，不执行 altChunks、事件处理或嵌入脚本；XLSX 在可信页面的只读表格容器中按文字与受限样式构造 DOM，不执行公式或外部链接。渲染库、ZIP 库和许可证随包携带。PPTX 已呈现页面保留 DOM，切页不重复解压创建；页码、缩放和工作表状态随现有视图状态保存。消息附件的 Office 预览通过 `/api/conversations/{conversationId}/attachments/{attachmentId}/preview` 复用同一选择与转换逻辑，仍先验证消息归属、附件 ID 和原件版本，不向模型文件工具开放私有上传目录。`artifact.open` 的文件回执明确区分登记与渲染完成，模型不能从登记时的类型推断最终显示模式。
+
+Office 首屏与后台完成分开回报：`shown` 表示当前内容已可操作，带同一 key/renderId 的 `preparing/settled` 管理后续资源，不让图片、字体或其他页拖延首屏。PPTX 先解析页序和当前页，共用布局按 Promise 缓存，后续页在空闲片段准备；XLSX 并行读取当前表与共用结构，可见行先解码，其余行按短时间片继续，保留完整尺寸、合并区域与公式缓存语义；DOCX 先挂载排版内容，使用原生内部滚动与后续页按需布局，字体和图片在后台补齐。XML 部件仍需结构解析，不能将此描述成文件级流式下载或完整流式 XML 引擎。Rust 保留全包路径、链接、容量和已知不支持部件检查，PPTX/XLSX 后续页 XML 由渲染器在访问时核验。后台准备中的视图切走后继续工作，完成后才挂起；准备并发沿用硬件额度并为当前文件保留优先位置，不加入聊天发送等待链路。轻量空闲预热仅准备共用 WebView 环境，不预读工作文件或启动本机浏览器。
 
 `ConversationDocumentPanel` 按需建立并保留已打开文档的 WebView、DOM 与阅读位置，按硬件档位缓存 4／8／12 个视图，闲置视图降低内存目标并尝试挂起；另保留最多 64 份、合计 3200 万字符的解析结果。每份文件拥有独立的读取与渲染任务，切换标签后继续完成并更新其自身缓存，不把晚到结果写到新选中的文件；关闭、刷新和删除所属聊天时取消对应任务。切换缓存内标签不重复读取或渲染，显式刷新重新获取内容，超出容量淘汰最久未用视图。Markdown、SVG、隔离 HTML 和代码预览各用正确的显示类型；普通文本使用中英界面字体，代码复用统一高亮组件和等宽字体。Rust 执行读取、解析和转换，C# 管理标签及生命周期，WebView JavaScript 只做文档渲染。
 
@@ -118,6 +124,8 @@ EXE 安装器采用自包含、无包身份的 WinUI 载荷，安装时将软件
 右侧主页提供文件、未提交变更与终端入口。主页和浏览器地址栏共用地址解析：网址直接访问，普通关键词进入 Google 搜索。启动恢复历史网页只恢复标签信息，用户激活或当前任务明确请求打开时才加载；浏览器类 MCP 不参与后台预热，其他可信服务沿用现有策略。普通打开网站默认进入右栏；只有明确要求本机或系统浏览器时才走外部应用，个人浏览器配置不被借用。变更通过 `GET /api/agent/workspace/changes` 在当前授权目录查询 Git 已暂存、未暂存内容及未跟踪文件名。
 
 终端直接显示在右侧 `terminal` 标签中，不弹出 PowerShell 或 Windows Terminal 窗口。`ConversationWorkspaceTerminal` 使用随包 xterm.js 展示真实 ConPTY 的 VT 输出并回传键盘、粘贴及窗口尺寸；它的本地 WebView 桥只接受终端页面消息，与聊天、文档及外站浏览器隔离。Rust `tools/gateway_workspace_terminal.rs` 持有 ConPTY、shell 和进程树；`POST /api/agent/workspace/terminal/open` 从当前聊天的真实工作归属解析启动目录，`/terminal/action` 提供 read、write、resize、close。模型通过 `terminal.workspace.open/list/read/write/close` 操作同一真实会话，`workspace_terminal_open` 只让界面挂接既有 sessionId，不再创建第二个 shell；模型也可列出、读取和向用户已开的当前聊天终端输入命令。输入接受与命令完成分开，界面和模型使用独立输出游标。切换标签或收起侧栏保留 shell 与输出，关闭终端标签、删除所属聊天或退出软件释放会话和进程树；输出缓存有界。此入口遵守宿主终端的权限与审批，不改变 `terminal.host.*` 的现有合同。
+
+完整命令优先使用 `terminal.workspace.run(sessionId, command, commandId?, waitMs?)`：整段 PowerShell 脚本在同一右侧 PTY 中提交，由程序处理编码与回车。回执区分 `running/completed/unknown`，包含命令退出码、实际工作目录、输出与游标；`terminal.workspace.read` 可按 `commandId` 继续观察。相同 ID 与相同脚本只查询既有回执，不重放；相同 ID 对应不同脚本会被拒绝。等待时间仅约束本次观察，不终止命令；不能自动清空用户未提交输入或向运行程序抢写。终端退出、关闭或缺少自有完成标记时保留未知状态，不能凭 shell 退出码或输入接收宣称命令成功。原始 `write` 保留给真正的交互程序，权限、工作范围和任务操作账本保持既有约束。
 
 终端已建立会话后的按键、输出和尺寸变更只复核现有会话及当前聊天归属，不重新准备整份工具配置、检索与目录布局；目录文件身份变化或待恢复事务仍走正式恢复路径。输出长轮询与输入写入分开持锁，等待输出不能阻止用户输入。
 

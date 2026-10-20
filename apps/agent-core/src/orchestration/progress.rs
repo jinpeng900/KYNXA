@@ -11,8 +11,8 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const DIAGNOSTIC_ERROR: &str = "INVALID_TOOL_RUN_DIAGNOSTICS";
 const MAX_DOCUMENT_TARGETS: usize = 4096;
 
-/// A prose artifact is checked by complete, hash-matched reads; code still needs execution checks.
-/// 文本产物依据完整且哈希一致的回读核验；代码修改仍须真实执行检查，回读不证明语义正确。
+/// Document artifacts use complete, hash-matched reads; code still needs execution checks.
+/// 文档产物依据完整且哈希一致的回读核验；代码修改仍须真实执行检查，回读不证明语义正确。
 #[derive(Default)]
 struct DocumentValidation {
     sha256: String,
@@ -20,6 +20,14 @@ struct DocumentValidation {
     ranges: Vec<(u64, u64)>,
     read_back: bool,
     result_ref: Value,
+    page_count: Option<u64>,
+    page_windows: BTreeMap<(u64, u64), DocumentReadWindow>,
+}
+
+#[derive(Default)]
+struct DocumentReadWindow {
+    total_characters: Option<u64>,
+    ranges: Vec<(u64, u64)>,
 }
 
 /// Request-local metrics and execution evidence never certify semantic task correctness.
@@ -322,7 +330,7 @@ impl RunProgress {
             .filter(|value| value.is_object())
             .or_else(|| canonical.get("value").filter(|value| value.is_object()))
             .unwrap_or(canonical);
-        if name == "filesystem.read" && completed {
+        if matches!(name, "filesystem.read" | "document.read") && completed {
             self.observe_document_read(output, result);
             return;
         }
@@ -332,13 +340,14 @@ impl RunProgress {
             "filesystem.mkdir",
             "filesystem.move",
             "filesystem.delete",
+            "document.create",
         ]
         .contains(&name)
         {
             if completed || uncertain {
                 self.mutation_revision += 1;
             }
-            if completed && matches!(name, "filesystem.write" | "filesystem.edit") {
+            if completed && matches!(name, "filesystem.write" | "filesystem.edit" | "document.create") {
                 self.observe_document_write(output);
             }
             // A successful directory receipt checks the structural effect, not executable code.
@@ -469,7 +478,7 @@ impl RunProgress {
     }
 
     fn observe_document_write(&mut self, output: &Value) {
-        let Some(path) = output["path"].as_str().filter(|path| is_prose_target(path)) else {
+        let Some(path) = output["path"].as_str().filter(|path| is_document_target(path)) else {
             return;
         };
         let Some(hash) = content_hash(&output["sha256"]) else {
@@ -502,6 +511,8 @@ impl RunProgress {
             document.read_back = false;
             document.ranges.clear();
             document.total_characters = None;
+            document.page_count = None;
+            document.page_windows.clear();
             return;
         }
         let Some((start, end, total)) = output["offset"]
@@ -515,35 +526,44 @@ impl RunProgress {
         if start > end
             || end > total
             || total > MAX_SAFE_INTEGER
-            || output["content"]
+            || output.get("content").filter(|value| value.is_string()).or_else(|| output.get("text"))
+                .unwrap_or(&Value::Null)
                 .as_str()
                 .is_none_or(|content| content.encode_utf16().count() as u64 != end - start)
         {
             return;
         }
-        if document
-            .total_characters
-            .is_some_and(|previous| previous != total)
-        {
-            document.ranges.clear();
-            document.read_back = false;
-        }
-        document.total_characters = Some(total);
-        if document.ranges.len() >= MAX_DOCUMENT_TARGETS {
-            return;
-        }
-        document.ranges.push((start, end));
-        document.ranges.sort_unstable();
-        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(document.ranges.len());
-        for &(start, end) in &document.ranges {
-            if let Some(previous) = merged.last_mut().filter(|previous| start <= previous.1) {
-                previous.1 = previous.1.max(end);
-            } else {
-                merged.push((start, end));
+        if output["extraction"]["format"] == "pdf" {
+            let page_window = &output["extraction"]["pageWindow"];
+            let Some(((first, last), count)) = page_window["startPage"].as_u64()
+                .zip(page_window["endPage"].as_u64()).zip(output["extraction"]["pageCount"].as_u64())
+                .filter(|((first, last), count)| *first > 0 && first <= last && last <= count && *count <= MAX_SAFE_INTEGER)
+            else { return; };
+            if document.page_count.is_some_and(|previous| previous != count) {
+                document.page_windows.clear();
             }
+            if document.page_windows.len() >= MAX_DOCUMENT_TARGETS && !document.page_windows.contains_key(&(first, last)) {
+                return;
+            }
+            document.page_count = Some(count);
+            // PDF text offsets restart per page window; keep their ranges separate before merging completed pages.
+            // PDF 文本偏移在各页窗口内重新计数，先分别保存字符范围，再合并完整窗口的页覆盖。
+            let window = document.page_windows.entry((first, last)).or_default();
+            record_read_range(&mut window.total_characters, &mut window.ranges, start, end, total);
+            let mut pages = Vec::new();
+            for (&(first, last), window) in &document.page_windows {
+                if window.total_characters.is_some_and(|total| window.ranges.as_slice() == [(0, total)]) {
+                    merge_read_range(&mut pages, first, last + 1);
+                }
+            }
+            document.read_back = pages.as_slice() == [(1, count + 1)];
+        } else {
+            if output["extractionComplete"] == false || output["extraction"]["complete"] == false {
+                return;
+            }
+            record_read_range(&mut document.total_characters, &mut document.ranges, start, end, total);
+            document.read_back = document.ranges.as_slice() == [(0, total)];
         }
-        document.ranges = merged;
-        document.read_back = document.ranges.as_slice() == [(0, total)];
         if document.read_back {
             document.result_ref = result["resultRef"].clone();
         }
@@ -720,13 +740,32 @@ impl RunProgress {
     }
 }
 
+fn record_read_range(total_characters: &mut Option<u64>, ranges: &mut Vec<(u64, u64)>, start: u64, end: u64, total: u64) {
+    if total_characters.is_some_and(|previous| previous != total) { ranges.clear(); }
+    *total_characters = Some(total);
+    merge_read_range(ranges, start, end);
+}
+
+fn merge_read_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+    if ranges.len() >= MAX_DOCUMENT_TARGETS { return; }
+    ranges.push((start, end));
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for &(start, end) in ranges.iter() {
+        if let Some(previous) = merged.last_mut().filter(|previous| start <= previous.1) {
+            previous.1 = previous.1.max(end);
+        } else { merged.push((start, end)); }
+    }
+    *ranges = merged;
+}
+
 fn content_hash(value: &Value) -> Option<&str> {
     value
         .as_str()
         .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn is_prose_target(path: &str) -> bool {
+fn is_document_target(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     if ["AGENTS.md", "SKILL.md"]
         .iter()
@@ -735,7 +774,7 @@ fn is_prose_target(path: &str) -> bool {
         return false;
     }
     name.rsplit_once('.').is_some_and(|(_, extension)| {
-        ["md", "markdown", "txt", "rst", "adoc"]
+        ["md", "markdown", "txt", "rst", "adoc", "docx", "pptx", "xlsx", "pdf"]
             .iter()
             .any(|prose| extension.eq_ignore_ascii_case(prose))
     })
@@ -921,6 +960,45 @@ mod document_validation_tests {
         assert_eq!(progress.verification()["pendingValidation"], true);
         read(&mut progress, "/work/report.txt", 'b', 0, 8, "new body");
         assert_eq!(progress.verification()["pendingValidation"], false);
+    }
+
+    #[test]
+    fn generated_office_documents_accept_document_read_text_with_the_written_hash() {
+        for format in ["docx", "pptx", "xlsx"] {
+            let mut progress = RunProgress::default();
+            let path = format!("/work/report.{format}");
+            progress.apply("progress.observeOutcome", &json!({"call":{"id":"create","name":"document.create"},
+                "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":"a".repeat(64),
+                    "bytes":1024,"format":format,"actualFormat":format,"validated":true}})).unwrap();
+            assert_eq!(progress.verification()["documentValidation"]["targetCount"], 1);
+            assert_eq!(progress.verification()["pendingValidation"], true);
+            for (hash, complete) in [('b', true), ('a', false), ('a', true)] {
+                progress.apply("progress.observeOutcome", &json!({"call":{"id":"read","name":"document.read"},
+                    "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":hash.to_string().repeat(64),
+                        "text":"正文42","offset":0,"nextOffset":4,"totalCharacters":4,"extractionComplete":complete,
+                        "extraction":{"format":format,"complete":complete}}})).unwrap();
+                assert_eq!(progress.verification()["pendingValidation"], hash != 'a' || !complete);
+            }
+            assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"}}))["completionState"], "completed");
+        }
+    }
+
+    #[test]
+    fn generated_pdf_readback_merges_complete_page_windows_without_offset_collisions() {
+        let mut progress = RunProgress::default();
+        progress.apply("progress.observeOutcome", &json!({"call":{"id":"pdf-create","name":"document.create"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":"/work/book.pdf","sha256":"a".repeat(64),
+                "format":"pdf","validated":true,"bytes":2048}})).unwrap();
+        for (first, last, offset, text, total) in [(1, 2, 0, "Page12", 6), (3, 3, 0, "A", 2), (3, 3, 1, "B", 2)] {
+            progress.apply("progress.observeOutcome", &json!({"call":{"id":"pdf-read","name":"document.read"},
+                "result":{"status":"completed","isError":false},"canonicalResult":{"path":"/work/book.pdf","sha256":"a".repeat(64),
+                    "text":text,"offset":offset,"nextOffset":offset+text.len(),"totalCharacters":total,"extractionComplete":false,
+                    "extraction":{"format":"pdf","complete":false,"pageCount":3,
+                        "pageWindow":{"version":"pdf-page-window-v1","startPage":first,"endPage":last}}}})).unwrap();
+            assert_eq!(progress.verification()["pendingValidation"], !(first == 3 && offset == 1));
+        }
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 1);
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"}}))["completionState"], "completed");
     }
 
     #[test]

@@ -18,6 +18,7 @@ use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::string;
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_BINARY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static FILE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
 
 fn invalid(message: &str) -> ServiceError {
@@ -146,6 +147,10 @@ fn decode_text(bytes: &[u8]) -> ServiceResult<&str> {
 }
 
 fn check_hash(path: &Path, expected: &Value) -> ServiceResult<Option<Vec<u8>>> {
+    check_hash_bounded(path, expected, MAX_FILE_BYTES)
+}
+
+fn check_hash_bounded(path: &Path, expected: &Value, maximum: u64) -> ServiceResult<Option<Vec<u8>>> {
     let Some(metadata) = inspect(path, true, false)? else {
         if !expected.is_null() {
             return Err(conflict("文件已不存在或版本不匹配，请重新读取。"));
@@ -155,7 +160,7 @@ fn check_hash(path: &Path, expected: &Value) -> ServiceResult<Option<Vec<u8>>> {
     if !metadata.is_file() {
         return Err(invalid("路径不是普通文件。"));
     }
-    let bytes = read_bounded(path, MAX_FILE_BYTES)?;
+    let bytes = read_bounded(path, maximum)?;
     if !matches(r"^[a-f0-9]{64}$", string(expected)) || sha256(&bytes) != string(expected) {
         return Err(conflict("文件已更新，请重新读取后再修改。"));
     }
@@ -260,14 +265,15 @@ fn read_page(path: &Path, input: &Value) -> ServiceResult<Value> {
     Ok(page)
 }
 
-fn atomic_text(
+fn atomic_write(
     path: &Path,
     bytes: &[u8],
     expected: &Value,
     binding: &Value,
     cancellation: &Option<Arc<AtomicBool>>,
+    maximum_existing_bytes: u64,
 ) -> ServiceResult<Value> {
-    check_hash(path, expected)?;
+    check_hash_bounded(path, expected, maximum_existing_bytes)?;
     let parent = path.parent().ok_or_else(|| invalid("文件父目录不存在。"))?;
     if !inspect(parent, false, false)?.is_some_and(|metadata| metadata.is_dir()) {
         return Err(invalid("文件父目录不存在。"));
@@ -289,7 +295,7 @@ fn atomic_text(
         file.sync_all().map_err(ServiceError::io)?;
         drop(file);
         inspect(parent, false, false)?;
-        check_hash(path, expected)?;
+        check_hash_bounded(path, expected, maximum_existing_bytes)?;
         revalidate(binding)?;
         cancelled(cancellation)?;
         // Once the atomic replacement is dispatched, return its actual commit receipt despite later cancellation.
@@ -303,6 +309,69 @@ fn atomic_text(
         }
     }
     result
+}
+
+fn file_lock(path: &Path) -> Arc<Mutex<()>> {
+    let key = path_key(path);
+    let mut locks = FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = locks.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| Arc::new(Mutex::new(())));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// Commit generated document bytes through the same per-file transaction as text writes.
+/// 生成文档字节复用文本写入的逐文件事务；独立额度不扩大公开文本工具的 1 MiB 合同。
+pub(super) fn commit_binary(
+    path: &Path,
+    bytes: &[u8],
+    expected: &Value,
+    binding: &Value,
+    cancellation: &Option<Arc<AtomicBool>>,
+) -> ServiceResult<Value> {
+    if bytes.len() as u64 > MAX_BINARY_FILE_BYTES {
+        return Err(ServiceError::new("TOOL_FILE_TOO_LARGE", "生成文档超过 64 MiB 上限。", 400));
+    }
+    if binding["path"].as_str() != Some(path_text(path).as_str()) {
+        return Err(ServiceError::new("TOOL_PATH_CHANGED", "生成文档与已授权目标不一致。", 409));
+    }
+    let lock = file_lock(path);
+    let _guard = lock.lock().unwrap();
+    cancelled(cancellation)?;
+    revalidate(binding)?;
+    atomic_write(path, bytes, expected, binding, cancellation, MAX_BINARY_FILE_BYTES)
+}
+
+#[cfg(test)]
+mod binary_commit_tests {
+    use super::*;
+
+    #[test]
+    fn document_binary_commit_preserves_versions_cancellation_and_text_limits() {
+        let root = std::env::temp_dir().join(format!("kynxa-document-commit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = canonical(&root, false).unwrap();
+        let path = root.join("document.docx");
+        let binding = json!({"requestedPath":path_text(&path),"path":path_text(&path),"allowMissing":true,"allowHardLinks":false});
+        let first = vec![1; 2 * 1024 * 1024];
+        let created = commit_binary(&path, &first, &Value::Null, &binding, &None).unwrap();
+        assert_eq!(created["bytes"], first.len());
+        assert_eq!(created["sha256"], sha256(&first));
+        assert_eq!(fs::read(&path).unwrap(), first);
+        let metadata = apply("file.stat", &json!({"path":path_text(&path),"pathBinding":binding}), &None).unwrap();
+        assert_eq!(metadata["sha256"], created["sha256"]);
+        let second = vec![2; first.len() + 1024];
+        let updated = commit_binary(&path, &second, &created["sha256"], &binding, &None).unwrap();
+        assert_eq!(updated["sha256"], sha256(&second));
+        assert_eq!(commit_binary(&path, &first, &created["sha256"], &binding, &None).unwrap_err().code, "TOOL_FILE_CONFLICT");
+        let cancellation = Some(Arc::new(AtomicBool::new(true)));
+        assert_eq!(commit_binary(&path, &first, &updated["sha256"], &binding, &cancellation).unwrap_err().code, "TOOL_CANCELLED");
+        assert_eq!(fs::read(&path).unwrap(), second);
+        assert_eq!(apply("file.write", &json!({"path":path_text(&path),"pathBinding":binding,
+            "input":{"content":"text","expectedHash":updated["sha256"]}}), &None).unwrap_err().code, "TOOL_FILE_TOO_LARGE");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 pub fn apply(
@@ -332,8 +401,10 @@ pub fn apply(
     }
     if operation == "file.stat" {
         let metadata = inspect(&path, false, true)?.ok_or_else(|| invalid("路径不是普通文件。"))?;
-        let hash = if metadata.is_file() && metadata.len() <= MAX_FILE_BYTES {
-            json!(sha256(&read_bounded(&path, MAX_FILE_BYTES)?))
+        // Hash generated Office files too, so their next replacement can obtain an exact expectedHash.
+        // 元信息也覆盖生成的 Office 文件，保证下次替换可取得准确 expectedHash；文本读取额度不变。
+        let hash = if metadata.is_file() && metadata.len() <= MAX_BINARY_FILE_BYTES {
+            json!(sha256(&read_bounded(&path, MAX_BINARY_FILE_BYTES)?))
         } else {
             Value::Null
         };
@@ -362,20 +433,7 @@ pub fn apply(
             json!({"path":path_text(&path),"entries":entries,"limit":bounded(&input["limit"],200,1,500)?}),
         );
     }
-    let key = path_key(&path);
-    let lock = {
-        let mut locks = FILE_LOCKS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap();
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        let lock = locks
-            .get(&key)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Mutex::new(())));
-        locks.insert(key, Arc::downgrade(&lock));
-        lock
-    };
+    let lock = file_lock(&path);
     let _guard = lock.lock().unwrap();
     cancelled(cancellation)?;
     revalidate(binding)?;
@@ -424,12 +482,13 @@ pub fn apply(
                     400,
                 ));
             }
-            atomic_text(
+            atomic_write(
                 &path,
                 content.as_bytes(),
                 &input["expectedHash"],
                 binding,
                 cancellation,
+                MAX_FILE_BYTES,
             )
         }
         "file.delete" => {

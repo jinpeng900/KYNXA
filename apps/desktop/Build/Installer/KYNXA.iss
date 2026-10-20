@@ -89,7 +89,9 @@ zhcn.ConfirmUninstall=是否卸载 KYNXA？聊天、模型、用户工具和数�
 [Files]
 ; Never enumerate a development output or an existing installation directly.
 ; 不直接枚举开发输出或已有安装；发布脚本只把批准的运行载荷放进暂存目录。
-Source: "{#PayloadRoot}\*"; DestDir: "{app}"; Excludes: "Data,Data\*,Extensions,Extensions\*,.git,.git\*,*.pdb,prerequisites,prerequisites\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Anchor private-root exclusions so nested third-party data and extensions remain available.
+; 私有目录排除规则限定在载荷根目录，保留第三方依赖内的同名目录。
+Source: "{#PayloadRoot}\*"; DestDir: "{app}"; Excludes: "\Data,\Data\*,\Extensions,\Extensions\*,\.git,\.git\*,*.pdb,\prerequisites,\prerequisites\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BrandImageFile}"; DestName: "kynxa-installer-logo.png"; Flags: dontcopy
 Source: "Configure-Kynxa.ps1"; DestName: "Configure-Kynxa-Read.ps1"; Flags: dontcopy
 Source: "{#PayloadRoot}\prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Flags: dontcopy skipifsourcedoesntexist

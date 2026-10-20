@@ -1,10 +1,13 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
+using KYNXA.Contracts;
 using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
@@ -56,6 +59,27 @@ namespace TranscriptUiSmoke
             try
             {
                 Guid conversation = Guid.NewGuid();
+                if (Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_DOCX_ONLY") == "1")
+                {
+                    await CheckDocxDocumentAsync(panel, fixture, conversation);
+                    SaveWorkspaceMetrics(cold, "workspace-docx-only");
+                    File.WriteAllText(_result, $"PASS: {_checks} DOCX workspace checks; actual text/table/image rendering, isolated resources, cached DOM and PDF fallback. No Chrome launched.");
+                    return;
+                }
+                if (Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_PPTX_ONLY") == "1")
+                {
+                    await CheckPptxDocumentAsync(panel, fixture, conversation);
+                    SaveWorkspaceMetrics(cold, "workspace-pptx-only");
+                    File.WriteAllText(_result, $"PASS: {_checks} PPTX workspace checks; actual slides, text/table/image rendering, controls/keyboard, fitted aspect ratio, cached page state, scoped attachment and PDF fallback. No Chrome launched.");
+                    return;
+                }
+                if (Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_XLSX_ONLY") == "1")
+                {
+                    await CheckXlsxDocumentAsync(panel, fixture, conversation);
+                    SaveWorkspaceMetrics(cold, "workspace-xlsx-only");
+                    File.WriteAllText(_result, $"PASS: {_checks} XLSX workspace checks; typed values, cached formulas, real sheet switching/scrolling, cached document state and PDF fallback. No Chrome launched.");
+                    return;
+                }
                 if (Environment.GetCommandLineArgs().Contains("--workspace-chrome-only", StringComparer.Ordinal))
                 {
                     await CheckNativeChromeAsync(panel, fixture, conversation);
@@ -104,6 +128,9 @@ namespace TranscriptUiSmoke
                 await WaitWorkspaceAsync(panel, false, "!!document.querySelector('.mermaid-svg') && document.querySelector('.mermaid-source').textContent.includes('FILE_DIAGRAM')");
                 panel.ShowResource(conversation, "picture.png");
                 await WaitWorkspaceAsync(panel, false, "document.querySelector('img')?.naturalWidth > 0");
+                await CheckDocxDocumentAsync(panel, fixture, conversation);
+                await CheckPptxDocumentAsync(panel, fixture, conversation);
+                await CheckXlsxDocumentAsync(panel, fixture, conversation);
                 panel.ShowResource(conversation, "sample.pdf");
                 await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
                 Check(fixture.PdfRequests > 0, "PDF native rendering reads bytes from the authorized content endpoint");
@@ -114,18 +141,243 @@ namespace TranscriptUiSmoke
                     "external and HTML pages expose no native message or host-object bridge");
                 Check(await panel.WebsiteBrowser.CoreWebView2.ExecuteScriptAsync("document.querySelector('button').click(); document.querySelector('button').dataset.count === '1'") == "true",
                     "local HTML runs its own interactive controls inside the isolated document view");
-                await CheckNativeChromeAsync(panel, fixture, conversation);
+                bool documentsOnly = Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_DOCUMENTS_ONLY") == "1";
+                if (!documentsOnly) await CheckNativeChromeAsync(panel, fixture, conversation);
                 panel.ShowResource(conversation, "report.md", "报告.md", userSelected: true, version: "updated");
                 await WaitWorkspaceAsync(panel, false, "!!document.querySelector('h1') && !!document.querySelector('.mermaid-svg')");
                 Check(panel.DocumentBrowser.CoreWebView2.Settings.IsWebMessageEnabled && !panel.DocumentBrowser.CoreWebView2.Settings.AreHostObjectsAllowed,
                     "trusted local preview returns after PDF and external browsing without exposing host objects");
-                _metrics["checks"] = _checks; _metrics["mode"] = "workspace-preview-only";
-                _metrics["durationMs"] = cold.ElapsedMilliseconds;
-                File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics));
-                File.WriteAllText(_result, $"PASS: {_checks} native workspace preview checks; Markdown/table/math/Mermaid, scroll restoration, text, image, SVG, PDF, isolated HTML, cached DOM and actual embedded Chrome HWND/CDP body.");
+                SaveWorkspaceMetrics(cold, documentsOnly ? "workspace-documents-only" : "workspace-preview-only");
+                File.WriteAllText(_result, documentsOnly
+                    ? $"PASS: {_checks} workspace document checks; Markdown/table/math/Mermaid, background completion, text/code, image, SVG, DOCX/PDF fallback, isolated HTML and cached DOM. No Chrome launched."
+                    : $"PASS: {_checks} native workspace preview checks; Markdown/table/math/Mermaid, scroll restoration, text, image, SVG, DOCX, PDF, isolated HTML, cached DOM and actual embedded Chrome HWND/CDP body.");
             }
             catch (Exception error) { File.WriteAllText(_result, "FAIL: " + error); }
             finally { panel.Dispose(); await fixture.DisposeAsync(); _window?.Close(); }
+        }
+
+        private void SaveWorkspaceMetrics(Stopwatch cold, string mode)
+        {
+            _metrics["checks"] = _checks; _metrics["mode"] = mode;
+            _metrics["durationMs"] = cold.ElapsedMilliseconds;
+            File.WriteAllText(Path.Combine(Path.GetTempPath(), "kynxa-transcript-smoke.json"), JsonSerializer.Serialize(_metrics));
+        }
+
+        private async Task CheckDocxDocumentAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
+        {
+            const string frameBody = "document.querySelector('iframe.docx-view')?.contentDocument?.body";
+            var firstDisplay = Stopwatch.StartNew();
+            panel.ShowResource(conversation, "sample.docx", "文档.docx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, $"{frameBody}?.textContent.includes('DOCX_BROWSER_FIXTURE') && {frameBody}?.querySelector('table')?.textContent.includes('DOCX_TABLE_CELL') && {frameBody}?.querySelector('img')?.naturalWidth > 0");
+            _metrics["docxFirstDisplayMs"] = firstDisplay.ElapsedMilliseconds;
+            var document = panel.DocumentBrowser!.CoreWebView2;
+            Check(await document.ExecuteScriptAsync($"!{frameBody}.querySelector('script,iframe,object,[onclick]') && !{frameBody}.textContent.includes('ALT_CHUNK_EXECUTED') && document.querySelector('iframe.docx-view').sandbox.value === 'allow-same-origin'") == "true",
+                "DOCX altChunks/scripts are absent and its document lives in a frame without script permission");
+            Check(await document.ExecuteScriptAsync("document.querySelector('iframe.docx-view').getBoundingClientRect().width <= innerWidth && document.querySelector('iframe.docx-view').contentDocument.querySelector('.docx-wrapper').getBoundingClientRect().width <= innerWidth + 2") == "true",
+                "DOCX pages fit the available sidebar width instead of forcing a wide horizontal viewport");
+            await document.ExecuteScriptAsync($"window.__docxPage = {frameBody}.querySelector('section.docx')");
+            int contentReads = fixture.DocxRequests;
+            panel.ShowResource(conversation, "notes.txt");
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('pre')?.textContent.includes('PLAIN_FILE_FIXTURE') === true");
+            int prepared = fixture.PreviewRequests;
+            var cachedReturn = Stopwatch.StartNew();
+            panel.ShowResource(conversation, "sample.docx", "文档.docx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, $"!!window.__docxPage && window.__docxPage === {frameBody}?.querySelector('section.docx')");
+            _metrics["docxCachedReturnMs"] = cachedReturn.ElapsedMilliseconds;
+            Check(ReferenceEquals(document, panel.DocumentBrowser!.CoreWebView2) && fixture.DocxRequests == contentReads
+                && fixture.PreviewRequests == prepared,
+                "returning to DOCX retains the same page DOM and does not fetch or render its file again");
+            fixture.AttachmentConversationId = conversation;
+            var attachment = new ChatAttachment(fixture.AttachmentId, "attachment.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 4096, Sha256: WorkspacePreviewFixture.AttachmentVersion);
+            var attachmentDisplay = Stopwatch.StartNew();
+            panel.ShowAttachment(conversation, fixture.AttachmentMessageId, attachment);
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('iframe.docx-view')?.title === 'attachment.docx' && {frameBody}?.textContent.includes('DOCX_BROWSER_FIXTURE') && {frameBody}?.querySelector('table')?.textContent.includes('DOCX_TABLE_CELL')");
+            Check(fixture.AttachmentPreviewRequests == 1 && fixture.AttachmentContentRequests == 1 && fixture.UnexpectedAttachmentRequests == 0,
+                $"DOCX message attachments render through exact message/attachment/version scoped preview and content requests (preview={fixture.AttachmentPreviewRequests}, content={fixture.AttachmentContentRequests}, unexpected={fixture.UnexpectedAttachmentRequests})");
+            _metrics["docxAttachmentDisplayMs"] = attachmentDisplay.ElapsedMilliseconds;
+            panel.ShowResource(conversation, "broken.docx");
+            await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
+            Check(fixture.BrokenDocxRequests == 1 && fixture.DocxFallbackRequests == 1 && fixture.PdfRequests > 0,
+                "a failed direct DOCX render reports failure and receives its PDF representation once");
+            Check(fixture.UnexpectedDocxRequests == 0, "DOCX external resources never reach the fixture network endpoint");
+            _metrics["docxContentRequests"] = fixture.DocxRequests;
+            _metrics["docxPdfFallbackRequests"] = fixture.DocxFallbackRequests;
+            await CheckDeferredDocxTailAsync(panel, fixture, conversation);
+        }
+
+        private async Task CheckDeferredDocxTailAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
+        {
+            panel.ShowResource(conversation, "sample.docx", "文档.docx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('iframe.docx-view')?.contentDocument?.body.textContent.includes('DOCX_SCROLL_ROW_69') === true");
+            var browser = panel.DocumentBrowser!;
+            var document = browser.CoreWebView2;
+            await document.ExecuteScriptAsync("window.__docxTailWaiting=false; const originalParse=window.docx.parseAsync; window.__docxTailGate=new Promise(resolve=>window.__releaseDocxTail=resolve); window.docx.parseAsync=async(...arguments)=>{const parsed=await originalParse(...arguments); const originalImage=parsed.loadDocumentImage.bind(parsed); parsed.loadDocumentImage=(...imageArguments)=>{window.__docxTailWaiting=true; return window.__docxTailGate.then(()=>originalImage(...imageArguments));}; window.docx.parseAsync=originalParse; return parsed;}");
+            int beforeRead = fixture.DocxRequests;
+            panel.ShowResource(conversation, "sample.docx", "文档.docx", userSelected: true, version: "slow-tail-v2");
+            await WaitWorkspaceAsync(panel, false, "window.__docxTailWaiting && document.querySelector('iframe.docx-view')?.contentDocument?.body.textContent.includes('DOCX_SCROLL_ROW_69') === true");
+            DateTime firstPaintDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (panel.PreparedResourceBrowser(conversation, "sample.docx") is null && DateTime.UtcNow < firstPaintDeadline)
+                await Task.Delay(30);
+            Check(panel.PreparedResourceBrowser(conversation, "sample.docx") is not null
+                && panel.IsResourcePreparingInBackground(conversation, "sample.docx")
+                && browser.Visibility == Visibility.Visible && browser.Opacity == 1 && browser.IsHitTestVisible,
+                "DOCX releases its first-paint queue slot and enables input while a real document image is still pending");
+            await SendWorkspacePointerAsync(browser, "iframe.docx-view", click: true, wheelY: -1440);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('iframe.docx-view').contentWindow.scrollY > 0 && window.__docxTailWaiting");
+            await document.ExecuteScriptAsync("window.__tailDocxPage=document.querySelector('iframe.docx-view').contentDocument.querySelector('section.docx')");
+            panel.ShowResource(conversation, "notes.txt");
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('pre')?.textContent.includes('PLAIN_FILE_FIXTURE') === true");
+            Check(panel.IsResourcePreparingInBackground(conversation, "sample.docx")
+                && browser.Visibility == Visibility.Visible && browser.Opacity == 0 && !browser.IsHitTestVisible,
+                "switching files keeps unfinished background resources alive without covering or taking input from the current document");
+            await document.ExecuteScriptAsync("window.__releaseDocxTail()");
+            DateTime settledDeadline = DateTime.UtcNow.AddSeconds(20);
+            while (panel.IsResourcePreparingInBackground(conversation, "sample.docx") && DateTime.UtcNow < settledDeadline)
+                await Task.Delay(40);
+            Check(!panel.IsResourcePreparingInBackground(conversation, "sample.docx") && browser.Visibility == Visibility.Collapsed,
+                "the hidden DOCX becomes eligible for suspension only after its real pending resource has settled");
+            int contentReads = fixture.DocxRequests, previews = fixture.PreviewRequests;
+            panel.ShowResource(conversation, "sample.docx", "文档.docx", userSelected: true, version: "slow-tail-v2");
+            await WaitWorkspaceAsync(panel, false, "window.__tailDocxPage === document.querySelector('iframe.docx-view')?.contentDocument?.querySelector('section.docx') && document.querySelector('iframe.docx-view')?.contentDocument?.querySelector('img')?.naturalWidth > 0 && document.querySelector('iframe.docx-view').contentWindow.scrollY > 0");
+            Check(ReferenceEquals(browser, panel.DocumentBrowser) && contentReads == beforeRead + 1
+                && fixture.DocxRequests == contentReads && fixture.PreviewRequests == previews,
+                "returning after background settling preserves the same DOCX DOM and scroll state without another raw read or render");
+            _metrics["docxFirstPaintBeforeTail"] = true;
+        }
+
+        private async Task CheckPptxDocumentAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
+        {
+            const string frameDocument = "document.querySelector('.pptx-view iframe')?.contentDocument";
+            const string visibleSlide = "[...document.querySelector('.pptx-view iframe').contentDocument.querySelectorAll('.pptx-slide')].find(slide => getComputedStyle(slide).display !== 'none')";
+            var firstDisplay = Stopwatch.StartNew();
+            panel.ShowResource(conversation, "sample.pptx", "演示文稿.pptx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, $"{frameDocument}?.body.textContent.includes('PPTX_SLIDE_ONE') && {frameDocument}?.querySelector('table')?.textContent.includes('PPTX_TABLE_CELL') && {frameDocument}?.querySelector('img')?.naturalWidth > 0");
+            _metrics["pptxFirstDisplayMs"] = firstDisplay.ElapsedMilliseconds;
+            var document = panel.DocumentBrowser!.CoreWebView2;
+            Check(await document.ExecuteScriptAsync($"document.querySelector('.pptx-view iframe').sandbox.value === 'allow-same-origin' && !{frameDocument}.querySelector('script,object,iframe,[onclick]')") == "true",
+                "PPTX slides render in a frame without script permission or executable document markup");
+            Check(await document.ExecuteScriptAsync($"(() => {{ const slide=({visibleSlide}).getBoundingClientRect(); const frame=document.querySelector('.pptx-view iframe').getBoundingClientRect(); return slide.width > 0 && Math.abs(slide.width / slide.height - 16/9) < .02 && frame.width <= innerWidth + 2 && slide.width <= frame.width + 2; }})()") == "true",
+                "PPTX fit preserves the presentation aspect ratio inside the actual sidebar viewport");
+            Check(await document.ExecuteScriptAsync("document.querySelector('.pptx-view input[data-action=page]').value === '1' && document.querySelector('.pptx-view input[data-action=page]').max === '2'") == "true",
+                "the presentation control reports page one of the two actual slides");
+            await document.ExecuteScriptAsync("window.__officeProxyDenied=false; Promise.all(['document.pptx?version=forged','document.xlsx?version=fixture-v1'].map(path=>fetch('https://kynxa-workspace-content.local/Workspace/'+path).then(response=>response.ok).catch(()=>false))).then(results=>window.__officeProxyDenied=results.every(result=>!result))");
+            await WaitWorkspaceAsync(panel, false, "window.__officeProxyDenied === true");
+            Check(fixture.PptxRequests == 1 && fixture.XlsxRequests == 0,
+                "the Office content proxy rejects another version or format without reading any additional authorized original");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=next]", click: true);
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view input[data-action=page]').value === '2' && ({visibleSlide}).textContent.includes('PPTX_SLIDE_TWO')");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=previous]", click: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.pptx-view input[data-action=page]').value === '1'");
+            SendChromeInput(new NativeChromeInput { Type = 1, Data = new() { Key = new() { VirtualKey = 0x22 } } },
+                new NativeChromeInput { Type = 1, Data = new() { Key = new() { VirtualKey = 0x22, Flags = 0x0002 } } });
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.pptx-view input[data-action=page]').value === '2'");
+            await document.ExecuteScriptAsync($"window.__pptxView=document.querySelector('.pptx-view'); window.__pptxFirstSlide={frameDocument}.querySelector('.pptx-slide')");
+            int contentReads = fixture.PptxRequests;
+            panel.ShowResource(conversation, "notes.txt");
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('pre')?.textContent.includes('PLAIN_FILE_FIXTURE') === true");
+            int prepared = fixture.PreviewRequests;
+            panel.ShowResource(conversation, "sample.pptx", "演示文稿.pptx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, $"window.__pptxView === document.querySelector('.pptx-view') && window.__pptxFirstSlide === {frameDocument}?.querySelector('.pptx-slide') && document.querySelector('.pptx-view input[data-action=page]').value === '2'");
+            Check(ReferenceEquals(document, panel.DocumentBrowser!.CoreWebView2) && contentReads == 1
+                && fixture.PptxRequests == contentReads && fixture.PreviewRequests == prepared,
+                "returning to PPTX retains its actual DOM and selected slide without another raw fetch or preview preparation");
+            fixture.AttachmentConversationId = conversation;
+            var attachment = new ChatAttachment(fixture.PptxAttachmentId, "attachment.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation", 4096, Sha256: WorkspacePreviewFixture.AttachmentVersion);
+            panel.ShowAttachment(conversation, fixture.AttachmentMessageId, attachment);
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view iframe')?.title === 'attachment.pptx' && {frameDocument}?.body.textContent.includes('PPTX_SLIDE_ONE') && {frameDocument}?.querySelector('table')?.textContent.includes('PPTX_TABLE_CELL')");
+            Check(fixture.PptxAttachmentPreviewRequests == 1 && fixture.PptxAttachmentContentRequests == 1 && fixture.UnexpectedAttachmentRequests == 0,
+                $"PPTX attachments use exact message, attachment and version scoped content addresses (preview={fixture.PptxAttachmentPreviewRequests}, content={fixture.PptxAttachmentContentRequests}, unexpected={fixture.UnexpectedAttachmentRequests})");
+            panel.ShowResource(conversation, "broken.pptx");
+            await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
+            Check(fixture.BrokenPptxRequests == 1 && fixture.PptxFallbackRequests == 1 && fixture.PdfRequests > 0,
+                "invalid direct PPTX rendering falls back to its PDF representation once");
+            panel.ShowResource(conversation, "late-failure.pptx");
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view iframe')?.title === 'late-failure.pptx' && {frameDocument}?.body.textContent.includes('PPTX_SLIDE_ONE') && document.querySelector('.pptx-view input[data-action=page]')?.value === '1'");
+            DateTime settledDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (panel.PreparedResourceBrowser(conversation, "late-failure.pptx") is null && DateTime.UtcNow < settledDeadline)
+                await Task.Delay(30);
+            Check(panel.PreparedResourceBrowser(conversation, "late-failure.pptx") is not null,
+                "the late-page fixture has fully settled its first shown receipt before navigating");
+            var lateDocument = panel.DocumentBrowser!.CoreWebView2;
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=next]", click: true, clicks: 2);
+            await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
+            Check(fixture.LatePptxRequests == 1 && fixture.LatePptxFallbackRequests == 1,
+                "a later unsupported slide after shown coalesces repeated errors into one PDF fallback");
+            _metrics["pptxContentRequests"] = fixture.PptxRequests;
+            _metrics["pptxPdfFallbackRequests"] = fixture.PptxFallbackRequests;
+            string? samplePath = Environment.GetEnvironmentVariable("KYNXA_WORKSPACE_PPTX_SAMPLE_PATH");
+            if (!string.IsNullOrWhiteSpace(samplePath))
+                await CheckUserPptxSampleAsync(panel, fixture, conversation, samplePath);
+        }
+
+        private async Task CheckUserPptxSampleAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture,
+            Guid conversation, string samplePath)
+        {
+            var sample = fixture.LoadUserPptxSample(samplePath);
+            Check(sample.SlideCount >= 2, "the read-only user presentation contains at least two actual slide parts");
+            string firstText = JsonSerializer.Serialize(sample.FirstPageText);
+            string secondText = JsonSerializer.Serialize(sample.SecondPageText);
+            const string visibleSlide = "[...document.querySelector('.pptx-view iframe').contentDocument.querySelectorAll('.pptx-slide')].find(slide => getComputedStyle(slide).display !== 'none')";
+            panel.ShowResource(conversation, "user-sample.pptx", sample.Title, userSelected: true);
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view iframe')?.contentDocument?.body.textContent.includes({firstText}) && document.querySelector('.pptx-view input[data-action=page]')?.value === '1'");
+            var document = panel.DocumentBrowser!.CoreWebView2;
+            Check(await document.ExecuteScriptAsync($"document.querySelector('.pptx-view input[data-action=page]').max === '{sample.SlideCount}'") == "true",
+                "the real presentation page count matches its original OOXML slide list");
+            string evidenceDirectory = Path.GetDirectoryName(_result)!;
+            using (var capture = File.Create(Path.Combine(evidenceDirectory, "workspace-user-pptx-page1.png")))
+                await document.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture.AsRandomAccessStream());
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=next]", click: true);
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view input[data-action=page]').value === '2' && ({visibleSlide}).textContent.includes({secondText})");
+            using (var capture = File.Create(Path.Combine(evidenceDirectory, "workspace-user-pptx-page2.png")))
+                await document.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture.AsRandomAccessStream());
+            Check(fixture.UserPptxRequests == 1 && fixture.UserPptxPreviewRequests == 1,
+                "the user presentation is read once through its independent preview fixture without changing the original file");
+            _metrics["userPptxSlideCount"] = sample.SlideCount;
+            _metrics["userPptxContentRequests"] = fixture.UserPptxRequests;
+        }
+
+        private async Task CheckXlsxDocumentAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
+        {
+            var firstDisplay = Stopwatch.StartNew();
+            panel.ShowResource(conversation, "sample.xlsx", "工作簿.xlsx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-cell[data-address=A1]')?.textContent.includes('XLSX_TYPED_TITLE') && document.querySelector('.xlsx-cell[data-address=B1]')?.textContent.trim() === '42.5' && document.querySelector('.xlsx-cell[data-address=C1]')?.textContent.trim() === '50' && document.querySelector('.xlsx-cell[data-address=D1]')?.textContent.includes('XLSX_SHARED_TEXT')");
+            _metrics["xlsxFirstDisplayMs"] = firstDisplay.ElapsedMilliseconds;
+            var document = panel.DocumentBrowser!.CoreWebView2;
+            Check(await document.ExecuteScriptAsync("document.querySelector('.xlsx-grid').getAttribute('role') === 'grid' && document.querySelector('.xlsx-cell[data-address=C1]').dataset.formula === 'SUM(B1,7.5)' && document.querySelector('.xlsx-cell[data-address=C2]').dataset.formula === '2+2' && document.querySelector('.xlsx-cell[data-address=C2]').textContent.trim() !== '4'") == "true",
+                "Excel shows typed cells and stored formula results without recalculating uncached expressions");
+            Check(await document.ExecuteScriptAsync("/^(true|真)$/i.test(document.querySelector('.xlsx-cell[data-address=A2]').textContent.trim()) && document.querySelector('.xlsx-cell[data-address=B2]').textContent.trim() === '01-01-24' && document.querySelector('.xlsx-cell[data-address=D2]').textContent.includes('<img') && !document.querySelector('.xlsx-grid img,.xlsx-grid script')") == "true",
+                "Excel preserves Boolean/date data and treats markup-looking cell values as inert text");
+            string cellFont = await document.ExecuteScriptAsync("getComputedStyle(document.querySelector('.xlsx-cell[data-address=B1]')).fontFamily");
+            Check(cellFont.Contains("Segoe UI", StringComparison.Ordinal), "Excel preserves the declared cell font instead of the browser serif default: " + cellFont);
+            using (var capture = File.Create(Path.Combine(Path.GetDirectoryName(_result)!, "workspace-xlsx-grid.png")))
+                await document.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture.AsRandomAccessStream());
+            // Target populated column L; the viewer can also expose empty columns beyond the used range.
+            // 滚动到有数据的 L 列；预览器允许继续展示已用区域以外的空白列，不能把最右端当成最后一列数据。
+            await document.ExecuteScriptAsync("const zoom=document.querySelector('.xlsx-view select[data-action=zoom]'); zoom.value='1.25'; zoom.dispatchEvent(new Event('change',{bubbles:true})); const area=document.querySelector('.xlsx-scroll'); const columnWidth=document.querySelector('.xlsx-cell[data-address=B1]').getBoundingClientRect().width; area.scrollLeft=columnWidth*8");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-scroll", wheelY: -1440);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-scroll').scrollLeft > 0 && document.querySelector('.xlsx-scroll').scrollTop >= 450 && [...document.querySelectorAll('.xlsx-cell')].some(cell=>cell.textContent.includes('SCROLL_ROW_'))");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-view button[data-action=sheet][data-sheet-index=\"1\"]", click: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-cell[data-address=A1]')?.textContent.includes('XLSX_SECOND_SHEET')");
+            await document.ExecuteScriptAsync("window.__xlsxView=document.querySelector('.xlsx-view')");
+            int contentReads = fixture.XlsxRequests;
+            panel.ShowResource(conversation, "notes.txt");
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('pre')?.textContent.includes('PLAIN_FILE_FIXTURE') === true");
+            int prepared = fixture.PreviewRequests;
+            panel.ShowResource(conversation, "sample.xlsx", "工作簿.xlsx", userSelected: true);
+            await WaitWorkspaceAsync(panel, false, "window.__xlsxView === document.querySelector('.xlsx-view') && document.querySelector('.xlsx-cell[data-address=A1]')?.textContent.includes('XLSX_SECOND_SHEET') && document.querySelector('.xlsx-view select[data-action=zoom]').value === '1.25'");
+            Check(ReferenceEquals(document, panel.DocumentBrowser!.CoreWebView2) && contentReads == 1
+                && fixture.XlsxRequests == contentReads && fixture.PreviewRequests == prepared,
+                "returning to Excel retains its actual view, active sheet and zoom without refetching or parsing the workbook");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-view button[data-action=sheet][data-sheet-index=\"0\"]", click: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-scroll').scrollLeft > 0 && document.querySelector('.xlsx-scroll').scrollTop >= 450 && [...document.querySelectorAll('.xlsx-cell')].some(cell=>cell.textContent.includes('SCROLL_ROW_'))");
+            panel.ShowResource(conversation, "broken.xlsx");
+            await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
+            Check(fixture.BrokenXlsxRequests == 1 && fixture.XlsxFallbackRequests == 1 && fixture.PdfRequests > 0,
+                "invalid direct XLSX rendering falls back to its PDF representation once");
+            _metrics["xlsxContentRequests"] = fixture.XlsxRequests;
+            _metrics["xlsxPdfFallbackRequests"] = fixture.XlsxFallbackRequests;
         }
 
         private async Task CheckBackgroundDocumentAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
@@ -170,7 +422,16 @@ namespace TranscriptUiSmoke
                 }
                 await Task.Delay(40);
             }
-            throw new InvalidOperationException("Workspace preview timed out: " + expression + "; source=" + lastSource);
+            string diagnostics = "unavailable";
+            try
+            {
+                var core = (website ? panel.WebsiteBrowser : panel.DocumentBrowser)?.CoreWebView2;
+                if (core is not null) diagnostics = await core.ExecuteScriptAsync("JSON.stringify({docx:typeof window.docx,zip:typeof window.JSZip,office:typeof window.kynxaOffice,pptx:typeof window.kynxaPptx,xlsx:typeof window.kynxaXlsx,frame:!!document.querySelector('iframe.docx-view'),body:document.querySelector('iframe.docx-view')?.contentDocument?.body?.textContent?.slice(0,600),pptxBody:document.querySelector('.pptx-view iframe')?.contentDocument?.body?.textContent?.slice(0,600),pptxPage:document.querySelector('.pptx-view input[data-action=page]')?.value,xlsxCells:[...document.querySelectorAll('.xlsx-cell')].slice(0,8).map(cell=>({address:cell.dataset.address,text:cell.textContent})),errors:[...document.querySelectorAll('[role=alert],.preview-error,.error')].map(node=>node.textContent.slice(0,200)),image:[...document.querySelector('iframe.docx-view')?.contentDocument?.querySelectorAll('img')||[]].map(i=>({src:i.src.slice(0,140),width:i.naturalWidth,complete:i.complete})),outer:document.body.textContent.slice(0,250)})");
+                diagnostics += "; notice=" + string.Join(" | ", WorkTabVisuals(panel).OfType<Microsoft.UI.Xaml.Controls.TextBlock>()
+                    .Where(text => text.Visibility == Visibility.Visible).Select(text => text.Text).Where(text => !string.IsNullOrEmpty(text)));
+            }
+            catch (Exception error) { diagnostics = error.Message; }
+            throw new InvalidOperationException("Workspace preview timed out: " + expression + "; source=" + lastSource + "; diagnostics=" + diagnostics);
         }
 
         private async Task CheckNativeChromeAsync(ConversationDocumentPanel panel, WorkspacePreviewFixture fixture, Guid conversation)
@@ -468,6 +729,41 @@ namespace TranscriptUiSmoke
             }
         }
 
+        private async Task SendWorkspacePointerAsync(Microsoft.UI.Xaml.Controls.WebView2 browser, string selector,
+            bool click = false, int clicks = 1, int wheelY = 0)
+        {
+            nint owner = Microsoft.UI.Win32Interop.GetWindowFromWindowId(_window!.AppWindow.Id);
+            await ActivateNativeTestHostAsync(owner);
+            Check(browser.Visibility == Visibility.Visible && browser.Opacity > 0 && browser.IsHitTestVisible,
+                "the selected document view accepts real pointer input before interacting");
+            string boundsJson = await browser.CoreWebView2.ExecuteScriptAsync($"JSON.stringify((() => {{ const element=document.querySelector({JsonSerializer.Serialize(selector)}); if(!element) throw new Error('Missing input target'); const rect=element.getBoundingClientRect(); return {{ x:Math.max(8,Math.min(innerWidth-8,rect.left+rect.width/2)), y:Math.max(8,Math.min(innerHeight-8,rect.top+rect.height/2)), width:innerWidth, height:innerHeight }}; }})())");
+            using var bounds = JsonDocument.Parse(JsonSerializer.Deserialize<string>(boundsJson)!);
+            var position = browser.TransformToVisual(_window.Content).TransformPoint(new Windows.Foundation.Point());
+            double raster = browser.XamlRoot.RasterizationScale;
+            var origin = new NativeChromePoint();
+            Check(NativeChromeClientToScreen(owner, ref origin), "the document test client maps to screen coordinates");
+            int x = origin.X + (int)Math.Round((position.X + bounds.RootElement.GetProperty("x").GetDouble()
+                * browser.ActualWidth / bounds.RootElement.GetProperty("width").GetDouble()) * raster);
+            int y = origin.Y + (int)Math.Round((position.Y + bounds.RootElement.GetProperty("y").GetDouble()
+                * browser.ActualHeight / bounds.RootElement.GetProperty("height").GetDouble()) * raster);
+            nint hit = NativeChromeWindowFromPoint(new NativeChromePoint { X = x, Y = y });
+            Check(hit == owner || NativeChromeIsChild(owner, hit),
+                $"real document input stays inside the isolated test window: target={selector}, point={x},{y}, owner={owner:X}, hit={hit:X}");
+            var input = new List<NativeChromeInput> { ChromeMouseMove(x, y) };
+            if (click)
+                for (int index = 0; index < clicks; index++)
+                {
+                    input.Add(new NativeChromeInput { Data = new() { Mouse = new() { Flags = 0x0002 } } });
+                    input.Add(new NativeChromeInput { Data = new() { Mouse = new() { Flags = 0x0004 } } });
+                }
+            if (wheelY != 0)
+                input.Add(new NativeChromeInput { Data = new() { Mouse = new() { Flags = 0x0800, MouseData = unchecked((uint)wheelY) } } });
+            // SendInput validates the native hit/focus path; script execution above only reads the target geometry.
+            // SendInput 验证真实原生命中与焦点路径；上方脚本只读取目标几何信息，不模拟点击或滚轮。
+            SendChromeInput(input.ToArray());
+            await Task.Delay(100);
+        }
+
         private async Task CheckNativeChromeInputAsync(WorkspacePreviewFixture fixture, nint owner, NativeChromeRectangle bounds)
         {
             File.WriteAllText(_result, "RUNNING: native Chrome operating-system mouse and keyboard input");
@@ -617,6 +913,31 @@ namespace TranscriptUiSmoke
         public int PdfRequests { get; private set; }
         public int PreviewRequests { get; private set; }
         public int SlowRequests { get; private set; }
+        public int DocxRequests { get; private set; }
+        public int BrokenDocxRequests { get; private set; }
+        public int DocxFallbackRequests { get; private set; }
+        public int UnexpectedDocxRequests { get; private set; }
+        public int PptxRequests { get; private set; }
+        public int UserPptxRequests { get; private set; }
+        public int UserPptxPreviewRequests { get; private set; }
+        private byte[]? _userPptxSample;
+        public int BrokenPptxRequests { get; private set; }
+        public int PptxFallbackRequests { get; private set; }
+        public int LatePptxRequests { get; private set; }
+        public int LatePptxFallbackRequests { get; private set; }
+        public int XlsxRequests { get; private set; }
+        public int BrokenXlsxRequests { get; private set; }
+        public int XlsxFallbackRequests { get; private set; }
+        public Guid AttachmentConversationId { get; set; }
+        public Guid AttachmentMessageId { get; } = Guid.NewGuid();
+        public Guid AttachmentId { get; } = Guid.NewGuid();
+        public Guid PptxAttachmentId { get; } = Guid.NewGuid();
+        public const string AttachmentVersion = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        public int AttachmentPreviewRequests { get; private set; }
+        public int AttachmentContentRequests { get; private set; }
+        public int UnexpectedAttachmentRequests { get; private set; }
+        public int PptxAttachmentPreviewRequests { get; private set; }
+        public int PptxAttachmentContentRequests { get; private set; }
         public TaskCompletionSource SlowStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseSlow { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -624,6 +945,47 @@ namespace TranscriptUiSmoke
         {
             _listener.Start(); Address = new Uri($"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}");
             _server = ServeAsync();
+        }
+
+        public (string Title, string FirstPageText, string SecondPageText, int SlideCount) LoadUserPptxSample(string path)
+        {
+            // Keep the explicitly provided sample in memory; neither the original nor a repository copy is changed.
+            // 明确指定的样本仅只读到内存，不修改原件，也不复制进仓库或正式数据目录。
+            var source = new FileInfo(path);
+            if (!source.Exists || !source.Extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
+                || source.Length > 64L * 1024 * 1024)
+                throw new InvalidDataException("The optional PPTX sample must be an existing presentation within the authorized preview limit.");
+            byte[] bytes = File.ReadAllBytes(source.FullName);
+            using var archive = new ZipArchive(new MemoryStream(bytes, writable: false), ZipArchiveMode.Read);
+            XDocument Part(string name)
+            {
+                using var stream = (archive.GetEntry(name) ?? throw new InvalidDataException("PPTX sample part missing: " + name)).Open();
+                using var reader = System.Xml.XmlReader.Create(stream, new System.Xml.XmlReaderSettings
+                {
+                    DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null,
+                    MaxCharactersInDocument = 16L * 1024 * 1024
+                });
+                return XDocument.Load(reader);
+            }
+            XNamespace presentation = "http://schemas.openxmlformats.org/presentationml/2006/main";
+            XNamespace drawing = "http://schemas.openxmlformats.org/drawingml/2006/main";
+            XNamespace relation = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+            XNamespace package = "http://schemas.openxmlformats.org/package/2006/relationships";
+            var relationships = Part("ppt/_rels/presentation.xml.rels").Descendants(package + "Relationship")
+                .Where(item => ((string?)item.Attribute("Type"))?.EndsWith("/slide", StringComparison.Ordinal) == true
+                    && (string?)item.Attribute("TargetMode") != "External")
+                .ToDictionary(item => (string)item.Attribute("Id")!, item => (string)item.Attribute("Target")!);
+            var slides = Part("ppt/presentation.xml").Descendants(presentation + "sldId")
+                .Select(item => (string?)item.Attribute(relation + "id"))
+                .Where(id => id is not null && relationships.ContainsKey(id))
+                .Select(id => new Uri(new Uri("https://fixture.invalid/ppt/presentation.xml"), relationships[id!]).AbsolutePath.TrimStart('/'))
+                .ToArray();
+            if (slides.Length < 2) throw new InvalidDataException("The optional presentation needs at least two slides for navigation validation.");
+            string Text(string slide) => Part(slide).Descendants(drawing + "t").Select(item => item.Value.Trim())
+                .FirstOrDefault(value => value.Length > 0) ?? throw new InvalidDataException("The optional presentation slide has no text to validate.");
+            string first = Text(slides[0]), second = Text(slides[1]);
+            _userPptxSample = bytes;
+            return (source.Name, first, second, slides.Length);
         }
 
         private async Task ServeAsync()
@@ -674,24 +1036,68 @@ namespace TranscriptUiSmoke
                     string target = request.Length > 1 ? request[1] : "/";
                     string contentType = "application/json";
                     byte[] bytes;
-                    if (target == "/agent/workspace/preview")
+                    string attachmentEndpoint = $"/api/conversations/{AttachmentConversationId:D}/attachments/{AttachmentId:D}";
+                    string pptxAttachmentEndpoint = $"/api/conversations/{AttachmentConversationId:D}/attachments/{PptxAttachmentId:D}";
+                    string attachmentQuery = $"messageId={AttachmentMessageId:D}&version={AttachmentVersion}";
+                    if (target == attachmentEndpoint + "/preview?" + attachmentQuery + "&offset=0")
+                    {
+                        AttachmentPreviewRequests++;
+                        bytes = JsonSerializer.SerializeToUtf8Bytes(new { kind = "docx", title = "attachment.docx", path = "attachment.docx",
+                            version = AttachmentVersion, mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            contentUrl = new Uri(Address, attachmentEndpoint + "/content?" + attachmentQuery).AbsoluteUri });
+                    }
+                    else if (target == attachmentEndpoint + "/content?" + attachmentQuery)
+                    {
+                        AttachmentContentRequests++;
+                        contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+                        bytes = MinimalDocx();
+                    }
+                    else if (target == pptxAttachmentEndpoint + "/preview?" + attachmentQuery + "&offset=0")
+                    {
+                        PptxAttachmentPreviewRequests++;
+                        bytes = JsonSerializer.SerializeToUtf8Bytes(new { kind = "pptx", title = "attachment.pptx", path = "attachment.pptx",
+                            version = AttachmentVersion, mimeType = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            contentUrl = new Uri(Address, pptxAttachmentEndpoint + "/content?" + attachmentQuery).AbsoluteUri });
+                    }
+                    else if (target == pptxAttachmentEndpoint + "/content?" + attachmentQuery)
+                    {
+                        PptxAttachmentContentRequests++;
+                        contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                        bytes = MinimalPptx();
+                    }
+                    else if (target.StartsWith("/api/conversations/", StringComparison.Ordinal))
+                    {
+                        UnexpectedAttachmentRequests++; bytes = "{}"u8.ToArray();
+                    }
+                    else if (target == "/agent/workspace/preview")
                     {
                         PreviewRequests++;
                         using var json = JsonDocument.Parse(requestBody);
                         string path = json.RootElement.GetProperty("path").GetString()!;
+                        if (path == "user-sample.pptx") UserPptxPreviewRequests++;
                         if (path == "slow.md")
                         {
                             SlowRequests++; SlowStarted.TrySetResult();
                             await ReleaseSlow.Task.WaitAsync(_stop.Token);
                         }
                         LastUserSelected = json.RootElement.GetProperty("userSelected").GetBoolean();
-                        string kind = Path.GetExtension(path) switch { ".md" => "markdown", ".mmd" => "mermaid", ".png" or ".svg" => "image", ".pdf" => "pdf", ".html" => "html", _ => "text" };
+                        string kind = Path.GetExtension(path) switch { ".md" => "markdown", ".mmd" => "mermaid", ".png" or ".svg" => "image", ".pdf" => "pdf", ".docx" => "docx", ".pptx" => "pptx", ".xlsx" => "xlsx", ".html" => "html", _ => "text" };
+                        if (path is "broken.docx" or "broken.pptx" or "broken.xlsx" or "late-failure.pptx"
+                            && json.RootElement.TryGetProperty("representation", out var representation) && representation.GetString() == "pdf")
+                        {
+                            kind = "pdf";
+                            if (path == "broken.docx") DocxFallbackRequests++;
+                            else if (path == "broken.pptx") PptxFallbackRequests++;
+                            else if (path == "late-failure.pptx") LatePptxFallbackRequests++;
+                            else XlsxFallbackRequests++;
+                        }
                         string text = kind == "markdown" ? "# REPORT_FIXTURE\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n$E=mc^2$\n\n```mermaid\nflowchart LR\n A-->B\n```\n\n" + string.Join("\n\n", Enumerable.Range(0, 300).Select(index => $"段落 {index}：用于核对实际文件切换后的阅读位置。"))
                             : kind == "mermaid" ? "flowchart LR\n A[FILE_DIAGRAM]-->B[完成]" : path == "sample.cs" ? "public class Sample { public string Name = \"syntax\"; }" : path == "sample.rs" ? "// 中文说明\npub fn greet() -> String { String::from(\"Hello\") }" : "PLAIN_FILE_FIXTURE\n第二行";
                         if (path == "slow.md") text = "# BACKGROUND_DOCUMENT\n\n```mermaid\nflowchart LR\n A[后台加载]-->B[完成并缓存]\n```";
                         bytes = JsonSerializer.SerializeToUtf8Bytes(new { kind, title = path, path, version = "fixture-v1", text,
-                            mimeType = kind == "pdf" ? "application/pdf" : "text/plain", hasMore = false,
-                            contentUrl = kind is "pdf" or "image" or "html" ? "/agent/workspace/content?file=" + path : null as string });
+                            mimeType = kind switch { "pdf" => "application/pdf", "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation", "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", _ => "text/plain" }, hasMore = false,
+                            contentUrl = kind is "pdf" or "image" or "html" or "docx" or "pptx" or "xlsx" ? "/agent/workspace/content?file=" + (kind == "pdf" ? "sample.pdf" : path) : null as string });
                     }
                     else if (target == "/api/agent/workspace/chrome")
                     {
@@ -716,6 +1122,50 @@ namespace TranscriptUiSmoke
                             ? await ChromeEvaluateAsync("JSON.stringify({width:innerWidth,height:innerHeight,deviceScaleFactor:devicePixelRatio})") : "null");
                         bytes = JsonSerializer.SerializeToUtf8Bytes(new { url, title, canGoBack = false, canGoForward = false,
                             viewport = viewport.RootElement });
+                    }
+                    else if (target.Contains("sample.docx", StringComparison.Ordinal))
+                    {
+                        DocxRequests++; contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+                        bytes = MinimalDocx(longDocument: true);
+                    }
+                    else if (target.Contains("broken.docx", StringComparison.Ordinal))
+                    {
+                        BrokenDocxRequests++; contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+                        bytes = "not a ZIP document"u8.ToArray();
+                    }
+                    else if (target.Contains("user-sample.pptx", StringComparison.Ordinal))
+                    {
+                        UserPptxRequests++; contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                        bytes = _userPptxSample ?? throw new InvalidOperationException("The optional user presentation was not initialized.");
+                    }
+                    else if (target.Contains("sample.pptx", StringComparison.Ordinal))
+                    {
+                        PptxRequests++; contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                        bytes = MinimalPptx();
+                    }
+                    else if (target.Contains("broken.pptx", StringComparison.Ordinal))
+                    {
+                        BrokenPptxRequests++; contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                        bytes = "not a ZIP presentation"u8.ToArray();
+                    }
+                    else if (target.Contains("late-failure.pptx", StringComparison.Ordinal))
+                    {
+                        LatePptxRequests++; contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+                        bytes = MinimalPptx(unsupportedSecondPage: true);
+                    }
+                    else if (target.Contains("sample.xlsx", StringComparison.Ordinal))
+                    {
+                        XlsxRequests++; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                        bytes = MinimalXlsx();
+                    }
+                    else if (target.Contains("broken.xlsx", StringComparison.Ordinal))
+                    {
+                        BrokenXlsxRequests++; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                        bytes = "not a ZIP workbook"u8.ToArray();
+                    }
+                    else if (target.StartsWith("/docx-external", StringComparison.Ordinal))
+                    {
+                        UnexpectedDocxRequests++; contentType = "image/png"; bytes = [];
                     }
                     else if (target.Contains("sample.pdf", StringComparison.Ordinal))
                     {
@@ -848,6 +1298,220 @@ namespace TranscriptUiSmoke
         private void StopChrome()
         {
             if (_chrome is { HasExited: false }) { _chrome.Kill(entireProcessTree: true); _chrome.WaitForExit(); }
+        }
+
+        private static byte[] MinimalPptx(bool unsupportedSecondPage = false)
+        {
+            using var output = new MemoryStream();
+            using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                void Text(string path, string value)
+                {
+                    using var stream = archive.CreateEntry(path).Open();
+                    stream.Write(Encoding.UTF8.GetBytes(value));
+                }
+                Text("[Content_Types].xml", """
+                    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+                      <Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>
+                      <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+                      <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+                      <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+                      <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+                      <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+                      <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+                    </Types>
+                    """);
+                Text("_rels/.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>
+                    """);
+                Text("ppt/presentation.xml", """
+                    <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                      <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>
+                      <p:sldIdLst><p:sldId id="256" r:id="rIdSlide1"/><p:sldId id="257" r:id="rIdSlide2"/></p:sldIdLst>
+                      <p:sldSz cx="12192000" cy="6858000" type="screen16x9"/><p:notesSz cx="6858000" cy="9144000"/>
+                    </p:presentation>
+                    """);
+                Text("ppt/_rels/presentation.xml.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                      <Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+                      <Relationship Id="rIdSlide2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+                      <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+                    </Relationships>
+                    """);
+                const string group = "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>";
+                for (int page = 1; page <= 2; page++)
+                {
+                    string title = page == 1 ? "PPTX_SLIDE_ONE 中文标题" : "PPTX_SLIDE_TWO 第二页";
+                    string titlePreset = page == 2 && unsupportedSecondPage ? "star5" : "rect";
+                    string details = page == 1 ? """
+                        <p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="3" name="Fixture table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+                          <p:xfrm><a:off x="457200" y="1645920"/><a:ext cx="5486400" cy="1828800"/></p:xfrm>
+                          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1"/><a:tblGrid><a:gridCol w="2743200"/><a:gridCol w="2743200"/></a:tblGrid>
+                            <a:tr h="914400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="2200"/><a:t>PPTX_TABLE_CELL</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2200"/><a:t>42</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr>
+                          </a:tbl></a:graphicData></a:graphic>
+                        </p:graphicFrame>
+                        <p:pic><p:nvPicPr><p:cNvPr id="4" name="Embedded fixture image"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                          <p:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                          <p:spPr><a:xfrm><a:off x="6858000" y="1828800"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                        </p:pic>
+                        """ : "";
+                    Text($"ppt/slides/slide{page}.xml", $$"""
+                        <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                          <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>{{group}}
+                            <p:sp><p:nvSpPr><p:cNvPr id="2" name="Fixture title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                              <p:spPr><a:xfrm><a:off x="457200" y="274320"/><a:ext cx="11277600" cy="914400"/></a:xfrm><a:prstGeom prst="{{titlePreset}}"><a:avLst/></a:prstGeom></p:spPr>
+                              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="3200" b="1"/><a:t>{{title}}</a:t></a:r><a:endParaRPr lang="zh-CN"/></a:p></p:txBody>
+                            </p:sp>{{details}}
+                          </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+                        </p:sld>
+                        """);
+                    Text($"ppt/slides/_rels/slide{page}.xml.rels", """
+                        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                          <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+                          <Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/picture.png"/>
+                        </Relationships>
+                        """);
+                }
+                Text("ppt/slideMasters/slideMaster1.xml", $$"""
+                    <p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                      <p:cSld><p:spTree>{{group}}</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+                      <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles>
+                    </p:sldMaster>
+                    """);
+                Text("ppt/slideMasters/_rels/slideMaster1.xml.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>
+                    """);
+                Text("ppt/slideLayouts/slideLayout1.xml", $$"""
+                    <p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree>{{group}}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>
+                    """);
+                Text("ppt/slideLayouts/_rels/slideLayout1.xml.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>
+                    """);
+                Text("ppt/theme/theme1.xml", """
+                    <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Fixture"><a:themeElements>
+                      <a:clrScheme name="Fixture"><a:dk1><a:srgbClr val="181818"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="404040"/></a:dk2><a:lt2><a:srgbClr val="F4F4F4"/></a:lt2><a:accent1><a:srgbClr val="7C644B"/></a:accent1><a:accent2><a:srgbClr val="526C56"/></a:accent2><a:accent3><a:srgbClr val="705D7C"/></a:accent3><a:accent4><a:srgbClr val="556C78"/></a:accent4><a:accent5><a:srgbClr val="986B4C"/></a:accent5><a:accent6><a:srgbClr val="74745C"/></a:accent6><a:hlink><a:srgbClr val="6C5645"/></a:hlink><a:folHlink><a:srgbClr val="6C5645"/></a:folHlink></a:clrScheme>
+                      <a:fontScheme name="Fixture"><a:majorFont><a:latin typeface="Segoe UI"/><a:ea typeface="Microsoft YaHei UI"/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Segoe UI"/><a:ea typeface="Microsoft YaHei UI"/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Fixture"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+                    </a:themeElements></a:theme>
+                    """);
+                using var picture = archive.CreateEntry("ppt/media/picture.png").Open();
+                picture.Write(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFv8AAAAASUVORK5CYII="));
+            }
+            return output.ToArray();
+        }
+
+        private static byte[] MinimalXlsx()
+        {
+            using var output = new MemoryStream();
+            using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                void Text(string path, string value)
+                {
+                    using var stream = archive.CreateEntry(path).Open();
+                    stream.Write(Encoding.UTF8.GetBytes(value));
+                }
+                Text("[Content_Types].xml", """
+                    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>
+                      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+                      <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+                    </Types>
+                    """);
+                Text("_rels/.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>
+                    """);
+                Text("xl/workbook.xml", """
+                    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="数据 Data" sheetId="1" r:id="rIdSheet1"/><sheet name="第二张" sheetId="2" r:id="rIdSheet2"/></sheets><calcPr calcId="191029" fullCalcOnLoad="0"/></workbook>
+                    """);
+                Text("xl/_rels/workbook.xml.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rIdSheet2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>
+                    """);
+                Text("xl/styles.xml", """
+                    <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Segoe UI"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>
+                    """);
+                Text("xl/sharedStrings.xml", """
+                    <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><t>XLSX_SHARED_TEXT 中文</t></si></sst>
+                    """);
+                string rows = string.Join("", Enumerable.Range(3, 118).Select(row => $"<row r=\"{row}\"><c r=\"A{row}\"><v>{row}</v></c><c r=\"L{row}\" t=\"inlineStr\"><is><t>SCROLL_ROW_{row}</t></is></c></row>"));
+                Text("xl/worksheets/sheet1.xml", $$"""
+                    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:L120"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><cols><col min="1" max="12" width="18" customWidth="1"/></cols><sheetData>
+                      <row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_TYPED_TITLE 中文</t></is></c><c r="B1"><v>42.5</v></c><c r="C1"><f>SUM(B1,7.5)</f><v>50</v></c><c r="D1" t="s"><v>0</v></c></row>
+                      <row r="2"><c r="A2" t="b"><v>1</v></c><c r="B2" s="1"><v>45292</v></c><c r="C2"><f>2+2</f></c><c r="D2" t="inlineStr"><is><t>&lt;img src=x onerror=alert(1)&gt;</t></is></c></row>{{rows}}
+                    </sheetData></worksheet>
+                    """);
+                Text("xl/worksheets/sheet2.xml", """
+                    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECOND_SHEET 第二张</t></is></c><c r="B1"><v>2026</v></c></row></sheetData></worksheet>
+                    """);
+            }
+            return output.ToArray();
+        }
+
+        private byte[] MinimalDocx(bool longDocument = false)
+        {
+            using var output = new MemoryStream();
+            using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                void Text(string path, string value)
+                {
+                    using var stream = archive.CreateEntry(path).Open();
+                    stream.Write(Encoding.UTF8.GetBytes(value));
+                }
+                Text("[Content_Types].xml", """
+                    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+                      <Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>
+                      <Default Extension="html" ContentType="text/html"/>
+                      <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+                      <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+                    </Types>
+                    """);
+                Text("_rels/.rels", """
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+                    </Relationships>
+                    """);
+                string paragraphs = longDocument ? string.Join("", Enumerable.Range(0, 70)
+                    .Select(index => $"<w:p><w:r><w:t>DOCX_SCROLL_ROW_{index} 中文与 English：用于真实滚轮和后台资源完成前的首屏交互检查。</w:t></w:r></w:p>")) : "";
+                Text("word/document.xml", $$"""
+                    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                      xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                      <w:body>
+                        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>DOCX_BROWSER_FIXTURE 中文标题</w:t></w:r></w:p>
+                        <w:p><w:r><w:t>正文包含中文与 English，保留文档格式。</w:t></w:r></w:p>
+                        <w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>
+                          <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>
+                            <w:tc><w:p><w:r><w:t>DOCX_TABLE_CELL</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>42</w:t></w:r></w:p></w:tc>
+                          </w:tr></w:tbl>
+                        <w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Embedded image"/>
+                          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>
+                            <pic:nvPicPr><pic:cNvPr id="1" name="picture.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+                            <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
+                          </pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+                        <w:hyperlink r:id="rIdUnsafeLink"><w:r><w:t>Unsafe link</w:t></w:r></w:hyperlink>
+                        <w:altChunk r:id="rIdAltChunk"/>
+                        {{paragraphs}}
+                        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>
+                      </w:body>
+                    </w:document>
+                    """);
+                Text("word/styles.xml", """
+                    <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                      <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="36"/></w:rPr></w:style>
+                    </w:styles>
+                    """);
+                Text("word/_rels/document.xml.rels", $$"""
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                      <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+                      <Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/>
+                      <Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{{new Uri(Address, "/docx-external/image.png").AbsoluteUri}}" TargetMode="External"/>
+                      <Relationship Id="rIdUnsafeLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:parent.__unsafeDocx=1" TargetMode="External"/>
+                      <Relationship Id="rIdAltChunk" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="alt.html"/>
+                    </Relationships>
+                    """);
+                Text("word/alt.html", "<script>parent.__unsafeDocx=1</script><p>ALT_CHUNK_EXECUTED</p>");
+                using var picture = archive.CreateEntry("word/media/picture.png").Open();
+                picture.Write(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFv8AAAAASUVORK5CYII="));
+            }
+            return output.ToArray();
         }
 
         private static byte[] MinimalPdf()

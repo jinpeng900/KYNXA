@@ -1,6 +1,223 @@
 {
   "tools": [
     {
+      "name": "document.create",
+      "description": "Generate a real editable DOCX, PPTX or XLSX, or a PDF exported through the installed Office converter. No user Python/Node/Word setup is required. DOCX/PDF use content (headings/paragraphs) or explicit blocks; PPTX uses slides; XLSX uses typed sheet rows and optional formulas. PDF availability depends on the packaged converter. Formulas are stored, not calculated. Read/stat an existing target and supply its expectedHash; null expects a new file. Parent directory must exist. Validates package structure before an authorized atomic save and returns an actual file/hash receipt. Does not automatically open every intermediate file: artifact.open useful final outputs. For MD/TXT/CSV/JSON/HTML/SVG/Mermaid use filesystem.write; never rename text to an Office extension.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mountId": {
+            "type": "string",
+            "description": "Authorized work folder mount ID; omitted uses the current default."
+          },
+          "path": {
+            "type": "string",
+            "description": "Target .docx/.pdf/.pptx/.xlsx path. Existing targets need their current full-file expectedHash."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "docx",
+              "pdf",
+              "pptx",
+              "xlsx"
+            ],
+            "description": "Optional; inferred from and must match the filename extension."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 1048576,
+            "description": "DOCX/PDF text with Markdown headings and paragraphs; explicit blocks allow tables."
+          },
+          "blocks": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "heading",
+                    "paragraph",
+                    "table"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                },
+                "level": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "slides": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "bullets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "required": [
+                "title"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sheets": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "rows": {
+                  "type": "array",
+                  "maxItems": 100000,
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "formula": {
+                              "type": "string"
+                            },
+                            "cachedValue": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "formula"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "rows"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "expectedHash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current SHA-256 for replacement, null or omitted only for a new file."
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "attachment.read",
       "description": "Read extracted text from a file attached to a saved user message in this conversation. Use messageId and attachmentId from the attachment manifest; no private filesystem path is needed. Continue with nextOffset while hasMore. Returns original snapshot version and extraction coverage; unsupported or failed extraction is explicit, not empty evidence.",
       "inputSchema": {
@@ -20,7 +237,7 @@
     },
     {
       "name": "artifact.open",
-      "description": "Open an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. For a URL, opens the interactive sidebar browser and returns its actual sessionId and tabId; retain them for browser.snapshot and later interactions. Opening alone does not establish page contents or login. Write real files with existing file tools first. Files return the validated version and supported preview, including text fallback when Office page conversion is unavailable. Does not create files or grant broader file access.",
+      "description": "Open an existing work file or an HTTP(S) webpage in the user's right workspace. This is the default for opening a website, especially when the user says right/sidebar/workspace; do not launch a desktop browser instead. Use path OR url and an optional natural title. For a URL, opens the interactive sidebar browser and returns its actual sessionId and tabId; retain them for browser.snapshot and later interactions. Opening alone does not establish page contents or login. Write real files with existing file tools first. A file receipt registers its validated version for display; preview may still be pending. Metadata kind is not the final rendered mode. DOCX, PPTX and XLSX default to direct preview, with slide paging and worksheet switching. The current page becomes interactive before remaining content prepares in the background; cached file views retain their state without rereading on tab switches. Only unsupported content or an actual rendering failure uses a cached PDF fallback; legacy DOC/PPT/XLS use conversion. Spreadsheet previews display stored formula caches, not recalculated results. Claim final layout, text fallback or a missing converter only from actual preview observation, never from this registration receipt alone. Does not create files or grant broader file access.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -401,7 +618,7 @@
     {
       "name": "web.fetch",
       "source": "builtin",
-      "description": "Read a public HTTP(S) page as text, preserving its final URL and links. No Python, cookies or JavaScript. Private/local, signed-in and interactive pages need browser MCP. Full bounded extracted text is archived; use tool.result.read for stable paging. Each fetch is live.",
+      "description": "Read a public HTTP(S) page as text with final URL and links. No cookies or JavaScript. First page is live; follow returned nextOffset and responseHash to page the same conversation-scoped response for up to five minutes. refresh:true requests a new response. Full bounded text is archived; tool.result.read provides durable paging. Check pagination, evidenceUsable and recovery diagnostics; challenge or script-shell text is not evidence. Private, signed-in and interactive pages need an authorized browser.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -415,6 +632,13 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 262144
+          },
+          "responseHash": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "refresh": {
+            "type": "boolean"
           },
           "limit": {
             "type": "integer",
@@ -1303,12 +1527,13 @@
     {
       "name": "terminal.workspace.read",
       "source": "builtin",
-      "description": "Read actual output from a right workspace terminal, including user-opened sessions. 右侧终端输出、查看运行命令结果、终端读取。Uses an independent byte cursor; pass nextCursor on later reads. waitMs defaults to 1000 and may be 0 for an immediate page. exited/exitCode refer to the shell process, not each command; determine command outcomes from the real output. Never runs or replays input.",
+      "description": "Read actual output from a right workspace terminal, including user-opened sessions. 右侧终端输出、查看运行命令结果、终端读取。Uses an independent byte cursor; pass nextCursor on later reads. Optional commandId selects a tracked command in the nested command receipt (status/completed/exitCode/currentWorkingDirectory). Top-level exited/exitCode still refer to the shell. waitMs defaults to 1000 and may be 0 for an immediate page. Missing completion evidence means running or unknown, never success; do not replay accepted commands. Never runs input.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "commandId": { "type": "string", "minLength": 1, "maxLength": 120 },
           "after": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "waitMs": { "type": "integer", "minimum": 0, "maximum": 15000 }
         },
@@ -1316,9 +1541,26 @@
       }
     },
     {
+      "name": "terminal.workspace.run",
+      "source": "builtin",
+      "description": "Run a complete PowerShell command or multiline script in the user's same right-workspace terminal. 右侧终端运行命令、脚本、同会话执行。Prefer this to raw write for commands: submission, quoting and carriage return are handled by the program. Returns commandId, status (running/completed/unknown), completed, command exitCode, currentWorkingDirectory, output and nextCursor. Reuse commandId only with the identical command to observe without rerunning; a different command with that ID is rejected. waitMs only observes (default 1000, maximum 15000), never kills a command. Read later with terminal.workspace.read(sessionId,commandId,after). Busy terminals and partial user input reject submission; do not clear input or send Ctrl+C automatically. Use list/read or explicitly open a new session. Scripts share cwd and environment with this PTY; local PowerShell variables use an isolated invocation scope. Shell exit/closure or a missing completion marker yields unknown, never automatic replay. Host permission and work-scope checks apply.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "command": { "type": "string", "minLength": 1, "maxLength": 65536 },
+          "commandId": { "type": "string", "minLength": 1, "maxLength": 120, "description": "Stable ASCII letters/digits/-_./: identifier; reuse the same ID and exact command only to observe the original execution." },
+          "waitMs": { "type": "integer", "minimum": 0, "maximum": 15000 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["sessionId", "command", "reason"]
+      }
+    },
+    {
       "name": "terminal.workspace.write",
       "source": "builtin",
-      "description": "Send input to the same real right workspace terminal the user can see. 在右侧终端运行命令、输入命令、操作已有终端。Append carriage return (\\r) to submit a PowerShell command; control characters support actions such as Ctrl+C. Read the session before writing so an interactive program is not mistaken for a shell prompt. Returns inputAccepted and an output cursor, not command completion; use terminal.workspace.read for actual results. Ask/Smart host-command approval applies; never replay an accepted command just because output is delayed.",
+      "description": "Send raw keyboard input to the same real right workspace terminal the user can see. 右侧终端交互输入、操作已有终端。Use terminal.workspace.run for complete commands/scripts; reserve write for actual interactive input. A real carriage return (\\r), not LF or literal backslash-r, submits a PowerShell line. Read the session before writing so a running program is not mistaken for a prompt. Never clear user input or send Ctrl+C automatically. Returns inputAccepted and an output cursor, not command completion. Ask/Smart host-command approval applies; never replay accepted input because output is delayed.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

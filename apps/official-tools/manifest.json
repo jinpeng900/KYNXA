@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packageId": "kynxa-official-tools",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "license": "Apache-2.0",
   "licenseFile": "LICENSE.txt",
   "description": "Installed, read-only KYNXA tool descriptors, skill packages and MCP connection presets. External MCP implementations are not vendored.",
@@ -23,7 +23,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "69f10d7289cb71d80266476f13ff8cbf38e2f44ea437e455412e9d905f529cba"
+          "sha256": "a5ae235352b939d9a64917083705f1db1a6acf331c4767d260ba7a99689e8964"
         }
       ]
     },
@@ -39,7 +39,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "44900e0f992bdb0fc824069023e42e100474ea805013ca6249e14c3885785984"
+          "sha256": "3ae7306557662a46c6ca0fdf07ac7df29b5fd913e88c272913815d7a2b77e946"
         }
       ]
     },
@@ -55,7 +55,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "643f4ca491f88fbc2700c0959a8e9b0c1f29fcdff16205bfc3c5f1e4950b16d9"
+          "sha256": "0cf158764276a6aeafb55944bd6d15dfc7df5a43c13ad30d85fe6bd137ebeaa3"
         }
       ]
     },
@@ -114,7 +114,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "72cc91aa77e3004f7a093d11e274ee1b367b1f56bfaa3e32df5d87df5d4372a9"
+          "sha256": "c732e851a9c0f626d3ed5c4642ee30c77ceda7aa78d4249ca040442e58301d69"
         }
       ]
     },
@@ -130,7 +130,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "66ef438b1e3b84b8ebb31d4a0de8efe09a12dacb9e4ca64914fe267b553a2d0b"
+          "sha256": "2e4602f65e383c2e9cc835ba760599599c706f91fd4fde61310059314742ab0e"
         }
       ]
     },
@@ -146,20 +146,121 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "04e35f7e78ab52a5a250400a88c0e0995e87f1e72baf0b1effa1722c3f6a65da"
+          "sha256": "88d2b8c2a7236f4ca862840ff8055964014652612d861a93cf29e72366095377"
+        }
+      ]
+    },
+    {
+      "name": "document-authoring",
+      "path": "document-authoring/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a9e395f47e5c998fb314efd25f6de9addc9ab81f08aaed301ce5482c20853cd9"
+        }
+      ]
+    },
+    {
+      "name": "slides-authoring",
+      "path": "slides-authoring/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "d97388fd590fae9015aecf721268c8811cbdf095b85c371ad8018d54ccacb43f"
+        }
+      ]
+    },
+    {
+      "name": "spreadsheets-authoring",
+      "path": "spreadsheets-authoring/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "2cd2b62ce4a02dee1834cf1fb2d529da28d268e094a2a914bf4f120e0e12aa23"
+        }
+      ]
+    },
+    {
+      "name": "visual-artifacts",
+      "path": "visual-artifacts/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "f8a0c95ddaae1c3c66dbef97a23fe0b4c6104eb73e8157fe065415de1bf55965"
+        }
+      ]
+    },
+    {
+      "name": "code-workflow",
+      "path": "code-workflow/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "9b810fff8ce8f6c9cd59438eb2a876f7ae76cb9a585cace9246d0c19f46ad955"
+        }
+      ]
+    },
+    {
+      "name": "memory-workflow",
+      "path": "memory-workflow/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ed5bdd4d05384ba07fb68657fb92c6d611ff021e5a837b8cfeed0b2ed4f57a7c"
         }
       ]
     }
   ],
   "coreTools": [
+    "document.create",
+    "attachment.read",
+    "artifact.open",
     "filesystem.list",
     "filesystem.read",
+    "document.read",
     "filesystem.stat",
     "filesystem.search",
     "filesystem.write",
     "filesystem.edit",
     "filesystem.delete",
     "filesystem.mkdir",
+    "work.folder.list",
     "work.folder.bind",
     "web.fetch",
     "knowledge.plan",
@@ -179,6 +280,12 @@
     "skill.run",
     "terminal.run",
     "terminal.host.run",
+    "terminal.workspace.open",
+    "terminal.workspace.list",
+    "terminal.workspace.read",
+    "terminal.workspace.run",
+    "terminal.workspace.write",
+    "terminal.workspace.close",
     "terminal.host.start",
     "terminal.host.read",
     "terminal.host.stop",
@@ -199,7 +306,14 @@
     "computer.scroll",
     "computer.drag",
     "computer.type",
-    "computer.key"
+    "computer.key",
+    "task.document",
+    "task.delegate",
+    "task.describe",
+    "task.status",
+    "task.wait",
+    "task.control",
+    "task.read"
   ],
   "mcpPresets": [
     {

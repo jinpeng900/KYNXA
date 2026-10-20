@@ -28,7 +28,7 @@ Use this skill for local application windows and screenshots. For webpages, use 
 
 ## Capture and interact
 
-- `computer.screenshot` captures the identified client area as an original-resolution PNG, optionally with a physical-pixel crop. The application archives it for the sidebar. This text-only model receives metadata, not image pixels; use observed UI text unless image understanding is actually available. A screenshot acknowledgement is not visual evidence of its contents.
+- `computer.screenshot` captures the identified client area as an original-resolution PNG, optionally with a physical-pixel crop. The application archives it for the sidebar. Its metadata receipt alone is not visual evidence; verify that the current model request actually includes image pixels before claiming to see the image. Otherwise use observed UI text or an available image-understanding route. Do not assume every configured model is text-only.
 - Prefer browser DOM operations for web controls. For a native control without a direct automation tool, read its current UIA bounds before choosing desktop input. Physical `computer.move`, `computer.click`, `computer.scroll`, `computer.drag`, `computer.type` and `computer.key` require the identified window in the foreground.
 - Activate with `computer.activate` only within the user's allowed interaction, then check its receipt. If background-only operation is required and DOM or another suitable automation channel is unavailable, explain the limitation instead of taking focus.
 - Coordinates are physical pixels relative to that window's client origin. Re-read after every layout change. Do not reuse browser CSS-pixel coordinates or a stale screenshot's coordinates.

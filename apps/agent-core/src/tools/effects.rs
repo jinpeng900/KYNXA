@@ -279,7 +279,7 @@ fn effect_key(call: &Value) -> Result<String, String> {
 fn mutable_target(call: &Value, workspace_root: Option<&str>) -> Option<String> {
     if !matches!(
         call["name"].as_str(),
-        Some("filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir")
+        Some("filesystem.write" | "filesystem.edit" | "filesystem.delete" | "filesystem.mkdir" | "document.create")
     ) {
         return None;
     }

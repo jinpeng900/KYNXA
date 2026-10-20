@@ -667,7 +667,69 @@ fn check_http_status(
         &format!("{message}（HTTP {}）。", response.status().as_u16()),
         response.status().as_u16(),
     )
-    .with_retry_after(retry_after_ms(response.headers())))
+    .with_retry_after(retry_after_ms(response.headers()))
+    .with_details(json!({"failureOrigin":"provider-http","httpStatus":response.status().as_u16()})))
+}
+
+/// Inspect bounded protocol fields only; error prose is not evidence of account balance or quota.
+/// 仅检查有界协议字段；错误正文不能作为余额或配额判断依据。
+pub(crate) fn provider_failure_details(value: &Value, origin: &str) -> Value {
+    let candidates = [
+        &value["structuredContent"]["error"],
+        &value["structuredContent"],
+        &value["data"]["error"],
+        &value["data"],
+        &value["error"],
+        value,
+    ];
+    let mut details = json!({"failureOrigin":origin});
+    if let Some(status) = candidates.iter().find_map(|candidate| {
+        ["httpStatus", "statusCode", "status"].iter().find_map(|key| {
+            candidate[*key].as_u64().filter(|status| (400..=599).contains(status))
+        })
+    }) {
+        details["httpStatus"] = json!(status);
+    }
+    if origin == "provider-rpc" {
+        if let Some(code) = value["code"].as_i64() {
+            details["rpcCode"] = json!(code);
+        }
+    }
+    if let Some(code) = candidates.iter().find_map(|candidate| {
+        ["code", "type"].iter().find_map(|key| {
+            let code = &candidate[*key];
+            if code.as_str().is_some_and(|code| !code.is_empty() && code.len() <= 128
+                && code.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))) {
+                Some(code.clone())
+            } else if code.is_i64() && !(origin == "provider-rpc" && std::ptr::eq(*candidate, value)) {
+                Some(code.clone())
+            } else {
+                None
+            }
+        })
+    }) {
+        details["providerCode"] = code;
+    }
+    if let Some(milliseconds) = candidates.iter().find_map(|candidate| candidate["retryAfterMs"].as_u64()) {
+        details["retryAfterMs"] = json!(milliseconds);
+    }
+    details
+}
+
+fn rpc_failure(value: &Value) -> GatewayError {
+    let details = provider_failure_details(value, "provider-rpc");
+    let status = details["httpStatus"].as_u64().map(|status| status as u16)
+        .unwrap_or(if details["rpcCode"] == -32602 { 400 } else { 424 });
+    failure("MCP_RPC_ERROR", "MCP 服务返回 JSON-RPC 失败回执。", status)
+        .with_retry_after(details["retryAfterMs"].as_u64())
+        .with_details(details)
+}
+
+fn failure_diagnostic(error: &GatewayError) -> Value {
+    let mut value = error.response();
+    value["message"] = json!(error.message);
+    value["gatewayStatus"] = json!(error.status);
+    value
 }
 
 /// Preserve seconds/date cooldowns without retaining remote bodies, URLs or credentials.
@@ -1149,13 +1211,7 @@ impl McpClient {
                 }
             };
             if !envelope["error"].is_null() {
-                return Err(failure(
-                    "MCP_RPC_ERROR",
-                    envelope["error"]["message"]
-                        .as_str()
-                        .unwrap_or("MCP 服务执行失败。"),
-                    502,
-                ));
+                return Err(rpc_failure(&envelope["error"]));
             }
             envelope
                 .get("result")
@@ -1393,7 +1449,7 @@ async fn connection_with_priority(
                 "MCP_CONNECTION_CAPACITY",
                 "MCP 连接及启动预约达到32个；未启动额外进程。",
                 429,
-            ));
+            ).with_details(json!({"failureOrigin":"local-capacity"})));
         }
         pending.insert(id.to_owned());
         reservation.reserved = true;
@@ -1631,7 +1687,7 @@ async fn reap_idle(ctx: &GatewayToolContext, timeout: Duration) {
                     .mcp_errors
                     .lock()
                     .await
-                    .insert(id, json!({"code":error.code,"message":error.message}));
+                    .insert(id, failure_diagnostic(&error));
             }
         }
     }
@@ -1788,7 +1844,7 @@ pub(crate) fn prewarm(ctx: &GatewayToolContext) -> Value {
                     if ctx.runtime.mcp_lifecycle.check(id, generation).is_ok() {
                         errors.insert(
                             id.to_owned(),
-                            json!({"code":error.code,"message":error.message}),
+                            failure_diagnostic(&error),
                         );
                     }
                 }
@@ -1876,7 +1932,7 @@ pub(crate) async fn catalog_selected(
             Err(error) => {
                 ctx.runtime.mcp_errors.lock().await.insert(
                     server["id"].as_str().unwrap_or("").to_owned(),
-                    json!({"code":error.code,"message":error.message}),
+                    failure_diagnostic(&error),
                 );
                 emit(ctx,json!({"type":"mcp_status","serverId":server["id"],"ready":false,"code":error.code,"message":error.message})).await;
             }
@@ -1981,7 +2037,7 @@ pub(crate) async fn execute(
         {
             ctx.runtime.mcp_errors.lock().await.insert(
                 id.to_owned(),
-                json!({"code":error.code,"message":error.message}),
+                failure_diagnostic(&error),
             );
             let _ = disconnect(id, ctx).await;
             Ok(
@@ -2104,7 +2160,7 @@ pub(crate) async fn disconnect(id: &str, ctx: &GatewayToolContext) -> Result<(),
         if let Err(error) = state.close_transport().await {
             ctx.runtime.mcp_errors.lock().await.insert(
                 id.to_owned(),
-                json!({"code":error.code,"message":error.message}),
+                failure_diagnostic(&error),
             );
             return Err(error);
         }
@@ -2182,6 +2238,8 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
         state["processTreeMemory"]=observation;
         state["externalNodeRuntime"]=json!(memory.get(id).map(|entry|entry.1));
         state["error"] = json!(errors.get(id));
+        state["searchCooldown"] = ctx.runtime.web_search.cooling(&server)
+            .map(|error| error.response()).unwrap_or(Value::Null);
         state
     }).collect()
 }
@@ -2189,6 +2247,24 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_failure_retains_only_safe_machine_metadata_and_default_errors_stay_compatible() {
+        let error = rpc_failure(&json!({"code":-32000,"message":"private billing message",
+            "data":{"code":"insufficient_quota","httpStatus":402,"retryAfterMs":30000,
+                "Authorization":"secret","url":"https://private.example/path"}}));
+        assert_eq!(error.status, 402);
+        assert_eq!(error.details, json!({"failureOrigin":"provider-rpc","rpcCode":-32000,
+            "providerCode":"insufficient_quota","httpStatus":402,"retryAfterMs":30000}));
+        assert_eq!(error.retry_after_ms, Some(30000));
+        assert_eq!(failure_diagnostic(&error)["details"]["httpStatus"], 402);
+        assert_eq!(failure_diagnostic(&error)["retryAfterMs"], 30000);
+        assert!(!error.response().to_string().contains("private"));
+        let unsafe_code = rpc_failure(&json!({"code":-32000,"data":{"code":"Bearer secret with spaces"}}));
+        assert!(unsafe_code.details.get("providerCode").is_none());
+        assert_eq!(unsafe_code.status, 424);
+        assert_eq!(failure("LEGACY", "message", 500).response(), json!({"code":"LEGACY","error":"message"}));
+    }
 
     #[tokio::test]
     async fn durable_mcp_catalog_survives_runtime_restart_without_connecting() {

@@ -42,7 +42,7 @@ impl Drop for SearchWaiter {
 /// 冷却与查询合并归运行时所有；缓存有界并按聊天和授权快照隔离。
 #[derive(Default)]
 pub(crate) struct SearchState {
-    cooldowns: Mutex<HashMap<String, (Instant, Duration, String, u16)>>,
+    cooldowns: Mutex<HashMap<String, (Instant, Duration, GatewayError)>>,
     requests: Mutex<HashMap<String, CachedSearch>>,
 }
 
@@ -73,15 +73,10 @@ impl SearchState {
             .cooldowns
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        cooldowns.retain(|_, (started, duration, _, _)| started.elapsed() < *duration);
-        let (started, duration, code, status) = cooldowns.get(&Self::provider_key(server))?;
+        cooldowns.retain(|_, (started, duration, _)| started.elapsed() < *duration);
+        let (started, duration, error) = cooldowns.get(&Self::provider_key(server))?;
         Some(
-            failure(
-                code,
-                "搜索服务仍在冷却；可使用已允许的备用来源或稍后重试。",
-                *status,
-            )
-            .with_retry_after(Some(
+            error.clone().with_retry_after(Some(
                 duration.saturating_sub(started.elapsed()).as_millis() as u64,
             )),
         )
@@ -91,6 +86,8 @@ impl SearchState {
         let cooldown_ms = error.retry_after_ms.unwrap_or(match error.code.as_str() {
             "WEB_SEARCH_RATE_LIMITED" => 60_000,
             "WEB_SEARCH_AUTH_FAILED" | "WEB_SEARCH_CREDENTIAL_MISSING" => 300_000,
+            "WEB_SEARCH_QUOTA_EXHAUSTED" => 300_000,
+            "MCP_CONNECTION_CAPACITY" => 2000,
             "WEB_SEARCH_TRANSIENT" => 2000,
             _ => 30_000,
         });
@@ -98,7 +95,7 @@ impl SearchState {
             .cooldowns
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        cooldowns.retain(|_, (started, duration, _, _)| started.elapsed() < *duration);
+        cooldowns.retain(|_, (started, duration, _)| started.elapsed() < *duration);
         // Do not evict an unexpired rate limit to make a service immediately eligible again.
         // 未到期的限流记录不能为腾缓存而删除，再次请求会重新收到并保留真实限制。
         if cooldowns.len() < 128 || cooldowns.contains_key(&Self::provider_key(server)) {
@@ -107,8 +104,7 @@ impl SearchState {
                 (
                     Instant::now(),
                     Duration::from_millis(cooldown_ms),
-                    error.code.clone(),
-                    error.status,
+                    error.clone(),
                 ),
             );
         }
@@ -190,12 +186,27 @@ fn search_failure(error: GatewayError) -> GatewayError {
     {
         return error;
     }
-    let code = if error.status == 429 {
+    if error.code == "MCP_CONNECTION_CAPACITY" || error.details["failureOrigin"] == "local-capacity" {
+        let mut error = error;
+        error.details["failureOrigin"] = json!("local-capacity");
+        return error;
+    }
+    let http_status = error.details["httpStatus"].as_u64();
+    let quota = error.details["providerCode"].as_str().is_some_and(|code| matches!(
+        code.to_ascii_uppercase().as_str(),
+        "INSUFFICIENT_QUOTA" | "QUOTA_EXCEEDED" | "CREDITS_EXHAUSTED"
+            | "INSUFFICIENT_CREDITS" | "PAYMENT_REQUIRED" | "CREDIT_BALANCE_EXHAUSTED"
+    ));
+    let code = if http_status == Some(402) || quota {
+        "WEB_SEARCH_QUOTA_EXHAUSTED"
+    } else if http_status == Some(429) {
         "WEB_SEARCH_RATE_LIMITED"
-    } else if error.status == 401 || error.status == 403 {
+    } else if matches!(http_status, Some(401 | 403)) || error.code == "WEB_SEARCH_CREDENTIAL_MISSING" {
         "WEB_SEARCH_AUTH_FAILED"
-    } else if error.status >= 500
+    } else if http_status.is_some_and(|status| status >= 500)
         || [
+            "WEB_SEARCH_TRANSIENT",
+            "WEB_SEARCH_FAILED",
             "MCP_TIMEOUT",
             "MCP_CONNECTION_LOST",
             "MCP_EXECUTION_UNKNOWN",
@@ -210,12 +221,39 @@ fn search_failure(error: GatewayError) -> GatewayError {
         code,
         match code {
             "WEB_SEARCH_RATE_LIMITED" => "搜索服务限流，已保留服务要求的冷却时间。",
+            "WEB_SEARCH_QUOTA_EXHAUSTED" => "搜索服务明确返回额度或付费限制；未重复请求该来源。",
             "WEB_SEARCH_AUTH_FAILED" => "搜索服务认证或访问权限未满足。",
             _ => "搜索服务暂时不可用，已有结果与其他任务仍可继续。",
         },
-        error.status,
+        if code == "WEB_SEARCH_QUOTA_EXHAUSTED" { 402 } else { error.status },
     )
     .with_retry_after(error.retry_after_ms)
+    .with_details(error.details)
+}
+
+fn tool_failure(value: &Value) -> Option<GatewayError> {
+    let has_error = |value: &Value| value.get("error").is_some_and(|error| !error.is_null() && error != &Value::Bool(false));
+    if value["isError"] != true && value["structuredContent"]["isError"] != true
+        && !has_error(value) && !has_error(&value["structuredContent"]) {
+        return None;
+    }
+    let details = super::gateway_mcp::provider_failure_details(value, "provider-tool");
+    // An unspecified tool error is a failed dependency, not an invented upstream HTTP 502.
+    // 未提供状态的工具失败属于依赖失败，不伪造远端 HTTP 502 并据此重试。
+    let status = details["httpStatus"].as_u64().unwrap_or(424) as u16;
+    Some(failure("WEB_SEARCH_TOOL_FAILED", "搜索服务返回失败回执，未将其当作搜索结果。", status)
+        .with_retry_after(details["retryAfterMs"].as_u64())
+        .with_details(details))
+}
+
+fn failure_receipt(error: &GatewayError) -> Value {
+    let mut receipt = error.response();
+    receipt["message"] = json!(error.message);
+    receipt["gatewayStatus"] = json!(error.status);
+    if let Some(status) = error.details.get("httpStatus") {
+        receipt["httpStatus"] = status.clone();
+    }
+    receipt
 }
 
 fn cacheable(value: &Value) -> bool {
@@ -305,7 +343,8 @@ async fn search_provider(
                 "Brave 搜索被服务拒绝。",
                 response.status().as_u16(),
             )
-            .with_retry_after(super::gateway_mcp::retry_after_ms(response.headers())));
+            .with_retry_after(super::gateway_mcp::retry_after_ms(response.headers()))
+            .with_details(json!({"failureOrigin":"provider-http","httpStatus":response.status().as_u16()})));
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -374,21 +413,8 @@ async fn search_provider(
         }),
         ctx,
     ).await?;
-    if value["isError"] == true {
-        let status = value["structuredContent"]["statusCode"]
-            .as_u64()
-            .or_else(|| value["statusCode"].as_u64())
-            .unwrap_or(502) as u16;
-        let error = failure(
-            "WEB_SEARCH_TOOL_FAILED",
-            "搜索服务返回失败回执，未将其当作搜索结果。",
-            status,
-        );
-        return Err(error.with_retry_after(
-            value["retryAfterMs"]
-                .as_u64()
-                .or_else(|| value["structuredContent"]["retryAfterMs"].as_u64()),
-        ));
+    if let Some(error) = tool_failure(&value) {
+        return Err(error);
     }
     let sources = super::service_web_sources::normalize_result(
         value.get("structuredContent").unwrap_or(&value),
@@ -548,7 +574,10 @@ async fn search_sources(
     let mut retries = Vec::new();
     for (index, server) in servers.iter().enumerate().take(8) {
         if let Some(error) = ctx.runtime.web_search.cooling(server) {
-            attempts.push(json!({"providerId":server["id"],"status":"cooldown","code":error.code,"retryAfterMs":error.retry_after_ms}));
+            let mut receipt = failure_receipt(&error);
+            receipt["providerId"] = server["id"].clone();
+            receipt["status"] = json!("cooldown");
+            attempts.push(receipt);
             last_error = Some(error);
             continue;
         }
@@ -582,19 +611,24 @@ async fn search_sources(
                     "RESOURCE_CANCELLED",
                 ]
                 .contains(&error.code.as_str())
-                    || error.status == 400
                 {
                     return Err(error);
                 }
-                attempts.push(json!({"providerId":server["id"],"status":"failed","code":error.code,"httpStatus":error.status,"retryAfterMs":error.retry_after_ms}));
+                let mut receipt = failure_receipt(&error);
+                ctx.runtime.mcp_errors.lock().await.insert(
+                    server["id"].as_str().unwrap_or("").to_owned(), receipt.clone());
+                if error.status == 400 {
+                    return Err(error);
+                }
+                receipt["providerId"] = server["id"].clone();
+                receipt["status"] = json!("failed");
+                attempts.push(receipt);
                 if error.code == "WEB_SEARCH_TRANSIENT"
                     && error.retry_after_ms.unwrap_or(2000) <= 2000
                 {
                     retries.push(index);
                 }
                 ctx.runtime.web_search.failed(server, &error);
-                ctx.runtime.mcp_errors.lock().await.insert(server["id"].as_str().unwrap_or("").to_owned(),
-                    json!({"code":error.code,"message":error.message,"httpStatus":error.status,"retryAfterMs":error.retry_after_ms}));
                 last_error = Some(error);
             }
         }
@@ -640,13 +674,15 @@ async fn search_sources(
                     "RESOURCE_CANCELLED",
                 ]
                 .contains(&error.code.as_str())
-                    || error.status == 400
                 {
                     return Err(error);
                 }
-                ctx.runtime.web_search.failed(server, &error);
                 ctx.runtime.mcp_errors.lock().await.insert(server["id"].as_str().unwrap_or("").to_owned(),
-                    json!({"code":error.code,"message":error.message,"httpStatus":error.status,"retryAfterMs":error.retry_after_ms}));
+                    failure_receipt(&error));
+                if error.status == 400 {
+                    return Err(error);
+                }
+                ctx.runtime.web_search.failed(server, &error);
                 last_error = Some(error);
             }
         }
@@ -751,6 +787,16 @@ mod tests {
                         if state.delay_ms > 0 {
                             tokio::time::sleep(Duration::from_millis(state.delay_ms)).await;
                         }
+                        if ["rpc-quota", "rpc-unknown", "rpc-schema"].contains(&state.kind.as_str()) {
+                            let error = match state.kind.as_str() {
+                                "rpc-quota" => json!({"code":-32000,"message":"private diagnostic",
+                                    "data":{"code":"insufficient_quota","httpStatus":402,"retryAfterMs":60000}}),
+                                "rpc-schema" => json!({"code":-32602,"message":"private diagnostic"}),
+                                _ => json!({"code":-32000,"message":"quota billing temporary failure without machine evidence"}),
+                            };
+                            return Response::builder().header("Content-Type", "application/json")
+                                .body(Body::from(json!({"jsonrpc":"2.0","id":request["id"],"error":error}).to_string())).unwrap();
+                        }
                         if call < state.failures {
                             return Response::builder()
                                 .status(state.status)
@@ -763,7 +809,12 @@ mod tests {
                         } else {
                             json!({"results":[{"url":"https://example.org/evidence","title":"Evidence","excerpts":["原始证据 / original evidence"]}]})
                         };
-                        json!({"content":[{"type":"text","text":sources.to_string()}],"structuredContent":sources})
+                        match state.kind.as_str() {
+                            "nested-quota" => json!({"structuredContent":{"error":{"code":"insufficient_quota"}}}),
+                            "tool-unknown" => json!({"isError":true,"content":[{"type":"text","text":"quota exceeded but no machine code"}]}),
+                            "nested-rate" => json!({"structuredContent":{"error":{"code":"RATE_LIMITED","statusCode":429,"retryAfterMs":60000}}}),
+                            _ => json!({"content":[{"type":"text","text":sources.to_string()}],"structuredContent":sources}),
+                        }
                     }
                     _ => json!({}),
                 };
@@ -814,6 +865,87 @@ mod tests {
         super::super::gateway_mcp::shutdown(ctx).await;
         let root = ctx.workdir.parent().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failure_classification_distinguishes_local_capacity_from_upstream_limits() {
+        let local = search_failure(failure("MCP_CONNECTION_CAPACITY", "local", 429));
+        assert_eq!(local.code, "MCP_CONNECTION_CAPACITY");
+        assert_eq!(local.details["failureOrigin"], "local-capacity");
+        assert!(local.details.get("httpStatus").is_none());
+        let remote = search_failure(failure("MCP_HTTP_REJECTED", "remote", 429)
+            .with_details(json!({"failureOrigin":"provider-http","httpStatus":429}))
+            .with_retry_after(Some(12345)));
+        assert_eq!(remote.code, "WEB_SEARCH_RATE_LIMITED");
+        assert_eq!(remote.retry_after_ms, Some(12345));
+        assert_eq!(remote.response()["details"]["httpStatus"], 429);
+        let unknown = search_failure(failure("MCP_RPC_ERROR", "quota exceeded", 502));
+        assert_eq!(unknown.code, "MCP_RPC_ERROR", "Unstructured prose and a gateway status do not establish upstream transience or quota.");
+    }
+
+    #[tokio::test]
+    async fn quota_receipts_keep_machine_evidence_without_retry_or_success_cache() {
+        for kind in ["exa", "rpc-quota", "nested-quota"] {
+            let mut exa = SearchFixture::start(kind, if kind == "exa" { usize::MAX } else { 0 }, 402, 0).await;
+            exa.server["id"] = json!("official-exa");
+            let (mut ctx, _keep) = super::super::gateway::test_context();
+            ctx.config["mcpServers"] = json!([exa.server]);
+            let error = search(json!({"query":"quota fixture"}), &ctx).await.unwrap_err();
+            assert_eq!(error.code, "WEB_SEARCH_QUOTA_EXHAUSTED", "{kind}");
+            assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Quota failures are not transient retries.");
+            if kind == "rpc-quota" {
+                assert_eq!(error.details["failureOrigin"], "provider-rpc");
+                assert_eq!(error.details["rpcCode"], -32000);
+                assert_eq!(error.details["providerCode"], "insufficient_quota");
+                assert_eq!(error.details["httpStatus"], 402);
+                assert_eq!(error.retry_after_ms, Some(60000));
+                assert!(!error.response().to_string().contains("private diagnostic"));
+            }
+            if kind == "nested-quota" {
+                assert!(error.details.get("httpStatus").is_none(), "A quota machine code is not an HTTP response.");
+            }
+            ctx.runtime.web_search.cooldowns.lock().unwrap().clear();
+            assert_eq!(search(json!({"query":"quota fixture"}), &ctx).await.unwrap_err().code, "WEB_SEARCH_QUOTA_EXHAUSTED");
+            assert_eq!(exa.calls.load(Ordering::Acquire), 2, "A nested error must not become a cached empty success.");
+            cleanup_search(&ctx).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_and_rpc_errors_never_guess_quota_or_retry_while_schema_errors_keep_query() {
+        for kind in ["tool-unknown", "rpc-unknown", "rpc-schema"] {
+            let mut exa = SearchFixture::start(kind, 0, 200, 0).await;
+            exa.server["id"] = json!("official-exa");
+            let (mut ctx, _keep) = super::super::gateway::test_context();
+            ctx.config["mcpServers"] = json!([exa.server]);
+            let error = search(json!({"query":"original query preserved"}), &ctx).await.unwrap_err();
+            assert!(!["WEB_SEARCH_TRANSIENT", "WEB_SEARCH_QUOTA_EXHAUSTED"].contains(&error.code.as_str()), "{kind}");
+            assert!(error.details.get("httpStatus").is_none());
+            assert_eq!(exa.calls.load(Ordering::Acquire), 1);
+            assert_eq!(exa.arguments.lock().unwrap()[0]["query"], "original query preserved");
+            if kind == "rpc-schema" {
+                assert_eq!(error.status, 400);
+                assert_eq!(error.details["rpcCode"], -32602);
+            }
+            cleanup_search(&ctx).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_rate_receipts_expose_remaining_cooldown_without_new_search() {
+        let mut exa = SearchFixture::start("nested-rate", 0, 200, 0).await;
+        exa.server["id"] = json!("official-exa");
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        ctx.config["mcpServers"] = json!([exa.server]);
+        let error = search(json!({"query":"rate fixture"}), &ctx).await.unwrap_err();
+        assert_eq!(error.code, "WEB_SEARCH_RATE_LIMITED");
+        assert_eq!(error.retry_after_ms, Some(60000));
+        let states = super::super::gateway_mcp::diagnostics(&ctx).await;
+        let state = states.iter().find(|state| state["serverId"] == "official-exa").unwrap();
+        assert_eq!(state["searchCooldown"]["details"]["httpStatus"], 429);
+        assert!(state["searchCooldown"]["retryAfterMs"].as_u64().is_some_and(|remaining| remaining > 0 && remaining <= 60000));
+        assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Reading diagnostics does not consume another search.");
+        cleanup_search(&ctx).await;
     }
 
     #[tokio::test]
