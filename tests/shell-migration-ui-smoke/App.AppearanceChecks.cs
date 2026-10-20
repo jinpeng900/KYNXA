@@ -141,6 +141,7 @@ public partial class App
             var root = (FrameworkElement)settings.Content;
             await WaitAsync(() => root.IsLoaded && root.XamlRoot is not null,
                 "the production appearance settings window is loaded");
+            NativeUi.Invoke(NativeUi.ById<Button>(root, "SettingsCategory_appearance"));
             await SettleAsync();
             var paletteGrid = NativeUi.ById<Grid>(root, "AppearancePaletteGrid");
             var buttons = AppearanceService.Palettes.Select(palette =>

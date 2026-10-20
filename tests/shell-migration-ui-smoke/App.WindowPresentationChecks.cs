@@ -33,7 +33,7 @@ public partial class App
     private readonly Stopwatch _presentationClock = new();
     private Exception? _presentationHookError;
     private sealed record PresentationEntry(Action Invoke, Window Owner, Popup? MenuPopup = null, FlyoutBase? PickerFlyout = null,
-        Popup? SourcePopup = null, MenuFlyoutPresenter? MenuPresenter = null);
+        Popup? SourcePopup = null, MenuFlyoutPresenter? MenuPresenter = null, Func<Task>? AfterInvoke = null);
     private sealed record OpeningObservation(string Case, string State, string DismissBoundary, long Handle,
         long TriggerTicks, long? DismissedTicks, long FirstVisibleTicks, long? FirstOwnedPixelTicks,
         bool VisibleBeforeDismissed, bool OwnedPixelBeforeDismissed, int Polls, long MaximumPollGapTicks, long? PopupClosedTicks);
@@ -254,8 +254,7 @@ public partial class App
         Convert.ToInt32(color.Substring(5, 2), 16) >= 240;
 
     private static string PresentationChildField(string route) => route.StartsWith("model-", StringComparison.Ordinal)
-        ? "_modelManagementWindow" : route.StartsWith("tools-", StringComparison.Ordinal) ? "_toolManagementWindow"
-        : route.StartsWith("settings-", StringComparison.Ordinal) ? "_storageSettingsWindow" : "_retrievalSettingsWindow";
+        ? "_modelManagementWindow" : "_storageSettingsWindow";
 
     private Button PresentationSidebarButton(string key) => NativeUi.Descendants<Button>(_shell).Single(button =>
         NativeUi.IsVisible(button) && (AutomationProperties.GetName(button) == UiText.Get(key) ||
@@ -320,14 +319,19 @@ public partial class App
         }
         if (route == "tools-settings")
         {
-            NativeUi.Invoke(PresentationSidebarButton("设置"));
-            await WaitAsync(() => ShellField<Window?>("_storageSettingsWindow")?.Content is FrameworkElement { IsLoaded: true },
-                "the actual settings entry realizes the tools shortcut");
-            var settings = ShellField<Window>("_storageSettingsWindow");
-            var button = NativeUi.ById<Button>((FrameworkElement)settings.Content, "AgentToolsSettingsButton");
-            button.StartBringIntoView();
-            await SettleAsync();
-            return new(() => NativeUi.Invoke(button), settings);
+            // Arm the native sampler before opening settings, then navigate inside that same visible HWND.
+            // 原生采样先就绪再打开设置；工具分类在同一可见 HWND 中切换，不再期待新的工具窗口。
+            var openSettings = PresentationSidebarButton("设置");
+            return new(() => NativeUi.Invoke(openSettings), Window, AfterInvoke: async () =>
+            {
+                await WaitAsync(() => ShellField<Window?>("_storageSettingsWindow")?.Content is FrameworkElement { IsLoaded: true },
+                    "the actual settings entry realizes the tools category");
+                var settings = ShellField<Window>("_storageSettingsWindow");
+                var button = NativeUi.ById<Button>((FrameworkElement)settings.Content, "SettingsCategory_tools");
+                button.StartBringIntoView();
+                await SettleAsync();
+                NativeUi.Invoke(button);
+            });
         }
         string sidebarKey = route switch
         {
@@ -353,7 +357,8 @@ public partial class App
         return handles.ToArray();
     }
 
-    private PresentationFrame? RecordOpeningNativeFrame(nint handle, string target, string caseName, string phase, ref long dismissedTicks)
+    private PresentationFrame? RecordOpeningNativeFrame(nint handle, string target, string caseName, string phase, ref long dismissedTicks,
+        PresentationPoint? screenPoint = null)
     {
         // Snapshot ordering before native queries and pixel I/O; a Closed callback during GetPixel cannot rewrite this sample's order.
         // 在原生查询与像素读取前捕获时序；GetPixel 期间到达的 Closed 不得将当前样本改判为关闭后采样。
@@ -361,8 +366,8 @@ public partial class App
         if (!PresentationIsWindow(handle) || !PresentationIsVisible(handle) || PresentationIsIconic(handle) ||
             !PresentationClientRect(handle, out var client) || client.Right < 25 || client.Bottom < 25 ||
             !PresentationWindowRect(handle, out var bounds)) return null;
-        var point = PresentationClientProbe(client, target == nameof(Window));
-        if (!PresentationClientToScreen(handle, ref point)) return null;
+        var point = screenPoint ?? PresentationClientProbe(client, target == nameof(Window));
+        if (screenPoint is null && !PresentationClientToScreen(handle, ref point)) return null;
         nint hitRoot = PresentationRootAtPoint(point);
         bool owned = hitRoot == handle;
         string? pixel = null;
@@ -391,11 +396,15 @@ public partial class App
         nint ownerHandle = WinRT.Interop.WindowNative.GetWindowHandle(Window);
         uint guiThread = PresentationWindowProcess(ownerHandle, out uint ownProcess);
         string nativeClass = PresentationClass(ownerHandle), caseName = _presentationCase, phase = _presentationPhase;
-        string target = route.StartsWith("model-", StringComparison.Ordinal) ? nameof(ModelManagementWindow) :
-            route.StartsWith("tools-", StringComparison.Ordinal) ? nameof(ToolManagementWindow) :
-            route.StartsWith("settings-", StringComparison.Ordinal) ? nameof(Window) : "RetrievalSettingsWindow";
+        string target = route.StartsWith("model-", StringComparison.Ordinal) ? nameof(ModelManagementWindow) : nameof(Window);
         var previousHandles = PresentationThreadWindows(guiThread, ownProcess, nativeClass).ToHashSet();
         nint existingHandle = existing is null ? 0 : WinRT.Interop.WindowNative.GetWindowHandle(existing);
+        // A reused window can extend beyond its owner. Observe only a patch the owner actually covers before activation.
+        // 复用窗口可能超出所有者边界；仅观察激活前确由所有者覆盖的两窗交叠区域。
+        PresentationPoint? reusePoint = state == "reuse" && existing is not null ? FormerChildPoint(existing, entry.Owner) : null;
+        if (state == "reuse" && (reusePoint is null || PresentationRootAtPoint(reusePoint.Value) !=
+            WinRT.Interop.WindowNative.GetWindowHandle(entry.Owner)))
+            throw new InvalidOperationException("The reuse probe is not covered by its actual owner before opening.");
         PresentationPoint? sourcePoint = null;
         nint sourceHandle = 0;
         string sourceClass = string.Empty;
@@ -460,16 +469,20 @@ public partial class App
                     foreach (nint handle in PresentationThreadWindows(guiThread, ownProcess, nativeClass))
                     {
                         if (existingHandle != 0 ? handle != existingHandle : previousHandles.Contains(handle)) continue;
-                        var frame = RecordOpeningNativeFrame(handle, target, caseName, phase, ref dismissedTicks);
+                        var frame = RecordOpeningNativeFrame(handle, target, caseName, phase, ref dismissedTicks, reusePoint);
                         if (frame is null) continue;
                         long seen = frame.SampleStartedTicks!.Value;
-                        bool dismissed = !hasFlyout || frame.DismissedTicksAtSample > 0;
-                        if (firstVisible == 0) { firstVisible = seen; observedHandle = handle.ToInt64(); }
-                        if (!dismissed) visibleBeforeDismissed = true;
+                        long dismissedAtSampleEnd = Volatile.Read(ref dismissedTicks);
+                        // Native queries can span content unload. Keep those pixels, but only wholly ordered samples establish ordering.
+                        // 原生查询可能跨越内容卸载；保留其像素，但只用完整位于边界一侧的样本判断先后。
+                        bool beforeDismissed = hasFlyout && (dismissedAtSampleEnd == 0 || frame.SampleCompletedTicks < dismissedAtSampleEnd);
+                        bool afterDismissed = !hasFlyout || dismissedAtSampleEnd > 0 && seen >= dismissedAtSampleEnd;
+                        if (firstVisible == 0 && (beforeDismissed || afterDismissed)) { firstVisible = seen; observedHandle = handle.ToInt64(); }
+                        if (beforeDismissed) visibleBeforeDismissed = true;
                         if (frame.OwnedPixel && frame.Pixel is not null)
                         {
-                            if (firstOwned == 0) firstOwned = seen;
-                            if (!dismissed) ownedBeforeDismissed = true;
+                            if (firstOwned == 0 && (beforeDismissed || afterDismissed)) firstOwned = seen;
+                            if (beforeDismissed) ownedBeforeDismissed = true;
                         }
                     }
                 }
@@ -488,6 +501,7 @@ public partial class App
             await ready.Task;
             Interlocked.Exchange(ref triggerTicks, Stopwatch.GetTimestamp());
             entry.Invoke();
+            if (entry.AfterInvoke is not null) await entry.AfterInvoke();
             await WaitAsync(() => ShellField<Window?>(PresentationChildField(route)) is not null,
                 caseName + "-" + state + " dispatches the actual entry before reading the child");
             child = ShellField<Window>(PresentationChildField(route));
@@ -497,14 +511,20 @@ public partial class App
             nint childHandle = WinRT.Interop.WindowNative.GetWindowHandle(child);
             await WaitAsync(() => !PresentationIsIconic(childHandle) && GetForegroundWindow() == childHandle &&
                 child.Content is FrameworkElement { IsLoaded: true }, caseName + "-" + state + " naturally presents loaded content in the foreground");
-            if (child is ToolManagementWindow tools)
+            if (route.StartsWith("tools-", StringComparison.Ordinal))
             {
+                var tools = ShellField<ToolManagementWindow>("_toolManagementWindow");
                 await WaitAsync(() => typeof(ToolManagementWindow).GetField("_config", PrivateInstance)!.GetValue(tools) is not null &&
                     !tools.HasPendingChanges, caseName + " loads all four read-only management responses");
-                var root = (FrameworkElement)tools.Content;
+                var root = (FrameworkElement)child.Content;
+                Check(tools.IsEmbedded && tools.Content is null &&
+                    ReferenceEquals(child, ShellField<Window>("_storageSettingsWindow")),
+                    caseName + " embeds the real tool controller inside the same visible settings window");
                 Check(!NativeUi.ByName<InfoBar>(root, "AgentStatusBar").IsOpen,
                     caseName + " loads the actual tool management page without an error notice");
-                Check(NativeUi.ByName<Pivot>(root, "AgentTabs").SelectedIndex == (route is "tools-skills" or "tools-drawer" ? 1 : 0),
+                int expectedSection = route is "tools-skills" or "tools-drawer" ? 1 :
+                    route == "tools-settings" && ShellField<bool>("_settingsToolsSkills") ? 1 : 0;
+                Check(NativeUi.ByName<Pivot>(root, "AgentTabs").SelectedIndex == expectedSection,
                     caseName + " selects the section requested by its actual entry");
             }
             await Task.Delay(350);

@@ -26,9 +26,10 @@ public sealed partial class RetrievalSettingsWindow : Window
     private RetrievalStatus? _status;
     private string? _noticeMessageKey;
     private bool _closed, _busy, _rendering, _loaded, _polling, _allowClose;
+    private Window? _settingsOwner;
 
     public RetrievalSettingsWindow(Guid? projectId = null, string? projectName = null, string? mountedPath = null,
-        IRetrievalApi? api = null)
+        IRetrievalApi? api = null, Window? settingsOwner = null)
     {
         if (projectId == Guid.Empty) throw new ArgumentException("A saved project ID is required.", nameof(projectId));
         _projectId = projectId;
@@ -36,30 +37,76 @@ public sealed partial class RetrievalSettingsWindow : Window
         _mountedPath = mountedPath;
         _api = api ?? new RetrievalApiClient();
         _ownsApi = api is null;
+        _settingsOwner = settingsOwner;
         BuildLayout();
-        AppearanceService.TrackWindow(this);
+        if (settingsOwner is null) AppearanceService.TrackWindow(this);
         Title = UiText.Get("KYNXA · 检索与网页搜索");
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 760));
+        if (settingsOwner is null) AppWindow.Resize(new Windows.Graphics.SizeInt32(720, 760));
         UiText.LanguageChanged += LanguageChanged;
-        AppWindow.Closing += (_, args) => { if (_busy && !_allowClose) args.Cancel = true; };
-        Closed += (_, _) =>
-        {
-            _closed = true;
-            _jobTimer.Stop();
-            _lifetime.Cancel();
-            UiText.LanguageChanged -= LanguageChanged;
-            if (_ownsApi && _api is IDisposable disposable) disposable.Dispose();
-            _lifetime.Dispose();
-        };
+        AppWindow.Closing += WindowClosing;
+        Closed += WindowClosed;
     }
 
     public bool HasPendingChanges => _busy;
     public Guid? ProjectId => _projectId;
+    public bool IsEmbedded => _settingsOwner is not null;
+
+    /// <summary>
+    /// Reuses retrieval controls and polling in the settings content area, owned by the visible window.
+    /// 在设置内容区复用检索控件和轮询，选择器与确认框由可见设置窗口持有。
+    /// </summary>
+    public FrameworkElement AttachToSettings(Window owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ObjectDisposedException.ThrowIf(_closed, this);
+        _settingsOwner = owner;
+        SetTitleBar(null);
+        _titleBar.Visibility = Visibility.Collapsed;
+        _settingsRoot.RowDefinitions[0].Height = new GridLength(0);
+        Content = null;
+        return _settingsRoot;
+    }
+
+    private XamlRoot? DialogRoot => (_settingsOwner?.Content as FrameworkElement)?.XamlRoot ?? _settingsRoot.XamlRoot;
+
+    public void DisposeEmbedded()
+    {
+        if (_closed) return;
+        _allowClose = true;
+        ReleaseResources();
+        Close();
+        _settingsOwner = null;
+    }
 
     public void CloseForOwner()
     {
+        if (IsEmbedded)
+        {
+            DisposeEmbedded();
+            return;
+        }
         _allowClose = true;
         Close();
+    }
+
+    private void WindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_busy && !_allowClose) args.Cancel = true;
+    }
+
+    private void WindowClosed(object sender, WindowEventArgs args) => ReleaseResources();
+
+    private void ReleaseResources()
+    {
+        if (_closed) return;
+        _closed = true;
+        _jobTimer.Stop();
+        _lifetime.Cancel();
+        UiText.LanguageChanged -= LanguageChanged;
+        AppWindow.Closing -= WindowClosing;
+        Closed -= WindowClosed;
+        if (_ownsApi && _api is IDisposable disposable) disposable.Dispose();
+        _lifetime.Dispose();
     }
 
     private void LanguageChanged(object? sender, EventArgs args)
@@ -208,14 +255,14 @@ public sealed partial class RetrievalSettingsWindow : Window
             {
                 var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
                 picker.FileTypeFilter.Add("*");
-                WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_settingsOwner ?? this));
                 path = (await picker.PickSingleFolderAsync())?.Path;
             }
             else
             {
                 var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
                 picker.FileTypeFilter.Add("*");
-                WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_settingsOwner ?? this));
                 path = (await picker.PickSingleFileAsync())?.Path;
             }
             if (path is null || _closed) return;
@@ -241,7 +288,7 @@ public sealed partial class RetrievalSettingsWindow : Window
             var remove = ActionButton("移除资料", "RetrievalRemoveSource-" + source.Id);
             remove.Click += async (_, _) => await RunOperationAsync(async () =>
             {
-                var choice = await DialogPresentation.ShowAsync(new ContentDialog { XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                var choice = await DialogPresentation.ShowAsync(new ContentDialog { XamlRoot = DialogRoot,
                     Title = UiText.Get("移除检索资料？"), Content = UiText.Get("仅移除检索资料，不删除原文件。"),
                     PrimaryButtonText = UiText.Get("移除资料"), CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Close });
                 if (choice != ContentDialogResult.Primary || _closed) return;

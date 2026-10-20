@@ -41,6 +41,7 @@ public partial class App : Application
     private bool _sidebarRoundnessOnly;
     private bool _typographyOnly;
     private bool _settingsInteractionsOnly;
+    private bool _settingsWorkspaceOnly;
     private bool _dialogsOnly;
     private bool _windowPresentationOnly;
 
@@ -107,6 +108,9 @@ public partial class App : Application
         _settingsInteractionsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--settings-interactions-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--settings-interactions-only", StringComparer.Ordinal);
+        _settingsWorkspaceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--settings-workspace-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--settings-workspace-only", StringComparer.Ordinal);
         _dialogsOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--dialogs-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--dialogs-only", StringComparer.Ordinal);
@@ -459,7 +463,7 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            if (_promptSendOnly || _workspaceAutoOpenOnly) _gateway.ReleaseInitialCatalog();
+            if (_promptSendOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
             else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&
@@ -476,6 +480,15 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
+            if (_settingsWorkspaceOnly)
+            {
+                await CheckSettingsWorkspaceAsync();
+                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
+                    "unified settings checks use isolated read-only fixtures without supplier calls or formal writes");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell settings workspace checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_windowPresentationOnly)
             {
                 await CheckWindowPresentationAsync();

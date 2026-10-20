@@ -47,12 +47,15 @@ public sealed partial class ShellPage
         private void AddTransferControls(FontFamily font, Func<AppearanceTransferPreferences> readSavedPreferences,
             Func<bool, Task<StorageFile?>> pickFile)
         {
-            var actions = new Grid { ColumnSpacing = 8 };
+            var transferGroup = new StackPanel { Spacing = 10, Padding = new Thickness(16, 14, 16, 14) };
+            var actions = new Grid { ColumnSpacing = 8, MaxWidth = 460,
+                HorizontalAlignment = HorizontalAlignment.Left, Width = 340 };
             actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             Button Action(string key, string id)
             {
-                var button = new Button { FontFamily = font, CornerRadius = new CornerRadius(8), MinWidth = 0,
+                var button = new Button { FontFamily = font, CornerRadius = new CornerRadius(9), MinWidth = 0,
+                    MinHeight = 34, Padding = new Thickness(14, 5, 14, 5),
                     HorizontalAlignment = HorizontalAlignment.Stretch };
                 UiLocalization.Bind(button, Button.ContentProperty, key);
                 UiLocalization.Bind(button, AutomationProperties.NameProperty, key);
@@ -64,11 +67,13 @@ public sealed partial class ShellPage
             Grid.SetColumn(_exportAppearance, 1);
             actions.Children.Add(_importAppearance);
             actions.Children.Add(_exportAppearance);
-            Root.Children.Add(actions);
+            transferGroup.Children.Add(actions);
             var hint = new TextBlock { FontFamily = font, FontSize = 12, TextWrapping = TextWrapping.Wrap,
                 Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") };
             UiLocalization.Bind(hint, TextBlock.TextProperty, "仅包含已保存的配色、主题、聊天字号和强调色。导入会替换当前外观。");
-            Root.Children.Add(hint);
+            transferGroup.Children.Add(hint);
+            Root.Children.Add(BuildSettingGroup(transferGroup));
+            transferGroup.SizeChanged += (_, args) => actions.Width = Math.Min(340, Math.Max(0, args.NewSize.Width - 32));
             _importAppearance.Click += async (_, _) => await TransferAsync(true, readSavedPreferences, pickFile);
             _exportAppearance.Click += async (_, _) => await TransferAsync(false, readSavedPreferences, pickFile);
         }
