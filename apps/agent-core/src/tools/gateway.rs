@@ -487,9 +487,13 @@ pub(crate) fn canonical_authorized(
 
 pub(crate) fn protected_path(ctx: &GatewayToolContext, path: &Path) -> bool {
     let sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
-    let own_sandbox = super::service_filesystem::canonical(&sandbox, false)
+    // A sandbox directory does not exist until the first generated file lands in it; resolving with allow_missing
+    // keeps that first write inside its own sandbox instead of reporting protected application data.
+    // 沙盒目录在首个生成文件落盘前并不存在；允许缺失的解析让首次写入仍属于本会话沙盒，
+    // 不会被误判成受保护的应用数据。
+    let own_sandbox = super::service_filesystem::canonical(&sandbox, true)
         .ok()
-        .zip(super::service_filesystem::canonical(&ctx.workdir, false).ok())
+        .zip(super::service_filesystem::canonical(&ctx.workdir, true).ok())
         .is_some_and(|(sandbox, work)| {
             super::local_files::within(&sandbox, &work)
                 && super::local_files::within(&work, &sandbox)
@@ -515,6 +519,20 @@ pub(super) async fn filesystem(
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
     let missing = matches!(name, "filesystem.write" | "filesystem.mkdir");
+    // The per-conversation sandbox is created on first write so a generated file has a place to land; subdirectories
+    // still require an explicit mkdir, and a linked work folder keeps its own existing directory.
+    // 首次写入时创建本会话沙盒，让生成的文件有落点；子目录仍需显式 mkdir，挂载文件夹沿用其已有目录。
+    if missing {
+        let sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
+        if let (Ok(sandbox), Ok(work)) = (
+            super::service_filesystem::canonical(&sandbox, true),
+            super::service_filesystem::canonical(&ctx.workdir, true),
+        ) {
+            if super::local_files::within(&sandbox, &work) && super::local_files::within(&work, &sandbox) {
+                let _ = std::fs::create_dir_all(&work);
+            }
+        }
+    }
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -527,9 +545,13 @@ pub(super) async fn filesystem(
         managed.push(PathBuf::from(official));
     }
     let sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
-    let own_sandbox = super::service_filesystem::canonical(&sandbox, false)
+    // A sandbox directory does not exist until the first generated file lands in it; resolving with allow_missing
+    // keeps that first write inside its own sandbox instead of reporting protected application data.
+    // 沙盒目录在首个生成文件落盘前并不存在；允许缺失的解析让首次写入仍属于本会话沙盒，
+    // 不会被误判成受保护的应用数据。
+    let own_sandbox = super::service_filesystem::canonical(&sandbox, true)
         .ok()
-        .zip(super::service_filesystem::canonical(&ctx.workdir, false).ok())
+        .zip(super::service_filesystem::canonical(&ctx.workdir, true).ok())
         .is_some_and(|(sandbox, work)| {
             super::local_files::within(&sandbox, &work)
                 && super::local_files::within(&work, &sandbox)
@@ -2065,6 +2087,46 @@ mod tests {
         .unwrap();
         assert_eq!(unverified["sandboxVerified"], false);
     }
+    #[tokio::test]
+    async fn first_write_into_an_absent_own_sandbox_creates_it_instead_of_reporting_protected_data() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        // A formal conversation works in data_root/Sandboxes/<conversationId>, which does not exist before the
+        // first generated file; the write must create it rather than be rejected as protected application data.
+        // 正式会话的工作目录是 data_root/Sandboxes/<会话 ID>，首个生成文件之前该目录还不存在；
+        // 写入应当创建它，而不是被当成受保护的应用数据拒绝。
+        let sandbox = ctx.data_home.join("Sandboxes").join(&ctx.conversation_id);
+        ctx.workdir = sandbox.clone();
+        ctx.authorized_roots = vec![sandbox.clone()];
+        ctx.permission_mode = "full".into();
+        let target = sandbox.join("生成.md");
+        let written = execute(
+            "filesystem.write",
+            json!({"path":target,"content":"# 生成","expectedHash":null}),
+            &ctx,
+        )
+        .await;
+        assert!(written.is_ok(), "{written:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "# 生成");
+        // Any other conversation's sandbox stays protected.
+        // 其他会话的沙盒仍然受保护。
+        let foreign = ctx.data_home.join("Sandboxes/foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("secret.txt"), "private").unwrap();
+        assert_eq!(
+            execute(
+                "filesystem.read",
+                json!({"path":foreign.join("secret.txt")}),
+                &ctx
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "PROTECTED_APP_DATA"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn write_restore_uses_current_hash_and_preserves_approval_boundary() {
         let (mut ctx, _sender) = test_context();

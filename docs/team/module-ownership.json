@@ -375,6 +375,7 @@
         "tools/gateway_attachment_read.rs",
         "tools/gateway_workspace_changes.rs",
         "tools/gateway_workspace_terminal.rs",
+        "tools/gateway_workspace_tree.rs",
         "tools/gateway_browser.rs",
         "tools/gateway_browser_permissions.rs",
         "tools/gateway_mcp.rs",
@@ -493,6 +494,11 @@
           "path": "tools/gateway_workspace_changes.rs",
           "allowedDomains": [],
           "purpose": "Read-only Git changes in the authorized work directory / 授权工作目录内的只读 Git 变更"
+        },
+        {
+          "path": "tools/gateway_workspace_tree.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Read-only work directory mirror with attachment view / 只读工作目录镜像与附件视图"
         },
         {
           "path": "gateway.rs",

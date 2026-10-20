@@ -4,7 +4,6 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.Storage.Pickers;
 
 namespace KYNXA_Desktop.Views;
 
@@ -39,22 +38,6 @@ public sealed partial class ShellPage
     { _layout.WorkTaskRatio = _taskRatioBeforeDrag; UpdateTaskRegionLayout(); }
     private void TaskRegionGrip_ResetRequested(object? sender, EventArgs args)
     { _layout.WorkTaskRatio = 0; UpdateTaskRegionLayout(); SaveLayout(); }
-
-    private async void OpenWorkspaceFile()
-    {
-        if (_chatClosing || ActiveChatId is not Guid conversation) return;
-        try
-        {
-            var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-            picker.FileTypeFilter.Add("*");
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-            var file = await picker.PickSingleFileAsync();
-            if (file is not null && !_chatClosing) AddWorkspaceTab(conversation,
-                ConversationWorkspaceSources.File(file.Path, userSelected: true), select: true);
-        }
-        catch (Exception error) when (error is System.Runtime.InteropServices.COMException or InvalidOperationException or UnauthorizedAccessException)
-        { if (!_chatClosing) ShowActionFeedback(UiText.Get("文件打开失败，请重试。")); }
-    }
 
     private string? CurrentWorkspaceDirectory() => ActiveChatId is Guid conversation
         ? FindChat(conversation).Project?.FolderPath

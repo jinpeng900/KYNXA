@@ -126,6 +126,18 @@ Google 异常流量页及已识别的 Cloudflare 人机验证页返回明确的�
 
 消息范围内的附件接口提供原始字节、图片及 UTF-16 解析分页。DOCX/PDF/PPT/文本与图片 OCR 复用 Rust 现有解析器；当前模型轮按上下文预算接收相关摘录，图片沿已有多模态协议发送，模型明确拒绝图片时保留文本与 `attachment.read` 回读路径继续。用户正文不改写成解析结果，队列与引导沿同一附件身份续接。用户消息上方显示图片和文档卡片，点击后在右侧打开，历史图片通过只允许当前消息附件的原生代理加载。
 
+## 工作区文件树
+
+右栏文件面板镜像会话工作目录，而不只是用户上传的附件列表。`GET /api/agent/workspace/tree?conversationId=&since=&maximumEntries=&maximumDepth=` 返回 `{version, changed, workspaceKind, root, truncated, virtualAttachmentFolder, entries[], attachments[]}`。
+
+- `workspaceKind` 为 `isolated`（每聊天的 `Sandboxes/<conversationId>`）或 `linked`（工作关联的本地文件夹）；前端据根类型分开展示，不把两个根合并成一棵树。
+- `entries` 是扁平列表，`path` 以 `/` 分隔，`kind` 为 `file` 或 `directory`；文件带 `sizeBytes` 与 `modifiedAt`，并按 `Agent/workspace-index/<conversationId>.json` 的基线标注 `added`、`modified` 或 `unchanged`。首次观察只建立基线，不把既有文件标成新增。
+- `version` 是路径、大小与修改时间的稳定哈希；带 `since` 且与当前版本一致时返回 `changed=false`，前端据此跳过重绘。
+- 遍历不跟随符号链接与重解析点，跳过保留名 `_attachments`；超过 `maximumEntries`（默认 2000）或 `maximumDepth`（默认 4）时置 `truncated=true`。
+- `attachments` 是本聊天已保存的上传附件，前端渲染为只读虚拟目录 `_attachments/`；原件仍由附件接口提供，不复制字节。模型侧继续用 `attachment.read`，系统提示已列出本会话已保存附件。
+
+该接口只读，不改变工作目录内容；删除、重命名等写操作以及会话销毁时清理隔离沙盒尚未实现，沙盒目录当前长期保留。
+
 ## 检索与模型资源
 
 - 路径查找、受限文本搜索和回源读取独立于全量语义索引。挂载工作和正式资料由后台维护；前台不等待全部向量生成。

@@ -88,6 +88,24 @@ pub(crate) async fn list(
         .map_err(Into::into)
 }
 
+/// A work page reads saved snapshots from the work's own chats only; no bytes are copied or served here.
+/// 工作级分页只读取本工作各聊天已保存的快照；此处不复制也不返回二进制内容。
+pub(crate) async fn project_list(
+    runtime: &GatewayRuntime,
+    project: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, GatewayError> {
+    let root = runtime.config.data_root.clone();
+    let project = project.to_owned();
+    tokio::task::spawn_blocking(move || {
+        message_attachments::project_list(&root, &project, offset, limit)
+    })
+    .await
+    .map_err(|_| GatewayError::new("ATTACHMENT_WORKER_FAILED", "附件读取线程结束。", 500))?
+    .map_err(Into::into)
+}
+
 pub(crate) async fn content(
     runtime: &GatewayRuntime,
     conversation: &str,

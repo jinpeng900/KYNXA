@@ -9,15 +9,15 @@ using Windows.System;
 namespace KYNXA_Desktop.Controls;
 
 /// <summary>
-/// Workspace entry points share the right pane; website entry never opens a modal dialog.
-/// 工作区入口共用右栏，网址直接输入，不再弹出阻断式输入窗口。
+/// Right-pane menu: work files first, then terminal and changes, with the website entry kept at the bottom.
+/// 右栏菜单：工作区文件在最上，其后依次为终端与变更；网址入口保持在最下方。
 /// </summary>
 public sealed class ConversationWorkspaceHome : Grid
 {
     private readonly TextBox _address = new() { PlaceholderText = "https://", FontSize = 13, MinHeight = 34,
         CornerRadius = new CornerRadius(9), Padding = new Thickness(10, 5, 10, 5), MinWidth = 0 };
-    private readonly TextBlock _directory = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap,
-        TextAlignment = TextAlignment.Center, MaxWidth = 420 };
+    private readonly TextBlock _directory = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap, MaxLines = 2,
+        TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Left };
     public event EventHandler<string>? WebsiteRequested;
     public event EventHandler? ChangesRequested;
     public event EventHandler? TerminalRequested;
@@ -29,13 +29,27 @@ public sealed class ConversationWorkspaceHome : Grid
 
     public ConversationWorkspaceHome()
     {
-        var content = new StackPanel { Spacing = 18, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(18) };
-        var title = new TextBlock { Text = UiText.Get("工作区"), FontSize = 20,
-            HorizontalAlignment = HorizontalAlignment.Center, Foreground = Brush("KynxaTextBrush") };
-        _labels[title] = "工作区";
-        content.Children.Add(title);
-        content.Children.Add(_directory);
+        RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
+        RowDefinitions.Add(new() { Height = GridLength.Auto });
+
+        // The menu sits in the middle of the free area, lifted slightly above true centre so it stays clear of the
+        // address footer below it.
+        // 菜单位于空白区域中部，比正中略高一些，避免贴近下方网址页脚。
+        var menu = new StackPanel { Spacing = 6, Margin = new Thickness(14, 0, 14, 24),
+            VerticalAlignment = VerticalAlignment.Center };
+        _file = CreateMenuButton("\uE8B7", "工作区文件");
+        _terminal = CreateMenuButton("\uE756", "终端");
+        _changes = CreateMenuButton("\uE8A9", "变更");
+        _file.Click += (_, _) => FileRequested?.Invoke(this, EventArgs.Empty);
+        _terminal.Click += (_, _) => TerminalRequested?.Invoke(this, EventArgs.Empty);
+        _changes.Click += (_, _) => ChangesRequested?.Invoke(this, EventArgs.Empty);
+        menu.Children.Add(_file);
+        menu.Children.Add(_terminal);
+        menu.Children.Add(_changes);
+        Children.Add(menu);
+
+        var footer = new StackPanel { Spacing = 9, Margin = new Thickness(14, 0, 14, 14) };
+        footer.Children.Add(_directory);
         var addressRow = new Grid { ColumnSpacing = 5 };
         addressRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         addressRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
@@ -44,18 +58,10 @@ public sealed class ConversationWorkspaceHome : Grid
         navigate.Padding = new Thickness(9); Grid.SetColumn(navigate, 1); addressRow.Children.Add(navigate);
         navigate.Click += (_, _) => Navigate();
         _address.KeyDown += (_, args) => { if (args.Key == VirtualKey.Enter) { args.Handled = true; Navigate(); } };
-        content.Children.Add(addressRow);
-        var actions = new Grid { ColumnSpacing = 8 };
-        for (int index = 0; index < 3; index++) actions.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        _changes = CreateButton("\uE8A9", "变更");
-        _terminal = CreateButton("\uE756", "终端");
-        _file = CreateButton("\uE8A5", "文件");
-        _changes.Click += (_, _) => ChangesRequested?.Invoke(this, EventArgs.Empty);
-        _terminal.Click += (_, _) => TerminalRequested?.Invoke(this, EventArgs.Empty);
-        _file.Click += (_, _) => FileRequested?.Invoke(this, EventArgs.Empty);
-        actions.Children.Add(_changes); Grid.SetColumn(_terminal, 1); actions.Children.Add(_terminal);
-        Grid.SetColumn(_file, 2); actions.Children.Add(_file); content.Children.Add(actions);
-        Children.Add(content);
+        footer.Children.Add(addressRow);
+        Grid.SetRow(footer, 1);
+        Children.Add(footer);
+
         _directory.Foreground = Brush("KynxaSecondaryTextBrush");
         _address.Foreground = Brush("KynxaTextBrush");
         _address.Background = Brush("KynxaReplySurfaceBrush");
@@ -94,6 +100,27 @@ public sealed class ConversationWorkspaceHome : Grid
             WebsiteRequested?.Invoke(this, address.AbsoluteUri);
     }
 
+    /// <summary>A menu row keeps the existing button look but reads left-aligned like the reference layout.
+    /// 菜单行保留现有按钮外观，但像参考布局那样左对齐排布。</summary>
+    private Button CreateMenuButton(string glyph, string text)
+    {
+        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center };
+        label.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15 });
+        var caption = new TextBlock { Text = UiText.Get(text), FontSize = 13 };
+        _labels[caption] = text; label.Children.Add(caption);
+        var button = new Button { Content = label, CornerRadius = new CornerRadius(9), Padding = new Thickness(12, 10, 12, 10),
+            MinWidth = 0, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Background = Brush("KynxaReplySurfaceBrush"), BorderBrush = Brush("KynxaDividerBrush"),
+            Foreground = Brush("KynxaTextBrush"), FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush"),
+            FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Tag = text };
+        if (Application.Current.Resources.TryGetValue("KynxaQuietButtonStyle", out var style) && style is Style quiet) button.Style = quiet;
+        AutomationProperties.SetName(button, UiText.Get(text));
+        ToolTipService.SetToolTip(button, UiText.Get(text));
+        return button;
+    }
+
     private Button CreateButton(string glyph, string text)
     {
         var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Center };
@@ -114,7 +141,7 @@ public sealed class ConversationWorkspaceHome : Grid
     private void RefreshLanguage()
     {
         foreach (var (label, key) in _labels) label.Text = UiText.Get(key);
-        foreach (var button in new[] { _changes, _terminal, _file })
+        foreach (var button in new[] { _file, _terminal, _changes })
         {
             string caption = UiText.Get((string)button.Tag);
             AutomationProperties.SetName(button, caption); ToolTipService.SetToolTip(button, caption);
