@@ -26,6 +26,9 @@ public sealed partial class ShellPage
         WorkTabs.TabsChanged += (_, _) => { if (!_chatClosing) ApplyLayout(); };
         WorkTabs.TabInvoked += (_, tab) =>
         {
+            // Selecting a tab gives the preview row back to that tab.
+            // 选择标签时把预览行交还给该标签。
+            _workspaceFilesVisible = false;
             if (!_chatClosing && ActiveChatId is Guid conversation && tab.Kind == "browser" && tab.Target is { } url)
                 DocumentPanel.ShowWebsite(conversation, url, tab.Title);
         };
@@ -34,11 +37,14 @@ public sealed partial class ShellPage
             if (closed.Tab.Kind == "terminal") WorkspaceTerminal.CloseSession(closed.ConversationId, closed.Tab.Key);
             else DocumentPanel.CloseTab(closed.ConversationId, closed.Tab);
         };
-        WorkTabs.HomeRequested += (_, _) => { ApplyLayout(); WorkspaceHome.FocusAddress(); };
-        WorkspaceHome.FileRequested += (_, _) => OpenWorkspaceFile();
+        WorkTabs.HomeRequested += (_, _) => { _workspaceFilesVisible = false; ApplyLayout(); WorkspaceHome.FocusAddress(); };
+        WorkspaceHome.FileRequested += (_, _) => ShowWorkspaceFiles();
         WorkspaceHome.WebsiteRequested += (_, url) => AddWebsiteTab(url);
         WorkspaceHome.ChangesRequested += (_, _) => OpenWorkspaceChanges();
         WorkspaceHome.TerminalRequested += (_, _) => OpenWorkspaceTerminal();
+        WorkspaceFiles.FileOpenRequested += (_, path) => OpenWorkspacePath(path);
+        WorkspaceFiles.AttachmentOpenRequested += (_, attachment) => OpenWorkspaceAttachment(attachment);
+        WorkspaceFiles.BackRequested += (_, _) => CloseWorkspaceFiles();
         WorkspaceTerminal.NewSessionRequested += (_, _) => OpenWorkspaceTerminal();
         ConversationMessages.AttachmentRequested += (_, request) =>
         {
@@ -175,10 +181,13 @@ public sealed partial class ShellPage
         var selected = WorkTabs.SelectedTab;
         var screenshot = selected?.Kind == "screenshot"
             ? ScreenshotPanel.Items.FirstOrDefault(source => ScreenshotTabKey(source) == selected.Key) : null;
-        bool showScreenshot = sidebarVisible && screenshot is not null;
-        bool showDocument = sidebarVisible && ActiveChatId is not null && selected?.Target is not null &&
+        // The file mirror owns the preview row while it is open; opening a tab releases that row back to the tab.
+        // 文件镜像打开期间占用预览行；打开标签后把该行交还给标签。
+        bool filesOwnRow = sidebarVisible && _workspaceFilesVisible && ActiveChatId is not null;
+        bool showScreenshot = sidebarVisible && !filesOwnRow && screenshot is not null;
+        bool showDocument = !filesOwnRow && sidebarVisible && ActiveChatId is not null && selected?.Target is not null &&
             selected.Kind is "document" or "diagram" or "browser" or "changes";
-        bool showTerminal = sidebarVisible && ActiveChatId is not null && selected?.Kind == "terminal";
+        bool showTerminal = !filesOwnRow && sidebarVisible && ActiveChatId is not null && selected?.Kind == "terminal";
 
         if (!showScreenshot) ScreenshotPanel.SetPreviewEnabled(false);
         if (!showDocument) DocumentPanel.SetPreviewEnabled(false);
@@ -213,7 +222,8 @@ public sealed partial class ShellPage
         DocumentPanel.Visibility = showDocument ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceTerminal.Visibility = showTerminal ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceHome.ShowDirectory(CurrentWorkspaceDirectory(), ActiveChatId is not null);
-        WorkspaceHome.Visibility = sidebarVisible && !showScreenshot && !showDocument && !showTerminal ? Visibility.Visible : Visibility.Collapsed;
+        SynchronizeWorkspaceFiles(filesOwnRow);
+        WorkspaceHome.Visibility = sidebarVisible && !showScreenshot && !showDocument && !showTerminal && !filesOwnRow ? Visibility.Visible : Visibility.Collapsed;
         UpdateTaskRegionLayout();
     }
 

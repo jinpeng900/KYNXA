@@ -364,6 +364,7 @@ struct Fixture {
     url: String,
     conversation: String,
     user_message_id: String,
+    project: String,
     provider: Provider,
     servers: Vec<JoinHandle<()>>,
     root: PathBuf,
@@ -445,6 +446,9 @@ impl Fixture {
             .unwrap();
         let conversation = new_id();
         let user_message_id = new_id();
+        // The work identity is kept so work-scoped attachment checks can address the real relationship.
+        // 保留工作身份，便于工作级附件检查针对真实归属发请求。
+        let project = new_id();
         let initial_message = if mcp {
             "检查隔离 MCP；不可用时也继续回答。"
         } else if tool {
@@ -457,7 +461,7 @@ impl Fixture {
         // A formal work chat is retained only once it has a user message; mimic the desktop send contract.
         // 正式工作聊天有用户消息才保留；夹具遵循桌面发送合同，不假设空聊天会被持久化。
         let saved = client.put(format!("{url}/api/conversations/catalog")).json(&json!({"Revision":catalog["Revision"],"Chats":[],"Projects":[{
-            "Id":new_id(),"Name":"Isolated work","FolderPath":root.join("work"),"Chats":[{"Id":conversation,"Title":"Native HTTP fixture","Draft":"","Messages":[{"Id":user_message_id,"Role":"user","Content":initial_message,"CreatedAt":"2026-10-12T00:00:00Z"}]}]}]})).send().await.unwrap();
+            "Id":project,"Name":"Isolated work","FolderPath":root.join("work"),"Chats":[{"Id":conversation,"Title":"Native HTTP fixture","Draft":"","Messages":[{"Id":user_message_id,"Role":"user","Content":initial_message,"CreatedAt":"2026-10-12T00:00:00Z"}]}]}]})).send().await.unwrap();
         assert!(
             saved.status().is_success(),
             "{}",
@@ -474,6 +478,7 @@ impl Fixture {
             url,
             conversation,
             user_message_id,
+            project,
             provider,
             servers: vec![provider_server, gateway_server],
             root,
@@ -973,6 +978,148 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
         assert_eq!(response.text().await.unwrap(), text);
         assert_eq!(fixture.client.get(format!("{content_url}&version=stale")).send().await.unwrap().status(), 409);
     }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_attachment_page_stays_inside_one_work() {
+    use kynxa_agent_core_native::storage::gateway as data;
+    let fixture = Fixture::new(false, false).await;
+    let first_message = new_id();
+    let first_attachment = new_id();
+    let bytes = b"work-one-bytes";
+    std::fs::write(fixture.root.join("work/first.txt"), bytes).unwrap();
+    data::upsert_message(&fixture.runtime.config.data_root, &fixture.conversation,
+        &json!({"Id":first_message,"Role":"user","Content":"第一个工作的附件",
+            "Attachments":[{"Id":first_attachment,"Name":"first.txt","SizeBytes":bytes.len()}]})).unwrap();
+    let imported = fixture.client.post(format!("{}/api/conversations/{}/attachments/import", fixture.url, fixture.conversation))
+        .json(&json!({"messageId":first_message,"files":[{"id":first_attachment,"name":"first.txt","path":fixture.root.join("work/first.txt")}]}))
+        .send().await.unwrap();
+    assert_eq!(imported.status(), 200, "{}", imported.text().await.unwrap());
+
+    // A second work is created through the real catalog route, so isolation is checked against a formal relationship.
+    // 第二个工作经正式目录接口建立，隔离检查针对真实归属而不是测试自造的旁路。
+    let catalog: Value = fixture.client.get(format!("{}/api/conversations/catalog?includeMessages=false", fixture.url)).send().await.unwrap().json().await.unwrap();
+    let second_project = new_id();
+    let second_chat = new_id();
+    let second_message = new_id();
+    let second_attachment = new_id();
+    let mut projects = catalog["Projects"].as_array().unwrap().clone();
+    projects.push(json!({"Id":second_project,"Name":"Second work","FolderPath":null,"IsFolderlessWorkspace":true,
+        "Chats":[{"Id":second_chat,"Title":"Second chat","Draft":"","Messages":[
+            {"Id":second_message,"Role":"user","Content":"第二个工作的附件","CreatedAt":"2026-10-13T00:00:00Z",
+             "Attachments":[{"Id":second_attachment,"Name":"second.txt","SizeBytes":bytes.len()}]}]}]}));
+    let saved = fixture.client.put(format!("{}/api/conversations/catalog", fixture.url))
+        .json(&json!({"Revision":catalog["Revision"],"Projects":projects,"Chats":catalog["Chats"]}))
+        .send().await.unwrap();
+    assert!(saved.status().is_success(), "{}", saved.text().await.unwrap());
+    std::fs::write(fixture.root.join("work/second.txt"), bytes).unwrap();
+    let imported = fixture.client.post(format!("{}/api/conversations/{second_chat}/attachments/import", fixture.url))
+        .json(&json!({"messageId":second_message,"files":[{"id":second_attachment,"name":"second.txt","path":fixture.root.join("work/second.txt")}]}))
+        .send().await.unwrap();
+    assert_eq!(imported.status(), 200, "{}", imported.text().await.unwrap());
+
+    let first: Value = fixture.client.get(format!("{}/api/projects/{}/attachments", fixture.url, fixture.project)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(first["total"], 1, "{first}");
+    assert_eq!(first["attachments"][0]["id"], first_attachment);
+    assert_eq!(first["attachments"][0]["name"], "first.txt");
+    assert_eq!(first["attachments"][0]["conversationId"], fixture.conversation);
+    assert_eq!(first["attachments"][0]["sizeBytes"], bytes.len());
+    assert_eq!(first["hasMore"], false);
+    let second: Value = fixture.client.get(format!("{}/api/projects/{second_project}/attachments", fixture.url)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(second["total"], 1, "{second}");
+    assert_eq!(second["attachments"][0]["id"], second_attachment);
+    assert_ne!(second["attachments"][0]["id"], first["attachments"][0]["id"]);
+
+    let missing = fixture.client.get(format!("{}/api/projects/{}/attachments", fixture.url, new_id())).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let invalid = fixture.client.get(format!("{}/api/projects/{}/attachments?limit=0", fixture.url, fixture.project)).send().await.unwrap();
+    assert_eq!(invalid.status(), 400);
+    let beyond: Value = fixture.client.get(format!("{}/api/projects/{}/attachments?offset=1&limit=1", fixture.url, fixture.project)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(beyond["total"], 1);
+    assert_eq!(beyond["attachments"], json!([]));
+    assert_eq!(beyond["hasMore"], false);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_tree_mirrors_the_work_directory_and_reports_the_attachment_folder() {
+    use kynxa_agent_core_native::storage::gateway as data;
+    let fixture = Fixture::new(false, false).await;
+    let url = format!(
+        "{}/api/agent/workspace/tree?conversationId={}",
+        fixture.url, fixture.conversation
+    );
+    let first: Value = fixture.client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(first["workspaceKind"], "linked", "{first}");
+    assert_eq!(first["virtualAttachmentFolder"], "_attachments");
+    let paths = first["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"fixture.txt"), "{first}");
+    let first_version = first["version"].as_str().unwrap().to_owned();
+
+    // A newly produced file appears with an explicit status once a baseline exists.
+    // 基线建立后，新生成的文件带明确状态出现。
+    std::fs::write(fixture.root.join("work").join("produced.md"), b"# produced").unwrap();
+    let second: Value = fixture.client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_ne!(second["version"].as_str().unwrap(), first_version, "{second}");
+    let produced = second["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "produced.md")
+        .unwrap_or_else(|| panic!("{second}"));
+    assert_eq!(produced["status"], "added", "{second}");
+
+    // Polling with the current version reports no change.
+    // 用当前版本轮询时报告未变化。
+    let unchanged: Value = fixture
+        .client
+        .get(format!("{url}&since={}", second["version"].as_str().unwrap()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unchanged["changed"], false, "{unchanged}");
+
+    // A saved upload is exposed through the virtual attachment folder instead of being copied.
+    // 已保存的上传通过虚拟附件目录暴露，而不是复制一份。
+    let message = new_id();
+    let attachment = new_id();
+    let bytes = b"upload";
+    std::fs::write(fixture.root.join("work").join("上传.txt"), bytes).unwrap();
+    data::upsert_message(
+        &fixture.runtime.config.data_root,
+        &fixture.conversation,
+        &json!({"Id":message,"Role":"user","Content":"",
+            "Attachments":[{"Id":attachment,"Name":"上传.txt","SizeBytes":bytes.len()}]}),
+    )
+    .unwrap();
+    let imported = fixture
+        .client
+        .post(format!(
+            "{}/api/conversations/{}/attachments/import",
+            fixture.url, fixture.conversation
+        ))
+        .json(&json!({"messageId":message,"files":[{"id":attachment,"name":"上传.txt","path":fixture.root.join("work").join("上传.txt")}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), 200, "{}", imported.text().await.unwrap());
+    let third: Value = fixture.client.get(&url).send().await.unwrap().json().await.unwrap();
+    let attachments = third["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1, "{third}");
+    assert_eq!(attachments[0]["id"], attachment);
+    assert!(attachments[0]["contentUrl"]
+        .as_str()
+        .unwrap()
+        .contains("/attachments/"));
     fixture.close().await;
 }
 

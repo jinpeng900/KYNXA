@@ -647,6 +647,7 @@
                                 <controls:ConversationDocumentPanel x:Name="DocumentPanel" Visibility="Collapsed" />
                                 <controls:ConversationWorkspaceTerminal x:Name="WorkspaceTerminal" Visibility="Collapsed" />
                                 <controls:ConversationWorkspaceHome x:Name="WorkspaceHome" Visibility="Collapsed" />
+                                <controls:ConversationWorkspaceTree x:Name="WorkspaceFiles" Visibility="Collapsed" />
                             </Grid>
                         </Grid>
                         <Button x:Name="CloseWorkPanelButton" HorizontalAlignment="Right" VerticalAlignment="Top"

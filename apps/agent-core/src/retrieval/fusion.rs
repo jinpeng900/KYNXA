@@ -21,6 +21,11 @@ pub fn apply(arguments: &Value) -> Value {
         .filter_map(|(index, id)| id.as_str().map(|id| (id, index)))
         .collect();
     let mut candidates: HashMap<String, Candidate> = HashMap::new();
+    // Equal lexical and vector weights stay. On the frozen evaluation dataset lowering the vector weight to 0.6
+    // neither restored the literal first hit nor kept paraphrase recall (diagnostic nDCG 0.83 -> 0.71), because in
+    // additive RRF a candidate matched by two channels always outranks a single-channel first hit.
+    // 词法与向量保持等权：固定评估集上把向量权重降到 0.6 既没找回字面首位，也损失了改写召回
+    // （诊断 nDCG 0.83 → 0.71）；加法式 RRF 中两通道命中总会压过单通道首位，权重不是这里的杠杆。
     for (channel, weight) in [
         ("lexical", 1.0),
         ("vector", 1.0),
@@ -83,5 +88,14 @@ mod tests {
         assert_eq!(result[0]["score"], result[1]["score"]);
         assert_eq!(result[0]["chunkId"], "a");
         assert_eq!(result[1]["chunkId"], "A");
+    }
+
+    #[test]
+    fn a_two_channel_hit_outranks_a_single_channel_first_hit() {
+        // Additive RRF favours the candidate both channels agree on, even against a lexical first hit.
+        // 加法式 RRF 偏向两个通道都命中的候选，即使对手是词法首位。
+        let result = apply(&json!({"lexical":[{"chunkId":"first"},{"chunkId":"both"}],
+            "vector":[{"chunkId":"both"}],"limit":2}));
+        assert_eq!(result[0]["chunkId"], "both");
     }
 }

@@ -2,6 +2,7 @@ pub mod contracts;
 mod gateway_attachment_read;
 pub(crate) mod gateway_workspace_changes;
 pub(crate) mod gateway_workspace_terminal;
+pub(crate) mod gateway_workspace_tree;
 pub mod discovery;
 pub mod effects;
 pub mod intent;

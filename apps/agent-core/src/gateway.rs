@@ -452,6 +452,36 @@ async fn handle_request(
     let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
+    if let Some(tail) = path.strip_prefix("/api/projects/") {
+        let parts = tail.split('/').collect::<Vec<_>>();
+        if method == Method::GET && parts.len() == 2 && parts[1] == "attachments" {
+            // An explicit but unparsable page value fails instead of silently falling back to the default page.
+            // 显式给出但无法解析的分页值直接失败，不静默退回默认分页。
+            let page = |name: &str, fallback: usize| {
+                match crate::storage::gateway::query_value(&query, name) {
+                    None => Ok(fallback),
+                    Some(value) => value.parse::<usize>().map_err(|_| {
+                        GatewayError::new("INVALID_ATTACHMENT_PAGE", "分页参数无效。", 400)
+                    }),
+                }
+            };
+            let offset = match page("offset", 0) {
+                Ok(value) => value,
+                Err(error) => return response(Err(error)),
+            };
+            let limit = match page("limit", crate::storage::message_attachments::DEFAULT_PROJECT_PAGE_SIZE) {
+                Ok(value) => value,
+                Err(error) => return response(Err(error)),
+            };
+            return response(
+                crate::orchestration::gateway_attachments::project_list(
+                    &runtime, parts[0], offset, limit,
+                )
+                .await
+                .map(|value| (200, value)),
+            );
+        }
+    }
     if let Some(tail) = path.strip_prefix("/api/conversations/") {
         let parts = tail.split('/').collect::<Vec<_>>();
         if parts.get(1) == Some(&"attachments") {
@@ -487,7 +517,7 @@ async fn handle_request(
         let conversation = arguments["conversationId"].as_str().unwrap_or("");
         let lightweight_view = matches!((method.as_str(), workspace_path),
             ("POST", "/agent/workspace/chrome" | "/agent/workspace/chrome/action" | "/agent/workspace/preview")
-            | ("GET", "/agent/workspace/content"));
+            | ("GET", "/agent/workspace/content" | "/agent/workspace/tree"));
         let context = match if lightweight_view {
             let closing = workspace_path == "/agent/workspace/chrome/action" && arguments["action"] == "close";
             workspace_view_context(&runtime, conversation, closing).await
@@ -502,6 +532,8 @@ async fn handle_request(
                 crate::tools::gateway_workspace_preview::preview(arguments, &context).await.map(|value| (200, value))),
             ("GET", "/agent/workspace/changes") => response(
                 crate::tools::gateway_workspace_changes::changes(&context).await.map(|value| (200, value))),
+            ("GET", "/agent/workspace/tree") => response(
+                crate::tools::gateway_workspace_tree::tree(&arguments, &context).await.map(|value| (200, value))),
             ("POST", "/agent/workspace/terminal/open") => response(
                 Box::pin(crate::tools::gateway_workspace_terminal::open(&arguments, &context)).await.map(|value| (200, value))),
             ("POST", "/agent/workspace/chrome") => response(

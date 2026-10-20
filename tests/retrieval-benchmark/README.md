@@ -6,6 +6,53 @@ After the native migration, the execution commands below are historical Node gat
 
 独立 `metrics.mjs`、`metrics.test.mjs` 与 `vector-cache.mjs` 保留，用于固定数据身份、指标和公开向量缓存。它们不运行当前生产索引。当前原生运行时验证见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
 
+## 原生链路固定评估集（2026-10-20）
+
+`datasets/native-baseline.json` 是当前原生 Rust 检索链路的固定评估集：40 篇资料、15 条查询，其中 11 条计分、3 条语义诊断、1 条无答案。资料与金标证据内嵌冻结，金标证据必须是原文子串；数据集能被 `metrics.mjs` 的 `createRetrievalEvaluationDataset` 直接读取并得到固定 `pairingId`（当前 `0d17ed1f24f7f0ae`）。
+
+runner 是原生集成测试，不启动网关进程、不读用户数据、不下载资产、不调用模型供应商。它在隔离临时数据根用正式资料合同发布索引，再调用生产融合排序 `gateway_index::search`，把分块结果按返回顺序折叠为文档后计算 nDCG@10／Recall@10／MRR@10。
+
+```powershell
+# 词法阶段：始终运行，不需要模型资产
+cargo test --manifest-path apps/agent-core/Cargo.toml --test retrieval_evaluation
+# 语义阶段：需要已准备的随包载荷，默认 #[ignore]
+$env:KYNXA_LOCAL_RETRIEVAL_BUNDLE_ROOT = 'artifacts/runtime/native-desktop/win-x64'
+cargo test --manifest-path apps/agent-core/Cargo.toml --test retrieval_evaluation -- --ignored
+$env:KYNXA_RETRIEVAL_EVALUATION_REPORT = 'artifacts/development/retrieval-evaluation-baseline.json'
+$env:KYNXA_RETRIEVAL_SEMANTIC_REPORT = 'artifacts/development/retrieval-evaluation-semantic.json'
+```
+
+词法阶段不提供查询向量，度量词法 BM25、字面子串、符号、路径四路召回及加权 RRF。语义阶段用真实本地 E5 生成分块与查询向量（384 维，CPU），走同一生产混合融合，并额外给出两列诊断结果，都不是生产通道，只用于定位瓶颈：
+
+- **纯余弦排序**：在评估内由已发布分块向量计算，说明融合相对纯向量损失多少；
+- **混合+重排**：用随包 `builtin-multilingual-reranker` 对融合后的前 20 条候选重排（与生产阶段同模型、同摘录文本、同候选上限），复现 `knowledge.search` 的重排语义。生产阶段另有资源服务准入，评估内用 `rerank_blocking` 直接调用因而可在库测试中运行。
+
+2026-10-20 记录基线（40 资料／40 分块，11 条计分查询）：
+
+| 模式 | nDCG@10 | Recall@10 | MRR@10 | 诊断 nDCG@10（3 条） |
+|---|---|---|---|---|
+| 词法（生产） | 0.9210 | 1.0000 | 0.8939 | 0.5436 |
+| 混合（生产，builtin-multilingual 384 维） | 0.8692 | 1.0000 | 0.8258 | 0.8333 |
+| 混合+重排（诊断） | **1.0000** | **1.0000** | **1.0000** | **1.0000** |
+| 纯向量（诊断） | 0.8347 | 1.0000 | 0.7818 | 0.7540 |
+
+三列读法：向量通道把口语化改写救回来（诊断项 0.5436→0.8333），但在当前 RRF 权重下也会挤掉词法强项（`q6-message-log-file` 1.00→0.43），因此混合 nDCG 反而低于纯词法 0.052。**已验证降低向量权重无效**：把它降到 0.6 只让 `q6` 从第 4 位挪到第 3 位，同时把一条语义改写从第 1 挤到第 2（诊断项 0.8333→0.7103），因为加法式 RRF 中两通道命中总会压过单通道首位，权重不是这里的杠杆。真正修正来自重排：`q5`、`q6`、`q7`、`q14` 四条排序损失全部回到第 1，且无任何查询退化。
+
+重排代价（2026-10-20 实测，两个环境）：
+
+| 环境 | 纯检索 | 重排稳态 | 首次（含模型加载） |
+|---|---|---|---|
+| 库测试（`default()` 推理选项，20 条候选） | — | 1493 ms | 7872 ms |
+| 真实网关（独立端口 5399，资源预算参数，1–20 条候选） | 375 ms（10 条查询） | 795–1604 ms（平均 1165） | 10413 ms |
+
+真实网关这次每个查询重排 1–20 条候选，延迟仍主要在固定成本上；相对纯检索增加约 0.8 秒。生产是否默认开启由设置页的"重排"选项决定，本次没有改动默认值 `rerankProfileId = null`。
+
+**测量注意**：向网关发送含中文的 JSON 必须用 UTF-8 字节作为请求体（例如 `[Text.Encoding]::UTF8.GetBytes($json)` 配 `charset=utf-8`）。Windows PowerShell 的 `Invoke-RestMethod` 直接传字符串时会把中文编码成 `?`，网关收到的查询是 `"??"`，表现为"中文查询零命中"——这是客户端编码错误，不是检索缺陷。
+
+测试内置记录下限：词法 nDCG 0.88／Recall 0.95，混合 nDCG 0.85／诊断 0.75，重排 nDCG 0.95；低于下限即失败并列出未命中查询。诊断项单独报告、不计入主指标。基线只能与同一数据集版本、同一 `pairingId`、同一 runner 设置的成绩比较；它不是 BEIR 榜单成绩，也不是 Agent 任务完成率或生成答案质量。
+
+**已知饱和**：混合+重排已把 11 条计分查询全部排到第 1，本数据集无法再区分重排或融合的进一步优化。要继续量化命中率，需要扩充语料规模（更多篇、更多分块）并加入答案分散在多个文档片段的问题。
+
 ## 同尺度完整对照（2026-10-06）
 
 `run-peer-scifact.mjs` 接受已完成的完整 300 查询／5,183 文档公开评测，复制关闭后的索引并核验每个原文、块哈希和偏移；不重算全文向量、不触碰原评测或用户 Data。实际运行文档 SQLite FTS5 BM25、生产 chunk lexical、同索引 40 块 vector-only 和 RRF hybrid，按官方 document@10 去重与同 ID 排除规则计算 nDCG／Recall／MRR／MAP／Precision／Hit。文档 BM25 有独立原文 FTS，不能改称官方 Anserini 同实现复现。

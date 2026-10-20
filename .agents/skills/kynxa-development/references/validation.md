@@ -96,6 +96,8 @@ Rust 控制改动优先复用受影响的现有用例；需要核对传输或实
 
 旧 Agent/SciFact/统一智能体评测适配器仍依赖迁移前网关，尚未适配当前 Rust。参考保留的 [Agent 历史说明](../../../../tests/agent-performance-benchmark/README.md)、[检索历史说明](../../../../tests/retrieval-benchmark/README.md) 与 [统一智能体历史说明](../../../../tools/development/fixtures/unified-agent/README.md)。保留固定题集、评分和原始报告；不能直接运行旧入口或把原生 smoke 当作完整基准替代。归档旧入口时同时检查静态导入、动态启动、源码指纹和文档调用者，保留可核验的原路径/字节哈希，不移动独立 C# 客户端或 WebView 检查。
 
+当前原生链路有一个固定检索评估入口：`cargo test --manifest-path apps/agent-core/Cargo.toml --test retrieval_evaluation`，数据集为 `tests/retrieval-benchmark/datasets/native-baseline.json`。词法阶段默认运行，不需要模型资产；语义阶段加 `-- --ignored` 并设置 `KYNXA_LOCAL_RETRIEVAL_BUNDLE_ROOT`，用真实本地 E5 生成分块与查询向量走生产混合融合，另报纯余弦诊断列。两阶段都在隔离临时数据根发布正式索引并调用生产融合排序，报告 nDCG@10、Recall@10、MRR@10 与单独计列的语义诊断项；不读用户数据、不下载资产、不调用模型供应商。重排尚未覆盖。改动检索召回、分词、切块、向量空间或融合权重后与同一数据集版本和 `pairingId` 的成绩比较，不把它当作 BEIR 榜单或 Agent 任务完成率。评分定义与数据集身份继续复用 `tests/retrieval-benchmark/metrics.mjs`。
+
 桌面默认启动随包原生网关。必要的手动集成测试可调用 `tools/development/start-native-gateway.ps1`，明确指定准备好的 BundleRoot、独立 DataHome/ModelHome/ExtensionHome 和端口。该启动命令会实际启动进程，只在任务需要时执行；不能为文档检查启动、停止或替换用户日常网关。
 
 正式 WinUI 桌面需要有效包身份，按工程/WinApp 或已注册包入口启动；直接运行裸 EXE 的 COM 身份错误不代表网关失效。分支预览使用独立包身份、数据、模型/扩展目录及端口；不能覆盖主包注册或与日常网关共写 Data。纯 WebView 夹具按自身工程规定启动，不套用正式桌面的包身份要求。
