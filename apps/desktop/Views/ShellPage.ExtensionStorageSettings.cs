@@ -14,7 +14,7 @@ public sealed partial class ShellPage
         bool MigrationReady = false, string? RuntimeCleanupError = null);
 
     private sealed class StorageSettingsControls(Window window, StorageLocationRow dataRow, StorageLocationRow extensionRow,
-        Button memoryButton, Button toolsButton, ComboBox languagePicker, ProgressRing progress, InfoBar status)
+        ComboBox languagePicker, ProgressRing progress, InfoBar status)
     {
         private readonly CancellationTokenSource _lifetime = new();
         public Window Window => window;
@@ -22,14 +22,16 @@ public sealed partial class ShellPage
         public CancellationToken Token => IsClosed ? new CancellationToken(canceled: true) : _lifetime.Token;
         public bool IsBusy { get; private set; }
         public bool IsClosed { get; private set; }
+        public Control? Navigation { get; set; }
 
         public void SetBusy(bool busy)
         {
             IsBusy = busy;
             if (IsClosed) return;
+            if (Navigation is { } navigation) navigation.IsEnabled = !busy;
             dataRow.ChangeButton.IsEnabled = !busy && !StoragePaths.EnvironmentControlled;
             extensionRow.ChangeButton.IsEnabled = !busy && !ExtensionPaths.EnvironmentControlled;
-            memoryButton.IsEnabled = toolsButton.IsEnabled = languagePicker.IsEnabled = !busy;
+            languagePicker.IsEnabled = !busy;
         }
 
         public void ShowProgress(bool active)
@@ -64,7 +66,9 @@ public sealed partial class ShellPage
                 throw new InvalidOperationException(UiText.Get("启动环境变量正在指定工具与技能目录。"));
             if (_toolManagementWindow is { HasPendingChanges: true })
                 throw new InvalidOperationException(UiText.Get("请先完成工具配置，再更改工具与技能存储位置。"));
-            _toolManagementWindow?.CloseForOwner();
+            _toolManagementWindow?.DisposeEmbedded();
+            _toolManagementWindow = null;
+            _settingsWorkspace?.ResetPage("tools");
             if (_sendingPrompt || _pendingReplies.Values.Any(reply => reply.Error is null))
                 throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
             using (var self = System.Diagnostics.Process.GetCurrentProcess())

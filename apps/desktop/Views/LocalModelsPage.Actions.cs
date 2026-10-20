@@ -8,6 +8,9 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class LocalModelsPage
 {
+    private Border? _inlineEditor;
+    private TaskCompletionSource<bool>? _inlineEditorCompletion;
+
     private async void ModelAction_Click(object sender, RoutedEventArgs args)
     {
         if (sender is not Button { Tag: string id } button || !_rows.TryGetValue(id, out var row)) return;
@@ -34,21 +37,62 @@ public sealed partial class LocalModelsPage
         }
     }
 
-    private ContentDialog Dialog(string title, object content, string primary)
+    private Task<bool> ShowInlineEditorAsync(string title, UIElement content, string primary)
     {
-        var dialog = new ContentDialog
+        CloseInlineEditor(accepted: false);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inlineEditorCompletion = completion;
+        var page = new Grid { RowSpacing = 16 };
+        page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        page.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+        var back = new Button
         {
-            XamlRoot = _root.XamlRoot,
-            Title = UiText.Get(title),
-            Content = content,
-            PrimaryButtonText = UiText.Get(primary),
-            CloseButtonText = UiText.Get("取消"),
-            DefaultButton = ContentDialogButton.None,
-            PrimaryButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"],
-            CloseButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"]
+            Content = new SymbolIcon(Symbol.Back), Width = 32, Height = 32, Padding = new Thickness(8),
+            CornerRadius = new CornerRadius(8), Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"],
+            FocusVisualPrimaryBrush = AppearanceService.GetBrush("KynxaSecondaryTextBrush")
         };
-        ApplyNeutralResources(dialog.Resources);
-        return dialog;
+        UiLocalization.Bind(back, Microsoft.UI.Xaml.Automation.AutomationProperties.NameProperty, "返回");
+        back.Click += (_, _) => CloseInlineEditor(accepted: false);
+        header.Children.Add(back);
+        header.Children.Add(Label(title, 16));
+        page.Children.Add(header);
+        var scroll = new ScrollViewer { Content = content, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(4, 0, 4, 0) };
+        Grid.SetRow(scroll, 1);
+        page.Children.Add(scroll);
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+        var cancel = ActionButton("取消", "LocalModelsInlineCancel");
+        var apply = ActionButton(primary, "LocalModelsInlineApply");
+        cancel.Click += (_, _) => CloseInlineEditor(accepted: false);
+        apply.Click += (_, _) => CloseInlineEditor(accepted: true);
+        actions.Children.Add(cancel);
+        actions.Children.Add(apply);
+        Grid.SetRow(actions, 2);
+        page.Children.Add(actions);
+        _inlineEditor = new Border { Child = page, Padding = new Thickness(20, 12, 20, 16),
+            Background = AppearanceService.GetBrush("KynxaMainBrush"), CornerRadius = new CornerRadius(12) };
+        Grid.SetRowSpan(_inlineEditor, _root.RowDefinitions.Count);
+        // Inline forms stay inside the owning settings category; hidden controls cannot retain keyboard focus.
+        // 表单在所属设置分类内展开；隐藏原页面，避免键盘进入表单背后的控件。
+        foreach (var child in _root.Children) child.Visibility = Visibility.Collapsed;
+        _root.Children.Add(_inlineEditor);
+        back.Focus(FocusState.Programmatic);
+        return completion.Task;
+    }
+
+    private void CloseInlineEditor(bool accepted)
+    {
+        if (_inlineEditor is not null)
+        {
+            _root.Children.Remove(_inlineEditor);
+            _inlineEditor = null;
+            foreach (var child in _root.Children) child.Visibility = Visibility.Visible;
+        }
+        var completion = _inlineEditorCompletion;
+        _inlineEditorCompletion = null;
+        completion?.TrySetResult(accepted);
     }
 
     private async Task ChangeDirectoryAsync()
@@ -70,7 +114,7 @@ public sealed partial class LocalModelsPage
                 Content = UiText.Get("同时移动已安装的受管模型（引用文件保持原位）") };
             content.Children.Add(move);
             content.Children.Add(Label("不勾选时仅改变以后安装的位置；已有模型继续按原路径使用。", 12, secondary: true));
-            if (await Dialog("更改模型安装目录", content, "应用目录").ShowAsync() != ContentDialogResult.Primary) return;
+            if (!await ShowInlineEditorAsync("更改模型安装目录", content, "应用目录") || _closed) return;
             await RunOperationAsync(() => _api.SettingsAsync(installDirectory: folder.Path, moveExisting: move.IsChecked == true,
                 token: _lifetime.Token), settings: true);
         }
@@ -120,7 +164,7 @@ public sealed partial class LocalModelsPage
             content.Children.Add(copy);
             content.Children.Add(projector);
             content.Children.Add(Label("只有带兼容视觉投影的模型才可理解图片；导入后仍需启用模型。", 12, secondary: true));
-            if (await Dialog("导入本地 GGUF", content, "导入").ShowAsync() != ContentDialogResult.Primary) return;
+            if (!await ShowInlineEditorAsync("导入本地 GGUF", content, "导入") || _closed) return;
             string? mmprojPath = null;
             if (projector.IsChecked == true)
             {
