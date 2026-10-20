@@ -346,7 +346,7 @@ public partial class App
         finally
         {
             current?.Hide();
-            if (CurrentRetrievalWindow is { } retrieval) retrieval.CloseForOwner();
+            if (CurrentRetrievalWindow is not null) ShellField<Window>("_storageSettingsWindow").Close();
             AppearanceService.ApplyPreferences(palette.Id, mode, fontSize, custom);
             UiText.Initialize(language);
             await SettleAsync();
@@ -358,10 +358,13 @@ public partial class App
         var knowledge = NativeUi.Descendants<Button>(_shell).Single(button =>
             AutomationProperties.GetName(button) == UiText.Get("知识库") && NativeUi.IsVisible(button));
         NativeUi.Invoke(knowledge);
-        await WaitAsync(() => CurrentRetrievalWindow?.Content is FrameworkElement { IsLoaded: true } && !CurrentRetrievalWindow.HasPendingChanges,
-            "the production retrieval owner window is loaded before opening its dialog");
+        var settings = ShellField<Window>("_storageSettingsWindow");
+        var root = (FrameworkElement)settings.Content;
+        await WaitAsync(() => root.IsLoaded && CurrentRetrievalWindow is { HasPendingChanges: false } &&
+            NativeUi.Descendants<FrameworkElement>(root).Any(page =>
+                AutomationProperties.GetAutomationId(page) == "SettingsPage_retrieval" && page.IsLoaded && NativeUi.IsVisible(page)),
+            "the production retrieval page loads inside its unified settings owner before opening its dialog");
         var retrieval = CurrentRetrievalWindow!;
-        var root = (FrameworkElement)retrieval.Content;
         await WaitAsync(() => NativeUi.ById<Button>(root, "RetrievalAddLinks").IsEnabled, "the retrieval link button becomes available after its reads");
         NativeUi.Invoke(NativeUi.ById<Button>(root, "RetrievalAddLinks"));
         await WaitAsync(() => NativeUi.OpenDialog(root) is not null, "the actual retrieval add-links action opens its modal");
@@ -381,8 +384,8 @@ public partial class App
         NativeUi.InvokeDialogButton(dialog, primary: false);
         await WaitAsync(() => NativeUi.OpenDialog(root) is null && !retrieval.HasPendingChanges,
             "canceling link import completes the original pending operation");
-        retrieval.CloseForOwner();
-        await WaitAsync(() => CurrentRetrievalWindow is null, "the fixture-owned retrieval window closes cleanly");
+        settings.Close();
+        await WaitAsync(() => CurrentRetrievalWindow is null, "closing the fixture settings owner releases its embedded retrieval controller");
         await ActivateOwnedShortcutWindowAsync();
     }
 }

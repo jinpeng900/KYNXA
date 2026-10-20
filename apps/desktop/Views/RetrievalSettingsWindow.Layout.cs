@@ -26,10 +26,13 @@ public sealed partial class RetrievalSettingsWindow
     private readonly Button _rebuild = new();
     private readonly Button _cancelJob = new();
     private readonly DispatcherTimer _jobTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly Grid _settingsRoot = new();
+    private readonly Grid _titleBar = new();
 
     private void BuildLayout()
     {
-        var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
+        var root = _settingsRoot;
+        root.Background = AppearanceService.GetBrush("KynxaMainBrush");
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
@@ -41,7 +44,8 @@ public sealed partial class RetrievalSettingsWindow
         foreach (string key in new[] { "ComboBoxItemBorderBrushSelected", "ComboBoxItemBorderBrushSelectedPointerOver", "ComboBoxItemBorderBrushSelectedPressed" })
             root.Resources[key] = AppearanceService.GetBrush("KynxaSelectionBrush");
 
-        var titleBar = new Grid { Background = AppearanceService.GetBrush("KynxaTitleBarBrush") };
+        var titleBar = _titleBar;
+        titleBar.Background = AppearanceService.GetBrush("KynxaTitleBarBrush");
         var title = Label("KYNXA  /  检索与网页搜索");
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
@@ -53,8 +57,11 @@ public sealed partial class RetrievalSettingsWindow
         Grid.SetRow(scroll, 1);
         root.Children.Add(scroll);
         Content = root;
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(titleBar);
+        if (_settingsOwner is null)
+        {
+            ExtendsContentIntoTitleBar = true;
+            SetTitleBar(titleBar);
+        }
         _settingsPanel.Children.Add(_notice);
         AutomationProperties.SetAutomationId(_notice, "RetrievalSettingsNotice");
 
@@ -110,7 +117,7 @@ public sealed partial class RetrievalSettingsWindow
 
         root.Loaded += async (_, _) =>
         {
-            if (_loaded) return;
+            if (_loaded || _closed) return;
             _loaded = true;
             await RunOperationAsync(LoadAsync);
         };

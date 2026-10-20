@@ -1,4 +1,5 @@
 using System.Text.Json;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Views;
 using MemoryUiSmoke;
@@ -12,6 +13,9 @@ public partial class App
 {
     private RetrievalSettingsWindow? CurrentRetrievalWindow =>
         (RetrievalSettingsWindow?)typeof(ShellPage).GetField("_retrievalSettingsWindow", PrivateInstance)!.GetValue(_shell);
+
+    private Window? CurrentRetrievalOwner =>
+        (Window?)typeof(ShellPage).GetField("_storageSettingsWindow", PrivateInstance)!.GetValue(_shell);
 
     private async Task CheckRetrievalNavigationAsync()
     {
@@ -27,17 +31,29 @@ public partial class App
         int originalReads = _gateway.RetrievalReads;
         int writes = _gateway.Writes;
         RetrievalSettingsWindow? retrieval = null;
-        int closed = 0;
+        Window? settings = null;
+        int retrievalClosed = 0;
+        int settingsClosed = 0;
         try
         {
             // Invoke the real sidebar button and let the production client read only the mock gateway.
             // 点击真实侧栏按钮，由生产客户端仅从模拟网关读取设置。
             NativeUi.Invoke(knowledge);
-            await WaitAsync(() => CurrentRetrievalWindow?.Content is FrameworkElement { IsLoaded: true },
-                "the actual knowledge button opens a loaded production retrieval settings window");
+            await WaitAsync(() => CurrentRetrievalWindow is not null &&
+                CurrentRetrievalOwner?.Content is FrameworkElement { IsLoaded: true } content &&
+                NativeUi.Descendants<FrameworkElement>(content).Any(element => element.IsLoaded &&
+                    AutomationProperties.GetAutomationId(element) == "SettingsPage_retrieval" && NativeUi.IsVisible(element)),
+                "the actual knowledge button loads the retrieval page inside the production settings window");
             retrieval = CurrentRetrievalWindow!;
-            retrieval.Closed += (_, _) => closed++;
-            var root = (FrameworkElement)retrieval.Content;
+            settings = CurrentRetrievalOwner!;
+            retrieval.Closed += (_, _) => retrievalClosed++;
+            settings.Closed += (_, _) => settingsClosed++;
+            var root = (FrameworkElement)settings.Content;
+            var workspace = NativeUi.Descendants<SettingsWorkspace>(root).Single();
+            var page = NativeUi.ById<FrameworkElement>(root, "SettingsPage_retrieval");
+            Check(retrieval.IsEmbedded && retrieval.Content is null && workspace.SelectedKey == "retrieval" &&
+                NativeUi.IsVisible(page),
+                "knowledge navigation embeds the real retrieval controller in the selected settings page");
             await WaitAsync(() => _gateway.RetrievalReads == originalReads + 4 && !retrieval.HasPendingChanges &&
                 NativeUi.Descendants<ComboBox>(root).Any(picker => AutomationProperties.GetAutomationId(picker) ==
                     "RetrievalLocalMode" && picker.SelectedItem is ComboBoxItem),
@@ -50,19 +66,22 @@ public partial class App
 
             NativeUi.Invoke(knowledge);
             await SettleAsync();
-            Check(ReferenceEquals(CurrentRetrievalWindow, retrieval) && closed == 0 &&
+            Check(ReferenceEquals(CurrentRetrievalWindow, retrieval) && ReferenceEquals(CurrentRetrievalOwner, settings) &&
+                ReferenceEquals(page, NativeUi.ById<FrameworkElement>(root, "SettingsPage_retrieval")) &&
+                workspace.SelectedKey == "retrieval" && NativeUi.IsVisible(page) && retrievalClosed == 0 && settingsClosed == 0 &&
                 _gateway.RetrievalReads == originalReads + 4 && _gateway.Writes == writes,
-                "repeated knowledge navigation reuses the same native window without new reads or writes");
+                "repeated knowledge navigation reuses the same settings owner, retrieval controller and page without new reads or writes");
             Check(Prompt.Text == draft && ActiveId == chatId && _shell.ViewModel.IsChatMode == chatMode &&
                 _shell.ActiveMessages.Select(row => row.Message).SequenceEqual(messages) &&
                 JsonSerializer.Serialize(messages) == originalMessages,
                 "opening and reusing retrieval settings preserve the active conversation, exact draft and message objects");
 
-            // Close the actual secondary window; its production Closed handler must release the Shell owner reference.
-            // 关闭真实附属窗口；生产 Closed 回调应释放 Shell 持有的窗口引用。
-            retrieval.Close();
-            await WaitAsync(() => CurrentRetrievalWindow is null && closed == 1,
-                "closing retrieval settings clears its production owner reference exactly once");
+            // Close the visible settings owner; its production handler disposes the embedded controller and clears both references.
+            // 关闭可见设置窗口，由生产回调释放内嵌检索控制器并清除两处引用。
+            NativeUi.RequestClose(settings);
+            await WaitAsync(() => CurrentRetrievalOwner is null && CurrentRetrievalWindow is null &&
+                settingsClosed == 1 && retrievalClosed == 1,
+                "closing the settings owner releases its embedded retrieval controller and both Shell references exactly once");
             Check(Prompt.Text == draft && ActiveId == chatId && _shell.ViewModel.IsChatMode == chatMode &&
                 JsonSerializer.Serialize(messages) == originalMessages && JsonSerializer.Serialize(_gateway.Catalog) == originalCatalog &&
                 _gateway.RetrievalReads == originalReads + 4 && _gateway.Writes == writes && _gateway.Failure is null,
@@ -70,7 +89,7 @@ public partial class App
         }
         finally
         {
-            if (CurrentRetrievalWindow is { } remaining) remaining.CloseForOwner();
+            if (CurrentRetrievalOwner is { } remaining) remaining.Close();
         }
     }
 }

@@ -6,12 +6,13 @@ using Microsoft.UI.Xaml.Controls;
 namespace KYNXA_Desktop.Views;
 
 /// <summary>
-/// Manages local generation models inside settings; leaving the page never cancels downloads.
-/// 在设置内管理本地生成模型；离开子页面仅停止界面轮询，不取消后台下载。
+/// Manages local generation models inside settings; category navigation retains the page and background downloads.
+/// 在设置内管理本地生成模型；切换分类保留页面和后台下载，关闭设置才释放界面资源。
 /// </summary>
 public sealed partial class LocalModelsPage : UserControl, IDisposable
 {
     private readonly Window _owner;
+    private readonly bool _embedded;
     private readonly LocalModelsApiClient _api = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ObservableCollection<ModelRow> _visibleRows = [];
@@ -20,6 +21,7 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
     private readonly DispatcherTimer _downloadTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private LocalModelsSnapshot? _snapshot;
     private string? _pickerSignature;
+    private string? _pendingLoadPolicy;
     private string? _storageDirectory;
     private long? _storageAvailableBytes;
     private DateTimeOffset _storageRefreshAt;
@@ -28,22 +30,27 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
     public event EventHandler? ModelsChanged;
     public event EventHandler? BackRequested;
 
-    public LocalModelsPage(Window owner)
+    public LocalModelsPage(Window owner, bool embedded = false)
     {
         _owner = owner;
+        _embedded = embedded;
         BuildLayout();
         UiText.LanguageChanged += LanguageChanged;
+        AppearanceService.Changed += AppearanceChanged;
         _downloadTimer.Tick += async (_, _) => await PollDownloadsAsync();
-        Unloaded += (_, _) => Dispose();
     }
 
     public void Dispose()
     {
         if (_closed) return;
         _closed = true;
+        CloseInlineEditor(accepted: false);
         _downloadTimer.Stop();
         _lifetime.Cancel();
         UiText.LanguageChanged -= LanguageChanged;
+        AppearanceService.Changed -= AppearanceChanged;
+        _policy.Dispose();
+        _filter.Dispose();
         _api.Dispose();
     }
 
@@ -79,7 +86,15 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
             _directory.Text = snapshot.InstallDirectory;
             RenderStorageSpace();
             _ = RefreshStorageSpaceAsync(snapshot.InstallDirectory);
-            _policy.SelectedItem = _policy.Items.OfType<ComboBoxItem>().FirstOrDefault(item => item.Tag as string == snapshot.LoadPolicy);
+            // Retain the user's pending choice while saving, then reconcile with the authoritative snapshot on success or failure.
+            // 保存期间保留用户当前选择，完成后以正式快照确认或回滚，不在网络等待时来回跳动。
+            _policy.SelectedKey = _pendingLoadPolicy ?? snapshot.LoadPolicy;
+            _policyHint.Text = UiText.Get((_pendingLoadPolicy ?? snapshot.LoadPolicy) switch
+            {
+                "on-demand" => "使用本地模型时再加载；首次回复可能需要等待，空闲驻留由资源策略管理。",
+                "preload" => "软件启动后在后台预热当前选中的本地模型；资源不足时延后。",
+                _ => "根据可用资源安排加载与空闲驻留，优先保持聊天响应。"
+            });
             foreach (var model in snapshot.Models)
             {
                 if (!_rows.TryGetValue(model.Id, out var row)) _rows[model.Id] = row = new ModelRow(model);
@@ -112,7 +127,7 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
     private void ApplyFilter()
     {
         if (_closed) return;
-        string filter = (_filter.SelectedItem as ComboBoxItem)?.Tag as string ?? "all";
+        string filter = _filter.SelectedKey ?? "all";
         string query = _search.Text.Trim();
         var desired = (_snapshot?.Models ?? []).Where(model => filter switch
             { "installed" => model.Installed, "downloading" => IsTransfer(model) || model.Status == "paused", _ => true })
@@ -200,5 +215,12 @@ public sealed partial class LocalModelsPage : UserControl, IDisposable
     {
         if (_closed) return;
         if (_snapshot is { } snapshot) ApplySnapshot(snapshot);
+        ArrangeLoadPolicy();
     }
+
+    private void AppearanceChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_closed) return;
+        ApplyNeutralResources(_root.Resources);
+    });
 }

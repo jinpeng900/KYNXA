@@ -1,4 +1,5 @@
 using KYNXA.Contracts;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Xaml.Controls;
@@ -175,7 +176,7 @@ public partial class App
         const string edited = "EDIT_SYNTHETIC 中文草稿\r第二行保持原样。";
         NativeUi.SetText(ContentBox, edited);
         await WaitAsync(() => _viewModel.EditorContent == edited, "native content input reaches the production editor state");
-        NativeUi.ById<ComboBox>(_root, "MemoryKindPicker").SelectedIndex = 2;
+        NativeUi.ById<SegmentedSelector>(_root, "MemoryKindPicker").SelectedKey = MemoryKinds.Decision;
         await WaitAsync(() => _viewModel.EditorContent == edited && _viewModel.EditorKind == MemoryKinds.Decision && Button("SaveMemoryButton").IsEnabled,
             "native editor input and kind selection enable Save");
         Check(_api.Snapshot(_user).Entries[0].Content == original && _api.Writes == 0,
@@ -190,9 +191,10 @@ public partial class App
             "live language change preserves editor text, kind, search, and selected entry identity");
         Check(ContentBox.PlaceholderText == UiText.Get("输入需要保留的记忆") && Label("MemorySourceLabel").Text.Contains("Manually added"),
             "live language change updates native placeholders and source metadata");
-        Check(NativeUi.Descendants<TextBlock>(NativeUi.ById<ComboBox>(_root, "MemoryKindPicker"))
+        Check(NativeUi.Descendants<RadioButton>(NativeUi.ById<SegmentedSelector>(_root, "MemoryKindPicker"))
+                .Where(button => button.IsChecked == true).SelectMany(NativeUi.Descendants<TextBlock>)
                 .Any(label => NativeUi.IsVisible(label) && label.Text == UiText.Get("决定")),
-            "live language change updates the visible selected kind caption in the native ComboBox");
+            "live language change updates the visible selected kind caption in the native segmented selector");
         await CaptureAsync("03-editor-en");
         NativeUi.SetText(SearchBox, string.Empty);
         await SettleAsync();

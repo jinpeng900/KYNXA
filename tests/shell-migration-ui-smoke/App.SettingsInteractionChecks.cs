@@ -124,8 +124,18 @@ public partial class App
             var root = (FrameworkElement)settings.Content;
             await WaitAsync(() => root.IsLoaded && root.XamlRoot is not null, "the actual settings window loads before layout and native wheel checks");
             await SettleAsync();
-            var scroll = NativeUi.ById<ScrollViewer>(root, "SettingsScrollViewer");
-            var content = NativeUi.ById<StackPanel>(root, "SettingsContentColumn");
+            var workspace = NativeUi.Descendants<SettingsWorkspace>(root).Single();
+            async Task<ScrollViewer> SelectCategoryAsync(string key)
+            {
+                NativeUi.Invoke(NativeUi.ById<Button>(root, "SettingsCategory_" + key));
+                await WaitAsync(() => workspace.SelectedKey == key && NativeUi.ById<FrameworkElement>(root,
+                    "SettingsPage_" + key).IsLoaded, "the actual category navigation loads " + key);
+                await SettleAsync();
+                return NativeUi.ById<ScrollViewer>(root, "SettingsPage_" + key);
+            }
+            var scroll = await SelectCategoryAsync("appearance");
+            var content = NativeUi.ById<StackPanel>(root, "AppearancePaletteSection");
+            var navigation = NativeUi.ById<StackPanel>(root, "SettingsNavigation");
             var presenter = (OverlappedPresenter)settings.AppWindow.Presenter;
             double scale = root.XamlRoot.RasterizationScale;
 
@@ -136,19 +146,20 @@ public partial class App
                 var bounds = ContentBounds();
                 observations.Add(new { Label = label, Width = scroll.ActualWidth, Height = scroll.ActualHeight,
                     ContentWidth = content.ActualWidth, bounds.Left, bounds.Right, bounds.Top,
-                    CenterError = Math.Abs(bounds.Left + bounds.Right - scroll.ActualWidth) / 2,
+                    LeftInsetError = Math.Abs(bounds.Left - 24),
                     Viewport = scroll.ViewportWidth, ScrollableHeight = scroll.ScrollableHeight, Scale = scale });
             }
-            void CheckFilledWidth(string label)
+            void CheckPageWidth(string label)
             {
                 var bounds = ContentBounds();
                 RecordGeometry(label);
                 Check(bounds.Width > 200 && bounds.Left >= 23 && bounds.Right <= scroll.ActualWidth - 23 &&
-                    Math.Abs(bounds.Left + bounds.Right - scroll.ActualWidth) <= 2,
-                    label + " centers the complete settings column with balanced margins and no horizontal clipping");
-                Check(scroll.ActualWidth >= root.ActualWidth - 1 &&
-                    Math.Abs(content.ActualWidth - (scroll.ActualWidth - 48)) <= 2,
-                    label + " fills the available window width with only the two 24 DIP margins");
+                    Math.Abs(bounds.Left - 24) <= 1,
+                    label + " left-aligns the complete settings column at 24 DIP without horizontal clipping");
+                Check(Math.Abs(scroll.ActualWidth - (root.ActualWidth - navigation.ActualWidth)) <= 2 &&
+                    Math.Abs(content.ActualWidth - (Math.Min(820, scroll.ActualWidth) - 48)) <= 2 &&
+                    NativeUi.IsVisible(navigation),
+                    label + " reserves the persistent sidebar and gives the left-aligned right page padding within its readable width cap");
             }
             async Task ResizeAsync(double width, double height)
             {
@@ -161,48 +172,43 @@ public partial class App
                 await SettleAsync();
             }
 
-            await ResizeAsync(660, 560);
-            CheckFilledWidth("restored 660 DIP settings window");
+            await ResizeAsync(720, 560);
+            CheckPageWidth("restored 720 DIP settings window");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-restored.png"));
             presenter.Maximize();
             await SettleAsync();
             root.UpdateLayout();
             Check(presenter.State == OverlappedPresenterState.Maximized, "the real native settings window is maximized for the reported layout case");
-            CheckFilledWidth("maximized settings window");
+            CheckPageWidth("maximized settings window");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-maximized.png"));
 
-            // Compare the previous centered, capped layout inside the owned tree, then restore the product values.
-            // 仅在自有界面中对照上一版居中限宽布局，再恢复产品值；不回滚源码或用户设置。
-            var filledAlignment = content.HorizontalAlignment;
-            double filledMaximumWidth = content.MaxWidth;
-            content.HorizontalAlignment = HorizontalAlignment.Center;
-            content.MaxWidth = 900;
-            root.UpdateLayout();
+            // The new contract deliberately caps the right page; category changes must retain the original view.
+            // 新布局有意限制右页阅读宽度；切换分类仍须保留原页面实例和独立滚动状态。
+            scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
             await SettleAsync();
-            RecordGeometry("controlled previous capped layout reproduction");
-            await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-capped-layout-reproduction.png"));
-            var originalBounds = ContentBounds();
-            Check(scroll.ActualWidth > 950 && originalBounds.Width < scroll.ActualWidth - 50,
-                "the previous centered width cap leaves unused space in the actual maximized window");
-            content.HorizontalAlignment = filledAlignment;
-            content.MaxWidth = filledMaximumWidth;
-            root.UpdateLayout();
-            await SettleAsync();
-            CheckFilledWidth("maximized settings after restoring the responsive layout");
+            double retainedOffset = scroll.VerticalOffset;
+            var retainedScroll = scroll;
+            await SelectCategoryAsync("general");
+            scroll = await SelectCategoryAsync("appearance");
+            Check(ReferenceEquals(scroll, retainedScroll) &&
+                ReferenceEquals(content, NativeUi.ById<StackPanel>(root, "AppearancePaletteSection")) &&
+                Math.Abs(scroll.VerticalOffset - retainedOffset) <= 1,
+                "category navigation preserves the actual appearance view and its independent scroll position");
+            CheckPageWidth("maximized settings after category round trip");
 
             await ResizeAsync(1000, 680);
-            CheckFilledWidth("restored 1000 DIP settings window after maximization");
+            CheckPageWidth("restored 1000 DIP settings window after maximization");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-wide.png"));
 
-            await ResizeAsync(420, 560);
-            CheckFilledWidth("narrow 420 DIP settings window");
+            await ResizeAsync(720, 560);
+            CheckPageWidth("narrow 720 DIP settings window");
             var paletteGrid = NativeUi.ById<Grid>(root, "AppearancePaletteGrid");
             var paletteBounds = paletteGrid.TransformToVisual(scroll).TransformBounds(new Rect(0, 0, paletteGrid.ActualWidth, paletteGrid.ActualHeight));
             Check(paletteBounds.Left >= 0 && paletteBounds.Right <= scroll.ActualWidth + 1 && scroll.ScrollableHeight > 100,
                 "narrow settings keep the palette grid inside the viewport and all lower sections vertically reachable");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-narrow.png"));
-            await ResizeAsync(360, 560);
-            CheckFilledWidth("minimum 360 DIP settings window");
+            await ResizeAsync(700, 460);
+            CheckPageWidth("minimum 700 DIP settings window");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-minimum.png"));
             string layoutLanguage = UiText.Language;
             try
@@ -211,8 +217,8 @@ public partial class App
                 {
                     UiText.Initialize(languageId);
                     await SettleAsync();
-                    CheckFilledWidth(languageId + " minimum-width settings window");
-                    var narrowControls = new[] { "InterfaceLanguagePicker", "AppearanceModePicker", "ChatFontSizePicker",
+                    CheckPageWidth(languageId + " minimum-width settings window");
+                    var narrowControls = new[] { "AppearanceModePicker", "ChatFontSizePicker",
                         "AppearanceAccentInput", "AppearanceColorPickerButton", "AppearanceAccentApplyButton", "AppearanceAccentResetButton" }
                         .Select(id => NativeUi.ById<FrameworkElement>(root, id)).ToArray();
                     Check(narrowControls.All(control =>
@@ -229,16 +235,25 @@ public partial class App
                     Check(Math.Abs(scroll.VerticalOffset - scroll.ScrollableHeight) <= 1,
                         languageId + " minimum-width settings can reach the bottom of the complete form");
                     await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-minimum-bottom-" + languageId + ".png"));
+                    var generalScroll = await SelectCategoryAsync("general");
+                    var languageControl = NativeUi.ById<ComboBox>(root, "InterfaceLanguagePicker");
+                    var languageBounds = languageControl.TransformToVisual(generalScroll).TransformBounds(
+                        new Rect(0, 0, languageControl.ActualWidth, languageControl.ActualHeight));
+                    Check(languageBounds.Width > 0 && languageBounds.Left >= 23 &&
+                        languageBounds.Right <= generalScroll.ActualWidth - 23 && generalScroll.ScrollableWidth <= 1,
+                        languageId + " keeps the language picker reachable inside its own general category");
+                    scroll = await SelectCategoryAsync("appearance");
                 }
             }
             finally { UiText.Initialize(layoutLanguage); }
-            await ResizeAsync(660, 560);
+            await ResizeAsync(720, 560);
 
-            var mode = NativeUi.ById<ComboBox>(root, "AppearanceModePicker");
+            var mode = NativeUi.ById<SegmentedSelector>(root, "AppearanceModePicker");
             var font = NativeUi.ById<ComboBox>(root, "ChatFontSizePicker");
             var language = NativeUi.ById<ComboBox>(root, "InterfaceLanguagePicker");
-            Check(new[] { mode, font, language }.All(picker => picker is ScrollSafeComboBox),
-                "all actual settings dropdowns use the shared native wheel-safe control");
+            Check(new[] { font, language }.All(picker => picker is ScrollSafeComboBox) &&
+                NativeUi.Descendants<RadioButton>(mode).Count() == 3,
+                "actual settings dropdowns stay wheel-safe while theme mode uses the three-segment selector");
 
             // Compare framework and guarded controls with real wheel input in the same production scroll host.
             // 在同一生产滚动宿主中对比框架控件与保护控件，使用真实滚轮输入而非手动触发事件。
@@ -331,8 +346,9 @@ public partial class App
                 content.Children.Remove(guarded);
             }
 
-            foreach (var picker in new[] { language, mode, font })
+            foreach (var (category, picker) in new[] { ("general", language), ("appearance", font) })
             {
+                scroll = await SelectCategoryAsync(category);
                 picker.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0.15 });
                 picker.Focus(FocusState.Programmatic);
                 settings.Activate();
@@ -345,6 +361,32 @@ public partial class App
                 Check(picker.SelectedIndex == selected && File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json")) == stored,
                     AutomationProperties.GetAutomationId(picker) + " ignores closed-control wheel selection without writing a preference");
             }
+            scroll = await SelectCategoryAsync("appearance");
+            var selectedSegment = NativeUi.ById<RadioButton>(mode, "Segment_" + mode.SelectedKey);
+            selectedSegment.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0.15 });
+            selectedSegment.Focus(FocusState.Keyboard);
+            settings.Activate();
+            await SettleAsync();
+            string? originalMode = mode.SelectedKey;
+            string storedMode = File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json"));
+            MovePointerInsideSettings(settings, selectedSegment);
+            SendSettingsWheel(settings, -120);
+            await SettleAsync();
+            Check(mode.SelectedKey == originalMode &&
+                File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json")) == storedMode,
+                "wheel over the selected theme segment scrolls the page without changing or saving its selection");
+            try
+            {
+                SendSettingsKey(settings, 0x23);
+                await WaitAsync(() => mode.SelectedKey == "system" && AppearanceService.Mode == "system",
+                    "native End selects and applies the final theme segment");
+                SendSettingsKey(settings, 0x24);
+                await WaitAsync(() => mode.SelectedKey == "light" && AppearanceService.Mode == "light",
+                    "native Home selects and applies the first theme segment");
+                Check(NativeUi.ById<RadioButton>(mode, "Segment_light").IsChecked == true,
+                    "explicit keyboard selection updates the real radio state as well as the saved appearance");
+            }
+            finally { mode.SelectedKey = originalMode; }
             Check(_gateway.Writes == initialWrites, "settings layout and dropdown checks never write formal gateway data");
             Check(_unhandled is null, "settings resize, focus, native keyboard and wheel checks complete without an unhandled UI exception");
         }

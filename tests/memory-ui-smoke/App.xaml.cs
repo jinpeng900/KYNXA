@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using KYNXA.Contracts;
 using KYNXA_Desktop;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Windowing;
@@ -136,7 +137,7 @@ public partial class App : Application
                 editorState = new { _viewModel.EditorContent, _viewModel.EditorKind, _viewModel.IsLoaded,
                     _viewModel.IsBusy, _viewModel.HasChanges, _viewModel.CanSave, _viewModel.Status,
                     nativeContent = ContentBox.Text,
-                    nativeKind = NativeUi.ById<ComboBox>(_root, "MemoryKindPicker").SelectedItem?.ToString(),
+                    nativeKind = NativeUi.ById<SegmentedSelector>(_root, "MemoryKindPicker").SelectedKey,
                     saveEnabled = Button("SaveMemoryButton").IsEnabled },
                 dataRoot = Environment.GetEnvironmentVariable("KYNXA_DATA_HOME"),
                 inputMethod = "Real WinUI automation peers and programmatic ComboBox selection; no physical pointer or keyboard claim"

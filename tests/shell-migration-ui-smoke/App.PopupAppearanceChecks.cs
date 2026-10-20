@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using MemoryUiSmoke;
@@ -31,8 +32,11 @@ public partial class App
         string messages = JsonSerializer.Serialize(_shell.ActiveMessages.Select(row => row.Message));
         int writes = _gateway.Writes;
         var observations = new List<object>();
-        var modePicker = NativeUi.ById<ComboBox>(settingsRoot, "AppearanceModePicker");
+        await SelectPopupSettingsCategoryAsync(settingsRoot, "appearance");
+        var modePicker = NativeUi.ById<SegmentedSelector>(settingsRoot, "AppearanceModePicker");
         var fontPicker = NativeUi.ById<ComboBox>(settingsRoot, "ChatFontSizePicker");
+        await SelectPopupSettingsCategoryAsync(settingsRoot, "general");
+        var languagePicker = NativeUi.ById<ComboBox>(settingsRoot, "InterfaceLanguagePicker");
         MenuFlyout? menu = null;
         try
         {
@@ -40,10 +44,14 @@ public partial class App
             foreach (string accent in new[] { "#C02070", "#16836B" })
             {
                 AppearanceService.ApplyPreferences(originalId, mode, originalSize, accent);
+                await SelectPopupSettingsCategoryAsync(settingsRoot, "appearance");
                 await ActivatePopupSettingsAsync(settings);
                 string label = mode + " " + accent;
-                foreach (var picker in new[] { modePicker, fontPicker })
+                await CheckSegmentedAppearanceAsync(modePicker, label + " theme selector", observations);
+                foreach (var (category, picker) in new[] { ("general", languagePicker), ("appearance", fontPicker) })
                 {
+                    await SelectPopupSettingsCategoryAsync(settingsRoot, category);
+                    await ActivatePopupSettingsAsync(settings);
                     picker.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = .2 });
                     await SettleAsync();
                     picker.IsDropDownOpen = true;
@@ -61,23 +69,27 @@ public partial class App
                     Check(popupBorder.CornerRadius.Equals(new CornerRadius(16)),
                         label + " keeps all four corners of the actual dropdown popup rounded at sixteen DIPs");
                     var layout = NativeUi.ByName<Grid>(selected, "LayoutRoot");
-                    if (ReferenceEquals(picker, modePicker))
+                    if (ReferenceEquals(picker, languagePicker))
                     {
                         var bounds = SidebarBounds(layout, popupBorder);
                         double rightInset = popupBorder.ActualWidth - bounds.Right;
+                        var scroll = NativeUi.Descendants<ScrollViewer>(popupBorder).Single();
                         Check(bounds.Left > 0 && bounds.Left <= 8 && rightInset > 0 && rightInset <= 8 &&
-                            Math.Abs(bounds.Left - rightInset) < 1,
+                            Math.Abs(bounds.Left - rightInset) < 1 && scroll.ScrollableHeight <= 1 && scroll.Padding.Right == 0,
                             label + " short dropdown keeps narrow symmetric sides without an unused scrollbar gutter");
                     }
                     var common = VisualStateManager.GetVisualStateGroups(layout).Single(group => group.Name == "CommonStates");
                     string pickerLabel = label + " " + picker.GetType().Name + " " + picker.Name;
+                    // General language settings retain their neutral focus marker; font choices use the application accent.
+                    // 通用语言设置保留中性焦点标记；字号选项使用应用强调色。
+                    var markerBrush = ReferenceEquals(picker, languagePicker) ? AppearanceService.GetBrush("KynxaSecondaryTextBrush") : null;
                     foreach (string state in new[] { "Selected", "SelectedUnfocused", "SelectedPointerOver", "SelectedPressed" })
                     {
                         // Exercise the SDK state on a loaded production item, without claiming physical presses.
                         // 在已加载的生产选项上核对 SDK 状态，不将视觉状态切换宣称为真实鼠标按压。
                         Check(VisualStateManager.GoToState(selected, state, false), pickerLabel + " exposes " + state);
                         await SettleAsync();
-                        CheckSelectedPopupItem(selected, pickerLabel + " VSM " + state, observations);
+                        CheckSelectedPopupItem(selected, pickerLabel + " VSM " + state, observations, markerBrush);
                     }
                     MovePointerInsideSettings(settings, settingsRoot, localPoint: new Point(12, settingsRoot.ActualHeight - 12));
                     await SettleAsync();
@@ -89,8 +101,8 @@ public partial class App
                         MovePointerInsideSettings(settings, selected, popup);
                         await WaitAsync(() => entered && common.CurrentState?.Name == "SelectedPointerOver",
                             pickerLabel + " receives real native selected-item hover");
-                        CheckSelectedPopupItem(selected, pickerLabel + " real pointer hover", observations);
-                        if (ReferenceEquals(picker, modePicker) && accent == "#C02070")
+                        CheckSelectedPopupItem(selected, pickerLabel + " real pointer hover", observations, markerBrush);
+                        if (ReferenceEquals(picker, languagePicker) && accent == "#C02070")
                             await RenderPopupElementAsync(popupBorder, "shell-popup-dropdown-" + mode + "-ui-render.png");
                     }
                     finally { selected.PointerEntered -= onEntered; }
@@ -119,6 +131,7 @@ public partial class App
                 await SettleAsync();
             }
 
+            await SelectPopupSettingsCategoryAsync(settingsRoot, "appearance");
             if (dropdownsOnly)
             {
                 foreach (string mode in new[] { "light", "dark" })
@@ -150,7 +163,7 @@ public partial class App
         finally
         {
             menu?.Hide();
-            modePicker.IsDropDownOpen = false;
+            languagePicker.IsDropDownOpen = false;
             fontPicker.IsDropDownOpen = false;
             AppearanceService.ApplyPreferences(originalId, originalMode, originalSize, originalAccent);
             var layout = ShellField<LayoutState>("_layout");
@@ -164,6 +177,51 @@ public partial class App
         }
     }
 
+    private async Task<FrameworkElement> SelectPopupSettingsCategoryAsync(FrameworkElement settingsRoot, string category)
+    {
+        var workspace = NativeUi.Descendants<SettingsWorkspace>(settingsRoot).Single();
+        NativeUi.Invoke(NativeUi.ById<Button>(settingsRoot, "SettingsCategory_" + category));
+        await WaitAsync(() => workspace.SelectedKey == category && NativeUi.Descendants<FrameworkElement>(settingsRoot)
+            .Any(page => Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(page) == "SettingsPage_" + category &&
+                page.IsLoaded && NativeUi.IsVisible(page)), "popup checks reveal the actual settings category " + category);
+        await SettleAsync();
+        return NativeUi.ById<FrameworkElement>(settingsRoot, "SettingsPage_" + category);
+    }
+
+    private async Task CheckSegmentedAppearanceAsync(SegmentedSelector selector, string label, List<object> observations)
+    {
+        var buttons = NativeUi.Descendants<RadioButton>(selector).ToArray();
+        var surface = (Border)selector.Content;
+        var selected = buttons.Single(button => button.IsChecked == true);
+        Check(buttons.Length == 3 && buttons.All(button => button.CornerRadius.Equals(new CornerRadius(9))) &&
+            surface.CornerRadius.Equals(new CornerRadius(12)) &&
+            ReferenceEquals(surface.Background, AppearanceService.GetBrush("KynxaSettingsCardBrush")) &&
+            buttons.All(button => ReferenceEquals(button.Foreground, AppearanceService.GetBrush("KynxaTextBrush"))),
+            label + " retains rounded radio segments and the live shared surface and text palette");
+        var fill = (Microsoft.UI.Composition.CompositionColorBrush)typeof(SegmentedSelector)
+            .GetField("_capsuleFill", PrivateInstance)!.GetValue(selector)!;
+        var stroke = (Microsoft.UI.Composition.CompositionColorBrush)typeof(SegmentedSelector)
+            .GetField("_capsuleStroke", PrivateInstance)!.GetValue(selector)!;
+        Check(fill.Color == AppearanceService.GetBrush("KynxaSelectionBrush").Color &&
+            stroke.Color == AppearanceService.GetBrush("KynxaDividerBrush").Color,
+            label + " paints the actual compositor capsule with the current selection and divider palette");
+        // Inspect hover and pressed visuals without changing the stable selection or submitting model settings.
+        // 仅检查悬停与按下视觉，不改变稳定选中键，也不提交模型设置。
+        string? selection = selector.SelectedKey;
+        foreach (var (state, brushKey) in new[] { ("PointerOver", "KynxaControlHoverBrush"), ("Pressed", "KynxaControlPressedBrush") })
+        {
+            Check(VisualStateManager.GoToState(selected, state, false), label + " exposes " + state);
+            await SettleAsync();
+            var background = NativeUi.ByName<Border>(selected, "Surface");
+            Check(ReferenceEquals(background.Background, AppearanceService.GetBrush(brushKey)) &&
+                selector.SelectedKey == selection && selected.IsChecked == true,
+                label + " " + state + " uses the shared rounded state without changing the selection");
+        }
+        VisualStateManager.GoToState(selected, "Normal", false);
+        observations.Add(new { Label = label, Selection = selector.SelectedKey, Surface = PopupBrushHex(surface.Background),
+            Capsule = fill.Color.ToString(), Stroke = stroke.Color.ToString(), surface.CornerRadius });
+    }
+
     private async Task ActivatePopupSettingsAsync(Window settings)
     {
         // A previously active main window can keep native focus after WinUI's asynchronous activation request.
@@ -171,7 +229,7 @@ public partial class App
         await ActivateOwnedShortcutWindowAsync(settings);
     }
 
-    private void CheckSelectedPopupItem(ComboBoxItem item, string label, List<object> observations)
+    private void CheckSelectedPopupItem(ComboBoxItem item, string label, List<object> observations, SolidColorBrush? expectedMarker = null)
     {
         var background = NativeUi.ByName<Grid>(item, "LayoutRoot");
         var content = NativeUi.ByName<ContentPresenter>(item, "ContentPresenter");
@@ -186,8 +244,8 @@ public partial class App
             PopupTextContrast(content.Foreground, background.Background, palette.Sidebar) >= 4.5,
             label + " uses the live application accent tint and readable foreground instead of OS blue");
         Check(pill.Opacity > .99 && pill.Fill is SolidColorBrush marker &&
-            marker.Color == AppearanceService.ParseColor(palette.IsHighContrast ? palette.OnAccent : palette.AccentText),
-            label + " retains the native selected indicator in the application accent");
+            marker.Color == (expectedMarker?.Color ?? AppearanceService.ParseColor(palette.IsHighContrast ? palette.OnAccent : palette.AccentText)),
+            label + " retains the native selected indicator in its configured semantic color");
         observations.Add(new { Label = label, Surface = "ComboBoxItem", Palette = palette.Id, palette.IsDark,
             CustomAccent = AppearanceService.CustomAccent, Background = PopupBrushHex(background.Background),
             Foreground = PopupBrushHex(content.Foreground), Marker = PopupBrushHex(pill.Fill), background.CornerRadius,

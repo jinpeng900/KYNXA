@@ -17,33 +17,32 @@ public sealed partial class ShellPage
     private Window? _storageSettingsWindow;
     private LocalModelsPage? _localModelsPage;
     private ContentControl? _settingsPageHost;
-    private ScrollViewer? _settingsHome;
+    private SettingsWorkspace? _settingsWorkspace;
+    private string _lastSettingsCategory = "general";
     private sealed record StorageHealth(int StorageProtocol, int ActiveRequests, bool Migrating, string? ModelDataHome,
         bool MigrationReady = false, string? RuntimeCleanupError = null);
 
-    private void OpenLocalModels()
+    private void OpenLocalModels() => NavigateSettings("local-models");
+
+    private void NavigateSettings(string category)
     {
-        if (_chatClosing || _savingOnClose || _projectViewClosed || StoragePaths.IsMigrating) return;
-        if (_localModelsPage is not null || _storageSettingsWindow is not { } window ||
-            _settingsPageHost is not { } host || _settingsHome is not { } home) return;
-        var page = new LocalModelsPage(window);
+        if (!_projectsReady || StoragePaths.IsMigrating) return;
+        StorageSettings_Click(this, new RoutedEventArgs());
+        _settingsWorkspace?.SelectPage(category);
+    }
+
+    private FrameworkElement BuildSettingsLocalModelsPage(Window window)
+    {
+        var page = new LocalModelsPage(window, embedded: true);
         _localModelsPage = page;
         void RefreshChoices(object? sender, EventArgs args)
         {
             if (!_chatClosing && !_projectViewClosed && !_closeApproved) _ = RefreshModelPickerAsync();
         }
         page.ModelsChanged += RefreshChoices;
-        page.BackRequested += (_, _) =>
-        {
-            // Retain the same settings controls and scroll position while the subpage is open.
-            // 子页面打开期间保留设置首页原控件及滚动位置，返回时不重建首页。
-            host.Content = home;
-            page.ModelsChanged -= RefreshChoices;
-            page.Dispose();
-            _localModelsPage = null;
-            RefreshChoices(null, EventArgs.Empty);
-        };
-        host.Content = page;
+        page.BackRequested += (_, _) => _settingsWorkspace?.SelectPage("general");
+        window.Closed += (_, _) => page.ModelsChanged -= RefreshChoices;
+        return page;
     }
 
     private void StorageSettings_Click(object sender, RoutedEventArgs args)
@@ -62,9 +61,6 @@ public sealed partial class ShellPage
         var window = new Window { Title = UiText.Get("KYNXA · 设置") };
         _storageSettingsWindow = window;
         var font = (FontFamily)Application.Current.Resources["KynxaUIFont"];
-        var content = new StackPanel { Spacing = 12, Margin = new Thickness(24),
-            HorizontalAlignment = HorizontalAlignment.Stretch };
-        AutomationProperties.SetAutomationId(content, "SettingsContentColumn");
         TextBlock Label(string text, double size = 14) => new() { Text = text, FontSize = size, FontFamily = font,
             Foreground = AppearanceService.GetBrush("KynxaTextBrush"), TextWrapping = TextWrapping.Wrap };
         TextBlock LocalizedLabel(string key, double size = 14)
@@ -73,9 +69,6 @@ public sealed partial class ShellPage
             UiLocalization.Bind(text, TextBlock.TextProperty, key);
             return text;
         }
-        var general = LocalizedLabel("通用", 13);
-        general.Opacity = 0.6;
-        content.Children.Add(general);
         var languageRow = new Grid { ColumnSpacing = 20, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
             Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         languageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -83,8 +76,8 @@ public sealed partial class ShellPage
         var languageLabel = LocalizedLabel("界面语言");
         languageLabel.VerticalAlignment = VerticalAlignment.Center;
         var languagePicker = new ScrollSafeComboBox { FontFamily = font, FontSize = 13,
-            MinWidth = 140, VerticalAlignment = VerticalAlignment.Center };
-        var focusBrush = AppearanceService.GetBrush("KynxaFocusBrush");
+            CornerRadius = new CornerRadius(9), MinWidth = 140, VerticalAlignment = VerticalAlignment.Center };
+        var focusBrush = AppearanceService.GetBrush("KynxaSecondaryTextBrush");
         var selectedBrush = AppearanceService.GetBrush("KynxaSelectionBrush");
         languagePicker.Resources["ComboBoxBackgroundBorderBrushFocused"] = focusBrush;
         languagePicker.Resources["SystemControlFocusVisualPrimaryBrush"] = focusBrush;
@@ -98,86 +91,21 @@ public sealed partial class ShellPage
         AutomationProperties.SetAutomationId(languagePicker, "InterfaceLanguagePicker");
         Grid.SetColumn(languagePicker, 1);
         languageRow.Children.Add(languageLabel); languageRow.Children.Add(languagePicker);
-        content.Children.Add(languageRow);
         var appearanceSection = new AppearanceSettingsSection(font, preferences =>
         {
             TrySetAppearancePreferences(preferences, out string? errorKey);
             return errorKey;
         }, () => new AppearanceTransferPreferences(_layout.AppearancePaletteId, _layout.AppearanceMode,
-            _layout.ChatFontSize, _layout.AppearanceAccent), isImport => PickAppearanceFileAsync(window, isImport));
-        content.Children.Add(appearanceSection.Root);
-        var moreOptions = LocalizedLabel("更多功能", 13);
-        moreOptions.Opacity = 0.6;
-        content.Children.Add(moreOptions);
-        var memoryRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
-        memoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        memoryRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var memoryLabel = LocalizedLabel("记忆管理");
-        memoryLabel.VerticalAlignment = VerticalAlignment.Center;
-        var memoryButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6), CornerRadius = new CornerRadius(8),
-            Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-        UiLocalization.Bind(memoryButton, Button.ContentProperty, "打开");
-        AutomationProperties.SetAutomationId(memoryButton, "MemoryManagementSettingsButton");
-        Grid.SetColumn(memoryButton, 1);
-        memoryRow.Children.Add(memoryLabel);
-        memoryRow.Children.Add(memoryButton);
-        content.Children.Add(memoryRow);
-        var toolsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
-        toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        toolsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var toolsLabel = LocalizedLabel("工具与技能");
-        toolsLabel.VerticalAlignment = VerticalAlignment.Center;
-        var toolsButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6), CornerRadius = new CornerRadius(8),
-            Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-        UiLocalization.Bind(toolsButton, Button.ContentProperty, "打开");
-        AutomationProperties.SetAutomationId(toolsButton, "AgentToolsSettingsButton");
-        Grid.SetColumn(toolsButton, 1);
-        toolsRow.Children.Add(toolsLabel); toolsRow.Children.Add(toolsButton);
-        content.Children.Add(toolsRow);
-        toolsButton.Click += (_, _) => { if (!StoragePaths.IsMigrating) OpenAgentTools(); };
-        var retrievalRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
-        retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        retrievalRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        retrievalRow.Children.Add(LocalizedLabel("检索与网页搜索"));
-        var retrievalButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6), CornerRadius = new CornerRadius(8),
-            Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-        UiLocalization.Bind(retrievalButton, Button.ContentProperty, "管理");
-        AutomationProperties.SetAutomationId(retrievalButton, "RetrievalSettingsButton");
-        Grid.SetColumn(retrievalButton, 1);
-        retrievalRow.Children.Add(retrievalButton);
-        content.Children.Add(retrievalRow);
-        retrievalButton.Click += (_, _) => OpenRetrievalSettings();
-        var localModelsRow = new Grid { ColumnSpacing = 14, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(12),
-            Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
-        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        localModelsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        localModelsRow.Children.Add(LocalizedLabel("本地对话模型"));
-        var localModelsButton = new Button { FontFamily = font, FontSize = 13, Padding = new Thickness(12, 6, 12, 6),
-            CornerRadius = new CornerRadius(8), Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
-        UiLocalization.Bind(localModelsButton, Button.ContentProperty, "管理");
-        AutomationProperties.SetAutomationId(localModelsButton, "LocalModelsSettingsButton");
-        Grid.SetColumn(localModelsButton, 1);
-        localModelsRow.Children.Add(localModelsButton);
-        content.Children.Add(localModelsRow);
-        localModelsButton.Click += (_, _) => OpenLocalModels();
-        var section = LocalizedLabel("存储", 13);
-        section.Opacity = 0.6;
-        content.Children.Add(section);
+            _layout.ChatFontSize, _layout.AppearanceAccent), isImport => PickAppearanceFileAsync(window, isImport), hideHeading: true);
         var row = new StorageLocationRow("数据存储", StoragePaths.DataRoot ?? StoragePaths.DesktopDirectory,
             "StorageDirectoryPath", "StorageDirectoryChooseButton");
         var choose = row.ChangeButton;
-        content.Children.Add(row);
         var extensionRow = new StorageLocationRow("用户工具", ExtensionPaths.Root,
             "ExtensionStorageDirectoryPath", "ExtensionStorageDirectoryChooseButton");
-        content.Children.Add(extensionRow);
         var progress = new ProgressRing { IsActive = false, Width = 24, Height = 24, Visibility = Visibility.Collapsed };
         var status = new InfoBar { IsOpen = false, IsClosable = false };
         AutomationProperties.SetLiveSetting(status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
-        content.Children.Add(progress); content.Children.Add(status);
-        var storageControls = new StorageSettingsControls(window, row, extensionRow, memoryButton, toolsButton, languagePicker, progress, status);
+        var storageControls = new StorageSettingsControls(window, row, extensionRow, languagePicker, progress, status);
         var root = new Grid { Background = AppearanceService.GetBrush("KynxaMainBrush") };
         AutomationProperties.SetAutomationId(root, "AppearanceSettingsRoot");
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -187,18 +115,67 @@ public sealed partial class ShellPage
         title.Margin = new Thickness(20, 0, 140, 0);
         title.VerticalAlignment = VerticalAlignment.Center;
         titleBar.Children.Add(title);
-        // Fill the available width at every window size; the content margin keeps both edges balanced.
-        // 各种窗口尺寸下都铺满可用宽度，由内容外边距保持两侧留白一致。
-        var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            HorizontalContentAlignment = HorizontalAlignment.Stretch };
-        AutomationProperties.SetAutomationId(scroll, "SettingsScrollViewer");
-        var pageHost = new ContentControl { Content = scroll, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        // Categories retain their views, including drafts, downloads and scroll positions.
+        // 分类保留原页面实例，包括草稿、下载与滚动位置，不再打开其他设置窗口。
+        var workspace = new SettingsWorkspace(font);
+        _settingsWorkspace = workspace;
+        var generalPage = new StackPanel { Spacing = 14 };
+        generalPage.Children.Add(languageRow);
+        var storagePage = new StackPanel { Spacing = 14 };
+        storagePage.Children.Add(row);
+        storagePage.Children.Add(extensionRow);
+        workspace.AddPage("general", "通用", "\uE713", () => SettingsWorkspace.ScrollPage(generalPage), font);
+        workspace.AddPage("appearance", "外观", "\uE790", () => SettingsWorkspace.ScrollPage(appearanceSection.Root), font,
+            headerAction: appearanceSection.HeaderAction);
+        workspace.AddPage("memory", "记忆", "\uE8F1", () => BuildSettingsMemoryPage(window), font);
+        workspace.AddPage("local-models", "本地模型", "\uE950", () => BuildSettingsLocalModelsPage(window), font);
+        workspace.AddPage("storage", "存储", "\uE8B7", () => SettingsWorkspace.ScrollPage(storagePage), font);
+        workspace.AddPage("tools", "工具与技能", "\uE912", () => BuildSettingsToolsPage(window), font);
+        workspace.AddPage("retrieval", "检索与网页搜索", "\uE721", () => BuildSettingsRetrievalPage(window), font);
+        workspace.AddPage("about", "关于", "\uE946", () =>
+        {
+            var about = new StackPanel { Spacing = 12 };
+            about.Children.Add(new TextBlock { Text = "KYNXA", FontFamily = font, FontSize = 22,
+                Foreground = AppearanceService.GetBrush("KynxaTextBrush") });
+            about.Children.Add(new TextBlock { Text = typeof(ShellPage).Assembly.GetName().Version?.ToString(3) ?? "1.6",
+                FontFamily = font, FontSize = 14, Foreground = AppearanceService.GetBrush("KynxaSecondaryTextBrush") });
+            return SettingsWorkspace.ScrollPage(about);
+        }, font);
+        void RefreshSettingsContext(string category)
+        {
+            bool current = category switch
+            {
+                "memory" => RefreshSettingsMemoryContext(),
+                "tools" => RefreshSettingsToolsContext(),
+                _ => true
+            };
+            const string pendingScope = "当前页面仍对应原范围，请先保存或放弃编辑，再切换范围。";
+            if (!current) storageControls.Message(pendingScope, InfoBarSeverity.Warning);
+            else if (status.Message == UiText.Get(pendingScope)) status.IsOpen = false;
+        }
+        workspace.PageChanged += (_, category) =>
+        {
+            _lastSettingsCategory = category;
+            RefreshSettingsContext(category);
+        };
+        window.Activated += (_, args) =>
+        {
+            if (args.WindowActivationState != WindowActivationState.Deactivated && workspace.SelectedKey is { } category)
+                RefreshSettingsContext(category);
+        };
+        storageControls.Navigation = workspace;
+        var pageHost = new ContentControl { Content = workspace, HorizontalContentAlignment = HorizontalAlignment.Stretch,
             VerticalContentAlignment = VerticalAlignment.Stretch };
         _settingsPageHost = pageHost;
-        _settingsHome = scroll;
         Grid.SetRow(pageHost, 1);
         root.Children.Add(titleBar); root.Children.Add(pageHost);
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var feedback = new StackPanel { Spacing = 6, Margin = new Thickness(16, 0, 16, 10) };
+        feedback.Children.Add(progress);
+        feedback.Children.Add(status);
+        Grid.SetRow(feedback, 2);
+        root.Children.Add(feedback);
+        workspace.SelectPage(_lastSettingsCategory);
         window.Content = root;
         window.ExtendsContentIntoTitleBar = true;
         window.SetTitleBar(titleBar);
@@ -209,24 +186,18 @@ public sealed partial class ShellPage
         double scale = XamlRoot?.RasterizationScale ?? 1;
         if (window.AppWindow.Presenter is OverlappedPresenter settingsPresenter)
         {
-            settingsPresenter.PreferredMinimumWidth = (int)Math.Ceiling(360 * scale);
-            settingsPresenter.PreferredMinimumHeight = (int)Math.Ceiling(320 * scale);
+            settingsPresenter.PreferredMinimumWidth = (int)Math.Ceiling(700 * scale);
+            settingsPresenter.PreferredMinimumHeight = (int)Math.Ceiling(460 * scale);
         }
         var area = DisplayArea.GetFromWindowId(ownerBounds.Id, DisplayAreaFallback.Primary).WorkArea;
-        int width = Math.Min((int)Math.Ceiling(660 * scale), Math.Max(1, area.Width - 32));
-        int height = Math.Min((int)Math.Ceiling(560 * scale), Math.Max(1, area.Height - 32));
+        int width = Math.Min((int)Math.Ceiling(1000 * scale), Math.Max(1, area.Width - 32));
+        int height = Math.Min((int)Math.Ceiling(720 * scale), Math.Max(1, area.Height - 32));
         int x = Math.Clamp(ownerBounds.Position.X + (ownerBounds.Size.Width - width) / 2, area.X, area.X + area.Width - width);
         int y = Math.Clamp(ownerBounds.Position.Y + (ownerBounds.Size.Height - height) / 2, area.Y, area.Y + area.Height - height);
         window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
         void Message(string text, InfoBarSeverity severity = InfoBarSeverity.Informational)
         { storageControls.Message(text, severity); }
         if (extensionLocationError is not null) Message(extensionLocationError.Message, InfoBarSeverity.Error);
-        memoryButton.Click += (_, _) =>
-        {
-            if (_projectActionPending || _sendingPrompt)
-                Message(UiText.Get("正在保存聊天，请稍后打开记忆管理。"));
-            else OpenMemoryManagement();
-        };
         languagePicker.SelectionChanged += (_, _) =>
         {
             if (languagePicker.SelectedItem is not ComboBoxItem { Tag: string selected } || selected == _layout.InterfaceLanguage) return;
@@ -249,9 +220,21 @@ public sealed partial class ShellPage
         else if (ExtensionPaths.EnvironmentControlled) Message(UiText.Get("工具与技能目录由启动环境变量指定，请移除 KYNXA_EXTENSION_HOME 后再通过设置修改。"), InfoBarSeverity.Warning);
         void PreventClose(Microsoft.UI.Windowing.AppWindow window, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
         { if (StoragePaths.IsMigrating) e.Cancel = true; }
+        bool ownerClosing = false;
         App.Window.AppWindow.Closing += PreventClose;
-        window.AppWindow.Closing += PreventClose;
-        void CloseSettings(object sender, WindowEventArgs e) => window.Close();
+        window.AppWindow.Closing += (sender, e) =>
+        {
+            PreventClose(sender, e);
+            if (ownerClosing || e.Cancel) return;
+            string? pending = _memoryManagementWindow is { HasPendingChanges: true } ? "memory"
+                : _toolManagementWindow is { HasPendingChanges: true } ? "tools"
+                : _retrievalSettingsWindow is { HasPendingChanges: true } ? "retrieval" : null;
+            if (pending is null) return;
+            e.Cancel = true;
+            workspace.SelectPage(pending);
+            Message(UiText.Get("请先保存或放弃当前编辑，再关闭设置。"), InfoBarSeverity.Warning);
+        };
+        void CloseSettings(object sender, WindowEventArgs e) { ownerClosing = true; window.Close(); }
         App.Window.Closed += CloseSettings;
         void UpdateSettingsTitle(object? sender, EventArgs e) => window.Title = UiText.Get("KYNXA · 设置");
         UiText.LanguageChanged += UpdateSettingsTitle;
@@ -261,11 +244,20 @@ public sealed partial class ShellPage
             App.Window.Closed -= CloseSettings;
             UiText.LanguageChanged -= UpdateSettingsTitle;
             appearanceSection.Dispose();
+            _memoryManagementWindow?.DisposeEmbedded();
+            _memoryManagementWindow = null;
+            _settingsMemoryTargets = null;
+            _toolManagementWindow?.DisposeEmbedded();
+            _toolManagementWindow = null;
+            _settingsToolsConversationId = null;
+            _retrievalSettingsWindow?.DisposeEmbedded();
+            _retrievalSettingsWindow = null;
             storageControls.Close();
             _localModelsPage?.Dispose();
             _localModelsPage = null;
             _settingsPageHost = null;
-            _settingsHome = null;
+            workspace.Dispose();
+            _settingsWorkspace = null;
             _storageSettingsWindow = null;
         };
         extensionRow.ChangeButton.Click += async (_, _) => await ChangeExtensionStorageAsync(storageControls);
@@ -282,13 +274,19 @@ public sealed partial class ShellPage
                 if (StoragePaths.EnvironmentControlled) throw new InvalidOperationException(UiText.Get("启动环境变量正在指定数据目录。"));
                 if (_memoryManagementWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成记忆编辑，再更改数据存储位置。"));
-                _memoryManagementWindow?.CloseForOwner();
+                _memoryManagementWindow?.DisposeEmbedded();
+                _memoryManagementWindow = null;
+                workspace.ResetPage("memory");
                 if (_toolManagementWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成工具配置，再更改数据存储位置。"));
-                _toolManagementWindow?.CloseForOwner();
+                _toolManagementWindow?.DisposeEmbedded();
+                _toolManagementWindow = null;
+                workspace.ResetPage("tools");
                 if (_retrievalSettingsWindow is { HasPendingChanges: true })
                     throw new InvalidOperationException(UiText.Get("请先完成检索配置，再更改数据存储位置。"));
-                _retrievalSettingsWindow?.CloseForOwner();
+                _retrievalSettingsWindow?.DisposeEmbedded();
+                _retrievalSettingsWindow = null;
+                workspace.ResetPage("retrieval");
                 if (_sendingPrompt || _pendingReplies.Count > 0 || _retryingReplies.Count > 0) throw new InvalidOperationException(UiText.Get("请等待模型回复完成后再迁移。"));
                 using (var self = System.Diagnostics.Process.GetCurrentProcess())
                 {
