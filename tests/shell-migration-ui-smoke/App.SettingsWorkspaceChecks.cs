@@ -69,6 +69,27 @@ public partial class App
 
             Rect BoundsIn(FrameworkElement element, UIElement relativeTo) => element.TransformToVisual(relativeTo)
                 .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            void CheckNavigationLabels(string state)
+            {
+                var labels = keys.Select(key =>
+                {
+                    var button = NativeUi.ById<Button>(root, "SettingsCategory_" + key);
+                    var label = ((Panel)button.Content).Children.OfType<TextBlock>().Single();
+                    return new { Key = key, label.Text, Bounds = BoundsIn(label, button), label.DesiredSize,
+                        ButtonWidth = button.ActualWidth, ButtonHeight = button.ActualHeight, button.Padding };
+                }).ToArray();
+                observations.Add(new { Page = "navigation", State = state, Language = UiText.Language,
+                    RootWidth = root.ActualWidth, NavigationWidth = navigation.ActualWidth, Labels = labels });
+                Check(labels.All(label => label.Bounds.Width > 0 && label.Bounds.Height > 0 &&
+                    label.Bounds.Left >= label.Padding.Left - 1 && label.Bounds.Top >= label.Padding.Top - 1 &&
+                    label.Bounds.Right <= label.ButtonWidth - label.Padding.Right + 1 &&
+                    label.Bounds.Bottom <= label.ButtonHeight - label.Padding.Bottom + 1 &&
+                    label.Bounds.Width >= label.DesiredSize.Width - 1 && label.Bounds.Height >= label.DesiredSize.Height - 1),
+                    state + " navigation keeps all eight complete category labels inside their padded buttons without clipping");
+            }
+            var responsiveSizes = new Dictionary<(string State, string Page),
+                (double PageWidth, double ContentWidth, double? HeaderActionRight)>();
+            var responsivePalettes = new Dictionary<string, (double GridWidth, double CardWidth, int Columns)>();
             async Task CheckResponsivePagesAsync(string state)
             {
                 foreach (string key in new[] { "general", "appearance", "storage", "about" })
@@ -84,6 +105,8 @@ public partial class App
                     await SettleAsync();
                     var heading = NativeUi.ById<TextBlock>(root, "SettingsPageHeading");
                     Rect headingBounds = BoundsIn(heading, host), contentBounds = BoundsIn(content, page);
+                    Rect? headerActionBounds = key == "appearance"
+                        ? BoundsIn(NativeUi.ById<Button>(root, "AppearanceResetButton"), host) : null;
                     string[] controlIds = key switch
                     {
                         "general" => ["InterfaceLanguagePicker"],
@@ -105,12 +128,75 @@ public partial class App
                         RootWidth = root.ActualWidth, HostWidth = host.ActualWidth, PageWidth = page.ActualWidth,
                         page.ViewportWidth, page.ExtentWidth, page.ScrollableWidth, Heading = headingBounds,
                         Content = contentBounds, Frame = BoundsIn(frame, page), ContentDesiredWidth = content.DesiredSize.Width,
-                        Controls = measured });
+                        HeaderAction = headerActionBounds, Controls = measured });
+                    responsiveSizes[(state, key)] = (page.ActualWidth, contentBounds.Width, headerActionBounds?.Right);
                     Check(Math.Abs(headingBounds.Left - 24) <= 1 && Math.Abs(contentBounds.Left - 24) <= 1 &&
-                        contentBounds.Width > 200 && contentBounds.Right <= page.ActualWidth - 23 &&
-                        frame.ActualWidth <= 821 && page.ScrollableWidth <= 1 &&
+                        contentBounds.Width > 200 && Math.Abs(contentBounds.Right - (page.ActualWidth - 24)) <= 1 &&
+                        Math.Abs(frame.ActualWidth - page.ActualWidth) <= 1 && page.ScrollableWidth <= 1 &&
                         measured.All(item => item.Bounds.Width > 0 && item.Bounds.Left >= 23 && item.Bounds.Right <= page.ActualWidth - 23),
-                        state + " " + key + " aligns heading and content at 24 DIP and keeps cards and actions inside the right viewport");
+                        state + " " + key + " fills the viewport between 24 DIP page insets and keeps cards and actions inside its bounds");
+                    if (headerActionBounds is { } actionBounds)
+                        Check(actionBounds.Width > 0 && Math.Abs(actionBounds.Right - (host.ActualWidth - 24)) <= 1 &&
+                            headingBounds.Right <= actionBounds.Left - 11,
+                            state + " appearance keeps the restore action at the right page inset without overlapping its heading");
+                    if (key == "appearance")
+                    {
+                        var paletteGrid = NativeUi.ById<Grid>(page, "AppearancePaletteGrid");
+                        var paletteCards = paletteGrid.Children.OfType<Button>().ToArray();
+                        var cardBounds = paletteCards.Select(card => BoundsIn(card, paletteGrid)).ToArray();
+                        var labels = paletteCards.SelectMany(card => NativeUi.Descendants<TextBlock>(card)
+                            .Select(label => new { label.Text, label.IsTextTrimmed, Bounds = BoundsIn(label, card),
+                                CardWidth = card.ActualWidth, CardHeight = card.ActualHeight,
+                                label.ActualWidth, label.ActualHeight })).ToArray();
+                        int columns = paletteGrid.ColumnDefinitions.Count;
+                        observations.Add(new { Page = "appearance-palettes", State = state, Columns = columns,
+                            Grid = BoundsIn(paletteGrid, page), CardBounds = cardBounds, Labels = labels });
+                        responsivePalettes[state] = (paletteGrid.ActualWidth, paletteCards[0].ActualWidth, columns);
+                        Check(paletteCards.Length == 5 && columns is >= 1 and <= 5 && columns != 4 &&
+                            Math.Abs(paletteGrid.ActualWidth - content.ActualWidth) <= 1 &&
+                            cardBounds.All(bounds => bounds.Width >= 170 && bounds.Height is >= 110 and <= 160 &&
+                                bounds.Left >= -1 && bounds.Right <= paletteGrid.ActualWidth + 1 &&
+                                bounds.Top >= -1 && bounds.Bottom <= paletteGrid.ActualHeight + 1) &&
+                            paletteCards.All(card => card.CornerRadius.TopLeft >= 10),
+                            state + " lays out all five rounded palette previews across the full page width with readable card sizes");
+                        Check(cardBounds.All(bounds => Math.Abs(bounds.Width - cardBounds[0].Width) <= 1) &&
+                            cardBounds.SelectMany((bounds, index) => cardBounds.Skip(index + 1).Select(other =>
+                                bounds.Right <= other.Left + 1 || other.Right <= bounds.Left + 1 ||
+                                bounds.Bottom <= other.Top + 1 || other.Bottom <= bounds.Top + 1)).All(separated => separated) &&
+                            labels.All(label => !label.IsTextTrimmed && label.ActualWidth > 0 && label.ActualHeight > 0 &&
+                                label.Bounds.Left >= -1 && label.Bounds.Right <= label.CardWidth + 1 &&
+                                label.Bounds.Top >= -1 && label.Bounds.Bottom <= label.CardHeight + 1),
+                            state + " keeps equal-width palette cards separate and their complete names and selection glyphs inside each card");
+                        if (state is "wide" or "maximized")
+                            Check(columns == 5 && cardBounds.All(bounds => Math.Abs(bounds.Top - cardBounds[0].Top) <= 1),
+                                state + " places all five palette choices in a single balanced row");
+                        if (state == "narrow")
+                            Check(columns <= 3 && paletteGrid.RowDefinitions.Count >= 2,
+                                "narrow settings wrap palette cards into readable rows instead of compressing five into one row");
+                        if (state is "wide" or "narrow")
+                        {
+                            var themePicker = NativeUi.ById<SegmentedSelector>(page, "AppearanceModePicker");
+                            string savedMode = AppearanceService.Mode;
+                            try
+                            {
+                                foreach (string theme in new[] { "light", "dark" })
+                                {
+                                    themePicker.SelectedKey = theme;
+                                    await SettleAsync();
+                                    Check(AppearanceService.Mode == theme && paletteCards.Count(card =>
+                                        AutomationProperties.GetItemStatus(card) == UiText.Get("已选中")) == 1,
+                                        state + " " + theme + " previews follow the active theme and retain one selected palette");
+                                    paletteGrid.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false,
+                                        VerticalAlignmentRatio = 0.1 });
+                                    await CaptureSettingsWorkspaceAsync(settings,
+                                        "shell-settings-workspace-palettes-" + state + "-" + theme + ".png");
+                                    await RenderPopupElementAsync(paletteGrid,
+                                        "shell-palette-grid-" + state + "-" + theme + "-ui-render.png");
+                                }
+                            }
+                            finally { themePicker.SelectedKey = savedMode; }
+                        }
+                    }
                     if (page.ScrollableHeight > 1)
                     {
                         page.ChangeView(null, page.ScrollableHeight, null, true);
@@ -120,6 +206,7 @@ public partial class App
                             state + " " + key + " scrolls the full content bottom into view without clipping lower actions");
                     }
                 }
+                CheckNavigationLabels(state);
             }
             var presenter = (OverlappedPresenter)settings.AppWindow.Presenter;
             var initialBounds = new Windows.Graphics.RectInt32(settings.AppWindow.Position.X, settings.AppWindow.Position.Y,
@@ -149,16 +236,51 @@ public partial class App
             settings.AppWindow.MoveAndResize(initialBounds);
             await SettleAsync();
             await CheckResponsivePagesAsync("restored");
+            // Compare the same cached pages across actual native window sizes, not only their final fit.
+            // 对比同一缓存页面在真实窗口缩放前后的宽度，避免只校验最终边界而漏掉固定窄列。
+            foreach (string key in new[] { "general", "appearance", "storage", "about" })
+            {
+                var initial = responsiveSizes[("initial", key)];
+                var wide = responsiveSizes[("wide", key)];
+                var narrow = responsiveSizes[("narrow", key)];
+                var maximized = responsiveSizes[("maximized", key)];
+                var restored = responsiveSizes[("restored", key)];
+                Check(wide.PageWidth > narrow.PageWidth + 1 && wide.ContentWidth > narrow.ContentWidth + 1 &&
+                    Math.Abs((wide.ContentWidth - narrow.ContentWidth) - (wide.PageWidth - narrow.PageWidth)) <= 2 &&
+                    maximized.ContentWidth >= wide.ContentWidth - 1 &&
+                    Math.Abs(restored.PageWidth - initial.PageWidth) <= 2 &&
+                    Math.Abs(restored.ContentWidth - initial.ContentWidth) <= 2,
+                    key + " expands with the viewport, shrinks without clipping and restores its original content width");
+            }
+            var wideAppearance = responsiveSizes[("wide", "appearance")];
+            var narrowAppearance = responsiveSizes[("narrow", "appearance")];
+            Check(wideAppearance.HeaderActionRight is { } wideActionRight &&
+                narrowAppearance.HeaderActionRight is { } narrowActionRight &&
+                Math.Abs((wideActionRight - narrowActionRight) - (wideAppearance.PageWidth - narrowAppearance.PageWidth)) <= 2,
+                "the appearance restore action follows the page's right edge when the settings window changes width");
+            var widePalette = responsivePalettes["wide"];
+            var narrowPalette = responsivePalettes["narrow"];
+            var maximizedPalette = responsivePalettes["maximized"];
+            Check(widePalette.GridWidth > narrowPalette.GridWidth + 1 &&
+                maximizedPalette.GridWidth >= widePalette.GridWidth - 1 &&
+                maximizedPalette.CardWidth > widePalette.CardWidth + 1 &&
+                Math.Abs(responsivePalettes["restored"].GridWidth - responsivePalettes["initial"].GridWidth) <= 2 &&
+                responsivePalettes["restored"].Columns == responsivePalettes["initial"].Columns,
+                "palette previews grow with the wider viewport, wrap at narrower widths and restore their original layout");
 
             var appearance = await SelectAsync("appearance");
             var mode = NativeUi.ById<SegmentedSelector>(appearance, "AppearanceModePicker");
             var palette = NativeUi.ById<Grid>(appearance, "AppearancePaletteGrid");
             var cards = palette.Children.OfType<Button>().ToArray();
-            Check(palette.ColumnDefinitions.Count == 2 && cards.Length == 5 && palette.ActualWidth <= 461 &&
-                cards.All(card => card.ActualWidth is > 100 and <= 231 && card.ActualHeight is >= 76 and <= 89 &&
-                    card.CornerRadius.TopLeft >= 10) && Grid.GetRow(cards[0]) == Grid.GetRow(cards[1]) &&
-                Grid.GetColumn(cards[0]) == 0 && Grid.GetColumn(cards[1]) == 1,
-                "the five smaller rounded palette cards align in two columns without stretching across the page");
+            string originalPaletteId = AppearanceService.Current.Id;
+            var selectedCard = cards.First(card => AutomationProperties.GetAutomationId(card) != "AppearancePalette_" + originalPaletteId);
+            NativeUi.Invoke(selectedCard);
+            Check(AppearanceService.Current.Id == AutomationProperties.GetAutomationId(selectedCard)["AppearancePalette_".Length..] &&
+                new LayoutStateService().Load().AppearancePaletteId == AppearanceService.Current.Id &&
+                AutomationProperties.GetItemStatus(selectedCard) == UiText.Get("已选中") &&
+                cards.Count(card => AutomationProperties.GetItemStatus(card) == UiText.Get("已选中")) == 1,
+                "invoking a responsive palette card saves its existing preference and exposes exactly one accessible selection");
+            NativeUi.Invoke(cards.Single(card => AutomationProperties.GetAutomationId(card) == "AppearancePalette_" + originalPaletteId));
             Check(NativeUi.Descendants<RadioButton>(mode).Count() == 3 && mode.SelectedKey == originalMode,
                 "theme mode uses three real radio segments with the saved selection");
             var capsule = typeof(SegmentedSelector).GetField("_capsule", PrivateInstance)?.GetValue(mode) as ShapeVisual
@@ -170,14 +292,32 @@ public partial class App
             var target = NativeUi.ById<RadioButton>(mode, "Segment_" + nextMode);
             await ActivateOwnedShortcutWindowAsync(settings);
             target.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0.15 });
+            root.UpdateLayout();
             await SettleAsync();
-            MovePointerInsideSettings(settings, target);
-            await SettleAsync();
-            RequireSettingsForeground(settings);
-            SendFixtureInput([
-                new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0002 } } },
-                new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }
-            ]);
+            bool entered = false;
+            Microsoft.UI.Xaml.Input.PointerEventHandler onEntered = (_, _) => entered = true;
+            target.PointerEntered += onEntered;
+            try
+            {
+                MovePointerInsideSettings(settings, root, localPoint: new Point(12, root.ActualHeight - 12));
+                await SettleAsync();
+                MovePointerInsideSettings(settings, target);
+                await WaitAsync(() => entered, "the actual target segment receives native pointer input before clicking");
+                // Recalculate after pointer dispatch and let WinUI process the press before releasing it.
+                // 指针事件派发后重新计算坐标，让 WinUI 先处理按下再接收释放，避免缩放后点击时序丢失。
+                MovePointerInsideSettings(settings, target);
+                RequireSettingsForeground(settings);
+                try
+                {
+                    SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0002 } } }]);
+                    await Task.Delay(40);
+                }
+                finally
+                {
+                    SendFixtureInput([new NativeInput { Data = new NativeInputData { Mouse = new NativeMouseInput { Flags = 0x0004 } } }]);
+                }
+            }
+            finally { target.PointerEntered -= onEntered; }
             await WaitAsync(() => mode.SelectedKey == nextMode && AppearanceService.Mode == nextMode,
                 "a real mouse click changes the selected mode and applies its actual appearance preference");
             await SettleAsync();
@@ -246,6 +386,45 @@ public partial class App
             await WaitAsync(() => _gateway.AgentReads == 4, "embedded tool management finishes its four read-only configuration requests");
             var retrieval = await SelectAsync("retrieval");
             await WaitAsync(() => _gateway.RetrievalReads == 4, "embedded retrieval settings finish their four synthetic reads");
+            string layoutLanguage = UiText.Language;
+            try
+            {
+                foreach (string languageId in new[] { "zh-CN", "en" })
+                {
+                    UiText.Initialize(languageId);
+                    foreach (int width in new[] { 700, 1240 })
+                    {
+                        await ResizeSettingsAsync(width, 760);
+                        root.UpdateLayout();
+                        await SettleAsync();
+                        CheckNavigationLabels(languageId + " " + width + " DIP retrieval");
+                        var retrievalScroll = ((Grid)retrieval).Children.OfType<ScrollViewer>().Single();
+                        var controls = new[] { "RetrievalLocalMode", "RetrievalSemanticMode", "RetrievalRerankMode",
+                            "RetrievalAddFile", "RetrievalAddFolder", "RetrievalAddLinks", "RetrievalWebMode",
+                            "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage", "RetrievalRefresh" }
+                            .Select(id => NativeUi.ById<FrameworkElement>(retrieval, id)).Select(control => new
+                            {
+                                Id = AutomationProperties.GetAutomationId(control), Bounds = BoundsIn(control, retrieval),
+                                control.ActualWidth, control.DesiredSize.Width
+                            }).ToArray();
+                        observations.Add(new { Page = "retrieval", Language = languageId, RequestedWidth = width,
+                            RootWidth = retrieval.ActualWidth, retrievalScroll.ViewportWidth,
+                            retrievalScroll.ScrollableWidth, Controls = controls });
+                        Check(retrievalScroll.ScrollableWidth <= 1 && controls.All(control =>
+                            control.Bounds.Width > 0 && control.Bounds.Left >= 23 && control.Bounds.Right <= retrieval.ActualWidth - 23),
+                            languageId + " " + width + " DIP retrieval settings keep source actions and every picker inside the page without horizontal clipping");
+                        if (languageId == "en")
+                            await CaptureSettingsWorkspaceAsync(settings, "shell-settings-workspace-retrieval-" + width + ".png");
+                    }
+                }
+            }
+            finally
+            {
+                UiText.Initialize(layoutLanguage);
+                presenter.Restore();
+                settings.AppWindow.MoveAndResize(initialBounds);
+                await SettleAsync();
+            }
             await SelectAsync("about");
             Check(host.Children.Count == keys.Length, "each requested category creates one page and retains it in the same host");
             Check(ReferenceEquals(appearance, await SelectAsync("appearance")) &&

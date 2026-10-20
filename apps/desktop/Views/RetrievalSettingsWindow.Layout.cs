@@ -152,11 +152,26 @@ public sealed partial class RetrievalSettingsWindow
             Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.Children.Add(Label(key));
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var label = Label(key);
+        row.Children.Add(label);
         control.HorizontalAlignment = HorizontalAlignment.Stretch;
         control.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(control, 1);
         row.Children.Add(control);
+        row.SizeChanged += (_, args) =>
+        {
+            // Give localized actions the full row on narrow pages without recreating controls or their selection state.
+            // 窄页中让本地化操作占用整行，保留已有控件及其选择状态，避免半宽列裁切按钮。
+            bool stacked = args.NewSize.Width < 620;
+            row.ColumnSpacing = stacked ? 0 : 16;
+            row.RowSpacing = stacked ? 8 : 0;
+            Grid.SetColumnSpan(label, stacked ? 2 : 1);
+            Grid.SetRow(control, stacked ? 1 : 0);
+            Grid.SetColumn(control, stacked ? 0 : 1);
+            Grid.SetColumnSpan(control, stacked ? 2 : 1);
+        };
         return row;
     }
 
