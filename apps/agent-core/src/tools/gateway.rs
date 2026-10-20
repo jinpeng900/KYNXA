@@ -50,6 +50,7 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
     pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
     pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
     configuration_updates: tokio::sync::RwLock<()>,
@@ -76,6 +77,7 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
             configuration_updates: Default::default(),
@@ -496,7 +498,7 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
         || name == "artifact.open" && !arguments["url"].is_string()
 }
 
@@ -543,7 +545,7 @@ pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot:
 }
 
 pub(crate) async fn select_workspace_context(ctx: &GatewayToolContext, arguments: &Value) -> Result<GatewayToolContext, GatewayError> {
-    let selected = if arguments["input"].is_string() && arguments["sessionId"].is_string() {
+    let selected = if (arguments["input"].is_string() || arguments["command"].is_string()) && arguments["sessionId"].is_string() {
         super::gateway_workspace_terminal::session_mount(ctx,arguments["sessionId"].as_str().unwrap()).await?
     } else { operation_mount_binding(ctx, arguments)? };
     if selected.is_null() { return Ok(ctx.clone()); }
@@ -649,7 +651,7 @@ pub(super) async fn filesystem(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir");
+    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -708,6 +710,14 @@ pub(super) async fn filesystem(
         let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
         observe_code_target(ctx, &binding)?;
         return Ok(result);
+    }
+    if name == "document.create" {
+        // Only the authorized canonical binding reaches the binary writer; model fields cannot supply it.
+        // 二进制写入只接收本层授权的规范路径绑定，模型参数不能自行提供该绑定。
+        let mut input = args;
+        input["path"] = json!(super::local_files::path_text(&path));
+        input["_pathBinding"] = binding;
+        return super::gateway_document_create::create(ctx, input).await;
     }
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
@@ -942,7 +952,7 @@ async fn execute_inner(
         super::gateway_mcp::authorized_server(tool_name, ctx)?;
     }
     let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop",
-        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.close"].contains(&tool_name)
+        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.workspace.close"].contains(&tool_name)
         || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
@@ -961,7 +971,7 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
@@ -990,7 +1000,7 @@ async fn execute_inner(
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "artifact.open"].contains(&tool_name) {
+    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
@@ -1360,17 +1370,28 @@ pub(crate) async fn relevant_skill_headers(
     // Reuse bilingual task signals so Chinese requests can find the shipped English skill names.
     // 复用双语任务信号，使中文要求也能找到随包英文技能名，不增加模型判断调用。
     let signals = super::discovery::selection_signals(&json!({"message":query}));
-    let topics = [
+    let mut topics = [
         ("web", "web-research"), ("browser", "browser-workflow"),
         ("desktop", "desktop-workflow"), ("hostTerminal", "terminal-workflow"),
-        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect safe-file-edit"),
+        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect"),
     ].into_iter().filter(|(signal, _)| signals[*signal] == true)
-        .map(|(_, topic)| topic).collect::<Vec<_>>().join(" ");
+        .map(|(_, topic)| topic).collect::<Vec<_>>();
+    topics.extend(super::discovery::authoring_topics(query));
+    if super::intent::matches(r"代码|编程|修复|重构|\b(?:code|coding|refactor|debug|implementation)\b", &query.to_lowercase()) {
+        topics.push("code-workflow");
+    }
+    if super::intent::matches(r"记忆|记住|偏好|\b(?:memory|remember|preference)\b", &query.to_lowercase()) {
+        topics.push("memory-workflow");
+    }
+    if super::intent::matches(r"修改|编辑|删除|新建文件|\b(?:edit|modify|delete)\b", &query.to_lowercase()) {
+        topics.push("safe-file-edit");
+    }
+    let topics = topics.join(" ");
     let query = format!("{topics} {query}");
     let indices = super::discovery::calculate("tools.searchTools", &json!({"query":query,"descriptors":headers}))
         .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
     Ok(indices.as_array().into_iter().flatten().filter_map(Value::as_u64)
-        .filter_map(|index| headers.get(index as usize).cloned()).take(6).collect())
+        .filter_map(|index| headers.get(index as usize).cloned()).take(16).collect())
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1778,6 +1799,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
         .fetch_add(1, Ordering::AcqRel);
     let result = native(ctx, "config.update", json!({"input":input})).await?;
     ctx.runtime.web_search.clear_queries();
+    ctx.runtime.web_fetch.clear();
     super::gateway_mcp::reset(ctx).await;
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
@@ -2529,6 +2551,25 @@ mod tests {
         ctx.config["disabledSkills"] = json!([]);
         std::fs::remove_file(&path).unwrap();
         assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn document_skill_discovery_reads_only_relevant_headers_until_explicit_read() {
+        let (ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        for name in ["document-authoring", "slides-authoring", "spreadsheets-authoring", "memory-workflow"] {
+            let directory = root.join("official/Skills").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("SKILL.md"), format!("---\nname: {name}\ndescription: {name} native workflow\n---\nPRIVATE-BODY-{name}\n")).unwrap();
+        }
+        let headers = relevant_skill_headers(&ctx, "生成一份报告.docx").await.unwrap();
+        assert_eq!(headers[0]["name"], "document-authoring");
+        assert!(headers.len() <= 16);
+        assert!(headers.iter().all(|header| header.get("content").is_none()));
+        assert!(!serde_json::to_string(&headers).unwrap().contains("PRIVATE-BODY"));
+        let loaded = execute("skill.read", json!({"id":headers[0]["id"]}), &ctx).await.unwrap();
+        assert!(loaded["content"].as_str().unwrap().contains("PRIVATE-BODY-document-authoring"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

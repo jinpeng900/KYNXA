@@ -993,6 +993,32 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
         .json(&json!({"messageId":message,"files":files.iter().zip(&source_paths).map(|((id,name,_),path)|json!({"id":id,"name":name,"path":path})).collect::<Vec<_>>()}))
         .send().await.unwrap();
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let imported: Value = response.json().await.unwrap();
+    let version = imported["attachments"].as_array().unwrap().iter().find(|item| item["id"] == document_id)
+        .unwrap()["sha256"].as_str().unwrap();
+    let preview_url = format!("{}/api/conversations/{}/attachments/{document_id}/preview?messageId={message}&version={version}", fixture.url, fixture.conversation);
+    let preview: Value = fixture.client.get(&preview_url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(preview["kind"], "docx", "{preview}");
+    assert!(preview.get("text").is_none(), "direct previews must not wait for text extraction");
+    let original_url = format!("{}{}", fixture.url, preview["contentUrl"].as_str().unwrap());
+    let original = fixture.client.get(&original_url).send().await.unwrap();
+    assert_eq!(original.status(), 200);
+    assert_eq!(original.bytes().await.unwrap().as_ref(), files[0].2.as_slice());
+    assert_eq!(fixture.client.get(preview_url.replace(version, "stale")).send().await.unwrap().status(), 409);
+    let unrelated = fixture.client.get(format!("{}/api/conversations/{}/attachments/{document_id}/preview?messageId={message}", fixture.url, new_id()))
+        .send().await.unwrap();
+    assert_ne!(unrelated.status(), 200);
+    // A prepared page representation remains version-bound and shares the same authorized attachment route.
+    // 已准备的页面表示仍绑定原件版本，并复用同一消息范围附件授权，不开放私有文件路径。
+    let cache = fixture.runtime.config.data_root.join("Cache/Previews/office-pdf-v1");
+    std::fs::create_dir_all(&cache).unwrap();
+    let pdf = b"%PDF-1.4\n% cached page fixture\n%%EOF";
+    std::fs::write(cache.join(format!("{version}.pdf")), pdf).unwrap();
+    let converted: Value = fixture.client.get(format!("{preview_url}&representation=pdf")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(converted["kind"], "pdf", "{converted}");
+    let converted_response = fixture.client.get(format!("{}{}", fixture.url, converted["contentUrl"].as_str().unwrap())).send().await.unwrap();
+    assert_eq!(converted_response.headers()["content-type"], "application/pdf");
+    assert_eq!(converted_response.bytes().await.unwrap().as_ref(), pdf);
     let mut input = fixture.request("");
     input["userMessageId"] = json!(message);
     input["attachmentIds"] = json!([document_id, image_id]);

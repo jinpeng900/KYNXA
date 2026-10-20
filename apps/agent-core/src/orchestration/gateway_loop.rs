@@ -1167,7 +1167,7 @@ fn document_notice(state: &LoopState) -> Option<String> {
                 && source["executed"] != false
                 && matches!(
                     source["name"].as_str(),
-                    Some("filesystem.write" | "filesystem.edit" | "filesystem.delete")
+                    Some("filesystem.write" | "filesystem.edit" | "filesystem.delete" | "document.create")
                 )
         }) {
             if let Some(path) = source["sourceMetadata"]["path"]
@@ -1230,7 +1230,7 @@ fn compact_document_notice(directory: &Value, result_sources: &[Value], maximum_
     let mut seen = HashSet::new();
     for source in result_sources.iter().rev().filter(|source| {
         source["status"] == "completed" && source["executed"] != false
-            && matches!(source["name"].as_str(), Some("filesystem.write" | "filesystem.edit" | "filesystem.delete"))
+            && matches!(source["name"].as_str(), Some("filesystem.write" | "filesystem.edit" | "filesystem.delete" | "document.create"))
     }) {
         if let Some(path) = source["sourceMetadata"]["path"].as_str().or_else(|| source["arguments"]["path"].as_str()) {
             let identity = json!([source["arguments"]["mountId"], path]).to_string();
@@ -2484,6 +2484,7 @@ async fn execute(
             "timeZone": "Asia/Shanghai",
             "browserPrompt": if browser_prompt.is_empty() { json!([]) } else { json!([browser_prompt]) },
             "skills": skill_headers,
+            "contextWindowTokens": context_window,
             "maximumTokens": 1800,
             "compactLocalModel": crate::models::gateway_local_engine::is_managed(&connection) && context_window <= 16384
         }),
@@ -2503,7 +2504,7 @@ async fn execute(
     if resolved_limits["corrections"].as_array().is_some_and(|corrections| !corrections.is_empty()) {
         state.broker_note(&format!("Broker: malformed transport execution limits were normalized to the existing defaults. The user's goal, permissions, saved context and completed operations are unchanged. Settings correction: {}", resolved_limits["corrections"]));
     }
-    let memory_budget = (context_window / 8).clamp(512, 8192);
+    let memory_budget = (context_window / 8).clamp(512, 4096);
     let mut live_memory = LiveMemoryProjection::prepare(&memories, input["message"].clone(), memory_budget)?;
     system.push_str(&live_memory.block);
     // Add authoritative route facts after memory and before budgeting; compaction keeps this base system intact.
@@ -2745,7 +2746,7 @@ async fn execute(
                 && source["executed"] != false
                 && matches!(
                     source["name"].as_str(),
-                    Some("filesystem.write" | "filesystem.edit")
+                    Some("filesystem.write" | "filesystem.edit" | "document.create")
                 )
         });
         let delivery_version = json!({"revision":verification["mutationRevision"],
@@ -3832,7 +3833,7 @@ async fn execute(
                         operation_id: operation_id.clone(), tool_call_id: call["id"].as_str().unwrap_or("").into(), tool_name: name.into(),
                         input_sha256: crate::retrieval::gateway_index::hash(&call["arguments"].to_string()),
                         input_reference: Some(input_reference),
-                        effect: if is_observation { OperationEffect::Observation } else if name.starts_with("filesystem.") { OperationEffect::FileMutation } else { OperationEffect::Irreversible },
+                        effect: if is_observation { OperationEffect::Observation } else if name.starts_with("filesystem.") || name == "document.create" { OperationEffect::FileMutation } else { OperationEffect::Irreversible },
                     })?;
                     journal.dispatch_operation(&operation_id)?;
                     operation_dispatched = true;
@@ -4022,7 +4023,7 @@ async fn execute(
                 && receipt["reused"] != true
                 && matches!(
                     name,
-                    "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+                    "filesystem.write" | "filesystem.edit" | "filesystem.delete" | "document.create"
                 )
             {
                 round_progress.artifact_updated = true;

@@ -54,7 +54,7 @@ public sealed class MessageAttachmentsApiClient : IDisposable
     /// <summary>Open the saved attachment without exposing application-private disk paths.</summary>
     /// <remarks>打开已保存附件；预览仍由消息范围接口授权，不向工作区文件工具开放私有数据目录。</remarks>
     public async Task<WorkspacePreviewTarget> ReadPreviewAsync(Guid conversationId, Guid messageId,
-        ChatAttachment attachment, int offset = 0, CancellationToken cancellationToken = default)
+        ChatAttachment attachment, int offset = 0, CancellationToken cancellationToken = default, string? representation = null)
     {
         if (string.IsNullOrEmpty(attachment.Sha256))
             attachment = (await ListAsync(conversationId, messageId, cancellationToken))
@@ -63,6 +63,17 @@ public sealed class MessageAttachmentsApiClient : IDisposable
         string query = $"messageId={messageId:D}";
         if (!string.IsNullOrEmpty(attachment.Sha256)) query += "&version=" + Uri.EscapeDataString(attachment.Sha256);
         string extension = System.IO.Path.GetExtension(attachment.Name).ToLowerInvariant();
+        if (extension is ".doc" or ".docx" or ".ppt" or ".pptx" or ".odt" or ".odp" or ".rtf" or ".xls" or ".xlsx" or ".ods")
+        {
+            using var previewDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            previewDeadline.CancelAfter(TimeSpan.FromSeconds(150));
+            await ModelGatewayService.EnsureReadyAsync(previewDeadline.Token);
+            string previewQuery = query + $"&offset={offset}";
+            if (representation is not null) previewQuery += "&representation=" + Uri.EscapeDataString(representation);
+            using var previewResponse = await _http.GetAsync(endpoint + "/preview?" + previewQuery, previewDeadline.Token);
+            return await GatewayResponseReader.ReadAsync<WorkspacePreviewTarget>(previewResponse,
+                UiText.Get("附件解析结果为空。"), UiText.Get("附件解析失败（HTTP {0}）。"), previewDeadline.Token, JsonOptions);
+        }
         string kind = extension == ".svg" || attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ? "image"
             : extension is ".html" or ".htm" or ".xhtml" ? "html"
             : extension == ".pdf" ? "pdf" : extension is ".md" or ".markdown" ? "markdown"

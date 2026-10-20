@@ -141,7 +141,7 @@ fn check_write_target(ctx: &GatewayToolContext, input: &Value, call: &Value) -> 
             "Declared target exceeds the parent's scope. / 声明目标超出父任务范围。",
         ));
     }
-    if ["filesystem.write", "filesystem.edit", "filesystem.delete"].contains(&name) {
+    if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create"].contains(&name) {
         let path = call["arguments"]["path"].as_str().ok_or_else(|| {
             failure(
                 "INVALID_CHILD_WRITE_TARGET",
@@ -152,7 +152,9 @@ fn check_write_target(ctx: &GatewayToolContext, input: &Value, call: &Value) -> 
         let path = if path.is_absolute() {
             path
         } else {
-            ctx.workdir.join(path)
+            let mount = tools::operation_mount_binding(ctx, &call["arguments"])?;
+            let root = mount["path"].as_str().map(PathBuf::from).unwrap_or_else(|| ctx.workdir.clone());
+            root.join(path)
         };
         let path = local_files::absolute_path(&path.to_string_lossy());
         local_files::inspect(&path, true, false).map_err(|_| {
@@ -194,7 +196,7 @@ fn operation_intent(call: &Value, observation: bool, round: u64) -> OperationInt
         input_reference: None,
         effect: if observation {
             OperationEffect::Observation
-        } else if ["filesystem.write", "filesystem.edit", "filesystem.delete"]
+        } else if ["filesystem.write", "filesystem.edit", "filesystem.delete", "document.create"]
             .contains(&call["name"].as_str().unwrap_or(""))
         {
             OperationEffect::FileMutation
@@ -1225,7 +1227,7 @@ async fn execute_loop(
                 state.code_version = after.clone();
             }
             if !observation && receipt["status"] == "completed" && receipt["reused"] != true {
-                if let Some(path) = call["arguments"]["path"].as_str() {
+                if let Some(path) = receipt["content"]["path"].as_str().or_else(|| call["arguments"]["path"].as_str()) {
                     state.changed_files.push(
                         json!({"path":path,"resultRef":receipt["resultRef"],"codeVersion":after}),
                     );

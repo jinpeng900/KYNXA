@@ -113,6 +113,110 @@ pub(crate) async fn content(
     })
 }
 
+/// Message-scoped previews reuse the document renderer without granting tools access to private uploads.
+/// 消息范围预览复用文档渲染器，不向工作区文件工具授予私有附件目录访问权。
+pub(crate) async fn preview(
+    runtime: &GatewayRuntime,
+    conversation: &str,
+    message: &str,
+    attachment: &str,
+    arguments: &Value,
+) -> Result<Value, GatewayError> {
+    let root = runtime.config.data_root.clone();
+    let identifiers = (conversation.to_owned(), message.to_owned(), attachment.to_owned());
+    let (metadata, bytes) = tokio::task::spawn_blocking(move || {
+        message_attachments::read(&root, &identifiers.0, &identifiers.1, &identifiers.2)
+    }).await.map_err(|_| GatewayError::new("ATTACHMENT_WORKER_FAILED", "附件读取线程结束。", 500))??;
+    let version = metadata["sha256"].as_str().unwrap_or("");
+    if arguments["version"].as_str().is_some_and(|expected| expected != version) {
+        return Err(GatewayError::new("ATTACHMENT_VERSION_CHANGED", "附件预览版本已变化，请重新打开。", 409));
+    }
+    let name = metadata["name"].as_str().unwrap_or("attachment.docx");
+    let path = Path::new(name);
+    let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or("").to_ascii_lowercase();
+    let content_url = {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("messageId", message).append_pair("version", version);
+        format!("/api/conversations/{conversation}/attachments/{attachment}/content?{}", query.finish())
+    };
+    let mut result = json!({"kind":"text","title":name,"path":name,"version":version,
+        "mimeType":metadata["contentType"]});
+    let (direct, bytes) = if matches!(extension.as_str(), "docx" | "pptx" | "xlsx") && arguments["representation"] != "pdf" {
+        let source = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let direct = crate::tools::gateway_workspace_preview::office_direct_preview(&source, &bytes)?;
+            Ok::<_, GatewayError>((direct, bytes))
+        }).await.map_err(|_| GatewayError::new("PREVIEW_WORKER_FAILED", "附件预览检查未完成。", 500))??
+    } else { (false, bytes) };
+    if direct {
+        result["kind"] = json!(extension);
+        result["mimeType"] = json!(match extension.as_str() {
+            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            _ => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+        result["contentUrl"] = json!(content_url);
+        return Ok(result);
+    }
+    if matches!(extension.as_str(), "doc" | "docx" | "ppt" | "pptx" | "odt" | "odp" | "rtf" | "xls" | "xlsx" | "ods") {
+        let context = crate::gateway::workspace_tool_context(runtime, conversation).await?;
+        match crate::tools::gateway_workspace_preview::office_pdf(path, version, &bytes, &context).await {
+            Ok(Some(_)) => {
+                result["kind"] = json!("pdf");
+                result["mimeType"] = json!("application/pdf");
+                result["contentUrl"] = json!(format!("{content_url}&representation=pdf"));
+                return Ok(result);
+            }
+            Err(error) if error.code == "TOOL_CANCELLED" => return Err(error),
+            Err(error) => result["notice"] = json!(error.message),
+            Ok(None) => result["notice"] = json!("未提供 Office 页面转换器，当前显示提取正文；原文件保持原格式。"),
+        }
+    }
+    let extracted = text(runtime, conversation, message, attachment,
+        arguments["offset"].as_u64().unwrap_or(0) as usize, 64000).await?;
+    result["mimeType"] = json!("text/plain; charset=utf-8");
+    result["text"] = extracted["text"].clone();
+    for key in ["offset", "nextOffset", "hasMore", "totalCharacters", "offsetUnit"] {
+        result[key] = extracted[key].clone();
+    }
+    result["totalCharacters"] = extracted["totalChars"].clone();
+    if !extracted["error"].is_null() { result["notice"] = extracted["error"].clone(); }
+    Ok(result)
+}
+
+/// Only an already authorized attachment/version can request its cached converted representation.
+/// 只有通过附件归属与版本核验的原件才能请求对应转换结果，仍不开放私有磁盘路径。
+pub(crate) async fn content_representation(
+    runtime: &GatewayRuntime,
+    conversation: &str,
+    message: &str,
+    attachment: &str,
+    version: Option<&str>,
+    representation: Option<&str>,
+) -> Result<AttachmentContent, GatewayError> {
+    let mut original = content(runtime, conversation, message, attachment).await?;
+    if version.is_some_and(|version| version != original.sha256) {
+        return Err(GatewayError::new("ATTACHMENT_VERSION_CHANGED", "附件预览版本已变化，请重新打开。", 409));
+    }
+    if representation == Some("pdf") {
+        let metadata = list(runtime, conversation, message).await?;
+        let name = metadata["attachments"].as_array().and_then(|items| items.iter().find(|item|
+            item["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(attachment))))
+            .and_then(|item| item["name"].as_str())
+            .ok_or_else(|| GatewayError::new("ATTACHMENT_NOT_FOUND", "附件不存在。", 404))?;
+        if !Path::new(name).extension().and_then(|extension| extension.to_str()).is_some_and(|extension|
+            matches!(extension.to_ascii_lowercase().as_str(), "doc" | "docx" | "ppt" | "pptx" | "odt" | "odp" | "rtf" | "xls" | "xlsx" | "ods")) {
+            return Err(GatewayError::new("PREVIEW_FORMAT_UNSUPPORTED", "此附件不使用 Office 页面转换。", 422));
+        }
+        let context = crate::gateway::workspace_tool_context(runtime, conversation).await?;
+        let converted = crate::tools::gateway_workspace_preview::office_pdf(Path::new(name), &original.sha256, &original.bytes, &context).await?
+            .ok_or_else(|| GatewayError::new("PREVIEW_CONVERTER_UNAVAILABLE", "文档页面转换器不可用。", 503))?;
+        original.bytes = tokio::fs::read(converted).await?;
+        original.mime_type = "application/pdf".to_owned();
+    }
+    Ok(original)
+}
+
 pub(crate) async fn text(
     runtime: &GatewayRuntime,
     conversation: &str,

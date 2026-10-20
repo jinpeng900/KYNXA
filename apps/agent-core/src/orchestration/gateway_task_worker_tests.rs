@@ -398,6 +398,25 @@ async fn child_write_scope_and_unknown_dispatch_remain_enforced_on_restart() {
     fixture.close().await;
 }
 
+#[test]
+fn child_document_create_respects_exact_write_targets_and_selected_mount() {
+    let (mut context, _cancellation) = tools::test_context();
+    let input = json!({"writeTargets":["only.docx"]});
+    let allowed = json!({"id":"document-create","name":"document.create","arguments":{"path":"only.docx","content":"正文","expectedHash":null}});
+    assert!(check_write_target(&context, &input, &allowed).is_ok());
+    assert!(matches!(operation_intent(&allowed, false, 1).effect, OperationEffect::FileMutation));
+    let mut outside = allowed.clone();
+    outside["arguments"]["path"] = json!("other.docx");
+    assert_eq!(check_write_target(&context, &input, &outside).unwrap_err().code, "CHILD_WRITE_TARGET_REQUIRED");
+    let second = context.workdir.join("second");
+    std::fs::create_dir(&second).unwrap();
+    context.config["workspaceMounts"] = json!([{"id":"second","path":second}]);
+    outside["arguments"]["path"] = json!("only.docx");
+    outside["arguments"]["mountId"] = json!("second");
+    assert_eq!(check_write_target(&context, &input, &outside).unwrap_err().code, "CHILD_WRITE_TARGET_REQUIRED");
+    std::fs::remove_dir_all(context.data_home.parent().unwrap()).unwrap();
+}
+
 #[tokio::test]
 async fn recovery_reconciles_original_tool_and_model_receipts_once_without_replay() {
     let fixture = Fixture::new().await;

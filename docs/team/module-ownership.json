@@ -376,6 +376,7 @@
         "storage/tool_memory.rs",
         "tools/gateway.rs",
         "tools/gateway_document_read.rs",
+        "tools/gateway_document_create.rs",
         "tools/gateway_workspace_preview.rs",
         "tools/gateway_attachment_read.rs",
         "tools/gateway_workspace_changes.rs",
@@ -629,6 +630,11 @@
             "retrieval"
           ],
           "purpose": "Authorized direct file-document extraction without an index / 已授权文件的直接文档解析，不依赖索引"
+        },
+        {
+          "path": "tools/gateway_document_create.rs",
+          "allowedDomains": [],
+          "purpose": "Authorized document generation, validation and atomic binary publication / 授权文档生成、校验与二进制原子发布"
         },
         {
           "path": "tools/gateway_workspace_preview.rs",
