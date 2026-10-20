@@ -23,7 +23,7 @@ public sealed partial class RetrievalSettingsWindow
             body.Children.Add(Label("每行一个 HTTP 或 HTTPS 链接。仅保存这些页面或文档，不抓取整个网站。", 12));
             body.Children.Add(input); body.Children.Add(error);
             string[] links = [];
-            var dialog = new ContentDialog { XamlRoot = ((FrameworkElement)Content).XamlRoot,
+            var dialog = new ContentDialog { XamlRoot = DialogRoot,
                 Title = UiText.Get("添加链接资料"), Content = body, PrimaryButtonText = UiText.Get("导入"),
                 CloseButtonText = UiText.Get("取消"), DefaultButton = ContentDialogButton.Primary };
             dialog.PrimaryButtonClick += (_, args) =>

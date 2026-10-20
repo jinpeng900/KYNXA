@@ -21,6 +21,8 @@ public partial class App
     private static void SelectAppearanceItem(ComboBox picker, object tag)
         => picker.SelectedItem = picker.Items.Cast<ComboBoxItem>().Single(item => Equals(item.Tag, tag));
 
+    private static void SelectAppearanceItem(SegmentedSelector picker, string key) => picker.SelectedKey = key;
+
     private async Task<ReadingAppearanceObservation> ObserveReadingAppearanceAsync(ConversationTranscript transcript)
         => JsonSerializer.Deserialize<ReadingAppearanceObservation>(await transcript.Browser.ExecuteScriptAsync("""
             (() => {
@@ -72,7 +74,9 @@ public partial class App
         Guid? conversationId = ActiveId;
         string formalMessages = JsonSerializer.Serialize(_shell.ActiveMessages.Select(row => row.Message));
         string layoutPath = Path.Combine(DesktopDirectory, "layout.json");
-        var modePicker = NativeUi.ById<ComboBox>(root, "AppearanceModePicker");
+        NativeUi.Descendants<SettingsWorkspace>(root).Single().SelectPage("appearance");
+        await SettleAsync();
+        var modePicker = NativeUi.ById<SegmentedSelector>(root, "AppearanceModePicker");
         var fontPicker = NativeUi.ById<ComboBox>(root, "ChatFontSizePicker");
         var accentInput = NativeUi.ById<TextBox>(root, "AppearanceAccentInput");
         var applyAccent = NativeUi.ById<Button>(root, "AppearanceAccentApplyButton");
@@ -85,7 +89,7 @@ public partial class App
         var applicationAccentBrush = AppearanceService.GetBrush("KynxaAccentBrush");
         var nativeAccentBrush = AppearanceService.GetBrush("AccentFillColorDefaultBrush");
         var evidence = new List<object>();
-        Check(modePicker.Items.Cast<ComboBoxItem>().Select(item => item.Tag).SequenceEqual(new object[] { "light", "dark", "system" }) &&
+        Check(NativeUi.Descendants<RadioButton>(modePicker).Select(item => item.Tag).SequenceEqual(new object[] { "light", "dark", "system" }) &&
             fontPicker.Items.Count == 19 && (double)((ComboBoxItem)fontPicker.Items[0]).Tag == 13 &&
             (double)((ComboBoxItem)fontPicker.Items[^1]).Tag == 22,
             "production settings exposes three theme modes and every half-pixel chat size from 13 to 22");
@@ -283,7 +287,7 @@ public partial class App
             Check(accentInput.Text == "#C05289" && AppearanceService.CustomAccent == savedAccentBeforePicker &&
                 File.ReadAllText(layoutPath) == stored,
                 "a same-preference appearance refresh keeps the unapplied picker HEX while its flyout owns focus");
-            var savedModeChoice = modePicker.SelectedItem;
+            string? savedModeChoice = modePicker.SelectedKey;
             DateTime savedBeforeLanguage = File.GetLastWriteTimeUtc(layoutPath);
             foreach (string language in new[] { "en", "zh-CN" })
             {
@@ -292,15 +296,14 @@ public partial class App
                 Check(accentInput.Text == "#C05289" && AppearanceService.CustomAccent == savedAccentBeforePicker &&
                     File.ReadAllText(layoutPath) == stored,
                     "language refresh " + language + " keeps the unapplied HEX without saving or applying it");
-                // Read the actual collapsed selection presenter; updated item content alone missed this regression.
-                // 读取真正收起态的选中显示；只检查已更新的选项 Content 无法发现此回归。
-                modePicker.ApplyTemplate();
+                // Read the selected radio segment's actual rendered label, not an unrelated hidden option.
+                // 读取选中单选分段实际显示的标签，不以其他隐藏选项的文字代替可见文本。
                 modePicker.UpdateLayout();
-                var modePresenter = NativeUi.ByName<ContentPresenter>(modePicker, "ContentPresenter");
-                string displayedMode = string.Join("", NativeUi.Descendants<TextBlock>(modePresenter)
+                var selectedModeButton = NativeUi.ById<RadioButton>(modePicker, "Segment_dark");
+                string displayedMode = string.Join("", NativeUi.Descendants<TextBlock>(selectedModeButton)
                     .Where(NativeUi.IsVisible).Select(text => text.Text));
                 Check(displayedMode == (language == "en" ? "Dark" : "深色") &&
-                    ReferenceEquals(modePicker.SelectedItem, savedModeChoice) &&
+                    modePicker.SelectedKey == savedModeChoice && selectedModeButton.IsChecked == true &&
                     File.GetLastWriteTimeUtc(layoutPath) == savedBeforeLanguage && accentInput.Text == "#C05289",
                     "language refresh " + language + " updates the real theme selection text without re-saving or disturbing the color draft");
             }
@@ -409,7 +412,7 @@ public partial class App
             try
             {
                 SelectAppearanceItem(modePicker, "light");
-                Check(AppearanceService.Mode == "dark" && (string)((ComboBoxItem)modePicker.SelectedItem).Tag == "dark" &&
+                Check(AppearanceService.Mode == "dark" && modePicker.SelectedKey == "dark" &&
                     accentInput.Text == "#GGGGGG" && status.IsOpen,
                     "a real mode-save failure rolls the actual theme picker back and preserves the unapplied HEX");
                 SelectAppearanceItem(fontPicker, 22d);

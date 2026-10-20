@@ -24,6 +24,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private readonly string _fixtureDataDirectory;
     private TaskCompletionSource? _initialCatalogGate;
     private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads, _agentReads;
+    private int _localModelReads, _memoryReads;
 
     private readonly List<AgentApprovalRequest> _approvalRequests = [];
     private TaskCompletionSource? _approvalGate;
@@ -38,7 +39,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private int _pausedReads, _streamRequests;
     private int _chromeOpenRequests;
     private int _activationRequests;
-    private int _localModelReads;
     private ToolResultReference? _screenshotReference;
     private ToolResultResponse? _screenshotResult;
     private byte[]? _attachmentBytes;
@@ -49,12 +49,14 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int ScreenshotReads => Volatile.Read(ref _screenshotReads);
     public int RetrievalReads => Volatile.Read(ref _retrievalReads);
     public int AgentReads => Volatile.Read(ref _agentReads);
+    public int LocalModelReads => Volatile.Read(ref _localModelReads);
+    public int MemoryReads => Volatile.Read(ref _memoryReads);
+    public bool EnableSettingsReads { get; set; }
 
     public int PausedReads => Volatile.Read(ref _pausedReads);
     public int StreamRequests => Volatile.Read(ref _streamRequests);
     public int ChromeOpenRequests => Volatile.Read(ref _chromeOpenRequests);
     public int ActivationRequests => Volatile.Read(ref _activationRequests);
-    public int LocalModelReads => Volatile.Read(ref _localModelReads);
     public bool EnableLocalModelReads { get; set; }
     public bool EnablePromptSends { get; set; }
     public bool EnableAttachmentImports { get; set; }
@@ -358,6 +360,46 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                     LoadPolicy = "auto", Models = [] };
             }
             else if (TryAgentManagementRead(context.Request, out var agentManagement)) result = agentManagement!;
+            else if (EnableSettingsReads && path == "/api/memory/user" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                result = new MemoryScopeDocument(1, MemoryScopes.User, "user", 0, []);
+            }
+            else if (EnableSettingsReads && string.IsNullOrEmpty(context.Request.Url.Query) &&
+                (path == $"/api/conversations/{WorkChatId:D}/memory" || path == $"/api/conversations/{StandaloneChatId:D}/memory"))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                Guid conversation = path == $"/api/conversations/{WorkChatId:D}/memory" ? WorkChatId : StandaloneChatId;
+                result = new ConversationMemoryResponse(conversation, conversation == WorkChatId ? ProjectId : null,
+                    false, [new MemoryScopeDocument(1, MemoryScopes.Chat, conversation.ToString("D"), 0, [])]);
+            }
+            else if (EnableSettingsReads && path == $"/api/projects/{ProjectId:D}/memory" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                result = new MemoryScopeDocument(1, MemoryScopes.Project, ProjectId.ToString("D"), 0, []);
+            }
+            else if (EnableSettingsReads && path == "/api/local-models" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _localModelReads);
+                // Synthetic rows exercise real filters without model downloads, files, processes or inference.
+                // 虚构模型行用于执行真实筛选，不下载文件、不启动进程、不调用推理。
+                result = new
+                {
+                    enabled = false, installDirectory = Path.Combine(_fixtureDataDirectory, "Models"), loadPolicy = "on-demand",
+                    hardware = new { memoryGb = 32, availableMemoryGb = 16, vramGb = 8, gpuName = "Fixture GPU" },
+                    models = new[]
+                    {
+                        new { id = "fixture-local-installed", name = "Fixture Local 3B", family = "Fixture", category = "chat",
+                            parameters = 3, quantization = "Q4_K_M", installed = true, enabled = false, status = "installed",
+                            downloadBytes = 1024L, downloadedBytes = 1024L, recommendedRamGb = 8, recommendedVramGb = 4,
+                            capabilities = new[] { "text" } },
+                        new { id = "fixture-local-available", name = "Fixture Local 12B", family = "Fixture", category = "chat",
+                            parameters = 12, quantization = "Q4_K_M", installed = false, enabled = false, status = "available",
+                            downloadBytes = 2048L, downloadedBytes = 0L, recommendedRamGb = 16, recommendedVramGb = 8,
+                            capabilities = new[] { "text", "tools" } }
+                    }
+                };
+            }
             else if (path == "/api/retrieval/settings")
             {
                 Interlocked.Increment(ref _retrievalReads);

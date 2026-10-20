@@ -12,8 +12,11 @@ public sealed partial class LocalModelsPage
 {
     private readonly Grid _root = new();
     private readonly ToggleSwitch _enabled = new();
-    private readonly ScrollSafeComboBox _policy = new();
-    private readonly ScrollSafeComboBox _filter = new();
+    private readonly SegmentedSelector _policy = new([
+        new("auto", "自动调度"), new("on-demand", "按需加载"), new("preload", "启动预热")]);
+    private readonly TextBlock _policyHint = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = 0.7 };
+    private readonly SegmentedSelector _filter = new([
+        new("all", "全部模型"), new("installed", "已安装"), new("downloading", "下载中")]);
     private readonly TextBox _search = new();
     private readonly TextBlock _directory = new() { IsTextSelectionEnabled = true, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 12 };
     private readonly TextBlock _storageSpace = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = 0.7 };
@@ -49,6 +52,7 @@ public sealed partial class LocalModelsPage
         UiLocalization.Bind(back, ToolTipService.ToolTipProperty, "返回设置");
         AutomationProperties.SetAutomationId(back, "LocalModelsBack");
         back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
+        back.Visibility = _embedded ? Visibility.Collapsed : Visibility.Visible;
         navigation.Children.Add(back);
         _root.Children.Add(navigation);
         var settings = new StackPanel { Spacing = 8, Margin = new Thickness(20, 8, 20, 8) };
@@ -84,25 +88,33 @@ public sealed partial class LocalModelsPage
         Grid.SetColumn(locationActions, 1);
         storage.Children.Add(locationActions);
         card.Children.Add(storage);
-        ConfigurePicker(_policy, "LocalModelsLoadPolicy", "模型加载策略", ("auto", "自动调度"),
-            ("on-demand", "仅使用时加载"), ("preload", "启动后预热当前模型"));
+        UiLocalization.Bind(_policy, AutomationProperties.NameProperty, "模型加载策略");
+        AutomationProperties.SetAutomationId(_policy, "LocalModelsLoadPolicy");
         _policy.IsEnabled = false;
-        var policyRow = new Grid { ColumnSpacing = 10 };
-        policyRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var policyRow = new Grid { ColumnSpacing = 10, RowSpacing = 6, Margin = new Thickness(0, 6, 0, 0) };
         policyRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        policyRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        policyRow.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        policyRow.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var policyLabel = Label("模型加载策略", 12, secondary: true);
+        policyLabel.VerticalAlignment = VerticalAlignment.Center;
+        policyRow.Children.Add(policyLabel);
+        Grid.SetColumn(_policy, 1);
+        _policy.HorizontalAlignment = HorizontalAlignment.Right;
         policyRow.Children.Add(_policy);
-        _hardware.FontFamily = UIFont;
-        _hardware.VerticalAlignment = VerticalAlignment.Center;
-        _hardware.MaxLines = 2;
-        _hardware.TextTrimming = TextTrimming.CharacterEllipsis;
-        Grid.SetColumn(_hardware, 1);
-        policyRow.Children.Add(_hardware);
+        policyRow.SizeChanged += (_, _) => ArrangeLoadPolicy();
         card.Children.Add(policyRow);
+        _policyHint.FontFamily = UIFont;
+        AutomationProperties.SetAutomationId(_policyHint, "LocalModelsLoadPolicyHint");
+        card.Children.Add(_policyHint);
+        _hardware.FontFamily = UIFont;
+        card.Children.Add(_hardware);
         settings.Children.Add(new Border { Child = card, Padding = new Thickness(12), CornerRadius = new CornerRadius(12),
             Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") });
-        var toolbar = new Grid { ColumnSpacing = 8 };
+        var toolbar = new Grid { ColumnSpacing = 8, RowSpacing = 8 };
+        toolbar.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        toolbar.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _search.FontFamily = UIFont;
         _search.CornerRadius = new CornerRadius(8);
@@ -110,12 +122,14 @@ public sealed partial class LocalModelsPage
         UiLocalization.Bind(_search, AutomationProperties.NameProperty, "搜索本地模型");
         AutomationProperties.SetAutomationId(_search, "LocalModelsSearch");
         toolbar.Children.Add(_search);
-        ConfigurePicker(_filter, "LocalModelsFilter", "模型筛选", ("all", "全部模型"), ("installed", "已安装"), ("downloading", "下载中"));
-        _filter.SelectedIndex = 0;
-        Grid.SetColumn(_filter, 1);
+        UiLocalization.Bind(_filter, AutomationProperties.NameProperty, "模型筛选");
+        AutomationProperties.SetAutomationId(_filter, "LocalModelsFilter");
+        _filter.SelectedKey = "all";
+        Grid.SetRow(_filter, 1);
+        Grid.SetColumnSpan(_filter, 2);
         toolbar.Children.Add(_filter);
         ConfigureButton(_import, "导入 GGUF", "LocalModelsImport");
-        Grid.SetColumn(_import, 2);
+        Grid.SetColumn(_import, 1);
         toolbar.Children.Add(_import);
         settings.Children.Add(toolbar);
         var details = new Grid();
@@ -162,10 +176,18 @@ public sealed partial class LocalModelsPage
                 await RunOperationAsync(() => _api.SettingsAsync(enabled: enabled, token: _lifetime.Token), settings: true);
             }
         };
-        _policy.SelectionChanged += async (_, _) =>
+        _policy.SelectionChanged += async (_, policy) =>
         {
-            if (!_rendering && _snapshot is not null && _policy.SelectedItem is ComboBoxItem { Tag: string policy })
-                await RunOperationAsync(() => _api.SettingsAsync(loadPolicy: policy, token: _lifetime.Token), settings: true);
+            if (!_rendering && !_settingsBusy && _snapshot is not null && policy != _snapshot.LoadPolicy)
+            {
+                _pendingLoadPolicy = policy;
+                try { await RunOperationAsync(() => _api.SettingsAsync(loadPolicy: policy, token: _lifetime.Token), settings: true); }
+                finally
+                {
+                    _pendingLoadPolicy = null;
+                    if (!_closed && _snapshot is { } snapshot) ApplySnapshot(snapshot);
+                }
+            }
         };
         _search.TextChanged += (_, _) => ApplyFilter();
         _filter.SelectionChanged += (_, _) => ApplyFilter();
@@ -176,6 +198,18 @@ public sealed partial class LocalModelsPage
     }
 
     private static FontFamily UIFont => (FontFamily)Application.Current.Resources["KynxaUIFont"];
+
+    private void ArrangeLoadPolicy()
+    {
+        if (_policy.Parent is not Grid row) return;
+        // Keep the short segments together; descriptive text has its own wrapping row on narrow windows.
+        // 窄窗时让短选项整体换到下一行，详细说明独立换行，不挤压硬件信息。
+        bool compact = row.ActualWidth < (UiText.Language == "en" ? 540 : 400);
+        Grid.SetColumn(_policy, compact ? 0 : 1);
+        Grid.SetRow(_policy, compact ? 1 : 0);
+        Grid.SetColumnSpan(_policy, compact ? 2 : 1);
+        _policy.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+    }
 
     private void BindModelActions(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
@@ -221,21 +255,6 @@ public sealed partial class LocalModelsPage
         UiLocalization.Bind(button, Button.ContentProperty, key);
         UiLocalization.Bind(button, AutomationProperties.NameProperty, key);
         AutomationProperties.SetAutomationId(button, id);
-    }
-
-    private static void ConfigurePicker(ComboBox picker, string id, string label, params (string Value, string Label)[] options)
-    {
-        picker.FontFamily = UIFont;
-        picker.CornerRadius = new CornerRadius(8);
-        picker.HorizontalAlignment = HorizontalAlignment.Stretch;
-        UiLocalization.Bind(picker, AutomationProperties.NameProperty, label);
-        AutomationProperties.SetAutomationId(picker, id);
-        foreach (var option in options)
-        {
-            var item = new ComboBoxItem { Tag = option.Value };
-            UiLocalization.Bind(item, ComboBoxItem.ContentProperty, option.Label);
-            picker.Items.Add(item);
-        }
     }
 
     private static void ApplyNeutralResources(ResourceDictionary resources)

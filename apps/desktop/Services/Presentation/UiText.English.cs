@@ -4,6 +4,16 @@ public static partial class UiText
 {
     private static readonly IReadOnlyDictionary<string, string> English = new Dictionary<string, string>
     {
+        ["记忆"] = "Memory",
+        ["本地模型"] = "Local models",
+        ["关于"] = "About",
+        ["按需加载"] = "On demand",
+        ["启动预热"] = "Startup warmup",
+        ["根据可用资源安排加载与空闲驻留，优先保持聊天响应。"] = "Schedule loading and idle residency around available resources, keeping chat responsive.",
+        ["使用本地模型时再加载；首次回复可能需要等待，空闲驻留由资源策略管理。"] = "Load when a local model is used. The first reply may take longer; idle residency follows the resource policy.",
+        ["软件启动后在后台预热当前选中的本地模型；资源不足时延后。"] = "Warm up the selected local model in the background after startup; defer when resources are insufficient.",
+        ["请先保存或放弃当前编辑，再关闭设置。"] = "Save or discard the current edits before closing settings.",
+        ["当前页面仍对应原范围，请先保存或放弃编辑，再切换范围。"] = "This page still uses its previous scope. Save or discard the edits before switching scope.",
         ["任务库路径被文件夹占用。"] = "The task database path is occupied by a directory.",
         ["任务库格式或版本不受支持，原库已保留。"] = "The task database format or version is unsupported. The original database has been preserved.",
         ["任务库仍有未归并日志，请等待网关完成维护。"] = "The task database still has unsettled WAL entries. Wait for gateway maintenance to finish.",

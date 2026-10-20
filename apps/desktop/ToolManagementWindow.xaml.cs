@@ -37,16 +37,19 @@ public sealed partial class ToolManagementWindow : Window
     private AgentSkill? _editingSkill;
     private AgentSkill[] _skills = [];
     private bool _skillDirty;
+    private bool _loaded;
+    private Window? _settingsOwner;
     private McpCatalogResponse _catalog = new([], []);
     private McpConnectionDiagnostic[] _connections = [];
     private sealed record ServerEditorState(string Id, string Name, string Command, string Arguments, bool Enabled,
         string Transport, string Cwd, string EnvRefs, string Url, string HeaderEnv, string Auth,
         int BrowserMode, bool BrowserVisible, string BrowserEndpoint);
 
-    public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null)
+    public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null, Window? settingsOwner = null)
     {
         InitializeComponent();
-        AppearanceService.TrackWindow(this);
+        _settingsOwner = settingsOwner;
+        if (settingsOwner is null) AppearanceService.TrackWindow(this);
         _api = api ?? new AgentApiClient();
         _ownsApi = api is null;
         _conversationId = conversationId;
@@ -54,9 +57,12 @@ public sealed partial class ToolManagementWindow : Window
         AgentDirectoryList.ItemsSource = _directories;
         UiLocalization.Bind(AgentServersTab, PivotItem.HeaderProperty, "MCP 服务");
         UiLocalization.Bind(AgentSkillsTab, PivotItem.HeaderProperty, "技能");
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AgentTitleBar);
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(940, 720));
+        if (settingsOwner is null)
+        {
+            ExtendsContentIntoTitleBar = true;
+            SetTitleBar(AgentTitleBar);
+            AppWindow.Resize(new Windows.Graphics.SizeInt32(940, 720));
+        }
         UiText.LanguageChanged += Language_Changed;
         AppWindow.Closing += Window_Closing;
         Closed += Window_Closed;
@@ -66,6 +72,32 @@ public sealed partial class ToolManagementWindow : Window
     }
 
     public bool HasPendingChanges => _busy || _serverDirty || _directoriesDirty || _toolDirty || _skillDirty;
+    public bool IsEmbedded => _settingsOwner is not null;
+
+    /// <summary>
+    /// Hosts the actual tool editors in settings without opening a second visible window.
+    /// 将真实工具编辑器放入设置，避免另开可见窗口；目录选择和确认使用设置所属窗口。
+    /// </summary>
+    public FrameworkElement AttachToSettings(Window owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ObjectDisposedException.ThrowIf(_closed, this);
+        _settingsOwner = owner;
+        SetTitleBar(null);
+        AgentTitleBar.Visibility = Visibility.Collapsed;
+        AgentRoot.RowDefinitions[0].Height = new GridLength(0);
+        Content = null;
+        return AgentRoot;
+    }
+
+    public void DisposeEmbedded()
+    {
+        if (_closed) return;
+        _allowClose = true;
+        ReleaseResources();
+        Close();
+        _settingsOwner = null;
+    }
 
     public void ShowSection(bool skills)
     {
@@ -77,12 +109,19 @@ public sealed partial class ToolManagementWindow : Window
 
     public void CloseForOwner()
     {
+        if (IsEmbedded)
+        {
+            DisposeEmbedded();
+            return;
+        }
         _allowClose = true;
         Close();
     }
 
     private async void AgentRoot_Loaded(object sender, RoutedEventArgs e)
     {
+        if (_loaded || _closed) return;
+        _loaded = true;
         ApplyAdaptiveLayout(AgentRoot.ActualWidth);
         await LoadAsync();
     }
@@ -780,7 +819,7 @@ public sealed partial class ToolManagementWindow : Window
     {
         var picker = new FolderPicker();
         picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_settingsOwner ?? this));
         var folder = await picker.PickSingleFolderAsync();
         if (_closed || folder is null || _directories.Contains(folder.Path, StringComparer.OrdinalIgnoreCase)) return;
         _directories.Add(folder.Path);
@@ -892,7 +931,7 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_closed || _busy || _config is null) return;
         var picker = new FolderPicker(); picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_settingsOwner ?? this));
         var folder = await picker.PickSingleFolderAsync();
         if (_closed || folder is null) return;
         SetBusy(true);
@@ -978,7 +1017,8 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_closed || _dialogOpen || AgentRoot.XamlRoot is null) return false;
         _dialogOpen = true;
-        var dialog = new ContentDialog { XamlRoot = AgentRoot.XamlRoot, DefaultButton = ContentDialogButton.None,
+        var dialog = new ContentDialog { XamlRoot = (_settingsOwner?.Content as FrameworkElement)?.XamlRoot ?? AgentRoot.XamlRoot,
+            DefaultButton = ContentDialogButton.None,
             PrimaryButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"],
             CloseButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
         UiLocalization.Bind(dialog, ContentDialog.TitleProperty, title);
@@ -996,13 +1036,17 @@ public sealed partial class ToolManagementWindow : Window
         if (await ConfirmDiscardAsync() && !_closed) { _allowClose = true; Close(); }
     }
 
-    private void Window_Closed(object sender, WindowEventArgs e)
+    private void Window_Closed(object sender, WindowEventArgs e) => ReleaseResources();
+
+    private void ReleaseResources()
     {
+        if (_closed) return;
         _closed = true;
         _lifetime.Cancel();
         _preview?.Cancel();
         UiText.LanguageChanged -= Language_Changed;
         AppWindow.Closing -= Window_Closing;
+        Closed -= Window_Closed;
         if (_ownsApi && _api is IDisposable disposable) disposable.Dispose();
         _lifetime.Dispose();
     }

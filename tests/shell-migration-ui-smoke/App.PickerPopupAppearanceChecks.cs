@@ -1,4 +1,5 @@
 using System.Reflection;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Models.UI;
 using KYNXA_Desktop.Services;
 using MemoryUiSmoke;
@@ -27,7 +28,7 @@ public partial class App
             await WaitAsync(() => root.IsLoaded && root.XamlRoot is not null,
                 "focused dropdown checks load the test-owned production settings window");
             await CheckPopupAppearanceAsync(settings, root, dropdownsOnly: true);
-            await CheckLocalModelsDropdownsAsync(settings, root);
+            await CheckLocalModelsSelectorsAsync(settings, root);
         }
         finally
         {
@@ -36,7 +37,7 @@ public partial class App
         }
     }
 
-    private async Task CheckLocalModelsDropdownsAsync(Window settings, FrameworkElement settingsRoot)
+    private async Task CheckLocalModelsSelectorsAsync(Window settings, FrameworkElement settingsRoot)
     {
         string originalId = AppearanceService.Current.Id, originalMode = AppearanceService.Mode;
         double originalSize = AppearanceService.ChatFontSize;
@@ -45,10 +46,11 @@ public partial class App
         Guid? activeId = ActiveId;
         int writes = _gateway.Writes;
         bool originalReads = _gateway.EnableLocalModelReads;
-        var home = ShellField<ScrollViewer>("_settingsHome");
-        var host = ShellField<ContentControl>("_settingsPageHost");
-        var homeMode = NativeUi.ById<ComboBox>(settingsRoot, "AppearanceModePicker");
-        var homeFont = NativeUi.ById<ComboBox>(settingsRoot, "ChatFontSizePicker");
+        var appearance = (ScrollViewer)await SelectPopupSettingsCategoryAsync(settingsRoot, "appearance");
+        var appearanceMode = NativeUi.ById<SegmentedSelector>(settingsRoot, "AppearanceModePicker");
+        var appearanceFont = NativeUi.ById<ComboBox>(settingsRoot, "ChatFontSizePicker");
+        FrameworkElement? modelsPage = null;
+        SegmentedSelector? loadPolicy = null, modelFilter = null;
         var windowSize = settings.AppWindow.Size;
         string layout = System.Text.Json.JsonSerializer.Serialize(ShellField<LayoutState>("_layout"));
         var observations = new List<object>();
@@ -59,77 +61,54 @@ public partial class App
             {
                 AppearanceService.ApplyPreferences(originalId, mode, originalSize, mode == "light" ? "#C02070" : "#16836B");
                 await ActivatePopupSettingsAsync(settings);
-                var entry = NativeUi.ById<Button>(settingsRoot, "LocalModelsSettingsButton");
-                entry.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
+                appearance.ChangeView(null, appearance.ScrollableHeight, null, true);
                 await SettleAsync();
-                double homeOffset = home.VerticalOffset;
+                double appearanceOffset = appearance.VerticalOffset;
                 int readsBefore = _gateway.LocalModelReads;
-                NativeUi.Invoke(entry);
-                await WaitAsync(() => _gateway.LocalModelReads > readsBefore && NativeUi.Descendants<ComboBox>(settingsRoot)
+                var currentPage = await SelectPopupSettingsCategoryAsync(settingsRoot, "local-models");
+                await WaitAsync(() => NativeUi.Descendants<SegmentedSelector>(currentPage)
                     .Any(picker => Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(picker) == "LocalModelsLoadPolicy"
-                        && picker.IsEnabled && picker.SelectedItem is ComboBoxItem { Tag: "auto" }),
+                        && picker.IsEnabled && picker.SelectedKey == "auto"),
                     mode + " actual settings local-model route loads its opt-in read-only snapshot");
+                var currentPolicy = NativeUi.ById<SegmentedSelector>(currentPage, "LocalModelsLoadPolicy");
+                var currentFilter = NativeUi.ById<SegmentedSelector>(currentPage, "LocalModelsFilter");
+                if (modelsPage is null)
+                {
+                    Check(_gateway.LocalModelReads == readsBefore + 1,
+                        mode + " first category visit performs one isolated local-model catalog read");
+                    modelsPage = currentPage;
+                    loadPolicy = currentPolicy;
+                    modelFilter = currentFilter;
+                }
+                else
+                    Check(ReferenceEquals(modelsPage, currentPage) && ReferenceEquals(loadPolicy, currentPolicy) &&
+                        ReferenceEquals(modelFilter, currentFilter) && _gateway.LocalModelReads == readsBefore,
+                        mode + " category revisit keeps the actual model page and selectors without another catalog read");
                 Check(!NativeUi.ById<InfoBar>(settingsRoot, "LocalModelsNotice").IsOpen &&
                     NativeUi.ById<TextBlock>(settingsRoot, "LocalModelsInstallDirectory").Text == Path.Combine(_directory, "LocalModels"),
                     mode + " local-model page presents only the isolated empty model catalog without an error");
                 foreach (string id in new[] { "LocalModelsLoadPolicy", "LocalModelsFilter" })
                 {
-                    var picker = NativeUi.ById<ComboBox>(settingsRoot, id);
-                    object selection = picker.SelectedItem;
-                    picker.IsDropDownOpen = true;
-                    var selected = (ComboBoxItem)selection;
-                    await WaitAsync(() => selected.IsLoaded && VisualTreeHelper.GetOpenPopupsForXamlRoot(settingsRoot.XamlRoot)
-                        .Any(popup => popup.IsOpen && popup.Child is not null && NativeUi.Descendants<ComboBoxItem>(popup.Child)
-                            .Any(item => ReferenceEquals(item, selected))), mode + " " + id + " opens its production dropdown");
-                    await SettleAsync();
-                    var popup = NativePickerPopup(selected, settingsRoot.XamlRoot);
-                    var border = NativeUi.ByName<Border>((FrameworkElement)popup.Child!, "PopupBorder");
-                    var background = NativeUi.ByName<Grid>(selected, "LayoutRoot");
-                    var scroll = NativeUi.Descendants<ScrollViewer>(border).Single();
-                    Rect bounds = SidebarBounds(background, border);
-                    double rightInset = border.ActualWidth - bounds.Right;
-                    Check(border.CornerRadius.Equals(new CornerRadius(16)) && bounds.Left > 0 && bounds.Left <= 8 &&
-                        rightInset > 0 && rightInset <= 8 && Math.Abs(bounds.Left - rightInset) < 1 &&
-                        scroll.ScrollableHeight <= 1 && scroll.Padding.Right == 0,
-                        mode + " " + id + " keeps rounded popup corners and compact symmetric sides without an idle scrollbar gutter");
-                    foreach (string state in new[] { "Selected", "SelectedUnfocused", "SelectedPointerOver", "SelectedPressed" })
-                    {
-                        Check(VisualStateManager.GoToState(selected, state, false), mode + " " + id + " exposes " + state);
-                        await SettleAsync();
-                        CheckSelectedPopupItem(selected, mode + " " + id + " VSM " + state, observations);
-                    }
-                    // Exercise hover without selecting another policy, which would submit a production settings action.
-                    // 只验证悬停，不切换策略选项，避免触发生产设置提交。
-                    MovePointerInsideSettings(settings, settingsRoot, localPoint: new Point(12, 12));
-                    await SettleAsync();
-                    var common = VisualStateManager.GetVisualStateGroups(background).Single(group => group.Name == "CommonStates");
-                    bool entered = false;
-                    PointerEventHandler onEntered = (_, _) => entered = true;
-                    selected.PointerEntered += onEntered;
-                    try
-                    {
-                        MovePointerInsideSettings(settings, selected, popup);
-                        await WaitAsync(() => entered && common.CurrentState?.Name == "SelectedPointerOver", mode + " " + id + " receives real selected-item hover");
-                        CheckSelectedPopupItem(selected, mode + " " + id + " real hover", observations);
-                        await RenderPopupElementAsync(border, "shell-popup-local-models-" + id + "-" + mode + "-ui-render.png");
-                    }
-                    finally { selected.PointerEntered -= onEntered; picker.IsDropDownOpen = false; }
-                    await SettleAsync();
-                    Check(ReferenceEquals(picker.SelectedItem, selection) && _gateway.Writes == writes,
-                        mode + " " + id + " preserves the actual selection without submitting a policy change");
+                    var selector = NativeUi.ById<SegmentedSelector>(currentPage, id);
+                    string? selection = selector.SelectedKey;
+                    await CheckSegmentedAppearanceAsync(selector, mode + " " + id, observations);
+                    await RenderPopupElementAsync(selector, "shell-local-models-" + id + "-" + mode + "-ui-render.png");
+                    Check(selector.SelectedKey == selection && _gateway.Writes == writes,
+                        mode + " " + id + " preserves the stable selection without submitting a policy change");
                 }
-                NativeUi.Invoke(NativeUi.ById<Button>(settingsRoot, "LocalModelsBack"));
-                await WaitAsync(() => ReferenceEquals(host.Content, home) && home.IsLoaded, mode + " local-model Back restores the original settings homepage");
-                await SettleAsync();
-                Check(ReferenceEquals(homeMode, NativeUi.ById<ComboBox>(settingsRoot, "AppearanceModePicker")) &&
-                    ReferenceEquals(homeFont, NativeUi.ById<ComboBox>(settingsRoot, "ChatFontSizePicker")) &&
-                    Math.Abs(home.VerticalOffset - homeOffset) < 1 && settings.AppWindow.Size.Equals(windowSize),
-                    mode + " local-model Back retains settings control instances, scroll position and window size");
+                Check(!NativeUi.IsVisible(NativeUi.ById<Button>(currentPage, "LocalModelsBack")),
+                    mode + " embedded model settings use the persistent category navigation without a duplicate Back entry");
+                var returnedPage = await SelectPopupSettingsCategoryAsync(settingsRoot, "appearance");
+                Check(ReferenceEquals(appearance, returnedPage) &&
+                    ReferenceEquals(appearanceMode, NativeUi.ById<SegmentedSelector>(settingsRoot, "AppearanceModePicker")) &&
+                    ReferenceEquals(appearanceFont, NativeUi.ById<ComboBox>(settingsRoot, "ChatFontSizePicker")) &&
+                    Math.Abs(appearance.VerticalOffset - appearanceOffset) < 1 && settings.AppWindow.Size.Equals(windowSize),
+                    mode + " category round trip retains settings controls, independent scroll position and window size");
             }
             Check(Prompt.Text == draft && ActiveId == activeId && _gateway.Writes == writes &&
                 System.Text.Json.JsonSerializer.Serialize(ShellField<LayoutState>("_layout")) == layout,
-                "local-model dropdown route preserves shell layout, draft and active conversation without gateway writes");
-            File.WriteAllText(Path.Combine(_directory, "shell-popup-local-models.json"),
+                "local-model selector route preserves shell layout, draft and active conversation without gateway writes");
+            File.WriteAllText(Path.Combine(_directory, "shell-local-model-selectors.json"),
                 System.Text.Json.JsonSerializer.Serialize(observations, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
         finally
