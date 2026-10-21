@@ -203,7 +203,17 @@ impl PreparationService {
 
     pub async fn snapshot(&self) -> Value {
         let state = self.state.lock().await;
-        snapshot(&state, false)
+        let mut value = snapshot(&state, false);
+        for entry in value["models"].as_array_mut().into_iter().flatten() {
+            if entry["providerId"].as_str().is_some_and(|id|id.starts_with("kynxa-local-")) {
+                let running = super::gateway_local_engine::status(&self.config.data_home, entry["modelId"].as_str().unwrap_or(""));
+                if matches!(running["state"].as_str(),Some("ready"|"loading"|"preparing-runtime"|"waiting-resource"|"sleeping")) {
+                    let observed = super::gateway_local_engine::preparation_status(&running);
+                    for (key, field) in observed.as_object().unwrap() { entry[key] = field.clone(); }
+                }
+            }
+        }
+        value
     }
 
     pub async fn wait_idle(
@@ -387,8 +397,8 @@ impl PreparationService {
         } else {
             self.prepare_api(provider, entry["modelId"].as_str().unwrap_or(""), token)
         };
-        // Both branches use boxed futures so their shared timeout owns the complete network/resource attempt.
-        // 两类准备共用整个网络和准入尝试的截止，不把初始观测成功冒充模型装载完成。
+        // This deadline bounds observation; managed weight loading retains its independent engine lifetime.
+        // 此期限只约束准备观察；自管权重装载保留独立引擎生命周期，不把初始连通冒充装载完成。
         let result = tokio::time::timeout(Duration::from_secs(60), preparation).await;
         match result {
             Ok(Ok(observed)) => {
@@ -406,8 +416,16 @@ impl PreparationService {
                 entry["upstreamStatus"] = error.details["upstreamStatus"].clone();
             }
             Err(_) => {
-                entry["state"] = json!("unknown");
-                entry["code"] = json!("MODEL_PREPARATION_TIMEOUT");
+                let running = super::gateway_local_engine::status(&self.config.data_home, entry["modelId"].as_str().unwrap_or(""));
+                if super::gateway_local_engine::is_managed(provider)
+                    && matches!(running["state"].as_str(),Some("loading"|"preparing-runtime"|"waiting-resource")) {
+                    entry["state"] = json!("loading");
+                    entry["modelReady"] = json!(false);
+                    entry["code"] = json!("MODEL_PREPARATION_PENDING");
+                } else {
+                    entry["state"] = json!("unknown");
+                    entry["code"] = json!("MODEL_PREPARATION_TIMEOUT");
+                }
             }
         }
         entry["checkedAt"] = json!(chrono::Utc::now().to_rfc3339());
@@ -469,7 +487,7 @@ impl PreparationService {
                     prepared["loadPolicy"] = json!(policy);
                     return Ok(prepared);
                 }
-                super::gateway_local_engine::ensure(&self.config.data_home, connection, model, token).await?;
+                super::gateway_local_engine::ensure_with_priority(&self.config.data_home, connection, model, token, false).await?;
                 let running = super::gateway_local_engine::status(&self.config.data_home, model);
                 let mut prepared = super::gateway_local_engine::preparation_status(&running);
                 prepared["loadPolicy"] = json!(policy);
@@ -606,7 +624,7 @@ impl PreparationService {
             })
             .await;
             let lease = service.acquire(json!({"taskId":format!("model-preparation-{}",uuid::Uuid::new_v4()),
-                "workspaceId":"model-preparation","kind":"foreground","workload":"compute","cpuThreads":1,
+                "workspaceId":"model-preparation","kind":"background","workload":"compute","cpuThreads":1,
                 "memoryBytes":demand["memoryBytes"],"gpuMemoryBytes":demand["gpuMemoryBytes"],"waitMs":30000,"ttlMs":30000}),token.clone()).await
                 .map_err(|error|ModelError::new(&error.code,&error.message,error.status))?;
             if *token.borrow() {

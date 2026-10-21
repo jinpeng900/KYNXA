@@ -4,6 +4,15 @@ using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Services;
 
+public sealed record SavedAttachmentEntry(Guid Id, string Name, string ContentType, long SizeBytes,
+    Guid ConversationId, Guid MessageId, string ConversationTitle, string Status = "ready",
+    string? Sha256 = null, Guid? ProjectId = null)
+{
+    public ChatAttachment ToAttachment() => new(Id, Name, ContentType, SizeBytes, Status, Sha256);
+}
+public sealed record SavedAttachmentPage(SavedAttachmentEntry[] Attachments, int Offset = 0,
+    int Limit = 50, int Total = 0, bool HasMore = false, int? NextOffset = null);
+
 /// <summary>
 /// Imports user-selected files through the gateway; local paths never become model context.
 /// 用户选择的文件由网关接收保存；本地来源路径不作为模型上下文或正式附件字段。
@@ -13,6 +22,21 @@ public sealed class MessageAttachmentsApiClient : IDisposable
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly HttpClient _http = new() { BaseAddress = ModelGatewayService.Address, Timeout = Timeout.InfiniteTimeSpan };
     private sealed record AttachmentResponse(ChatAttachment[] Attachments);
+
+    /// <summary>List committed attachments in the selected chat or its explicitly selected work.</summary>
+    /// <remarks>仅列出所选聊天或明确选择的工作中已正式提交的附件，不读取挂载文件夹。</remarks>
+    public async Task<SavedAttachmentPage> ListSavedAsync(Guid conversationId, Guid? projectId = null,
+        int offset = 0, CancellationToken cancellationToken = default)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        await ModelGatewayService.EnsureReadyAsync(deadline.Token);
+        string endpoint = projectId is Guid project
+            ? $"/api/projects/{project:D}/attachments" : $"/api/conversations/{conversationId:D}/attachments";
+        using var response = await _http.GetAsync(endpoint + $"?offset={Math.Max(0, offset)}&limit=50", deadline.Token);
+        return await GatewayResponseReader.ReadAsync<SavedAttachmentPage>(response,
+            UiText.Get("附件列表为空。"), UiText.Get("附件读取失败（HTTP {0}）。"), deadline.Token, JsonOptions);
+    }
 
     public async Task<ChatAttachment[]> ImportAsync(Guid conversationId, Guid messageId,
         IReadOnlyList<MessageAttachmentDraft> files, CancellationToken cancellationToken = default)

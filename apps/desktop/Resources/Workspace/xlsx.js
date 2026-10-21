@@ -7,6 +7,7 @@
   const MAX_EXPANDED_BYTES = 128 * 1024 * 1024;
   const MAX_XML_BYTES = 64 * 1024 * 1024;
   const MAX_ROWS = 1048576, MAX_COLUMNS = 16384;
+  const MAX_VISIBLE_CELLS = 131072;
   const ROW_HEADER_WIDTH = 46, COLUMN_HEADER_HEIGHT = 27;
   const builtinFormats = { 0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00',
     9: '0%', 10: '0.00%', 11: '0.00E+00', 12: '# ?/?', 13: '# ??/??', 14: 'mm-dd-yy',
@@ -303,7 +304,7 @@
     position(index) { return index * this.defaultSize + this.differences[this.before(index)]; }
     size(index) { const slot = this.before(index); return this.indices[slot] === index ? this.sizes[slot] : this.defaultSize; }
     at(pixel) { let low = 0, high = this.count; while (low < high) { const middle = (low + high) >>> 1; if (this.position(middle + 1) <= pixel) low = middle + 1; else high = middle; } return Math.min(low, this.count - 1); }
-    visible(start, end, limit = 256) {
+    visible(start, end, limit = Infinity) {
       const result = []; let index = this.at(Math.max(0, start));
       while (index < this.count && this.position(index) <= end && result.length < limit) {
         if (this.size(index) > 0) { result.push(index); index++; }
@@ -461,7 +462,16 @@
       // 已解析行释放 XML 子树，之后滚动和切表只读缓存值，不再解压或重复解码。
       entry.node.remove(); entry.node = null;
     }
-    result.ensureRows = rows => { checkSignal(signal); for (const row of rows) decodeRow(rowEntries.get(row)); };
+    result.ensureRows = (rows, deadline = Infinity) => {
+      checkSignal(signal);
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        const entry = rowEntries.get(row); decodeRow(entry, deadline);
+        if (entry && !entry.complete) return false;
+        if (performance.now() >= deadline) return index === rows.length - 1;
+      }
+      return true;
+    };
     result.hasPending = () => remaining > 0;
     result.advance = deadline => {
       checkSignal(signal);
@@ -501,7 +511,8 @@
     const cancellation = new AbortController(), signal = cancellation.signal;
     const document = container.ownerDocument, initial = options.state || {};
     let disposed = false, packageReader, workbook, root, scroll, grid, note, observer;
-    let currentSheet = -1, sheet, showRevision = 0, frame = 0, zoom = clamp(Number(initial.zoom) || 1, .25, 3);
+    let currentSheet = -1, sheet, showRevision = 0, frame = 0, paintFrame = 0, viewportRevision = 0;
+    let viewport = null, viewportPending = false, zoom = clamp(Number(initial.zoom) || 1, .25, 3);
     const sheetCache = new Map(), nodes = new Map(), positions = {}, tabButtons = [];
     const preparedSheets = new Map(), pendingSheets = new Set();
     let requestedSheet = -1, worker = null, initializing = true, backgroundPending = false;
@@ -517,7 +528,7 @@
     function getState() { savePosition(); return { sheet: Math.max(0, currentSheet), zoom, sheets: Object.fromEntries(Object.entries(positions).map(([index, position]) => [index, { ...position }])) }; }
     function emit() { if (!disposed && typeof options.onState === 'function') options.onState(getState()); }
     function updateBackground() {
-      const pending = !disposed && (initializing || pendingSheets.size > 0);
+      const pending = !disposed && (initializing || pendingSheets.size > 0 || viewportPending);
       if (pending === backgroundPending) return;
       backgroundPending = pending;
       if (pending) idle = new Promise(resolve => { resolveIdle = resolve; });
@@ -526,6 +537,7 @@
     }
     function updateNote() {
       if (!note || !sheet) return;
+      if (viewportPending) { note.textContent = '正在显示当前区域；可继续滚动、缩放或切换工作表。'; return; }
       note.textContent = !sheet.hasPending() && sheet.missingCached
         ? `${sheet.missingCached} 个公式没有缓存，显示公式原文；不执行计算。`
         : '公式显示文件内缓存值；没有缓存时显示公式原文，不执行计算。';
@@ -547,7 +559,7 @@
           if (selected === undefined) break;
           const parsed = preparedSheets.get(selected);
           try {
-            const budget = navigator.scheduling?.isInputPending?.() ? Math.min(5, sliceMs) : sliceMs;
+            const budget = viewportPending || navigator.scheduling?.isInputPending?.() ? Math.min(5, sliceMs) : sliceMs;
             parsed.advance(performance.now() + budget); completed(selected, parsed);
           } catch (error) {
             pendingSheets.delete(selected); preparedSheets.delete(selected); updateBackground(); report(error); break;
@@ -569,6 +581,7 @@
       savePosition(); disposed = true; showRevision++;
       cancellation.abort(); externalSignal?.removeEventListener('abort', dispose);
       if (frame) cancelAnimationFrame(frame);
+      invalidateViewport(); viewportPending = false;
       observer?.disconnect(); signal?.removeEventListener('abort', dispose); packageReader?.close();
       sheetCache.clear(); preparedSheets.clear(); pendingSheets.clear(); nodes.clear(); root?.remove(); updateBackground();
     }
@@ -584,8 +597,8 @@
     function place(node, left, top, width, height) {
       Object.assign(node.style, { left: `${left}px`, top: `${top}px`, width: `${Math.max(0, width)}px`, height: `${Math.max(0, height)}px` });
     }
-    function cellNode(row, column, merge, visible) {
-      const key = `cell:${row}:${column}`; visible.add(key);
+    function cellNode(row, column, merge) {
+      const key = `cell:${row}:${column}`;
       const node = element(key, 'xlsx-cell', 'gridcell');
       const cell = sheet.cells.get(`${row}:${column}`);
       const style = cell?.style || workbook.styles[sheet.rowStyles.get(row) ?? sheet.columnStyles.get(column) ?? 0] || workbook.styles[0];
@@ -618,34 +631,103 @@
         (sheet.columns.position(lastColumn) - sheet.columns.position(column)) * zoom,
         (sheet.rows.position(lastRow) - sheet.rows.position(row)) * zoom);
     }
+    function invalidateViewport() {
+      viewportRevision++; viewport = null;
+      if (paintFrame) cancelAnimationFrame(paintFrame);
+      paintFrame = 0;
+    }
+    function finishViewport() {
+      viewport = null; viewportPending = false; grid.setAttribute('aria-busy', 'false');
+      completed(currentSheet, sheet); updateBackground(); updateNote();
+    }
+    function paintViewport(current) {
+      if (disposed || viewport !== current || current.revision !== viewportRevision) return;
+      const deadline = performance.now() + Math.min(navigator.scheduling?.isInputPending?.() ? 4 : 8, sliceMs);
+      let steps = 0;
+      // Complete the full visible range over short frames; a cell-count budget must never remove columns.
+      // 单元格数量只限制每帧工作量，可见区域分帧完整补齐，不能用预算直接裁掉右侧列。
+      while (steps++ < 512 && performance.now() < deadline) {
+        if (current.phase === 'prune') {
+          const next = current.previous.next();
+          if (next.done) { current.phase = 'columns'; continue; }
+          const [key, node] = next.value, parts = key.split(':');
+          const keep = key === 'corner' || (parts[0] === 'column' ? current.columnSet.has(Number(parts[1]))
+            : parts[0] === 'row' ? current.rowSet.has(Number(parts[1]))
+              : current.mergeKeys.has(key) || current.rowSet.has(Number(parts[1])) && current.columnSet.has(Number(parts[2])));
+          if (!keep) { node.remove(); nodes.delete(key); }
+          continue;
+        }
+        if (current.phase === 'columns') {
+          if (current.headerIndex === current.columns.length) { current.headerIndex = 0; current.phase = 'rows'; continue; }
+          const column = current.columns[current.headerIndex++];
+          const node = element('column:' + column, 'xlsx-header xlsx-column-header', 'columnheader'); node.textContent = columnName(column);
+          place(node, ROW_HEADER_WIDTH + sheet.columns.position(column) * zoom, current.top, sheet.columns.size(column) * zoom, COLUMN_HEADER_HEIGHT);
+          continue;
+        }
+        if (current.phase === 'rows') {
+          if (current.headerIndex === current.rows.length) {
+            place(element('corner', 'xlsx-header xlsx-corner', 'presentation'), current.left, current.top, ROW_HEADER_WIDTH, COLUMN_HEADER_HEIGHT);
+            current.phase = 'cells'; continue;
+          }
+          const row = current.rows[current.headerIndex++];
+          const node = element('row:' + row, 'xlsx-header xlsx-row-header', 'rowheader'); node.textContent = String(row + 1);
+          place(node, current.left, COLUMN_HEADER_HEIGHT + sheet.rows.position(row) * zoom, ROW_HEADER_WIDTH, sheet.rows.size(row) * zoom);
+          continue;
+        }
+        if (current.phase === 'cells') {
+          if (current.rowIndex === current.rows.length) { current.phase = 'merges'; continue; }
+          const row = current.rows[current.rowIndex];
+          if (!current.rowReady) {
+            // Decode each row before exposing its values, yielding if an unusually wide row needs more time.
+            // 每行先解析再展示，超宽行可跨帧解码，不能将尚未解析的数据伪装成空白。
+            if (!sheet.ensureRows([row], deadline)) break;
+            current.rowRanges = current.merges.filter(range => range.r1 <= row && range.r2 >= row).sort((a, b) => a.c1 - b.c1);
+            current.rangeIndex = 0; current.rowReady = true;
+          }
+          if (current.columnIndex === current.columns.length) {
+            current.rowIndex++; current.columnIndex = 0; current.rowReady = false; continue;
+          }
+          const column = current.columns[current.columnIndex++];
+          while (current.rangeIndex < current.rowRanges.length && current.rowRanges[current.rangeIndex].c2 < column) current.rangeIndex++;
+          const range = current.rowRanges[current.rangeIndex];
+          if (!range || range.c1 > column) cellNode(row, column, null);
+          continue;
+        }
+        if (current.mergeIndex < current.merges.length) {
+          const merge = current.merges[current.mergeIndex];
+          if (!sheet.ensureRows([merge.r1], deadline)) break;
+          cellNode(merge.r1, merge.c1, merge); current.mergeIndex++;
+          continue;
+        }
+        finishViewport(); return;
+      }
+      paintFrame = requestAnimationFrame(() => {
+        paintFrame = 0;
+        try { paintViewport(current); }
+        catch (error) { invalidateViewport(); finishViewport(); report(error); }
+      });
+    }
     function renderViewport() {
       if (disposed || !sheet) return;
+      invalidateViewport();
       const width = scroll.clientWidth || 760, height = scroll.clientHeight || 440;
-      const rows = sheet.rows.visible(scroll.scrollTop / zoom, (scroll.scrollTop + height - COLUMN_HEADER_HEIGHT) / zoom);
-      const columns = sheet.columns.visible(scroll.scrollLeft / zoom, (scroll.scrollLeft + width - ROW_HEADER_WIDTH) / zoom, Math.max(1, Math.floor(4096 / Math.max(rows.length, 1))));
-      const visible = new Set();
+      const rows = sheet.rows.visible(scroll.scrollTop / zoom, (scroll.scrollTop + height - COLUMN_HEADER_HEIGHT) / zoom, MAX_VISIBLE_CELLS + 1);
+      const columns = sheet.columns.visible(scroll.scrollLeft / zoom, (scroll.scrollLeft + width - ROW_HEADER_WIDTH) / zoom, MAX_VISIBLE_CELLS + 1);
+      // Only an exceptionally dense viewport falls back explicitly; ordinary wide/zoomed sheets stay complete.
+      // 仅当前视口超过十三万个格子时明确转入既有转换回退，常见大窗口及低缩放表格不再静默缺列。
+      if (rows.length * columns.length > MAX_VISIBLE_CELLS) {
+        finishViewport(); throw unsupported('XLSX visible area exceeds 131072 cells; Office page rendering is required');
+      }
       const merges = rows.length && columns.length ? visibleMerges(sheet.merges, rows[0], rows[rows.length - 1], columns[0], columns[columns.length - 1]) : [];
-      // Visible rows and merged-cell anchors are complete before any cells are shown, never blank placeholders.
-      // 可见行与合并区域锚点先完整解析再显示，不能把尚未解析的内容伪装成空单元格。
-      sheet.ensureRows([...rows, ...merges.map(range => range.r1)]); completed(currentSheet, sheet);
-      for (const row of rows) for (const column of columns) {
-        if (!merges.some(range => range.r1 <= row && range.r2 >= row && range.c1 <= column && range.c2 >= column)) cellNode(row, column, null, visible);
-      }
-      for (const merge of merges) cellNode(merge.r1, merge.c1, merge, visible);
-      for (const column of columns) {
-        const key = 'column:' + column; visible.add(key);
-        const node = element(key, 'xlsx-header xlsx-column-header', 'columnheader'); node.textContent = columnName(column);
-        place(node, ROW_HEADER_WIDTH + sheet.columns.position(column) * zoom, scroll.scrollTop, sheet.columns.size(column) * zoom, COLUMN_HEADER_HEIGHT);
-      }
-      for (const row of rows) {
-        const key = 'row:' + row; visible.add(key);
-        const node = element(key, 'xlsx-header xlsx-row-header', 'rowheader'); node.textContent = String(row + 1);
-        place(node, scroll.scrollLeft, COLUMN_HEADER_HEIGHT + sheet.rows.position(row) * zoom, ROW_HEADER_WIDTH, sheet.rows.size(row) * zoom);
-      }
-      visible.add('corner'); place(element('corner', 'xlsx-header xlsx-corner', 'presentation'), scroll.scrollLeft, scroll.scrollTop, ROW_HEADER_WIDTH, COLUMN_HEADER_HEIGHT);
-      for (const [key, node] of nodes) if (!visible.has(key)) { node.remove(); nodes.delete(key); }
+      const current = { revision: viewportRevision, top: scroll.scrollTop, left: scroll.scrollLeft, rows, columns, merges,
+        rowSet: new Set(rows), columnSet: new Set(columns), mergeKeys: new Set(merges.map(range => `cell:${range.r1}:${range.c1}`)),
+        previous: nodes.entries(), phase: 'prune', headerIndex: 0, rowIndex: 0, columnIndex: 0, mergeIndex: 0,
+        rowReady: false };
+      viewport = current; viewportPending = true; grid.setAttribute('aria-busy', 'true'); updateBackground(); updateNote();
+      paintViewport(current);
     }
     function schedule() {
+      invalidateViewport();
       if (frame || disposed) return;
       frame = requestAnimationFrame(() => { frame = 0; try { renderViewport(); emit(); } catch (error) { report(error); } });
     }

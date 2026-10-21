@@ -5,7 +5,7 @@ use std::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::StreamExt;
@@ -22,6 +22,38 @@ use super::{
 
 const MAXIMUM_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
+
+/// The request owner measures visible text independently of provider usage and keeps it through cancellation.
+/// 请求拥有者独立测量可见正文，不信任供应商同名计量；取消或断流后仍保留已观测结果。
+#[derive(Default)]
+struct ClientTiming {
+    dispatched_at: OnceLock<Instant>,
+    first_visible_text_ms: OnceLock<u64>,
+}
+
+impl ClientTiming {
+    fn mark_dispatched(&self) {
+        self.dispatched_at.get_or_init(Instant::now);
+    }
+
+    fn observe_public_text(&self, event: &Value) {
+        if event["type"] != "text_delta"
+            || !event["delta"].as_str().is_some_and(|text| !text.trim().is_empty())
+            || self.first_visible_text_ms.get().is_some()
+        {
+            return;
+        }
+        if let Some(started) = self.dispatched_at.get() {
+            let elapsed = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let _ = self.first_visible_text_ms.set(elapsed);
+        }
+    }
+
+    fn attach(&self, usage: &mut Value) {
+        if !usage.is_object() { *usage = json!({}); }
+        usage["_kynxaFirstVisibleTextMs"] = json!(self.first_visible_text_ms.get().copied());
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ModelError {
@@ -88,6 +120,141 @@ mod tests {
             .map(|(name, value)| format!("event: {name}\ndata: {value}\n\n"))
             .collect()
     }
+    #[tokio::test]
+    async fn incomplete_http_stream_preserves_already_received_numeric_usage_without_response_text() {
+        let payload = format!("data: {}\n\n", json!({"choices":[],"usage":{
+            "prompt_tokens":100,"completion_tokens":5,"prompt_cache_miss_tokens":20,
+            "prompt_tokens_details":{"cached_tokens":80,"cache_write_tokens":10},
+            "private_response":"never-copy-this-body"}}));
+        let (connection, server) = fixture(payload, "text/event-stream", StatusCode::OK, Duration::ZERO).await;
+        let (_owner, cancel) = watch::channel(false);
+        let error = request(&connection, json!({"stream":true}), cancel, None).await.unwrap_err();
+        assert_eq!(error.details["requestDispatched"], true);
+        assert_eq!(error.details["reportedUsage"]["prompt_tokens"], 100);
+        assert_eq!(error.details["reportedUsage"]["completion_tokens"], 5);
+        assert_eq!(error.details["reportedUsage"]["prompt_tokens_details"]["cached_tokens"], 80);
+        assert_eq!(error.details["reportedUsage"]["prompt_tokens_details"]["cache_write_tokens"], 10);
+        assert_eq!(error.details["reportedUsage"]["prompt_cache_miss_tokens"], 20);
+        assert!(!error.details.to_string().contains("never-copy-this-body"));
+        server.abort();
+    }
+
+    #[test]
+    fn numeric_usage_observer_merges_partial_cache_details_without_copying_response_content() {
+        let reported = std::sync::Mutex::new(json!({}));
+        observe_provider_usage(&reported, &json!({"input_tokens":100,
+            "input_tokens_details":{"cached_tokens":80,"private":"never-copy"}}));
+        observe_provider_usage(&reported, &json!({"input_tokens_details":{"cache_write_tokens":10},
+            "prompt_cache_miss_tokens":20,"private":"never-copy"}));
+        let reported = reported.into_inner().unwrap();
+        assert_eq!(reported["input_tokens"],100);
+        assert_eq!(reported["input_tokens_details"]["cached_tokens"],80);
+        assert_eq!(reported["input_tokens_details"]["cache_write_tokens"],10);
+        assert_eq!(reported["prompt_cache_miss_tokens"],20);
+        assert!(!reported.to_string().contains("never-copy"));
+    }
+
+    #[test]
+    fn client_timing_counts_only_first_visible_text_after_actual_dispatch() {
+        let timing = ClientTiming::default();
+        timing.observe_public_text(&json!({"type":"text_delta","delta":"before dispatch"}));
+        let mut projected = json!({"_kynxaFirstVisibleTextMs":999999});
+        timing.attach(&mut projected);
+        assert!(projected["_kynxaFirstVisibleTextMs"].is_null());
+        timing.mark_dispatched();
+        for event in [json!({"type":"reasoning_delta","delta":"private thinking"}),
+            json!({"type":"tool_call_delta","delta":"arguments"}),
+            json!({"type":"completed","delta":"terminal"}),
+            json!({"type":"content_snapshot","content":"complete body"}),
+            json!({"type":"text_delta","delta":" \n\t"}),
+            json!({"type":"text_delta","delta":""})] {
+            timing.observe_public_text(&event);
+        }
+        timing.attach(&mut projected);
+        assert!(projected["_kynxaFirstVisibleTextMs"].is_null());
+        timing.observe_public_text(&json!({"type":"text_delta","delta":"可见正文"}));
+        timing.attach(&mut projected);
+        assert!(projected["_kynxaFirstVisibleTextMs"].is_u64());
+        let first = projected.clone();
+        timing.observe_public_text(&json!({"type":"text_delta","delta":"later text"}));
+        timing.attach(&mut projected);
+        assert_eq!(projected, first);
+    }
+
+    #[tokio::test]
+    async fn incomplete_visible_stream_keeps_measured_timing_and_partial_numeric_usage() {
+        let payload = sse(&[("",json!({"choices":[{"index":0,"delta":{"reasoning_content":"private thinking"}}]})),
+            ("",json!({"choices":[{"index":0,"delta":{"content":"visible output"}}],
+                "usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":80},"_kynxaFirstVisibleTextMs":999999}})),
+            ("",json!({"choices":[],"usage":{"prompt_tokens_details":{"cache_write_tokens":10},"private":"never-copy"}}))]);
+        let (connection, server) = fixture(payload, "text/event-stream", StatusCode::OK, Duration::from_millis(25)).await;
+        let (_owner, cancel) = watch::channel(false);
+        let error = request(&connection,json!({"stream":true}),cancel,None).await.unwrap_err();
+        let observed = &error.details["reportedUsage"];
+        let first = observed["_kynxaFirstVisibleTextMs"].as_u64().unwrap();
+        assert!((20..999999).contains(&first));
+        assert_eq!(observed["prompt_tokens"],100);
+        assert_eq!(observed["prompt_tokens_details"]["cached_tokens"],80);
+        assert_eq!(observed["prompt_tokens_details"]["cache_write_tokens"],10);
+        assert!(!error.details.to_string().contains("private thinking"));
+        assert!(!error.details.to_string().contains("visible output"));
+        assert!(!error.details.to_string().contains("never-copy"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_streaming_snapshots_and_tool_only_streams_have_unknown_first_visible_text_time() {
+        let non_stream = json!({"choices":[{"message":{"role":"assistant","content":"complete body"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":3,"completion_tokens":5,"_kynxaFirstVisibleTextMs":999999}}).to_string();
+        let tool_stream = format!("{}data: [DONE]\n\n",sse(&[("",json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":0,"id":"call-1","type":"function","function":{"name":"read_data","arguments":"{}"}}]}}]})),
+            ("",json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":3,"completion_tokens":5,"_kynxaFirstVisibleTextMs":999999}}))]));
+        for (payload, content_type, streaming) in [(non_stream,"application/json",false),(tool_stream,"text/event-stream",true)] {
+            let (connection,server)=fixture(payload,content_type,StatusCode::OK,Duration::ZERO).await;
+            let (_owner,cancel)=watch::channel(false);
+            let body=json!({"stream":streaming,"tools":[{"type":"function","function":{"name":"read_data","parameters":{"type":"object","properties":{}}}}]});
+            let response=request(&connection,body,cancel,None).await.unwrap();
+            assert!(response.usage["_kynxaFirstVisibleTextMs"].is_null());
+            assert_eq!(response.raw["usage"]["_kynxaFirstVisibleTextMs"],999999);
+            if streaming { assert_eq!(response.calls.len(),1); }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_visible_text_keeps_the_observed_time_without_reissuing_a_request() {
+        let payload=sse(&[("",json!({"choices":[{"index":0,"delta":{"content":"visible before cancellation"}}]}))]);
+        let server=Router::new().fallback(move || {
+            let payload=payload.clone();
+            async move {
+                let stream=futures_util::stream::once(async move { Ok::<_,std::convert::Infallible>(payload) })
+                    .chain(futures_util::stream::pending::<Result<String,std::convert::Infallible>>());
+                HttpResponse::builder().status(StatusCode::OK).header(CONTENT_TYPE,"text/event-stream")
+                    .body(Body::from_stream(stream)).unwrap()
+            }
+        });
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connection=json!({"protocol":"openai-completions","baseUrl":format!("http://{}",listener.local_addr().unwrap())});
+        let server=tokio::spawn(async move { axum::serve(listener,server).await.unwrap(); });
+        let (owner,cancel)=watch::channel(false);
+        let (events,mut received)=mpsc::channel(8);
+        let operation=request(&connection,json!({"stream":true}),cancel,Some(events));
+        tokio::pin!(operation);
+        let event=tokio::select! {
+            event=received.recv()=>event.unwrap(),
+            result=&mut operation=>panic!("request ended before cancellation: {result:?}"),
+        };
+        assert_eq!(event["type"],"text_delta");
+        owner.send_replace(true);
+        let error=operation.await.unwrap_err();
+        assert_eq!(error.code,"ABORT_ERR");
+        assert_eq!(error.details["requestDispatched"],true);
+        assert!(error.details["reportedUsage"]["_kynxaFirstVisibleTextMs"].is_u64());
+        assert!(!error.details.to_string().contains("visible before cancellation"));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn actual_http_streams_keep_provider_identity_usage_and_incremental_text() {
         let fixtures = [
@@ -165,7 +332,7 @@ mod tests {
         ];
         for (name, content_type, payload) in fixtures {
             let (mut connection, server) =
-                fixture(payload, content_type, StatusCode::OK, Duration::ZERO).await;
+                fixture(payload, content_type, StatusCode::OK, Duration::from_millis(25)).await;
             connection["protocol"] = json!(name);
             let (_owner, cancel) = watch::channel(false);
             let (events, mut received) = mpsc::channel(32);
@@ -178,6 +345,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(response.content, "hello");
+            assert!(response.usage["_kynxaFirstVisibleTextMs"].as_u64().is_some_and(|time| time >= 20));
             assert_eq!(
                 response.usage[if name == "openai-completions" || name == "ollama" {
                     "completion_tokens"
@@ -199,6 +367,55 @@ mod tests {
             server.abort();
         }
     }
+    #[tokio::test]
+    async fn an_active_stream_outlives_the_start_deadline_but_a_stalled_one_stops() {
+        // Each chunk arrives within idleTimeoutMs while the whole stream lasts longer than timeoutMs.
+        // 每块都在 idleTimeoutMs 内到达，但整段流长于 timeoutMs；持续有效的输出不能被开始期限截断。
+        async fn stream_fixture(gap: Duration) -> (Value, tokio::task::JoinHandle<()>) {
+            let server = Router::new().fallback(move || async move {
+                let chunks = (0..6).map(move |index| {
+                    let data = if index < 5 {
+                        format!("data: {}\n\n", json!({"choices":[{"index":0,"delta":{"content":"a"}}]}))
+                    } else {
+                        format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))
+                    };
+                    (data, gap)
+                });
+                let body = futures_util::stream::iter(chunks).then(|(data, gap)| async move {
+                    tokio::time::sleep(gap).await;
+                    Ok::<_, std::convert::Infallible>(data)
+                });
+                HttpResponse::builder()
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(body))
+                    .unwrap()
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let connection = json!({"providerId":"fixture","protocol":"openai-completions",
+                "baseUrl":format!("http://{}",listener.local_addr().unwrap()),"apiKey":"fixture-secret",
+                "timeoutMs":300,"idleTimeoutMs":250});
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, server).await.unwrap();
+            });
+            (connection, handle)
+        }
+        let (connection, server) = stream_fixture(Duration::from_millis(100)).await;
+        let (_owner, cancel) = watch::channel(false);
+        let response = request(&connection, json!({"model":"fixture","stream":true}), cancel, None)
+            .await
+            .unwrap();
+        assert_eq!(response.content, "aaaaa");
+        server.abort();
+        let (connection, server) = stream_fixture(Duration::from_millis(400)).await;
+        let (_owner, cancel) = watch::channel(false);
+        let error = request(&connection, json!({"model":"fixture","stream":true}), cancel, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error.code.as_str(), "MODEL_RESPONSE_TIMEOUT" | "MODEL_IDLE_TIMEOUT"), "{}", error.code);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn grammar_and_context_http_rejections_have_distinct_recovery_details() {
         for (message, code, field, absent) in [
@@ -717,19 +934,72 @@ pub async fn request_with_catalog(
         .clamp(100, 3_600_000);
     let mut lifetime = cancellation.clone();
     let dispatched = AtomicBool::new(false);
+    let streaming = AtomicBool::new(false);
+    let reported_usage = std::sync::Mutex::new(Value::Null);
+    let client_timing = ClientTiming::default();
+    // timeoutMs bounds response startup; after streaming starts, cancellation and per-chunk idle detection own its lifetime.
+    // timeoutMs 仅约束响应开始；流启动后由取消和逐块闲置检查管理生命周期，不按累计一小时截断有效输出。
+    let deadline = async {
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        if streaming.load(Ordering::Acquire) {
+            std::future::pending::<()>().await;
+        }
+    };
     let result = tokio::select! {
         biased;
         _ = cancelled(&mut lifetime) => Err(ModelError::cancelled()),
-        result = tokio::time::timeout(Duration::from_millis(timeout_ms), execute_request(connection, body, &mut cancellation, events, catalog, &dispatched)) =>
-            result.unwrap_or_else(|_| Err(ModelError::new("MODEL_RESPONSE_TIMEOUT", "模型请求超时，已保留先前执行记录。", 504))),
+        result = execute_request(connection, body, &mut cancellation, events, catalog, &dispatched, &streaming, &reported_usage, &client_timing) => result,
+        _ = deadline => Err(ModelError::new("MODEL_RESPONSE_TIMEOUT", "模型请求超时，已保留先前执行记录。", 504)),
     };
-    result.map_err(|mut error| {
-        if !error.details.is_object() {
-            error.details = json!({});
+    let observed = reported_usage.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    match result {
+        Ok(mut response) => {
+            // A later usage fragment can omit earlier nested cache counts; merge only our already observed numeric whitelist.
+            // 后续用量片段可能省略较早的嵌套缓存计量；仅合并本次已观测的数值白名单，不复制正文。
+            if !response.usage.is_object() { response.usage = json!({}); }
+            for (key, value) in observed.as_object().into_iter().flatten() {
+                if matches!(key.as_str(), "prompt_tokens_details" | "input_tokens_details") {
+                    if !response.usage[key].is_object() { response.usage[key] = json!({}); }
+                    for (field, value) in value.as_object().into_iter().flatten() {
+                        response.usage[key][field] = value.clone();
+                    }
+                } else { response.usage[key] = value.clone(); }
+            }
+            client_timing.attach(&mut response.usage);
+            Ok(response)
         }
-        error.details["requestDispatched"] = json!(dispatched.load(Ordering::Relaxed));
-        error
-    })
+        Err(mut error) => {
+            if !error.details.is_object() { error.details = json!({}); }
+            error.details["requestDispatched"] = json!(dispatched.load(Ordering::Relaxed));
+            let mut usage = observed;
+            client_timing.attach(&mut usage);
+            error.details["reportedUsage"] = usage;
+            Err(error)
+        }
+    }
+}
+
+/// Keep only already received numeric billing fields in this request, including before a later cancellation/error.
+/// 本次请求内仅保留已收到的数值计量；后续取消或断流也不丢失，绝不复制响应正文到诊断。
+fn observe_provider_usage(target: &std::sync::Mutex<Value>, usage: &Value) {
+    if !usage.is_object() { return; }
+    let mut selected = target.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for name in ["prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "cache_read_input_tokens",
+        "cache_creation_input_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_eval_count", "eval_count"] {
+        if let Some(value) = usage[name].as_u64() {
+            if !selected.is_object() { *selected = json!({}); }
+            selected[name] = json!(value);
+        }
+    }
+    for name in ["prompt_tokens_details", "input_tokens_details"] {
+        for field in ["cached_tokens", "cache_write_tokens"] {
+            if let Some(value) = usage[name][field].as_u64() {
+                if !selected.is_object() { *selected = json!({}); }
+                if !selected[name].is_object() { selected[name] = json!({}); }
+                selected[name][field] = json!(value);
+            }
+        }
+    }
 }
 
 async fn execute_request(
@@ -739,6 +1009,9 @@ async fn execute_request(
     events: Option<mpsc::Sender<Value>>,
     catalog: &[Value],
     dispatched: &AtomicBool,
+    streaming: &AtomicBool,
+    reported_usage: &std::sync::Mutex<Value>,
+    client_timing: &ClientTiming,
 ) -> Result<ModelResponse, ModelError> {
     if *cancellation.borrow() {
         return Err(ModelError::cancelled());
@@ -797,6 +1070,7 @@ async fn execute_request(
     // 只有 HTTP future 实际被轮询才计一次尝试；网络失败仍属于尝试，不表示供应商收费。
     let sending = std::future::poll_fn(|context| {
         dispatched.store(true, Ordering::Relaxed);
+        client_timing.mark_dispatched();
         sending.as_mut().poll(context)
     });
     let response = tokio::select! {
@@ -810,6 +1084,7 @@ async fn execute_request(
             Err(error) if error.code == "ABORT_ERR" => return Err(error),
             result => result.unwrap_or(Value::Null),
         };
+        observe_provider_usage(reported_usage, &rejected["usage"]);
         return Err(upstream_rejection(status, &rejected));
     }
     let content_type = response
@@ -822,7 +1097,9 @@ async fn execute_request(
         && !(protocol == "ollama" && content_type.contains("ndjson"))
     {
         let raw = bounded_json(response, MAXIMUM_RESPONSE_BYTES, cancellation).await?;
+        observe_provider_usage(reported_usage, if protocol == "ollama" { &raw } else { &raw["usage"] });
         let result = gateway_protocol::decode_response(protocol, raw, catalog, Value::Null)?;
+        observe_provider_usage(reported_usage, &result.usage);
         if let Some(events) = events {
             events.send(json!({"type":"content_snapshot","content":result.content,"reasoning":result.reasoning})).await
             .map_err(|_| ModelError::cancelled())?;
@@ -832,6 +1109,7 @@ async fn execute_request(
     let mut frames = FrameDecoder::default();
     let mut decoder = ProviderStream::new(protocol)?;
     let mut stream = response.bytes_stream();
+    streaming.store(true, Ordering::Release);
     let mut terminal: Option<Value> = None;
     let idle_ms = connection["idleTimeoutMs"]
         .as_u64()
@@ -849,9 +1127,12 @@ async fn execute_request(
             .map_err(|_| ModelError::new("MODEL_RESPONSE_READ_FAILED", "模型流连接中断。", 502))?
             .unwrap_or_default();
         for frame in frames.push(&bytes, protocol == "ollama", end)? {
-            let decoded = decoder.frame(&frame)?;
-            if let Some(events) = &events {
-                for event in decoded["events"].as_array().into_iter().flatten() {
+            let decoded = decoder.frame(&frame);
+            observe_provider_usage(reported_usage, &decoder.usage);
+            let decoded = decoded?;
+            for event in decoded["events"].as_array().into_iter().flatten() {
+                client_timing.observe_public_text(event);
+                if let Some(events) = &events {
                     tokio::select! { _ = cancelled(cancellation) => return Err(ModelError::cancelled()),
                     sent = events.send(event.clone()) => sent.map_err(|_| ModelError::cancelled())? };
                 }

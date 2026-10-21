@@ -192,6 +192,7 @@ fn search_failure(error: GatewayError) -> GatewayError {
         return error;
     }
     let http_status = error.details["httpStatus"].as_u64();
+    let transport_failure = super::gateway_mcp::transient_connection_failure(&error.code);
     let quota = error.details["providerCode"].as_str().is_some_and(|code| matches!(
         code.to_ascii_uppercase().as_str(),
         "INSUFFICIENT_QUOTA" | "QUOTA_EXCEEDED" | "CREDITS_EXHAUSTED"
@@ -203,12 +204,10 @@ fn search_failure(error: GatewayError) -> GatewayError {
         "WEB_SEARCH_RATE_LIMITED"
     } else if matches!(http_status, Some(401 | 403)) || error.code == "WEB_SEARCH_CREDENTIAL_MISSING" {
         "WEB_SEARCH_AUTH_FAILED"
-    } else if http_status.is_some_and(|status| status >= 500)
+    } else if http_status.is_some_and(|status| status >= 500) || transport_failure
         || [
             "WEB_SEARCH_TRANSIENT",
             "WEB_SEARCH_FAILED",
-            "MCP_TIMEOUT",
-            "MCP_CONNECTION_LOST",
             "MCP_EXECUTION_UNKNOWN",
         ]
         .contains(&error.code.as_str())
@@ -217,6 +216,11 @@ fn search_failure(error: GatewayError) -> GatewayError {
     } else {
         return error;
     };
+    let mut details = error.details;
+    if transport_failure {
+        details["failureOrigin"] = json!("mcp-transport");
+        details["causeCode"] = json!(error.code);
+    }
     failure(
         code,
         match code {
@@ -228,7 +232,7 @@ fn search_failure(error: GatewayError) -> GatewayError {
         if code == "WEB_SEARCH_QUOTA_EXHAUSTED" { 402 } else { error.status },
     )
     .with_retry_after(error.retry_after_ms)
-    .with_details(error.details)
+    .with_details(details)
 }
 
 fn tool_failure(value: &Value) -> Option<GatewayError> {
@@ -236,6 +240,14 @@ fn tool_failure(value: &Value) -> Option<GatewayError> {
     if value["isError"] != true && value["structuredContent"]["isError"] != true
         && !has_error(value) && !has_error(&value["structuredContent"]) {
         return None;
+    }
+    // MCP reports a timed-out or dropped call as an unknown-result value; a read-only search can safely retry it.
+    // MCP 把超时或断线的调用包装成“结果未知”的返回值；只读搜索可以安全重试，不能当作不可重试的工具失败。
+    if value["code"] == "MCP_EXECUTION_UNKNOWN"
+        && matches!(value["causeCode"].as_str(), Some("MCP_TIMEOUT" | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED"))
+    {
+        return Some(failure("WEB_SEARCH_TRANSIENT", "搜索服务调用超时或连接中断，可重试或改用备用来源。", 504)
+            .with_details(json!({"failureOrigin":"mcp-transport","causeCode":value["causeCode"]})));
     }
     let details = super::gateway_mcp::provider_failure_details(value, "provider-tool");
     // An unspecified tool error is a failed dependency, not an invented upstream HTTP 502.
@@ -451,15 +463,18 @@ async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, G
     let loaded = ctx.runtime.schemas.read().await.clone();
     let servers = super::gateway_mcp::servers(ctx)
         .into_iter()
-        .filter_map(|mut server| {
-            server["tools"] = json!(
+        .filter_map(|server| {
+            // Discovery metadata must not change the connection's configuration identity and force another handshake.
+            // 发现目录仅用于筛选能力，不能混入连接配置身份，否则执行时会无故重新握手。
+            let mut discovery = server.clone();
+            discovery["tools"] = json!(
                 loaded
                     .iter()
                     .filter(|tool| tool["serverId"] == server["id"])
                     .cloned()
                     .collect::<Vec<_>>()
             );
-            (super::service_web::search_server(&server)
+            (super::service_web::search_server(&discovery)
                 && (selected == "auto" || server["id"] == selected))
                 .then_some(server)
         })
@@ -645,6 +660,7 @@ async fn search_sources(
             .unwrap_or(0);
         tokio::time::sleep(Duration::from_millis(delay)).await;
         check_cancelled(ctx)?;
+        super::gateway_mcp::prepare_read_retry(server, ctx).await?;
         let result = tokio::time::timeout(
             Duration::from_secs(20),
             search_provider(&input, server, ctx),
@@ -716,6 +732,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_timeouts_become_retryable_search_failures_but_tool_errors_do_not() {
+        for cause in ["MCP_TIMEOUT", "MCP_START_TIMEOUT", "MCP_CONNECTION_FAILED", "MCP_CONNECTION_LOST", "MCP_CONNECTION_CLOSED"] {
+            let error = search_failure(failure(cause, "Pre-dispatch transport fixture.", 502));
+            assert_eq!(error.code, "WEB_SEARCH_TRANSIENT", "{cause}");
+            assert_eq!(error.details["causeCode"], cause);
+        }
+        for cause in ["MCP_TIMEOUT", "MCP_CONNECTION_LOST", "MCP_CONNECTION_CLOSED"] {
+            let unknown = json!({"isError":true,"status":"unknown","code":"MCP_EXECUTION_UNKNOWN","causeCode":cause,"content":[]});
+            let error = search_failure(tool_failure(&unknown).unwrap());
+            assert_eq!(error.code, "WEB_SEARCH_TRANSIENT", "{cause}");
+            assert!(error.retry_after_ms.unwrap_or(2000) <= 2000, "{cause}");
+        }
+        let rejected = json!({"isError":true,"content":[{"type":"text","text":"bad query"}]});
+        assert_ne!(search_failure(tool_failure(&rejected).unwrap()).code, "WEB_SEARCH_TRANSIENT");
+    }
+
+    #[test]
     fn brave_projection_preserves_provider_dates_without_inventing_publication_time() {
         let source = brave_source(&json!({
             "url":"https://example.org/news", "title":"News", "description":"Original snippet",
@@ -730,6 +763,7 @@ mod tests {
 
     struct SearchFixture {
         server: Value,
+        starts: Arc<AtomicUsize>,
         calls: Arc<AtomicUsize>,
         arguments: Arc<Mutex<Vec<Value>>>,
         task: tokio::task::JoinHandle<()>,
@@ -744,6 +778,7 @@ mod tests {
                 failures: usize,
                 status: u16,
                 delay_ms: u64,
+                starts: Arc<AtomicUsize>,
                 calls: Arc<AtomicUsize>,
                 arguments: Arc<Mutex<Vec<Value>>>,
             }
@@ -763,6 +798,7 @@ mod tests {
                 }
                 let result = match request["method"].as_str().unwrap_or("") {
                     "initialize" => {
+                        state.starts.fetch_add(1, Ordering::AcqRel);
                         json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
                     }
                     "tools/list" => json!({"tools":[{
@@ -827,6 +863,7 @@ mod tests {
             }
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
+            let starts = Arc::new(AtomicUsize::new(0));
             let calls = Arc::new(AtomicUsize::new(0));
             let arguments = Arc::new(Mutex::new(Vec::new()));
             let state = FixtureState {
@@ -834,6 +871,7 @@ mod tests {
                 failures,
                 status,
                 delay_ms,
+                starts: starts.clone(),
                 calls: calls.clone(),
                 arguments: arguments.clone(),
             };
@@ -848,6 +886,7 @@ mod tests {
             Self {
                 server: json!({"id":format!("official-{kind}"),"name":kind,"transport":"streamable-http","enabled":true,"trusted":true,
                 "url":format!("http://{address}/mcp"),"startupTimeoutMs":3000,"timeoutMs":5000}),
+                starts,
                 calls,
                 arguments,
                 task,
@@ -1056,6 +1095,80 @@ mod tests {
         );
         assert_eq!(auth.calls.load(Ordering::Acquire), 1);
         cleanup_search(&ctx).await;
+    }
+
+    #[tokio::test]
+    async fn closed_cached_connection_is_retired_before_read_retry_but_explicit_stop_is_preserved() {
+        let exa = SearchFixture::start("exa", 0, 200, 0).await;
+        let (mut ctx, _keep) = super::super::gateway::test_context();
+        ctx.config["mcpServers"] = json!([exa.server]);
+        let server = super::super::gateway_mcp::servers(&ctx).remove(0);
+        super::super::gateway_mcp::connection(&server, &ctx).await.unwrap();
+        assert_eq!(exa.starts.load(Ordering::Acquire), 1);
+        let close = ctx.runtime.mcp_aborters.lock().unwrap().get(server["id"].as_str().unwrap()).unwrap().clone();
+        close.send(true).unwrap();
+        let value = search(json!({"query":"cached connection closed before dispatch"}), &ctx).await.unwrap();
+        assert_eq!(value["attempts"][0]["details"]["causeCode"], "MCP_CLEANUP_PENDING");
+        assert_eq!(value["attempts"][1]["retry"], true);
+        assert_eq!(exa.starts.load(Ordering::Acquire), 2, "A fresh initialize must replace the closed cached connection.");
+        assert_eq!(exa.calls.load(Ordering::Acquire), 1, "Only the reconnected read may be dispatched.");
+        super::super::gateway_mcp::stop(server["id"].as_str().unwrap(), &ctx).await.unwrap();
+        let error = search(json!({"query":"stopped service must remain stopped"}), &ctx).await.unwrap_err();
+        assert_eq!(error.code, "MCP_STOPPED");
+        assert_eq!(exa.starts.load(Ordering::Acquire), 2);
+        assert_eq!(exa.calls.load(Ordering::Acquire), 1);
+        cleanup_search(&ctx).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn handshake_eof_reconnects_read_only_search_once_without_reusing_failed_startup() {
+        for recover in [true, false] {
+            let (mut ctx, _keep) = super::super::gateway::test_context();
+            let root = ctx.workdir.parent().unwrap();
+            let script_path = root.join("handshake-search.ps1");
+            let marker_path = root.join("handshake-count.txt");
+            let script = r#"param([string]$CounterPath,[string]$Recover)
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$starts = if ([IO.File]::Exists($CounterPath)) { [int][IO.File]::ReadAllText($CounterPath) } else { 0 }
+[IO.File]::WriteAllText($CounterPath, [string]($starts + 1))
+$requestLine = [Console]::ReadLine()
+if ($starts -eq 0 -or $Recover -ne 'true') { exit 0 }
+while ($null -ne $requestLine) {
+    $request = $requestLine | ConvertFrom-Json
+    if ($null -ne $request.id) {
+        $result = switch ($request.method) {
+            'initialize' { @{protocolVersion='2025-11-25';capabilities=@{tools=@{}};serverInfo=@{name='eof-search-fixture';version='1'}} }
+            'tools/list' { @{tools=@(@{name='web_search_exa';inputSchema=@{type='object';properties=@{query=@{type='string'};numResults=@{type='integer'}};required=@('query')}})} }
+            'tools/call' { @{structuredContent=@{results=@(@{url='https://example.org/reconnected';title='Reconnected fixture';excerpts=@('Actual read after a fresh handshake')})}} }
+            default { @{} }
+        }
+        $reply = @{jsonrpc='2.0';id=$request.id;result=$result} | ConvertTo-Json -Depth 20 -Compress
+        [Console]::WriteLine($reply)
+    }
+    $requestLine = [Console]::ReadLine()
+}
+"#;
+            std::fs::write(&script_path, script).unwrap();
+            let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            ctx.config["mcpServers"] = json!([{"id":"official-exa","name":"EOF search fixture","transport":"stdio","trusted":true,"enabled":true,"command":powershell,"args":["-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",script_path.to_string_lossy(),marker_path.to_string_lossy(),if recover {"true"}else{"false"}],"cwd":root,"startupTimeoutMs":3000,"timeoutMs":5000}]);
+            let result = search(json!({"query":"handshake EOF fixture"}), &ctx).await;
+            assert_eq!(std::fs::read_to_string(&marker_path).unwrap(), "2", "The bounded read retry must start a fresh MCP process exactly once: {result:?}");
+            if recover {
+                let value = result.unwrap();
+                assert_eq!(value["attempts"][0]["code"], "WEB_SEARCH_TRANSIENT");
+                assert_eq!(value["attempts"][0]["details"]["causeCode"], "MCP_CONNECTION_CLOSED");
+                assert_eq!(value["attempts"][1]["retry"], true);
+                assert_eq!(value["sources"][0]["url"], "https://example.org/reconnected");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "WEB_SEARCH_TRANSIENT");
+                assert_eq!(error.details["causeCode"], "MCP_CONNECTION_CLOSED");
+            }
+            cleanup_search(&ctx).await;
+        }
     }
 
     #[tokio::test]

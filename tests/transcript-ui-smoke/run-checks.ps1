@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidateSet('format', 'all', 'block-copy', 'content-reading', 'appearance-reading', 'body-search', 'language-navigation', 'clipboard-persistence', 'render-performance', 'metadata', 'diagrams', 'diagram-export', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final', 'prompt-queue', 'steering-reply', 'workspace-preview', 'workspace-chrome', 'message-attachments', 'work-tabs')]
+    [ValidateSet('format', 'all', 'block-copy', 'content-reading', 'appearance-reading', 'body-search', 'language-navigation', 'clipboard-persistence', 'render-performance', 'metadata', 'diagrams', 'diagram-export', 'typography', 'message-time-cache', 'reply-timing', 'retrieval-tools', 'inline-math', 'computer-tools', 'multiline', 'api-final', 'prompt-queue', 'unknown-outcome', 'steering-reply', 'workspace-preview', 'workspace-chrome', 'message-attachments', 'work-tabs')]
     [string]$Scenario = 'format',
     [string]$ApiReportPath,
     [switch]$BuildOnly,

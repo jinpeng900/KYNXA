@@ -21,6 +21,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, mpsc};
 
 const MAX_RPC_BYTES: usize = 32 * 1024 * 1024;
+/// Default per-call MCP execution deadline when the server sets no timeoutMs: long enough for renders and builds.
+/// 服务未设置 timeoutMs 时的 MCP 单次调用默认执行期限，足以覆盖渲染与构建等较长操作。
+const DEFAULT_MCP_EXECUTION_MS: u64 = 600_000;
 const PROTOCOL: &str = "2025-11-25";
 const MCP_BUDGET_REFRESH: Duration = Duration::from_secs(5);
 
@@ -239,7 +242,7 @@ enum Transport {
 
 pub(crate) struct McpClient {
     transport: Transport,
-    sequence: u64,
+    sequence: Arc<AtomicU64>,
     protocol: String,
     pub(crate) tools: Vec<Value>,
     configuration: String,
@@ -251,10 +254,14 @@ pub(crate) struct McpClient {
     external_node: bool,
     background_task: bool,
     memory_observation: Value,
+    tasks: Value,
+    parallel_active: Arc<AtomicUsize>,
+    detached_read: bool,
 }
 
 impl Drop for McpClient {
     fn drop(&mut self) {
+        if self.detached_read { self.parallel_active.fetch_sub(1, Ordering::AcqRel); }
         match &mut self.transport {
             Transport::Stdio { child, stderr, .. } => {
                 let _ = child.start_kill();
@@ -315,7 +322,7 @@ fn installed_path(path: &Path, directory: bool) -> bool {
     }
     true
 }
-fn validate_runtime(server: &Value) -> Result<bool, GatewayError> {
+pub(crate) fn validate_runtime(server: &Value) -> Result<bool, GatewayError> {
     let command = server["command"].as_str().unwrap_or("");
     let args = server["args"].as_array().cloned().unwrap_or_default();
     let filename = Path::new(command)
@@ -436,7 +443,7 @@ pub(crate) fn servers(ctx: &GatewayToolContext) -> Vec<Value> {
         .collect()
 }
 
-async fn headers(server: &Value) -> Result<HeaderMap, GatewayError> {
+async fn headers(server: &Value, ctx: &GatewayToolContext) -> Result<HeaderMap, GatewayError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
@@ -476,6 +483,11 @@ async fn headers(server: &Value) -> Result<HeaderMap, GatewayError> {
             HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|_| failure("MCP_INVALID_CONFIG", "MCP 认证无效。", 400))?,
         );
+    }
+    if server["auth"]["type"] == "oauth-authorization-code" {
+        let token = super::gateway_mcp_oauth::token(server, ctx).await?;
+        headers.insert(reqwest::header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| failure("MCP_AUTH_FAILED", "OAuth token 无效。", 401))?);
     }
     if server["auth"]["type"] == "oauth-client-credentials" {
         let auth = &server["auth"];
@@ -865,11 +877,11 @@ impl McpClient {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_millis(
-                    server["timeoutMs"].as_u64().unwrap_or(120_000),
+                    server["timeoutMs"].as_u64().unwrap_or(DEFAULT_MCP_EXECUTION_MS),
                 ))
                 .build()
                 .map_err(|_| failure("MCP_HTTP_FAILED", "MCP HTTP 客户端初始化失败。", 500))?;
-            let headers = headers(server).await?;
+            let headers = headers(server, ctx).await?;
             if server["transport"] == "sse" {
                 let response = client
                     .get(url.clone())
@@ -958,7 +970,7 @@ impl McpClient {
             .insert(server["id"].as_str().unwrap_or("").to_owned(), close_tx);
         let mut client = Self {
             transport,
-            sequence: 0,
+            sequence: Arc::new(AtomicU64::new(0)),
             protocol: protocol.to_owned(),
             tools: Vec::new(),
             configuration: server.to_string(),
@@ -970,8 +982,11 @@ impl McpClient {
             external_node,
             background_task: server["backgroundTask"] == true,
             memory_observation: json!({"measured":false,"reason":"not-yet-sampled"}),
+            tasks: Value::Null,
+            parallel_active: Arc::new(AtomicUsize::new(0)),
+            detached_read: false,
         };
-        let result=client.rpc("initialize",json!({"protocolVersion":client.protocol,"capabilities":{},"clientInfo":{"name":"KYNXA","version":env!("CARGO_PKG_VERSION")}}),ctx,server["startupTimeoutMs"].as_u64().unwrap_or(30_000)).await?;
+        let result=client.rpc("initialize",json!({"protocolVersion":client.protocol,"capabilities":{"tasks":{}},"clientInfo":{"name":"KYNXA","version":env!("CARGO_PKG_VERSION")}}),ctx,server["startupTimeoutMs"].as_u64().unwrap_or(30_000)).await?;
         client.protocol = result["protocolVersion"]
             .as_str()
             .ok_or_else(|| failure("MCP_INVALID_INITIALIZE", "MCP 初始化没有协议版本。", 502))?
@@ -980,9 +995,10 @@ impl McpClient {
             return Err(failure("MCP_UNSUPPORTED_PROTOCOL", "MCP 服务返回了尚未实现的协议版本，未继续发送不兼容请求。", 502));
         }
         let supports_resources = result["capabilities"]["resources"].is_object();
+        client.tasks = if client.protocol.as_str() >= "2025-11-25" { result["capabilities"]["tasks"].clone() } else { Value::Null };
         client.resources = supports_resources;
         client
-            .notify("notifications/initialized", json!({}))
+            .notify("notifications/initialized", json!({}), ctx)
             .await?;
         let mut cursor = Value::Null;
         for _ in 0..if result["capabilities"]["tools"].is_object() { 32 } else { 0 } {
@@ -1042,7 +1058,21 @@ impl McpClient {
         Ok(client)
     }
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), GatewayError> {
+    async fn refresh_auth(&mut self, ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+        let server: Value = serde_json::from_str(&self.configuration)
+            .map_err(|_| failure("MCP_INVALID_CONFIG", "MCP 连接配置不可读。", 500))?;
+        if server["auth"]["type"] == "oauth-authorization-code" {
+            let fresh = headers(&server, ctx).await?;
+            match &mut self.transport {
+                Transport::Http { headers, .. } | Transport::Sse { headers, .. } => *headers = fresh,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn notify(&mut self, method: &str, params: Value, ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+        self.refresh_auth(ctx).await?;
         let request = json!({"jsonrpc":"2.0","method":method,"params":params});
         match &mut self.transport {
             Transport::Stdio { input, .. } => {
@@ -1101,10 +1131,10 @@ impl McpClient {
         ctx: &GatewayToolContext,
         timeout_ms: u64,
     ) -> Result<Value, GatewayError> {
+        self.refresh_auth(ctx).await?;
         self.last_used = tokio::time::Instant::now();
         let subscription_uri = params["uri"].as_str().map(str::to_owned);
-        self.sequence += 1;
-        let id = self.sequence;
+        let id = self.sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         let mut cancellation = ctx.cancellation.clone();
         let mut close = self.close.clone();
@@ -1252,6 +1282,25 @@ impl McpClient {
         }
         Ok(())
     }
+
+    /// Streamable HTTP supports independent request/response exchanges in the established session.
+    /// Streamable HTTP 在既有会话中复用独立交换；stdio/SSE 保持原有顺序队列。
+    fn independent_http_read(&self, descriptor: &Value, args: &Value) -> Option<Self> {
+        if descriptor["annotations"]["readOnlyHint"] != true || descriptor["annotations"]["destructiveHint"] == true
+            || ["tabId","pageId","sessionId","browserId"].iter().any(|key|args.get(key).is_some())
+            || !["url","path","uri","filePath"].iter().any(|key|args[*key].as_str().is_some_and(|v|!v.trim().is_empty() && v.len()<=8192)) {
+            return None;
+        }
+        let Transport::Http { client,url,headers,session } = &self.transport else { return None; };
+        self.parallel_active.fetch_add(1, Ordering::AcqRel);
+        Some(Self {
+            transport:Transport::Http { client:client.clone(),url:url.clone(),headers:headers.clone(),session:session.clone() },
+            sequence:self.sequence.clone(),protocol:self.protocol.clone(),tools:self.tools.clone(),configuration:self.configuration.clone(),
+            close:self.close.clone(),resources:self.resources,diagnostic_id:self.diagnostic_id,last_used:tokio::time::Instant::now(),
+            subscriptions:HashSet::new(),external_node:false,background_task:self.background_task,memory_observation:self.memory_observation.clone(),tasks:self.tasks.clone(),
+            parallel_active:self.parallel_active.clone(),detached_read:true,
+        })
+    }
 }
 
 pub(crate) async fn connection(
@@ -1260,6 +1309,43 @@ pub(crate) async fn connection(
 ) -> Result<Arc<Mutex<McpClient>>, GatewayError> {
     connection_with_priority(server, ctx, false, None).await
 }
+
+pub(crate) fn transient_connection_failure(code: &str) -> bool {
+    matches!(code, "MCP_TIMEOUT" | "MCP_START_TIMEOUT" | "MCP_CONNECTION_FAILED"
+        | "MCP_CONNECTION_LOST" | "MCP_CONNECTION_CLOSED" | "MCP_CLEANUP_PENDING")
+}
+
+/// Prepare only the search owner's bounded read retry; never replay an invocation or reset an explicit stop.
+/// 仅准备搜索所有者的有界只读重试，不重放调用，也不撤销用户停止；配置、代次及资源规则继续有效。
+pub(crate) async fn prepare_read_retry(server: &Value, ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    super::gateway::check_configuration_generation(ctx)?;
+    let id = server["id"].as_str().unwrap_or("");
+    let lifecycle = &ctx.runtime.mcp_lifecycle;
+    let generation = invocation_generation(ctx);
+    lifecycle.check(id, generation)?;
+    check_cancelled(ctx)?;
+    let gate = lifecycle.gate(id).await;
+    let _singleflight = tokio::select! {guard=gate.lock_owned()=>guard,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
+    lifecycle.check(id, generation)?;
+    let cached = ctx.runtime.mcp.lock().await.get(id).cloned();
+    if let Some(client) = cached {
+        let closed = {
+            let client = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
+            let closed = *client.close.borrow();
+            closed
+        };
+        if closed { disconnect(id, ctx).await?; }
+    }
+    let configuration = server.to_string();
+    let mut failures = lifecycle.failures.lock().await;
+    // The caller already observed its short cooldown; auth, quota and a different configuration keep their failures.
+    // 调用方已遵守短冷却；认证、额度以及其他配置的失败记录保留，不通过重试旁路清除。
+    if failures.get(id).is_some_and(|(saved, _, error)| saved == &configuration && transient_connection_failure(&error.code)) {
+        failures.remove(id);
+    }
+    lifecycle.check(id, generation)
+}
+
 async fn lifecycle_cancelled(ctx: &GatewayToolContext, id: &str, generation: u64) -> GatewayError {
     loop {
         if let Err(error) =
@@ -1309,7 +1395,7 @@ async fn admit_buffers(
         "memoryBytes":MAX_RPC_BYTES,"gpuMemoryBytes":0,"waitMs":if background{5000}else{30000},"ttlMs":30000});
     // An owned admission future survives caller cancellation long enough to retire a racing late grant.
     // 自有准入任务在调用方取消后继续核销竞争中的晚到授额，不能丢弃尚未兑现的预约回执。
-    let attempt = tokio::spawn(async move { service.acquire(request, cancellation).await });
+    let attempt = tokio::spawn(async move { service.acquire_waiting(request, cancellation).await });
     let lease = attempt
         .await
         .map_err(|_| failure("RESOURCE_RUNTIME_EXITED", "MCP 资源准入任务退出。", 503))??;
@@ -1578,7 +1664,7 @@ async fn reap_idle(ctx: &GatewayToolContext, timeout: Duration) {
         let Ok(mut state) = client.try_lock() else {
             continue;
         };
-        if state.background_task || !state.subscriptions.is_empty() {
+        if state.background_task || !state.subscriptions.is_empty() || state.parallel_active.load(Ordering::Acquire)>0 {
             continue;
         }
         let (used, owned) = (
@@ -1634,7 +1720,7 @@ async fn reap_idle(ctx: &GatewayToolContext, timeout: Duration) {
         let Ok(mut state) = client.try_lock() else {
             continue;
         };
-        if state.background_task || !state.subscriptions.is_empty() {
+        if state.background_task || !state.subscriptions.is_empty() || state.parallel_active.load(Ordering::Acquire)>0 {
             continue;
         }
         if state.last_used != used || (state.last_used.elapsed() < timeout && !memory_pressure) {
@@ -1888,6 +1974,7 @@ async fn remember_actual_catalog(
         "name":format!("mcp.{id}.{}",tool["name"].as_str().unwrap_or("")),
         "description":tool["description"],"source":format!("mcp:{id}"),"serverId":id,"toolName":tool["name"],
         "configurationFingerprint":fingerprint,"originalInputSchema":tool["inputSchema"],
+        "annotations":tool["annotations"],"execution":tool["execution"],
         "inputSchema":{"type":"object","properties":{"arguments":tool["inputSchema"],
             "policy":{"type":"object","properties":{"reason":{"type":"string","minLength":1,"maxLength":2000}}}},
             "required":["arguments","policy"],"additionalProperties":false}
@@ -1962,6 +2049,156 @@ pub(crate) fn authorized_server(
     Ok(server)
 }
 
+pub(crate) fn builtin_task(name: &str) -> bool {
+    ["mcp.task.status","mcp.task.result","mcp.task.cancel"].contains(&name)
+}
+
+pub(crate) fn task_descriptors() -> Vec<Value> {
+    [("mcp.task.status","Read the current state of a previously created MCP task using its original archived resultRef. Does not restart the tool; working/input_required is not completion."),
+        ("mcp.task.result","Retrieve the actual final result of an existing MCP task through its original archived resultRef. Never repeat the original tools/call. A task status alone does not prove result quality."),
+        ("mcp.task.cancel","Explicitly cancel an existing remote MCP task using its original archived resultRef. Requires the server's advertised cancellation capability; preserves the original operation and its known/unknown outcome.")]
+        .into_iter().map(|(name,description)|json!({"name":name,"source":"builtin","description":description,
+            "inputSchema":{"type":"object","properties":{"resultRef":{"type":"object","properties":{"id":{"type":"string","minLength":1},"sha256":{"type":"string"},"bytes":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":false},"reason":{"type":"string","maxLength":2000}},"required":["resultRef"],"additionalProperties":false}})).collect()
+}
+
+fn task_handle(server: &Value, task: &Value, name: &str, ctx: &GatewayToolContext) -> Value {
+    json!({"kind":"mcp-task","serverId":server["id"],"taskId":task["taskId"],"toolName":name,
+        "conversationId":ctx.conversation_id,"requestId":ctx.config["activeRequestId"],"toolCallId":ctx.config["activeToolCallId"],"operationId":ctx.config["activeOperationId"],
+        "configurationFingerprint":super::gateway_tool_memory::server_fingerprint(server)})
+}
+
+fn unknown_task(handle: &Value, code: &str, cause: Option<&GatewayError>) -> Value {
+    json!({"isError":true,"status":"unknown","code":code,"causeCode":cause.map(|error|&error.code),"recoveryHandle":handle,
+        "content":[{"type":"text","text":"The remote task was accepted. Query its original task ID; never repeat the original action. / 远端任务已接受，必须查询原任务，不能重新执行原动作。"}]})
+}
+
+fn checked_task(value: Value, id: Option<&str>) -> Result<Value,GatewayError> {
+    let task_id = value["taskId"].as_str().filter(|id|!id.is_empty() && id.len()<=1024)
+        .ok_or_else(||failure("MCP_INVALID_TASK","MCP 任务回执缺少真实任务身份。",502))?;
+    if id.is_some_and(|id|id!=task_id) || !matches!(value["status"].as_str(),Some("working"|"input_required"|"completed"|"failed"|"cancelled")) {
+        return Err(failure("MCP_INVALID_TASK","MCP 任务身份或状态无效，未推断完成。",502));
+    }
+    Ok(value)
+}
+
+/// Crash recovery queries a journaled remote identity; it never dispatches the original tool again.
+/// 崩溃恢复只查询正式事件日志中的远端身份，绝不再次派发原工具。
+pub(crate) async fn recover_checkpoint(handle: &Value, original_call_id: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    if handle["kind"] != "mcp-task" || handle["conversationId"] != ctx.conversation_id
+        || handle["toolCallId"] != original_call_id || original_call_id.is_empty() {
+        return Err(failure("MCP_TASK_SCOPE_INVALID", "远端任务检查点不属于此聊天的原调用。", 403));
+    }
+    let server = servers(ctx).into_iter().find(|server| server["id"] == handle["serverId"])
+        .ok_or_else(|| failure("MCP_SERVER_NOT_FOUND", "原 MCP 服务未启用，已保留任务检查点。", 409))?;
+    if super::gateway_tool_memory::server_fingerprint(&server) != handle["configurationFingerprint"] {
+        return Err(failure("MCP_TASK_CONFIG_CHANGED", "服务配置已改变，未查询其他来源。", 409));
+    }
+    let id = handle["taskId"].as_str().filter(|id|!id.is_empty() && id.len()<=1024)
+        .ok_or_else(|| failure("MCP_INVALID_TASK", "检查点没有有效远端任务 ID。", 409))?;
+    let task = checked_task(task_rpc(&server, "tasks/get", id, ctx).await?, Some(id))?;
+    if !matches!(task["status"].as_str(), Some("completed"|"failed"|"cancelled")) {
+        return Ok(json!({"status":"waiting","remoteTask":task,"recoveryHandle":handle}));
+    }
+    let mut result = task_rpc(&server,"tasks/result",id,ctx).await?;
+    if !result.is_object() { return Err(failure("MCP_INVALID_TASK_RESULT","远端任务结果无效，未判定完成。",502)); }
+    if task["status"] != "completed" { result["isError"] = json!(true); }
+    result["remoteTask"] = task;
+    result["recoveryHandle"] = handle.clone();
+    Ok(json!({"status":"settled","result":result}))
+}
+
+async fn task_rpc(server: &Value, method: &str, task_id: &str, ctx: &GatewayToolContext) -> Result<Value,GatewayError> {
+    for attempt in 0..2 {
+        let generation = invocation_generation(ctx);
+        let id = server["id"].as_str().unwrap_or("");
+        let result=async {
+            let client = connection_with_priority(server,ctx,false,Some(generation)).await?;
+            let _permit = tokio::select! {permit=ctx.runtime.mcp_lifecycle.calls.acquire_owned()=>permit,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
+            let _buffers=admit_buffers(ctx,id,generation,false).await?;
+            let mut client = tokio::select! {client=client.lock()=>client,error=lifecycle_cancelled(ctx,id,generation)=>return Err(error)};
+            if !client.tasks.is_object() || method=="tasks/cancel" && !client.tasks["cancel"].is_object() {
+                return Err(failure("MCP_TASK_UNSUPPORTED","该服务未协商对应任务协议，不会重做原调用。",409));
+            }
+            client.rpc(method,json!({"taskId":task_id}),ctx,server["timeoutMs"].as_u64().unwrap_or(DEFAULT_MCP_EXECUTION_MS)).await
+        }.await;
+        match result {
+            Err(error) if attempt==0 && method!="tasks/cancel" && transient_connection_failure(&error.code)=> {
+                // Only the identity query may retry; a healthy stdio owner is never killed to retry a task read.
+                // 仅身份查询可短重试；不会为了重试读取而杀掉健康的 stdio 任务宿主。
+                prepare_read_retry(server,ctx).await?;
+                let mut cancellation=ctx.cancellation.clone();
+                tokio::select! {_=tokio::time::sleep(Duration::from_millis(100))=>{},_=super::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("TOOL_CANCELLED","任务状态查询已取消，远端身份已保留。",409))}
+            },
+            other=>return other,
+        }
+    }
+    unreachable!("bounded task query retry always returns its second result")
+}
+
+async fn poll_task(server: &Value, first: Value, name: &str, ctx: &GatewayToolContext) -> Result<Value,GatewayError> {
+    let mut task = match checked_task(first.clone(),None) {
+        Ok(task)=>task,
+        Err(error)=>return Ok(unknown_task(&task_handle(server,&first,name,ctx),"MCP_EXECUTION_UNKNOWN",Some(&error))),
+    };
+    let handle = task_handle(server,&task,name,ctx);
+    let task_id = task["taskId"].as_str().unwrap().to_owned();
+    // The normal run event journal preserves this identity before any deferred-result wait or network failure.
+    // 远端身份先进入现有运行事件日志，再等待延迟结果；断线或重启后可据此查询，不能重派动作。
+    emit(ctx,json!({"type":"mcp_task_checkpoint","toolCallId":ctx.config["activeToolCallId"],"operationId":ctx.config["activeOperationId"],"recoveryHandle":handle})).await;
+    loop {
+        if matches!(task["status"].as_str(),Some("completed"|"failed"|"cancelled")) {
+            return match task_rpc(server,"tasks/result",&task_id,ctx).await {
+                Ok(mut result) => {
+                    if !result.is_object(){return Ok(unknown_task(&handle,"MCP_INVALID_TASK_RESULT",None));}
+                    if task["status"]!="completed" {result["isError"]=json!(true);}
+                    result["remoteTask"] = task;
+                    Ok(result)
+                },
+                Err(error) => Ok(unknown_task(&handle,"MCP_EXECUTION_UNKNOWN",Some(&error))),
+            };
+        }
+        if task["status"]=="input_required" {return Ok(unknown_task(&handle,"MCP_TASK_INPUT_REQUIRED",None));}
+        let interval = task["pollInterval"].as_u64().unwrap_or(1000).max(50);
+        let Some(deadline) = tokio::time::Instant::now().checked_add(Duration::from_millis(interval)) else {
+            return Ok(unknown_task(&handle,"MCP_INVALID_TASK_POLL",None));
+        };
+        let mut cancellation = ctx.cancellation.clone();
+        tokio::select! {
+            _=tokio::time::sleep_until(deadline)=>{},
+            _=super::gateway::wait_for_cancellation(&mut cancellation)=>return Ok(unknown_task(&handle,"MCP_EXECUTION_UNKNOWN",None)),
+        }
+        match task_rpc(server,"tasks/get",&task_id,ctx).await.and_then(|value|checked_task(value,Some(&task_id))) {
+            Ok(observed) => {task=observed;emit(ctx,json!({"type":"mcp_task_progress","toolCallId":ctx.config["activeToolCallId"],"remoteTaskId":task_id,"status":task["status"]})).await;},
+            Err(error)=>return Ok(unknown_task(&handle,"MCP_EXECUTION_UNKNOWN",Some(&error))),
+        }
+    }
+}
+
+pub(crate) async fn execute_task(name:&str,args:Value,ctx:&GatewayToolContext)->Result<Value,GatewayError>{
+    let root=ctx.data_home.clone();let conversation=ctx.conversation_id.clone();
+    let reference=args["resultRef"].clone();
+    let archived=tokio::task::spawn_blocking(move ||crate::storage::gateway::load_private_tool_result(&root,&conversation,reference["id"].as_str().unwrap_or("")))
+        .await.map_err(|_|failure("MCP_TASK_ARCHIVE_FAILED","原任务回执读取失败。",503))??;
+    if args["resultRef"]["sha256"].as_str().is_some_and(|hash|archived["sha256"]!=hash){return Err(failure("MCP_TASK_ARCHIVE_CHANGED","原任务回执身份已改变。",409));}
+    let handle=&archived["canonical"]["recoveryHandle"];
+    if handle["kind"]!="mcp-task" || handle["conversationId"]!=ctx.conversation_id || archived["toolCallId"]!=handle["toolCallId"] {
+        return Err(failure("MCP_TASK_SCOPE_INVALID","此回执不属于当前聊天的原 MCP 任务。",403));
+    }
+    let server=servers(ctx).into_iter().find(|server|server["id"]==handle["serverId"])
+        .ok_or_else(||failure("MCP_SERVER_NOT_FOUND","原 MCP 服务尚未启用。",409))?;
+    if super::gateway_tool_memory::server_fingerprint(&server)!=handle["configurationFingerprint"] {return Err(failure("MCP_TASK_CONFIG_CHANGED","原任务的服务配置已变化，未查询其他来源。",409));}
+    let id=handle["taskId"].as_str().ok_or_else(||failure("MCP_INVALID_TASK","原任务身份无效。",409))?;
+    if name=="mcp.task.cancel" {return task_rpc(&server,"tasks/cancel",id,ctx).await.and_then(|value|checked_task(value,Some(id)));}
+    let task=checked_task(task_rpc(&server,"tasks/get",id,ctx).await?,Some(id))?;
+    if name=="mcp.task.status" {return Ok(json!({"remoteTask":task,"recoveryHandle":handle}));}
+    if !matches!(task["status"].as_str(),Some("completed"|"failed"|"cancelled")){return Ok(unknown_task(handle,"MCP_TASK_RUNNING",None));}
+    let mut result=task_rpc(&server,"tasks/result",id,ctx).await?;
+    if !result.is_object(){return Err(failure("MCP_INVALID_TASK_RESULT","原任务结果格式无效，未标记成功。",502));}
+    if task["status"]!="completed" {result["isError"]=json!(true);}
+    result["_mcpTaskProof"]=json!({"serverId":handle["serverId"],"taskId":id,"toolCallId":handle["toolCallId"],"configurationFingerprint":handle["configurationFingerprint"],"terminalStatus":task["status"]});
+    Ok(result)
+}
+
 pub(crate) async fn execute(
     name: &str,
     args: Value,
@@ -1992,7 +2229,7 @@ pub(crate) async fn execute(
     let arguments = args.get("arguments").cloned().unwrap_or(args);
     super::gateway::validate_schema(&descriptor["inputSchema"], &arguments, name)?;
     let operation = descriptor["operation"].as_str().unwrap_or("tools/call");
-    let params = if operation == "tools/call" {
+    let mut params = if operation == "tools/call" {
         json!({"name":tool,"arguments":arguments})
     } else {
         arguments
@@ -2009,19 +2246,36 @@ pub(crate) async fn execute(
             409,
         ));
     }
-    let result = client
-        .rpc(
-            operation,
-            params,
-            ctx,
-            server["timeoutMs"].as_u64().unwrap_or(120_000),
-        )
-        .await;
-    drop(client);
+    let task_supported=operation=="tools/call" && client.tasks["requests"]["tools"]["call"].is_object()
+        && matches!(descriptor["execution"]["taskSupport"].as_str(),Some("optional"|"required"));
+    if operation=="tools/call" && descriptor["execution"]["taskSupport"]=="required" && !task_supported {
+        return Err(failure("MCP_TASK_UNSUPPORTED","该工具要求服务尚未协商的任务协议，未派发。",409));
+    }
+    if task_supported {params["task"]=json!({});}
+    let independent = if operation == "tools/call" { client.independent_http_read(descriptor, &params["arguments"]) } else { None };
+    let was_independent=independent.is_some();
+    let timeout = server["timeoutMs"].as_u64().unwrap_or(DEFAULT_MCP_EXECUTION_MS);
+    let result = if let Some(mut independent) = independent {
+        client.last_used = tokio::time::Instant::now();
+        drop(client);
+        independent.rpc(operation, params, ctx, timeout).await
+    } else {
+        let result = client.rpc(operation,params,ctx,timeout).await;
+        drop(client);
+        result
+    };
+    drop(_permit);
+    drop(_buffers);
+    if was_independent {
+        let cached=ctx.runtime.mcp.lock().await.get(id).cloned();
+        if let Some(cached)=cached { if let Ok(mut canonical)=cached.try_lock() {
+            if canonical.configuration==server.to_string() {canonical.last_used=tokio::time::Instant::now();}
+        } }
+    }
     match result {
         Ok(value) => {
             ctx.runtime.mcp_errors.lock().await.remove(id);
-            Ok(value)
+            if task_supported {poll_task(&server,value["task"].clone(),name,ctx).await}else{Ok(value)}
         }
         Err(error)
             if [
@@ -2039,7 +2293,9 @@ pub(crate) async fn execute(
                 id.to_owned(),
                 failure_diagnostic(&error),
             );
-            let _ = disconnect(id, ctx).await;
+            // A failed independent HTTP read must not cancel other healthy exchanges sharing this session.
+            // 独立 HTTP 读取失败不能连带取消同一会话中其它健康交换。
+            if !was_independent {let _ = disconnect(id, ctx).await;}
             Ok(
                 json!({"isError":true,"status":"unknown","code":"MCP_EXECUTION_UNKNOWN","causeCode":error.code,"content":[{"type":"text","text":error.message}],"executionEnvironment":{"executorKind":if server["transport"]=="stdio"{"mcp-stdio"}else{"mcp-http"},"executorLocation":if server["transport"]=="stdio"{"gateway-host"}else{"remote-service"}}}),
             )
@@ -2217,7 +2473,7 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
         let ready = connected.iter().any(|value| value == id);
         let mut state = snapshots.as_array().into_iter().flatten().find(|value| value["serverId"] == id).cloned().unwrap_or_else(||json!({"serverId":id,"transport":server["transport"],"state":"disconnected","toolCount":0,"resourceCapabilities":{"resources":false,"templates":false}}));
         if !ready && state["state"] == "ready" { state["state"] = json!("disconnected"); state["toolCount"] = json!(0); }
-        if let Some(error) = errors.get(id) { state["code"] = error["code"].clone(); state["state"] = json!(if error["code"] == "MCP_AUTH_REQUIRED" {"auth-required"} else {"error"}); }
+        if let Some(error) = errors.get(id) { state["code"] = error["code"].clone(); state["state"] = json!(if ["MCP_AUTH_REQUIRED","MCP_OAUTH_LOGIN_REQUIRED","MCP_CREDENTIAL_MISSING","MCP_OAUTH_CREDENTIAL_LOCKED"].iter().any(|code| error["code"] == *code) {"auth-required"} else {"error"}); }
         state["name"] = server["name"].clone();
         state["enabled"] = json!(server["enabled"] != false);
         state["ready"] = json!(ready && state["state"] == "ready");
@@ -2247,6 +2503,86 @@ pub(crate) async fn diagnostics(ctx: &GatewayToolContext) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_task_checkpoint_recovers_actual_result_without_replaying_original_mutation() {
+        use axum::{Json, Router, extract::State, routing::post};
+        #[derive(Clone,Default)] struct StateData { calls:Arc<AtomicUsize>, reads:Arc<AtomicUsize>, fail:Arc<AtomicBool> }
+        async fn handler(State(state):State<StateData>,Json(request):Json<Value>)->Json<Value> {
+            let result=match request["method"].as_str().unwrap_or("") {
+                "initialize"=>json!({"protocolVersion":PROTOCOL,"capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}},"cancel":{}}},"serverInfo":{"name":"task-fixture","version":"1"}}),
+                "tools/list"=>json!({"tools":[{"name":"render","inputSchema":{"type":"object"},"execution":{"taskSupport":"optional"}}]}),
+                "tools/call"=> { assert!(request["params"]["task"].is_object());state.calls.fetch_add(1,Ordering::AcqRel);json!({"task":{"taskId":"original-render","status":"working","pollInterval":50}}) },
+                "tasks/get"=> {
+                    assert_eq!(request["params"]["taskId"],"original-render");
+                    if state.fail.load(Ordering::Acquire) {return Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32099,"message":"temporary fixture disconnect"}}));}
+                    json!({"taskId":"original-render","status":"completed"})
+                },
+                "tasks/result"=> {state.reads.fetch_add(1,Ordering::AcqRel);json!({"content":[{"type":"text","text":"actual-render-result"}]})},
+                _=>json!({}),
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        }
+        let state=StateData::default();state.fail.store(true,Ordering::Release);
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let app=Router::new().route("/mcp",post(handler)).with_state(state.clone());
+        let service=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
+        let (mut ctx,_keep)=super::super::gateway::test_context();let root=ctx.workdir.parent().unwrap().to_owned();
+        ctx.config["mcpServers"]=json!([{"id":"task-fixture","enabled":true,"transport":"streamable-http","url":format!("http://{address}/mcp")}]);
+        ctx.config["activeToolCallId"]=json!("original-call");ctx.config["activeOperationId"]=json!("original-operation");
+        let (events,mut observed)=tokio::sync::mpsc::channel(16);ctx.events=Some(events);
+        let unknown=execute("mcp.task-fixture.render",json!({"arguments":{}}),&ctx).await.unwrap();
+        assert_eq!(unknown["status"],"unknown");assert_eq!(unknown["recoveryHandle"]["taskId"],"original-render");
+        let mut checkpoint=None;
+        while let Ok(event)=observed.try_recv(){if event["type"]=="mcp_task_checkpoint" {checkpoint=Some(event);}}
+        let checkpoint=checkpoint.unwrap();assert_eq!(checkpoint["operationId"],"original-operation");
+        state.fail.store(false,Ordering::Release);
+        let recovered=recover_checkpoint(&checkpoint["recoveryHandle"],"original-call",&ctx).await.unwrap();
+        assert_eq!(recovered["status"],"settled");assert_eq!(recovered["result"]["content"][0]["text"],"actual-render-result");
+        assert_eq!(state.calls.load(Ordering::Acquire),1);assert_eq!(state.reads.load(Ordering::Acquire),1);
+        assert_eq!(recover_checkpoint(&checkpoint["recoveryHandle"],"other-call",&ctx).await.unwrap_err().code,"MCP_TASK_SCOPE_INVALID");
+        shutdown(&ctx).await;service.abort();std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn streamable_http_parallelizes_actual_independent_reads_and_keeps_writes_serial() {
+        use axum::{Json,Router,extract::State,routing::post};
+        #[derive(Clone,Default)] struct StateData { active:Arc<AtomicUsize>, peak:Arc<AtomicUsize>, ids:Arc<Mutex<HashSet<u64>>> }
+        async fn handler(State(state):State<StateData>,Json(request):Json<Value>)->Json<Value> {
+            let result=match request["method"].as_str().unwrap_or("") {
+                "initialize"=>json!({"protocolVersion":PROTOCOL,"capabilities":{"tools":{}},"serverInfo":{"name":"parallel-fixture","version":"1"}}),
+                "tools/list"=>json!({"tools":[{"name":"read","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false}},{"name":"write","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}}]}),
+                "tools/call"=> {
+                    assert!(request["params"].get("task").is_none());
+                    assert!(state.ids.lock().await.insert(request["id"].as_u64().unwrap()),"Concurrent exchanges must keep distinct RPC identities");
+                    let active=state.active.fetch_add(1,Ordering::AcqRel)+1;state.peak.fetch_max(active,Ordering::AcqRel);
+                    let path=request["params"]["arguments"]["path"].as_str().unwrap_or("");
+                    tokio::time::sleep(Duration::from_millis(if path=="bad"{20}else{80})).await;state.active.fetch_sub(1,Ordering::AcqRel);
+                    if path=="bad" {return Json(json!({"jsonrpc":"2.0","id":request["id"],"invalid":true}));}
+                    json!({"content":[{"type":"text","text":request["params"]["arguments"]["path"]}]})
+                },
+                _=>json!({}),
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        }
+        let state=StateData::default();let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let app=Router::new().route("/mcp",post(handler)).with_state(state.clone());let service=tokio::spawn(async move{axum::serve(listener,app).await.unwrap();});
+        let (mut ctx,_keep)=super::super::gateway::test_context();let root=ctx.workdir.parent().unwrap().to_owned();
+        ctx.config["mcpServers"]=json!([{"id":"parallel-fixture","enabled":true,"transport":"streamable-http","url":format!("http://{address}/mcp")}]);
+        let mut budget=ctx.runtime.mcp_lifecycle.budget();budget.calls=4;budget.sampled_at=Some(0);ctx.runtime.mcp_lifecycle.apply_budget(budget);
+        *ctx.runtime.mcp_lifecycle.last_refresh.lock().unwrap()=Some(tokio::time::Instant::now());
+        let (a,b)=tokio::join!(execute("mcp.parallel-fixture.read",json!({"arguments":{"path":"a.txt"}}),&ctx),execute("mcp.parallel-fixture.read",json!({"arguments":{"path":"b.txt"}}),&ctx));
+        assert!(a.is_ok() && b.is_ok());assert_eq!(state.peak.load(Ordering::Acquire),2);
+        let actual=ctx.runtime.schemas.read().await.iter().find(|tool|tool["name"]=="mcp.parallel-fixture.read").unwrap().clone();
+        assert_eq!(actual["annotations"]["readOnlyHint"],true);
+        state.peak.store(0,Ordering::Release);
+        let (a,b)=tokio::join!(execute("mcp.parallel-fixture.write",json!({"arguments":{"path":"same.txt"}}),&ctx),execute("mcp.parallel-fixture.write",json!({"arguments":{"path":"same.txt"}}),&ctx));
+        assert!(a.is_ok() && b.is_ok());assert_eq!(state.peak.load(Ordering::Acquire),1);
+        let (bad,healthy)=tokio::join!(execute("mcp.parallel-fixture.read",json!({"arguments":{"path":"bad"}}),&ctx),execute("mcp.parallel-fixture.read",json!({"arguments":{"path":"healthy"}}),&ctx));
+        assert_eq!(bad.unwrap()["code"],"MCP_EXECUTION_UNKNOWN");
+        assert_eq!(healthy.unwrap()["content"][0]["text"],"healthy","One failed exchange must not close a healthy concurrent read");
+        shutdown(&ctx).await;service.abort();std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rpc_failure_retains_only_safe_machine_metadata_and_default_errors_stay_compatible() {
@@ -2317,10 +2653,10 @@ mod tests {
         let client = Arc::new(Mutex::new(McpClient {
             transport:Transport::Http { client:reqwest::Client::new(), url:url::Url::parse("http://127.0.0.1:9/mcp").unwrap(),
                 headers:HeaderMap::new(),session:None },
-            sequence:0,protocol:PROTOCOL.into(),tools:vec![json!({"name":"echo","inputSchema":schema})],
+            sequence:Arc::new(AtomicU64::new(0)),protocol:PROTOCOL.into(),tools:vec![json!({"name":"echo","inputSchema":schema})],
             configuration:server.to_string(),close,resources:false,diagnostic_id:0,
             last_used:tokio::time::Instant::now(),subscriptions:HashSet::new(),external_node:false,
-            background_task:false,memory_observation:Value::Null,
+            background_task:false,memory_observation:Value::Null,tasks:Value::Null,parallel_active:Arc::new(AtomicUsize::new(0)),detached_read:false,
         }));
         ctx.runtime.mcp.lock().await.insert("cached".into(), client.clone());
         ctx.runtime.schemas.write().await.push(tool);

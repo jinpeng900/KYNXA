@@ -327,7 +327,36 @@ pub fn build_request(
             }
         }
     }
+    super::cache_policy::include_stream_usage(connection, model, name, &mut body);
+    super::cache_policy::canonicalize_request(&mut body);
     Ok(body)
+}
+
+/// Cache projection uses an authorized stable scope and an exact prefix, without storing a second request history.
+/// 缓存投影使用已核验稳定范围及逐字前缀，不另存第二份请求历史。
+pub fn apply_prompt_cache(connection: &Value, model: &str, body: &mut Value,
+    scope: &str, stable_system: &str) -> Value {
+    super::cache_policy::apply(connection, model, protocol(connection), body, scope, stable_system)
+}
+
+/// Auxiliary summaries retain their native system fields and reuse the same scoped provider policy.
+/// 辅助摘要保留协议原生系统字段，并复用相同的范围隔离及供应商缓存策略。
+pub fn apply_summary_prompt_cache(connection: &Value, model: &str, body: &mut Value, scope: &str) -> Value {
+    fn system_text(value: &Value) -> Option<String> {
+        if let Some(text) = value.as_str() { return Some(text.to_owned()); }
+        value.as_array()?.iter().try_fold(String::new(), |mut text, block| {
+            if !matches!(block["type"].as_str(), Some("text" | "input_text")) { return None; }
+            text.push_str(block["text"].as_str()?);
+            Some(text)
+        })
+    }
+    let stable_system = system_text(&body["instructions"])
+        .or_else(|| system_text(&body["system"]))
+        .or_else(|| body["messages"].as_array().into_iter().flatten()
+            .filter(|message| message["role"] == "system")
+            .find_map(|message| system_text(&message["content"])))
+        .unwrap_or_default();
+    apply_prompt_cache(connection, model, body, scope, &stable_system)
 }
 
 /// Validate the fully templated input against the same owned runtime, before generation is dispatched.
@@ -1283,6 +1312,35 @@ fn apply_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_summary_cache_uses_native_system_fields_without_changing_roles_or_responses_instructions() {
+        for (kind, model, base) in [("openai-responses","gpt-6.1-sol","https://api.openai.com/v1"),
+            ("openai-completions","gpt-4.1","https://api.openai.com/v1"),
+            ("anthropic-messages","claude-sonnet-4-5","https://api.anthropic.com/v1")] {
+            let connection=json!({"protocol":kind,"baseUrl":base,"providerId":"fixture"});
+            let (mut body,_)=build_summary_request(&connection,model,
+                &[json!({"role":"user","content":"untrusted history to summarize"})],
+                "stable summary guidance",Some(1024),false).unwrap();
+            let original=body.clone();
+            let field=if kind=="openai-responses" { "input" } else { "messages" };
+            let roles=body[field].as_array().unwrap().iter().map(|item|item["role"].clone()).collect::<Vec<_>>();
+            let policy=apply_summary_prompt_cache(&connection,model,&mut body,"summary-scope");
+            assert_ne!(policy["mode"],"unavailable");
+            assert_eq!(body[field].as_array().unwrap().iter().map(|item|item["role"].clone()).collect::<Vec<_>>(),roles);
+            if kind=="openai-responses" {
+                assert_eq!(body["instructions"],original["instructions"]);
+                assert_eq!(body["input"],original["input"]);
+                assert_eq!(body["prompt_cache_options"]["mode"],"implicit");
+            } else if kind=="openai-completions" { assert_eq!(body["messages"],original["messages"]); }
+            else { assert_eq!(body["system"][0]["text"],original["system"]); }
+        }
+        let connection=json!({"protocol":"openai-responses","baseUrl":"https://proxy.invalid/v1"});
+        let mut body=json!({"instructions":"guidance","input":[{"role":"user","content":"history"}]});
+        let original=body.clone();
+        apply_summary_prompt_cache(&connection,"gpt-6.1-sol",&mut body,"scope");
+        assert_eq!(body,original);
+    }
 
     #[test]
     fn measured_context_preflight_reserves_output_and_retains_actual_runtime_limit() {

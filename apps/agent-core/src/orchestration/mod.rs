@@ -12,6 +12,7 @@ pub mod gateway_task_http;
 pub mod gateway_model_pool;
 pub mod gateway_task_hub;
 pub mod gateway_task_worker;
+pub mod gateway_tool_batch;
 pub mod evidence_projection;
 pub mod evidence_publication;
 pub mod interpretation;

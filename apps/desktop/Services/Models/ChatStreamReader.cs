@@ -92,7 +92,7 @@ public static class ChatStreamReader
                             }
                             else
                             {
-                                if (assistantSegments.Count >= 128 || segment.Order <= lastTimelineOrder || assistantSegments.Values.Any(value => value.Round >= segment.Round || value.Status == "streaming" || value.Phase == "final_answer"))
+                                if (assistantSegments.Count >= 512 || segment.Order <= lastTimelineOrder || assistantSegments.Values.Any(value => value.Round >= segment.Round || value.Status == "streaming" || value.Phase == "final_answer"))
                                     throw InvalidSegment();
                                 lastTimelineOrder = segment.Order;
                             }
@@ -231,7 +231,7 @@ public static class ChatStreamReader
             _ => false
         };
         if (!validStatus) throw new InvalidDataException(UiText.Get("工具事件无效。"));
-        if ((tool.Round is null) != (tool.Order is null) || tool.Round is < 1 or > 128 || tool.Order is < 0 or > 1024)
+        if ((tool.Round is null) != (tool.Order is null) || tool.Round is < 1 or > 512 || tool.Order is < 0 or > 8192)
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
         if (tool.ResultRef is { } reference && (reference.Id == Guid.Empty || reference.Bytes < 0 || reference.Bytes > 8388608
             || string.IsNullOrEmpty(reference.Sha256) || reference.Sha256.Length != 64 || reference.Sha256.Any(character => !Uri.IsHexDigit(character))))

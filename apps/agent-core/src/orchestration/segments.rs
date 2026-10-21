@@ -1,5 +1,8 @@
 use serde_json::{Value, json};
 
+pub(crate) const MAX_MESSAGE_SEGMENTS: usize = 512;
+pub(crate) const MAX_SEGMENT_ORDER: u64 = 8192;
+
 fn invalid() -> String {
     "INVALID_CONVERSATION_DATA".into()
 }
@@ -95,7 +98,7 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
         "orchestration.segment.validate" => {
             let items = args["items"]
                 .as_array()
-                .filter(|items| items.len() <= 128)
+                .filter(|items| items.len() <= MAX_MESSAGE_SEGMENTS)
                 .ok_or_else(invalid)?;
             let mut ids = std::collections::HashSet::new();
             let mut orders = std::collections::HashSet::new();
@@ -118,9 +121,9 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
                 if !item["object"].as_bool().unwrap_or(false)
                     || !ids.insert(id)
                     || !orders.insert(order)
-                    || !integer(&item["round"], 1, 128)
+                    || !integer(&item["round"], 1, crate::models::transcript::MAX_TRANSCRIPT_ROUNDS as u64)
                     || round <= previous_round
-                    || !integer(&item["order"], 0, 1024)
+                    || !integer(&item["order"], 0, MAX_SEGMENT_ORDER)
                     || previous_order.is_some_and(|previous| order <= previous)
                     || final_seen
                     || !matches!(item["phase"].as_str(), Some("commentary" | "final_answer"))

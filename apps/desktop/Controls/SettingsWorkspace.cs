@@ -74,14 +74,20 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
     public Button AddPage(string key, string labelKey, string iconGlyph, Func<FrameworkElement> create, FontFamily font,
         FrameworkElement? headerAction = null)
     {
-        var body = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+        var body = new Grid { ColumnSpacing = 10 };
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         body.Children.Add(new FontIcon { Glyph = iconGlyph, FontSize = 16,
-            FontFamily = new FontFamily("Segoe Fluent Icons"), IsHitTestVisible = false });
-        var label = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center };
+            FontFamily = new FontFamily("Segoe Fluent Icons"), IsHitTestVisible = false, VerticalAlignment = VerticalAlignment.Center });
+        // Constrain translated labels to the remaining sidebar width so compact navigation can wrap instead of clipping.
+        // 将翻译后的标签限制在侧栏剩余宽度内，让紧凑导航自动换行，避免长名称被截断。
+        var label = new TextBlock { FontFamily = font, FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap };
         UiLocalization.Bind(label, TextBlock.TextProperty, labelKey);
+        Grid.SetColumn(label, 1);
         body.Children.Add(label);
         var button = new Button { Content = body, HorizontalAlignment = HorizontalAlignment.Stretch,
-            HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(12, 10, 12, 10),
+            HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(12, 10, 12, 10),
             MinWidth = 0, CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(0),
             Style = (Style)Application.Current.Resources["KynxaQuietButtonStyle"] };
         UiLocalization.Bind(button, AutomationProperties.NameProperty, labelKey);

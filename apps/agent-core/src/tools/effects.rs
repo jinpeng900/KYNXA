@@ -5,7 +5,7 @@ use std::path::Path;
 use super::local_files::{absolute_path, path_key};
 use super::service_filesystem::canonical;
 
-const MAX_EFFECT_RECEIPTS: usize = 512;
+const MAX_EFFECT_RECEIPTS: usize = 4096;
 
 #[derive(Clone)]
 struct EffectReceipt {
@@ -22,7 +22,11 @@ pub struct EffectLedger {
     completed: Vec<(String, EffectReceipt)>,
     protected_effects: Option<Vec<(String, EffectReceipt)>>,
     unknown: Vec<(String, EffectReceipt)>,
+    /// Unknown outcomes the user accepted: still unconfirmed, never reusable, but no longer a mutation barrier.
+    /// 用户已确认的未知结果：仍未核实、不可复用为成功回执，但不再阻止后续修改。
+    acknowledged_unknown: Vec<(String, EffectReceipt)>,
     receipts: Vec<Value>,
+    observed_receipt_count: u64,
     events: Vec<Value>,
     verified_effects: Vec<Value>,
 }
@@ -36,9 +40,6 @@ impl EffectLedger {
                 if arguments["observation"].as_bool().unwrap_or(false) {
                     return Ok(Value::Null);
                 }
-                if self.receipts.len() >= MAX_EFFECT_RECEIPTS {
-                    return Err("AGENT_CORE_EFFECT_LIMIT".into());
-                }
                 let key = effect_key(call)?;
                 let status = result
                     .get("status")
@@ -51,6 +52,10 @@ impl EffectLedger {
                             "completed"
                         })
                     });
+                // This list is a bounded diagnostic projection; recovery protection lives in the keyed sets.
+                // 此列表只是有界诊断投影；恢复保护保存在按操作键组织的集合中，不能因诊断容量丢弃。
+                self.observed_receipt_count = self.observed_receipt_count.saturating_add(1);
+                if self.receipts.len() == MAX_EFFECT_RECEIPTS { self.receipts.remove(0); }
                 self.receipts
                     .push(json!({"id": call["id"], "name": call["name"], "status": status}));
                 // Rebinding an old receipt is not a new dispatch or a fresh state observation.
@@ -115,6 +120,27 @@ impl EffectLedger {
                     .unwrap_or(Value::Null))
             }
             "effects.resolve" => self.resolve(arguments),
+            "effects.acknowledge" => {
+                // Only the formal task ledger supplies these IDs after an explicit user confirmation.
+                // 这些调用 ID 只来自正式任务账本中用户明确确认的记录；模型文字不能触发此操作。
+                let ids = arguments
+                    .get("toolCallIds")
+                    .and_then(Value::as_array)
+                    .ok_or("INVALID_AGENT_CORE_ARGUMENTS")?;
+                let mut acknowledged = 0;
+                for id in ids {
+                    while let Some(index) = self
+                        .unknown
+                        .iter()
+                        .position(|(_, receipt)| &receipt.call["id"] == id)
+                    {
+                        let (key, receipt) = self.unknown.remove(index);
+                        set_receipt(&mut self.acknowledged_unknown, key, receipt);
+                        acknowledged += 1;
+                    }
+                }
+                Ok(json!(acknowledged))
+            }
             "effects.record" => {
                 self.events.push(
                     json!({"code": arguments["code"], "action": arguments["action"],
@@ -131,7 +157,8 @@ impl EffectLedger {
             )),
             "effects.state" => Ok(json!({
                 "unknown": receipt_entries(&self.unknown), "hasUnknownEffects": !self.unknown.is_empty(),
-                "audit": self.audit()
+                "acknowledgedUnknown": receipt_entries(&self.acknowledged_unknown),
+                "effectCount": self.observed_receipt_count, "audit": self.audit()
             })),
             _ => Err("AGENT_CORE_OPERATION_UNKNOWN".into()),
         }
@@ -205,6 +232,7 @@ impl EffectLedger {
 
     fn audit(&self) -> Value {
         json!({"version": 1, "events": self.events, "unknownEffects": self.unknown.len(),
+            "acknowledgedUnknownEffects": self.acknowledged_unknown.len(),
             "verifiedEffects": self.verified_effects})
     }
 
@@ -333,6 +361,22 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_capacity_does_not_drop_recovery_protection_or_unknown_outcomes() {
+        let mut ledger = EffectLedger::default();
+        for index in 0..MAX_EFFECT_RECEIPTS + 5 {
+            ledger.apply("effects.observe", &json!({"call":call(&index.to_string(), &format!("command-{index}")),
+                "result":{"status":"completed"}})).unwrap();
+        }
+        ledger.apply("effects.protect", &json!({"includeCurrent":true})).unwrap();
+        let first = ledger.apply("effects.previous", &json!({"call":call("retry", "command-0")})).unwrap();
+        assert_eq!(first["result"]["status"], "completed");
+        assert_eq!(ledger.apply("effects.state", &json!({})).unwrap()["effectCount"], MAX_EFFECT_RECEIPTS + 5);
+        ledger.apply("effects.observe", &json!({"call":call("unknown", "uncertain"),"result":{"status":"unknown"}})).unwrap();
+        assert_eq!(ledger.apply("effects.state", &json!({})).unwrap()["hasUnknownEffects"], true);
+        assert!(ledger.apply("effects.previous", &json!({"call":call("retry", "command-0")})).unwrap().is_null());
+    }
+
+    #[test]
     fn protection_freezes_at_the_recovery_boundary() {
         let mut ledger = EffectLedger::default();
         let first = call("first", "first");
@@ -378,6 +422,30 @@ mod tests {
                 .unwrap()["call"]["id"],
             "later"
         );
+    }
+
+    #[test]
+    fn acknowledged_unknown_stops_blocking_without_becoming_reusable() {
+        let mut ledger = EffectLedger::default();
+        let original = call("original", "fixture");
+        ledger
+            .apply("effects.observe", &json!({"call": original, "result": {"status": "unknown"}}))
+            .unwrap();
+        ledger.apply("effects.protect", &json!({"includeCurrent": true})).unwrap();
+        assert_eq!(ledger.apply("effects.state", &json!({})).unwrap()["hasUnknownEffects"], true);
+        assert_eq!(
+            ledger.apply("effects.acknowledge", &json!({"toolCallIds": ["other", "original"]})).unwrap(),
+            1
+        );
+        let state = ledger.apply("effects.state", &json!({})).unwrap();
+        assert_eq!(state["hasUnknownEffects"], false);
+        assert_eq!(state["acknowledgedUnknown"].as_array().unwrap().len(), 1);
+        assert_eq!(state["audit"]["acknowledgedUnknownEffects"], 1);
+        // The confirmed unknown is never offered as a reusable success for the same call.
+        // 已确认的未知结果不能作为同一调用的成功回执复用。
+        assert!(ledger.apply("effects.previous", &json!({"call": original})).unwrap().is_null());
+        let fallback = ledger.apply("effects.fallback", &json!({"message": "继续处理"})).unwrap();
+        assert!(fallback.as_str().unwrap().contains("结果尚未确认 1 项"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ public sealed partial class RetrievalSettingsWindow
     private readonly Button _rebuild = new();
     private readonly Button _cancelJob = new();
     private readonly DispatcherTimer _jobTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly Grid _settingsRoot = new();
     private readonly Grid _titleBar = new();
 
@@ -83,6 +84,7 @@ public sealed partial class RetrievalSettingsWindow
         _settingsPanel.Children.Add(Row("语义检索", _semanticMode));
         _settingsPanel.Children.Add(Row("复杂查询重排", _rerankMode));
         _settingsPanel.Children.Add(Row("内置中英文模型", _embeddingStatus));
+        AutomationProperties.SetAutomationId(_embeddingStatus, "RetrievalEmbeddingStatus");
 
         var sourcesActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var addFile = ActionButton("添加文件", "RetrievalAddFile");
@@ -117,10 +119,17 @@ public sealed partial class RetrievalSettingsWindow
 
         root.Loaded += async (_, _) =>
         {
-            if (_loaded || _closed) return;
+            if (_closed) return;
+            StartStatusObservation();
+            if (_loaded)
+            {
+                await PollStatusAsync();
+                return;
+            }
             _loaded = true;
             await RunOperationAsync(LoadAsync);
         };
+        root.Unloaded += (_, _) => StopStatusObservation();
         foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
             picker.SelectionChanged += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Checked += async (_, _) => { if (!_rendering) await SaveAsync(); };
@@ -135,6 +144,7 @@ public sealed partial class RetrievalSettingsWindow
         });
         refresh.Click += async (_, _) => await RunOperationAsync(LoadAsync);
         _jobTimer.Tick += async (_, _) => await PollJobAsync();
+        _statusTimer.Tick += async (_, _) => await PollStatusAsync();
         _settingsHost.IsEnabled = false;
     }
 
@@ -152,11 +162,26 @@ public sealed partial class RetrievalSettingsWindow
             Background = AppearanceService.GetBrush("KynxaSettingsCardBrush") };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.Children.Add(Label(key));
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var label = Label(key);
+        row.Children.Add(label);
         control.HorizontalAlignment = HorizontalAlignment.Stretch;
         control.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(control, 1);
         row.Children.Add(control);
+        row.SizeChanged += (_, args) =>
+        {
+            // Give localized actions the full row on narrow pages without recreating controls or their selection state.
+            // 窄页中让本地化操作占用整行，保留已有控件及其选择状态，避免半宽列裁切按钮。
+            bool stacked = args.NewSize.Width < 620;
+            row.ColumnSpacing = stacked ? 0 : 16;
+            row.RowSpacing = stacked ? 8 : 0;
+            Grid.SetColumnSpan(label, stacked ? 2 : 1);
+            Grid.SetRow(control, stacked ? 1 : 0);
+            Grid.SetColumn(control, stacked ? 0 : 1);
+            Grid.SetColumnSpan(control, stacked ? 2 : 1);
+        };
         return row;
     }
 

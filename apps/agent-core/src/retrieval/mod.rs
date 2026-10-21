@@ -1,5 +1,9 @@
 pub mod ann_queue;
 pub mod budget;
+pub(crate) mod cache;
+pub(crate) mod cache_budget;
+pub(crate) mod cache_candidates;
+pub(crate) mod gateway_cache;
 pub mod candidates;
 pub mod chunking;
 pub mod code_units;

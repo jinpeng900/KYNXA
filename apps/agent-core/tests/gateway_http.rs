@@ -44,6 +44,9 @@ struct Provider {
     cancel_summary: Arc<std::sync::atomic::AtomicBool>,
     summary_requests: Arc<AtomicUsize>,
     skill_pagination_cycle: Arc<std::sync::atomic::AtomicBool>,
+    parallel_cycle: Arc<std::sync::atomic::AtomicBool>,
+    buffered_cycle: Arc<std::sync::atomic::AtomicBool>,
+    memory_approval_target: Arc<Mutex<Option<String>>>,
 }
 fn system_text(request: &Value) -> String {
     request["messages"]
@@ -66,6 +69,27 @@ fn is_completion_review_request(request: &Value) -> bool {
                 content.starts_with("Broker: compare the original requested work")
             })
         })
+}
+
+/// The mock reviews only the broker's actual checklist and verified receipts, without inventing evidence.
+/// 模拟核对仅读取实际发送的验收清单与成功回执，不凭空补造要求或证据来掩盖缺口。
+fn completion_review_reply(request: &Value, reason: &str) -> Value {
+    let note = request["messages"].as_array().unwrap().iter().rev()
+        .filter_map(|message| message["content"].as_str())
+        .find(|content| content.starts_with("Broker: compare the original requested work")).unwrap();
+    let requirements: Value = serde_json::from_str(note.split("Expected acceptance requirements: ").nth(1).unwrap()
+        .lines().next().unwrap()).unwrap();
+    let evidence: Value = serde_json::from_str(note.split("Verified completion evidence: ").nth(1).unwrap()
+        .lines().next().unwrap()).unwrap();
+    assert!(!evidence.as_array().unwrap().is_empty(), "a real effect needs a successful receipt");
+    // The footer accepts eight concise references per requirement; retain the latest real write/readback receipts.
+    // 尾部每项接受八条简短证据；取末段真实写入及读回回执，不把全部历史调用塞入单个验收项。
+    let evidence = evidence.as_array().unwrap().iter().rev().take(8).cloned().collect::<Vec<_>>();
+    let met = requirements.as_array().unwrap().iter().map(|requirement| json!({
+        "requirementId":requirement["requirementId"],"item":"verified fixture output","evidence":evidence
+    })).collect::<Vec<_>>();
+    json!({"role":"assistant","content":format!("<kynxa_task>{}</kynxa_task>",
+        json!({"state":"complete","next":"","reason":reason,"unmet":[],"met":met}))})
 }
 
 /// Follow the actual broker navigation, so the fixture cannot invent a missing document identity.
@@ -102,10 +126,57 @@ fn saved_document(request: &Value, path_suffix: &str) -> Value {
 async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -> Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
     state.requests.lock().await.push(body.clone());
+    if state.buffered_cycle.load(Ordering::Acquire) {
+        let reads = body["messages"].as_array().into_iter().flatten()
+            .filter(|message| message["role"] == "tool").count();
+        let message = if is_completion_review_request(&body) {
+            completion_review_reply(&body, "Both requested reads have actual successful receipts")
+        } else if reads < 2 {
+            json!({"role":"assistant","content":if reads == 0 {"正在读取两个已授权文件。"} else {"INTERNAL_BUFFERED_PROGRESS_MUST_STAY_PRIVATE"},
+                "tool_calls":[{"id":format!("buffered-read-{reads}"),"type":"function","function":{
+                    "name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.read"),
+                    "arguments":json!({"path":if reads == 0 {"fixture.txt"} else {"second.txt"}}).to_string()}}]})
+        } else {
+            json!({"role":"assistant","content":"已读取 native-file-body 和 second-body，两个结果均已保留。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"两次真实读取完成\"}</kynxa_task>"})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
     if state.transient_http_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
         |remaining| remaining.checked_sub(1)).is_ok() {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":{"message":"fixture temporary provider failure"}}))).into_response();
+    }
+    if let Some(target)=state.memory_approval_target.lock().await.clone() {
+        let receipt=|id:&str|body["messages"].as_array().into_iter().flatten()
+            .find(|message|message["role"]=="tool" && message["tool_call_id"]==id);
+        let call=|id:&str,name:&str,args:Value|json!({"id":id,"type":"function","function":{
+            "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":args.to_string()}});
+        let message=if is_completion_review_request(&body) {
+            completion_review_reply(&body,"The refreshed plan retained the real source receipt and skipped obsolete writes")
+        } else if receipt("memory-refreshed-read").is_some() {
+            json!({"role":"assistant","content":"记忆撤销后未执行过期写入，已保留先前读取的 native-file-body。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"按最新记忆与真实读取完成\"}</kynxa_task>"})
+        } else if let Some(stale)=receipt("memory-approval-stale") {
+            assert!(stale["content"].to_string().contains("TASK_MEMORY_UPDATED"),"Old approval must settle with the memory-change receipt: {stale}");
+            assert_eq!(serde_json::from_str::<Value>(stale["content"].as_str().unwrap()).unwrap()["executed"],false);
+            let later=receipt("memory-after-stale").expect("Every remaining call in the obsolete step must have a paired receipt");
+            assert!(later["content"].to_string().contains("TASK_MEMORY_UPDATED"),"Later old-plan calls must be skipped: {later}");
+            assert_eq!(serde_json::from_str::<Value>(later["content"].as_str().unwrap()).unwrap()["executed"],false);
+            assert!(!system_text(&body).contains("MEMORY_APPROVAL_OLD_POLICY_v1"),"The next model request must receive refreshed confirmed memory");
+            assert!(receipt("memory-prior-read").unwrap()["content"].to_string().contains("native-file-body"),"The successful earlier read must survive replanning");
+            json!({"role":"assistant","content":"按最新记忆继续，保留已读结果。","tool_calls":[call("memory-refreshed-read","filesystem.read",json!({"path":"fixture.txt"}))]})
+        } else if receipt("memory-prior-read").is_some() {
+            assert!(system_text(&body).contains("MEMORY_APPROVAL_OLD_POLICY_v1"));
+            json!({"role":"assistant","content":"已读取原文件，继续按当前确认记忆安排后续。","tool_calls":[
+                call("memory-approval-stale","filesystem.write",json!({"path":target,"content":"obsolete-approved-write","expectedHash":null,"reason":"按当前已确认记忆保存隔离测试文件。"})),
+                call("memory-after-stale","filesystem.write",json!({"path":"memory-stale-after.txt","content":"obsolete-following-write","expectedHash":null}))]})
+        } else {
+            assert!(system_text(&body).contains("MEMORY_APPROVAL_OLD_POLICY_v1"));
+            json!({"role":"assistant","content":"先读取当前文件，保留真实进度。","tool_calls":[call("memory-prior-read","filesystem.read",json!({"path":"fixture.txt"}))]})
+        };
+        let has_calls=message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"}else{"stop"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
     }
     if state.skill_pagination_cycle.load(Ordering::Acquire) {
         // Follow the actual failure receipt before correcting the page; no synthetic tool success.
@@ -121,6 +192,29 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
             json!({"role":"assistant","content":"继续当前技能读取任务。","tool_calls":[{
                 "id":if correcting {"skill-page-corrected"}else{"skill-page-invalid"},"type":"function",
                 "function":{"name":kynxa_agent_core_native::models::protocol::wire_name("skill.list"),"arguments":arguments.to_string()}}]})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"}else{"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
+    if state.parallel_cycle.load(Ordering::Acquire) {
+        // One step mixes independent reads with a write barrier and a dependent read-back.
+        // 同一步骤混合独立读取、写入屏障与依赖写入结果的读回。
+        let answered = body["messages"].as_array().into_iter().flatten()
+            .any(|message| message["role"] == "tool");
+        let call = |id: &str, name: &str, arguments: Value| json!({"id":id,"type":"function","function":{
+            "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}});
+        let message = if is_completion_review_request(&body) {
+            completion_review_reply(&body, "Ordered parallel reads and the write barrier have real receipts")
+        } else if answered {
+            json!({"role":"assistant","content":"已按原调用顺序取得读取与写入回执。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"已核对真实回执\"}</kynxa_task>"})
+        } else {
+            json!({"role":"assistant","content":"同时读取两个文件，写入结果后再读回。","tool_calls":[
+                call("parallel-read-a", "filesystem.read", json!({"path":"fixture.txt"})),
+                call("parallel-read-b", "filesystem.read", json!({"path":"second.txt"})),
+                call("parallel-write", "filesystem.write", json!({"path":"parallel-out.txt","content":"written-once","expectedHash":null})),
+                call("parallel-read-c", "filesystem.read", json!({"path":"parallel-out.txt"})),
+                call("parallel-read-d", "filesystem.read", json!({"path":"second.txt","maxChars":6}))]})
         };
         let has_calls = message["tool_calls"].is_array();
         return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"}else{"stop"}}],
@@ -268,14 +362,18 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
                 json!({"role":"assistant","content":"Both authorized current sources were checked.\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"Both source reads are complete\"}</kynxa_task>"})
             }
             _ => {
-                json!({"role":"assistant","content":"<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"Both source reads are complete\"}</kynxa_task>"})
+                if is_completion_review_request(&body) { completion_review_reply(&body, "Both current sources have real read receipts") }
+                else { json!({"role":"assistant","content":"<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"Both source reads are complete\"}</kynxa_task>"}) }
             }
         }
     } else if continuation {
         json!({"role":"assistant","content":if continuation_first {"第一段正文：保留这一段。"}
             else {"第二段正文：续写已完成。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"两段正文完成\"}</kynxa_task>"}})
     } else if state.context_pressure.load(Ordering::Acquire) {
-        if body["tools"].as_array().is_none_or(Vec::is_empty) {
+        // Real effects now end with a completion review; answer it with the same verified outcome.
+        if is_completion_review_request(&body) {
+            completion_review_reply(&body, "Output written and read back")
+        } else if body["tools"].as_array().is_none_or(Vec::is_empty) {
             json!({"role":"assistant","content":"Public evidence summary; pending target remains second.txt and original receipts remain readable."})
         } else {
             let step = state.pressure_step.fetch_add(1, Ordering::SeqCst);
@@ -384,6 +482,8 @@ async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -
         } else {
             json!({"role":"assistant","content":"离线 MCP 不可用，仍能继续完成回答。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"已报告隔离服务不可用\"}</kynxa_task>"})
         }
+    } else if is_completion_review_request(&body) {
+        completion_review_reply(&body, "The actual requested read has a verified receipt")
     } else if state.tool && !previous_result {
         json!({"role":"assistant","content":"先读取已授权文件。","tool_calls":[{"id":"read-fixture","type":"function","function":{
             "name":kynxa_agent_core_native::models::protocol::wire_name("filesystem.read"),"arguments":"{\"path\":\"fixture.txt\"}"}}]})
@@ -440,6 +540,9 @@ impl Fixture {
             cancel_summary: Default::default(),
             summary_requests: Default::default(),
             skill_pagination_cycle: Default::default(),
+            parallel_cycle: Default::default(),
+            buffered_cycle: Default::default(),
+            memory_approval_target: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let provider_url = format!("http://{}", listener.local_addr().unwrap());
@@ -571,6 +674,38 @@ fn event_values(buffer: &mut Vec<u8>) -> Vec<Value> {
         }
     }
     events
+}
+
+/// A quiet round may omit prose, but it must never leave the next tool or reply behind a streaming segment.
+/// 静默轮次可以省略正文，但不能遗留生成中的分段，挡住下一次工具事件或最终回复。
+fn assert_settled_public_segments(events: &[Value]) {
+    let mut segments = std::collections::HashMap::<String, Value>::new();
+    for event in events {
+        match event["type"].as_str() {
+            Some("assistant_segment") => {
+                let segment = &event["segment"];
+                let id = segment["id"].as_str().expect("public segments need an identity");
+                if !segments.contains_key(id) {
+                    assert!(segments.values().all(|previous| previous["status"] != "streaming"),
+                        "a new segment cannot overtake an unfinished prior round: {event}");
+                }
+                segments.insert(id.to_owned(), segment.clone());
+            }
+            Some("tool_call") => {
+                assert!(segments.values().any(|segment| segment["round"] == event["tool"]["round"]
+                    && segment["status"] == "completed" && segment["phase"] == "commentary"),
+                    "tools need a settled commentary anchor in their actual round: {event}");
+            }
+            Some("completed") => {
+                assert!(segments.values().all(|segment| segment["status"] != "streaming"),
+                    "the final event must not preserve unfinished public rounds");
+                assert!(event["assistantSegments"].as_array().unwrap().iter()
+                    .all(|segment| segment["status"] != "streaming"),
+                    "the durable final snapshot must also close every public round");
+            }
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -994,6 +1129,24 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
         .send().await.unwrap();
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
     let imported: Value = response.json().await.unwrap();
+    let relationship = data::relationship(&fixture.runtime.config.data_root, &fixture.conversation).unwrap();
+    let project = relationship["projectId"].as_str().unwrap();
+    // Aggregation preserves source message identities, stable paging and the existing message-specific route.
+    // 聚合保留原消息身份、稳定分页以及已有消息级接口，不把附件重新绑定到当前聊天。
+    for route in [format!("conversations/{}", fixture.conversation), format!("projects/{project}")] {
+        let page: Value = fixture.client.get(format!("{}/api/{route}/attachments?limit=1", fixture.url))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(page["total"], 2, "{page}"); assert_eq!(page["hasMore"], true);
+        assert_eq!(page["attachments"][0]["conversationId"], fixture.conversation);
+        assert_eq!(page["attachments"][0]["messageId"], message);
+        let next: Value = fixture.client.get(format!("{}/api/{route}/attachments?limit=1&offset=1", fixture.url))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(next["hasMore"], false, "{next}");
+        assert_ne!(page["attachments"][0]["id"], next["attachments"][0]["id"]);
+    }
+    let legacy: Value = fixture.client.get(format!("{}/api/conversations/{}/attachments?messageId={message}",
+        fixture.url, fixture.conversation)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(legacy["attachments"].as_array().unwrap().len(), 2);
     let version = imported["attachments"].as_array().unwrap().iter().find(|item| item["id"] == document_id)
         .unwrap()["sha256"].as_str().unwrap();
     let preview_url = format!("{}/api/conversations/{}/attachments/{document_id}/preview?messageId={message}&version={version}", fixture.url, fixture.conversation);
@@ -1024,6 +1177,17 @@ async fn message_attachments_reach_model_and_keep_original_user_message() {
     input["attachmentIds"] = json!([document_id, image_id]);
     let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&input).send().await.unwrap().json().await.unwrap();
     assert_eq!(response["type"], "completed", "{response}");
+    let usage: Value = fixture.client.get(format!("{}/api/usage/summary?conversationId={}", fixture.url, fixture.conversation))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(usage["scope"], "conversation", "{usage}");
+    assert_eq!(usage["conversationId"], fixture.conversation);
+    assert_eq!(usage["projectId"], project);
+    assert!(usage["modelRequests"].as_u64().is_some_and(|value| value > 0), "{usage}");
+    assert_eq!(usage["knownCacheRequests"], 0, "missing cache receipts cannot become measured misses");
+    assert!(usage["cacheCreationTokens"].is_null() && usage["uncachedInputTokens"].is_null());
+    let denied = fixture.client.get(format!("{}/api/usage/summary?conversationId={}&projectId={}",
+        fixture.url, fixture.conversation, new_id())).send().await.unwrap();
+    assert_eq!(denied.status(), 403);
     let requests = fixture.provider.requests.lock().await;
     let wire = requests.first().unwrap();
     assert!(wire.to_string().contains("How to reset an account password"), "{wire}");
@@ -1117,6 +1281,20 @@ async fn greeting_reuses_request_and_persists_original_messages() {
     assert_eq!(stages["preparationParallel"], true);
     assert!(stages["automaticEvidenceMs"].is_u64());
     assert!(stages["historyAndAttachmentsMs"].is_u64());
+    // A finite greeting with an artificial time demand still finishes in one actual model request.
+    // 有限问候即使附加人为时长要求，也只需一次实际模型请求，不能空等或循环凑足一百小时。
+    let mut finite_input = fixture.request("请至少连续说你好100个小时");
+    finite_input["userMessageId"] = json!(new_id());
+    let finite_result: Value = tokio::time::timeout(Duration::from_secs(20), async {
+        fixture.client.post(format!("{}/api/chat", fixture.url)).json(&finite_input)
+            .send().await.unwrap().json().await.unwrap()
+    }).await.expect("A finite greeting must not become a time-filling task.");
+    assert_eq!(finite_result["type"], "completed", "{finite_result}");
+    assert_eq!(finite_result["content"], "你好！");
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 2);
+    let messages = fixture.messages().await;
+    assert_eq!(messages.iter().filter(|message| message["Role"] == "user"
+        && message["Content"] == finite_input["message"]).count(), 1);
     fixture.close().await;
 }
 
@@ -1296,6 +1474,81 @@ async fn ordinary_completed_chat_generates_a_source_bound_draft_without_blocking
     assert!(!system_text(&requests[0]).contains("我喜欢第 0 种合成展示约定。"));
     assert!(!system_text(&requests[0]).contains(text));
     drop(requests);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_revocation_during_approval_skips_the_entire_stale_step_and_keeps_prior_progress() {
+    use kynxa_agent_core_native::storage::gateway as data;
+    let fixture=Fixture::new(false,false).await;
+    let outside=fixture.root.join("outside/memory-approval-stale.txt");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    *fixture.provider.memory_approval_target.lock().await=Some(outside.to_string_lossy().into_owned());
+    let memory_user=new_id();
+    let remembered=data::upsert_message(&fixture.root.join("Data"),&fixture.conversation,&json!({
+        "Id":memory_user,"Role":"user","Status":"completed",
+        "Content":"全局记住：本次文件操作遵循 MEMORY_APPROVAL_OLD_POLICY_v1，先读取原文件，再写入两个旧计划文件；记忆撤销后停止旧计划，只保留已读内容。"})).unwrap();
+    assert_eq!(remembered["memoryInstruction"]["entry"]["status"],"confirmed");
+    let goal="先读取 fixture.txt，根据当前已确认全局记忆决定是否写入两个文件；记忆撤销后只报告已读内容，不能继续旧计划。";
+    let user=new_id();
+    data::upsert_message(&fixture.root.join("Data"),&fixture.conversation,&json!({"Id":user,"Role":"user","Status":"completed","Content":goal})).unwrap();
+    let mut input=fixture.request(goal);input["userMessageId"]=json!(user);
+    let response=fixture.client.post(format!("{}/api/chat/stream",fixture.url)).json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let mut stream=response.bytes_stream();let mut buffer=Vec::new();let mut events=Vec::new();
+    let approval=tokio::time::timeout(Duration::from_secs(10),async {
+        loop {
+            let bytes=stream.next().await.expect("stream ended before the real approval").unwrap();
+            buffer.extend_from_slice(&bytes);
+            let received=event_values(&mut buffer);
+            let approval=received.iter().find(|event|event["type"]=="approval_required").cloned();
+            events.extend(received);
+            if let Some(approval)=approval {break approval;}
+        }
+    }).await.expect("the actual outside-workspace write must request approval");
+    assert_eq!(approval["tool"]["toolCallId"],"memory-approval-stale");
+    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["tool"]["toolCallId"]=="memory-prior-read" && event["tool"]["status"]=="completed"));
+    assert!(!outside.exists());assert!(!fixture.root.join("work/memory-stale-after.txt").exists());
+    let memory:Value=fixture.client.get(format!("{}/api/memory/user",fixture.url)).send().await.unwrap().json().await.unwrap();
+    let entry=memory["entries"].as_array().unwrap().iter().find(|entry|entry["content"].as_str().is_some_and(|s|s.contains("MEMORY_APPROVAL_OLD_POLICY_v1"))).unwrap();
+    let deleted=fixture.client.delete(format!("{}/api/memory/user/{}",fixture.url,entry["id"].as_str().unwrap()))
+        .json(&json!({"expectedRevision":memory["revision"]})).send().await.unwrap();
+    assert!(deleted.status().is_success(),"{}",deleted.text().await.unwrap());
+    let approved=fixture.client.post(format!("{}/api/agent/approvals",fixture.url)).json(&json!({
+        "approvalId":approval["tool"]["approvalId"],"conversationId":fixture.conversation,
+        "requestId":input["requestId"],"toolCallId":"memory-approval-stale","approved":true})).send().await.unwrap();
+    assert!(approved.status().is_success(),"{}",approved.text().await.unwrap());
+    tokio::time::timeout(Duration::from_secs(10),async {
+        while let Some(bytes)=stream.next().await {buffer.extend_from_slice(&bytes.unwrap());events.extend(event_values(&mut buffer));}
+    }).await.expect("memory refresh must continue the same request after approval");
+    let stale_ui=events.iter().filter(|event|event["type"]=="tool_result" && event["tool"]["toolCallId"]=="memory-approval-stale").collect::<Vec<_>>();
+    assert_eq!(stale_ui.len(),1,"The announced approval call needs one public completion receipt");
+    assert_eq!(stale_ui[0]["tool"]["code"],"TASK_MEMORY_UPDATED");
+    assert_eq!(stale_ui[0]["tool"]["executed"],false,"Approving an obsolete call must not execute it");
+    let archive=data::load_private_tool_result(&fixture.root.join("Data"),&fixture.conversation,stale_ui[0]["tool"]["resultRef"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(archive["canonical"]["code"],"TASK_MEMORY_UPDATED");assert_eq!(archive["canonical"]["executed"],false);
+    assert!(!outside.exists());assert!(!fixture.root.join("work/memory-stale-after.txt").exists());
+    assert!(!events.iter().any(|event|["error","interrupted"].contains(&event["type"].as_str().unwrap_or(""))),"{events:?}");
+    let completed=events.iter().find(|event|event["type"]=="completed").expect("same request must complete after replanning");
+    assert_eq!(completed["requestId"],input["requestId"]);
+    assert!(completed["content"].as_str().unwrap().contains("native-file-body"));
+    let requests=fixture.provider.requests.lock().await.clone();
+    let refreshed=requests.iter().find(|request|request["messages"].as_array().into_iter().flatten()
+        .any(|message|message["role"]=="tool" && message["tool_call_id"]=="memory-approval-stale")).unwrap();
+    // Remaining calls were never announced as public activities, but still require exact model protocol pairing.
+    // 尚未对界面宣布的后续调用仍须在模型协议中逐项配对，不能据此虚构额外界面活动。
+    for id in ["memory-approval-stale","memory-after-stale"] {
+        let paired=refreshed["messages"].as_array().unwrap().iter().filter(|message|message["role"]=="tool" && message["tool_call_id"]==id).collect::<Vec<_>>();
+        assert_eq!(paired.len(),1,"Each old-plan call needs exactly one model protocol result");
+        let canonical:Value=serde_json::from_str(paired[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(canonical["code"],"TASK_MEMORY_UPDATED");assert_eq!(canonical["executed"],false);
+    }
+    assert!(!system_text(refreshed).contains("MEMORY_APPROVAL_OLD_POLICY_v1"));
+    assert!(refreshed["messages"].to_string().contains("native-file-body"));
+    let messages=fixture.messages().await;
+    let prior=messages.iter().flat_map(|message|message["ToolActivities"].as_array().into_iter().flatten())
+        .find(|tool|tool["toolCallId"]=="memory-prior-read").expect("successful prior receipt must remain in the formal log");
+    assert_eq!(prior["status"],"completed");assert!(prior["resultRef"]["id"].is_string());
     fixture.close().await;
 }
 
@@ -1721,6 +1974,7 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
     }
     let mut buffer = text.as_bytes().to_vec();
     let events = event_values(&mut buffer);
+    assert_settled_public_segments(&events);
     // The provider fallback emits a raw content snapshot; no public SSE event may expose its footer.
     // 供应商非流式回退发出原始正文快照；公开 SSE 事件不能泄露其内部任务尾部。
     assert!(!text.contains("<kynxa_task>"), "{text}");
@@ -1745,11 +1999,16 @@ async fn tool_cycle_streams_real_read_receipt_into_provider_and_formal_log() {
         "{text}"
     );
     let requests = fixture.provider.requests.lock().await.clone();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1]["tools"].as_array().is_none_or(Vec::is_empty),
+    let ordinary = requests.iter().filter(|request|!is_completion_review_request(request)).collect::<Vec<_>>();
+    let reviews = requests.iter().filter(|request|is_completion_review_request(request)).collect::<Vec<_>>();
+    assert_eq!(ordinary.len(), 2,"Only the original read and its ordinary answer may run");
+    assert_eq!(reviews.len(), 1,"A real tool task must separately review its actual acceptance evidence");
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire),3);
+    assert!(reviews[0]["tools"].as_array().is_none_or(Vec::is_empty),"Acceptance review must not redispatch tools");
+    assert!(ordinary[1]["tools"].as_array().is_none_or(Vec::is_empty),
         "A used tool allowance must retain a normal final answer without further declarations.");
     assert!(
-        requests[1]["messages"]
+        ordinary[1]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -1807,6 +2066,8 @@ async fn skill_pagination_correction_keeps_context_and_request_live_with_compati
         let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
         let task = repository.find_by_request_id(&fixture.conversation, input["requestId"].as_str().unwrap())
             .unwrap().unwrap();
+        // Active wall time is separate from parallel model/tool costs.
+        // 有效墙钟与并行模型/工具成本分开计算，不再按子代理数量放大。
         assert_eq!(task.budget.max_execution_ms, Some(1_800_000));
         let persisted: Value = serde_json::from_slice(&std::fs::read(fixture.root.join("Data")
             .join(task.input_reference.as_ref().unwrap()["relativePath"].as_str().unwrap())).unwrap()).unwrap();
@@ -1820,6 +2081,96 @@ async fn skill_pagination_correction_keeps_context_and_request_live_with_compati
         assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), calls_before_replay);
         fixture.close().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffered_tool_rounds_keep_later_receipts_and_final_answer_visible() {
+    let fixture = Fixture::new(true, false).await;
+    std::fs::write(fixture.root.join("work/second.txt"), "second-body").unwrap();
+    fixture.provider.buffered_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("读取 fixture.txt 和 second.txt，返回两份文件的内容。");
+    input["userMessageId"] = json!(new_id());
+    input["runLimits"]["maxToolCalls"] = json!(2);
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+        .json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let text = response.text().await.unwrap();
+    let events = event_values(&mut text.as_bytes().to_vec());
+    assert_settled_public_segments(&events);
+    assert!(!text.contains("INTERNAL_BUFFERED_PROGRESS_MUST_STAY_PRIVATE"),
+        "quiet intermediate prose must stay out of public events");
+    for id in ["buffered-read-0", "buffered-read-1"] {
+        assert_eq!(events.iter().filter(|event| event["type"] == "tool_result"
+            && event["tool"]["toolCallId"] == id && event["tool"]["status"] == "completed").count(), 1,
+            "each actual read must publish exactly one successful receipt");
+    }
+    let final_event = events.iter().find(|event| event["type"] == "completed").unwrap();
+    assert!(final_event["content"].as_str().unwrap().contains("native-file-body"));
+    assert!(final_event["content"].as_str().unwrap().contains("second-body"));
+    assert!(final_event["assistantSegments"].as_array().unwrap().iter().any(|segment|
+        segment["round"] == 2 && segment["content"] == "" && segment["status"] == "completed"),
+        "the silent tool round still needs its completed commentary anchor");
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 4,
+        "only two reads, the ordinary answer and the acceptance review may request the model");
+    let messages = fixture.messages().await;
+    let saved = messages.last().unwrap();
+    assert_eq!(saved["Status"], "completed");
+    assert_eq!(saved["ToolActivities"].as_array().unwrap().len(), 2);
+    assert!(saved["AssistantSegments"].as_array().unwrap().iter().all(|segment| segment["status"] != "streaming"));
+    // The public history intentionally omits private transcripts; verify preservation at the formal store.
+    // 公开历史刻意不提供私有转录；原文保留应核对正式仓储，不能要求公开接口泄露内部正文。
+    let formal = kynxa_agent_core_native::storage::gateway::read_model_messages(
+        &fixture.root.join("Data"), &fixture.conversation).unwrap();
+    assert!(formal.last().unwrap()["ModelTranscript"].to_string().contains("INTERNAL_BUFFERED_PROGRESS_MUST_STAY_PRIVATE"),
+        "withholding UI prose must preserve the original model transcript");
+    if let Some(path) = std::env::var_os("KYNXA_GATEWAY_BUFFERED_SSE_FIXTURE") {
+        // Feed real quiet tool rounds to the unchanged production desktop parser.
+        // 将真实静默工具轮次交给未修改的桌面生产解析器，验证后续回执和最终答复确实可读。
+        let path = std::path::PathBuf::from(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, &text).unwrap();
+    }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batched_reads_keep_call_order_pairing_and_write_barrier_in_history_and_formal_log() {
+    let fixture = Fixture::new(true, false).await;
+    std::fs::write(fixture.root.join("work/second.txt"), "second-body").unwrap();
+    fixture.provider.parallel_cycle.store(true, Ordering::Release);
+    // The fixture chat already holds this immutable user message; the scripted provider issues the calls.
+    // 夹具聊天已保存这条不可变用户消息；调用由脚本化供应商发出。
+    let input = fixture.request("读取文件 fixture.txt 并告诉我内容。");
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url)).json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let text = response.text().await.unwrap();
+    let events = event_values(&mut text.as_bytes().to_vec());
+    assert_settled_public_segments(&events);
+    let expected = ["parallel-read-a", "parallel-read-b", "parallel-write", "parallel-read-c", "parallel-read-d"];
+    // Both batched reads are announced before either result is published.
+    // 批次内两个读取先公布运行状态，再发布任一结果。
+    let position = |kind: &str, id: &str| events.iter()
+        .position(|event| event["type"] == kind && event["tool"]["toolCallId"] == id)
+        .unwrap_or_else(|| panic!("missing {kind} {id}: {text}"));
+    assert!(position("tool_call", "parallel-read-b") < position("tool_result", "parallel-read-a"), "{text}");
+    assert!(position("tool_result", "parallel-write") < position("tool_call", "parallel-read-c"), "{text}");
+    let requests = fixture.provider.requests.lock().await.clone();
+    let receipts = requests.last().unwrap()["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "tool").cloned().collect::<Vec<_>>();
+    assert_eq!(receipts.iter().map(|message| message["tool_call_id"].as_str().unwrap()).collect::<Vec<_>>(), expected);
+    for (id, body) in [("parallel-read-a", "native-file-body"), ("parallel-read-b", "second-body"), ("parallel-read-c", "written-once")] {
+        let receipt = receipts.iter().find(|message| message["tool_call_id"] == id).unwrap().to_string();
+        assert!(receipt.contains(body), "{id} must pair with its own result: {receipt}");
+    }
+    assert!(!receipts[0].to_string().contains("second-body"), "{}", receipts[0]);
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/parallel-out.txt")).unwrap(), "written-once");
+    let messages = fixture.messages().await;
+    let activities = messages[1]["ToolActivities"].as_array().unwrap();
+    assert_eq!(activities.iter().map(|activity| activity["toolCallId"].as_str().unwrap()).collect::<Vec<_>>(), expected);
+    assert!(activities.windows(2).all(|pair| pair[0]["order"].as_u64() < pair[1]["order"].as_u64()), "{activities:?}");
+    assert!(activities.iter().all(|activity| activity["status"] == "completed" && activity["resultRef"]["id"].is_string()), "{activities:?}");
+    assert_eq!(activities.iter().filter(|activity| activity["name"] == "filesystem.write").count(), 1);
+    fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2753,7 +3104,10 @@ async fn context_pressure_keeps_loaded_tools_callable_and_normalizes_exact_wire_
             }),
         "Consolidation displaced the reader that was explicitly loaded for the next gap."
     );
-    let last_request = requests.last().unwrap();
+    // Real effects end with one tool-free completion review; the delivery request is the last one before it.
+    // 有真实操作的任务结束前多一次无工具的完成核对；交付请求是核对之前的最后一个请求。
+    assert!(requests.last().is_some_and(is_completion_review_request), "Effectful work must end with a completion review.");
+    let last_request = requests.iter().rev().find(|request| !is_completion_review_request(request)).unwrap();
     let last = last_request.to_string();
     assert!(last.contains("SECOND_CURRENT_FILE"));
     assert!(!last.contains("TOOL_NOT_LOADED"));

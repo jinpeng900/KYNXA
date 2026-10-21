@@ -2482,7 +2482,7 @@
     },
     {
       "name": "task.delegate",
-      "description": "Delegate independent authorized work to a child agent. Stable task survives attempts; input includes only goal, acceptance, contextRefs and declared writeTargets. Parent and child share total budget; no authority increase.",
+      "description": "Delegate scoped independent work with real acceptance and resumable child context. Nested delegates can only narrow parent permissions and write targets. Default suggestion is 5 concurrent children; user-requested assignment counts remain accepted and resource/model admission queues actual I/O. Return to the parent for explicit delivery review; child self-review is not parent acceptance.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2517,6 +2517,62 @@
               "type": "string"
             },
             "maxItems": 128
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "Logical assignments, not simultaneous hardware slots. Prefer distinct assignments for distinct work; split larger registration batches without dropping jobs."
+          },
+          "assignments": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4096,
+            "items": {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "acceptance": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 128
+                },
+                "contextRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "maxItems": 64
+                },
+                "writeTargets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 64
+                },
+                "dependencyIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 128
+                }
+              },
+              "required": [
+                "goal"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -2550,6 +2606,64 @@
       "source": "builtin"
     },
     {
+      "name": "task.result",
+      "description": "Read a scoped child delivery, real receipt references and self-review. The direct parent must inspect the actual output and record review accept or return using current expectedVersion and exact outputRef. Return preserves the same child checkpoint, costs and successful effects; it does not replay successful writes. Acceptance is a parent judgment, not automatic visual or semantic quality certification.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "object"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "accept",
+                  "return"
+                ]
+              },
+              "expectedVersion": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "outputRef": {
+                "type": "object"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              }
+            },
+            "required": [
+              "decision",
+              "expectedVersion",
+              "outputRef",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "source": "builtin"
+    },
+    {
       "name": "task.status",
       "description": "Read actual task states, checkpoints and result references from the current authorized task tree. A model claim is not a verified execution.",
       "inputSchema": {
@@ -2566,7 +2680,7 @@
     },
     {
       "name": "task.wait",
-      "description": "Wait for delegated task state changes through program events without repeated model polling. Does not repeat unknown side effects.",
+      "description": "Event-based wait for scoped descendants. Returns when delivery needs parent acceptance, an external condition changes, steering arrives, or timeout; timeout does not stop the child. Logical IDs can exceed hardware concurrency; results paginate without losing queued tasks.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2576,12 +2690,21 @@
               "type": "string"
             },
             "minItems": 1,
-            "maxItems": 128
+            "maxItems": 4096
           },
           "timeoutMs": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 30000
+            "maximum": 3600000
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
           }
         },
         "required": [

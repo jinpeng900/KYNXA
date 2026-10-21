@@ -1278,6 +1278,14 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
         "storage.retrieval.scopes",
         &json!({"value":input["scopeKeys"]}),
     )?;
+    // Optional candidate memory is admitted before entering the SQLite read snapshot.
+    // 可选候选缓存的内存准入在 SQLite 读快照之前完成，不阻塞聊天等待资源。
+    let candidate_bytes = super::gateway_embedding::cache_memory_limit(
+        "retrieval-candidates", super::cache_candidates::DEFAULT_BYTES, super::cache_candidates::reclaim,
+    );
+    let _candidate_cache_grant = if candidate_bytes > 0 {
+        super::gateway_cache::memory_grant("retrieval-candidates")
+    } else { None };
     let query = input["query"].as_str().unwrap_or("");
     let expression=crate::retrieval::lexical::apply("retrieval.match-expression",&json!({"text":query,"normalizedText":query.nfkc().collect::<String>(),"domain":input["retrievalIntent"]["domain"]}))
         .map_err(|_|gateway::error("查询格式无效。","INVALID_RETRIEVAL_INPUT",400))?;
@@ -1295,6 +1303,7 @@ pub fn search(config: &GatewayConfig, input: &Value) -> Result<Value, ContractEr
     let mut begin = arguments(
         config,
         json!({"requestId":request_id,"query":query,"scopes":input["scopeKeys"],"expression":expression,"literalQuery":query,
+        "metadataReady":input["metadataReady"],"partial":input["partial"],
         "candidateLimit":input["channelCandidates"].as_u64().unwrap_or(64).clamp(1,160),"resultLimit":input["limit"].as_u64().unwrap_or(8).clamp(1,192),
         "modelProvided":input.get("embeddingModelVersion").is_some(),"model":input["embeddingModelVersion"],
         "spaceProvided":input.get("embeddingSpaceId").is_some(),"space":input["embeddingSpaceId"],"domain":input["retrievalIntent"]["domain"],

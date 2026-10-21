@@ -29,6 +29,7 @@ const OVERRIDE_FIELDS: &[&str] = &[
     "headerEnv",
     "auth",
     "startupTimeoutMs",
+    "timeoutMs",
     "trusted",
     "backgroundTask",
     "prewarmPriority",
@@ -43,6 +44,25 @@ fn invalid(message: &str) -> ServiceError {
 #[cfg(test)]
 mod lifecycle_configuration_tests {
     use super::*;
+
+    #[test]
+    fn execution_timeout_is_saved_separately_from_startup_and_bounded() {
+        let source = json!({"id":"blender","name":"Blender","enabled":true,
+            "transport":"stdio","command":"fixture.exe","args":[],"startupTimeoutMs":15000,"timeoutMs":1_800_000});
+        let normalized = normalize_server(&source).unwrap();
+        assert_eq!(normalized["timeoutMs"], 1_800_000);
+        assert_eq!(normalized["startupTimeoutMs"], 15000);
+        let mut omitted = source.clone();
+        omitted.as_object_mut().unwrap().remove("timeoutMs");
+        assert!(normalize_server(&omitted).unwrap().get("timeoutMs").is_none());
+        let mut http = json!({"id":"remote","name":"Remote","enabled":true,"transport":"streamable-http",
+            "url":"https://example.com/mcp","timeoutMs":600_000});
+        assert_eq!(normalize_server(&http).unwrap()["timeoutMs"], 600_000);
+        for value in [json!(999), json!(21_600_001), json!("60000"), json!(1.5)] {
+            http["timeoutMs"] = value.clone();
+            assert!(normalize_server(&http).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn lifecycle_policy_is_explicit_and_survives_config_normalization() {
@@ -216,7 +236,7 @@ pub fn normalize_server(server: &Value) -> ServiceResult<Value> {
         "cwdResolved":cwd.as_ref().map(|path| path_text(path)),"url":url_projection(&server["url"]),
         "issuerUrl":url_projection(&server["auth"]["issuer"]),"nonFiniteNumbers":special}))
     .map_err(|code| {
-        ServiceError::new(&code, "MCP 连接配置无效；凭据只能使用环境变量引用。", 400)
+        ServiceError::new(&code, "MCP 连接配置无效；密钥使用环境变量引用，个人 OAuth 使用浏览器登录。", 400)
     })?;
     if !server["enabled"].is_boolean() {
         return Err(invalid("请明确是否启用 MCP 服务。"));

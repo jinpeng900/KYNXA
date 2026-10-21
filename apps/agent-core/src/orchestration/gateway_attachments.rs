@@ -88,6 +88,36 @@ pub(crate) async fn list(
         .map_err(Into::into)
 }
 
+/// Paginate one work's saved attachment metadata without dispatching tools or creating a task.
+/// 分页读取本工作已保存附件的元信息，不派发工具，也不创建任务。
+pub(crate) async fn project_list(
+    runtime: &GatewayRuntime,
+    project: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, GatewayError> {
+    let root = runtime.config.data_root.clone();
+    let project = project.to_owned();
+    tokio::task::spawn_blocking(move || message_attachments::project_list(&root, &project, offset, limit))
+        .await
+        .map_err(|_| GatewayError::new("ATTACHMENT_WORKER_FAILED", "附件列表读取线程结束。", 500))?
+        .map_err(Into::into)
+}
+
+pub(crate) async fn conversation_list(
+    runtime: &GatewayRuntime,
+    conversation: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, GatewayError> {
+    let root = runtime.config.data_root.clone();
+    let conversation = conversation.to_owned();
+    tokio::task::spawn_blocking(move || message_attachments::conversation_list(&root, &conversation, offset, limit))
+        .await
+        .map_err(|_| GatewayError::new("ATTACHMENT_WORKER_FAILED", "附件列表读取线程结束。", 500))?
+        .map_err(Into::into)
+}
+
 pub(crate) async fn content(
     runtime: &GatewayRuntime,
     conversation: &str,
