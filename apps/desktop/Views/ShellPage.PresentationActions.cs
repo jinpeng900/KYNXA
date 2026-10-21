@@ -127,7 +127,7 @@ public sealed partial class ShellPage
 
     private void Presentation_KeyDown(object sender, KeyRoutedEventArgs args)
     {
-        if (args.Key == VirtualKey.Escape && TryDismissCompactSidebar()) args.Handled = true;
+        if (args.Key == VirtualKey.Escape && (TryDismissCompactSidebar() || TryDismissCompactWorkPanel())) args.Handled = true;
     }
 
     private bool TryDismissCompactSidebar()

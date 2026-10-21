@@ -4,6 +4,7 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Views;
@@ -53,7 +54,7 @@ public sealed partial class ShellPage
     private sealed partial class AppearanceSettingsSection : IDisposable
     {
         private sealed record PaletteCard(AppearancePalette Palette, Button Button, Border Frame, TextBlock Check,
-            Action<AppearancePalette> UpdatePreview);
+            Action<AppearancePalette> UpdatePreview, Action RefreshFrame);
 
         private readonly Func<AppearancePreferences, string?> _savePreferences;
         private readonly List<PaletteCard> _cards = [];
@@ -332,10 +333,29 @@ public sealed partial class ShellPage
             var button = new Button { Content = frame, Padding = new Thickness(0), Margin = new Thickness(0), MinWidth = 0,
                 Height = 86,
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Stretch,
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0),
                 CornerRadius = new CornerRadius(12), UseSystemFocusVisuals = true };
             button.Resources["SystemControlFocusVisualPrimaryBrush"] = AppearanceService.GetBrush("KynxaFocusBrush");
             AutomationProperties.SetAutomationId(button, "AppearancePalette_" + palette.Id);
+            bool hovered = false, pressed = false;
+            void RefreshFrame()
+            {
+                bool selected = palette.Id == AppearanceService.Current.Id;
+                frame.Background = AppearanceService.GetBrush(selected ? "KynxaSelectionBrush" : pressed
+                    ? "KynxaControlPressedBrush" : hovered ? "KynxaControlHoverBrush" : "KynxaSettingsCardBrush");
+                frame.BorderBrush = AppearanceService.GetBrush(AppearanceService.Current.IsHighContrast && selected
+                    ? "KynxaFocusBrush" : selected || hovered ? "KynxaAccentTextBrush" : "KynxaDividerBrush");
+                frame.BorderThickness = new Thickness(AppearanceService.Current.IsHighContrast && selected ? 2 : 1);
+            }
+            // Update the visible frame directly; the native button hover background is behind this opaque card.
+            // 直接更新可见卡框；原生按钮的悬停底色位于不透明卡片之后，无法单独提供反馈。
+            button.PointerEntered += (_, _) => { hovered = true; RefreshFrame(); };
+            button.PointerExited += (_, _) => { hovered = false; pressed = false; RefreshFrame(); };
+            button.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => { pressed = true; RefreshFrame(); }), true);
+            button.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => { pressed = false; RefreshFrame(); }), true);
+            button.PointerCanceled += (_, _) => { pressed = false; RefreshFrame(); };
+            button.PointerCaptureLost += (_, _) => { pressed = false; RefreshFrame(); };
             return new PaletteCard(palette, button, frame, check, effectivePalette =>
             {
                 previewBrushes["main"].Color = AppearanceService.ParseColor(effectivePalette.Main);
@@ -343,7 +363,7 @@ public sealed partial class ShellPage
                 previewBrushes["border"].Color = AppearanceService.ParseColor(effectivePalette.Border);
                 previewBrushes["accent"].Color = AppearanceService.ParseColor(effectivePalette.Accent);
                 previewBrushes["soft"].Color = AppearanceService.ParseColor(effectivePalette.Soft);
-            });
+            }, RefreshFrame);
         }
 
         private void SelectPalette(string paletteId)
@@ -376,10 +396,7 @@ public sealed partial class ShellPage
             foreach (var card in _cards)
             {
                 bool selected = card.Palette.Id == AppearanceService.Current.Id;
-                card.Frame.Background = AppearanceService.GetBrush(selected ? "KynxaSelectionBrush" : "KynxaSettingsCardBrush");
-                card.Frame.BorderBrush = AppearanceService.GetBrush(AppearanceService.Current.IsHighContrast && selected
-                    ? "KynxaFocusBrush" : "KynxaDividerBrush");
-                card.Frame.BorderThickness = new Thickness(AppearanceService.Current.IsHighContrast && selected ? 2 : 1);
+                card.RefreshFrame();
                 // Update retained preview brushes to reflect the active mode without rebuilding card controls.
                 // 仅更新已有缩略图画刷来跟随当前明暗模式，不重建配色卡控件。
                 card.UpdatePreview(AppearanceService.Current.IsHighContrast ? AppearanceService.Current :

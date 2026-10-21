@@ -39,6 +39,9 @@ public sealed partial class ShellPage
 
     private void TranscriptSearchClose_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        // Dismiss the top native drawer first, including when focus is inside its embedded WebView.
+        // 优先关闭最上层原生覆盖栏，嵌入 WebView 获得焦点时也可使用同一 Escape 入口。
+        if (TryDismissCompactSidebar() || TryDismissCompactWorkPanel()) { args.Handled = true; return; }
         // Browser Escape owns its menus and diagram modal; native controls can close the underlying find bar themselves.
         // 浏览器自行处理其菜单和图表模态的 Escape；焦点位于原生控件时才由宿主关闭正文查找。
         if (!CanUseNativeTranscriptSearchShortcut() || ConversationMessages.Browser.FocusState != FocusState.Unfocused) return;

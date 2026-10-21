@@ -14,7 +14,7 @@
                 <Setter Property="FontSize" Value="13" />
                 <Setter Property="TextWrapping" Value="Wrap" />
             </Style>
-            <Style TargetType="TextBox">
+            <Style TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />
                 <Setter Property="CornerRadius" Value="8" />
@@ -24,7 +24,7 @@
                 <Setter Property="CornerRadius" Value="8" />
                 <Setter Property="Padding" Value="12,8" />
             </Style>
-            <Style TargetType="controls:ScrollSafeComboBox">
+            <Style TargetType="controls:ScrollSafeComboBox" BasedOn="{StaticResource KynxaScrollSafeComboBoxStyle}">
                 <Setter Property="FontFamily" Value="{StaticResource KynxaUIFont}" />
                 <Setter Property="FontSize" Value="13" />
                 <Setter Property="CornerRadius" Value="8" />

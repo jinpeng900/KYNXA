@@ -117,10 +117,18 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
     {
         if (request.ConversationId == Guid.Empty || request.RequestId == Guid.Empty || request.ApprovalId == Guid.Empty ||
             string.IsNullOrWhiteSpace(request.ToolCallId)) throw new ArgumentException("An approval must identify its exact request and tool call.");
+        if (request.Scope is not ("once" or "task") || !request.Approved && request.Scope != "once")
+            throw new ArgumentException("Approval scope must describe an explicit single-use or task-local grant.");
         var result = await SendAsync<AgentApprovalResponse>(HttpMethod.Post, "/api/agent/approvals", request, cancellationToken);
         if (result.ApprovalId != request.ApprovalId || result.ToolCallId != request.ToolCallId || result.Approved != request.Approved)
             throw new InvalidDataException(UiText.Get("工具接口返回了无效的审批响应。"));
-        return result;
+        string scope = result.Scope ?? "once";
+        if (scope is not ("once" or "task") || scope == "task" &&
+            (!request.Approved || request.Scope != "task" || result.TaskId is null || result.TaskId == Guid.Empty))
+            throw new InvalidDataException(UiText.Get("工具接口返回了无效的审批响应。"));
+        // Older gateways can acknowledge only the invocation; never present that as a task grant.
+        // 旧网关可能只批准当前调用，不能把该响应展示为已授予整个任务范围。
+        return result with { Scope = scope };
     }
 
     public async Task<ToolResultPage> GetToolResultPageAsync(Guid conversationId, ToolResultReference reference, int offset = 0,
