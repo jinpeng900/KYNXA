@@ -52,6 +52,11 @@ public static class ChatStreamReader
                         throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
                     if (!ChatDurationRules.IsValid(streamEvent.DurationMs))
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"));
+                    // Optional display timing must never terminate an otherwise valid reply stream.
+                    // 可选展示计时缺失或越界时忽略，不因此结束有效回复，也不改写正式结算用时。
+                    if (streamEvent.GenerationElapsedMs is not long elapsed || !ChatDurationRules.IsValid(elapsed)
+                        || streamEvent.GenerationActive is null)
+                        streamEvent = streamEvent with { GenerationElapsedMs = null, GenerationActive = null };
                     if (!hasStarted && streamEvent.Type != "started")
                         throw new InvalidDataException(UiText.Get("模型流缺少开始事件。"));
                     bool isTerminalEvent = false;
@@ -63,6 +68,9 @@ public static class ChatStreamReader
                             if (streamEvent.TaskId == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty)
                                 throw new InvalidDataException(UiText.Get("任务事件无效。"));
                             rootTaskId = streamEvent.RootRequestTaskId ?? streamEvent.TaskId;
+                            break;
+                        case "generation_timing":
+                            if (streamEvent.GenerationElapsedMs is null) continue;
                             break;
                         case "reply_anchor":
                             if (streamEvent.ReplyMessageId is not Guid replyMessageId || replyMessageId == Guid.Empty
@@ -127,6 +135,14 @@ public static class ChatStreamReader
                             else if (!activeToolCalls.TryGetValue(toolCallId, out var original) || original.Name != toolName || original.Round != streamEvent.Tool.Round || original.Order != streamEvent.Tool.Order)
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             if (streamEvent.Type == "tool_result") { activeToolCalls.Remove(toolCallId); terminalOutputSequences.Remove(toolCallId); }
+                            break;
+                        case "approval_closed":
+                            // Closing an approval changes neither the active tool nor the reply's terminal state.
+                            // 审批关闭不结束工具或回复；后续真实工具回执仍必须正常接收。
+                            if (streamEvent.ApprovalId is not Guid closedId || closedId == Guid.Empty ||
+                                string.IsNullOrWhiteSpace(streamEvent.ToolCallId) || streamEvent.ToolCallId.Length > 200 ||
+                                streamEvent.TaskId == Guid.Empty || streamEvent.Scope is not (null or "once" or "task"))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             break;
                         case "terminal_output":
                             if (!HostTerminalOutputRules.IsValid(streamEvent.Terminal) ||
@@ -221,7 +237,7 @@ public static class ChatStreamReader
             || string.IsNullOrWhiteSpace(tool.Name) || tool.Name.Length > 200 || tool.Arguments is not { ValueKind: JsonValueKind.Object }
             || tool.Arguments.Value.GetRawText().Length > MaximumToolArgumentCharacters
             || string.IsNullOrWhiteSpace(tool.Summary) || tool.Summary.Length > 4096
-            || tool.Result?.Length > 65536)
+            || tool.Result?.Length > 65536 || tool.TaskApprovalDescription?.Length > 2048)
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
         bool validStatus = streamEvent.Type switch
         {

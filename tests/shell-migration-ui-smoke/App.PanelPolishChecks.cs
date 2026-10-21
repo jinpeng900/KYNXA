@@ -22,6 +22,52 @@ public partial class App
 
     private bool WorkPanelVisible => NativeUi.IsVisible(Element<Border>("WorkContextPanel"));
 
+    private async Task CheckCompactWorkPanelAsync(LayoutState layout)
+    {
+        var main = Element<Grid>("MainRegion");
+        var pane = Element<Border>("WorkContextPanel");
+        var tabs = Element<ConversationWorkTabs>("WorkTabs");
+        double width = main.Width, height = main.Height;
+        double preferred = layout.PreviewWidth;
+        try
+        {
+            // Constrain the real WinUI region; this checks arranged overlay geometry, not a fake second workspace.
+            // 约束真实 WinUI 区域，核验实际覆盖布局；不复制工作区或把夹具尺寸调整描述为原生窗口缩放。
+            main.Width = 620; main.Height = 360;
+            Call("ApplyLayout");
+            await WaitAsync(() => WorkPanelVisible && NativeUi.IsVisible(Element<Button>("WorkPanelScrim")),
+                "a compact real viewport keeps the existing workspace available as an overlay");
+            Check(Grid.GetColumn(pane) == 0 && Grid.GetColumnSpan(pane) == 3 &&
+                Math.Abs(Element<Grid>("PrimaryContentSlot").ActualWidth - main.ActualWidth) < 2 &&
+                pane.ActualWidth <= main.ActualWidth && !NativeUi.IsVisible(Element<ResizeGrip>("WorkPanelGrip")),
+                "the compact pane stays inside the viewport and leaves the chat column intact");
+            NativeUi.Invoke(Element<Button>("WorkPanelScrim"));
+            await WaitAsync(() => !WorkPanelVisible && NativeUi.IsVisible(Element<Button>("OpenWorkPanelButton")),
+                "outside dismissal keeps an accessible compact workspace entry");
+            NativeUi.Invoke(Element<Button>("OpenWorkPanelButton"));
+            await WaitAsync(() => WorkPanelVisible, "the same compact workspace can reopen");
+            Check(ReferenceEquals(pane, Element<Border>("WorkContextPanel")) && ReferenceEquals(tabs, Element<ConversationWorkTabs>("WorkTabs")),
+                "overlay transitions retain the original pane and cached tab owner");
+            Check(Call("TryDismissCompactWorkPanel") is true, "the shared Escape dismissal closes the visible compact pane");
+            NativeUi.Invoke(Element<Button>("OpenWorkPanelButton"));
+            await WaitAsync(() => WorkPanelVisible, "compact dismissal does not remove the workspace");
+            var send = Element<Button>("SendButton");
+            var icon = (FrameworkElement)send.Content;
+            var bounds = icon.TransformToVisual(send).TransformBounds(new Windows.Foundation.Rect(0, 0, icon.ActualWidth, icon.ActualHeight));
+            Check(Math.Abs(send.ActualWidth - 40) < 1 && Math.Abs(send.ActualHeight - 40) < 1 &&
+                Math.Abs(icon.ActualWidth - 20) < 1 && Math.Abs(icon.ActualHeight - 20) < 1 &&
+                bounds.Left >= 0 && bounds.Top >= 0 && bounds.Right <= 40 && bounds.Bottom <= 40,
+                "the circular send/stop button retains its complete centered icon in compact layout");
+            Check(layout.PreviewWidth == preferred, "temporary overlay constraints do not overwrite the saved panel width");
+        }
+        finally
+        {
+            main.Width = width; main.Height = height;
+            Call("ApplyLayout");
+            await SettleAsync();
+        }
+    }
+
     private async Task CheckPanelPolishAsync()
     {
         var projects = ShellField<List<ProjectState>>("_projects");
@@ -56,6 +102,7 @@ public partial class App
                 "the actual Open button reveals a useful empty preview hint");
             Check(Math.Abs(Element<Border>("WorkContextPanel").ActualWidth - 432) < 2,
                 "an explicitly opened empty preview uses the saved user width");
+            await CheckCompactWorkPanelAsync(layout);
             NativeUi.SetText(Prompt, "project-only draft");
             await SettleAsync();
             Check(WorkPanelVisible && NativeUi.IsVisible(Element<TextBlock>("WorkTabEmptyHint")),

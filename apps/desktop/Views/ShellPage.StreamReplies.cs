@@ -174,8 +174,17 @@ public sealed partial class ShellPage
                             _projectStore.AcceptSubmittedMessage(pending.ConversationId, pending.UserMessageId);
                             pending.UserPersisted = true;
                         }
+                        // Timing is independent of visible prose; buffered tool-only work still starts the clock.
+                        // 计时独立于可见正文；隐藏阶段文字的纯工具执行也必须启表，恢复沿用网关累计值。
+                        if (update.Type != "reply_anchor" && update.GenerationElapsedMs is long elapsed && update.GenerationActive is bool generationActive)
+                        {
+                            pending.Message.ApplyGenerationTiming(elapsed, generationActive);
+                            pending.Dirty = true;
+                        }
                         switch (update.Type)
                         {
+                            case "generation_timing":
+                                break;
                             case "reply_anchor":
                                 AcceptReplyAnchor(pending, update);
                                 break;
@@ -202,6 +211,9 @@ public sealed partial class ShellPage
                             case "task_approval_closed":
                                 if (update.ApprovalId is Guid closedApproval) CloseTaskApproval(closedApproval, update.TaskId);
                                 TaskPanel.NotifyChanged(pending.ConversationId);
+                                continue;
+                            case "approval_closed":
+                                if (update.ApprovalId is Guid closedInlineApproval) CloseTaskApproval(closedInlineApproval, update.TaskId);
                                 continue;
                             case "tool_call":
                             case "tool_result":
@@ -410,7 +422,7 @@ public sealed partial class ShellPage
     {
         // The first model segment follows preparation; transport acceptance and later rounds do not restart the clock.
         // 首个模型消息段表示准备已完成；传输接受事件不开始计时，后续轮次也不重置计时。
-        pending.Message.GenerationStartedTimestamp ??= Stopwatch.GetTimestamp();
+        pending.Message.StartGenerationTiming();
     }
 
     private static void AcceptAssistantSegment(PendingChatReply pending, AssistantSegment segment)

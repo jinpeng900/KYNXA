@@ -50,6 +50,35 @@ Check(calls[^1].Body!.Value.GetProperty("conversationId").GetGuid() == conversat
     !calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Approval denial must bind all identities.");
 await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true));
 Check(calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Explicit approval was lost.");
+Check(calls[^1].Body!.Value.GetProperty("scope").GetString() == "once", "Older approval callers must remain single-use.");
+
+var approvalTaskId = Guid.Parse("3a54c5b4-a9de-4c30-9f40-e5b2ecb89f82");
+using (var taskApprovalHttp = new HttpClient(new Handler(async (request, token) =>
+{
+    var body = await request.Content!.ReadFromJsonAsync<JsonElement>(token);
+    Check(body.GetProperty("scope").GetString() == "task", "Task scope must be explicitly sent by the client.");
+    return new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = JsonContent.Create(new AgentApprovalResponse(true, approvalId, "call-example", "task", approvalTaskId)) };
+})) { BaseAddress = http.BaseAddress })
+using (var taskApprovalClient = new AgentApiClient(taskApprovalHttp))
+{
+    var response = await taskApprovalClient.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task"));
+    Check(response.Scope == "task" && response.TaskId == approvalTaskId, "Task approval must retain its stable task identity.");
+}
+foreach (string invalidScope in new[] { "global", "session", "" })
+{
+    try { await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, invalidScope)); throw new InvalidOperationException("Unknown approval scope accepted."); }
+    catch (ArgumentException) { checks++; }
+}
+using (var invalidTaskHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    { Content = JsonContent.Create(new AgentApprovalResponse(true, approvalId, "call-example", "task", Guid.Empty)) }))) { BaseAddress = http.BaseAddress })
+using (var invalidTaskClient = new AgentApiClient(invalidTaskHttp))
+{
+    try { await invalidTaskClient.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task")); throw new InvalidOperationException("A task grant without an identity must fail."); }
+    catch (InvalidDataException) { checks++; }
+}
+var legacyApproval = await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task"));
+Check(legacyApproval.Scope == "once", "An older gateway acknowledgement must not masquerade as a task grant.");
 
 using (var failedHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict)
     { Content = JsonContent.Create(new { error = "Example conflict", code = "AGENT_CONFIG_CONFLICT" }) }))) { BaseAddress = http.BaseAddress })
@@ -99,6 +128,29 @@ var snapshotEvents = new[]
     new ChatStreamEvent("interrupted", conversationId, requestId, DateTimeOffset.UtcNow, Content: "Revised completed round", Reasoning: "Public revised summary")
 };
 var streamOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+var pendingApprovalTool = new ToolActivity("call-inline", "filesystem.write",
+    JsonSerializer.SerializeToElement(new { path = "example.txt", content = "fixture" }), "running", "Write example.txt");
+var inlineApprovalEvents = new[]
+{
+    new ChatStreamEvent("started", conversationId, requestId, DateTimeOffset.UtcNow, TaskId: approvalTaskId),
+    new ChatStreamEvent("tool_call", conversationId, requestId, DateTimeOffset.UtcNow, Tool: pendingApprovalTool),
+    new ChatStreamEvent("approval_required", conversationId, requestId, DateTimeOffset.UtcNow,
+        Tool: pendingApprovalTool with { Status = "approval-required", ApprovalId = approvalId, TaskApprovalAvailable = true,
+            TaskApprovalDescription = "Fixture task scope" }),
+    new ChatStreamEvent("approval_closed", conversationId, requestId, DateTimeOffset.UtcNow,
+        TaskId: approvalTaskId, ApprovalId: approvalId, ToolCallId: "call-inline", Approved: true, Scope: "task"),
+    new ChatStreamEvent("tool_result", conversationId, requestId, DateTimeOffset.UtcNow,
+        Tool: pendingApprovalTool with { Status = "completed", Result = "Saved" }),
+    new ChatStreamEvent("completed", conversationId, requestId, DateTimeOffset.UtcNow, Content: "Saved example.txt")
+};
+await using (var inlineApprovalStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(string.Concat(inlineApprovalEvents.Select(item =>
+    "data: " + JsonSerializer.Serialize(item, streamOptions) + "\n\n")))))
+{
+    var decoded = new List<ChatStreamEvent>();
+    await foreach (var item in ChatStreamReader.ReadAsync(inlineApprovalStream, conversationId, requestId)) decoded.Add(item);
+    Check(decoded.Count == 6 && decoded[3].Type == "approval_closed" && decoded[4].Type == "tool_result" && decoded[^1].Type == "completed",
+        "Closing an inline approval must preserve the following tool receipt and completed reply.");
+}
 await using (var snapshotStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(string.Concat(snapshotEvents.Select(item =>
     "data: " + JsonSerializer.Serialize(item, streamOptions) + "\n\n")))))
 {

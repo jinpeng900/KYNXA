@@ -40,7 +40,8 @@ public static class AssistantSegmentRules
 public sealed record ToolActivity(string ToolCallId, string Name, JsonElement? Arguments, string Status,
     string Summary, string? Result = null, Guid? ApprovalId = null, bool? OutsideWorkspace = null,
     string? Sandbox = null, string? WorkspaceRoot = null, ToolResultReference? ResultRef = null, string? Code = null,
-    int? Round = null, int? Order = null);
+    int? Round = null, int? Order = null, bool TaskApprovalAvailable = false,
+    string? TaskApprovalDescription = null);
 
 /// <summary>Ephemeral terminal display data. Formal output remains in the tool receipt archive.</summary>
 /// <remarks>仅用于临时终端展示；正式输出仍以工具回执归档为准。</remarks>
@@ -97,5 +98,9 @@ public sealed record McpPreset(string Id, string Name, string Description, McpSe
     string[]? Notes = null, string? ConfigurationTemplate = null);
 public sealed record McpCatalogResponse(McpPreset[] Presets, string[] ReusedCapabilities);
 public sealed record AgentToolsResponse(AgentTool[] Tools, string[]? Errors = null, McpConnectionDiagnostic[]? Connections = null);
-public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId, bool Approved);
-public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId);
+/// <summary>Explicit approval of one invocation or its validated task-local scope.</summary>
+/// <remarks>明确批准一次调用或经校验的本任务范围；省略范围仍只批准一次。</remarks>
+public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId,
+    bool Approved, string Scope = "once");
+public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId,
+    string? Scope = null, Guid? TaskId = null);

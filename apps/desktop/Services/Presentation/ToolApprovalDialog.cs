@@ -14,10 +14,7 @@ public static class ToolApprovalDialog
 {
     public static ContentDialog Create(XamlRoot root, ToolActivity tool)
     {
-        var content = new StackPanel { Spacing = 10 };
-        if (tool.Name == "terminal.host.run") AddHostTerminalOperation(content, tool);
-        else if (ComputerToolPresentation.Supports(tool.Name)) AddComputerOperation(content, tool);
-        else AddStandardOperation(content, tool);
+        var content = CreateOperationContent(tool);
         var scroll = new ScrollViewer { Name = "ToolApprovalContentScroll", Content = content,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         void UpdateHeight() => scroll.MaxHeight = Math.Clamp(root.Size.Height - 200, 80, 460);
@@ -35,6 +32,17 @@ public static class ToolApprovalDialog
         dialog.Closed += (_, _) => root.Changed -= RootChanged;
         UpdateHeight();
         return DialogPresentation.Prepare(dialog);
+    }
+
+    /// <summary>Reuse reviewed operation details in the live inline surface and historical previews.</summary>
+    /// <remarks>实时行内审批与历史预览复用同一份操作详情，不另造参数或权限说明。</remarks>
+    public static StackPanel CreateOperationContent(ToolActivity tool)
+    {
+        var content = new StackPanel { Spacing = 10 };
+        if (tool.Name == "terminal.host.run") AddHostTerminalOperation(content, tool);
+        else if (ComputerToolPresentation.Supports(tool.Name)) AddComputerOperation(content, tool);
+        else AddStandardOperation(content, tool);
+        return content;
     }
 
     private static void AddStandardOperation(StackPanel content, ToolActivity tool)

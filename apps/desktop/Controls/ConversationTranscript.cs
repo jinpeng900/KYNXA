@@ -35,7 +35,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private readonly Dictionary<Guid, Snapshot> _publishedRows = [];
     private Guid[] _publishedOrder = [];
     private bool _hasPublishedSnapshot;
-    private bool _historyHasOlder, _historyHasNewer;
+    private bool _historyHasOlder, _historyHasNewer, _historyHasNewReplies;
     private readonly LinkedList<Guid> _cacheOrder = [];
     private readonly Dictionary<Guid, LinkedListNode<Guid>> _cacheNodes = [];
     private readonly Dictionary<(Guid MessageId, string CallId), ToolDisplayRevision> _toolRevisions = [];
@@ -71,7 +71,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
-        long? GenerationElapsedMs, long? GenerationStartedTimestamp,
+        long? GenerationElapsedMs, long? GenerationStartedTimestamp, string GenerationTimingState, Guid GenerationClockId,
         long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, AttachmentDisplay[] Attachments);
     private sealed record AttachmentDisplay(Guid Id, string Name, string ContentType, long SizeBytes, string Status,
         string? Error, string? ThumbnailUrl);
@@ -91,11 +91,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public event EventHandler? FindTextStateChanged;
     public bool IsFindTextOpen { get; private set; }
 
-    public void SetHistoryAvailability(Guid conversationId, bool hasOlder, bool hasNewer)
+    public void SetHistoryAvailability(Guid conversationId, bool hasOlder, bool hasNewer, bool hasNewReplies = false)
     {
         if (_conversationId != conversationId) return;
-        _historyHasOlder = hasOlder; _historyHasNewer = hasNewer;
-        Post(new { type = "historyAvailability", conversationId = conversationId.ToString(), hasOlder, hasNewer });
+        _historyHasOlder = hasOlder; _historyHasNewer = hasNewer; _historyHasNewReplies = hasNewReplies;
+        Post(new { type = "historyAvailability", conversationId = conversationId.ToString(), hasOlder, hasNewer, hasNewReplies });
     }
 
     public void ForgetConversation(Guid conversationId, IReadOnlyList<Guid> messageIds)
@@ -136,7 +136,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             _publishedRows.Clear();
             _publishedOrder = [];
             _hasPublishedSnapshot = false;
-            _historyHasOlder = _historyHasNewer = false;
+            _historyHasOlder = _historyHasNewer = _historyHasNewReplies = false;
             _diagramExportNavigation++;
             _findTextRequest++;
             if (IsFindTextOpen)
@@ -305,6 +305,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 findTextSelection = UiText.Get("请先取消文字选择，再跳转到匹配内容。"), findTextSearching = UiText.Get("正在查找…"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),
+                newReplyNotice = UiText.Get("有新回复，跳转查看"),
                 copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
                 blockWrap = UiText.Get("自动换行"), blockUnwrap = UiText.Get("原样显示"),
                 blockExpand = UiText.Get("展开"), blockCollapse = UiText.Get("收起"), blockLineCount = UiText.Get("{0} 行"),
@@ -783,9 +784,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
             visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
             row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
             visible.Tools, segments, visible.Mode, row.Message.DurationMs,
-            row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
-                ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null,
-            row.IsStreaming ? row.Message.GenerationStartedTimestamp : null,
+            row.Message.GenerationElapsedMs, row.Message.GenerationStartedTimestamp,
+            row.Message.GenerationTimingState, row.Message.GenerationClockId,
             row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
             MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds(), row.Message.TaskCompletionState,
             row.Message.Attachments.Select(attachment => AttachmentView(row.ConversationId, row.Message.Id, attachment)).ToArray());
@@ -841,7 +841,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         return Post(new { type = fullSnapshot ? "render" : "renderPatch", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom, progressiveSnapshot,
             messageOrder,
-            historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer,
+            historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer, historyHasNewReplies = _historyHasNewReplies,
             messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
                 html = item.Cache.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                 htmlStableLength = item.Cache.Stream?.StableHtml.Length, htmlStableBlocks = item.Cache.Stream?.StableBlocks,
@@ -852,6 +852,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     contentType = attachment.ContentType, sizeBytes = attachment.SizeBytes, status = attachment.Status,
                     error = attachment.Error, thumbnailUrl = attachment.ThumbnailUrl }),
                 generationElapsedMs = item.Row.GenerationElapsedMs,
+                generationTimingState = item.Row.GenerationTimingState, generationClockId = item.Row.GenerationClockId,
                 createdAtMs = item.Row.CreatedAtMs, endRecordedAtMs = item.Row.EndRecordedAtMs,
                 streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                 assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
@@ -878,6 +879,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
         previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
         previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
+        previous.GenerationTimingState == current.GenerationTimingState && previous.GenerationClockId == current.GenerationClockId &&
+        (current.GenerationTimingState == "live" || previous.GenerationElapsedMs == current.GenerationElapsedMs) &&
         previous.CreatedAtMs == current.CreatedAtMs && previous.EndRecordedAtMs == current.EndRecordedAtMs &&
         previous.TaskCompletionState == current.TaskCompletionState && previous.Attachments.SequenceEqual(current.Attachments) &&
         previous.AssistantSegments.SequenceEqual(current.AssistantSegments) && previous.ToolActivities.SequenceEqual(current.ToolActivities);
