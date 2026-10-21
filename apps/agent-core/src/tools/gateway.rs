@@ -1280,6 +1280,43 @@ pub(crate) fn check_configuration_generation(ctx: &GatewayToolContext) -> Result
     check_cancelled(ctx)
 }
 
+/// Build authority only from the selected native context, not caller-supplied approval fields.
+/// 授权绑定只取已选择的原生上下文；动态调用ID不影响任务复用，权限/配置/挂载变化会失效。
+async fn task_approval_binding(name: &str, args: &Value, ctx: &GatewayToolContext, invocation: &Value) -> Result<Value, GatewayError> {
+    let target = if name == "filesystem.write" {
+        let (path, _) = canonical_authorized(ctx, args["path"].as_str().unwrap_or(""), true)?;
+        if protected_path(ctx, &path) {
+            return Err(failure("PROTECTED_APP_DATA", "正式数据、凭据和扩展须通过专用服务访问。", 403));
+        }
+        Some(super::local_files::path_text(&path))
+    } else { None };
+    let mut configuration = ctx.config.clone();
+    if let Some(fields) = configuration.as_object_mut() {
+        for key in ["approvedInvocation", "activeToolCallId", "activeOperationId", "activeRequestId", "nativeCancellationId",
+            "activeAssistantMessageId", "operationNamespace", "renewOperationalExecutionBudget", "attachmentContextChars", "activeSteeringSequence"] {
+            fields.remove(key);
+        }
+    }
+    let mut roots = ctx.authorized_roots.iter().map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .map(|root| super::local_files::path_text(&root)).collect::<Vec<_>>();
+    roots.sort(); roots.dedup();
+    let schemas = ctx.runtime.schemas.read().await;
+    let schema = schemas.iter().find(|tool| tool["name"] == name).map(|tool| tool["inputSchema"].clone()).unwrap_or(Value::Null);
+    drop(schemas);
+    let mut proof = invocation.clone();
+    if let Some(fields) = proof.as_object_mut() {
+        for key in ["id", "arguments", "taskApproval"] { fields.remove(key); }
+    }
+    let host = std::fs::metadata(&ctx.toolhost_exe).ok().map(|metadata|
+        json!({"bytes":metadata.len(),"modified":metadata.modified().ok().and_then(|time|time.duration_since(std::time::UNIX_EPOCH).ok()).map(|time|time.as_nanos().to_string())}));
+    let scope = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"permission":ctx.permission_mode,
+        "dataRoot":ctx.data_home,"extensionRoot":ctx.extension_root,"workdir":std::fs::canonicalize(&ctx.workdir).unwrap_or_else(|_|ctx.workdir.clone()),"authorizedRoots":roots,
+        "configuration":configuration,"configurationGeneration":ctx.runtime.configuration_generation.load(Ordering::Acquire),
+        "mcpGeneration":super::gateway_mcp::configuration_generation(ctx),"schema":schema,"toolhost":ctx.toolhost_exe,"hostVersion":host});
+    Ok(json!({"fingerprint":super::approval_grant::fingerprint(name,args,target.as_deref(),&scope,&proof),
+        "kind":if target.is_some(){"same-file-write"}else{"exact-invocation"}}))
+}
+
 pub async fn execute(
     tool_name: &str,
     args: Value,
@@ -1310,12 +1347,24 @@ pub async fn execute(
         None
     };
     let ctx = checked.as_ref().unwrap_or(ctx);
+    let approval_arguments = args.clone();
+    // A decision cannot silently move to another canonical target or a changed configuration while waiting.
+    // 等待期间目标或配置改变时，旧决定不能静默授权新绑定；原生执行仍会再次做完整安全校验。
+    if ctx.approved && ctx.config["approvedInvocation"]["taskApproval"].is_object() {
+        let binding = task_approval_binding(tool_name, &approval_arguments, ctx, &ctx.config["approvedInvocation"]).await?;
+        if binding["fingerprint"] != ctx.config["approvedInvocation"]["taskApproval"]["fingerprint"] {
+            return Err(failure("TOOL_APPROVAL_SCOPE_CHANGED", "审批目标、参数或权限范围已变化，操作未派发，请重新批准。", 409));
+        }
+    }
     // Keep the largest native dispatch branch off the caller's async frame.
     // 将较大的原生执行分支放到堆上，避免调试构建的浏览器握手层层占用线程栈。
     let started = std::time::Instant::now();
     let outcome = Box::pin(execute_inner(tool_name, args, ctx)).await;
     super::gateway_tool_memory::remember_outcome(tool_name, &outcome, started.elapsed(), ctx).await;
     let mut result = outcome?;
+    if result["requiresApproval"] == true && result["invocation"].is_object() {
+        result["invocation"]["taskApproval"] = task_approval_binding(tool_name, &approval_arguments, ctx, &result["invocation"]).await?;
+    }
     if result.is_object() && ctx.config["activeMount"].is_object() {
         result["mountId"] = ctx.config["activeMountId"].clone();
         result["mountName"] = ctx.config["activeMount"]["name"].clone();
@@ -2165,6 +2214,33 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn task_file_write_binding_preserves_live_hash_protection_and_rejects_target_or_configuration_changes() {
+        let (mut context, _sender)=test_context();context.permission_mode="ask".into();
+        let root=context.workdir.parent().unwrap().to_owned();
+        let initial=json!({"path":"report.md","content":"first","expectedHash":null});
+        let pending=execute("filesystem.write",initial.clone(),&context).await.unwrap();
+        assert_eq!(pending["requiresApproval"],true);
+        let mut approved=context.clone();approved.approved=true;approved.config["approvedInvocation"]=pending["invocation"].clone();
+        let first=execute("filesystem.write",initial,&approved).await.unwrap();
+        let update=json!({"path":context.workdir.join("report.md"),"content":"updated","expectedHash":first["sha256"]});
+        let current=execute("filesystem.write",update.clone(),&context).await.unwrap();
+        assert_eq!(pending["invocation"]["taskApproval"]["fingerprint"],current["invocation"]["taskApproval"]["fingerprint"]);
+        execute("filesystem.write",update.clone(),&approved).await.unwrap();
+        assert_eq!(std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),"updated");
+        // Matching authorization is not a substitute for the newest overwrite precondition.
+        // 相同授权不能替代最新覆盖前提，旧哈希即使已有任务授权也不能改写文件。
+        assert!(execute("filesystem.write",update.clone(),&approved).await.is_err());
+        assert_eq!(std::fs::read_to_string(context.workdir.join("report.md")).unwrap(),"updated");
+        let mut changed=update.clone();changed["path"]=json!("other.md");
+        assert_eq!(execute("filesystem.write",changed,&approved).await.unwrap_err().code,"TOOL_APPROVAL_SCOPE_CHANGED");
+        let mut protected=update.clone();protected["path"]=json!(context.data_home.join("formal.json"));protected["reason"]=json!("A grant cannot bypass protected data");
+        assert_eq!(execute("filesystem.write",protected,&approved).await.unwrap_err().code,"PROTECTED_APP_DATA");
+        context.runtime.configuration_generation.fetch_add(1,Ordering::AcqRel);
+        assert_eq!(execute("filesystem.write",update,&approved).await.unwrap_err().code,"TOOL_APPROVAL_SCOPE_CHANGED");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {

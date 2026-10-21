@@ -2494,6 +2494,7 @@ pub async fn run(runtime: Arc<GatewayRuntime>, run: Arc<RequestRun>, input: Valu
             }
         }
     }
+    runtime.retire_terminal_approvals(&run).await;
     run.finish(value).await;
 }
 

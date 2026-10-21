@@ -9,6 +9,7 @@ use crate::{
     tools::gateway::{GatewayToolContext, ToolRuntime},
 };
 use serde_json::{Value, json};
+use crate::tools::approval_grant::{ApprovalScope, TaskApprovalGrants};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -421,11 +422,25 @@ impl RequestRun {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct ApprovalDecision { approved: bool, scope: ApprovalScope }
+struct LiveTaskApproval {
+    conversation_id: String,
+    bindings: TaskApprovalGrants,
+    touched: Instant,
+}
+#[derive(Default)]
+struct RuntimeApprovals {
+    pending: HashMap<String, Approval>,
+    tasks: HashMap<String, LiveTaskApproval>,
+}
 struct Approval {
     conversation: String,
     request: String,
     call: String,
-    response: oneshot::Sender<bool>,
+    response: oneshot::Sender<ApprovalDecision>,
+    owner: Weak<RequestRun>,
+    task_binding: Option<(String, String)>,
     expires: Instant,
     deadline_code: &'static str,
 }
@@ -440,7 +455,7 @@ pub struct GatewayRuntime {
     task_journals: std::sync::Mutex<Vec<Weak<super::gateway_task_journal::TaskJournal>>>,
     runs: Mutex<HashMap<String, Arc<RequestRun>>>,
     conversations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    approvals: Mutex<HashMap<String, Approval>>,
+    approvals: Mutex<RuntimeApprovals>,
     execution_tasks: AtomicUsize,
     extension_prewarm_scheduled: AtomicBool,
     background_cancellation: watch::Sender<bool>,
@@ -802,6 +817,7 @@ impl GatewayRuntime {
                 .await?;
         }
         run.cancel();
+        self.retire_terminal_approvals(&run).await;
         Ok(json!({"cancelled":true}))
     }
     pub async fn run_status(&self, conversation: &str, request: &str) -> Option<Value> {
@@ -942,10 +958,10 @@ impl GatewayRuntime {
         Ok(run)
     }
     pub async fn cancel_task_worker(&self, task_id: &str) {
-        if let Ok(runs) = self.task_runs.lock() {
-            if let Some(run) = runs.get(task_id).and_then(Weak::upgrade) {
-                run.cancel();
-            }
+        let run = self.task_runs.lock().ok().and_then(|runs|runs.get(task_id).and_then(Weak::upgrade));
+        if let Some(run) = run {
+            run.cancel();
+            self.retire_terminal_approvals(&run).await;
         }
     }
     /// Interrupt only the current model turn; executing tools and the task lifetime keep their own cancellation.
@@ -1037,194 +1053,151 @@ impl GatewayRuntime {
         context.config = saved;
         Ok(context)
     }
+    /// Live permission belongs to the durable task, never a replaceable request/reply ID.
+    /// 活动授权归属持久任务；暂停可复用，终态和取消失效，重启不从历史文字恢复授权。
+    fn task_approval_binding(run: &RequestRun, receipt: &Value) -> Option<(String, String)> {
+        if run.finished.load(Ordering::Acquire) || *run.cancellation.borrow() { return None; }
+        let journal = run.journal.as_ref()?;
+        let task = journal.check_dispatch_fence().ok()?;
+        if task.state.is_terminal() || task.state == crate::storage::task_repository::TaskState::Paused
+            || task.scope.conversation_id != run.conversation_id { return None; }
+        let fingerprint = receipt["invocation"]["taskApproval"]["fingerprint"].as_str()?;
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) { return None; }
+        Some((journal.task_id().into(), fingerprint.into()))
+    }
+
+    pub(crate) async fn retire_terminal_approvals(&self, run: &RequestRun) {
+        let Some(journal) = &run.journal else { return; };
+        // Read formal state outside the approval lock; a paused attempt is deliberately retained.
+        // 正式状态读取不持审批锁；暂停尝试故意保留授权，只有真实终态才回收。
+        if journal.load_current().is_ok_and(|task| task.state.is_terminal()) {
+            self.approvals.lock().await.tasks.remove(journal.task_id());
+        }
+    }
+
     pub async fn await_approval(
-        &self,
-        run: &Arc<RequestRun>,
-        call: &Value,
-        receipt: &Value,
-        round: u64,
-        order: u64,
-        task_deadline: Instant,
+        &self, run: &Arc<RequestRun>, call: &Value, receipt: &Value, round: u64, order: u64, task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        self.await_approval_until(
-            run,
-            call,
-            receipt,
-            round,
-            order,
-            task_deadline,
-            Instant::now() + Duration::from_secs(300),
-        )
-        .await
+        self.await_approval_until(run, call, receipt, round, order, task_deadline, Instant::now()+Duration::from_secs(300)).await
     }
     async fn await_approval_until(
-        &self,
-        run: &Arc<RequestRun>,
-        call: &Value,
-        receipt: &Value,
-        round: u64,
-        order: u64,
-        task_deadline: Instant,
-        approval_deadline: Instant,
+        &self, run: &Arc<RequestRun>, call: &Value, receipt: &Value, round: u64, order: u64,
+        task_deadline: Instant, approval_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        let expires = task_deadline.min(approval_deadline);
-        let deadline_code = if task_deadline <= approval_deadline {
-            "TOOL_RUN_TIMEOUT"
-        } else {
-            "TOOL_APPROVAL_EXPIRED"
-        };
-        if Instant::now() >= expires {
-            return Err(GatewayError::new(
-                deadline_code,
-                "审批或任务有效期已结束，操作未派发。",
-                408,
-            ));
-        }
-        let id = receipt["invocation"]["id"]
-            .as_str()
-            .ok_or_else(|| GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?
-            .to_owned();
-        let (sender, receiver) = oneshot::channel();
-        self.approvals.lock().await.insert(
-            id.clone(),
-            Approval {
-                conversation: run.conversation_id.clone(),
-                request: run.request_id.clone(),
-                call: call["id"].as_str().unwrap_or("").to_owned(),
-                response: sender,
-                expires,
-                deadline_code,
-            },
-        );
-        run.emit(json!({"type":"approval_required","tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"等待授权","round":round,"order":order}})).await;
-        let mut cancellation = run.cancellation.subscribe();
-        if *cancellation.borrow() {
-            self.approvals.lock().await.remove(&id);
-            return Ok(false);
-        }
-        // Expiry and cancellation release the conversation task even without a user decision.
-        // 即使用户没有决定，过期与取消也会释放当前会话任务，不把审批永远留在活动槽中。
-        let waiting_started = Instant::now();
-        let approved = tokio::select! {
-            biased;
-            _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408)),
-            _ = cancellation.changed() => Ok(false),
-            result = receiver => {
-                if Instant::now() >= expires {
-                    Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408))
-                } else { Ok(result.unwrap_or(false)) }
-            },
-        };
-        self.approvals.lock().await.remove(&id);
-        run.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
-        approved
+        self.await_bound_approval(run, run, call, receipt, round, order, task_deadline, approval_deadline).await
     }
-    /// Child control can stop an approval wait without leaving a stale approval in the parent's UI.
-    /// 子任务控制可以结束审批等待，父界面不会留下失效的审批项。
     pub async fn await_child_approval(
-        &self,
-        parent: &Arc<RequestRun>,
-        child: &Arc<RequestRun>,
-        call: &Value,
-        receipt: &Value,
-        round: u64,
-        order: u64,
-        task_deadline: Instant,
+        &self, parent: &Arc<RequestRun>, child: &Arc<RequestRun>, call: &Value, receipt: &Value,
+        round: u64, order: u64, task_deadline: Instant,
     ) -> Result<bool, GatewayError> {
-        let approval_deadline = Instant::now() + Duration::from_secs(300);
-        let expires = task_deadline.min(approval_deadline);
-        let deadline_code = if task_deadline <= approval_deadline {
-            "TOOL_RUN_TIMEOUT"
-        } else {
-            "TOOL_APPROVAL_EXPIRED"
-        };
-        if Instant::now() >= expires {
-            return Err(GatewayError::new(
-                deadline_code,
-                "子任务审批或任务有效期已结束，操作未派发。",
-                408,
-            ));
-        }
-        let mut child_cancel = child.cancellation.subscribe();
-        let mut parent_cancel = parent.cancellation.subscribe();
-        if *child_cancel.borrow() || *parent_cancel.borrow() {
-            return Ok(false);
-        }
-        let id = receipt["invocation"]["id"]
-            .as_str()
-            .ok_or_else(|| {
-                GatewayError::new("INVALID_APPROVAL_RECEIPT", "子任务审批回执无效。", 500)
-            })?
-            .to_owned();
-        let (sender, receiver) = oneshot::channel();
-        self.approvals.lock().await.insert(
-            id.clone(),
-            Approval {
-                conversation: parent.conversation_id.clone(),
-                request: parent.request_id.clone(),
-                call: call["id"].as_str().unwrap_or("").into(),
-                response: sender,
-                expires,
-                deadline_code,
-            },
-        );
-        // Child approvals share the parent's user interface, never the parent's active tool sequence.
-        // 子审批共用父任务界面，但不能进入父回复的活动工具序号账本。
-        parent.emit(json!({"type":"task_approval_required","taskId":child.journal.as_ref().map(|journal| journal.task_id()),
-            "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"子任务等待授权","round":round,"order":order}})).await;
-        let waiting_started = Instant::now();
-        let approved = tokio::select! {
-            biased;
-            _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "子任务审批或任务有效期已结束，操作未派发。", 408)),
-            _ = crate::tools::gateway::wait_for_cancellation(&mut child_cancel) => Ok(false),
-            _ = crate::tools::gateway::wait_for_cancellation(&mut parent_cancel) => Ok(false),
-            result = receiver => if Instant::now() >= expires {
-                Err(GatewayError::new(deadline_code, "子任务审批或任务有效期已结束，操作未派发。", 408))
-            } else { Ok(result.unwrap_or(false)) },
-        };
-        self.approvals.lock().await.remove(&id);
-        child.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
-        parent.emit(json!({"type":"task_approval_closed","taskId":child.journal.as_ref().map(|journal|journal.task_id()),"approvalId":id,"toolCallId":call["id"],"approved":approved.as_ref().is_ok_and(|approved| *approved),"code":approved.as_ref().err().map(|error|&error.code)})).await;
-        approved
+        self.await_bound_approval(child, parent, call, receipt, round, order, task_deadline, Instant::now()+Duration::from_secs(300)).await
     }
-    pub async fn approve(&self, body: &Value) -> Result<Value, GatewayError> {
-        let id = body["approvalId"]
-            .as_str()
-            .or_else(|| body["id"].as_str())
-            .unwrap_or("");
-        let mut approvals = self.approvals.lock().await;
-        let pending = approvals
-            .get(id)
-            .ok_or_else(|| GatewayError::new("APPROVAL_NOT_FOUND", "审批已失效或不存在。", 404))?;
-        for (key, expected) in [
-            ("conversationId", pending.conversation.as_str()),
-            ("requestId", pending.request.as_str()),
-            ("toolCallId", pending.call.as_str()),
-        ] {
-            if body[key].as_str() != Some(expected) {
-                return Err(GatewayError::new(
-                    "APPROVAL_SCOPE_MISMATCH",
-                    "审批范围不匹配。",
-                    409,
-                ));
+    async fn approval_owner_finished(run: &RequestRun) {
+        let mut events=run.events.subscribe();
+        loop {
+            if run.finished.load(Ordering::Acquire) { return; }
+            match events.recv().await {
+                Ok(event) if terminal_event(&event) => return,
+                Err(broadcast::error::RecvError::Closed) => return,
+                _ => {}
             }
         }
-        if Instant::now() >= pending.expires {
-            let code = pending.deadline_code;
-            approvals.remove(id);
-            return Err(GatewayError::new(
-                code,
-                "审批或任务有效期已结束，操作未派发。",
-                408,
-            ));
+    }
+    async fn await_bound_approval(
+        &self, owner: &Arc<RequestRun>, display: &Arc<RequestRun>, call: &Value, receipt: &Value,
+        round: u64, order: u64, task_deadline: Instant, approval_deadline: Instant,
+    ) -> Result<bool, GatewayError> {
+        let expires = task_deadline.min(approval_deadline);
+        let deadline_code = if task_deadline <= approval_deadline { "TOOL_RUN_TIMEOUT" } else { "TOOL_APPROVAL_EXPIRED" };
+        if Instant::now() >= expires { return Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408)); }
+        if *owner.cancellation.borrow() || *display.cancellation.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire) { return Ok(false); }
+        self.retire_terminal_approvals(owner).await;
+        let binding = Self::task_approval_binding(owner, receipt);
+        if let Some((task_id, fingerprint)) = &binding {
+            let mut approvals = self.approvals.lock().await;
+            if let Some(task) = approvals.tasks.get_mut(task_id) {
+                if task.conversation_id == owner.conversation_id && task.bindings.contains(task_id, fingerprint) {
+                    task.touched = Instant::now();
+                    return Ok(true);
+                }
+            }
         }
-        let approved = body["approved"]
-            .as_bool()
-            .or_else(|| body["allow"].as_bool())
-            .ok_or_else(|| GatewayError::new("INVALID_APPROVAL", "审批决定无效。", 400))?;
-        let pending = approvals.remove(id).unwrap();
-        let _ = pending.response.send(approved);
-        Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call}))
+        let id = receipt["invocation"]["id"].as_str().ok_or_else(||GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?.to_owned();
+        let (sender, receiver) = oneshot::channel();
+        let mut owner_cancel = owner.cancellation.subscribe();
+        let mut display_cancel = display.cancellation.subscribe();
+        self.approvals.lock().await.pending.insert(id.clone(), Approval {
+            conversation:display.conversation_id.clone(), request:display.request_id.clone(), call:call["id"].as_str().unwrap_or("").into(),
+            response:sender, owner:Arc::downgrade(owner), task_binding:binding.clone(), expires, deadline_code,
+        });
+        let child = !Arc::ptr_eq(owner, display);
+        let task_id = owner.journal.as_ref().map(|journal|journal.task_id());
+        let description = if binding.is_none() { "当前调用不具备有效任务范围，仅可单次批准。" }
+            else if receipt["invocation"]["taskApproval"]["kind"] == "same-file-write" { "本任务内允许写入同一文件；每次仍校验当前文件哈希。暂停后保留，重启后需重新批准。" }
+            else { "本任务内允许相同工具、参数与工作范围；更换目标或配置需再次批准。暂停后保留，重启后需重新批准。" };
+        display.emit(json!({"type":if child{"task_approval_required"}else{"approval_required"},"taskId":task_id,
+            "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,
+            "summary":if child{"子任务等待授权"}else{"等待授权"},"round":round,"order":order,
+            "taskApprovalAvailable":binding.is_some(),"taskApprovalDescription":description}})).await;
+        let waiting_started = Instant::now();
+        let decision = if *owner_cancel.borrow() || *display_cancel.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire) {
+            Ok(ApprovalDecision::default())
+        } else {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code,"审批或任务有效期已结束，操作未派发。",408)),
+                _ = crate::tools::gateway::wait_for_cancellation(&mut owner_cancel) => Ok(ApprovalDecision::default()),
+                _ = crate::tools::gateway::wait_for_cancellation(&mut display_cancel) => Ok(ApprovalDecision::default()),
+                _ = Self::approval_owner_finished(owner) => Ok(ApprovalDecision::default()),
+                _ = Self::approval_owner_finished(display) => Ok(ApprovalDecision::default()),
+                result = receiver => if Instant::now()>=expires { Err(GatewayError::new(deadline_code,"审批或任务有效期已结束，操作未派发。",408)) }
+                    else { Ok(result.unwrap_or_default()) },
+            }
+        };
+        self.approvals.lock().await.pending.remove(&id);
+        owner.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
+        let cancelled = *owner.cancellation.borrow() || *display.cancellation.borrow() || owner.finished.load(Ordering::Acquire) || display.finished.load(Ordering::Acquire);
+        let approved = decision.as_ref().is_ok_and(|decision|decision.approved) && !cancelled;
+        let scope = decision.as_ref().map_or("once",|decision|decision.scope.as_str());
+        let code = decision.as_ref().err().map(|error|error.code.as_str()).or_else(||if cancelled{Some("TOOL_APPROVAL_CANCELLED")}else if !approved{Some("TOOL_APPROVAL_DENIED")}else{None});
+        let closed = json!({"type":"approval_closed","taskId":task_id,"approvalId":id,"toolCallId":call["id"],"approved":approved,"scope":scope,"code":code});
+        display.emit(closed.clone()).await;
+        if child { let mut compatible=closed;compatible["type"]=json!("task_approval_closed");display.emit(compatible).await; }
+        self.retire_terminal_approvals(owner).await;
+        decision.map(|_|approved)
+    }
+    pub async fn approve(&self, body: &Value) -> Result<Value, GatewayError> {
+        let id = body["approvalId"].as_str().or_else(||body["id"].as_str()).unwrap_or("");
+        let scope = ApprovalScope::parse(body.get("scope").filter(|value|!value.is_null()).map(|value|value.as_str().unwrap_or("invalid")))
+            .map_err(|message|GatewayError::new("INVALID_APPROVAL_SCOPE",message,400))?;
+        let mut approvals = self.approvals.lock().await;
+        let pending = approvals.pending.get(id).ok_or_else(||GatewayError::new("APPROVAL_NOT_FOUND","审批已失效或不存在。",404))?;
+        for (key, expected) in [("conversationId",pending.conversation.as_str()),("requestId",pending.request.as_str()),("toolCallId",pending.call.as_str())] {
+            if body[key].as_str()!=Some(expected) { return Err(GatewayError::new("APPROVAL_SCOPE_MISMATCH","审批范围不匹配。",409)); }
+        }
+        if Instant::now()>=pending.expires { let code=pending.deadline_code;approvals.pending.remove(id);return Err(GatewayError::new(code,"审批或任务有效期已结束，操作未派发。",408)); }
+        let approved=body["approved"].as_bool().or_else(||body["allow"].as_bool()).ok_or_else(||GatewayError::new("INVALID_APPROVAL","审批决定无效。",400))?;
+        if scope==ApprovalScope::Task && pending.task_binding.is_none() { return Err(GatewayError::new("TASK_APPROVAL_UNAVAILABLE","当前调用只能单次批准。",400)); }
+        let pending=approvals.pending.remove(id).unwrap();drop(approvals);
+        let owner=pending.owner.upgrade().filter(|run|!run.finished.load(Ordering::Acquire)&&!*run.cancellation.borrow())
+            .ok_or_else(||GatewayError::new("APPROVAL_NOT_FOUND","任务已暂停、结束或取消，本次审批已关闭。",404))?;
+        let mut granted_task=None;
+        if approved && scope==ApprovalScope::Task {
+            let (task_id,fingerprint)=pending.task_binding.as_ref().unwrap();
+            let journal=owner.journal.as_ref().ok_or_else(||GatewayError::new("TASK_APPROVAL_UNAVAILABLE","当前调用没有持久任务身份。",409))?;
+            let current=journal.check_dispatch_fence()?;
+            if current.state.is_terminal() || current.state==crate::storage::task_repository::TaskState::Paused || journal.task_id()!=task_id {
+                return Err(GatewayError::new("APPROVAL_NOT_FOUND","任务授权范围已失效。",409));
+            }
+            let mut approvals=self.approvals.lock().await;
+            if approvals.tasks.len()>=256 && !approvals.tasks.contains_key(task_id) {
+                if let Some(old)=approvals.tasks.iter().min_by_key(|(_,task)|task.touched).map(|(id,_)|id.clone()) { approvals.tasks.remove(&old); }
+            }
+            let task=approvals.tasks.entry(task_id.clone()).or_insert_with(||LiveTaskApproval{conversation_id:owner.conversation_id.clone(),bindings:Default::default(),touched:Instant::now()});
+            task.bindings.allow(task_id,fingerprint);task.touched=Instant::now();granted_task=Some(task_id.clone());
+        }
+        let _=pending.response.send(ApprovalDecision{approved,scope});
+        Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call,"scope":scope.as_str(),"taskId":granted_task}))
     }
     pub async fn active_requests(&self) -> usize {
         let unfinished = self
@@ -1614,6 +1587,61 @@ mod approval_tests {
     }
 
     #[tokio::test]
+    async fn task_scope_authorization_survives_pause_and_new_request_but_not_a_different_task_or_terminal_state() {
+        use crate::storage::task_repository::{TaskControl,TaskState};
+        let (runtime,root)=runtime();let run=durable_run(&runtime);let mut events=run.events.subscribe();
+        let receipt=json!({"invocation":{"id":new_id(),"taskApproval":{"fingerprint":"f".repeat(64),"kind":"same-file-write"}}});
+        let call=json!({"id":"scoped-call","name":"filesystem.write","arguments":{"path":"report.md"}});
+        let waiting={let runtime=runtime.clone();let run=run.clone();let receipt=receipt.clone();let call=call.clone();
+            tokio::spawn(async move{runtime.await_approval(&run,&call,&receipt,1,1,Instant::now()+Duration::from_secs(10)).await})};
+        let required=loop { let event=events.recv().await.unwrap();if event["type"]=="approval_required" {break event;} };
+        assert_eq!(required["tool"]["taskApprovalAvailable"],true);
+        let response=runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,
+            "toolCallId":"scoped-call","approved":true,"scope":"task"})).await.unwrap();
+        let task_id=run.journal.as_ref().unwrap().task_id().to_owned();assert_eq!(response["taskId"],task_id);assert_eq!(response["scope"],"task");
+        assert!(waiting.await.unwrap().unwrap());
+        let closed=loop {let event=events.recv().await.unwrap();if event["type"]=="approval_closed" {break event;} };
+        assert_eq!(closed["approvalId"],receipt["invocation"]["id"]);assert_eq!(closed["scope"],"task");assert_eq!(closed["approved"],true);
+        assert_eq!(runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,
+            "toolCallId":"scoped-call","approved":true,"scope":"task"})).await.unwrap_err().code,"APPROVAL_NOT_FOUND");
+        assert!(runtime.await_approval(&run,&call,&receipt,2,1,Instant::now()+Duration::from_secs(1)).await.unwrap());
+        let foreign=durable_run(&runtime);
+        let foreign_binding=GatewayRuntime::task_approval_binding(&foreign,&receipt).unwrap();
+        assert!(!runtime.approvals.lock().await.tasks[&task_id].bindings.contains(&foreign_binding.0,&foreign_binding.1));
+        foreign.journal.as_ref().unwrap().finish(TaskState::Completed,Some("fixture-complete")).await.unwrap();
+        let journal=run.journal.as_ref().unwrap();
+        journal.flush().await.unwrap();
+        let current=journal.load_current().unwrap();
+        journal.repository().control(&task_id,current.version,TaskControl::Pause).unwrap();
+        journal.finish(TaskState::Paused,Some("fixture-pause")).await.unwrap();
+        run.cancel();runtime.retire_terminal_approvals(&run).await;assert!(runtime.approvals.lock().await.tasks.contains_key(&task_id));
+        let paused=journal.load_current().unwrap();assert_eq!(paused.state,TaskState::Paused);
+        let queued=journal.repository().control(&task_id,paused.version,TaskControl::Resume).unwrap();
+        let next=super::super::gateway_task_journal::TaskJournal::start_existing(&runtime.config.data_root,&queued,"approval-resume",60_000).unwrap();
+        let mut resumed=RequestRun::test_run(16);{let value=Arc::get_mut(&mut resumed).unwrap();value.conversation_id=run.conversation_id.clone();value.journal=Some(next);}
+        assert_ne!(resumed.request_id,run.request_id);
+        assert!(runtime.await_approval(&resumed,&call,&receipt,3,1,Instant::now()+Duration::from_secs(1)).await.unwrap());
+        resumed.journal.as_ref().unwrap().finish(TaskState::Completed,Some("fixture-complete")).await.unwrap();
+        runtime.retire_terminal_approvals(&resumed).await;assert!(!runtime.approvals.lock().await.tasks.contains_key(&task_id));
+        assert!(GatewayRuntime::task_approval_binding(&resumed,&receipt).is_none());
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(events);drop(foreign);drop(resumed);drop(run);drop(runtime);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_inline_approval_emits_close_without_finishing_the_reply_or_dispatching() {
+        let (runtime,root)=runtime();let run=RequestRun::test_run(16);let mut events=run.events.subscribe();
+        let receipt=json!({"invocation":{"id":new_id()}});let call=json!({"id":"cancel-call","name":"terminal.host.run","arguments":{}});
+        let waiting={let runtime=runtime.clone();let run=run.clone();let receipt=receipt.clone();
+            tokio::spawn(async move{runtime.await_approval(&run,&call,&receipt,1,1,Instant::now()+Duration::from_secs(10)).await})};
+        loop {if events.recv().await.unwrap()["type"]=="approval_required" {break;}}
+        run.cancel();assert!(!waiting.await.unwrap().unwrap());
+        let closed=loop{let event=events.recv().await.unwrap();if event["type"]=="approval_closed"{break event;}};
+        assert_eq!(closed["approvalId"],receipt["invocation"]["id"]);assert_eq!(closed["toolCallId"],"cancel-call");assert_eq!(closed["approved"],false);
+        assert_eq!(closed["code"],"TOOL_APPROVAL_CANCELLED");assert!(!run.finished.load(Ordering::Acquire));
+        assert!(runtime.approvals.lock().await.pending.is_empty());std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn formal_approval_expires_and_task_deadline_interrupts_waiting() {
         let (runtime, root) = runtime();
         let run = RequestRun::test_run(16);
@@ -1636,7 +1664,7 @@ mod approval_tests {
                 .await
                 .unwrap_err();
             assert_eq!(error.code, code);
-            assert!(runtime.approvals.lock().await.is_empty());
+            assert!(runtime.approvals.lock().await.pending.is_empty());
             assert_eq!(runtime.approve(&json!({"approvalId":receipt["invocation"]["id"],"conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":"owned-call","approved":true})).await.unwrap_err().code, "APPROVAL_NOT_FOUND");
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -1646,13 +1674,15 @@ mod approval_tests {
         let (runtime, root) = runtime();
         let run = RequestRun::test_run(16);
         let (sender, _receiver) = oneshot::channel();
-        runtime.approvals.lock().await.insert(
+        runtime.approvals.lock().await.pending.insert(
             "expired".into(),
             Approval {
                 conversation: run.conversation_id.clone(),
                 request: run.request_id.clone(),
                 call: "call".into(),
                 response: sender,
+                owner: Arc::downgrade(&run),
+                task_binding: None,
                 expires: Instant::now() - Duration::from_millis(1),
                 deadline_code: "TOOL_APPROVAL_EXPIRED",
             },
@@ -1662,7 +1692,7 @@ mod approval_tests {
             runtime.approve(&decision).await.unwrap_err().code,
             "TOOL_APPROVAL_EXPIRED"
         );
-        assert!(runtime.approvals.lock().await.is_empty());
+        assert!(runtime.approvals.lock().await.pending.is_empty());
         let receipt = json!({"invocation":{"id":new_id()}});
         let call = json!({"id":"call","name":"skill.run","arguments":{}});
         let waiting = {
@@ -1682,7 +1712,7 @@ mod approval_tests {
                     .await
             })
         };
-        while runtime.approvals.lock().await.is_empty() {
+        while runtime.approvals.lock().await.pending.is_empty() {
             tokio::task::yield_now().await;
         }
         let mut live = decision;
@@ -1717,7 +1747,7 @@ mod approval_tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "TOOL_RUN_TIMEOUT");
-        assert!(runtime.approvals.lock().await.is_empty());
+        assert!(runtime.approvals.lock().await.pending.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -203,6 +203,9 @@ public sealed partial class ShellPage
                                 if (update.ApprovalId is Guid closedApproval) CloseTaskApproval(closedApproval, update.TaskId);
                                 TaskPanel.NotifyChanged(pending.ConversationId);
                                 continue;
+                            case "approval_closed":
+                                if (update.ApprovalId is Guid closedInlineApproval) CloseTaskApproval(closedInlineApproval, update.TaskId);
+                                continue;
                             case "tool_call":
                             case "tool_result":
                                 if (update.Tool is { } activity)

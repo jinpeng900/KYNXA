@@ -1,3 +1,4 @@
+pub(crate) mod approval_grant;
 pub mod contracts;
 mod gateway_attachment_read;
 pub(crate) mod gateway_workspace_changes;
