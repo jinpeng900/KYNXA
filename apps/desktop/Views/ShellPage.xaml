@@ -521,6 +521,7 @@
                             <Image x:Name="KynxaLogo" Width="353" Height="235" HorizontalAlignment="Center" VerticalAlignment="Center" Source="{StaticResource KynxaLogoImage}" Stretch="Uniform" />
                         </Grid>
 
+                        <controls:ConversationUnknownOutcomeCard x:Name="UnknownOutcomeCard" Margin="16,0,16,0" HorizontalAlignment="Stretch" />
                         <controls:ConversationPromptQueue x:Name="PromptQueue" Margin="16,0,16,0" HorizontalAlignment="Stretch" />
                         <controls:ComposerSurface x:Name="ComposerHost" IsFooterVisible="True" services:UiLocalization.AutomationName="对话输入区">
                             <controls:ComposerSurface.Body>
@@ -614,6 +615,8 @@
                         </controls:ComposerSurface>
                         <TextBlock services:UiLocalization.Text="Enter 发送 · Shift+Enter 换行" FontSize="11"
                                    Foreground="{StaticResource KynxaSecondaryTextBrush}" HorizontalAlignment="Center" />
+                        <controls:ConversationUsageSummary x:Name="UsageSummary" Margin="16,0,16,0"
+                                                           Visibility="Collapsed" HorizontalAlignment="Stretch" />
                     </StackPanel>
                 </Grid>
                 <controls:ResizeGrip x:Name="WorkPanelGrip" Grid.Column="1" Axis="Horizontal" Width="10" Visibility="Collapsed"

@@ -285,5 +285,50 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
             value["capabilitySource"] = source.clone();
         }
     }
+    // Keep independent verified input/output caps alongside the total window; callers must not infer one from another.
+    // 将独立输入、输出上限与总窗口一起返回，调用方不能把其中一个额度当成另一个额度。
+    for (source, target) in [("maxInputTokens", "providerMaxInputTokens"), ("maxOutputTokens", "providerMaxOutputTokens")] {
+        let mut limits = Vec::new();
+        if let Some(limit) = valid_limit(&args["connection"][source]) { limits.push(limit); }
+        if official.is_some() {
+            if let Some(limit) = valid_limit(&capabilities[source]) { limits.push(limit); }
+        }
+        if trusted_local {
+            if let Some(limit) = valid_limit(&local_model[source]) { limits.push(limit); }
+        }
+        if let Some(limit) = limits.into_iter().min() { value[target] = json!(limit); }
+    }
     Ok(value)
+}
+
+#[cfg(test)]
+mod dispatch_limit_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_context_retains_independent_verified_caps_and_explicit_lower_limits() {
+        let args = json!({"endpoint":{"protocol":"https:","hostname":"api.openai.com"},
+            "connection":{"maxOutputTokens":32000},"capabilities":{"contextWindowTokens":400000,"maxInputTokens":272000,"maxOutputTokens":128000}});
+        let context = calculate("models.capabilities.automaticContext", &args).unwrap();
+        assert_eq!(context["effectiveTokens"], 400000);
+        assert_eq!(context["providerMaxInputTokens"], 272000);
+        assert_eq!(context["providerMaxOutputTokens"], 32000);
+        let unknown = calculate("models.capabilities.automaticContext", &json!({"endpoint":{"protocol":"https:","hostname":"proxy.invalid"},"connection":{},"capabilities":{}})).unwrap();
+        assert!(unknown.get("providerMaxInputTokens").is_none() && unknown.get("providerMaxOutputTokens").is_none());
+    }
+
+    #[test]
+    fn actual_tiny_managed_window_is_not_inflated_before_output_allocation() {
+        for window in [512,1024] {
+            let context = calculate("models.capabilities.automaticContext",&json!({
+                "endpoint":{"protocol":"http:","hostname":"127.0.0.1","origin":"http://127.0.0.1:19385"},
+                "connection":{"contextWindowTokens":32768},"capabilities":{},
+                "localModel":{"backend":"llama.cpp","source":"llama-cpp-props","observationOnly":true,
+                    "endpointOrigin":"http://127.0.0.1:19385","runtimeContextTokens":window,"modelMaximumContextTokens":32768}})).unwrap();
+            assert_eq!(context["effectiveTokens"],window);
+            assert_eq!(context["source"],"local-runtime");
+            let output = crate::models::output::calculate("context.outputBudget",&json!({"contextWindowTokens":context["effectiveTokens"],"requiredInputTokens":100})).unwrap();
+            assert!(output["inputBudgetTokens"].as_u64().unwrap() + output["maxOutputTokens"].as_u64().unwrap() < window);
+        }
+    }
 }

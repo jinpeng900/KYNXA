@@ -20,12 +20,13 @@ public sealed partial class RetrievalSettingsWindow : Window
     private readonly string? _projectName;
     private readonly string? _mountedPath;
     private readonly CancellationTokenSource _lifetime = new();
+    private CancellationTokenSource? _observation;
     private RetrievalSettingsDocument? _global;
     private ProjectRetrievalSettingsDocument? _project;
     private RetrievalIndexJob? _job;
     private RetrievalStatus? _status;
     private string? _noticeMessageKey;
-    private bool _closed, _busy, _rendering, _loaded, _polling, _allowClose;
+    private bool _closed, _busy, _rendering, _loaded, _polling, _statusPolling, _statusObservationFailed, _allowClose;
     private Window? _settingsOwner;
 
     public RetrievalSettingsWindow(Guid? projectId = null, string? projectName = null, string? mountedPath = null,
@@ -100,7 +101,7 @@ public sealed partial class RetrievalSettingsWindow : Window
     {
         if (_closed) return;
         _closed = true;
-        _jobTimer.Stop();
+        StopStatusObservation();
         _lifetime.Cancel();
         UiText.LanguageChanged -= LanguageChanged;
         AppWindow.Closing -= WindowClosing;
@@ -155,6 +156,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         _global = await globalTask;
         _project = projectTask is null ? null : await projectTask;
         RenderSettings(await providersTask);
+        _statusObservationFailed = false;
         RenderStatus(await statusTask);
         RenderSources((await sourcesTask).Sources);
     }
@@ -309,13 +311,7 @@ public sealed partial class RetrievalSettingsWindow : Window
     private void RenderStatus(RetrievalStatus status)
     {
         _status = status;
-        _embeddingStatus.Text = status.Embedding.State switch
-        {
-            "ready" when status.Embedding.Available => UiText.Get("本地就绪"),
-            "loading" => UiText.Get("模型加载中"),
-            "error" => UiText.Get("模型不可用，使用关键词检索"),
-            _ => UiText.Get("模型未就绪，使用关键词检索")
-        };
+        RenderEmbeddingStatus(status.Embedding);
         _indexStatus.Text = string.Format(UiText.Get("{0} 个资料来源 · {1} 个索引片段"), status.SourceCount, status.ChunkCount);
         var scopedJobs = status.Jobs.Where(job => job.ProjectId == _projectId).ToArray();
         var latestJob = scopedJobs.LastOrDefault(job => IsActiveJob(job.Status)) ?? scopedJobs.LastOrDefault();
@@ -328,6 +324,90 @@ public sealed partial class RetrievalSettingsWindow : Window
             _rebuild.IsEnabled = true;
             _rebuild.Visibility = Visibility.Collapsed;
         }
+    }
+
+    private void RenderEmbeddingStatus(RetrievalEmbeddingStatus embedding)
+    {
+        string summary = embedding.State switch
+        {
+            "ready" when embedding.Available && embedding.Loaded != false => UiText.Get("本地就绪"),
+            "waiting" => UiText.Get("等待资源，使用关键词检索"),
+            "loading" => UiText.Get("模型加载中，使用关键词检索"),
+            "error" => UiText.Get("模型加载失败，使用关键词检索"),
+            "unavailable" when embedding.Reason == "assets-missing" => UiText.Get("缺少检索模型文件，使用关键词检索"),
+            "unavailable" => UiText.Get("模型不可用，使用关键词检索"),
+            "unloaded" when embedding.Phase == "queued" => UiText.Get("模型未加载，后台预热排队中，使用关键词检索"),
+            _ => UiText.Get("模型未加载，使用关键词检索")
+        };
+        if (embedding.State is "waiting" or "loading" && embedding.ElapsedMs is { } elapsedMs)
+            summary += " · " + string.Format(UiText.Get("已用时 {0} 秒"), Math.Max(0, elapsedMs) / 1000);
+        string? detail = embedding.Message ?? EmbeddingReason(embedding.Reason) ?? embedding.ErrorCode;
+        if (!string.IsNullOrWhiteSpace(detail) && embedding.State != "ready")
+            summary += "\n" + UiText.Get(detail);
+        if (_statusObservationFailed)
+            summary += "\n" + UiText.Get("状态暂时无法刷新，将自动重试");
+        _embeddingStatus.Text = summary;
+    }
+
+    private static string? EmbeddingReason(string? reason) => reason switch
+    {
+        "startup-delay" => "启动后在后台准备，不阻塞聊天",
+        "resource-admission" => "正在等待后台资源许可",
+        "resource-busy" => "前台任务优先，资源空闲后自动继续",
+        "model-loading" => "正在载入并验证检索模型",
+        "assets-missing" => "请检查模型文件是否完整",
+        "disabled" => "本地检索已停用",
+        "semantic-off" => "语义检索已停用",
+        "unsupported-profile" => "当前检索模型不支持本地预热",
+        "load-failed" => "检索模型未能完成加载",
+        _ => reason
+    };
+
+    private void StartStatusObservation()
+    {
+        if (_closed || _observation is not null) return;
+        _observation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _statusTimer.Start();
+        if (_job is { } job && IsActiveJob(job.Status)) _jobTimer.Start();
+    }
+
+    private void StopStatusObservation()
+    {
+        _statusTimer.Stop();
+        _jobTimer.Stop();
+        var observation = _observation;
+        _observation = null;
+        observation?.Cancel();
+        observation?.Dispose();
+    }
+
+    private async Task PollStatusAsync()
+    {
+        if (_closed || _statusPolling || _busy || _observation is not { } observation) return;
+        _statusPolling = true;
+        try
+        {
+            var status = await _api.GetStatusAsync(observation.Token);
+            if (_closed || _busy || !ReferenceEquals(_observation, observation)) return;
+            // Observe only model residency; do not reload form values or replace a newer job receipt.
+            // 只观察模型驻留，不重载表单，也不以旧快照覆盖较新的索引任务回执。
+            _status = _status is { } previous ? previous with { Embedding = status.Embedding } : status;
+            _statusObservationFailed = false;
+            RenderEmbeddingStatus(status.Embedding);
+        }
+        catch (OperationCanceledException) when (_closed || !ReferenceEquals(_observation, observation)) { }
+        catch (Exception)
+        {
+            // A transient observation failure is not evidence that the model failed to load.
+            // 短暂状态读取失败不能被当成模型加载失败；保留最后回执，并在下次计时重试。
+            if (!_closed && ReferenceEquals(_observation, observation))
+            {
+                _statusObservationFailed = true;
+                if (_status is { } status) RenderEmbeddingStatus(status.Embedding);
+                else _embeddingStatus.Text = UiText.Get("状态暂时无法刷新，将自动重试");
+            }
+        }
+        finally { _statusPolling = false; }
     }
 
     private static bool IsActiveJob(string status) => status is "queued" or "running" or "paused";
@@ -356,7 +436,7 @@ public sealed partial class RetrievalSettingsWindow : Window
             "cancelled" => UiText.Get("索引任务已取消"),
             _ => UiText.Get("索引更新失败，请重试")
         };
-        if (active) _jobTimer.Start();
+        if (active && _observation is not null) _jobTimer.Start();
         else _jobTimer.Stop();
         if (job.Status == "failed") ShowError(job.Error ?? "索引更新失败，请重试");
     }
@@ -374,18 +454,18 @@ public sealed partial class RetrievalSettingsWindow : Window
 
     private async Task PollJobAsync()
     {
-        if (_closed || _polling || _busy || _job is not { } job) return;
+        if (_closed || _polling || _busy || _job is not { } job || _observation is not { } observation) return;
         _polling = true;
         try
         {
-            var updated = await _api.GetIndexJobAsync(job.JobId, _lifetime.Token);
-            if (_closed || _job?.JobId != job.JobId) return;
+            var updated = await _api.GetIndexJobAsync(job.JobId, observation.Token);
+            if (_closed || !ReferenceEquals(_observation, observation) || _job?.JobId != job.JobId) return;
             ShowJob(updated);
         }
-        catch (OperationCanceledException) when (_closed) { }
+        catch (OperationCanceledException) when (_closed || !ReferenceEquals(_observation, observation)) { }
         catch (Exception error)
         {
-            if (!_closed) { _jobTimer.Stop(); ShowError(error.Message); }
+            if (!_closed && ReferenceEquals(_observation, observation)) { _jobTimer.Stop(); ShowError(error.Message); }
         }
         finally { _polling = false; }
     }

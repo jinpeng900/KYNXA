@@ -33,6 +33,15 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
             new("config-fixture", "Advanced config / 配置文件", "npx", ["-y", "@playwright/mcp@0.0.83", "--config", "fixture-browser.json"], false)
         ] };
     }
+    public void InstallPersonalOAuthFixtures()
+    {
+        Config = Config with { McpServers = [
+            new("personal-oauth", "Personal account fixture", "", [], true, Transport: "streamable-http",
+                Url: "https://personal.test.invalid/mcp", Auth: new("oauth-authorization-code", ClientId: "public-test-client", Issuer: "https://login.test.invalid")),
+            new("local-fixture", "Local fixture", "fixture-never-executed", [], false)
+        ] };
+        ConnectionState = "auth-required";
+    }
     public int Reads { get; private set; }
     public int Saves { get; private set; }
     public int Connections { get; private set; }
@@ -40,6 +49,10 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
     public int PresetAdds { get; private set; }
     public int Reconnects { get; private set; }
     public int Disconnects { get; private set; }
+    public int OAuthStarts { get; private set; }
+    public int OAuthStatusReads { get; private set; }
+    public int OAuthLogouts { get; private set; }
+    public string? LastOAuthServerId { get; private set; }
     public string ConnectionState { get; set; } = "disconnected";
     public string? NextReconnectState { get; set; }
     public bool IncludeDiagnostics { get; set; }
@@ -119,6 +132,18 @@ internal sealed class FakeAgentApi(string directory) : IAgentApi, IDisposable
         return Task.FromResult(new AgentToolsResponse(Tools(), Connections: Diagnostics())); }
     public Task<McpConnectionsResponse> DisconnectMcpAsync(string serverId, CancellationToken cancellationToken = default)
     { Disconnects++; ConnectionState = "disconnected"; return Task.FromResult(new McpConnectionsResponse(Diagnostics())); }
+    public Task<McpOAuthStart> StartMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OAuthStarts++; LastOAuthServerId = serverId;
+        // Invalid synthetic URI exercises the production guard without launching a browser or contacting an account.
+        // 无效合成地址验证正式界面的协议保护，不打开浏览器，也不联系任何真实账号。
+        return Task.FromResult(new McpOAuthStart("fixture-authorization", "javascript:never-run-fixture"));
+    }
+    public Task<McpOAuthStatus> GetMcpOAuthStatusAsync(string serverId, string authorizationId, CancellationToken cancellationToken = default)
+    { OAuthStatusReads++; return Task.FromResult(new McpOAuthStatus("pending")); }
+    public Task<McpOAuthStatus> LogoutMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default)
+    { cancellationToken.ThrowIfCancellationRequested(); OAuthLogouts++; LastOAuthServerId = serverId; return Task.FromResult(new McpOAuthStatus("disconnected")); }
     private McpConnectionDiagnostic[] Diagnostics() => Config.McpServers.Select(server => new McpConnectionDiagnostic(server.Id,
         server.Transport, ConnectionState, ConnectionState == "auth-required" ? "MCP_AUTH_REQUIRED"
             : _officialLayers && server.Origin == "official" ? "MCP_COMMAND_NOT_FOUND" : null,

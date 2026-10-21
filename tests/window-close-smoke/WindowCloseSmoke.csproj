@@ -15,6 +15,8 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <Compile Include="../../apps/desktop/Views/ShellPage.Lifetime.cs" Link="ShellPage.Lifetime.cs" />
+    <Compile Include="../../apps/desktop/Services/Integration/MainWindowTrayService.cs" Link="MainWindowTrayService.cs" />
     <Compile Include="../memory-ui-smoke/NativeUi.cs" Link="NativeUi.cs" />
+    <Content Include="../../apps/desktop/Assets/AppIcon.ico" Link="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

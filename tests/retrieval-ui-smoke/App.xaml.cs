@@ -74,6 +74,12 @@ public partial class App : Application
             Check(_api.GlobalWrites == 0 && _api.ProjectWrites == 0, "Opening settings does not perform writes.");
             Check(Picker("RetrievalWebProvider").Items.Count == 2, "Search provider list includes automatic selection and configured services.");
             Check(!Notice.IsOpen, "Normal loading shows no saved notification.");
+            if (Environment.GetEnvironmentVariable("KYNXA_RETRIEVAL_STATE_ONLY") == "1")
+            {
+                await VerifyEmbeddingStatesAsync();
+                passed = true;
+                return;
+            }
             Check(!NativeUi.Descendants<Button>(_root).Any(button => button.Content?.ToString() == UiText.Get("关闭")), "Window uses native caption controls and has no bottom Close button.");
             Check(Picker("RetrievalRerankMode").SelectedIndex == 0, "Optional reranking stays disabled until selected.");
             Picker("RetrievalRerankMode").SelectedIndex = 1;

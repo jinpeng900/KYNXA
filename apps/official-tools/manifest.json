@@ -313,6 +313,7 @@
     "task.status",
     "task.wait",
     "task.control",
+    "task.result",
     "task.read"
   ],
   "mcpPresets": [

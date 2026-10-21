@@ -4,6 +4,50 @@
 
 独立的 `evaluation.mjs`、`rescore.mjs`、`system-suite.mjs` 和 `windows-six-suite.mjs` 保留；它们可用于历史数据评分或生成固定题集，不能单独证明当前网关完成这些任务。当前运行时/桌面合同验证见 [验证参考](../../.agents/skills/kynxa-development/references/validation.md)。
 
+## 原生网关工具顺序 A/B：独立开发入口
+
+新增 `run-cache-order.mjs`，直接驱动当前 Rust 网关的 HTTP/SSE、工具发现、任务 Hub、正式消息和原有模型预约；不恢复旧 Node 网关，也不自行实现另一个 Agent 循环。上文“尚未完成原生评测适配”指下文旧综合入口；本入口只覆盖工具顺序与缓存对照，不能替代完整 Agent 基准。
+
+- A 使用本轮相关性排名发送已选工具，B 使用稳定顺序；两者保持同一模型、连接、合成任务、工具目录、工作区路径和固定身份。每次重复反转 A/B 顺序，不额外调用模型选择工具类别。动态工具发现、权限、上下文压缩和任务续跑仍走正式链路。
+- 使用既有六项固定题：问候、英文资料中文回答、多文件事实合并、同聊天续问、依赖写入与真实读回、读取失败后恢复。沿用 `system-suite.mjs` 金标，不把模型自报完成当作通过；正式任务状态也须为 `completed`。工具选择正确率是预先冻结的允许工具集合精确率，另外保留逐项事实、来源及副作用验收，不冒充开放域语义裁判。
+- 每臂启动独占临时 Data、Models、Extensions；相同 Work 路径只在自有进程停止后重置。只读取显式给定的连接配置，不读取日常模型连接或聊天。子进程不继承 API Key 等任意环境变量。软件及日常网关不启停。临时存储中会由正式接口保存本次连接，结束后清理整份独占目录；报告不含密钥、端点、原始提示或私有路径。
+- 付费调用前要求 `/health.benchmarkToolOrder` 与该臂一致；旧构建不支持开关时立即退出，避免把未生效的对照标为 A/B。该开发开关只改变工具发送顺序，不改变工具选择、合同或长任务预算。任务观察超时是独立实验参数；超时取消的也只是在本评测中创建的请求。
+- `--application-root` 必须指向带 `runtime/resource/kynxa-resource-service.exe` 的只读原生 bundle（例如当前 AppX 构建目录），不能直接使用仓库根；即使问候不需要 ToolHost，原生启动仍要求资源服务。启动失败报告退出码、十六进制状态及经过筛选的机器错误码，不输出标准错误正文或凭据。
+- 固定项目、聊天与消息身份直接使用原生规范的 36 位带连字符 UUID，并在目录保存后核对返回身份。原生目录会规范化 32 位 UUID，而消息读取 URL 使用已登记的规范身份，评测端不能混用两种格式再误报生产 API 的 404。
+- 从现有任务详情遍历父子任务、去重原始模型预约，计入失败、重试、压缩和完成核验请求。缺失输入/缓存读写计数保留 `null`，另报告已知部分及覆盖数，不拿未知成本当零。首可见文本分别记录原预约中的单请求时间与 SSE 中的任务时间；思考和纯工具事件不计作可见文本。
+- 没有价格表时金额为 `null`。显式价格表仅计算 token 成本估计，缺失计数影响金额时不出完整估计；不冒充真实账单，也不暗算未知缓存存储费、税或供应商调整。
+
+默认只输出计划，不启动进程、不读连接文件、不写产物、不调用模型：
+
+```powershell
+node tests/agent-performance-benchmark/run-cache-order.mjs
+node --test tests/agent-performance-benchmark/cache-order.test.mjs tests/agent-performance-benchmark/evaluation.test.mjs tests/agent-performance-benchmark/system-suite.test.mjs
+```
+
+真实对照必须显式执行；先准备当前已构建的原生 bundle 和独立连接文件。连接文件示例（在仓库外保存，不提交真实凭据）：
+
+```json
+{
+  "providerId": "my-benchmark-provider",
+  "protocol": "openai-completions",
+  "baseUrl": "https://YOUR-PROVIDER.example/v1",
+  "apiKeyEnv": "MY_BENCHMARK_API_KEY",
+  "contextWindowTokens": 32768,
+  "maxOutputTokens": 4096
+}
+```
+
+支持 `openai-completions`、`openai-responses`、`anthropic-messages` 和 `ollama`。本地无 Key 服务可改用 `"apiKey": ""`；实际模型窗口和输出预算按该文件填写，示例数值只是本次实验设置，不更改产品默认上限。
+
+```powershell
+# 将路径、模型和环境变量值换成操作者明确选择的配置；此命令会调用该模型。
+node tests/agent-performance-benchmark/run-cache-order.mjs --execute --gateway-bin '<bundle>/runtime/agent/kynxa-gateway.exe' --application-root '<bundle>' --connection-file '<outside-repo>/connections.json' --model '<model-id>' --repeats 2 --task-timeout-ms 300000 --output '<new-result-path>.json'
+```
+
+`--tasks english-to-chinese,followup-entity,dependent-file-cycle` 可选择已有题目；两臂使用相同子集。`--output` 只新建文件，不覆盖已有报告。可选 `--price-file '<path>.json'`，内容包含 `provider`、`model`、`currency`、`inputPerMillion`、`outputPerMillion`，以及可选的 `cacheReadPerMillion`、`cacheWritePerMillion`；单价为非负数字、单位为每百万 token。provider/model 必须与本次运行一致。未单列的读写单价按普通输入单价计算，报告注明估计口径。
+
+本次离线检查验证的是归一化、计价、计划模式及模拟原生 SSE/预约读取，**没有运行真实模型 A/B，也没有据此宣称命中率或任务效果已改善**。远端缓存驻留和供应商采样无法强制清空；AB/BA 仅减轻顺序影响，不能消除全部混杂因素。质量与任务完成优先，不因 B 更省就自动改变产品工具能力。
+
 这里测固定模型如何通过 KYNXA 的上下文、记忆、检索、工具循环和正式存储完成任务。`tests/retrieval-benchmark` 中的 SciFact Recall/nDCG 只回答检索组件的问题；它不能替代最终事实正确性、引用支持、跨语言回答、续问或工具任务的成功率。原有 40 道英文 SciFact 也不应重新标成中文或续问题。
 
 ## Windows 六任务入口：2026-10-10 适配

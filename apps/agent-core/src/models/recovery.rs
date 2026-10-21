@@ -12,7 +12,7 @@ const MAX_OBSERVED_CONTEXT_LIMITS: usize = 32;
 fn valid_limit(value: &Value) -> Option<u64> {
     value
         .as_u64()
-        .filter(|value| (2048..=2_000_000).contains(value))
+        .filter(|value| (512..=2_000_000).contains(value))
 }
 
 /// Retain only bounded numeric observations, narrowing each limit without copying provider payloads.
@@ -20,7 +20,7 @@ fn valid_limit(value: &Value) -> Option<u64> {
 pub(crate) fn retain_numeric_limits(previous: &Value, observed: &Value) -> Value {
     let mut retained = serde_json::Map::new();
     for field in ["contextWindowTokens", "providerMaxInputTokens", "providerMaxOutputTokens", "estimatedInputBudgetTokens"] {
-        let minimum = if field == "contextWindowTokens" { 2048 } else { 256 };
+        let minimum = if field == "contextWindowTokens" { 512 } else { 1 };
         let valid = |value: &Value| value.as_u64().filter(|value| (minimum..=2_000_000).contains(value));
         let limit = match (valid(&previous[field]), valid(&observed[field])) {
             (Some(previous), Some(observed)) => Some(previous.min(observed)),
@@ -71,16 +71,16 @@ fn context_rejection(body: &Value) -> Value {
         let request_tokens = captures[1].replace(',', "").parse::<u64>().ok();
         let maximum = captures[2].replace(',', "").parse::<u64>().ok();
         if let (Some(request_tokens), Some(maximum)) = (request_tokens, maximum) {
-            if (2048..=2_000_000).contains(&maximum) && request_tokens > maximum {
+            if (512..=2_000_000).contains(&maximum) && request_tokens > maximum {
                 return json!({"kind":"context","contextWindowTokens":maximum,
                     "requestTokens":request_tokens,"verified":true});
             }
         }
     }
-    if let Some(maximum) = captured(output).filter(|maximum| (256..=2_000_000).contains(maximum)) {
+    if let Some(maximum) = captured(output).filter(|maximum| (1..=2_000_000).contains(maximum)) {
         return json!({"kind":"output","providerMaxOutputTokens":maximum,"verified":true});
     }
-    if let Some(maximum) = captured(input).filter(|maximum| (2048..=2_000_000).contains(maximum)) {
+    if let Some(maximum) = captured(input).filter(|maximum| (1..=2_000_000).contains(maximum)) {
         return json!({"kind":"input","providerMaxInputTokens":maximum,"verified":true});
     }
     let has_context = context.is_match(message);
@@ -100,7 +100,7 @@ fn context_rejection(body: &Value) -> Value {
         .filter(|value| !value.is_null())
         .unwrap_or(&error["max_context_tokens"]);
     let maximum = valid_limit(numeric)
-        .or_else(|| captured(context).filter(|maximum| (2048..=2_000_000).contains(maximum)));
+        .or_else(|| captured(context).filter(|maximum| (512..=2_000_000).contains(maximum)));
     match maximum {
         Some(maximum) => json!({"kind":"context","contextWindowTokens":maximum,"verified":true}),
         None => json!({"kind":"context","verified":false}),
@@ -114,7 +114,7 @@ fn recovery_limits(args: &Value) -> Value {
     let current = &args["current"];
     match string(&rejection["kind"]) {
         "input" => {
-            let Some(maximum) = valid_limit(&rejection["providerMaxInputTokens"]) else {
+            let Some(maximum) = rejection["providerMaxInputTokens"].as_u64().filter(|maximum| (1..=2_000_000).contains(maximum)) else {
                 return Value::Null;
             };
             if current["providerMaxInputTokens"]
@@ -128,7 +128,7 @@ fn recovery_limits(args: &Value) -> Value {
         "output" => {
             let Some(maximum) = rejection["providerMaxOutputTokens"]
                 .as_u64()
-                .filter(|maximum| (256..=2_000_000).contains(maximum))
+                .filter(|maximum| (1..=2_000_000).contains(maximum))
             else {
                 return Value::Null;
             };
@@ -145,12 +145,12 @@ fn recovery_limits(args: &Value) -> Value {
                 .as_u64()
                 .unwrap_or(previous / 2)
                 .min(previous);
-            if !(2048..=2_000_000).contains(&maximum) {
+            if !(512..=2_000_000).contains(&maximum) {
                 return Value::Null;
             }
             if maximum >= previous {
                 let rejected_input_limit = rejection["inputLimitTokens"].as_u64()
-                    .filter(|limit| (256..=maximum).contains(limit))
+                    .filter(|limit| (1..=maximum).contains(limit))
                     .unwrap_or(maximum);
                 let Some(request_tokens) = rejection["requestTokens"]
                     .as_u64()
@@ -174,7 +174,7 @@ fn recovery_limits(args: &Value) -> Value {
                 // 窗口相同仍可能低估模板输入；按实际计数收紧估算预算，不能提高实际窗口或重发相同请求。
                 let input_limit = ((u128::from(estimated_input) * u128::from(allowed_input) * 9)
                     / u128::from(request_tokens) / 10) as u64;
-                if input_limit < 256 || input_limit >= previous_input {
+                if input_limit == 0 || input_limit >= previous_input {
                     return Value::Null;
                 }
                 return json!({"kind":"context","contextWindowTokens":maximum,
@@ -281,6 +281,21 @@ mod tests {
             "canRebuildContext":true,"recoveryAttempts":0,"rejection":{"kind":"context","verified":false},
             "current":{"contextWindowTokens":32768},"cacheKey":"provider:model:credential",
             "cacheKeys":[],"now":1000})
+    }
+
+    #[test]
+    fn tiny_verified_runtime_limits_survive_parsing_recovery_and_cache_retention() {
+        for window in [512,1024] {
+            let rejection = context_rejection(&json!({"error":{"message":format!("request (2049 tokens) exceeds the available context size ({window} tokens)")}}));
+            assert_eq!(rejection["contextWindowTokens"],window);
+            let mut args = plan_arguments();
+            args["rejection"] = rejection;
+            let plan = context_recovery_plan(&args);
+            assert_eq!(plan["limits"]["contextWindowTokens"],window);
+            let retained = retain_numeric_limits(&Value::Null,&json!({"contextWindowTokens":window,"providerMaxInputTokens":384,"providerMaxOutputTokens":64}));
+            assert_eq!(retained["contextWindowTokens"],window);
+            assert_eq!(retained["providerMaxOutputTokens"],64);
+        }
     }
 
     #[test]

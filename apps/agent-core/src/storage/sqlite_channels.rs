@@ -285,7 +285,7 @@ pub fn status(connection: &Connection) -> ContractResult {
             })
             .collect(),
     );
-    result["schemaVersion"] = json!(5);
+    result["schemaVersion"] = json!(6);
     Ok(result)
 }
 

@@ -18,6 +18,9 @@ public interface IAgentApi
     Task<AgentConfig> AddMcpPresetAsync(string id, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     Task<McpConnectionsResponse> DisconnectMcpAsync(string serverId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     Task<AgentToolsResponse> ReconnectMcpAsync(string serverId, Guid? conversationId = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    Task<McpOAuthStart> StartMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    Task<McpOAuthStatus> GetMcpOAuthStatusAsync(string serverId, string authorizationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    Task<McpOAuthStatus> LogoutMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     Task<AgentApprovalResponse> SubmitApprovalAsync(AgentApprovalRequest request, CancellationToken cancellationToken = default);
     Task<ToolResultPage> GetToolResultPageAsync(Guid conversationId, ToolResultReference reference, int offset = 0,
         int limit = 16000, CancellationToken cancellationToken = default) => throw new NotSupportedException();
@@ -99,6 +102,16 @@ public sealed class AgentApiClient : IAgentApi, IDisposable
         if (string.IsNullOrWhiteSpace(serverId)) throw new ArgumentException("A server identity is required.");
         return new { serverId };
     }
+
+    public Task<McpOAuthStart> StartMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default) =>
+        SendAsync<McpOAuthStart>(HttpMethod.Post, "/api/agent/mcp/oauth/start", ServerIdentity(serverId), cancellationToken);
+
+    public Task<McpOAuthStatus> GetMcpOAuthStatusAsync(string serverId, string authorizationId, CancellationToken cancellationToken = default) =>
+        SendAsync<McpOAuthStatus>(HttpMethod.Get, "/api/agent/mcp/oauth/status?serverId=" + Uri.EscapeDataString(serverId)
+            + "&authorizationId=" + Uri.EscapeDataString(authorizationId), null, cancellationToken);
+
+    public Task<McpOAuthStatus> LogoutMcpOAuthAsync(string serverId, CancellationToken cancellationToken = default) =>
+        SendAsync<McpOAuthStatus>(HttpMethod.Post, "/api/agent/mcp/oauth/logout", ServerIdentity(serverId), cancellationToken);
 
     public async Task<AgentApprovalResponse> SubmitApprovalAsync(AgentApprovalRequest request, CancellationToken cancellationToken = default)
     {

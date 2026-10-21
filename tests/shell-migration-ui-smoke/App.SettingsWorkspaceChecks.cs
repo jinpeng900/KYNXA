@@ -69,8 +69,24 @@ public partial class App
 
             Rect BoundsIn(FrameworkElement element, UIElement relativeTo) => element.TransformToVisual(relativeTo)
                 .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            void CheckNavigationLabels(string state)
+            {
+                var labels = keys.Select(key =>
+                {
+                    var button = NativeUi.ById<Button>(root, "SettingsCategory_" + key);
+                    var label = ((Panel)button.Content).Children.OfType<TextBlock>().Single();
+                    return new { Key = key, label.TextWrapping, Bounds = BoundsIn(label, button), label.DesiredSize,
+                        ButtonWidth = button.ActualWidth, ButtonHeight = button.ActualHeight, button.Padding };
+                }).ToArray();
+                Check(labels.All(label => label.TextWrapping == TextWrapping.Wrap && label.Bounds.Width > 0 && label.Bounds.Height > 0
+                    && label.Bounds.Left >= label.Padding.Left - 1 && label.Bounds.Right <= label.ButtonWidth - label.Padding.Right + 1
+                    && label.Bounds.Top >= label.Padding.Top - 1 && label.Bounds.Bottom <= label.ButtonHeight - label.Padding.Bottom + 1
+                    && label.Bounds.Width >= label.DesiredSize.Width - 1 && label.Bounds.Height >= label.DesiredSize.Height - 1),
+                    state + " navigation keeps all eight localized labels inside the padded buttons without clipping");
+            }
             async Task CheckResponsivePagesAsync(string state)
             {
+                CheckNavigationLabels(state);
                 foreach (string key in new[] { "general", "appearance", "storage", "about" })
                 {
                     var page = await SelectAsync(key) as ScrollViewer
@@ -244,15 +260,60 @@ public partial class App
             var tools = await SelectAsync("tools");
             await WaitAsync(() => _gateway.AgentReads == 4, "embedded tool management finishes its four read-only configuration requests");
             var retrieval = await SelectAsync("retrieval");
-            await WaitAsync(() => _gateway.RetrievalReads == 4, "embedded retrieval settings finish their four synthetic reads");
+            await WaitAsync(() => _gateway.RetrievalInitialReads == (1, 1, 1) && _gateway.RetrievalStatusReads >= 1,
+                "embedded retrieval settings read settings, providers and sources once and start read-only status observation");
+            var completedReads = (_gateway.MemoryReads, _gateway.LocalModelReads, _gateway.AgentReads, _gateway.RetrievalInitialReads);
+            string CachedState() => $"memorySearch={memorySearch.Text}; modelSearch={modelSearch.Text}; filter={filter.SelectedKey}; " +
+                $"modelRows={models.Items.Count}; reads=memory:{_gateway.MemoryReads},local:{_gateway.LocalModelReads},tools:{_gateway.AgentReads}," +
+                $"retrievalInitial:{_gateway.RetrievalInitialReads},retrievalStatus:{_gateway.RetrievalStatusReads}";
+            string layoutLanguage = UiText.Language;
+            try
+            {
+                foreach (string languageId in new[] { "zh-CN", "en" })
+                {
+                    UiText.Initialize(languageId);
+                    foreach (int width in new[] { 700, 1240 })
+                    {
+                        await ResizeSettingsAsync(width, 760);
+                        root.UpdateLayout();
+                        await SettleAsync();
+                        CheckNavigationLabels(languageId + " " + width + " DIP retrieval");
+                        var scroll = ((Grid)retrieval).Children.OfType<ScrollViewer>().Single();
+                        var bounds = new[] { "RetrievalLocalMode", "RetrievalSemanticMode", "RetrievalRerankMode",
+                            "RetrievalAddFile", "RetrievalAddFolder", "RetrievalAddLinks", "RetrievalWebMode",
+                            "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage", "RetrievalRefresh" }
+                            .Select(id => BoundsIn(NativeUi.ById<FrameworkElement>(retrieval, id), retrieval)).ToArray();
+                        Check(scroll.ScrollableWidth <= 1 && bounds.All(item => item.Width > 0
+                            && item.Left >= 23 && item.Right <= retrieval.ActualWidth - 23),
+                            languageId + " " + width + " DIP retrieval actions and pickers stay inside the viewport");
+                    }
+                }
+            }
+            finally
+            {
+                UiText.Initialize(layoutLanguage);
+                presenter.Restore();
+                settings.AppWindow.MoveAndResize(initialBounds);
+                await SettleAsync();
+            }
             await SelectAsync("about");
             Check(host.Children.Count == keys.Length, "each requested category creates one page and retains it in the same host");
-            Check(ReferenceEquals(appearance, await SelectAsync("appearance")) &&
-                ReferenceEquals(memory, await SelectAsync("memory")) && memorySearch.Text == "记忆筛选保留" && _gateway.MemoryReads == 1 &&
-                ReferenceEquals(localModels, await SelectAsync("local-models")) && models.Items.Count == 1 && _gateway.LocalModelReads == 1 &&
-                ReferenceEquals(tools, await SelectAsync("tools")) && _gateway.AgentReads == 4 &&
-                ReferenceEquals(retrieval, await SelectAsync("retrieval")) && _gateway.RetrievalReads == 4,
-                "returning to categories preserves page identity, search input and completed reads without reloading");
+            observations.Add(new { State = "after-localization", CachedState = CachedState() });
+            Check((_gateway.MemoryReads, _gateway.LocalModelReads, _gateway.AgentReads, _gateway.RetrievalInitialReads) == completedReads,
+                "language and window-size changes retain completed reads without reloading: " + CachedState());
+            Check(ReferenceEquals(appearance, await SelectAsync("appearance")), "appearance retains its cached page identity");
+            var returnedMemory = await SelectAsync("memory");
+            Check(ReferenceEquals(memory, returnedMemory) && ReferenceEquals(memorySearch, NativeUi.ById<TextBox>(returnedMemory, "MemorySearchBox")) &&
+                memorySearch.Text == "记忆筛选保留" && _gateway.MemoryReads == 1,
+                "memory retains page identity, actual search control, query and completed read: " + CachedState());
+            var returnedModels = await SelectAsync("local-models");
+            Check(ReferenceEquals(localModels, returnedModels) && ReferenceEquals(modelSearch, NativeUi.ById<TextBox>(returnedModels, "LocalModelsSearch")) &&
+                modelSearch.Text == "Fixture Local 3B" && filter.SelectedKey == "all" && models.Items.Count == 1 && _gateway.LocalModelReads == 1,
+                "local models retain page identity, actual search control, query, filter and completed read: " + CachedState());
+            Check(ReferenceEquals(tools, await SelectAsync("tools")) && _gateway.AgentReads == 4,
+                "tools retain page identity and their four completed reads: " + CachedState());
+            Check(ReferenceEquals(retrieval, await SelectAsync("retrieval")) && _gateway.RetrievalInitialReads == (1, 1, 1),
+                "retrieval retains page identity and each of its three initialization reads while read-only status observation continues: " + CachedState());
             Check(ReferenceEquals(firstPage, await SelectAsync("general")) && host.Children.Count == keys.Length,
                 "the initial general page remains cached after every category has been visited");
             Check(Prompt.Text == draft && ActiveId == chatId && messages == JsonSerializer.Serialize(_shell.ActiveMessages.Select(row => row.Message)) &&

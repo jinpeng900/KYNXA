@@ -281,4 +281,13 @@ mod tests {
         assert_eq!(result[0]["chunkId"], "a");
         assert_eq!(result[1]["chunkId"], "A");
     }
+
+    #[test]
+    fn a_two_channel_hit_outranks_a_single_channel_first_hit() {
+        // Additive RRF favours the candidate both channels agree on, even against a lexical first hit.
+        // 加法式 RRF 偏向两个通道都命中的候选，即使对手是词法首位。
+        let result = apply(&json!({"lexical":[{"chunkId":"first"},{"chunkId":"both"}],
+            "vector":[{"chunkId":"both"}],"limit":2}));
+        assert_eq!(result[0]["chunkId"], "both");
+    }
 }

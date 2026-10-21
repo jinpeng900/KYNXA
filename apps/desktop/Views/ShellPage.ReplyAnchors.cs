@@ -43,6 +43,11 @@ public sealed partial class ShellPage
 
     private static void SetPendingReplyMessage(PendingChatReply pending, ChatMessageState message)
     {
+        // Guidance replaces the reply row, not the running task or its existing monotonic clock.
+        // 插话仅更换回复行；同一任务沿用已有单调计时，等待新输出期间也不能隐藏或归零。
+        if (pending.Message.GenerationStartedTimestamp is long taskStarted &&
+            (message.GenerationStartedTimestamp is not long replyStarted || taskStarted < replyStarted))
+            message.GenerationStartedTimestamp = taskStarted;
         pending.Message = message;
         pending.Content.Clear(); pending.Content.Append(message.Content);
         pending.Reasoning.Clear(); pending.Reasoning.Append(message.Reasoning);

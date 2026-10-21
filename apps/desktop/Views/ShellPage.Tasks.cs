@@ -22,17 +22,21 @@ public sealed partial class ShellPage
         Unloaded += (_, _) => TaskPanel.SetPreviewEnabled(false);
     }
 
-    private async Task ResumeSelectedTaskAsync(TaskRecord selected)
+    private async Task ResumeSelectedTaskAsync(TaskRecord selected, string[]? unknownOperationIds = null,
+        TaskModelReservationIdentity[]? unknownReservationIds = null, TaskOperationIdentity[]? unknownOperations = null)
     {
         Guid conversation = selected.Scope.ConversationId;
         if (_chatClosing || _savingOnClose || ActiveChatId != conversation || selected.ParentTaskId is not null ||
             !_resumingTaskConversations.Add(conversation)) return;
         TaskRecord current = selected;
+        bool CanControlSelected() => CanResumeSelectedTask(selected) ||
+            ((unknownOperations is not null || unknownReservationIds is not null) && selected.State == "waiting-verification" &&
+            ActiveChatId == conversation && _pendingReplies.TryGetValue(conversation, out var live) && live.TaskId == selected.TaskId);
         string? feedback = null;
         TaskPanel.SetResumePending(selected, true);
         try
         {
-            if (!CanResumeSelectedTask(selected))
+            if (!CanControlSelected())
             {
                 feedback = UiText.Get("当前回复仍在处理，请稍后继续所选任务。");
                 return;
@@ -52,16 +56,45 @@ public sealed partial class ShellPage
             current = detail.Task;
             // History and version reads yield to sends and navigation; recheck immediately before controlling the old root.
             // 历史及版本读取期间允许发送和导航；控制旧根前重新核对当前聊天和活动回复，不能使用过期选择。
-            if (!CanResumeSelectedTask(selected))
+            if (!CanControlSelected())
             {
                 feedback = UiText.Get("当前回复仍在处理，请稍后继续所选任务。");
                 return;
             }
+            // Confirm only operations the fresh detail still lists as unknown; otherwise use the ordinary resume.
+            // 只确认最新详情中仍未核验的操作；已无此类操作时按普通继续处理，不扩大用户确认范围。
+            string[] acknowledged = unknownOperationIds is null || current.State != "waiting-verification" ? [] :
+                (detail.RecoveryOperations ?? detail.Operations).Where(TaskOperationStates.NeedsUnknownAcknowledgement)
+                    .Select(operation => operation.Intent.OperationId).Intersect(unknownOperationIds).ToArray();
+            var freshReservations = (detail.RecoveryModelReservations ?? [])
+                .Where(item => item.State == "unknown" && (unknownReservationIds ?? [])
+                    .Contains(new TaskModelReservationIdentity(item.TaskId, item.ReservationId)))
+                .Select(item => new TaskModelReservationIdentity(item.TaskId, item.ReservationId)).ToArray();
+            var scopedOperations = (detail.RecoveryOperations ?? detail.Operations)
+                .Where(TaskOperationStates.NeedsUnknownAcknowledgement)
+                .Select(item => new TaskOperationIdentity(item.TaskId, item.Intent.OperationId))
+                .Intersect(unknownOperations ?? []).ToArray();
             if (TaskStates.CanResume(current.State))
             {
-                var receipt = await _tasksApiClient.ControlAsync(conversation, current.TaskId, current.Version,
-                    "resume", current.Scope.ProjectId, deadline.Token);
+                // Cost and operation acknowledgements remain independently auditable; re-read the root version between them.
+                // 成本与操作确认独立留痕；两者并存时使用前一步回执的新版本，避免覆盖并发控制。
+                TaskControlResponse? costReceipt = null;
+                if (freshReservations.Length > 0)
+                {
+                    costReceipt = await _tasksApiClient.AcknowledgeUnknownCostsAsync(conversation, current.TaskId,
+                        current.Version, freshReservations, current.Scope.ProjectId, deadline.Token);
+                    current = costReceipt.Task;
+                }
+                var receipt = scopedOperations.Length > 0
+                    ? await _tasksApiClient.AcknowledgeUnknownScopedAsync(conversation, current.TaskId, current.Version,
+                        scopedOperations, current.Scope.ProjectId, deadline.Token)
+                    : acknowledged.Length > 0 && unknownOperations is null
+                    ? await _tasksApiClient.AcknowledgeUnknownAsync(conversation, current.TaskId, current.Version,
+                        acknowledged, current.Scope.ProjectId, deadline.Token)
+                    : costReceipt ?? await _tasksApiClient.ControlAsync(conversation, current.TaskId, current.Version,
+                        "resume", current.Scope.ProjectId, deadline.Token);
                 current = receipt.Task;
+                OnUnknownOutcomeControlled(conversation, current);
                 if (receipt.Recovery is { ValueKind: System.Text.Json.JsonValueKind.Object } recovery &&
                     recovery.TryGetProperty("pending", out var pending) && pending.ValueKind == System.Text.Json.JsonValueKind.Array)
                 {

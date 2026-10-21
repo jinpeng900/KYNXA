@@ -610,7 +610,7 @@ impl RunProgress {
         (self.mutation_revision > self.checked_mutation_revision || latest["passed"] == false)
             && TASK_PATTERN
                 .get_or_init(|| {
-                    Regex::new(r"(?i)代码|修复|实现|重构|\b(?:code|fix|implement|refactor)\b")
+                    Regex::new(r"(?i)代码|修复|实现|重构|\b(?:code|fix|implement|refactor)\b|\.(?:rs|py|js|jsx|ts|tsx|cs|java|go|c|cpp|h|hpp|sql|html|css)\b")
                         .unwrap()
                 })
                 .is_match(task)
@@ -624,13 +624,23 @@ impl RunProgress {
             arguments["unknownEffects"] == true || result["state"] == "execution-unconfirmed";
         let evidence_invalid = arguments["evidenceValidation"]["current"] == false;
         let checks_failed = result["state"] == "checks-failed";
+        let model_state = arguments["modelTaskState"]["state"].as_str();
+        let unmet = arguments["modelTaskState"]["unmet"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty());
+        // Without a reviewed state, real external effects leave the task unassessed rather than complete.
+        // 有真实外部操作却没有核对状态时，任务属于尚未评估，不能记为完成。
+        let acceptance_unreviewed = arguments["requiresVerification"] == true && arguments["acceptanceReviewed"] != true;
+        let readback_missing = arguments["requiresReadback"] == true && arguments["hasReadback"] != true
+            || arguments["requiresVisualReadback"] == true && arguments["hasVisualReadback"] != true;
+        let unassessed = arguments["effectfulWork"] == true && model_state == Some("unknown")
+            || acceptance_unreviewed || readback_missing;
         let incomplete = arguments["interrupted"] == true
             || arguments["code"].as_str().is_some()
             || result["pendingValidation"] == true
-            || matches!(
-                arguments["modelTaskState"]["state"].as_str(),
-                Some("continue" | "blocked" | "review")
-            );
+            || matches!(model_state, Some("continue" | "blocked" | "review"))
+            || unmet
+            || unassessed;
         result["completionState"] = json!(if unknown {
             "execution-unknown"
         } else if evidence_invalid || checks_failed {
@@ -641,6 +651,8 @@ impl RunProgress {
             "completed"
         });
         result["correctnessCertified"] = json!(false);
+        result["acceptanceReviewRequired"] = arguments["requiresVerification"].clone();
+        result["acceptanceReviewed"] = json!(arguments["acceptanceReviewed"] == true);
         if unknown {
             result["state"] = json!("execution-unconfirmed");
         } else if arguments["interrupted"] == true {
@@ -981,6 +993,21 @@ mod document_validation_tests {
             }
             assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"}}))["completionState"], "completed");
         }
+    }
+
+    #[test]
+    fn unassessed_effectful_work_and_listed_unmet_requirements_are_partial() {
+        let mut progress = RunProgress::default();
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"unknown"},"effectfulWork":true}))["completionState"], "partial");
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete","unmet":["彩窗"]}}))["completionState"], "partial");
+        // A plain answer without external effects keeps the ordinary completed outcome.
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"unknown"}}))["completionState"], "completed");
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete","unmet":[]},"effectfulWork":true}))["completionState"], "completed");
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"},"requiresVerification":true}))["completionState"],"partial");
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"},"requiresVerification":true,
+            "acceptanceReviewed":true,"requiresVisualReadback":true,"hasVisualReadback":false}))["completionState"],"partial");
+        assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"},"requiresVerification":true,
+            "acceptanceReviewed":true,"requiresVisualReadback":true,"hasVisualReadback":true}))["completionState"],"completed");
     }
 
     #[test]

@@ -215,26 +215,65 @@
     return ph ? { type: attr(ph, 'type', 'obj'), index: attr(ph, 'idx', '0') } : null;
   }
 
-  function inheritedShape(shape, root) {
+  function inheritedShape(shape, root, fromMaster = false) {
     const identity = placeholder(shape);
     if (!identity) return null;
     const shapes = children(child(child(root, 'cSld'), 'spTree'));
-    return shapes.find(candidate => {
-      const other = placeholder(candidate);
-      return other && other.index === identity.index && other.type === identity.type;
-    }) || shapes.find(candidate => placeholder(candidate)?.type === identity.type) || null;
+    if (!fromMaster) return shapes.find(candidate => placeholder(candidate)?.index === identity.index) || null;
+    const masterType = ({ ctrTitle: 'title', subTitle: 'body', obj: 'body', chart: 'body', tbl: 'body',
+      clipArt: 'body', dgm: 'body', media: 'body', pic: 'body' })[identity.type] || identity.type;
+    return shapes.find(candidate => placeholder(candidate)?.type === masterType) || null;
   }
 
-  function geometry(shape, inherited) {
-    const transform = child(child(shape, shape.localName === 'graphicFrame' ? 'xfrm' : 'spPr'), 'xfrm')
-      || (shape.localName === 'graphicFrame' ? child(shape, 'xfrm') : null)
-      || child(child(inherited, 'spPr'), 'xfrm');
-    if (!transform) return null;
-    const offset = child(transform, 'off'), extent = child(transform, 'ext');
-    return { x: number(offset, 'x') / EMU, y: number(offset, 'y') / EMU,
-      width: Math.max(0, number(extent, 'cx')) / EMU, height: Math.max(0, number(extent, 'cy')) / EMU,
-      rotation: number(transform, 'rot') / 60000, flipX: isTrue(attr(transform, 'flipH')),
-      flipY: isTrue(attr(transform, 'flipV')), transform };
+  function shapeInheritance(shape, slide, context) {
+    const sources = [shape];
+    if (!placeholder(shape) || context === slide.master) return sources;
+    const layoutShape = context === slide ? inheritedShape(shape, slide.layout?.xml) : null;
+    if (layoutShape) sources.push(layoutShape);
+    const masterShape = inheritedShape(layoutShape || shape, slide.master?.xml, true);
+    if (masterShape) sources.push(masterShape);
+    return sources;
+  }
+
+  function mergedProperties(definitions) {
+    const sources = definitions.filter(Boolean);
+    if (!sources.length) return null;
+    const result = sources[0].cloneNode(false);
+    const propertyGroup = node => {
+      if (['noFill', 'solidFill', 'gradFill', 'blipFill', 'pattFill', 'grpFill'].includes(node.localName)) return 'fill';
+      if (['prstGeom', 'custGeom'].includes(node.localName)) return 'geometry';
+      if (['noAutofit', 'normAutofit', 'spAutoFit'].includes(node.localName)) return 'autofit';
+      return node.localName;
+    };
+    // Empty local property containers do not erase individual layout/master properties.
+    // 本页的空属性容器不能擦除版式和母版；各属性按最近定义覆盖，源 XML 保持只读。
+    for (const source of [...sources].reverse()) {
+      for (const attribute of source.attributes) result.setAttributeNS(attribute.namespaceURI, attribute.name, attribute.value);
+      for (const definition of children(source)) {
+        const existing = children(result).find(item => propertyGroup(item) === propertyGroup(definition));
+        const replacement = definition.localName === 'ln' && existing
+          ? mergedProperties([definition, existing]) : definition.cloneNode(true);
+        if (existing) result.replaceChild(replacement, existing);
+        else result.appendChild(replacement);
+      }
+    }
+    return result;
+  }
+
+  function geometry(sources) {
+    const transforms = sources.map(shape => shape.localName === 'graphicFrame'
+      ? child(shape, 'xfrm') : child(child(shape, 'spPr'), 'xfrm')).filter(Boolean);
+    const coordinate = (name, attribute) => {
+      const node = transforms.map(transform => child(transform, name)).find(item => item?.hasAttribute(attribute));
+      return node ? Number(attr(node, attribute)) : NaN;
+    };
+    const x = coordinate('off', 'x'), y = coordinate('off', 'y');
+    const width = coordinate('ext', 'cx'), height = coordinate('ext', 'cy');
+    if (![x, y, width, height].every(Number.isFinite) || width < 0 || height < 0) return null;
+    const inheritedAttribute = name => attr(transforms.find(item => item.hasAttribute(name)), name);
+    return { x: x / EMU, y: y / EMU, width: width / EMU, height: height / EMU,
+      rotation: Number(inheritedAttribute('rot') || 0) / 60000,
+      flipX: isTrue(inheritedAttribute('flipH')), flipY: isTrue(inheritedAttribute('flipV')) };
   }
 
   function position(element, bounds) {
@@ -346,26 +385,30 @@
 
   function renderText(document, body, shape, inherited, slide, bounds) {
     if (!body) return null;
+    const ancestors = inherited || [];
+    const inheritedBodies = ancestors.map(source => child(source, 'txBody')).filter(Boolean);
     const host = document.createElement('div'); host.className = 'pptx-textbox';
-    const properties = child(body, 'bodyPr');
+    const properties = mergedProperties([child(body, 'bodyPr'), ...inheritedBodies.map(source => child(source, 'bodyPr'))]);
     const autofit = child(properties, 'normAutofit');
     const anchor = attr(properties, 'anchor', 't');
     Object.assign(host.style, { position: 'absolute', inset: '0', boxSizing: 'border-box', display: 'flex',
       flexDirection: 'column', justifyContent: ({ ctr: 'center', b: 'flex-end' })[anchor] || 'flex-start',
       padding: `${number(properties, 'tIns', 45720) / EMU}px ${number(properties, 'rIns', 91440) / EMU}px ${number(properties, 'bIns', 45720) / EMU}px ${number(properties, 'lIns', 91440) / EMU}px`,
       overflow: 'hidden', whiteSpace: attr(properties, 'wrap') === 'none' ? 'pre' : 'pre-wrap',
-      fontFamily: fontFamily('', slide.theme), color: color(child(child(shape, 'style'), 'fontRef'), slide.theme) });
+      fontFamily: fontFamily('', slide.theme), color: color(child(mergedProperties([shape, ...ancestors].map(source => child(source, 'style'))), 'fontRef'), slide.theme) });
     const text = document.createElement('div'); text.className = 'pptx-text'; text.style.minHeight = '0'; host.append(text);
     if (autofit) { host.dataset.autofit = 'true'; host.dataset.fontScale = String(number(autofit, 'fontScale', 100000) / 100000); }
     const identity = placeholder(shape);
-    const masterStyle = child(child(slide.master?.xml, 'txStyles'), identity?.type?.includes('Title') || identity?.type === 'title' ? 'titleStyle' : identity ? 'bodyStyle' : 'otherStyle');
-    const inheritedBody = child(inherited, 'txBody');
+    const placeholderType = [shape, ...ancestors].map(source => descendants(source, 'ph')[0]).find(source => source?.hasAttribute('type'));
+    const type = attr(placeholderType, 'type', identity?.type);
+    const masterStyle = child(child(slide.master?.xml, 'txStyles'), ['title', 'ctrTitle'].includes(type) ? 'titleStyle' : identity ? 'bodyStyle' : 'otherStyle');
     const counters = new Map();
     for (const paragraph of children(body, 'p')) {
       const paragraphProperties = child(paragraph, 'pPr');
       const level = clamp(number(paragraphProperties, 'lvl'), 0, 8);
       const levelName = `lvl${level + 1}pPr`;
-      const defaults = [child(masterStyle, levelName), child(child(inheritedBody, 'lstStyle'), levelName),
+      const defaults = [child(masterStyle, levelName), ...[...inheritedBodies].reverse().flatMap(source => [
+        child(child(source, 'lstStyle'), levelName), child(children(source, 'p').find(item => number(child(item, 'pPr'), 'lvl') === level), 'pPr')]),
         child(child(body, 'lstStyle'), levelName), paragraphProperties].filter(Boolean);
       const merged = name => [...defaults].reverse().find(item => item.hasAttribute(name));
       const paragraphNode = document.createElement('p'); paragraphNode.className = 'pptx-paragraph';
@@ -400,6 +443,7 @@
         if (!['r', 'fld'].includes(run.localName)) continue;
         const span = document.createElement('span');
         span.textContent = child(run, 't')?.textContent || '';
+        if (child(child(run, 'rPr'), 'hlinkClick') || child(child(run, 'rPr'), 'hlinkMouseOver')) span.dataset.pptxLink = 'true';
         applyTextProperties(span, textProperties(child(run, 'rPr'), runDefaults, slide.theme));
         paragraphNode.append(span);
       }
@@ -418,10 +462,10 @@
   function renderShapePaint(document, shape, properties, theme, bounds, inherited) {
     const requestedPreset = attr(child(properties, 'prstGeom'), 'prst', shape.localName === 'cxnSp' ? 'line' : 'rect');
     const preset = ({ flowChartProcess: 'rect', flowChartDecision: 'diamond', flowChartTerminator: 'roundRect' })[requestedPreset] || requestedPreset;
-    const style = child(shape, 'style'), fillReference = child(style, 'fillRef');
+    const style = mergedProperties([shape, ...inherited].map(source => child(source, 'style'))), fillReference = child(style, 'fillRef');
     const defaultFill = fillReference ? color(fillReference, theme, 'transparent') : 'transparent';
     const background = fill(properties, theme, defaultFill);
-    const line = child(properties, 'ln') || child(child(inherited, 'spPr'), 'ln');
+    const line = child(properties, 'ln');
     const lineReference = child(style, 'lnRef');
     const stroke = line ? fill(line, theme, '#233b53') : lineReference ? color(lineReference, theme) : 'none';
     const strokeWidth = line ? number(line, 'w', 9525) / EMU : lineReference ? 1 : 0;
@@ -536,7 +580,7 @@
         const transform = child(child(shape, 'grpSpPr'), 'xfrm');
         const off = child(transform, 'off'), ext = child(transform, 'ext');
         const chOff = child(transform, 'chOff'), chExt = child(transform, 'chExt');
-        if (!transform || !number(chExt, 'cx') || !number(chExt, 'cy')) continue;
+        if (!transform || !number(chExt, 'cx') || !number(chExt, 'cy')) throw unsupported('PPTX group geometry requires Office/PDF preview');
         const bounds = { x: number(off, 'x') / EMU, y: number(off, 'y') / EMU,
           width: number(ext, 'cx') / EMU, height: number(ext, 'cy') / EMU,
           rotation: number(transform, 'rot') / 60000, flipX: isTrue(attr(transform, 'flipH')), flipY: isTrue(attr(transform, 'flipV')) };
@@ -548,12 +592,16 @@
         group.append(stage); parent.append(group);
         await renderTree(document, shape, stage, slide, context, packageReader, staticOnly); continue;
       }
-      const inherited = inheritedShape(shape, slide.layout?.xml) || inheritedShape(shape, slide.master?.xml);
-      const bounds = geometry(shape, inherited);
-      if (!bounds) continue;
+      const sources = shapeInheritance(shape, slide, context), inherited = sources.slice(1);
+      const bounds = geometry(sources);
+      if (!bounds) {
+        if (shape.localName === 'sp' && placeholder(shape) && !descendants(shape, 't').some(node => node.textContent)) continue;
+        throw unsupported('PPTX shape geometry requires Office/PDF preview');
+      }
       const host = document.createElement('div'); host.className = 'pptx-object'; position(host, bounds);
       host.setAttribute('aria-label', attr(descendants(shape, 'cNvPr')[0], 'name'));
-      const properties = child(shape, 'spPr') || child(inherited, 'spPr');
+      if (descendants(child(shape, 'nvSpPr'), 'hlinkClick').length) host.dataset.pptxLink = 'true';
+      const properties = mergedProperties(sources.map(source => child(source, 'spPr')));
       if (shape.localName === 'pic') host.append(await renderPicture(document, shape, properties, context, packageReader, bounds));
       else if (shape.localName === 'graphicFrame') host.append(renderTable(document, shape, slide, bounds));
       else {
@@ -622,6 +670,8 @@
     let disposed = false, frame = null, observer = null, root = null;
     let page = 0, requestedPage = 0, zoom = 'fit', currentShow = 0;
     const pending = new Map(), cache = new Map();
+    const eventCleanups = [];
+    let pointerGesture = null, textClickTimer = null;
     let deck, stage, pageInput, countLabel, previous, next, zoomSelect;
     const initial = typeof options.state === 'string' ? (() => { try { return JSON.parse(options.state); } catch { return {}; } })() : options.state || {};
     const state = () => ({ page, zoom });
@@ -630,6 +680,8 @@
     const dispose = () => {
       if (disposed) return;
       disposed = true; currentShow += 1; observer?.disconnect();
+      clearTimeout(textClickTimer); pointerGesture = null;
+      for (const cleanup of eventCleanups.splice(0)) cleanup();
       signal?.removeEventListener('abort', dispose); packageReader.dispose(); cache.clear(); pending.clear(); root?.remove();
     };
     signal?.addEventListener('abort', dispose, { once: true });
@@ -684,7 +736,9 @@
       for (const sheet of cache.values()) sheet.style.display = 'none';
       element.style.display = 'block'; page = target;
       pageInput.value = String(page + 1); countLabel.textContent = `/ ${deck.slides.length}`;
+      const activeElement = root.ownerDocument.activeElement;
       previous.disabled = page === 0; next.disabled = page === deck.slides.length - 1;
+      if ((activeElement === previous && previous.disabled) || (activeElement === next && next.disabled)) root.focus({ preventScroll: true });
       scaleSlide(); emit();
     }
 
@@ -724,9 +778,72 @@
     function keyboard(event) {
       if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)) return;
+      if (!root?.isConnected || !root.getClientRects().length) return;
+      const ownerDocument = container.ownerDocument;
+      if (event.currentTarget === ownerDocument && !root.contains(event.target)
+        && event.target !== ownerDocument.body && event.target !== ownerDocument.documentElement) return;
       const keys = { ArrowLeft: requestedPage - 1, PageUp: requestedPage - 1, ArrowRight: requestedPage + 1, PageDown: requestedPage + 1,
         Home: 0, End: deck.slides.length - 1 };
       if (Object.hasOwn(keys, event.key)) { event.preventDefault(); navigate(keys[event.key]); }
+    }
+
+    function connectSlideNavigation(document) {
+      const interactiveSelector = 'a,button,input,select,textarea,summary,[contenteditable]:not([contenteditable="false"]),[role="button"],[role="link"],[data-pptx-link]';
+      const hasSelection = () => {
+        const selection = document.defaultView.getSelection();
+        return !!selection && !selection.isCollapsed;
+      };
+      const eventElement = event => event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+      const listen = (target, type, handler) => {
+        target.addEventListener(type, handler);
+        eventCleanups.push(() => target.removeEventListener(type, handler));
+      };
+      const cancelTextClick = () => { clearTimeout(textClickTimer); textClickTimer = null; };
+      const cancelGesture = () => { pointerGesture = null; cancelTextClick(); };
+      listen(root, 'pointerdown', cancelTextClick);
+      listen(root, 'keydown', cancelTextClick);
+      listen(document, 'selectionchange', () => { if (hasSelection()) cancelTextClick(); });
+      listen(document, 'pointerdown', event => {
+        cancelTextClick();
+        const target = eventElement(event), sheet = target?.closest('.pptx-slide');
+        if (event.button !== 0 || event.isPrimary === false || !sheet || target.closest(interactiveSelector)
+          || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) { pointerGesture = null; return; }
+        pointerGesture = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+          sheet, hadSelection: hasSelection(), dragged: false, released: false };
+      });
+      listen(document, 'pointermove', event => {
+        if (pointerGesture?.pointerId === event.pointerId
+          && Math.hypot(event.clientX - pointerGesture.x, event.clientY - pointerGesture.y) > 5) pointerGesture.dragged = true;
+      });
+      listen(document, 'pointerup', event => {
+        if (pointerGesture?.pointerId !== event.pointerId) return;
+        pointerGesture.released = true;
+        pointerGesture.dragged ||= Math.hypot(event.clientX - pointerGesture.x, event.clientY - pointerGesture.y) > 5;
+      });
+      listen(document, 'pointercancel', cancelGesture);
+      listen(document, 'dragstart', cancelGesture);
+      listen(document.defaultView, 'blur', cancelGesture);
+      listen(document, 'dblclick', cancelTextClick);
+      listen(document, 'click', event => {
+        const gesture = pointerGesture; pointerGesture = null;
+        const target = eventElement(event), sheet = target?.closest('.pptx-slide');
+        if (event.defaultPrevented || event.button !== 0 || !gesture?.released || sheet !== gesture.sheet
+          || gesture.hadSelection || gesture.dragged || hasSelection() || target.closest(interactiveSelector)
+          || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+        cancelTextClick();
+        const advance = () => {
+          textClickTimer = null;
+          if (disposed || hasSelection() || sheet.style.display === 'none' || requestedPage >= deck.slides.length - 1) return;
+          stage.focus({ preventScroll: true });
+          navigate(requestedPage + 1);
+        };
+        // Leave time for a double-click to select a word; blank-area clicks navigate immediately.
+        // 文字单击稍候再翻页，为双击选词留出机会；拖选、已有选区和控件操作均不翻页。
+        if (target.closest('.pptx-textbox')) {
+          if (event.detail > 1) return;
+          textClickTimer = setTimeout(advance, 300);
+        } else advance();
+      });
     }
 
     try {
@@ -736,7 +853,11 @@
       root = container.ownerDocument.createElement('div'); root.className = 'pptx-view';
       Object.assign(root.style, { display: 'flex', flexDirection: 'column', minHeight: '360px', height: 'calc(100vh - 24px)',
         maxHeight: 'calc(100vh - 24px)', overflow: 'hidden', background: '#f3f2f0', borderRadius: '8px', outlineColor: '#8c806e' });
-      root.tabIndex = 0; root.addEventListener('keydown', keyboard);
+      root.tabIndex = 0;
+      // A boundary navigation button loses focus when disabled; keep paging available in the visible preview.
+      // 到达首页或末页后按钮禁用会释放焦点；外层键盘委托保留翻页，只响应当前可见预览及页面空白。
+      container.ownerDocument.addEventListener('keydown', keyboard);
+      eventCleanups.push(() => container.ownerDocument.removeEventListener('keydown', keyboard));
       const toolbar = container.ownerDocument.createElement('div'); toolbar.className = 'pptx-toolbar';
       toolbar.setAttribute('aria-label', '幻灯片翻页与缩放');
       Object.assign(toolbar.style, { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', padding: '7px 10px',
@@ -778,11 +899,10 @@
       frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src blob:; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>html,body{margin:0;min-height:100%;background:#f3f2f0}body{overflow:auto;font-family:'Microsoft YaHei','Segoe UI',sans-serif}*{box-sizing:border-box}p{overflow-wrap:normal}img{display:block}section{isolation:isolate}.pptx-text{flex-shrink:0;width:100%}.pptx-paragraph{overflow-wrap:break-word}.pptx-object{outline:0}</style></head><body><main id="slides" style="position:relative" tabindex="0"></main></body></html>`;
       root.append(frame); container.append(root); await loaded; alive();
       stage = frame.contentDocument.getElementById('slides');
+      stage.setAttribute('aria-label', '单击幻灯片翻至下一页，也可选择并复制文字');
       frame.contentDocument.addEventListener('keydown', keyboard);
-      frame.contentDocument.addEventListener('pointerdown', event => {
-        if (event.target.closest('a,input,button,select,textarea')) return;
-        stage.focus({ preventScroll: true });
-      });
+      eventCleanups.push(() => frame.contentDocument?.removeEventListener('keydown', keyboard));
+      connectSlideNavigation(frame.contentDocument);
       observer = new ResizeObserver(scaleSlide); observer.observe(frame);
       await show(page); alive();
       const settled = prepareRemaining();

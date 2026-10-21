@@ -117,9 +117,11 @@
       liveElapsedEntries.delete(entry);
     } else if (message.role === 'assistant' && message.streaming && Number.isSafeInteger(message.generationElapsedMs)
         && message.generationElapsedMs >= 0) {
-      // Anchor each attempt once; tokens, rounds, language and cached navigation keep the ongoing clock.
-      // 每次尝试仅定位一次；token、轮次、语言与缓存聊天切换保留本次计时，重试则使用新的起点。
-      if (entry.elapsedMode !== 'live') entry.generationStartedAtMs = performance.now() - message.generationElapsedMs;
+      // A continued task may supply an earlier origin; updates can never move its live clock back to zero.
+      // 接续任务可补回更早的起点；活动计时仅向前累计，更新不能将其归零。
+      const generationStartedAtMs = performance.now() - message.generationElapsedMs;
+      entry.generationStartedAtMs = entry.elapsedMode === 'live'
+        ? Math.min(entry.generationStartedAtMs, generationStartedAtMs) : generationStartedAtMs;
       entry.elapsedMode = 'live'; liveElapsedEntries.add(entry);
     } else {
       entry.elapsedMode = null; delete entry.generationStartedAtMs; liveElapsedEntries.delete(entry);

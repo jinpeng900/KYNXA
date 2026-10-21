@@ -261,10 +261,31 @@ namespace TranscriptUiSmoke
                 "PPTX fit preserves the presentation aspect ratio inside the actual sidebar viewport");
             Check(await document.ExecuteScriptAsync("document.querySelector('.pptx-view input[data-action=page]').value === '1' && document.querySelector('.pptx-view input[data-action=page]').max === '2'") == "true",
                 "the presentation control reports page one of the two actual slides");
+            Check(await document.ExecuteScriptAsync($"(() => {{ const slide=({visibleSlide}); const title=[...slide.querySelectorAll('.pptx-object')].find(node=>node.textContent.includes('PPTX_SLIDE_ONE')); const body=[...slide.querySelectorAll('.pptx-object')].find(node=>node.textContent.includes('PPTX_MASTER_BODY')); return title && body && Math.abs(parseFloat(title.style.left)-48)<1 && Math.abs(parseFloat(title.style.width)-1184)<1 && Math.abs(parseFloat(body.style.top)-480)<1; }})()") == "true",
+                "slide placeholders inherit missing position and size through an empty layout from their master");
             await document.ExecuteScriptAsync("window.__officeProxyDenied=false; Promise.all(['document.pptx?version=forged','document.xlsx?version=fixture-v1'].map(path=>fetch('https://kynxa-workspace-content.local/Workspace/'+path).then(response=>response.ok).catch(()=>false))).then(results=>window.__officeProxyDenied=results.every(result=>!result))");
             await WaitWorkspaceAsync(panel, false, "window.__officeProxyDenied === true");
             Check(fixture.PptxRequests == 1 && fixture.XlsxRequests == 0,
                 "the Office content proxy rejects another version or format without reading any additional authorized original");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-slide[style*='display: block']", click: true,
+                frameSelector: ".pptx-view iframe");
+            await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view input[data-action=page]').value === '2' && ({visibleSlide}).textContent.includes('PPTX_SLIDE_TWO')");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-slide[style*='display: block']", click: true,
+                frameSelector: ".pptx-view iframe");
+            Check(await document.ExecuteScriptAsync("document.querySelector('.pptx-view input[data-action=page]').value === '2'") == "true",
+                "clicking the actual slide advances one page and clicking the final page does not wrap");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=previous]", click: true);
+            await document.ExecuteScriptAsync($"(() => {{ const doc={frameDocument}; const text=({visibleSlide}).querySelector('.pptx-text'); const range=doc.createRange(); range.selectNodeContents(text); doc.getSelection().removeAllRanges(); doc.getSelection().addRange(range); }})()");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-slide[style*='display: block']", click: true,
+                frameSelector: ".pptx-view iframe");
+            Check(await document.ExecuteScriptAsync("document.querySelector('.pptx-view input[data-action=page]').value === '1'") == "true",
+                "a click used to clear selected slide text does not accidentally advance the presentation");
+            await document.ExecuteScriptAsync($"{frameDocument}.getSelection().removeAllRanges()");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-slide[style*='display: block']", click: true,
+                frameSelector: ".pptx-view iframe", dragX: 36);
+            Check(await document.ExecuteScriptAsync("document.querySelector('.pptx-view input[data-action=page]').value === '1'") == "true",
+                "dragging across slide content preserves the page instead of treating a selection gesture as next");
+            await document.ExecuteScriptAsync($"{frameDocument}.getSelection().removeAllRanges()");
             await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=next]", click: true);
             await WaitWorkspaceAsync(panel, false, $"document.querySelector('.pptx-view input[data-action=page]').value === '2' && ({visibleSlide}).textContent.includes('PPTX_SLIDE_TWO')");
             await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".pptx-view button[data-action=previous]", click: true);
@@ -372,6 +393,14 @@ namespace TranscriptUiSmoke
                 "returning to Excel retains its actual view, active sheet and zoom without refetching or parsing the workbook");
             await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-view button[data-action=sheet][data-sheet-index=\"0\"]", click: true);
             await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-scroll').scrollLeft > 0 && document.querySelector('.xlsx-scroll').scrollTop >= 450 && [...document.querySelectorAll('.xlsx-cell')].some(cell=>cell.textContent.includes('SCROLL_ROW_'))");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-view button[data-action=sheet][data-sheet-index=\"2\"]", click: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-cell[data-address=A1]')?.textContent.includes('DENSE_1_1')");
+            await document.ExecuteScriptAsync("(() => { const zoom=document.querySelector('.xlsx-view select[data-action=zoom]'); zoom.value='0.5'; zoom.dispatchEvent(new Event('change',{bubbles:true})); })()");
+            await WaitWorkspaceAsync(panel, false, "(() => { const area=document.querySelector('.xlsx-scroll'); const rect=area.getBoundingClientRect(); const cell=document.elementFromPoint(rect.left+area.clientWidth-3,rect.top+area.clientHeight-3)?.closest('.xlsx-cell'); return document.querySelectorAll('.xlsx-cell').length > 4096 && cell?.textContent.includes('DENSE_'); })()");
+            Check(await document.ExecuteScriptAsync("(() => { const area=document.querySelector('.xlsx-scroll'); const rect=area.getBoundingClientRect(); const headers=[...document.querySelectorAll('.xlsx-column-header')]; return Math.max(...headers.map(node=>node.getBoundingClientRect().right)) >= rect.left+area.clientWidth-1; })()") == "true",
+                "dense Excel at fifty-percent zoom fills the entire visible grid and rightmost headers beyond the old 4096-cell cut-off");
+            await SendWorkspacePointerAsync(panel.DocumentBrowser!, ".xlsx-view button[data-action=sheet][data-sheet-index=\"1\"]", click: true);
+            await WaitWorkspaceAsync(panel, false, "document.querySelector('.xlsx-cell[data-address=A1]')?.textContent.includes('XLSX_SECOND_SHEET') && ![...document.querySelectorAll('.xlsx-cell')].some(cell=>cell.textContent.includes('DENSE_'))");
             panel.ShowResource(conversation, "broken.xlsx");
             await WaitWorkspaceAsync(panel, false, "document.contentType === 'application/pdf' || !!document.querySelector('embed[type=\"application/pdf\"]')");
             Check(fixture.BrokenXlsxRequests == 1 && fixture.XlsxFallbackRequests == 1 && fixture.PdfRequests > 0,
@@ -730,13 +759,13 @@ namespace TranscriptUiSmoke
         }
 
         private async Task SendWorkspacePointerAsync(Microsoft.UI.Xaml.Controls.WebView2 browser, string selector,
-            bool click = false, int clicks = 1, int wheelY = 0)
+            bool click = false, int clicks = 1, int wheelY = 0, string? frameSelector = null, int dragX = 0)
         {
             nint owner = Microsoft.UI.Win32Interop.GetWindowFromWindowId(_window!.AppWindow.Id);
             await ActivateNativeTestHostAsync(owner);
             Check(browser.Visibility == Visibility.Visible && browser.Opacity > 0 && browser.IsHitTestVisible,
                 "the selected document view accepts real pointer input before interacting");
-            string boundsJson = await browser.CoreWebView2.ExecuteScriptAsync($"JSON.stringify((() => {{ const element=document.querySelector({JsonSerializer.Serialize(selector)}); if(!element) throw new Error('Missing input target'); const rect=element.getBoundingClientRect(); return {{ x:Math.max(8,Math.min(innerWidth-8,rect.left+rect.width/2)), y:Math.max(8,Math.min(innerHeight-8,rect.top+rect.height/2)), width:innerWidth, height:innerHeight }}; }})())");
+            string boundsJson = await browser.CoreWebView2.ExecuteScriptAsync($"JSON.stringify((() => {{ const frame={JsonSerializer.Serialize(frameSelector)} ? document.querySelector({JsonSerializer.Serialize(frameSelector)}) : null; const element=(frame?.contentDocument || document).querySelector({JsonSerializer.Serialize(selector)}); if(!element) throw new Error('Missing input target'); const rect=element.getBoundingClientRect(); const offset=frame?.getBoundingClientRect() || {{left:0,top:0}}; return {{ x:Math.max(8,Math.min(innerWidth-8,offset.left+rect.left+rect.width/2)), y:Math.max(8,Math.min(innerHeight-8,offset.top+rect.top+rect.height/2)), width:innerWidth, height:innerHeight }}; }})())");
             using var bounds = JsonDocument.Parse(JsonSerializer.Deserialize<string>(boundsJson)!);
             var position = browser.TransformToVisual(_window.Content).TransformPoint(new Windows.Foundation.Point());
             double raster = browser.XamlRoot.RasterizationScale;
@@ -754,6 +783,7 @@ namespace TranscriptUiSmoke
                 for (int index = 0; index < clicks; index++)
                 {
                     input.Add(new NativeChromeInput { Data = new() { Mouse = new() { Flags = 0x0002 } } });
+                    if (dragX != 0) input.Add(ChromeMouseMove(x + dragX, y));
                     input.Add(new NativeChromeInput { Data = new() { Mouse = new() { Flags = 0x0004 } } });
                 }
             if (wheelY != 0)
@@ -1344,6 +1374,14 @@ namespace TranscriptUiSmoke
                 {
                     string title = page == 1 ? "PPTX_SLIDE_ONE 中文标题" : "PPTX_SLIDE_TWO 第二页";
                     string titlePreset = page == 2 && unsupportedSecondPage ? "star5" : "rect";
+                    // A real placeholder may inherit its transform through a layout that has no geometry itself.
+                    // 真实占位符允许穿过没有几何信息的版式，继续从母版继承位置与尺寸。
+                    string titleTransform = page == 1 ? "" : "<a:xfrm><a:off x=\"457200\" y=\"274320\"/><a:ext cx=\"11277600\" cy=\"914400\"/></a:xfrm>";
+                    string inheritedBody = page == 1 ? """
+                        <p:sp><p:nvSpPr><p:cNvPr id="5" name="Inherited body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/>
+                          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>PPTX_MASTER_BODY</a:t></a:r></a:p></p:txBody>
+                        </p:sp>
+                        """ : "";
                     string details = page == 1 ? """
                         <p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="3" name="Fixture table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
                           <p:xfrm><a:off x="457200" y="1645920"/><a:ext cx="5486400" cy="1828800"/></p:xfrm>
@@ -1359,10 +1397,10 @@ namespace TranscriptUiSmoke
                     Text($"ppt/slides/slide{page}.xml", $$"""
                         <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
                           <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>{{group}}
-                            <p:sp><p:nvSpPr><p:cNvPr id="2" name="Fixture title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
-                              <p:spPr><a:xfrm><a:off x="457200" y="274320"/><a:ext cx="11277600" cy="914400"/></a:xfrm><a:prstGeom prst="{{titlePreset}}"><a:avLst/></a:prstGeom></p:spPr>
+                            <p:sp><p:nvSpPr><p:cNvPr id="2" name="Fixture title"/><p:cNvSpPr txBox="1"/><p:nvPr><p:ph type="title" idx="0"/></p:nvPr></p:nvSpPr>
+                              <p:spPr>{{titleTransform}}<a:prstGeom prst="{{titlePreset}}"><a:avLst/></a:prstGeom></p:spPr>
                               <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="3200" b="1"/><a:t>{{title}}</a:t></a:r><a:endParaRPr lang="zh-CN"/></a:p></p:txBody>
-                            </p:sp>{{details}}
+                            </p:sp>{{details}}{{inheritedBody}}
                           </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
                         </p:sld>
                         """);
@@ -1375,7 +1413,14 @@ namespace TranscriptUiSmoke
                 }
                 Text("ppt/slideMasters/slideMaster1.xml", $$"""
                     <p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-                      <p:cSld><p:spTree>{{group}}</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+                      <p:cSld><p:spTree>{{group}}
+                        <p:sp><p:nvSpPr><p:cNvPr id="2" name="Master title"/><p:cNvSpPr/><p:nvPr><p:ph type="title" idx="0"/></p:nvPr></p:nvSpPr>
+                          <p:spPr><a:xfrm><a:off x="457200" y="274320"/><a:ext cx="11277600" cy="914400"/></a:xfrm></p:spPr>
+                          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="3200"/></a:pPr></a:p></p:txBody></p:sp>
+                        <p:sp><p:nvSpPr><p:cNvPr id="5" name="Master body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+                          <p:spPr><a:xfrm><a:off x="457200" y="4572000"/><a:ext cx="9144000" cy="914400"/></a:xfrm></p:spPr>
+                          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="2400"/></a:pPr></a:p></p:txBody></p:sp>
+                      </p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
                       <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles>
                     </p:sldMaster>
                     """);
@@ -1383,7 +1428,10 @@ namespace TranscriptUiSmoke
                     <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>
                     """);
                 Text("ppt/slideLayouts/slideLayout1.xml", $$"""
-                    <p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree>{{group}}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>
+                    <p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" type="titleAndObject" preserve="1"><p:cSld name="Inherited"><p:spTree>{{group}}
+                      <p:sp><p:nvSpPr><p:cNvPr id="2" name="Layout title"/><p:cNvSpPr/><p:nvPr><p:ph type="title" idx="0"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>
+                      <p:sp><p:nvSpPr><p:cNvPr id="5" name="Layout body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>
+                    </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>
                     """);
                 Text("ppt/slideLayouts/_rels/slideLayout1.xml.rels", """
                     <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>
@@ -1412,7 +1460,7 @@ namespace TranscriptUiSmoke
                 }
                 Text("[Content_Types].xml", """
                     <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>
-                      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+                      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
                       <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
                     </Types>
                     """);
@@ -1420,10 +1468,10 @@ namespace TranscriptUiSmoke
                     <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>
                     """);
                 Text("xl/workbook.xml", """
-                    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="数据 Data" sheetId="1" r:id="rIdSheet1"/><sheet name="第二张" sheetId="2" r:id="rIdSheet2"/></sheets><calcPr calcId="191029" fullCalcOnLoad="0"/></workbook>
+                    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="数据 Data" sheetId="1" r:id="rIdSheet1"/><sheet name="第二张" sheetId="2" r:id="rIdSheet2"/><sheet name="密集表格" sheetId="3" r:id="rIdSheet3"/></sheets><calcPr calcId="191029" fullCalcOnLoad="0"/></workbook>
                     """);
                 Text("xl/_rels/workbook.xml.rels", """
-                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rIdSheet2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rIdSheet2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rIdSheet3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>
                     """);
                 Text("xl/styles.xml", """
                     <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Segoe UI"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>
@@ -1440,6 +1488,23 @@ namespace TranscriptUiSmoke
                     """);
                 Text("xl/worksheets/sheet2.xml", """
                     <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECOND_SHEET 第二张</t></is></c><c r="B1"><v>2026</v></c></row></sheetData></worksheet>
+                    """);
+                string ColumnName(int column)
+                {
+                    string name = "";
+                    for (; column > 0; column = (column - 1) / 26) name = (char)('A' + (column - 1) % 26) + name;
+                    return name;
+                }
+                var denseRows = new StringBuilder();
+                for (int row = 1; row <= 320; row++)
+                {
+                    denseRows.Append($"<row r=\"{row}\" ht=\"6\" customHeight=\"1\">");
+                    for (int column = 1; column <= 128; column++)
+                        denseRows.Append($"<c r=\"{ColumnName(column)}{row}\" t=\"inlineStr\"><is><t>DENSE_{row}_{column}</t></is></c>");
+                    denseRows.Append("</row>");
+                }
+                Text("xl/worksheets/sheet3.xml", $$"""
+                    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:DX320"/><sheetFormatPr defaultRowHeight="6"/><cols><col min="1" max="128" width="1.57" customWidth="1"/></cols><sheetData>{{denseRows}}</sheetData></worksheet>
                     """);
             }
             return output.ToArray();

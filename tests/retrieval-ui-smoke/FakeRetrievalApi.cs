@@ -16,6 +16,12 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
     public int Rebuilds { get; private set; }
     public int CancelledJobs { get; private set; }
     public int JobReads { get; private set; }
+    public int SettingsReads { get; private set; }
+    public int StatusReads { get; private set; }
+    public int StatusFailures { get; set; }
+    public RetrievalEmbeddingStatus Embedding { get; set; } = new("ready", "builtin-multilingual", 384, true, Loaded: true);
+    public TaskCompletionSource? StatusGate { get; set; }
+    public bool IgnoreStatusCancellation { get; set; }
     public string? LastCancelledJobId { get; private set; }
     private RetrievalIndexJob[]? _statusJobs;
     // Observe the current automatic job unless a test explicitly supplies a status snapshot or an empty result.
@@ -32,7 +38,8 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
         StatusJobs = [Job];
     }
 
-    public Task<RetrievalSettingsDocument> GetSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(Global);
+    public Task<RetrievalSettingsDocument> GetSettingsAsync(CancellationToken cancellationToken = default)
+    { SettingsReads++; return Task.FromResult(Global); }
     public async Task<RetrievalSettingsDocument> SaveSettingsAsync(RetrievalSettingsUpdateRequest request, CancellationToken cancellationToken = default)
     {
         GlobalWrites++;
@@ -60,8 +67,22 @@ internal sealed class FakeRetrievalApi : IRetrievalApi
                 new(mounted.Enabled, mounted.BindingRevision, [])) };
         return Task.FromResult(Project);
     }
-    public Task<RetrievalStatus> GetStatusAsync(CancellationToken cancellationToken = default) => Task.FromResult(new RetrievalStatus("sqlite", 2, 8,
-        new("ready", "builtin-multilingual", 384, true), StatusJobs));
+    public async Task<RetrievalStatus> GetStatusAsync(CancellationToken cancellationToken = default)
+    {
+        StatusReads++;
+        var snapshot = new RetrievalStatus("sqlite", 2, 8, Embedding, StatusJobs);
+        if (StatusGate is { } gate)
+        {
+            if (IgnoreStatusCancellation) await gate.Task;
+            else await gate.Task.WaitAsync(cancellationToken);
+        }
+        if (StatusFailures > 0)
+        {
+            StatusFailures--;
+            throw new HttpRequestException("Synthetic transient status failure");
+        }
+        return snapshot;
+    }
     public Task<RetrievalProvidersResponse> GetProvidersAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(new RetrievalProvidersResponse([new("synthetic_search", "Synthetic search", true)]));
     public Task<RetrievalSourcesResponse> GetSourcesAsync(Guid? projectId = null, CancellationToken cancellationToken = default) =>

@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::sync::{Notify, OnceCell, Semaphore, watch};
+use tokio::sync::{Notify, OnceCell, watch};
 
 type Result<T> = std::result::Result<T, GatewayError>;
 
@@ -40,7 +40,6 @@ pub struct TaskHub {
     repository: OnceCell<Arc<TaskRepository>>,
     runners: Mutex<HashMap<String, Runner>>,
     restoring_roots: Mutex<HashSet<String>>,
-    root_slots: Mutex<HashMap<String, Arc<Semaphore>>>,
     workspace_writers: Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>,
     recovery_gate: tokio::sync::Mutex<()>,
     changes: Notify,
@@ -54,7 +53,6 @@ impl TaskHub {
             repository: OnceCell::new(),
             runners: Mutex::new(HashMap::new()),
             restoring_roots: Mutex::new(HashSet::new()),
-            root_slots: Mutex::new(HashMap::new()),
             workspace_writers: Mutex::new(HashMap::new()),
             recovery_gate: tokio::sync::Mutex::new(()),
             changes: Notify::new(),
@@ -186,8 +184,26 @@ impl TaskHub {
         let id = id.to_owned();
         self.store(move|repository| {
             let task=repository.load(&id)?;let children=repository.children(&id)?;
-            Ok(json!({"task":task,"children":children,"attempt":repository.current_attempt(&id)?,"operations":repository.operations(&id)?,"checkpoint":repository.latest_checkpoint(&id)?,"artifacts":repository.artifacts(&id)?,"modelReservations":repository.model_reservations(&id)?}))
+            let mut tree = vec![task.clone()];
+            let mut index = 0;
+            let mut recovery_operations = Vec::new();
+            let mut recovery_reservations = Vec::new();
+            while index < tree.len() {
+                let member = &tree[index];
+                recovery_operations.extend(repository.operations(&member.task_id)?.into_iter().filter(TaskOperation::blocks_recovery));
+                recovery_reservations.extend(repository.model_reservations(&member.task_id)?.into_iter().filter(ModelRequestReservation::blocks_recovery));
+                let descendants = repository.children(&member.task_id)?;
+                tree.extend(descendants);
+                index += 1;
+            }
+            Ok(json!({"task":task,"children":children,"attempt":repository.current_attempt(&id)?,"operations":repository.operations(&id)?,"checkpoint":repository.latest_checkpoint(&id)?,"artifacts":repository.artifacts(&id)?,"modelReservations":repository.model_reservations(&id)?,
+                "recoveryOperations":recovery_operations,"recoveryModelReservations":recovery_reservations}))
         }).await
+    }
+    pub async fn usage_summary(&self, conversation: Option<&str>, project: Option<&str>) -> Result<Value> {
+        let conversation = conversation.map(str::to_owned);
+        let project = project.map(str::to_owned);
+        self.store(move |repository| repository.usage_summary(conversation.as_deref(), project.as_deref())).await
     }
     pub async fn events(&self, id: &str, after: u64, limit: usize) -> Result<Value> {
         let id = id.to_owned();
@@ -290,11 +306,75 @@ impl TaskHub {
             if recovery["pending"].as_array().is_none_or(Vec::is_empty)
                 && !changed.state.is_terminal() && changed.state != TaskState::Paused
             {
-                self.schedule_root_recovery(&changed).await?;
+                self.schedule_root_recovery(&changed, false).await?;
             }
         }
         self.changes.notify_waiters();
         Ok(json!({"task":changed,"affectedTaskIds":affected,"recovery":recovery}))
+    }
+
+    /// Accept listed unverifiable outcomes as unknown, then resume through the normal recovery path.
+    /// 用户确认所列无法核验的结果保持未知，再走正常恢复路径；不改记成功，也不重放原操作。
+    pub async fn acknowledge_unknown(
+        self: &Arc<Self>,
+        id: &str,
+        version: u64,
+        operation_ids: Vec<String>,
+    ) -> Result<Value> {
+        let task = self.repository().await?.load(id)?;
+        self.validate_binding(&task).await?;
+        let owned = id.to_owned();
+        let acknowledged_ids = operation_ids.clone();
+        let acknowledged = self
+            .store(move |repository| {
+                repository.acknowledge_unknown_operations(&owned, version, &acknowledged_ids)
+            })
+            .await?;
+        let mut result = if acknowledged.state == TaskState::WaitingVerification {
+            if let Some(result) = self.wake_verification_waiter(&acknowledged) { result }
+            else { self.control(id, acknowledged.version, TaskControl::Resume).await? }
+        } else {
+            // A replayed confirmation finds the task already resumed; report its current state.
+            // 重放的确认可能发现任务已经恢复，此时只返回当前状态，不再次触发恢复。
+            self.changes.notify_waiters();
+            json!({"task":acknowledged,"affectedTaskIds":[id],"recovery":Value::Null})
+        };
+        result["acknowledgedOperationIds"] = json!(operation_ids);
+        Ok(result)
+    }
+
+    /// Acknowledge unknown cost with its task-qualified reservation identity, preserving later settlement.
+    /// 按任务限定的预约身份确认未知成本，保留随后真实回执的结算入口。
+    pub async fn acknowledge_unknown_costs(self: &Arc<Self>, id: &str, version: u64,
+        identities: Vec<ModelReservationIdentity>) -> Result<Value> {
+        let task = self.repository().await?.load(id)?;
+        self.validate_binding(&task).await?;
+        let owned = id.to_owned();
+        let acknowledged = self.store(move |repository| repository.acknowledge_unknown_model_reservations(&owned, version, &identities)).await?;
+        let mut result = if let Some(result) = self.wake_verification_waiter(&acknowledged) { result }
+            else { self.control(id, acknowledged.version, TaskControl::Resume).await? };
+        result["costUnknown"] = json!(true);
+        Ok(result)
+    }
+
+    /// Descendant operations use task-qualified IDs because local call IDs can repeat in sibling tasks.
+    /// 子任务的局部调用ID可能重复，确认操作时必须使用任务限定身份。
+    pub async fn acknowledge_unknown_operations_scoped(self: &Arc<Self>, id: &str, version: u64,
+        identities: Vec<TaskOperationIdentity>) -> Result<Value> {
+        let task = self.repository().await?.load(id)?;
+        self.validate_binding(&task).await?;
+        let owned = id.to_owned();
+        let acknowledged = self.store(move |repository| repository.acknowledge_unknown_task_operations(&owned, version, &identities)).await?;
+        if let Some(result) = self.wake_verification_waiter(&acknowledged) { Ok(result) }
+        else { self.control(id, acknowledged.version, TaskControl::Resume).await }
+    }
+
+    fn wake_verification_waiter(&self, task: &TaskRecord) -> Option<Value> {
+        let run = self.runtime.upgrade()?.live_task_run(&task.task_id)?;
+        if task.state != TaskState::WaitingVerification { return None; }
+        run.steering.send_modify(|version| *version = version.saturating_add(1));
+        self.changes.notify_waiters();
+        Some(json!({"task":task,"affectedTaskIds":[task.task_id],"recovery":{"liveExecutorPreserved":true}}))
     }
 
     /// Reconcile a stopped task tree under the existing execution fences; no evidence means keep waiting.
@@ -318,11 +398,11 @@ impl TaskHub {
         let mut pending = Vec::new();
         for member in tree {
             let member = repository.load(&member.task_id)?;
-            let has_pending = repository.operations(&member.task_id)?.iter().any(|operation|
-                matches!(operation.state, OperationState::Unknown | OperationState::Dispatched)
-                    && operation.intent.effect != OperationEffect::Observation)
+            // User-acknowledged unknown effects stay recorded but no longer require new evidence.
+            // 用户已确认的未知副作用仍保留记录，但不再要求新的核验证据。
+            let has_pending = repository.operations(&member.task_id)?.iter().any(TaskOperation::blocks_recovery)
                 || repository.model_reservations(&member.task_id)?.iter().any(|reservation|
-                    matches!(reservation.state, ModelReservationState::Unknown | ModelReservationState::Reserved));
+                    reservation.blocks_recovery());
             if !has_pending { continue; }
             self.validate_binding(&member).await?;
             let current_root = repository.load(&root.task_id)?;
@@ -342,6 +422,15 @@ impl TaskHub {
             }
             let journal = TaskJournal::start_existing(&self.config.data_root, &member,
                 &format!("recovery:{}", std::process::id()), 30000)?;
+            if repository.recovery_receipts(&member.task_id)?.iter().any(|event| event.kind == "mcp_task_checkpoint") {
+                if let Some(runtime) = self.runtime.upgrade() {
+                    let mut context = runtime.tool_context(&member.scope.conversation_id,
+                        member.scope.permission_snapshot["permissionMode"].as_str().unwrap_or("smart"),
+                        &member.goal, tokio::sync::watch::channel(false).1).await?;
+                    crate::tools::gateway::restrict_workspace_context(&mut context, &member.scope.permission_snapshot["bindingSnapshot"])?;
+                    let _ = journal.reconcile_remote_tasks(&context).await;
+                }
+            }
             let report = journal.reconcile_receipts().await.unwrap_or_else(|error|
                 json!({"pending":[{"taskId":member.task_id,"code":error.code,"message":error.message}]}));
             operations += report["resolvedOperations"].as_u64().unwrap_or(0);
@@ -566,12 +655,21 @@ impl TaskHub {
             }
             "task.status" | "task.result" => {
                 let id = args["taskId"].as_str().unwrap_or(journal.task_id());
-                self.check_tool_scope(id, &context).await?;
-                self.detail(id).await
+                self.check_descendant_scope(journal.task_id(), id, &context).await?;
+                if name == "task.result" && args["review"].is_object() {
+                    return self.review_child(parent, context, args).await;
+                }
+                let task = self.repository().await?.load(id)?;
+                let mut response = self.detail(id).await?;
+                response["delivery"] = self.wait_response(&parent, vec![task], false).await?;
+                Ok(response)
             }
             "task.control" => {
                 let id = args["taskId"].as_str().unwrap_or(journal.task_id());
-                self.check_tool_scope(id, &context).await?;
+                self.check_descendant_scope(journal.task_id(), id, &context).await?;
+                if id == journal.task_id() {
+                    return Err(failure("TASK_SELF_CONTROL_DENIED"));
+                }
                 let version = args["expectedVersion"]
                     .as_u64()
                     .ok_or_else(|| failure("INVALID_TASK_CONTROL"))?;
@@ -597,11 +695,101 @@ impl TaskHub {
         self.validate_binding(&task).await?;
         Ok(task)
     }
+    /// Model task tools see their own descendants; shared chat identity does not grant sibling access.
+    /// 模型任务工具只查看自身后代；同一聊天身份不授予兄弟任务访问权。
+    async fn check_descendant_scope(&self, caller: &str, id: &str, context: &GatewayToolContext) -> Result<TaskRecord> {
+        let task = self.check_tool_scope(id, context).await?;
+        let repository = self.repository().await?;
+        let mut cursor = task.clone();
+        for _ in 0..64 {
+            if cursor.task_id == caller { return Ok(task); }
+            let Some(parent) = cursor.parent_task_id.as_deref() else { break; };
+            cursor = repository.load(parent)?;
+        }
+        Err(failure("TASK_SCOPE_DENIED"))
+    }
+    /// Persist the parent's explicit decision against the current immutable child delivery.
+    /// 父任务针对当前不可变子交付保存明确验收结论；退回沿用原任务与成功操作。
+    async fn review_child(self: &Arc<Self>, parent: Arc<RequestRun>, context: GatewayToolContext, args: Value) -> Result<Value> {
+        let journal = parent.journal.as_ref().ok_or_else(||failure("TASK_JOURNAL_UNAVAILABLE"))?;
+        let id = args["taskId"].as_str().ok_or_else(||failure("INVALID_TASK_REVIEW"))?;
+        let repository = self.repository().await?;
+        let child = self.check_descendant_scope(journal.task_id(),id,&context).await?;
+        if child.parent_task_id.as_deref() != Some(journal.task_id()) {
+            return Err(failure("TASK_CHILD_REVIEW_NOT_READY"));
+        }
+        journal.check_dispatch_fence()?;
+        let review = &args["review"];
+        let version = review["expectedVersion"].as_u64().ok_or_else(||failure("INVALID_TASK_REVIEW"))?;
+        let output = repository.latest_artifact(id,"task-output")?.ok_or_else(||failure("TASK_OUTPUT_MISSING"))?;
+        if review["outputRef"] != output.reference { return Err(failure("TASK_VERSION_CONFLICT")); }
+        let decision = review["decision"].as_str().ok_or_else(||failure("INVALID_TASK_REVIEW"))?;
+        let reason = review["reason"].as_str().filter(|value|!value.trim().is_empty()).ok_or_else(||failure("INVALID_TASK_REVIEW"))?;
+        let report: Value = serde_json::from_slice(&journal.read_blob(&output.reference).await?).map_err(|_|failure("INVALID_TASK_OUTPUT"))?;
+        let mut revised = None;
+        match decision {
+            "accept" => {
+                if child.state != TaskState::Completed || report["acceptanceReview"]["required"] == true && report["acceptanceReview"]["reviewed"] != true {
+                    return Err(failure("TASK_CHILD_ACCEPTANCE_UNREVIEWED"));
+                }
+                repository.accept_child_output(journal.token(),id,version,reason,&output.reference)?;
+            }
+            "return" => {
+                revised = Some(repository.request_child_revision(journal.token(),id,version,reason,&output.reference)?);
+            }
+            _ => return Err(failure("INVALID_TASK_REVIEW")),
+        }
+        if let Some(child) = revised {
+            let reference = child.input_reference.as_ref().ok_or_else(||failure("TASK_CHILD_INPUT_MISSING"))?;
+            let mut input: Value = serde_json::from_slice(&journal.read_blob(&reference["contextReference"]).await?).map_err(|_|failure("INVALID_TASK_INPUT"))?;
+            input["parentRevision"] = json!({"reason":reason,"reviewedOutputRef":output.reference,"reviewedVersion":version});
+            if child.state==TaskState::Queued {
+                // A just-finished runner may still be emitting its final UI event; do not let it erase the replacement.
+                // 刚结束的执行器可能仍在发送末次界面事件；等它退出，避免覆盖替代执行器的排队记录。
+                loop {
+                    let changed=self.changes.notified();
+                    tokio::pin!(changed); changed.as_mut().enable();
+                    let running=self.runners.lock().map_err(|_|failure("TASK_RUNNER_LOCK_FAILED"))?
+                        .get(id).is_some_and(|runner|!runner.handle.is_finished());
+                    if !running { break; }
+                    let mut cancellation=parent.cancellation.subscribe();
+                    tokio::select!{_=changed=>{},_=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))}
+                }
+                self.queue_child(parent.clone(),child,context,input).await?;
+            }
+        }
+        self.changes.notify_waiters();
+        Ok(json!({"taskId":id,"decision":decision,"outputRef":output.reference,"reviewedVersion":version,"progressPreserved":true}))
+    }
     async fn delegate(
         self: &Arc<Self>,
         parent: Arc<RequestRun>,
         context: GatewayToolContext,
         args: Value,
+    ) -> Result<Value> {
+        let count = args["assignments"].as_array().map(Vec::len).unwrap_or(args["count"].as_u64().unwrap_or(1) as usize);
+        if count == 0 || count > 4096 { return Err(failure("INVALID_TASK_DELEGATION_BATCH")); }
+        let mut children = Vec::new();
+        for index in 0..count {
+            let mut assignment = args.clone();
+            assignment.as_object_mut().ok_or_else(||failure("INVALID_TASK_INPUT"))?.remove("assignments");
+            assignment.as_object_mut().unwrap().remove("count");
+            if let Some(specific) = args["assignments"].as_array().and_then(|items|items.get(index)).and_then(Value::as_object) {
+                for (key,value) in specific { assignment[key] = value.clone(); }
+            }
+            if count > 1 {
+                let goal = assignment["goal"].as_str().ok_or_else(||failure("INVALID_TASK_GOAL"))?;
+                assignment["goal"] = json!(format!("{goal}\nAssignment {}/{}: work on your distinct part; retain the original requirements. / 第 {}/{} 份独立分工。",index+1,count,index+1,count));
+                assignment["requestId"] = json!(format!("{}:{index}",crate::retrieval::gateway_index::hash(&args.to_string())));
+            }
+            children.push(self.delegate_one(parent.clone(),context.clone(),assignment).await?);
+        }
+        if count == 1 { return Ok(children.remove(0)); }
+        Ok(json!({"tasks":children,"acceptedCount":count,"suggestedConcurrency":5,
+            "admission":"Actual model/tool concurrency follows available resources; accepted assignments remain queued."}))
+    }
+    async fn delegate_one(
+        self: &Arc<Self>, parent: Arc<RequestRun>, context: GatewayToolContext, args: Value,
     ) -> Result<Value> {
         let journal = parent
             .journal
@@ -624,22 +812,55 @@ impl TaskHub {
             .unwrap_or_else(|| {
                 crate::retrieval::gateway_index::hash(&json!([root_task.task_id, args]).to_string())
             });
-        let reference = root_task
+        // Walk the real ancestry for root input; a child's private input is not a root conversation record.
+        // 沿真实祖先读取根输入；子任务私有输入不能误作根会话记录读取。
+        let repository = self.repository().await?;
+        let mut origin = root_task.clone();
+        let mut depth = 0;
+        while let Some(id) = origin.parent_task_id.as_deref() {
+            if depth >= 63 { return Err(failure("TASK_DEPTH_EXCEEDED")); }
+            origin = repository.load(id)?;
+            depth += 1;
+        }
+        let reference = origin
             .input_reference
             .as_ref()
             .ok_or_else(|| failure("TASK_INPUT_MISSING"))?;
         let (root_input, _, _) =
             super::gateway_task_input::read(&self.config.data_root, reference).await?;
-        let input = json!({"provider":root_input["provider"],"model":root_input["model"],"goal":goal,"acceptance":args["acceptance"],"contextRefs":args["contextRefs"],"writeTargets":args["writeTargets"],"rootUserConstraints":{"goal":root_task.goal,"permissionSnapshot":root_task.scope.permission_snapshot,"inputReference":root_task.input_reference},"runLimits":root_input["runLimits"]});
+        let mut immediate_input = Value::Null;
+        if root_task.parent_task_id.is_some() {
+            let reference = root_task.input_reference.as_ref().ok_or_else(||failure("TASK_CHILD_INPUT_MISSING"))?;
+            immediate_input = serde_json::from_slice(&journal.read_blob(&reference["contextReference"]).await?).map_err(|_|failure("INVALID_TASK_INPUT"))?;
+            if immediate_input["rootUserConstraints"]["delegationAllowed"] == false { return Err(failure("TASK_DELEGATION_DENIED")); }
+        }
+        for reference in args["contextRefs"].as_array().into_iter().flatten() { journal.read_blob(reference).await?; }
+        let resolve = |value:&str| {
+            let path = PathBuf::from(value);
+            crate::tools::local_files::absolute_path(&if path.is_absolute(){path}else{context.workdir.join(path)}.to_string_lossy())
+        };
+        let parent_targets: Vec<PathBuf> = immediate_input["writeTargets"].as_array().into_iter().flatten().filter_map(Value::as_str).map(&resolve).collect();
+        let mut write_targets = Vec::new();
+        for value in args["writeTargets"].as_array().into_iter().flatten() {
+            let path = resolve(value.as_str().ok_or_else(||failure("INVALID_CHILD_WRITE_TARGET"))?);
+            if !context.authorized_roots.iter().any(|root|crate::tools::local_files::within(root,&path))
+                || root_task.parent_task_id.is_some() && !parent_targets.iter().any(|target|
+                    crate::tools::local_files::path_key(target)==crate::tools::local_files::path_key(&path) || target.is_dir() && crate::tools::local_files::within(target,&path)) {
+                return Err(failure("CHILD_WRITE_SCOPE_BLOCKED"));
+            }
+            write_targets.push(path.to_string_lossy().to_string());
+        }
+        let input = json!({"provider":root_input["provider"],"model":root_input["model"],"goal":goal,"acceptance":args["acceptance"],"contextRefs":args["contextRefs"],"writeTargets":write_targets,"rootUserConstraints":{"goal":origin.goal,"permissionSnapshot":origin.scope.permission_snapshot,"inputReference":origin.input_reference,"delegationAllowed":true},"runLimits":root_input["runLimits"]});
         let bytes = serde_json::to_vec(&input).map_err(|_| failure("INVALID_TASK_INPUT"))?;
         let context_ref = journal.save_blob("child-context", &bytes).await?;
-        let acceptance: Vec<String> = args["acceptance"]
+        let mut acceptance: Vec<String> = args["acceptance"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect();
+        if acceptance.is_empty() { acceptance = super::task::acceptance_requirements(goal); }
         let dependency_ids: Vec<String> = args["dependencyIds"]
             .as_array()
             .into_iter()
@@ -647,6 +868,7 @@ impl TaskHub {
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect();
+        for id in &dependency_ids { self.check_descendant_scope(journal.task_id(),id,&context).await?; }
         let task_input = NewTask {
             request_id: format!("child:{request}"),
             goal: goal.into(),
@@ -670,13 +892,14 @@ impl TaskHub {
             json!({"taskId":child.task_id,"parentTaskId":child.parent_task_id,"status":child.state,"task":child,"contextRef":context_ref}),
         )
     }
-    async fn queue_child(
+    fn queue_child(
         self: &Arc<Self>,
         parent: Arc<RequestRun>,
         child: TaskRecord,
         mut context: GatewayToolContext,
         input: Value,
-    ) -> Result<()> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<()>> + Send + '_>> {
+        Box::pin(async move {
         let mut runners = self
             .runners
             .lock()
@@ -705,32 +928,50 @@ impl TaskHub {
         });
         runners.insert(id, Runner { cancel, handle });
         Ok(())
+        })
+    }
+    /// Rebuild accepted direct descendants from their saved inputs, including nested recovery.
+    /// 从原始保存输入恢复已接受的直属后代，同时支持嵌套恢复，不复制父聊天历史。
+    pub(crate) async fn resume_children(self: &Arc<Self>, parent: Arc<RequestRun>, context: GatewayToolContext) -> Result<()> {
+        let journal = parent.journal.as_ref().ok_or_else(||failure("TASK_JOURNAL_UNAVAILABLE"))?;
+        for child in self.repository().await?.children(journal.task_id())? {
+            if child.state.is_terminal() || child.state == TaskState::Paused { continue; }
+            let reference = child.input_reference.as_ref().filter(|value|value["kind"]=="task-child-input").ok_or_else(||failure("TASK_CHILD_INPUT_MISSING"))?;
+            let mut input: Value = serde_json::from_slice(&journal.read_blob(&reference["contextReference"]).await?).map_err(|_|failure("INVALID_TASK_INPUT"))?;
+            if let Some(revision)=self.repository().await?.latest_child_return(&child.task_id)? { input["parentRevision"]=revision.payload; }
+            self.queue_child(parent.clone(),child,context.clone(),input).await?;
+        }
+        Ok(())
+    }
+    /// Completion needs an explicit parent review of every current direct-child delivery.
+    /// 完成前核对每个当前直属子交付的父验收；不把子自验当成父接纳。
+    pub(crate) async fn children_acceptance(&self,task_id:&str)->Result<Value> {
+        let repository = self.repository().await?;
+        let children = repository.children(task_id)?;
+        let mut unresolved = Vec::new();
+        for child in &children {
+            if child.state==TaskState::Cancelled && child.stop_reason.as_deref()==Some("superseded-by-user-steering") { continue; }
+            if child.state!=TaskState::Completed || !child_accepted(&repository,child)? {
+                unresolved.push(json!({"taskId":child.task_id,"state":child.state,"expectedVersion":child.version,
+                    "outputRef":repository.latest_artifact(&child.task_id,"task-output")?.map(|output|output.reference)}));
+            }
+        }
+        Ok(json!({"allAccepted":unresolved.is_empty(),"total":children.len(),"unacceptedCount":unresolved.len(),
+            "unaccepted":unresolved.into_iter().take(64).collect::<Vec<_>>(),"pageLimit":64}))
     }
     async fn execute_child(
         self: &Arc<Self>,
         parent: Arc<RequestRun>,
         child: TaskRecord,
         context: GatewayToolContext,
-        input: Value,
+        mut input: Value,
     ) -> Result<Value> {
         // A replacement waits for an existing lease instead of stealing a live worker's receipts.
         // 替代执行先等待旧租约，不能抢占仍有效 Worker 的回执提交权。
         self.wait_existing_lease(&child.task_id, Some(context.cancellation.clone()))
             .await?;
-        let root_id = child
-            .parent_task_id
-            .clone()
-            .ok_or_else(|| failure("TASK_PARENT_MISSING"))?;
-        let gate = {
-            let mut gates = self
-                .root_slots
-                .lock()
-                .map_err(|_| failure("TASK_QUEUE_LOCK_FAILED"))?;
-            gates
-                .entry(root_id)
-                .or_insert_with(|| Arc::new(Semaphore::new(3)))
-                .clone()
-        };
+        // Model/tool I/O owns resource admission; holding a task-lifetime slot would deadlock nested waits.
+        // 模型和工具 I/O 各自申请资源；整任务持有槽位会让嵌套委派等待形成死锁。
         loop {
             let notified = self.changes.notified();
             tokio::pin!(notified);
@@ -755,33 +996,23 @@ impl TaskHub {
                 repository.mark_unstarted_wait(
                     &current.task_id,
                     current.version,
-                    TaskState::Failed,
+                    TaskState::WaitingConfig,
                     "required-dependency-incomplete",
                 )?;
-                return Ok(json!({"taskId":current.task_id,"status":"failed"}));
+                return Ok(json!({"taskId":current.task_id,"status":"waiting-config","reason":"required-dependency-incomplete","progressPreserved":true}));
             }
             if dependencies
                 .iter()
-                .all(|task| task.state == TaskState::Completed)
+                .all(|task| task.state == TaskState::Completed && child_accepted(&repository,task).unwrap_or(false))
             {
                 break;
             }
             let mut cancellation = context.cancellation.clone();
             tokio::select! {_=notified=>{},_=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))}
         }
-        let mut cancellation = context.cancellation.clone();
-        let _slot = tokio::select! {permit=gate.acquire_owned()=>permit.map_err(|_|failure("TASK_QUEUE_CLOSED"))?,_=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))};
-        let writes = input["writeTargets"]
-            .as_array()
-            .is_some_and(|targets| !targets.is_empty());
-        let _write_guard = if writes {
-            Some(
-                tokio::select! {guard=self.workspace_mutation_guard(&context.workdir)=>guard?,_=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))},
-            )
-        } else {
-            None
-        };
-        let current = self.repository().await?.load(&child.task_id)?;
+        let repository=self.repository().await?;
+        if let Some(revision)=repository.latest_child_return(&child.task_id)? { input["parentRevision"]=revision.payload; }
+        let current = repository.load(&child.task_id)?;
         self.validate_binding(&current).await?;
         if current.state.is_terminal()
             || current.state == TaskState::Paused
@@ -808,8 +1039,7 @@ impl TaskHub {
         let state = if stopping {
             TaskState::WaitingNetwork
         } else if repository.operations(id)?.iter().any(|operation| {
-            operation.state == OperationState::Unknown
-                && operation.intent.effect != OperationEffect::Observation
+            operation.state == OperationState::Unknown && operation.blocks_recovery()
         }) {
             TaskState::WaitingVerification
         } else if error.code == "ABORT_ERR" {
@@ -846,7 +1076,7 @@ impl TaskHub {
                     .collect()
             })
             .unwrap_or_else(|| vec![default]);
-        if ids.is_empty() || ids.len() > 128 {
+        if ids.is_empty() || ids.len() > 4096 {
             return Err(failure("INVALID_TASK_WAIT"));
         }
         let timeout = Duration::from_millis(
@@ -866,16 +1096,18 @@ impl TaskHub {
             notified.as_mut().enable();
             let mut tasks = Vec::new();
             for id in &ids {
-                tasks.push(self.check_tool_scope(id, &context).await?);
+                tasks.push(self.check_descendant_scope(parent.journal.as_ref().unwrap().task_id(),id, &context).await?);
             }
             // Yield the parent to its new instruction; children keep their own execution and receipts.
             // 新引导到达即交还父循环处理；子任务继续原执行，保留已派发操作及真实回执。
             if *steering.borrow_and_update() != expected_steering {
-                let mut response = self.wait_response(&parent, tasks, false).await?;
+                let mut response = self.wait_page_response(&parent, tasks, false,&args).await?;
                 response["steeringPending"] = json!(true);
                 return Ok(response);
             }
+            let repository = self.repository().await?;
             if tasks.iter().all(|task| task.state.is_terminal())
+                || tasks.iter().any(|task|task.state==TaskState::Completed && !child_accepted(&repository,task).unwrap_or(false))
                 || tasks.iter().any(|task| {
                     matches!(
                         task.state,
@@ -886,14 +1118,14 @@ impl TaskHub {
                     )
                 })
             {
-                return self.wait_response(&parent, tasks, false).await;
+                return self.wait_page_response(&parent, tasks, false,&args).await;
             }
             let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-                return self.wait_response(&parent, tasks, true).await;
+                return self.wait_page_response(&parent, tasks, true,&args).await;
             };
             let mut cancellation = parent.cancellation.subscribe();
             tokio::select! {
-                _=tokio::time::sleep(remaining)=>return self.wait_response(&parent,tasks,true).await,
+                _=tokio::time::sleep(remaining)=>return self.wait_page_response(&parent,tasks,true,&args).await,
                 _=notified=>{},
                 changed=steering.changed()=>{
                     if changed.is_err() { return Err(failure("TASK_RUNTIME_UNAVAILABLE")); }
@@ -901,6 +1133,21 @@ impl TaskHub {
                 _=crate::tools::gateway::wait_for_cancellation(&mut cancellation)=>return Err(failure("ABORT_ERR"))
             }
         }
+    }
+    async fn wait_page_response(&self,parent:&Arc<RequestRun>,tasks:Vec<TaskRecord>,timed_out:bool,args:&Value)->Result<Value> {
+        let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = args["limit"].as_u64().unwrap_or(64).clamp(1,128) as usize;
+        let total = tasks.len();
+        let repository = self.repository().await?;
+        let all_completed = tasks.iter().all(|task|task.state==TaskState::Completed && child_accepted(&repository,task).unwrap_or(false)
+            || task.state==TaskState::Cancelled && task.stop_reason.as_deref()==Some("superseded-by-user-steering"));
+        let page = tasks.into_iter().skip(offset).take(limit).collect();
+        let mut response = self.wait_response(parent,page,timed_out).await?;
+        response["allCompleted"] = json!(all_completed);
+        response["offset"] = json!(offset);
+        response["total"] = json!(total);
+        response["nextOffset"] = if offset.saturating_add(limit)<total {json!(offset+limit)}else{Value::Null};
+        Ok(response)
     }
     async fn wait_response(
         &self,
@@ -923,6 +1170,11 @@ impl TaskHub {
                     Ok(bytes) => {
                         let report: Value = serde_json::from_slice(&bytes)
                             .map_err(|_| failure("INVALID_TASK_OUTPUT"))?;
+                        result["acceptanceReview"] = report["acceptanceReview"].clone();
+                        let review = task.parent_task_id.as_deref().map(|id|repository.latest_child_review(id,&task.task_id)).transpose()?.flatten();
+                        result["parentReview"] = json!(review);
+                        result["parentAccepted"] = json!(child_accepted(&repository,task)?);
+                        result["reviewedVersion"] = json!(task.version);
                         let summary = report["summary"].as_str().unwrap_or("");
                         let preview = bounded_preview(summary, preview_budget.min(4096));
                         preview_budget =
@@ -960,7 +1212,7 @@ impl TaskHub {
                                 != result["verification"].as_array().map(Vec::len).unwrap_or(0)
                         );
                         result["completionMeans"] = json!(
-                            "executor-reported; only the listed real verification receipts establish tests passed"
+                            "child self-review is distinct from parent acceptance; real receipts do not certify semantic or visual quality"
                         );
                     }
                     Err(error) => {
@@ -971,7 +1223,7 @@ impl TaskHub {
             results.push(result);
         }
         Ok(
-            json!({"tasks":tasks,"results":results,"timedOut":timed_out,"allCompleted":tasks.iter().all(|task|task.state==TaskState::Completed || task.state==TaskState::Cancelled && task.stop_reason.as_deref()==Some("superseded-by-user-steering"))}),
+            json!({"tasks":tasks,"results":results,"timedOut":timed_out,"allCompleted":tasks.iter().all(|task|task.state==TaskState::Completed && child_accepted(&repository,task).unwrap_or(false) || task.state==TaskState::Cancelled && task.stop_reason.as_deref()==Some("superseded-by-user-steering"))}),
         )
     }
     async fn read_result(&self, journal: &Arc<TaskJournal>, args: &Value) -> Result<Value> {
@@ -1000,7 +1252,7 @@ impl TaskHub {
             json!({"text":rendered,"reference":reference,"unit":"utf16","offset":actual_offset,"endOffset":actual_offset+length,"totalUnits":total,"hasMore":end<text.len()}),
         )
     }
-    async fn schedule_root_recovery(self: &Arc<Self>, task: &TaskRecord) -> Result<()> {
+    async fn schedule_root_recovery(self: &Arc<Self>, task: &TaskRecord, background: bool) -> Result<()> {
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Err(failure("TASK_HUB_STOPPING"));
         }
@@ -1028,7 +1280,7 @@ impl TaskHub {
         let hub = self.clone();
         tokio::spawn(async move {
             let id = root.task_id.clone();
-            if let Err(error) = hub.clone().restore_root(root).await {
+            if let Err(error) = hub.clone().restore_root(root, background).await {
                 let _ = hub.record_worker_failure(&id, &error).await;
                 hub.changes.notify_waiters();
             }
@@ -1041,6 +1293,7 @@ impl TaskHub {
     fn restore_root(
         self: Arc<Self>,
         task: TaskRecord,
+        background: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             if task.state.is_terminal() || task.state == TaskState::Paused {
@@ -1076,20 +1329,12 @@ impl TaskHub {
                 unknown |= repository
                     .operations(&member.task_id)?
                     .iter()
-                    .any(|operation| {
-                        matches!(
-                            operation.state,
-                            OperationState::Unknown | OperationState::Dispatched
-                        ) && operation.intent.effect != OperationEffect::Observation
-                    })
+                    .any(TaskOperation::blocks_recovery)
                     || repository
                         .model_reservations(&member.task_id)?
                         .iter()
                         .any(|reservation| {
-                            matches!(
-                                reservation.state,
-                                ModelReservationState::Unknown | ModelReservationState::Reserved
-                            )
+                            reservation.blocks_recovery()
                         });
             }
             if unknown {
@@ -1112,7 +1357,7 @@ impl TaskHub {
                 .runtime
                 .upgrade()
                 .ok_or_else(|| failure("TASK_RUNTIME_UNAVAILABLE"))?;
-            let parent = runtime.begin_recovered(input.clone(), original).await?;
+            let parent = runtime.begin_recovered(input.clone(), original, background).await?;
             if let Some(journal) = parent.journal.as_ref() {
                 let context = runtime
                     .tool_context(
@@ -1324,12 +1569,49 @@ impl TaskHub {
             after = page.last().map(|task| task.task_id.clone());
             for task in page {
                 if task.parent_task_id.is_none() && task.state != TaskState::Paused {
-                    self.schedule_root_recovery(&task).await?;
+                    self.schedule_root_recovery(&task, true).await?;
                     scheduled += 1;
                 }
             }
         }
+        self.schedule_network_retries();
         Ok(json!({"scheduled":scheduled,"source":"persistent-task-index"}))
+    }
+
+    /// Keep durable network waits observable after long outages with bounded polling and no model calls.
+    /// 长时间断网后仍可恢复；按有界退避检查持久等待，不为轮询调用模型。
+    fn schedule_network_retries(self: &Arc<Self>) {
+        let hub = self.clone();
+        tokio::spawn(async move {
+            let mut retry = 0u32;
+            loop {
+                let delay_seconds = 15u64.saturating_mul(1u64 << retry.min(6)).min(300);
+                retry = retry.saturating_add(1);
+                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+                if hub.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let Ok(repository) = hub.repository().await else { return };
+                let mut after = None;
+                let mut waiting = 0;
+                loop {
+                    let Ok(page) = repository.list_unfinished_after(after.as_deref(), 256) else { return };
+                    if page.is_empty() {
+                        break;
+                    }
+                    after = page.last().map(|task| task.task_id.clone());
+                    for task in page {
+                        if task.parent_task_id.is_none() && task.state == TaskState::WaitingNetwork {
+                            waiting += 1;
+                            let _ = hub.schedule_root_recovery(&task, true).await;
+                        }
+                    }
+                }
+                if waiting == 0 {
+                    return;
+                }
+            }
+        });
     }
     pub fn active_workers(&self) -> Result<usize> {
         let runners = self
@@ -1369,6 +1651,16 @@ impl TaskHub {
         self.changes.notify_waiters();
     }
 }
+/// An accepted delivery is pinned to its output and version, never inferred from a child's terminal label.
+/// 父接纳绑定交付引用与版本；不能仅凭子任务结束状态推定已经验收。
+fn child_accepted(repository:&TaskRepository,task:&TaskRecord)->Result<bool> {
+    let Some(parent) = task.parent_task_id.as_deref() else { return Ok(true); };
+    let Some(output) = repository.latest_artifact(&task.task_id,"task-output")? else { return Ok(false); };
+    let Some(review) = repository.latest_child_review(parent,&task.task_id)? else { return Ok(false); };
+    Ok(review.payload["decision"]=="accept" && review.payload["outputRef"]==output.reference
+        && review.payload["reviewedVersion"].as_u64()==Some(task.version))
+}
+
 fn failure(code: &str) -> GatewayError {
     GatewayError::new(
         code,

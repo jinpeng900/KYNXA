@@ -12,6 +12,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
+/// Longest time a background host start waits for a free job slot before reporting capacity.
+/// 后台宿主命令等待空闲作业槽的最长时间，超过后如实报告容量不足。
+
 /// Windows closes the entire owned process tree if the gateway crashes or releases this handle.
 /// 网关崩溃或释放句柄时，Windows 自动关闭此自有进程树，避免只清理父进程。
 pub(crate) struct OwnedProcessJob(usize);
@@ -878,16 +881,34 @@ pub(crate) async fn execute(
         return host_run(input, ctx, None).await;
     }
     if name == "terminal.host.start" {
-        let plan = native(
-            ctx,
-            "host.start",
-            json!({
-                "context": { "conversationId": ctx.conversation_id },
-                "request": input,
-                "startedAt": chrono::Utc::now().to_rfc3339()
-            }),
-        )
-        .await?;
+        // A full pool waits for capacity under the original cancellation identity, without a queue-age failure.
+        // 作业池满时沿原取消身份等待容量，不因排队时间长而终止任务；未派发前不产生副作用。
+        let mut cancellation = ctx.cancellation.clone();
+        let plan = loop {
+            let attempt = native(
+                ctx,
+                "host.start",
+                json!({
+                    "context": { "conversationId": ctx.conversation_id },
+                    "request": input,
+                    "startedAt": chrono::Utc::now().to_rfc3339()
+                }),
+            )
+            .await;
+            match attempt {
+                Err(error)
+                    if error.code == "HOST_TERMINAL_CAPACITY" =>
+                {
+                    tokio::select! {
+                        _ = super::gateway::wait_for_cancellation(&mut cancellation) => {
+                            return Err(GatewayError::new("TOOL_CANCELLED", "排队中的后台终端任务已取消，未启动。", 499));
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+                other => break other?,
+            }
+        };
         let id = plan["jobId"].as_str().unwrap_or("").to_owned();
         for evicted in plan["evicted"]
             .as_array()
@@ -1432,7 +1453,7 @@ mod tests {
         assert_eq!(completed["receipt"]["completed"], true);
         assert_eq!(completed["receipt"]["exitCode"], 0);
         assert_eq!(completed["receipt"]["outputTruncated"], true);
-        assert_eq!(completed["receipt"]["outputOverflowPolicy"], "truncate");
+        assert_eq!(completed["receipt"]["outputOverflowPolicy"], "truncate-keep-tail");
         assert_eq!(std::fs::read_to_string(ctx.workdir.join("host-output-complete.txt")).unwrap().trim(), "host-complete");
         shutdown_checked(&ctx).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

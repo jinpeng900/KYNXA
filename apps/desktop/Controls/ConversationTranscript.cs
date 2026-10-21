@@ -71,7 +71,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
-        long? GenerationElapsedMs, long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, AttachmentDisplay[] Attachments);
+        long? GenerationElapsedMs, long? GenerationStartedTimestamp,
+        long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, AttachmentDisplay[] Attachments);
     private sealed record AttachmentDisplay(Guid Id, string Name, string ContentType, long SizeBytes, string Status,
         string? Error, string? ThumbnailUrl);
     private sealed record ToolDisplayRevision(WeakReference<ToolActivity> Source, long Revision);
@@ -784,6 +785,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             visible.Tools, segments, visible.Mode, row.Message.DurationMs,
             row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
                 ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null,
+            row.IsStreaming ? row.Message.GenerationStartedTimestamp : null,
             row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
             MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds(), row.Message.TaskCompletionState,
             row.Message.Attachments.Select(attachment => AttachmentView(row.ConversationId, row.Message.Id, attachment)).ToArray());
@@ -867,12 +869,15 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     resultRef = tool.ResultRef is { } reference ? new { id = reference.Id, bytes = reference.Bytes, sha256 = reference.Sha256 } : null }) }) });
     }
 
+    // Compare the stable origin, not every elapsed millisecond; inherited clocks still need one metadata update.
+    // 比较稳定起点而非每毫秒变化；继承更早计时时仅发布一次元数据，不增加逐帧更新。
     private static bool SamePublishedSnapshot(Snapshot previous, Snapshot current) =>
         previous.Id == current.Id && previous.Role == current.Role && previous.Content == current.Content &&
         previous.Reasoning == current.Reasoning && previous.Streaming == current.Streaming &&
         previous.ReasoningState == current.ReasoningState && previous.ReasoningSeconds == current.ReasoningSeconds &&
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
         previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
+        previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
         previous.CreatedAtMs == current.CreatedAtMs && previous.EndRecordedAtMs == current.EndRecordedAtMs &&
         previous.TaskCompletionState == current.TaskCompletionState && previous.Attachments.SequenceEqual(current.Attachments) &&
         previous.AssistantSegments.SequenceEqual(current.AssistantSegments) && previous.ToolActivities.SequenceEqual(current.ToolActivities);

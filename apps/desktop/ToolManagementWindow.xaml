@@ -138,6 +138,7 @@
                                 <Expander x:Name="AgentServerAdvanced" services:UiLocalization.Header="高级设置">
                                     <StackPanel Spacing="10">
                                         <TextBox x:Name="AgentServerIdBox" services:UiLocalization.Header="服务 ID" TextChanging="Server_TextChanging" TextChanged="Server_TextChanged" />
+                                        <TextBox x:Name="AgentServerTimeoutBox" services:UiLocalization.Header="执行期限（秒，可选）" services:UiLocalization.PlaceholderText="留空使用默认 600 秒，最长 21600 秒" InputScope="Number" TextChanging="Server_TextChanging" TextChanged="Server_TextChanged" />
                                         <StackPanel x:Name="AgentStdioAdvancedFields" Spacing="10">
                                             <TextBox x:Name="AgentServerArgsBox" services:UiLocalization.Header="参数（JSON 字符串数组）" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64" TextChanging="Server_TextChanging" TextChanged="Server_TextChanged" />
                                             <TextBox x:Name="AgentServerCwdBox" services:UiLocalization.Header="运行目录（绝对路径，可选）" TextChanging="Server_TextChanging" TextChanged="Server_TextChanged" />
@@ -182,6 +183,8 @@
                             <StackPanel x:Name="AgentConnectionActions" Orientation="Horizontal" Spacing="8">
                                 <Button x:Name="AgentReconnectButton" services:UiLocalization.Content="连接此服务" Click="Reconnect_Click" />
                                 <Button x:Name="AgentDisconnectButton" services:UiLocalization.Content="断开此服务" Click="Disconnect_Click" />
+                                <Button x:Name="AgentOAuthLoginButton" services:UiLocalization.Content="登录个人账号" Click="OAuthLogin_Click" Visibility="Collapsed" />
+                                <Button x:Name="AgentOAuthLogoutButton" services:UiLocalization.Content="退出账号" Click="OAuthLogout_Click" Visibility="Collapsed" />
                             </StackPanel>
                         </StackPanel>
                     </Grid>

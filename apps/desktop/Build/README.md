@@ -90,6 +90,10 @@ powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -ResourcePackRo
 
 默认 `Full` 包含检索模型、原生依赖、私有 Node/MCP 和固定 Chromium。`-Profile Core` 是开发预览档，只准备网关与直接检索所需的核心资源，不作为完整用户发行包；以后切回 `Full` 时补齐其余资源。原有启动命令继续可用，MSBuild 对应属性为 `KynxaRuntimeProfile`、`KynxaResourcePackRoot`、`KynxaDownloadSourcesPath`、`KynxaOffline`。
 
+直接打开 `KYNXA.Desktop.slnx` 时，VS 会读取项目旁的 `KYNXA.Desktop.csproj.user`。仅准备了 Core 的开发机可在该文件中为 VS 的 Debug/x64 设置 `KynxaRuntimeProfile=Core`；此文件已被 Git 忽略，不把个人配置提交给其他成员。资源准备参数在构建目标执行时计算，采用用户文件导入后的最终值；工程默认值和 Release 仍为 Full。
+
+如需复用本机 Cargo 缓存，可在同一用户文件中设置 `KynxaNativeBuildEnvironment`，格式为分号分隔的 `名称=值`（例如 `CARGO_HOME`、`CARGO_TARGET_DIR`）。该可选配置只传给原生资源准备的子进程，不修改 VS 宿主或系统环境；包含分号的单个值需要使用 MSBuild 转义。个人工具和缓存路径只放在本机用户文件中。
+
 离线源码构建同时需要本机 .NET/Windows SDK、Rust/MSVC 工具链、对应 Cargo/NuGet 包缓存及还原结果。资源包解决用户运行资源分发，不包含这些构建机依赖。使用下列入口时，外部资源禁止联网，Cargo 使用 `--offline`，桌面使用 `--no-restore`，ToolHost 子构建只运行 `Build`：
 
 ```powershell

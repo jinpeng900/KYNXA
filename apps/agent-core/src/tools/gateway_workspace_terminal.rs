@@ -46,6 +46,43 @@ fn protocol_payload(frame: &str) -> String {
     payload
 }
 
+/// OSC 633 introducer shared by the owned READY/DONE frames.
+/// 自有 READY/DONE 帧共用的 OSC 633 起始序列。
+const PROTOCOL_OPENER: &str = "\u{1b}]633;";
+
+/// Byte offset of the BEL that ends a protocol frame, skipping escape sequences nested inside it.
+/// 返回结束协议帧的 BEL 位置，跳过帧内嵌套的 OSC/CSI 转义序列；尚未收齐时返回 None。
+fn protocol_frame_end(frame: &str) -> Option<usize> {
+    let mut characters = frame.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '\u{7}' => return Some(index),
+            '\u{1b}' => match characters.next() {
+                Some((_, ']')) => loop {
+                    match characters.next()? {
+                        (_, '\u{7}') => break,
+                        (_, '\u{1b}') if characters.peek().is_some_and(|(_, next)| *next == '\\') => {
+                            characters.next();
+                            break;
+                        }
+                        _ => {}
+                    }
+                },
+                Some((_, '[')) => loop {
+                    let (_, next) = characters.next()?;
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                },
+                Some(_) => {}
+                None => return None,
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
 struct CommandReceipt {
     id: String,
     fingerprint: String,
@@ -118,8 +155,7 @@ impl OutputState {
         }
     }
 
-    fn protocol_frame(&mut self, frame: &str) -> bool {
-        let payload = protocol_payload(frame);
+    fn protocol_frame(&mut self, payload: &str) -> bool {
         let parts = payload.split(':').collect::<Vec<_>>();
         let cwd = |value: &str| BASE64.decode(value).ok().and_then(|bytes| String::from_utf8(bytes).ok());
         match parts.as_slice() {
@@ -162,13 +198,20 @@ impl TerminalOutput {
             // 协议标记在编码脚本运行时生成；不把 PS>/>> 文本或输入回显当作执行证明。
             let mut pending = std::mem::take(&mut state.pending_protocol);
             pending.push_str(&text);
+            // ConPTY may insert title or cursor sequences inside the frame, including their own BEL, so the
+            // frame ends at the first BEL outside nested escapes and the owned identity is checked afterwards.
+            // ConPTY 可能在帧内插入带 BEL 的标题或光标序列；帧在嵌套转义之外的第一个 BEL 处结束，
+            // 去除这些控制序列后再核对自有标记身份，避免完成标记被截断而丢失。
+            let identity = &self.marker_prefix[PROTOCOL_OPENER.len()..];
             loop {
-                if let Some(start) = pending.find(&self.marker_prefix) {
+                if let Some(start) = pending.find(PROTOCOL_OPENER) {
                     state.retain(pending[..start].to_owned());
                     pending.drain(..start);
-                    if let Some(end) = pending[self.marker_prefix.len()..].find('\u{7}') {
-                        let end = self.marker_prefix.len() + end;
-                        if !state.protocol_frame(&pending[self.marker_prefix.len()..end]) {
+                    if let Some(end) = protocol_frame_end(&pending[PROTOCOL_OPENER.len()..]) {
+                        let end = PROTOCOL_OPENER.len() + end;
+                        let payload = protocol_payload(&pending[PROTOCOL_OPENER.len()..end]);
+                        let owned = payload.strip_prefix(identity);
+                        if !owned.is_some_and(|frame| state.protocol_frame(frame)) {
                             state.retain(pending[..end + 1].to_owned());
                         }
                         pending.drain(..end + 1);
@@ -176,8 +219,8 @@ impl TerminalOutput {
                         state.retain(std::mem::take(&mut pending));
                     } else { break; }
                 } else {
-                    let keep = (1..self.marker_prefix.len()).rev().find(|length|
-                        pending.ends_with(&self.marker_prefix[..*length])).unwrap_or(0);
+                    let keep = (1..PROTOCOL_OPENER.len()).rev().find(|length|
+                        pending.ends_with(&PROTOCOL_OPENER[..*length])).unwrap_or(0);
                     state.retain(pending[..pending.len() - keep].to_owned());
                     pending = pending[pending.len() - keep..].to_owned();
                     break;
@@ -803,6 +846,31 @@ mod command_contract_tests {
     }
 
     #[test]
+    fn completion_marker_survives_title_and_cursor_sequences_inserted_by_conpty() {
+        let output = TerminalOutput::default();
+        ready(&output);
+        output.begin_command("titled", "Write-Output done").unwrap().unwrap();
+        let token = output.state.lock().unwrap().commands[0].token.clone();
+        let cwd = BASE64.encode("D:\\fixture 中文");
+        // ConPTY may put a title update (with its own BEL) and cursor toggles inside the owned frame.
+        let frame = format!("{}DONE:{token}:\u{1b}]0;Windows PowerShell\u{7}\u{1b}[?25l0:{}\u{1b}[?25h{}\u{7}",
+            output.marker_prefix, &cwd[..4], &cwd[4..]);
+        for character in frame.chars() { output.append(character.to_string()); }
+        let receipt = output.command("titled").unwrap();
+        assert_eq!(receipt["completed"], true, "{receipt}");
+        assert_eq!(receipt["exitCode"], 0);
+        let page = output.read(0).unwrap();
+        assert!(!page["output"].as_str().unwrap().contains("DONE:"), "{page}");
+        // A frame owned by another terminal identity stays ordinary output and settles nothing.
+        let foreign = TerminalOutput::default();
+        ready(&foreign);
+        foreign.begin_command("foreign", "Write-Output done").unwrap().unwrap();
+        let token = foreign.state.lock().unwrap().commands[0].token.clone();
+        foreign.append(format!("\u{1b}]633;KYNXA_other;DONE:{token}:0:{cwd}\u{7}"));
+        assert_eq!(foreign.command("foreign").unwrap()["completed"], false);
+    }
+
+    #[test]
     fn workspace_run_receipts_require_owned_markers_and_deduplicate_exact_commands() {
         let output = TerminalOutput::default();
         let encoded_cwd=BASE64.encode("D:\\fixture 中文");
@@ -882,7 +950,10 @@ mod tests {
         let opened=open(&json!({"cols":120,"rows":30}),&context).await.unwrap();
         let id=opened["sessionId"].clone();
         let script="Set-Location -LiteralPath '中文 folder'\nAdd-Content -LiteralPath 'once.txt' -Value '中文 ''single'' \"double\"' -Encoding UTF8\nWrite-Output 'ACTUAL_STRUCTURED_COMMAND'";
-        let arguments=json!({"sessionId":id,"commandId":"once","command":script,"reason":"Verify a whole multiline command in the visible terminal"});
+        // The default one-second observation may legitimately return running during a cold PowerShell startup.
+        // PowerShell 冷启动时默认一秒观察可合法返回 running；此处等待真实完成，不能把接收回执当完成。
+        let arguments=json!({"sessionId":id,"commandId":"once","command":script,"waitMs":15000,
+            "reason":"Verify a whole multiline command in the visible terminal"});
         context.permission_mode="ask".into();
         let pending=super::super::gateway::execute("terminal.workspace.run",arguments.clone(),&context).await.unwrap();
         assert_eq!(pending["requiresApproval"],true);
