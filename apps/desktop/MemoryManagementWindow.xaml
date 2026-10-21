@@ -110,11 +110,8 @@
                         <TextBlock x:Name="MemoryEditorHeading" FontSize="18" FontWeight="SemiBold" />
                         <TextBlock x:Name="MemoryScopeLabel" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />
                         <TextBlock services:UiLocalization.Text="类型" />
-                        <controls:ScrollSafeComboBox x:Name="MemoryKindPicker" AutomationProperties.AutomationId="MemoryKindPicker" services:UiLocalization.AutomationName="记忆类型" SelectionChanged="Kind_SelectionChanged">
-                            <ComboBoxItem Tag="fact" services:UiLocalization.Content="事实" />
-                            <ComboBoxItem Tag="preference" services:UiLocalization.Content="偏好" />
-                            <ComboBoxItem Tag="decision" services:UiLocalization.Content="决定" />
-                        </controls:ScrollSafeComboBox>
+                        <ContentControl x:Name="MemoryKindPickerHost" HorizontalContentAlignment="Left"
+                            VerticalContentAlignment="Center" />
                         <TextBlock services:UiLocalization.Text="内容" />
                         <TextBox x:Name="MemoryContentBox" AutomationProperties.AutomationId="MemoryContentBox" services:UiLocalization.AutomationName="记忆内容" services:UiLocalization.PlaceholderText="输入需要保留的记忆" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="160" MaxHeight="300" ScrollViewer.VerticalScrollBarVisibility="Auto" TextChanged="Content_TextChanged" />
                         <TextBlock x:Name="MemoryInputHint" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextWrapping="Wrap" />

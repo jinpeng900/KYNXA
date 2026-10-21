@@ -26,6 +26,14 @@ fn bootstrap(connection: &Connection, root: &Path, arguments: &Value) -> Contrac
     connection
         .execute_batch(sqlite_schema::RETRIEVAL_SCHEMA)
         .map_err(failure)?;
+    migrate_integrity(connection, 6, &[
+        ("retrieval_metadata", ""), ("sources", ""),
+        ("chunks", "UNIQUE(source_id,chunk_index)"), ("scope_snapshots", ""),
+        ("index_jobs", ""), ("source_relations", ""),
+        ("chunk_vector_spaces", ""), ("source_coverage", ""),
+    ], &[
+        "SELECT EXISTS(SELECT 1 FROM chunks GROUP BY source_id,chunk_index HAVING COUNT(*)>1)",
+    ])?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(failure)?;
@@ -99,7 +107,7 @@ fn bootstrap(connection: &Connection, root: &Path, arguments: &Value) -> Contrac
             CREATE INDEX IF NOT EXISTS chunks_symbol ON chunks(symbol_name,structure_domain,parse_status);
             CREATE INDEX IF NOT EXISTS chunks_qualified_name ON chunks(qualified_name,structure_domain,parse_status);
             CREATE INDEX IF NOT EXISTS chunks_space ON chunks(embedding_space_id,embedding_profile_id,dimensions);
-            PRAGMA user_version=5;").map_err(failure)?;
+            PRAGMA user_version=6;").map_err(failure)?;
         sql_execute(
             connection,
             "INSERT OR IGNORE INTO retrieval_metadata(key,value) VALUES ('index_epoch',?)",

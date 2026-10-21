@@ -13,6 +13,7 @@ public sealed partial class ShellPage
         public Dictionary<string, (long Order, long Revision, ConversationWorkTab Tab)> Items { get; } = new(StringComparer.Ordinal);
         public HashSet<string> ExaminedCalls { get; } = new(StringComparer.Ordinal);
         public HashSet<string> ActivatedWebsites { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, ChatAttachment> Attachments { get; } = new(StringComparer.Ordinal);
         public long Touched { get; set; }
     }
     private readonly Dictionary<Guid, WorkspaceResources> _workspaceResources = [];
@@ -44,6 +45,15 @@ public sealed partial class ShellPage
             if (!_chatClosing && ActiveChatId is Guid conversation)
                   AddWorkspaceTab(conversation, ConversationWorkspaceSources.File(path, userSelected: true) with { MountId = CurrentWorkspaceMount()?.Id }, select: true);
         };
+        WorkspaceHome.FileBrowserClosed += (_, _) => CancelWorkspaceFileRead(forgetScope: true);
+        WorkspaceHome.RefreshRequested += async (_, _) =>
+        {
+            if (WorkspaceHome.IsShowingAttachments) await BrowseSavedAttachmentsAsync(_attachmentOffset);
+            else await BrowseWorkspaceFilesAsync(_filesPath);
+        };
+        WorkspaceHome.AttachmentsRequested += async (_, _) => await BrowseSavedAttachmentsAsync();
+        WorkspaceHome.AttachmentPageRequested += async (_, offset) => await BrowseSavedAttachmentsAsync(offset);
+        WorkspaceHome.SavedAttachmentRequested += (_, entry) => OpenSavedWorkspaceAttachment(entry);
         WorkspaceHome.WebsiteRequested += (_, url) => AddWebsiteTab(url);
         WorkspaceHome.ChangesRequested += (_, _) => OpenWorkspaceChanges();
         WorkspaceHome.TerminalRequested += (_, _) => OpenWorkspaceTerminal();
@@ -62,7 +72,7 @@ public sealed partial class ShellPage
             foreach (var request in requests) AcceptTaskArtifact(request, select: false);
         };
         DocumentPanel.WebsiteRequested += (_, url) => AddWebsiteTab(url);
-        Unloaded += (_, _) => DocumentPanel.SetPreviewEnabled(false);
+        Unloaded += (_, _) => { DocumentPanel.SetPreviewEnabled(false); CancelWorkspaceFileRead(forgetScope: true); };
     }
 
     private WorkspaceResources ResourcesFor(Guid conversation)
@@ -236,8 +246,7 @@ public sealed partial class ShellPage
             {
                 var ids = selected.Target[11..].Split('/');
                 if (ids.Length == 2 && Guid.TryParse(ids[0], out var messageId) && Guid.TryParse(ids[1], out var attachmentId)
-                    && ActiveMessages.FirstOrDefault(row => row.Message.Id == messageId)?.Message.Attachments
-                        .FirstOrDefault(attachment => attachment.Id == attachmentId) is { } attachment)
+                    && FindWorkspaceAttachment(ActiveChatId!.Value, messageId, attachmentId) is { } attachment)
                     DocumentPanel.ShowAttachment(ActiveChatId!.Value, messageId, attachment);
             }
             else if (selected.Kind == "changes") DocumentPanel.ShowChanges(ActiveChatId!.Value, selected.MountId);
@@ -261,7 +270,9 @@ public sealed partial class ShellPage
         WorkspaceTerminal.Visibility = showTerminal ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceHome.ShowDirectory(CurrentWorkspaceDirectory(), ActiveChatId is not null);
         WorkspaceHome.ShowMounts(CurrentWorkspaceProject()?.Mounts ?? [], CurrentWorkspaceMount()?.Id);
-        if (_filesConversation != ActiveChatId || _filesMount != CurrentWorkspaceMount()?.Id) WorkspaceHome.HideFiles();
+        WorkspaceHome.ShowProjectScope(CurrentWorkspaceProject() is not null);
+        if (_filesConversation != ActiveChatId || _filesBinding != CurrentWorkspaceFilesBinding())
+        { CancelWorkspaceFileRead(forgetScope: true); WorkspaceHome.HideFiles(); }
         WorkspaceHome.Visibility = sidebarVisible && !showScreenshot && !showDocument && !showTerminal ? Visibility.Visible : Visibility.Collapsed;
         UpdateTaskRegionLayout();
     }

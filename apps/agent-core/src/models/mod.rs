@@ -3,6 +3,7 @@
 
 pub mod batches;
 pub mod capabilities;
+pub(crate) mod cache_policy;
 pub mod connections;
 pub mod context;
 pub mod context_control;
@@ -35,6 +36,7 @@ pub mod semantic;
 pub mod stream;
 pub mod tool_context;
 pub mod transcript;
+pub(crate) mod usage;
 pub mod worker;
 
 use serde_json::Value;

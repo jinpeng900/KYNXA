@@ -69,7 +69,11 @@ public sealed record RetrievalEmbeddingStatus(string State, string ProfileId, in
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Loaded = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ErrorCode = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] RetrievalInferenceBackendStatus? InferenceBackend = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ResourceReservation = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ResourceReservation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Phase = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ElapsedMs = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? RetryAfterMs = null);
 public sealed record RetrievalInferenceBackendStatus(string Device,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CpuThreads = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? DeviceId = null,

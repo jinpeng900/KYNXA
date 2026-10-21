@@ -1,4 +1,4 @@
-# KYNXA 1.6
+# KYNXA 1.65
 
 <p align="center">
   English | <a href="./README.zh.md">中文</a>
@@ -6,15 +6,15 @@
 
 **KYNXA** is a local-first personal agent application for Windows. It brings cloud and local models, durable tasks, document retrieval, tools, and a file/browser/terminal workspace into one desktop application.
 
-**Desktop release: `1.6` (package version `1.6.0`) · Windows x64 · Active development**
+**Desktop release: `1.65` (package version `1.65.0`) · Windows x64 · Active development**
 
-Version 1.6 adds direct DOCX/PPTX/XLSX previews, usable first views with background resource preparation, native Office document generation, and more precise terminal execution receipts. Download packages from the [1.6 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.6.0); see the [documentation index](docs/README.md) for architecture and usage.
+Version 1.65 improves long-task continuation and recovery, unknown-operation verification, request/cache usage reporting, retrieval caching and background warmup, and desktop settings and previews. Direct DOCX/PPTX/XLSX previews, native Office document generation, and terminal execution receipts remain included. Download packages from the [1.65 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0); see the [documentation index](docs/README.md) for architecture and usage.
 
-**Release/source note:** The 1.6 application packages include local implementation changes not yet published to `main`. This README update does not include those source changes, so building the current GitHub source may not reproduce every 1.6 package feature.
+**Release/source note:** Use the matching release tag when building a published package from source; a different branch or revision may contain different implementation changes.
 
-This round passed **89 focused Windows UI checks and 6 Rust workspace-preview tests**, and the Debug Full desktop built with **zero warnings and zero errors**. These results cover the changed preview and interaction paths, not an exhaustive model, website, installer, or large-library retrieval evaluation. Earlier results remain in the [1.5.3 patch notes](docs/releases/1.5.3.md).
+Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cover the exercised paths, not every model, website, installation scenario, or large-library retrieval workload. Earlier results remain in the [1.5.3 patch notes](docs/releases/1.5.3.md).
 
-## Capabilities in the 1.6 package
+## Capabilities in the 1.65 package
 
 | Area | Current capabilities |
 | --- | --- |
@@ -40,14 +40,14 @@ The multilingual **E5 embedding model** and **BGE reranker** are included in the
 
 ## Install and store your data
 
-All downloads are published as assets of the [1.6 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.6.0):
+Downloads are published as EXE and ZIP assets of the [1.65 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0):
 
 | Download | Use |
 | --- | --- |
-| [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
-| [Online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-online-setup.exe) | Download the verified full payload during installation. |
-| [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
-| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
+| [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
+| [Online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-online-setup.exe) | Download the verified full payload during installation. |
+| [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
+| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5/BGE, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 

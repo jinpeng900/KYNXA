@@ -41,6 +41,11 @@ public partial class App : Application
             LaunchPromptQueueChecks(cold);
             return;
         }
+        if (Environment.GetCommandLineArgs().Contains("--unknown-outcome-only", StringComparer.Ordinal))
+        {
+            LaunchUnknownOutcomeChecks(cold);
+            return;
+        }
         _transcript = new ConversationTranscript();
         _window = new Window { Title = "KYNXA DOM transcript smoke", Content = _transcript };
         KYNXA_Desktop.Services.AppearanceService.Apply(KYNXA_Desktop.Services.AppearanceService.DefaultPaletteId);

@@ -50,6 +50,7 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
     pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
     pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
     configuration_updates: tokio::sync::RwLock<()>,
@@ -76,6 +77,7 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
             configuration_updates: Default::default(),
@@ -151,11 +153,23 @@ pub(crate) fn failure(code: &str, message: &str, status: u16) -> GatewayError {
 pub(crate) fn decode_native(result: Result<Value, String>) -> Result<Value, GatewayError> {
     let value = result.map_err(|message| failure("TOOL_NATIVE_FAILED", &message, 500))?;
     if let Some(error) = value.get("error") {
-        return Err(failure(
+        let mut mapped = failure(
             error["code"].as_str().unwrap_or("TOOL_FAILED"),
             error["message"].as_str().unwrap_or("工具执行失败。"),
             error["statusCode"].as_u64().unwrap_or(500) as u16,
-        ));
+        );
+        // Only copy the safe pagination contract, never arbitrary native error bodies.
+        // 仅保留安全的分页纠错合同，不将任意原生错误正文带入模型上下文。
+        if ["INVALID_SKILL_LIST_PAGINATION", "INVALID_SKILL_RESOURCE_PAGINATION"].contains(&mapped.code.as_str()) {
+            let mut details = serde_json::Map::new();
+            for field in ["tool", "parameter", "type", "minimum", "maximum", "executed", "requestDispatched", "recoverable"] {
+                if let Some(value) = error.get(field) {
+                    details.insert(field.into(), value.clone());
+                }
+            }
+            mapped.details = Value::Object(details);
+        }
+        return Err(mapped);
     }
     Ok(value.get("value").cloned().unwrap_or(value))
 }
@@ -330,13 +344,28 @@ pub async fn verify_unknown_effects(
     records: &[Value],
     observation: &Value,
 ) -> Result<Vec<Value>, GatewayError> {
+    let mut proofs = Vec::new();
+    if observation["call"]["name"] == "mcp.task.result" {
+        let result = &observation["result"]["content"];
+        let proof = &result["_mcpTaskProof"];
+        if result["isError"] != true && proof["terminalStatus"] == "completed" {
+            for record in records {
+                let handle = record["result"].get("recoveryHandle").unwrap_or(&record["result"]["content"]["recoveryHandle"]);
+                if handle["kind"] == "mcp-task" && handle["taskId"] == proof["taskId"]
+                    && handle["serverId"] == proof["serverId"] && handle["configurationFingerprint"] == proof["configurationFingerprint"]
+                    && record["call"]["id"] == proof["toolCallId"] {
+                    proofs.push(json!({"toolCallId":record["call"]["id"],"observationToolCallId":observation["call"]["id"],
+                        "outcome":"dispatch-confirmed","result":{"value":result,"isError":false,"status":"completed"}}));
+                }
+            }
+        }
+    }
     let indexes = native(
         ctx,
         "broker.completion.recoveryCandidates",
         json!({"records":records,"observation":observation}),
     )
     .await?;
-    let mut proofs = Vec::new();
     for index in indexes
         .as_array()
         .into_iter()
@@ -381,6 +410,9 @@ pub fn builtin_catalog() -> Vec<Value> {
         serde_json::from_str(include_str!("gateway-catalog.json")).expect("checked tool catalog");
     let mut tools = catalog["tools"].as_array().cloned().unwrap_or_default();
     tools.extend(super::gateway_browser::descriptors());
+    tools.extend(super::gateway_mcp::task_descriptors());
+    tools.extend(super::gateway_skill_authoring::descriptors());
+    tools.extend(super::gateway_extension_install::descriptors());
     tools
 }
 
@@ -405,11 +437,20 @@ pub async fn catalog(ctx: &GatewayToolContext) -> Result<Vec<Value>, GatewayErro
 
 pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Result<(), GatewayError> {
     let invalid = || {
+        let mut details = json!({"parameter":label,"executed":false,"requestDispatched":false,"recoverable":true});
+        // Parameter rejection precedes dispatch; do not record it as an executed tool or retry a side effect.
+        // 参数校验发生在派发前，不将其记作工具已执行，也不因此重试任何副作用。
+        for field in ["type", "minimum", "maximum", "minLength", "maxLength", "maxItems", "required"] {
+            if let Some(value) = schema.get(field) {
+                details[field] = value.clone();
+            }
+        }
         failure(
             "INVALID_TOOL_ARGUMENTS",
             &format!("工具参数 {label} 不符合声明。"),
             400,
         )
+        .with_details(details)
     };
     if let Some(options) = schema["enum"].as_array() {
         if !options.contains(value) {
@@ -475,7 +516,7 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
         || name == "artifact.open" && !arguments["url"].is_string()
 }
 
@@ -522,7 +563,7 @@ pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot:
 }
 
 pub(crate) async fn select_workspace_context(ctx: &GatewayToolContext, arguments: &Value) -> Result<GatewayToolContext, GatewayError> {
-    let selected = if arguments["input"].is_string() && arguments["sessionId"].is_string() {
+    let selected = if (arguments["input"].is_string() || arguments["command"].is_string()) && arguments["sessionId"].is_string() {
         super::gateway_workspace_terminal::session_mount(ctx,arguments["sessionId"].as_str().unwrap()).await?
     } else { operation_mount_binding(ctx, arguments)? };
     if selected.is_null() { return Ok(ctx.clone()); }
@@ -628,7 +669,7 @@ pub(super) async fn filesystem(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir");
+    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -687,6 +728,14 @@ pub(super) async fn filesystem(
         let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
         observe_code_target(ctx, &binding)?;
         return Ok(result);
+    }
+    if name == "document.create" {
+        // Only the authorized canonical binding reaches the binary writer; model fields cannot supply it.
+        // 二进制写入只接收本层授权的规范路径绑定，模型参数不能自行提供该绑定。
+        let mut input = args;
+        input["path"] = json!(super::local_files::path_text(&path));
+        input["_pathBinding"] = binding;
+        return super::gateway_document_create::create(ctx, input).await;
     }
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
@@ -800,7 +849,7 @@ pub(super) async fn filesystem(
     Ok(result)
 }
 
-fn approval(name: &str, args: &Value, ctx: &GatewayToolContext) -> Value {
+pub(crate) fn approval(name: &str, args: &Value, ctx: &GatewayToolContext) -> Value {
     json!({"requiresApproval":true,"status":"not-dispatched","invocation":{"id":uuid::Uuid::new_v4().to_string(),"name":name,
         "arguments":args,"conversationId":ctx.conversation_id,"projectId":ctx.project_id}})
 }
@@ -886,7 +935,7 @@ async fn execute_inner(
     };
     if let Some(descriptor) = descriptors
         .iter()
-        .find(|descriptor| descriptor["name"] == tool_name && !tool_name.starts_with("mcp."))
+        .find(|descriptor| descriptor["name"] == tool_name && (!tool_name.starts_with("mcp.") || super::gateway_mcp::builtin_task(tool_name)))
     {
         validate_schema(&descriptor["inputSchema"], &args, tool_name)?;
     }
@@ -917,11 +966,11 @@ async fn execute_inner(
             return Ok(opened);
         }
     }
-    if tool_name.starts_with("mcp.") {
+    if tool_name.starts_with("mcp.") && !super::gateway_mcp::builtin_task(tool_name) {
         super::gateway_mcp::authorized_server(tool_name, ctx)?;
     }
     let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop",
-        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.close"].contains(&tool_name)
+        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.workspace.close"].contains(&tool_name)
         || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
@@ -940,7 +989,7 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
@@ -969,7 +1018,7 @@ async fn execute_inner(
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "artifact.open"].contains(&tool_name) {
+    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
@@ -981,6 +1030,12 @@ async fn execute_inner(
     if tool_name.starts_with("browser.") {
         return Box::pin(super::gateway_browser::execute(tool_name, args, ctx)).await;
     }
+    if super::gateway_extension_install::supports(tool_name) {
+        return super::gateway_extension_install::execute(tool_name,args,ctx).await;
+    }
+    if super::gateway_mcp::builtin_task(tool_name) {
+        return super::gateway_mcp::execute_task(tool_name,args,ctx).await;
+    }
     if tool_name.starts_with("mcp.") {
         return super::gateway_mcp::execute(tool_name, args, ctx).await;
     }
@@ -989,6 +1044,9 @@ async fn execute_inner(
     }
     if tool_name == "web.search" {
         return super::gateway_search::search(args, ctx).await;
+    }
+    if super::gateway_skill_authoring::supports(tool_name) {
+        return super::gateway_skill_authoring::execute(tool_name,args,ctx).await;
     }
     if tool_name.starts_with("skill.") {
         return skills(tool_name, args, ctx).await;
@@ -1227,18 +1285,21 @@ pub async fn execute(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
+    // Invalid read pages are correctable before configuration, discovery or schema execution.
+    // 错误读取分页在配置、发现和通用 schema 校验前返回可纠正回执，不扫描目录或改变读取游标。
+    let pagination = match tool_name {
+        "skill.list" => super::service_skill_discovery::list_page(&args).map(|_| ()),
+        "skill.resource.read" => super::service_skills::resource_page(&args).map(|_| ()),
+        _ => Ok(()),
+    };
+    pagination.map_err(|error| {
+        failure(&error.code, &error.message, error.status_code)
+            .with_details(Value::Object(error.details))
+    })?;
     let selected = if workspace_path_tool(tool_name,&args) {
         Some(select_workspace_context(ctx,&args).await?)
     } else { None };
     let ctx = selected.as_ref().unwrap_or(ctx);
-    // Validate the public pagination contract before configuration/schema loading or
-    // directory enumeration, so malformed pages have one stable service error.
-    // 在加载配置/模型 schema 和扫描目录前校验公开分页参数，保持统一服务错误。
-    if tool_name == "skill.list" {
-        super::service_skill_discovery::list_page(&args).map_err(|error| {
-            failure(&error.code, &error.message, error.status_code)
-        })?;
-    }
     let checked = if tool_name.starts_with("skill.")
         || tool_name.starts_with("mcp.")
         || tool_name == "tool.load"
@@ -1277,6 +1338,10 @@ pub async fn execute(
 
 /// Cache only discovery metadata; reading or running a skill always obtains its current original body.
 /// 只缓存发现元信息；读取或运行技能始终取得当前原文，缓存不提供执行或权限依据。
+pub(crate) fn invalidate_skill_metadata(ctx: &GatewayToolContext) {
+    if let Ok(mut cache) = ctx.runtime.skill_headers.lock() { cache.clear(); }
+}
+
 async fn skill_metadata(
     path: &Path,
     version: super::local_files::FileVersion,
@@ -1336,23 +1401,35 @@ pub(crate) async fn relevant_skill_headers(
     // Reuse bilingual task signals so Chinese requests can find the shipped English skill names.
     // 复用双语任务信号，使中文要求也能找到随包英文技能名，不增加模型判断调用。
     let signals = super::discovery::selection_signals(&json!({"message":query}));
-    let topics = [
+    let mut topics = [
         ("web", "web-research"), ("browser", "browser-workflow"),
         ("desktop", "desktop-workflow"), ("hostTerminal", "terminal-workflow"),
-        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect safe-file-edit"),
+        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect"),
     ].into_iter().filter(|(signal, _)| signals[*signal] == true)
-        .map(|(_, topic)| topic).collect::<Vec<_>>().join(" ");
+        .map(|(_, topic)| topic).collect::<Vec<_>>();
+    topics.extend(super::discovery::authoring_topics(query));
+    if super::intent::matches(r"代码|编程|修复|重构|\b(?:code|coding|refactor|debug|implementation)\b", &query.to_lowercase()) {
+        topics.push("code-workflow");
+    }
+    if super::intent::matches(r"记忆|记住|偏好|\b(?:memory|remember|preference)\b", &query.to_lowercase()) {
+        topics.push("memory-workflow");
+    }
+    if super::intent::matches(r"修改|编辑|删除|新建文件|\b(?:edit|modify|delete)\b", &query.to_lowercase()) {
+        topics.push("safe-file-edit");
+    }
+    let topics = topics.join(" ");
     let query = format!("{topics} {query}");
     let indices = super::discovery::calculate("tools.searchTools", &json!({"query":query,"descriptors":headers}))
         .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
     Ok(indices.as_array().into_iter().flatten().filter_map(Value::as_u64)
-        .filter_map(|index| headers.get(index as usize).cloned()).take(6).collect())
+        .filter_map(|index| headers.get(index as usize).cloned()).take(16).collect())
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let (list_offset, list_limit) = if name == "skill.list" {
         super::service_skill_discovery::list_page(&args).map_err(|error| {
             failure(&error.code, &error.message, error.status_code)
+                .with_details(Value::Object(error.details))
         })?
     } else {
         (0, 128)
@@ -1753,6 +1830,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
         .fetch_add(1, Ordering::AcqRel);
     let result = native(ctx, "config.update", json!({"input":input})).await?;
     ctx.runtime.web_search.clear_queries();
+    ctx.runtime.web_fetch.clear();
     super::gateway_mcp::reset(ctx).await;
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
@@ -1865,6 +1943,15 @@ pub async fn handle_route(
         ("POST", "/api/agent/mcp/refresh") => {
             json!({"tools":catalog(&configured).await?,"errors":[],"connections":super::gateway_mcp::diagnostics(&configured).await})
         }
+        ("POST", "/api/agent/mcp/oauth/start") => {
+            super::gateway_mcp_oauth::start(body["serverId"].as_str().unwrap_or(""), &configured).await?
+        }
+        ("GET", "/api/agent/mcp/oauth/status") => {
+            super::gateway_mcp_oauth::status(query.get("serverId").map(String::as_str).unwrap_or(""), query.get("authorizationId").map(String::as_str).unwrap_or(""), &configured).await?
+        }
+        ("POST", "/api/agent/mcp/oauth/logout") => {
+            super::gateway_mcp_oauth::logout(body["serverId"].as_str().unwrap_or(""), &configured).await?
+        }
         ("POST", "/api/agent/mcp/disconnect") | ("POST", "/api/agent/mcp/reconnect") => {
             let id = body["serverId"]
                 .as_str()
@@ -1960,7 +2047,7 @@ pub async fn handle_route(
     Ok(Some((200, result)))
 }
 
-async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub(crate) async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let directory = body["directory"]
         .as_str()
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "请指定导入目录。", 400))?;
@@ -2002,11 +2089,13 @@ async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, Ga
             400,
         ));
     }
-    let target = ctx.extension_root.join("Skills").join(name);
+    let scope=body["scope"].as_str().unwrap_or("global");
+    let import_root=match scope {"project"=>ctx.workdir.join(".kynxa"),"global"=>ctx.extension_root.clone(),_=>return Err(failure("INVALID_SKILL_SCOPE","技能范围须为 project 或 global。",400))};
+    let target = import_root.join(if scope=="project" {"skills"} else {"Skills"}).join(name);
     let result = native(
         ctx,
         "skill.import",
-        json!({"root":ctx.extension_root,"target":target,"files":inspected["inventory"]["files"]}),
+        json!({"root":import_root,"scope":scope,"target":target,"files":inspected["inventory"]["files"]}),
     )
     .await?;
     let identity = native(
@@ -2017,19 +2106,27 @@ async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, Ga
     .await?;
     let mut skill = skills("skill.read", json!({"id":identity["id"]}), ctx).await?;
     skill["enabled"] = json!(true);
-    Ok(json!({"imported":result["imported"],"reused":result["reused"],"skill":skill}))
+    Ok(json!({"imported":result["imported"],"reused":result["reused"],"scope":scope,"skill":skill,"runtimeVerified":false}))
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown(ctx).await;
     super::gateway_process::shutdown(ctx).await;
     super::gateway_mcp::shutdown(ctx).await;
     super::gateway_browser::shutdown(ctx).await;
 }
 
+/// Resume a journaled MCP task without replaying its original mutation.
+/// 恢复事件日志中的 MCP 任务身份，禁止重做原写操作。
+pub async fn recover_mcp_task_checkpoint(handle: &Value, original_call_id: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    super::gateway_mcp::recover_checkpoint(handle, original_call_id, ctx).await
+}
+
 /// Migration requires verified cleanup; best-effort application shutdown is not a readiness receipt.
 /// 迁移必须取得核验清理结果；尽力退出应用不能作为迁移就绪回执。
 pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown_checked(ctx).await?;
     super::gateway_process::shutdown_checked(ctx).await?;
     super::gateway_mcp::shutdown_checked(ctx).await?;
@@ -2508,37 +2605,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_list_enforces_pagination_before_scanning_skill_directories() {
+    async fn document_skill_discovery_reads_only_relevant_headers_until_explicit_read() {
         let (ctx, _sender) = test_context();
-        for (arguments, parameter) in [
-            (json!({"offset":-1}), "offset"),
-            (json!({"offset":129}), "offset"),
-            (json!({"limit":0}), "limit"),
-            (json!({"limit":129}), "limit"),
-            (json!({"limit":"8"}), "limit"),
-        ] {
-            let error = execute("skill.list", arguments, &ctx).await.unwrap_err();
-            assert_eq!(error.code, "INVALID_SKILL_LIST_PAGINATION");
-            assert!(error.message.contains(parameter), "{}", error.message);
-        }
         let root = ctx.workdir.parent().unwrap().to_owned();
-        for name in ["first", "second"] {
-            let skill = root.join("official/Skills").join(name);
-            std::fs::create_dir_all(&skill).unwrap();
-            std::fs::write(
-                skill.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody."),
-            )
-            .unwrap();
+        for name in ["document-authoring", "slides-authoring", "spreadsheets-authoring", "memory-workflow"] {
+            let directory = root.join("official/Skills").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("SKILL.md"), format!("---\nname: {name}\ndescription: {name} native workflow\n---\nPRIVATE-BODY-{name}\n")).unwrap();
         }
-        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx)
-            .await
-            .unwrap();
+        let headers = relevant_skill_headers(&ctx, "生成一份报告.docx").await.unwrap();
+        assert_eq!(headers[0]["name"], "document-authoring");
+        assert!(headers.len() <= 16);
+        assert!(headers.iter().all(|header| header.get("content").is_none()));
+        assert!(!serde_json::to_string(&headers).unwrap().contains("PRIVATE-BODY"));
+        let loaded = execute("skill.read", json!({"id":headers[0]["id"]}), &ctx).await.unwrap();
+        assert!(loaded["content"].as_str().unwrap().contains("PRIVATE-BODY-document-authoring"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn skill_pagination_is_correctable_before_configuration_or_directory_scanning() {
+        let (mut ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let missing = root.join("never-created-skill-directory");
+        ctx.config["officialToolsRoot"] = json!(missing);
+        for (name, arguments, code, parameter, maximum) in [
+            ("skill.list", json!({"offset":-1}), "INVALID_SKILL_LIST_PAGINATION", "offset", 128),
+            ("skill.list", json!({"limit":129}), "INVALID_SKILL_LIST_PAGINATION", "limit", 128),
+            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","offset":2_097_153}),
+                "INVALID_SKILL_RESOURCE_PAGINATION", "offset", 2_097_152),
+            ("skill.resource.read", json!({"id":"not-loaded","path":"notes.md","limit":"8"}),
+                "INVALID_SKILL_RESOURCE_PAGINATION", "limit", 16_000),
+        ] {
+            let error = execute(name, arguments, &ctx).await.unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.details["tool"], name);
+            assert_eq!(error.details["parameter"], parameter);
+            assert_eq!(error.details["maximum"], maximum);
+            assert_eq!(error.details["executed"], false);
+            assert_eq!(error.details["recoverable"], true);
+            assert_eq!(error.response()["details"], error.details);
+        }
+        assert!(!missing.exists());
+        assert!(ctx.runtime.skill_headers.lock().unwrap().is_empty());
+        let official = root.join("official/Skills");
+        ctx.config["officialToolsRoot"] = json!(root.join("official"));
+        for name in ["first", "second"] {
+            let skill = official.join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Pagination fixture.\n---\nBody.")).unwrap();
+        }
+        let page = execute("skill.list", json!({"offset":1,"limit":1}), &ctx).await.unwrap();
         let all = execute("skill.list", json!({}), &ctx).await.unwrap();
         assert_eq!(page["skills"].as_array().unwrap().len(), 1);
         assert_eq!(page["skills"][0], all["skills"][1]);
+        shutdown(&ctx).await;
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn skill_pagination_native_diagnostics_keep_only_safe_correction_fields() {
+        let error = decode_native(Ok(json!({"error":{
+            "code":"INVALID_SKILL_RESOURCE_PAGINATION","message":"invalid page","statusCode":400,
+            "tool":"skill.resource.read","parameter":"limit","minimum":1,"maximum":16000,
+            "executed":false,"requestDispatched":false,"recoverable":true,"privateBody":"must not propagate"
+        }}))).unwrap_err();
+        assert_eq!(error.details["parameter"], "limit");
+        assert_eq!(error.details["maximum"], 16000);
+        assert_eq!(error.details["recoverable"], true);
+        assert!(error.details.get("privateBody").is_none());
+    }
+
+    #[test]
+    fn schema_argument_validation_is_recoverable_without_dispatch() {
+        let error = validate_schema(
+            &json!({"type":"integer","minimum":1,"maximum":128}),
+            &json!(0),
+            "skill.list.limit",
+        ).unwrap_err();
+        assert_eq!(error.code, "INVALID_TOOL_ARGUMENTS");
+        assert_eq!(error.details["parameter"], "skill.list.limit");
+        assert_eq!(error.details["minimum"], 1);
+        assert_eq!(error.details["maximum"], 128);
+        assert_eq!(error.details["executed"], false);
+        assert_eq!(error.details["requestDispatched"], false);
+        assert_eq!(error.details["recoverable"], true);
+    }
+
     #[tokio::test]
     async fn tool_search_never_connects_a_server_to_discover_its_header() {
         let (mut ctx, _sender) = test_context();

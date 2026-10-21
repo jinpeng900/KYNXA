@@ -23,6 +23,21 @@ public sealed class ConversationWorkspaceHome : Grid
         DisplayMemberPath = nameof(ProjectMountState.Name), Visibility = Visibility.Collapsed };
     private readonly StackPanel _files = new() { Spacing = 2 };
     private readonly ScrollViewer _fileScroll;
+    private readonly StackPanel _homeContent;
+    private readonly Grid _filePane = new() { Visibility = Visibility.Collapsed, RowSpacing = 10, Margin = new Thickness(14) };
+    private readonly ComboBox _browseRoots = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0,
+        DisplayMemberPath = nameof(ProjectMountState.Name), CornerRadius = new CornerRadius(8) };
+    private readonly SegmentedSelector _fileKinds = new([
+        new("files", "文件", "\uE8B7"), new("attachments", "已保存附件", "\uE723")]);
+    private readonly SegmentedSelector _attachmentScopes = new([new("chat", "本聊天"), new("work", "本工作")]);
+    private readonly StackPanel _pages = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+    private readonly Dictionary<string, WorkspaceDirectoryListing> _directoryCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expandedDirectories = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _directoryReads = new(3, 3);
+    private CancellationTokenSource _browserReads = new();
+    private long _browserGeneration;
+    private bool _updatingBrowser, _hasProject;
+    private SavedAttachmentPage? _attachmentPage;
     private readonly TextBlock _fileNotice = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
     private bool _updatingRoots;
     private Guid? _selectedMountId;
@@ -36,6 +51,15 @@ public sealed class ConversationWorkspaceHome : Grid
     public event EventHandler? ChangesRequested;
     public event EventHandler? TerminalRequested;
     public event EventHandler? FileRequested;
+    public event EventHandler? FileBrowserClosed;
+    public event EventHandler? RefreshRequested;
+    public event EventHandler<bool>? AttachmentsRequested;
+    public event EventHandler<int>? AttachmentPageRequested;
+    public event EventHandler<SavedAttachmentEntry>? SavedAttachmentRequested;
+    public Func<string, CancellationToken, Task<WorkspaceDirectoryListing>>? DirectoryLoader { get; set; }
+    public bool IsFileBrowserVisible => _filePane.Visibility == Visibility.Visible;
+    public bool IsShowingAttachments => IsFileBrowserVisible && _fileKinds.SelectedKey == "attachments";
+    public bool UsesProjectAttachments => _hasProject && _attachmentScopes.SelectedKey == "work";
     private readonly Button _changes, _terminal, _file;
     private readonly Dictionary<TextBlock, string> _labels = [];
     private string? _directoryPath;
@@ -43,7 +67,7 @@ public sealed class ConversationWorkspaceHome : Grid
 
     public ConversationWorkspaceHome()
     {
-        var content = new StackPanel { Spacing = 18, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Stretch,
+        var content = _homeContent = new StackPanel { Spacing = 18, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(18) };
         var title = new TextBlock { Text = UiText.Get("工作区"), FontSize = 20,
             HorizontalAlignment = HorizontalAlignment.Center, Foreground = Brush("KynxaTextBrush") };
@@ -87,10 +111,10 @@ public sealed class ConversationWorkspaceHome : Grid
         Grid.SetColumn(_file, 2); actions.Children.Add(_file); content.Children.Add(actions);
         _fileNotice.Foreground = Brush("KynxaSecondaryTextBrush");
         _files.Children.Add(_fileNotice);
-        _fileScroll = new ScrollViewer { Content = _files, MaxHeight = 300, Visibility = Visibility.Collapsed,
+        _fileScroll = new ScrollViewer { Content = _files,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        content.Children.Add(_fileScroll);
         Children.Add(content);
+        CreateFilePane();
         _directory.Foreground = Brush("KynxaSecondaryTextBrush");
         _address.Foreground = Brush("KynxaTextBrush");
         _address.Background = Brush("KynxaReplySurfaceBrush");
@@ -108,6 +132,7 @@ public sealed class ConversationWorkspaceHome : Grid
         Unloaded += (_, _) =>
         {
             _languageSubscribed = false; UiText.LanguageChanged -= LanguageChanged;
+            _browserReads.Cancel();
         };
     }
 
@@ -121,6 +146,87 @@ public sealed class ConversationWorkspaceHome : Grid
         _address.IsEnabled = hasConversation;
     }
 
+    private void CreateFilePane()
+    {
+        for (int index = 0; index < 5; index++) _filePane.RowDefinitions.Add(new()
+            { Height = index == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+        var toolbar = new Grid { ColumnSpacing = 8 };
+        toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        toolbar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        toolbar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        var back = CreateButton("\uE72B", "返回工作区");
+        back.Content = new FontIcon { Glyph = "\uE72B", FontSize = 14 };
+        back.Click += (_, _) => { HideFiles(); FileBrowserClosed?.Invoke(this, EventArgs.Empty); };
+        toolbar.Children.Add(back);
+        var title = new TextBlock { Text = UiText.Get("工作区文件"), FontSize = 15,
+            TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = Brush("KynxaTextBrush") };
+        _labels[title] = "工作区文件";
+        Grid.SetColumn(title, 1); toolbar.Children.Add(title);
+        var refresh = CreateButton("\uE72C", "刷新列表");
+        refresh.Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 };
+        refresh.Click += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+        toolbar.Children.Add(refresh); Grid.SetColumn(refresh, 2);
+        _filePane.Children.Add(toolbar);
+        _filePane.Children.Add(_fileKinds); Grid.SetRow(_fileKinds, 1);
+        _filePane.Children.Add(_browseRoots); Grid.SetRow(_browseRoots, 2);
+        _filePane.Children.Add(_attachmentScopes); Grid.SetRow(_attachmentScopes, 2);
+        _filePane.Children.Add(_fileScroll); Grid.SetRow(_fileScroll, 3);
+        _filePane.Children.Add(_pages); Grid.SetRow(_pages, 4);
+        _browseRoots.Background = Brush("KynxaReplySurfaceBrush");
+        _browseRoots.Foreground = Brush("KynxaTextBrush");
+        _browseRoots.BorderBrush = Brush("KynxaDividerBrush");
+        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
+        _browseRoots.FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush");
+        _browseRoots.FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        _browseRoots.Resources["ComboBoxBorderBrushFocused"] = Brush("KynxaSecondaryTextBrush");
+        _browseRoots.Resources["ComboBoxSelectionIndicatorBrush"] = Brush("KynxaSecondaryTextBrush");
+        AutomationProperties.SetAutomationId(_filePane, "WorkspaceFileBrowser");
+        AutomationProperties.SetAutomationId(back, "WorkspaceFileBrowserBack");
+        AutomationProperties.SetAutomationId(refresh, "WorkspaceFileBrowserRefresh");
+        AutomationProperties.SetAutomationId(_browseRoots, "WorkspaceBrowserMountSelector");
+        _browseRoots.SelectionChanged += (_, _) =>
+        {
+            if (_updatingRoots || _browseRoots.SelectedItem is not ProjectMountState mount || _selectedMountId == mount.Id) return;
+            _selectedMountId = mount.Id; MountRequested?.Invoke(this, mount.Id);
+        };
+        _fileKinds.SelectionChanged += (_, key) =>
+        {
+            if (_updatingBrowser) return;
+            if (key == "files") FileRequested?.Invoke(this, EventArgs.Empty);
+            else AttachmentsRequested?.Invoke(this, UsesProjectAttachments);
+        };
+        _attachmentScopes.SelectionChanged += (_, _) =>
+        {
+            if (!_updatingBrowser && IsShowingAttachments) AttachmentsRequested?.Invoke(this, UsesProjectAttachments);
+        };
+        Children.Add(_filePane);
+    }
+
+    public void ShowProjectScope(bool hasProject)
+    {
+        _hasProject = hasProject;
+        _attachmentScopes.Visibility = IsShowingAttachments && hasProject ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void EnterFilePane(string kind)
+    {
+        _updatingBrowser = true;
+        try { _fileKinds.SelectedKey = kind; }
+        finally { _updatingBrowser = false; }
+        _homeContent.Visibility = Visibility.Collapsed; _filePane.Visibility = Visibility.Visible;
+        _browseRoots.Visibility = kind == "files" && _browseRoots.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _attachmentScopes.Visibility = kind == "attachments" && _hasProject ? Visibility.Visible : Visibility.Collapsed;
+        _pages.Children.Clear();
+    }
+
+    private void ResetDirectoryReads()
+    {
+        ++_browserGeneration;
+        _browserReads.Cancel(); _browserReads.Dispose(); _browserReads = new();
+        _directoryCache.Clear();
+    }
+
     public void ShowMounts(IReadOnlyList<ProjectMountState> mounts, Guid? selectedMountId)
     {
         _updatingRoots = true;
@@ -128,27 +234,37 @@ public sealed class ConversationWorkspaceHome : Grid
         {
             bool changed = _roots.ItemsSource is not IReadOnlyList<ProjectMountState> previous || !previous.SequenceEqual(mounts);
             if (changed) _roots.ItemsSource = mounts.ToArray();
+            if (changed) _browseRoots.ItemsSource = _roots.ItemsSource;
             _selectedMountId = selectedMountId;
             _roots.SelectedItem = ((IEnumerable<ProjectMountState>?)_roots.ItemsSource)?.FirstOrDefault(mount => mount.Id == selectedMountId);
+            _browseRoots.SelectedItem = _roots.SelectedItem;
             _roots.Visibility = mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            _browseRoots.Visibility = !IsShowingAttachments && mounts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         finally { _updatingRoots = false; }
     }
 
     public void ShowFilesLoading()
     {
+        EnterFilePane("files"); ResetDirectoryReads(); _attachmentPage = null;
         _listing = null;
         _files.Children.Clear(); _fileNotice.Text = UiText.Get("正在读取文件列表…");
         _files.Children.Add(_fileNotice); _fileScroll.Visibility = Visibility.Visible;
     }
 
-    public void HideFiles() { _listing = null; _files.Children.Clear(); _fileScroll.Visibility = Visibility.Collapsed; }
+    public void HideFiles()
+    {
+        ResetDirectoryReads(); _expandedDirectories.Clear(); DirectoryLoader = null;
+        _listing = null; _attachmentPage = null; _files.Children.Clear();
+        _filePane.Visibility = Visibility.Collapsed; _homeContent.Visibility = Visibility.Visible;
+    }
 
     public void ShowFilesError(string message)
     { _files.Children.Clear(); _fileNotice.Text = message; _files.Children.Add(_fileNotice); }
 
     public void ShowFiles(WorkspaceDirectoryListing listing, string? rootPath)
     {
+        EnterFilePane("files");
         _listing = listing; _listingRoot = rootPath;
         _files.Children.Clear(); _fileScroll.Visibility = Visibility.Visible;
         if (rootPath is not null && !string.Equals(Path.TrimEndingDirectorySeparator(listing.Path),
@@ -158,24 +274,130 @@ public sealed class ConversationWorkspaceHome : Grid
             parent.Click += (_, _) => DirectoryRequested?.Invoke(this, Path.GetDirectoryName(listing.Path));
             _files.Children.Add(parent);
         }
-        foreach (var entry in listing.Entries.OrderBy(entry => entry.Type == "directory" ? 0 : 1).ThenBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase))
-        {
-            bool directory = entry.Type == "directory";
-            var button = CreateButton(directory ? "\uE8B7" : "\uE8A5", entry.Name, translate: false);
-            button.Padding = new Thickness(8, 6, 8, 6);
-            AutomationProperties.SetAutomationId(button, "WorkspaceFile_" + entry.Name);
-            ToolTipService.SetToolTip(button, entry.Name);
-            button.Click += (_, _) =>
-            {
-                string path = Path.Combine(listing.Path, entry.Name);
-                if (directory) DirectoryRequested?.Invoke(this, path); else WorkspaceFileRequested?.Invoke(this, path);
-            };
-            _files.Children.Add(button);
-        }
+        RenderDirectoryEntries(listing, _files);
         if (listing.Entries.Length == 0 || listing.Truncated)
         {
             _fileNotice.Text = UiText.Get(listing.Truncated ? "文件较多，仅显示当前目录的部分条目。" : "此文件夹为空。");
             _files.Children.Add(_fileNotice);
+        }
+    }
+
+    private void RenderDirectoryEntries(WorkspaceDirectoryListing listing, StackPanel container)
+    {
+        foreach (var entry in listing.Entries.OrderBy(entry => entry.Type == "directory" ? 0 : 1)
+            .ThenBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            string path = Path.Combine(listing.Path, entry.Name);
+            var label = new Grid { ColumnSpacing = 8, MinWidth = 0 };
+            label.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+            label.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+            label.Children.Add(new FontIcon { Glyph = entry.Type == "directory" ? "\uE8B7" : "\uE8A5", FontSize = 13 });
+            var name = new TextBlock { Text = entry.Name, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis,
+                Foreground = Brush("KynxaTextBrush"), VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(name, 1); label.Children.Add(name);
+            if (entry.Type == "directory")
+            {
+                var children = new StackPanel { Spacing = 2, Margin = new Thickness(8, 0, 0, 0) };
+                var folder = new Expander { Header = label, Content = children, CornerRadius = new CornerRadius(8),
+                    HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                    MinWidth = 0, Padding = new Thickness(2), Background = Brush("KynxaReplySurfaceBrush"),
+                    FocusVisualPrimaryBrush = Brush("KynxaSecondaryTextBrush"),
+                    FocusVisualSecondaryBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+                AutomationProperties.SetAutomationId(folder, "WorkspaceFolder_" + entry.Name);
+                ToolTipService.SetToolTip(folder, entry.Name);
+                folder.Expanding += async (_, _) =>
+                {
+                    _expandedDirectories.Add(path);
+                    if (children.Children.Count == 0) await ExpandDirectoryAsync(path, children);
+                };
+                folder.Collapsed += (_, _) => _expandedDirectories.Remove(path);
+                container.Children.Add(folder);
+                if (_expandedDirectories.Contains(path)) folder.IsExpanded = true;
+            }
+            else
+            {
+                var button = CreateButton("\uE8A5", entry.Name, translate: false);
+                button.Content = label; button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+                button.Padding = new Thickness(8, 7, 8, 7);
+                AutomationProperties.SetAutomationId(button, "WorkspaceFile_" + entry.Name);
+                button.Click += (_, _) => WorkspaceFileRequested?.Invoke(this, path);
+                container.Children.Add(button);
+            }
+        }
+    }
+
+    private async Task ExpandDirectoryAsync(string path, StackPanel children)
+    {
+        if (DirectoryLoader is not { } loader) return;
+        long generation = _browserGeneration;
+        CancellationToken token = _browserReads.Token;
+        // Mark admission immediately so collapsing/reopening a pending branch cannot dispatch it twice.
+        // 立即占位，避免目录尚在排队或读取时快速收起、再展开导致重复派发。
+        children.Children.Add(new TextBlock { Text = UiText.Get("正在读取文件列表…"), FontSize = 12,
+            Foreground = Brush("KynxaSecondaryTextBrush") });
+        bool admitted = false;
+        try
+        {
+            if (!_directoryCache.TryGetValue(path, out var listing))
+            {
+                await _directoryReads.WaitAsync(token); admitted = true;
+                listing = await loader(path, token);
+                if (generation != _browserGeneration || token.IsCancellationRequested) return;
+                if (_directoryCache.Count >= 128) _directoryCache.Remove(_directoryCache.Keys.First());
+                _directoryCache[path] = listing;
+            }
+            if (generation != _browserGeneration || token.IsCancellationRequested) return;
+            children.Children.Clear(); RenderDirectoryEntries(listing, children);
+            if (listing.Entries.Length == 0) children.Children.Add(new TextBlock { Text = UiText.Get("此文件夹为空。"), FontSize = 12 });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error) when (error is HttpRequestException or InvalidDataException or InvalidOperationException or System.Text.Json.JsonException)
+        {
+            if (generation != _browserGeneration) return;
+            children.Children.Clear();
+            var retry = CreateButton("\uE72C", "文件夹读取失败，可重试。");
+            retry.Click += async (_, _) => { children.Children.Clear(); await ExpandDirectoryAsync(path, children); };
+            children.Children.Add(retry);
+        }
+        finally { if (admitted) _directoryReads.Release(); }
+    }
+
+    public void ShowAttachmentsLoading()
+    {
+        EnterFilePane("attachments"); ResetDirectoryReads(); _listing = null; _attachmentPage = null;
+        _files.Children.Clear(); _fileNotice.Text = UiText.Get("正在读取附件…"); _files.Children.Add(_fileNotice);
+    }
+
+    public void ShowAttachments(SavedAttachmentPage page)
+    {
+        EnterFilePane("attachments"); _attachmentPage = page; _listing = null; _files.Children.Clear();
+        foreach (var entry in page.Attachments)
+        {
+            var button = CreateButton("\uE723", entry.Name, translate: false);
+            button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            var text = new StackPanel { Spacing = 3 };
+            text.Children.Add(new TextBlock { Text = entry.Name, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis });
+            text.Children.Add(new TextBlock { Text = $"{entry.ConversationTitle} · {entry.SizeBytes:N0} B", FontSize = 11,
+                Foreground = Brush("KynxaSecondaryTextBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+            button.Content = text;
+            AutomationProperties.SetAutomationId(button, "SavedAttachment_" + entry.Id.ToString("D"));
+            button.Click += (_, _) => SavedAttachmentRequested?.Invoke(this, entry);
+            _files.Children.Add(button);
+        }
+        if (page.Attachments.Length == 0)
+        {
+            _fileNotice.Text = UiText.Get("此范围内还没有已保存的附件。"); _files.Children.Add(_fileNotice);
+        }
+        if (page.Offset > 0)
+        {
+            var previous = CreateButton("\uE72B", "上一页");
+            previous.Click += (_, _) => AttachmentPageRequested?.Invoke(this, Math.Max(0, page.Offset - page.Limit));
+            _pages.Children.Add(previous);
+        }
+        if (page.HasMore && page.NextOffset is int offset)
+        {
+            var next = CreateButton("\uE72A", "下一页");
+            next.Click += (_, _) => AttachmentPageRequested?.Invoke(this, offset); _pages.Children.Add(next);
         }
     }
 
@@ -216,6 +438,7 @@ public sealed class ConversationWorkspaceHome : Grid
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
         ShowDirectory(_directoryPath, _hasConversation);
         if (_listing is { } listing) ShowFiles(listing, _listingRoot);
+        else if (_attachmentPage is { } page) ShowAttachments(page);
     }
 
     private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];

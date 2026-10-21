@@ -24,6 +24,8 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private readonly string _fixtureDataDirectory;
     private TaskCompletionSource? _initialCatalogGate;
     private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads, _agentReads;
+    private int _localModelReads, _memoryReads;
+    private int _retrievalSettingsReads, _retrievalProvidersReads, _retrievalSourcesReads, _retrievalStatusReads;
 
     private TaskCompletionSource? _pausedRecoveryGate;
     private int _pausedReads, _streamRequests;
@@ -38,7 +40,15 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int Writes => Volatile.Read(ref _writes);
     public int ScreenshotReads => Volatile.Read(ref _screenshotReads);
     public int RetrievalReads => Volatile.Read(ref _retrievalReads);
+    // Initialization must stay cached; background status observation is intentionally repeatable.
+    // 初始化配置必须缓存；后台状态观察允许重复读取，不能与页面重载混记。
+    public (int Settings, int Providers, int Sources) RetrievalInitialReads =>
+        (Volatile.Read(ref _retrievalSettingsReads), Volatile.Read(ref _retrievalProvidersReads), Volatile.Read(ref _retrievalSourcesReads));
+    public int RetrievalStatusReads => Volatile.Read(ref _retrievalStatusReads);
     public int AgentReads => Volatile.Read(ref _agentReads);
+    public int LocalModelReads => Volatile.Read(ref _localModelReads);
+    public int MemoryReads => Volatile.Read(ref _memoryReads);
+    public bool EnableSettingsReads { get; set; }
 
     public int PausedReads => Volatile.Read(ref _pausedReads);
     public int StreamRequests => Volatile.Read(ref _streamRequests);
@@ -255,6 +265,14 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2,
                 hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3,
                 retrievalProtocol = 1, modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root };
+            else if (path == "/api/usage/summary")
+            {
+                if (context.Request.QueryString.Count != 1 ||
+                    !Guid.TryParse(context.Request.QueryString["conversationId"], out var conversation) || conversation == Guid.Empty)
+                    throw new InvalidOperationException("Usage reads must retain an explicit synthetic conversation scope.");
+                result = new ConversationUsageSnapshot("conversation", conversation,
+                    conversation == WorkChatId ? ProjectId : null, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, 0);
+            }
             else if (path is "/api/tasks" or "/api/tasks/recoverable" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
                 result = new TaskListResponse([], false, null);
             else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
@@ -300,20 +318,63 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                         ["fixture-model"], false, "openai-completions")]);
             }
             else if (TryAgentManagementRead(context.Request, out var agentManagement)) result = agentManagement!;
+            else if (EnableSettingsReads && path == "/api/memory/user" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                result = new MemoryScopeDocument(1, MemoryScopes.User, "user", 0, []);
+            }
+            else if (EnableSettingsReads && string.IsNullOrEmpty(context.Request.Url.Query) &&
+                (path == $"/api/conversations/{WorkChatId:D}/memory" || path == $"/api/conversations/{StandaloneChatId:D}/memory"))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                Guid conversation = path == $"/api/conversations/{WorkChatId:D}/memory" ? WorkChatId : StandaloneChatId;
+                result = new ConversationMemoryResponse(conversation, conversation == WorkChatId ? ProjectId : null,
+                    false, [new MemoryScopeDocument(1, MemoryScopes.Chat, conversation.ToString("D"), 0, [])]);
+            }
+            else if (EnableSettingsReads && path == $"/api/projects/{ProjectId:D}/memory" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _memoryReads);
+                result = new MemoryScopeDocument(1, MemoryScopes.Project, ProjectId.ToString("D"), 0, []);
+            }
+            else if (EnableSettingsReads && path == "/api/local-models" && string.IsNullOrEmpty(context.Request.Url.Query))
+            {
+                Interlocked.Increment(ref _localModelReads);
+                // Synthetic rows exercise real filters without model downloads, files, processes or inference.
+                // 虚构模型行用于执行真实筛选，不下载文件、不启动进程、不调用推理。
+                result = new
+                {
+                    enabled = false, installDirectory = Path.Combine(_fixtureDataDirectory, "Models"), loadPolicy = "on-demand",
+                    hardware = new { memoryGb = 32, availableMemoryGb = 16, vramGb = 8, gpuName = "Fixture GPU" },
+                    models = new[]
+                    {
+                        new { id = "fixture-local-installed", name = "Fixture Local 3B", family = "Fixture", category = "chat",
+                            parameters = 3, quantization = "Q4_K_M", installed = true, enabled = false, status = "installed",
+                            downloadBytes = 1024L, downloadedBytes = 1024L, recommendedRamGb = 8, recommendedVramGb = 4,
+                            capabilities = new[] { "text" } },
+                        new { id = "fixture-local-available", name = "Fixture Local 12B", family = "Fixture", category = "chat",
+                            parameters = 12, quantization = "Q4_K_M", installed = false, enabled = false, status = "available",
+                            downloadBytes = 2048L, downloadedBytes = 0L, recommendedRamGb = 16, recommendedVramGb = 8,
+                            capabilities = new[] { "text", "tools" } }
+                    }
+                };
+            }
             else if (path == "/api/retrieval/settings")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalSettingsReads);
                 result = new RetrievalSettingsDocument(1, 13, new(true, "auto", "fixture-embedding"),
                     new("off", "auto", "standard", "auto"), new(4 * 1024 * 1024, 16 * 1024 * 1024));
             }
             else if (path == "/api/retrieval/status")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalStatusReads);
                 result = new RetrievalStatus("sqlite", 0, 0, new("unavailable", "fixture-embedding", 384, false), []);
             }
             else if (path == "/api/retrieval/providers")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalProvidersReads);
                 result = new RetrievalProvidersResponse([new("auto", "Automatic fixture provider", false)]);
             }
             else if (path == "/api/retrieval/sources" && string.IsNullOrEmpty(context.Request.Url.Query))
@@ -321,6 +382,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 // Only global synthetic reads are supported; the fixture still refuses imports, rebuilds and all writes.
                 // 仅提供全局虚构读取；夹具仍拒绝导入、重建及所有写入。
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalSourcesReads);
                 result = new RetrievalSourcesResponse([]);
             }
             else if (TryHistoryPage(context.Request, out var history)) result = history!;

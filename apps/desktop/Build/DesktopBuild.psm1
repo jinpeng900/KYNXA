@@ -291,10 +291,12 @@ function Start-KynxaDesktopBuild {
         Add-AppxPackage -Path $candidate
     }
     $package = Get-AppxPackage -Name $identity.Name | Select-Object -First 1
-    if (-not $package -or $package.InstallLocation -ne $root) {
+    # A matching folder can still retain an older package graph and fail WinRT activation after an update.
+    # 目录相同仍可能保留旧包依赖图；版本变化须更新注册，避免更新后 WinRT 类激活失败。
+    if (-not $package -or $package.InstallLocation -ne $root -or [version]$package.Version -ne [version]$identity.Version) {
         Add-AppxPackage -Register -Path (Join-Path $root 'AppxManifest.xml')
         $package = Get-AppxPackage -Name $identity.Name | Select-Object -First 1
-        if (-not $package -or $package.InstallLocation -ne $root) { throw 'Windows package registration still points at a different application directory.' }
+        if (-not $package -or $package.InstallLocation -ne $root -or [version]$package.Version -ne [version]$identity.Version) { throw 'Windows package registration does not match the application directory and version.' }
     }
     $plan = @{ applicationRoot = $root; packageIdentity = $identity.Name; receipt = (Join-Path $StateDirectory 'launch.json') }
     $planPath = Join-Path $StateDirectory 'launch-plan.json'

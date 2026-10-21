@@ -2,21 +2,27 @@
   <PropertyGroup>
     <KynxaOffline Condition="'$(KynxaOffline)' == ''">false</KynxaOffline>
     <KynxaRuntimeProfile Condition="'$(KynxaRuntimeProfile)' == ''">Full</KynxaRuntimeProfile>
-    <_KynxaDownloadSourcesFullPath Condition="'$(KynxaDownloadSourcesPath)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaDownloadSourcesPath)'))</_KynxaDownloadSourcesFullPath>
-    <_KynxaResourcePackFullPath Condition="'$(KynxaResourcePackRoot)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaResourcePackRoot)'))</_KynxaResourcePackFullPath>
-    <_KynxaRuntimeOptions>-Profile &quot;$(KynxaRuntimeProfile)&quot;</_KynxaRuntimeOptions>
-    <_KynxaRuntimeOptions Condition="'$(KynxaOffline)' == 'true'">$(_KynxaRuntimeOptions) -Offline</_KynxaRuntimeOptions>
-    <_KynxaRuntimeOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaRuntimeOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaRuntimeOptions>
-    <_KynxaRuntimeOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaRuntimeOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaRuntimeOptions>
-    <_KynxaVisualCppOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaVisualCppOptions>
-    <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
-    <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
-    <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
-    <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
-         离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
-    <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true' or '$(KynxaDependenciesPrepared)' == 'true'">Build</_KynxaToolHostTargets>
-    <_KynxaRuntimeOptions Condition="'$(KynxaRebuildNative)' == 'true'">$(_KynxaRuntimeOptions) -Rebuild</_KynxaRuntimeOptions>
   </PropertyGroup>
+  <!-- Resolve runtime options after SDK user settings have been imported.
+       SDK 导入本机用户设置后再计算运行参数，确保直接打开解决方案时使用最终配置。 -->
+  <Target Name="ConfigureKynxaRuntimeOptions">
+    <PropertyGroup>
+      <_KynxaDownloadSourcesFullPath Condition="'$(KynxaDownloadSourcesPath)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaDownloadSourcesPath)'))</_KynxaDownloadSourcesFullPath>
+      <_KynxaResourcePackFullPath Condition="'$(KynxaResourcePackRoot)' != ''">$([System.IO.Path]::GetFullPath('$(KynxaResourcePackRoot)'))</_KynxaResourcePackFullPath>
+      <_KynxaRuntimeOptions>-Profile &quot;$(KynxaRuntimeProfile)&quot;</_KynxaRuntimeOptions>
+      <_KynxaRuntimeOptions Condition="'$(KynxaOffline)' == 'true'">$(_KynxaRuntimeOptions) -Offline</_KynxaRuntimeOptions>
+      <_KynxaRuntimeOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaRuntimeOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaRuntimeOptions>
+      <_KynxaRuntimeOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaRuntimeOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaRuntimeOptions>
+      <_KynxaVisualCppOptions Condition="'$(KynxaOffline)' == 'true'">-Offline</_KynxaVisualCppOptions>
+      <_KynxaVisualCppOptions Condition="'$(KynxaDownloadSourcesPath)' != ''">$(_KynxaVisualCppOptions) -DownloadSourcesPath &quot;$(_KynxaDownloadSourcesFullPath)&quot;</_KynxaVisualCppOptions>
+      <_KynxaVisualCppOptions Condition="'$(KynxaResourcePackRoot)' != ''">$(_KynxaVisualCppOptions) -ResourcePackRoot &quot;$(_KynxaResourcePackFullPath)&quot;</_KynxaVisualCppOptions>
+      <_KynxaToolHostTargets>Restore;Build</_KynxaToolHostTargets>
+      <!-- Offline builds consume an existing NuGet restore; they do not contact configured feeds.
+           离线构建使用已有 NuGet 还原结果，不在 ToolHost 子构建中重新访问源。 -->
+      <_KynxaToolHostTargets Condition="'$(KynxaOffline)' == 'true' or '$(KynxaDependenciesPrepared)' == 'true'">Build</_KynxaToolHostTargets>
+      <_KynxaRuntimeOptions Condition="'$(KynxaRebuildNative)' == 'true'">$(_KynxaRuntimeOptions) -Rebuild</_KynxaRuntimeOptions>
+    </PropertyGroup>
+  </Target>
   <!-- VS deployment uses LayoutDir from the recipe; keep nested MCP paths below MAX_PATH.
        VS 按部署清单中的 LayoutDir 复制文件；缩短根目录，避免嵌套 MCP 路径超出限制。 -->
   <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
@@ -29,13 +35,14 @@
   </PropertyGroup>
   <!-- Prepare pinned native files using PowerShell and Cargo on the build machine only.
        仅在构建机准备原生文件及固定 MCP 依赖；用户无需安装开发工具或系统 Node。 -->
-  <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeNativeGatewayRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true'">
     <PropertyGroup>
       <_KynxaNativeCacheDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\artifacts\runtime\native-desktop\win-x64'))</_KynxaNativeCacheDirectory>
     </PropertyGroup>
     <!-- VS may send a BOM on redirected stdin; preparation scripts accept no pipeline input.
          VS 可能在重定向标准输入中发送 BOM；准备脚本不接收管道输入。 -->
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+          EnvironmentVariables="$(KynxaNativeBuildEnvironment)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\prepare-native-runtime.ps1&quot; -RuntimeIdentifier &quot;$(RuntimeIdentifier)&quot; -Configuration &quot;$(Configuration)&quot; $(_KynxaRuntimeOptions) &lt; NUL" />
     <ReadLinesFromFile File="$(_KynxaNativeCacheDirectory)\bundle-files.txt">
       <Output TaskParameter="Lines" ItemName="_KynxaNativeRuntimeFiles" />
@@ -69,7 +76,7 @@
   </Target>
   <!-- Design-time evaluation must not restore or build executable payloads.
        设计时求值不能还原或构建可执行载荷，避免阻塞 IDE 的项目元数据采集。 -->
-  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
+  <Target Name="IncludeToolHostRuntime" BeforeTargets="AssignTargetPaths" DependsOnTargets="ConfigureKynxaRuntimeOptions" Condition="'$(DesignTimeBuild)' != 'true'">
     <MSBuild Projects="..\tool-host\KYNXA.ToolHost.csproj" Targets="$(_KynxaToolHostTargets)" RemoveProperties="OutDir"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);Platform=AnyCPU;SelfContained=true" />
     <PropertyGroup>

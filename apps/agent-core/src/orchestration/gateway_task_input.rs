@@ -21,8 +21,6 @@ pub async fn accept(
     tokio::task::spawn_blocking(move || {
         let conversation = input["conversationId"].as_str().unwrap_or("");
         let request = input["requestId"].as_str().unwrap_or("");
-        let limits = super::budget::apply("budget.limits", &json!({"input":input.get("runLimits").filter(|limits|!limits.is_null()).cloned().unwrap_or(json!({}))}))
-            .map_err(|_| GatewayError::new("INVALID_TOOL_RUN_LIMITS", "任务执行额度无效。", 400))?;
         let repository = TaskRepository::open(&root)?;
         if let Some(existing) = repository.find_by_request_id(conversation, request)? {
             let reference = existing.input_reference.as_ref().ok_or_else(|| invalid("TASK_INPUT_MISSING"))?;
@@ -40,23 +38,63 @@ pub async fn accept(
         let relationship = data::relationship(&root, conversation)?;
         let permission = input["permissionMode"].as_str().unwrap_or("smart");
         if !["ask", "smart", "full"].contains(&permission) { return Err(invalid("INVALID_PERMISSION_MODE")); }
-        let bytes = serde_json::to_vec(&json!({"input":input,"originalMessageRaw":original,"fingerprint":fingerprint}))
+        // Resolve execution settings before persistence without changing the fingerprinted transport input.
+        // 写入前解析执行配置，但不得改写参与指纹计算的原始传输输入。
+        let mut resolved = super::budget::resolve_input_limits(&input);
+        let message = input["message"].as_str().unwrap_or("");
+        let mut goal: String = message.trim().chars().take(4096).collect();
+        let mut acceptance = super::task::acceptance_requirements(message);
+        // Only a clear continuation of unfinished work inherits its scope, acceptance and remaining time.
+        // 仅明确续作未完成的工作才继承范围、验收项和剩余时长；问候、新话题及已完成工作均不携带旧预算。
+        if super::task::is_explicit_continuation(message) && !super::budget::is_finite_response_request(message) {
+            if let Some(previous) = repository.previous_roots_for_conversation(conversation, i64::MAX, 1)?.into_iter().next()
+                .filter(|task| !matches!(task.state, TaskState::Cancelled | TaskState::Completed)
+                    && task.scope.project_id == relationship["projectId"].as_str().map(str::to_owned)
+                    && crate::storage::workspace_mounts::validate_snapshot(&task.scope.permission_snapshot["bindingSnapshot"], &relationship))
+            {
+                goal = previous.goal.chars().take(4096).collect();
+                acceptance = previous.input_reference.as_ref()
+                    .and_then(|reference| read_acceptance_requirements(&root, reference))
+                    .filter(|requirements| !requirements.is_empty())
+                    .unwrap_or_else(|| previous.acceptance.clone());
+                if super::task::has_continuation_details(message) {
+                    let combined = acceptance.iter().map(String::as_str).chain(std::iter::once(message)).collect::<Vec<_>>().join("\n");
+                    acceptance = super::task::acceptance_requirements(&combined);
+                }
+                resolved["limits"]["continuedFromTaskId"] = json!(previous.task_id);
+                let minimum = previous.input_reference.as_ref()
+                    .and_then(|reference| read_resolved_limits(&root, reference))
+                    .and_then(|limits| limits["minActiveMs"].as_u64())
+                    .unwrap_or(0);
+                let done = previous.usage.active_duration_ms.unwrap_or(0);
+                let remaining = minimum.saturating_sub(done);
+                if remaining > 0 && resolved["limits"].get("minActiveMs").is_none() {
+                    super::budget::apply_minimum_active(&mut resolved, remaining);
+                    resolved["limits"]["minimumInheritedFrom"] = json!(previous.task_id);
+                }
+            }
+        }
+        let limits = &resolved["limits"];
+        let duration_ms = limits["maxDurationMs"].as_u64().unwrap_or(1_800_000);
+        let record_acceptance = compact_record_acceptance(&acceptance);
+        let bytes = serde_json::to_vec(&json!({"input":input,"originalMessageRaw":original,
+            "fingerprint":fingerprint,"resolvedRunLimits":limits,"runLimitCorrections":resolved["corrections"],
+            "acceptanceRequirements":acceptance}))
             .map_err(|_| invalid("INVALID_TASK_INPUT"))?;
         let hash = managed_files::digest(&bytes);
         let relative = format!("Agent/task-inputs/{request}-{hash}.json");
         managed_files::atomic_write(&root, &root.join(&relative), &bytes, 32 * 1024 * 1024)?;
         let task = NewTask {
-            request_id: request.into(), goal: input["message"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or("处理用户附件 / Process user attachments").chars().take(4096).collect(),
-            acceptance: vec!["Return the requested result with actual execution and verification status. / 返回请求结果及真实执行、验证状态。".into()],
+            request_id: request.into(), goal: if goal.is_empty() { "处理用户附件 / Process user attachments".into() } else { goal },
+            acceptance: record_acceptance,
             scope: TaskScope { conversation_id: conversation.into(), project_id: relationship["projectId"].as_str().map(str::to_owned),
                 permission_snapshot: json!({"permissionMode":permission,"bindingSnapshot":crate::storage::workspace_mounts::snapshot(&relationship),"requestFingerprint":fingerprint}) },
+            // Active wall time is checkpointed separately from overlapping model/tool costs.
+            // 有效墙钟独立于重叠的模型、工具成本写入检查点，不再乘以并行执行器数量。
             parent_task_id: None, dependency_ids: vec![], budget: TaskBudget {
-                max_model_requests: limits["maxModelRequests"].as_u64().unwrap_or_else(|| TaskBudget::default().max_model_requests),
-                max_known_tokens: limits["maxKnownTokens"].as_u64(),
-                // Keep the documented 30-minute default and allow the validated 60-minute
-                // override through runLimits.maxDurationMs.
-                // 保留文档约定的 30 分钟默认值，并允许通过 runLimits.maxDurationMs 使用已校验的 60 分钟上限。
-                max_execution_ms: limits["maxDurationMs"].as_u64(),
+                max_model_requests: super::budget::model_request_allowance(duration_ms),
+                max_execution_ms: Some(duration_ms),
+                ..Default::default()
             },
             input_reference: Some(json!({"kind":"task-input","relativePath":relative,"sha256":hash,"bytes":bytes.len()})),
         };
@@ -73,6 +111,55 @@ pub async fn read(
     tokio::task::spawn_blocking(move || read_sync(&root, &reference))
         .await
         .map_err(|_| invalid("TASK_INPUT_WORKER_FAILED"))?
+}
+
+/// The limits resolved and persisted when the request was accepted, so every execution and recovery agrees.
+/// 读取接受请求时解析并保存的额度，保证每次执行与恢复使用同一结果（含继承的最低时长）。
+pub(crate) fn read_resolved_limits(root: &Path, reference: &Value) -> Option<Value> {
+    let value = read_input_document(root, reference)?;
+    value.get("resolvedRunLimits").filter(|limits| limits.is_object()).cloned()
+}
+
+/// Complete acceptance remains in the authenticated input document, even when the task row uses short labels.
+/// 完整验收项保存在经过哈希核验的输入文件中，即使任务行采用短标签也不丢失要求。
+pub(crate) fn read_acceptance_requirements(root: &Path, reference: &Value) -> Option<Vec<String>> {
+    let value = read_input_document(root, reference)?;
+    value.get("acceptanceRequirements")?.as_array()?.iter().map(|item| item.as_str().map(str::to_owned)).collect()
+}
+
+fn read_input_document(root: &Path, reference: &Value) -> Option<Value> {
+    let relative = reference["relativePath"].as_str()?;
+    if reference["kind"] != "task-input" || !relative.starts_with("Agent/task-inputs/") || relative.contains("..") || relative.contains('\\') {
+        return None;
+    }
+    let bytes = managed_files::read(root, &root.join(relative), 32 * 1024 * 1024).ok()??;
+    if reference["sha256"].as_str() != Some(managed_files::digest(&bytes).as_str()) {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Bound only row metadata; the full list above is retained for review, continuation and recovery.
+/// 仅约束任务行元数据；上方完整清单仍用于核对、续作和恢复。
+fn compact_record_acceptance(requirements: &[String]) -> Vec<String> {
+    const RECORD_ACCEPTANCE_BYTES: usize = 8 * 1024;
+    if serde_json::to_vec(requirements).is_ok_and(|bytes| bytes.len() <= RECORD_ACCEPTANCE_BYTES) {
+        return requirements.to_vec();
+    }
+    let item_bytes = RECORD_ACCEPTANCE_BYTES / requirements.len().max(1) - 4;
+    requirements.iter().enumerate().map(|(index, requirement)| {
+        let mut label = format!("requirement-{}: task-input #{} / ", index + 1, index + 1);
+        let mut json_bytes = label.len();
+        for character in requirement.chars() {
+            // Reserve JSON escaping expansion as well as UTF-8 bytes, including embedded newlines.
+            // 同时预留 JSON 转义扩展与 UTF-8 字节，包括要求中的换行。
+            let added = match character { '\\' | '"' => 2, character if character.is_control() => 6, character => character.len_utf8() };
+            if json_bytes + added > item_bytes { break; }
+            label.push(character);
+            json_bytes += added;
+        }
+        label
+    }).collect()
 }
 
 fn read_sync(

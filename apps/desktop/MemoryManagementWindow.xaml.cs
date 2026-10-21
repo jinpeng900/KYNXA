@@ -3,10 +3,12 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Net;
 using KYNXA.Contracts;
+using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
@@ -23,28 +25,38 @@ public sealed partial class MemoryManagementWindow : Window
     private readonly IReadOnlyList<MemoryTarget> _targets;
     private readonly MemoryTarget? _initialTarget;
     private readonly ObservableCollection<MemoryDisplayRow> _rows = [];
+    private readonly SegmentedSelector _kindPicker = new([
+        new(MemoryKinds.Fact, "事实"), new(MemoryKinds.Preference, "偏好"), new(MemoryKinds.Decision, "决定")]);
     private string _scope = MemoryScopes.User;
     private bool _updating;
     private bool _closed;
     private bool _loaded;
     private bool _queued;
     private bool _rowsChanged = true;
-    private bool _refreshKindDisplay;
     private bool _dialogOpen;
     private bool _allowClose;
+    private Window? _settingsOwner;
 
     public MemoryManagementWindow(IReadOnlyList<MemoryTarget> targets, MemoryTarget? initialTarget = null,
-        MemoryManagementViewModel? viewModel = null)
+        MemoryManagementViewModel? viewModel = null, Window? settingsOwner = null)
     {
         InitializeComponent();
-        AppearanceService.TrackWindow(this);
+        _settingsOwner = settingsOwner;
+        if (settingsOwner is null) AppearanceService.TrackWindow(this);
         _targets = targets.Where(target => target.Scope != MemoryScopes.User).DistinctBy(target => (target.Scope, target.Id)).ToArray();
         _initialTarget = initialTarget;
         _viewModel = viewModel ?? new MemoryManagementViewModel();
         MemoryEntryList.ItemsSource = _rows;
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(MemoryTitleBar);
-        AppWindow.Resize(new SizeInt32(960, 680));
+        AutomationProperties.SetAutomationId(_kindPicker, "MemoryKindPicker");
+        UiLocalization.Bind(_kindPicker, AutomationProperties.NameProperty, "记忆类型");
+        MemoryKindPickerHost.Content = _kindPicker;
+        _kindPicker.SelectionChanged += Kind_SelectionChanged;
+        if (settingsOwner is null)
+        {
+            ExtendsContentIntoTitleBar = true;
+            SetTitleBar(MemoryTitleBar);
+            AppWindow.Resize(new SizeInt32(960, 680));
+        }
         _viewModel.PropertyChanged += ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged += Entries_Changed;
         UiText.LanguageChanged += Language_Changed;
@@ -54,18 +66,49 @@ public sealed partial class MemoryManagementWindow : Window
     }
 
     public bool HasPendingChanges => _viewModel.IsBusy || _viewModel.HasChanges;
+    public bool IsEmbedded => _settingsOwner is not null;
+
+    /// <summary>
+    /// Reuses the existing editor inside the settings owner; switching categories keeps its draft and loaded state.
+    /// 将现有编辑器嵌入所属设置窗口；切换分类时保留草稿和已加载状态。
+    /// </summary>
+    public FrameworkElement AttachToSettings(Window owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ObjectDisposedException.ThrowIf(_closed, this);
+        _settingsOwner = owner;
+        SetTitleBar(null);
+        MemoryTitleBar.Visibility = Visibility.Collapsed;
+        MemoryRoot.RowDefinitions[0].Height = new GridLength(0);
+        Content = null;
+        return MemoryRoot;
+    }
+
+    public void DisposeEmbedded()
+    {
+        if (_closed) return;
+        _allowClose = true;
+        ReleaseResources();
+        Close();
+        _settingsOwner = null;
+    }
 
     // Called only when the application exits or after the migration guard checked the editor.
     // 仅在应用退出，或迁移保护已检查编辑器之后调用。
     public void CloseForOwner()
     {
+        if (IsEmbedded)
+        {
+            DisposeEmbedded();
+            return;
+        }
         _allowClose = true;
         Close();
     }
 
     private async void MemoryRoot_Loaded(object sender, RoutedEventArgs e)
     {
-        if (_loaded) return;
+        if (_loaded || _closed) return;
         _loaded = true;
         string scope = _initialTarget?.Scope ?? MemoryScopes.User;
         await ChangeScopeAsync(scope, _initialTarget);
@@ -94,7 +137,6 @@ public sealed partial class MemoryManagementWindow : Window
     private void Language_Changed(object? sender, EventArgs e)
     {
         _rowsChanged = true;
-        _refreshKindDisplay = true;
         QueueRender();
     }
 
@@ -123,17 +165,13 @@ public sealed partial class MemoryManagementWindow : Window
             if (_scope == MemoryScopes.User) MemoryScopeLabel.Text = UiText.Get("全局记忆");
             if (IsArchivedProject) MemoryScopeLabel.Text += "\n" + UiText.Get("工作已归档，共享记忆暂停用于聊天。");
             if (MemoryContentBox.Text != _viewModel.EditorContent) MemoryContentBox.Text = _viewModel.EditorContent;
-            var selectedKind = MemoryKindPicker.Items.OfType<ComboBoxItem>().FirstOrDefault(item => (string)item.Tag == _viewModel.EditorKind);
-            // ComboBox caches the selection box text; refresh that presentation after localization.
-            // The guard prevents these selection events from changing the editor's stable kind ID.
-            // 本地化后刷新 ComboBox 缓存的选中文案；保护标记避免刷新事件修改稳定的记忆类型 ID。
-            if (_refreshKindDisplay) MemoryKindPicker.SelectedItem = null;
-            MemoryKindPicker.SelectedItem = selectedKind;
-            _refreshKindDisplay = false;
+            // Read the editor's existing stable kind; rendering and localization never replace a draft's saved key.
+            // 回填编辑器已有的稳定类型；渲染和本地化不能替换草稿保存的类型键。
+            _kindPicker.SelectedKey = _viewModel.EditorKind;
             bool editable = _viewModel.Target is not null && !_viewModel.IsBusy;
             MemoryContentBox.IsEnabled = editable;
             MemoryContentBox.IsReadOnly = false;
-            MemoryKindPicker.IsEnabled = editable;
+            _kindPicker.IsEnabled = editable;
             NewMemoryButton.IsEnabled = editable && _viewModel.IsLoaded;
             RefreshMemoryButton.IsEnabled = _viewModel.Target is not null && !_viewModel.IsBusy;
             SaveMemoryButton.IsEnabled = _viewModel.CanSave;
@@ -347,9 +385,10 @@ public sealed partial class MemoryManagementWindow : Window
         if (!_updating && _viewModel is not null) _viewModel.EditorContent = MemoryContentBox.Text;
     }
 
-    private void Kind_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void Kind_SelectionChanged(object? sender, string kind)
     {
-        if (!_updating && _viewModel is not null && MemoryKindPicker.SelectedItem is ComboBoxItem { Tag: string kind }) _viewModel.EditorKind = kind;
+        if (!_updating && !_closed && !_viewModel.IsBusy && MemoryKinds.IsSupported(kind))
+            _viewModel.EditorKind = kind;
     }
 
     private void Search_TextChanged(object sender, TextChangedEventArgs e)
@@ -365,7 +404,11 @@ public sealed partial class MemoryManagementWindow : Window
     {
         if (_closed || _dialogOpen || MemoryRoot.XamlRoot is null) return false;
         _dialogOpen = true;
-        var dialog = new ContentDialog { XamlRoot = MemoryRoot.XamlRoot, DefaultButton = ContentDialogButton.None };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = (_settingsOwner?.Content as FrameworkElement)?.XamlRoot ?? MemoryRoot.XamlRoot,
+            DefaultButton = ContentDialogButton.None
+        };
         dialog.PrimaryButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"];
         dialog.CloseButtonStyle = (Style)Application.Current.Resources["KynxaQuietButtonStyle"];
         dialog.Resources["SystemControlFocusVisualPrimaryBrush"] = Application.Current.Resources["KynxaSecondaryTextBrush"];
@@ -388,13 +431,19 @@ public sealed partial class MemoryManagementWindow : Window
         }
     }
 
-    private void Window_Closed(object sender, WindowEventArgs e)
+    private void Window_Closed(object sender, WindowEventArgs e) => ReleaseResources();
+
+    private void ReleaseResources()
     {
+        if (_closed) return;
         _closed = true;
         UiText.LanguageChanged -= Language_Changed;
         _viewModel.PropertyChanged -= ViewModel_Changed;
         _viewModel.VisibleEntries.CollectionChanged -= Entries_Changed;
+        _kindPicker.SelectionChanged -= Kind_SelectionChanged;
+        _kindPicker.Dispose();
         AppWindow.Closing -= Window_Closing;
+        Closed -= Window_Closed;
         _viewModel.Dispose();
     }
 }

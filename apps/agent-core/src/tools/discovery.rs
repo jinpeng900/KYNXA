@@ -20,6 +20,29 @@ fn workspace_terminal_topic(text: &str) -> bool {
     )
 }
 
+/// Match authoring intent and format together; code documentation and file reads are not Office generation.
+/// 同时匹配创作意图与格式，代码文档查询或读取文件不会被误判为生成 Office 文档。
+pub(super) fn authoring_topics(query: &str) -> Vec<&'static str> {
+    let text = query.to_lowercase();
+    if !matches(r"生成|创建|写|制作|导出|保存|整理成|做成|\b(?:create|generate|write|export|build|make|save)\b", &text) {
+        return vec![];
+    }
+    let mut topics = Vec::new();
+    if matches(r"\b(?:docx|word|pdf)\b|文档|报告|总结|论文|合同", &text) {
+        topics.push("document-authoring");
+    }
+    if matches(r"\b(?:pptx?|powerpoint|slides?|presentation)\b|幻灯片|演示文稿|汇报演示", &text) {
+        topics.push("slides-authoring");
+    }
+    if matches(r"\b(?:xlsx?|excel|spreadsheet|workbook|csv|tsv)\b|电子表格|工作簿|数据表", &text) {
+        topics.push("spreadsheets-authoring");
+    }
+    if matches(r"\b(?:svg|html|mermaid|diagram)\b|流程图|架构图|关系图|可视化", &text) {
+        topics.push("visual-artifacts");
+    }
+    topics
+}
+
 pub(super) fn category(tool: &Value) -> &'static str {
     let name = normalized(&tool["name"], 256);
     let description = normalized(&tool["description"], 2000);
@@ -51,7 +74,7 @@ pub(super) fn category(tool: &Value) -> &'static str {
     ) {
         return "web-search";
     }
-    if name.starts_with("filesystem.") || ["document.read", "attachment.read", "artifact.open"].contains(&name.as_str()) {
+    if name.starts_with("filesystem.") || ["document.read", "document.create", "attachment.read", "artifact.open"].contains(&name.as_str()) {
         return "filesystem";
     }
     "other"
@@ -97,6 +120,9 @@ fn aliases(tool: &Value) -> String {
     }
     if name == "document.read" {
         return "document read parse extract word docx doc pdf ppt pptx xlsx markdown image OCR 文档 读取文档 解析文档 正文 页码 图片 文字识别 表格 幻灯片".to_owned();
+    }
+    if name == "document.create" {
+        return "generate create write export document docx word pdf pptx powerpoint presentation slides xlsx excel spreadsheet workbook 生成文档 创建文档 写文档 导出 报告 总结 幻灯片 演示文稿 电子表格 工作簿".to_owned();
     }
     if name == "attachment.read" {
         return "attachment upload attached document image read paginate 附件 上传文件 读取附件 正文 分页".to_owned();
@@ -248,6 +274,9 @@ fn search_tools(arguments: &Value) -> Value {
         } else {
             0
         };
+        if name == "document.create" && authoring_topics(&text).iter().any(|topic| *topic != "visual-artifacts") {
+            score += 30_000;
+        }
         // A named file plus an explicit read/write action beats incidental local/keyboard vocabulary.
         // 明确文件目标及读写动作优先于偶然出现的本地或键盘词；此处只排序，不扩大执行权限。
         if let Some(action) = match name.as_str() {
@@ -915,6 +944,22 @@ fn computer_alias(action: &str) -> &'static str {
 mod search_score_tests {
     use super::search_tools;
     use serde_json::{Value, json};
+
+    #[test]
+    fn document_authoring_prefers_real_generators_without_matching_ordinary_chat() {
+        let catalog: Value = serde_json::from_str(include_str!("gateway-catalog.json")).unwrap();
+        for query in ["生成一份报告.docx", "Create an Excel workbook", "制作 PPT 幻灯片"] {
+            let hits = search_tools(&json!({"query":query,"descriptors":catalog["tools"]}));
+            let index = hits[0].as_u64().unwrap() as usize;
+            assert_eq!(catalog["tools"][index]["name"], "document.create", "{query}");
+        }
+        for query in ["你好", "hello"] {
+            assert!(search_tools(&json!({"query":query,"descriptors":catalog["tools"]})).as_array().unwrap().is_empty());
+        }
+        assert!(super::authoring_topics("读取 example.docx").is_empty());
+        assert!(super::authoring_topics("查看这个 API 的代码文档").is_empty());
+        assert_eq!(super::authoring_topics("生成一个 SVG 流程图"), vec!["visual-artifacts"]);
+    }
 
     #[test]
     fn scored_search_preserves_legacy_candidates_and_relevance() {

@@ -25,13 +25,15 @@ public sealed class WorkspacePreviewApiClient : IDisposable
     }
 
     public async Task<WorkspacePreviewTarget> ReadAsync(Guid conversationId, string path, int offset = 0, bool userSelected = false,
-        CancellationToken cancellationToken = default, Guid? mountId = null)
+        CancellationToken cancellationToken = default, Guid? mountId = null, string? representation = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromSeconds(90));
+        bool office = System.IO.Path.GetExtension(path).ToLowerInvariant() is ".doc" or ".docx" or ".ppt" or ".pptx"
+            or ".xls" or ".xlsx" or ".odt" or ".odp" or ".ods" or ".rtf";
+        deadline.CancelAfter(TimeSpan.FromSeconds(office ? 150 : 90));
         await _ensureReady(deadline.Token);
         using var response = await _http.PostAsJsonAsync("/agent/workspace/preview",
-            new { conversationId, path, offset, maxChars = 64000, userSelected, mountId }, JsonOptions, deadline.Token);
+            new { conversationId, path, offset, maxChars = 64000, userSelected, mountId, representation }, JsonOptions, deadline.Token);
         return await GatewayResponseReader.ReadAsync<WorkspacePreviewTarget>(response,
             UiText.Get("文件预览返回为空。"), UiText.Get("文件预览请求失败（HTTP {0}）。"), deadline.Token, JsonOptions);
     }
@@ -44,6 +46,41 @@ public sealed class WorkspacePreviewApiClient : IDisposable
             || !address.AbsolutePath.StartsWith("/agent/workspace/", StringComparison.Ordinal))
             throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
         return address;
+    }
+
+    /// <summary>
+    /// Loads an already authorized original for the local document renderer, with a bounded response body.
+    /// 为本地文档渲染器读取已授权原件，限制响应体大小，不向页面开放任意网关地址。
+    /// </summary>
+    public async Task<byte[]> ReadDocumentContentAsync(Uri address, CancellationToken cancellationToken)
+    {
+        // Match the gateway's source limit; each format separately checks expanded package capacity.
+        // 原件上限与网关保持一致；各格式再单独核验解包容量，不沿用 DOCX 限额拦截演示稿和表格。
+        const int maximumBytes = 256 * 1024 * 1024;
+        var root = _http.BaseAddress ?? ModelGatewayService.Address;
+        string[] segments = address.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        bool attachment = segments is ["api", "conversations", var conversationId, "attachments", var attachmentId, "content"]
+            && Guid.TryParse(conversationId, out _) && Guid.TryParse(attachmentId, out _);
+        if (address.Scheme != root.Scheme || address.Host != root.Host || address.Port != root.Port
+            || address.AbsolutePath != "/agent/workspace/content" && !attachment)
+            throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(45));
+        using var response = await _http.GetAsync(address, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+        await GatewayResponseReader.EnsureSuccessAsync(response, UiText.Get("文件内容读取失败（HTTP {0}）。"), deadline.Token);
+        if (response.Content.Headers.ContentLength > maximumBytes)
+            throw new InvalidDataException(UiText.Get("文档较大，正在改用页面预览。"));
+        await using var source = await response.Content.ReadAsStreamAsync(deadline.Token);
+        using var content = new MemoryStream();
+        byte[] buffer = new byte[65536];
+        int count;
+        while ((count = await source.ReadAsync(buffer, deadline.Token)) != 0)
+        {
+            if (content.Length + count > maximumBytes)
+                throw new InvalidDataException(UiText.Get("文档较大，正在改用页面预览。"));
+            content.Write(buffer, 0, count);
+        }
+        return content.ToArray();
     }
 
     public async Task<WorkspacePreviewTarget> ReadChangesAsync(Guid conversationId, CancellationToken cancellationToken = default, Guid? mountId = null)

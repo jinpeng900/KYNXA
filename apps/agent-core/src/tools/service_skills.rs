@@ -132,6 +132,34 @@ pub fn resolve_resource(root: &Path, value: &Value) -> ServiceResult<(PathBuf, S
     Ok((target, relative))
 }
 
+#[cfg(test)]
+mod pagination_tests {
+    use super::{SkillInventory, resource_page};
+    use serde_json::json;
+
+    #[test]
+    fn resource_page_rejects_invalid_offset_and_limit_at_the_service_boundary() {
+        for (arguments, parameter) in [
+            (json!({"path":"notes.md","offset":2_097_153}), "offset"),
+            (json!({"path":"notes.md","offset":-1}), "offset"),
+            (json!({"path":"notes.md","limit":0}), "limit"),
+            (json!({"path":"notes.md","limit":16_001}), "limit"),
+            (json!({"path":"notes.md","limit":"128"}), "limit"),
+        ] {
+            let error = SkillInventory::default()
+                .apply("skill.readResource", &arguments, &None)
+                .unwrap_err();
+            assert_eq!(error.code, "INVALID_SKILL_RESOURCE_PAGINATION");
+            assert_eq!(error.details["parameter"], parameter);
+            assert_eq!(error.details["tool"], "skill.resource.read");
+            assert_eq!(error.details["requestDispatched"], false);
+        }
+        assert_eq!(resource_page(&json!({})).unwrap(), (0, 16_000));
+        assert_eq!(resource_page(&json!({"offset":2_097_152,"limit":1})).unwrap(), (2_097_152, 1));
+        assert_eq!(resource_page(&json!(null)).unwrap_err().details["parameter"], "arguments");
+    }
+}
+
 #[cfg(all(test, windows))]
 mod canonical_resource_tests {
     #[test]
@@ -172,11 +200,30 @@ fn bounded(
         .ok_or_else(|| {
             ServiceError::new(
                 "INVALID_SKILL_RESOURCE_PAGINATION",
-                &format!("skill.resource.read 的 {parameter} 必须在 {minimum}–{maximum} 范围内。"),
+                &format!("skill.resource.read 的 {parameter} 必须是 {minimum}–{maximum} 范围内的整数。"),
                 400,
             )
-            .with_details(json!({"tool":"skill.resource.read","parameter":parameter,"minimum":minimum,"maximum":maximum}))
+            .with_details(json!({"tool":"skill.resource.read","parameter":parameter,"minimum":minimum,"maximum":maximum,
+                "executed":false,"requestDispatched":false,"recoverable":true}))
         })
+}
+
+/// Validate pagination without resolving paths or reading the skill package.
+/// 分页校验不解析文件路径或读取技能包，失败不会产生副作用或改变读取位置。
+pub(crate) fn resource_page(arguments: &Value) -> ServiceResult<(usize, usize)> {
+    if !arguments.is_object() {
+        return Err(ServiceError::new(
+            "INVALID_SKILL_RESOURCE_PAGINATION",
+            "skill.resource.read 参数必须是对象。",
+            400,
+        )
+        .with_details(json!({"tool":"skill.resource.read","parameter":"arguments","type":"object",
+            "executed":false,"requestDispatched":false,"recoverable":true})));
+    }
+    Ok((
+        bounded(&arguments["offset"], "offset", 0, 0, FILE_BYTES)? as usize,
+        bounded(&arguments["limit"], "limit", 16000, 1, 16000)? as usize,
+    ))
 }
 
 fn read_file(arguments: &Value) -> ServiceResult<Value> {
@@ -191,10 +238,9 @@ fn read_file(arguments: &Value) -> ServiceResult<Value> {
 }
 
 fn read_resource(arguments: &Value) -> ServiceResult<Value> {
+    let (offset, limit) = resource_page(arguments)?;
     let root = absolute_path(string(&arguments["root"]));
     let (path, relative) = resolve_resource(&root, &arguments["path"])?;
-    let offset = bounded(&arguments["offset"], "offset", 0, 0, FILE_BYTES)? as usize;
-    let limit = bounded(&arguments["limit"], "limit", 16000, 1, 16000)? as usize;
     inspect(&path, false, false)?;
     let canonical_root = fs::canonicalize(&root).map_err(ServiceError::io)?;
     let canonical_path = fs::canonicalize(&path).map_err(ServiceError::io)?;
@@ -526,31 +572,6 @@ impl SkillInventory {
                 "Unknown skill resource operation.",
                 400,
             )),
-        }
-    }
-}
-
-#[cfg(test)]
-mod pagination_tests {
-    use super::SkillInventory;
-    use serde_json::json;
-
-    #[test]
-    fn resource_page_rejects_invalid_offset_and_limit_at_the_service_boundary() {
-        let root = std::env::temp_dir().join("kynxa-skill-pagination-test");
-        for (arguments, parameter) in [
-            (json!({"root":root,"path":"notes.md","offset":2_097_153}), "offset"),
-            (json!({"root":root,"path":"notes.md","limit":0}), "limit"),
-            (json!({"root":root,"path":"notes.md","limit":16_001}), "limit"),
-            (json!({"root":root,"path":"notes.md","limit":"128"}), "limit"),
-        ] {
-            let error = SkillInventory::default()
-                .apply("skill.readResource", &arguments, &None)
-                .unwrap_err();
-            assert_eq!(error.code, "INVALID_SKILL_RESOURCE_PAGINATION");
-            assert!(error.message.contains(parameter), "{}", error.message);
-            assert_eq!(error.details["parameter"], parameter);
-            assert_eq!(error.details["tool"], "skill.resource.read");
         }
     }
 }

@@ -2,6 +2,10 @@
 
 运行 `powershell -File tests/window-close-smoke/run.ps1`。
 
+仅验证关闭到托盘时，设置 `$env:KYNXA_WINDOW_TRAY_ONLY='1'` 后运行同一入口。夹具链接生产 `MainWindowTrayService` 和退出处理器，通过真实 `WM_CLOSE` 验证托盘注册、重复隐藏／恢复、原草稿及后台计时继续、子窗口独立关闭、资源管理器重建图标、明确退出保存，以及迁移拒绝／保存失败后仍可再次隐藏。资源管理器重建通过发送其原生通知模拟，不重启用户的资源管理器；不执行真实关机或注销。
+
+只验证本轮托盘行为时，先设置 `$env:KYNXA_WINDOW_TRAY_ONLY='1'`。该模式链接生产通知图标服务和退出保存流程，验证原生关闭到托盘、同一窗口与草稿恢复、后台继续、子窗口正常关闭、资源管理器重启后图标恢复，以及显式退出和退出失败恢复；不启动正式桌面或网关。
+
 直接链接生产 `ShellPage.Lifetime.cs`，用真实 WinUI 窗口和 `WM_CLOSE` 验证即时隐藏、元数据忙碌等待、合并保存、重复退出、保存失败恢复与再次退出、已有确认框取消、数据迁移保护。使用手动完成的模拟保存队列和虚构草稿，结果写入脚本返回的独立临时目录；不启动正式桌面、网关或真实模型，不读取日常数据。
 
 `ShellPageFixture.cs` 的 `DialogPresentation` 接口接缝直接调用 SDK `ContentDialog.ShowAsync()`，保留生产关闭处理器的模态结果与异步顺序；此最小夹具仅加载 SDK 控件资源。应用对话框的配色、圆角及主题生命周期由 `shell-migration-ui-smoke -Scenario dialogs` 使用生产展示服务验证。

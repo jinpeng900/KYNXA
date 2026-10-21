@@ -105,7 +105,7 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
             truthy(&server[key])
         }
     };
-    if special("transport") || special("startupTimeoutMs") {
+    if special("transport") || special("startupTimeoutMs") || special("timeoutMs") {
         return Err(invalid());
     }
     let default_transport = json!("stdio");
@@ -126,6 +126,17 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
     if !timeout.is_finite() || timeout.fract() != 0.0 || !(1000.0..=120000.0).contains(&timeout) {
         return Err(invalid());
     }
+    // Per-call execution deadline, separate from startup; long renders or builds can raise it up to six hours.
+    // 单次调用的执行期限，与启动期限分开；长时间渲染或构建可放宽到六小时，缺省时使用网关默认的 10 分钟。
+    let execution_timeout = match server.get("timeoutMs").filter(|value| !value.is_null()) {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|value| (1000..=MAXIMUM_MCP_EXECUTION_MS).contains(value))
+                .ok_or_else(invalid)?,
+        ),
+    };
     if transport == "stdio" {
         let command = server["command"]
             .as_str()
@@ -160,6 +171,9 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
             return Err(invalid());
         }
         let mut value = json!({"transport":transport,"command":js_trim(command),"args":args,"env":env,"envRefs":references,"startupTimeoutMs":timeout as u64});
+        if let Some(limit) = execution_timeout {
+            value["timeoutMs"] = json!(limit);
+        }
         if special("cwd") || !server["cwd"].is_null() && server["cwd"] != "" {
             if !string_limit(&server["cwd"], 4096, true)
                 || arguments["cwdAbsolute"] != true
@@ -181,6 +195,9 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
         environment_map(&server["headerEnv"], "header")?
     };
     let mut value = json!({"transport":transport,"command":"","args":[],"url":url,"headerEnv":headers,"startupTimeoutMs":timeout as u64});
+    if let Some(limit) = execution_timeout {
+        value["timeoutMs"] = json!(limit);
+    }
     let auth = &server["auth"];
     if special("auth") || !auth.is_null() {
         if !auth.is_object() {
@@ -190,6 +207,18 @@ pub(super) fn normalize_connection(arguments: &Value) -> Result<Value, String> {
             && matches(ENV_NAME, auth["tokenEnv"].as_str().unwrap_or(""))
         {
             json!({"type":"bearer-env","tokenEnv":auth["tokenEnv"]})
+        } else if auth["type"] == "oauth-authorization-code"
+            && string_limit(&auth["clientId"], 256, true)
+            && auth["clientId"].as_str().is_some_and(|value| !js_trim(value).is_empty())
+            && !special("auth.scope")
+            && (auth["scope"].is_null() || string_limit(&auth["scope"], 2000, true))
+        {
+            let mut normalized = json!({"type":"oauth-authorization-code","clientId":js_trim(auth["clientId"].as_str().unwrap())});
+            if auth["issuer"].as_str().is_some_and(|value| !value.trim().is_empty()) {
+                normalized["issuer"] = json!(mcp_url(&json!({"value":auth["issuer"],"url":arguments["issuerUrl"],"issuer":true}))?);
+            } else if !auth["issuer"].is_null() && auth["issuer"] != "" { return Err(invalid()); }
+            if truthy(&auth["scope"]) { normalized["scope"] = auth["scope"].clone(); }
+            normalized
         } else if auth["type"] == "oauth-client-credentials"
             && matches(ENV_NAME, auth["clientSecretEnv"].as_str().unwrap_or(""))
             && string_limit(&auth["clientId"], 256, true)
@@ -502,6 +531,9 @@ pub(super) fn calculate(operation: &str, arguments: &Value) -> Result<Value, Str
     }
 }
 
+/// Longest per-call MCP execution deadline, matching the six-hour owned background job limit.
+/// MCP 单次调用执行期限上限，与六小时的自有后台作业上限一致。
+const MAXIMUM_MCP_EXECUTION_MS: u64 = 21_600_000;
 const ENV_NAME: &str = r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$";
 const OWNED_HEADERS: &[&str] = &[
     "host",

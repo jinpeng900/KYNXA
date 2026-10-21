@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 
 use super::protocol::{MAX_TURN_CALLS, array, string};
 
+pub(crate) const MAX_TRANSCRIPT_ROUNDS: usize = 512;
+pub(crate) const MAX_TRANSCRIPT_CALLS: usize = 4096;
+
 fn units(value: &Value) -> Vec<u64> {
     array(&value["units"])
         .iter()
@@ -76,7 +79,7 @@ fn validate(args: &Value) -> Result<Value, String> {
         ]
         .contains(&string(&origin["protocol"]))
         || !hex(&origin["connectionFingerprint"])
-        || rounds.len() > 128
+        || rounds.len() > MAX_TRANSCRIPT_ROUNDS
     {
         return Err(invalid());
     }
@@ -85,7 +88,7 @@ fn validate(args: &Value) -> Result<Value, String> {
     for round in rounds {
         let number = round["round"]
             .as_u64()
-            .filter(|number| *number > previous && *number <= 128)
+            .filter(|number| *number > previous && *number <= MAX_TRANSCRIPT_ROUNDS as u64)
             .ok_or_else(invalid)?;
         let calls = round["calls"].as_array().ok_or_else(invalid)?;
         if round["object"] != true || !text(&round["text"], 2 * 1024 * 1024) {
@@ -94,7 +97,7 @@ fn validate(args: &Value) -> Result<Value, String> {
         validate_calls(calls)?;
         previous = number;
         total_calls += calls.len();
-        if total_calls > 512 {
+        if total_calls > MAX_TRANSCRIPT_CALLS {
             return Err(invalid());
         }
         if round["hasReference"] == true {
@@ -152,8 +155,10 @@ mod tests {
         );
         let mut value = value;
         let round = value["rounds"][0].clone();
+        // 129 full rounds exceed the 4096-call transcript total while staying under the 512-round limit.
+        // 129 个满调用轮次超过 4096 个调用的总上限，但仍低于 512 轮上限。
         value["rounds"] = json!(
-            (1..=17)
+            (1..=129)
                 .map(|number| {
                     let mut round = round.clone();
                     round["round"] = json!(number);

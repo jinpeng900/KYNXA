@@ -556,15 +556,23 @@ impl TaskJournal {
         dispatched: bool,
         usage: &TaskUsage,
     ) -> Result<ModelRequestReservation> {
+        self.settle_model_request_with_provider_usage(id, dispatched, usage, None)
+    }
+    pub fn settle_model_request_with_provider_usage(
+        &self, id: &str, dispatched: bool, usage: &TaskUsage,
+        provider_usage: Option<crate::storage::task_repository::ProviderTokenUsage>,
+    ) -> Result<ModelRequestReservation> {
         // The real I/O outcome precedes accounting, so a crash between the two retains verifiable settlement facts.
         // 真实 I/O 结果先于计量结算落盘，使两步之间崩溃后仍有可核验的精确结果。
+        let mut receipt = json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage});
+        if let Some(provider) = &provider_usage { receipt["providerUsage"] = json!(provider); }
         self.repository.append_events(&self.token, &[(
             format!("model-receipt:{id}"), "task.model.receipt".into(),
-            json!({"reservationId":id,"attemptId":self.token.attempt_id,"dispatched":dispatched,"usage":usage}),
+            receipt,
         )])?;
         Ok(self
             .repository
-            .settle_model_request(&self.token, id, dispatched, usage)?)
+            .settle_model_request_with_provider_usage(&self.token, id, dispatched, usage, provider_usage)?)
     }
     pub fn record_operation(&self, intent: &OperationIntent) -> Result<TaskOperation> {
         Ok(self.repository.record_operation(&self.token, intent)?)
@@ -602,6 +610,7 @@ impl TaskJournal {
         let mut resolved_operations = 0u64;
         let mut resolved_reservations = 0u64;
         let mut pending = Vec::new();
+        let mut acknowledged = Vec::new();
         for reservation in self.repository.model_reservations(self.task_id())?.into_iter()
             .filter(|reservation| matches!(reservation.state, ModelReservationState::Unknown | ModelReservationState::Reserved))
         {
@@ -612,11 +621,18 @@ impl TaskJournal {
                 if let (Some(dispatched), Ok(usage)) = (witness.payload["dispatched"].as_bool(),
                     serde_json::from_value::<TaskUsage>(witness.payload["usage"].clone()))
                 {
-                    self.repository.reconcile_model_request(&self.token, &reservation.reservation_id, dispatched, &usage,
+                    let provider_usage = witness.payload.get("providerUsage").filter(|value| !value.is_null())
+                        .map(|value| serde_json::from_value(value.clone())).transpose()
+                        .map_err(|_| GatewayError::new("TASK_MODEL_RECEIPT_INVALID", "供应商用量回执格式无效，保留原预约。", 409))?;
+                    self.repository.reconcile_model_request_with_provider_usage(&self.token, &reservation.reservation_id, dispatched, &usage, provider_usage,
                         json!({"kind":"task-event","taskId":self.task_id(),"eventId":witness.event_id,"sequence":witness.sequence}))?;
                     resolved_reservations += 1;
                     continue;
                 }
+            }
+            if reservation.is_unknown_acknowledged() {
+                acknowledged.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,"costUnknown":true}));
+                continue;
             }
             pending.push(json!({"taskId":self.task_id(),"reservationId":reservation.reservation_id,
                 "code":"MODEL_DISPATCH_EVIDENCE_REQUIRED","message":"模型请求尚无可核验的派发与用量回执。需核对供应商请求记录；不会假定未发送、伪造用量或重新发送原请求。"}));
@@ -629,6 +645,11 @@ impl TaskJournal {
                 // Missing observation receipts never become unknown mutations or block task recovery.
                 // 观察操作缺少回执不等于未知写入，也不能因此阻塞任务恢复。
                 _ if operation.intent.effect == OperationEffect::Observation => {},
+                // The user accepted this outcome as unknown: keep it unknown, never replay, and do not block.
+                // 用户已确认该结果未知：保持 unknown、不重放，也不再阻塞恢复。
+                _ if operation.is_unknown_acknowledged() => acknowledged.push(json!({"taskId":self.task_id(),
+                    "operationId":operation.intent.operation_id,"toolCallId":operation.intent.tool_call_id,
+                    "toolName":operation.intent.tool_name})),
                 Ok(false) => pending.push(json!({"taskId":self.task_id(),"operationId":operation.intent.operation_id,
                     "toolCallId":operation.intent.tool_call_id,"toolName":operation.intent.tool_name,
                     "code":"TOOL_RECEIPT_EVIDENCE_REQUIRED","message":"未找到与原始参数、派发时间及调用身份匹配的唯一真实工具回执。请核对原操作的实际结果；不会自动重做该操作。"})),
@@ -637,7 +658,45 @@ impl TaskJournal {
                     "code":error.code,"message":error.message})),
             }
         }
-        Ok(json!({"resolvedOperations":resolved_operations,"resolvedReservations":resolved_reservations,"pending":pending}))
+        Ok(json!({"resolvedOperations":resolved_operations,"resolvedReservations":resolved_reservations,"pending":pending,
+            "acknowledgedUnknown":acknowledged}))
+    }
+
+    /// Poll a remote task by its journaled identity and settle its original operation exactly once.
+    /// 使用正式日志中的远端任务身份查询，仅结算原操作一次，不再次派发原工具。
+    pub async fn reconcile_remote_tasks(&self, context: &crate::tools::gateway::GatewayToolContext) -> Result<Value> {
+        let task = self.load_current()?;
+        let mut resolved = 0;
+        let mut pending = Vec::new();
+        let events = self.repository.recovery_receipts(self.task_id())?;
+        for operation in self.repository.operations(self.task_id())?.into_iter()
+            .filter(|operation| operation.blocks_recovery()) {
+            let Some(checkpoint) = events.iter().rev().find(|event| event.kind == "mcp_task_checkpoint"
+                && event.payload["operationId"] == operation.intent.operation_id
+                && event.payload["toolCallId"] == operation.intent.tool_call_id) else { continue; };
+            let result = crate::tools::gateway::recover_mcp_task_checkpoint(&checkpoint.payload["recoveryHandle"],
+                &operation.intent.tool_call_id, context).await?;
+            if result["status"] != "settled" {
+                pending.push(json!({"taskId":task.task_id,"operationId":operation.intent.operation_id,"remoteTask":result["remoteTask"]}));
+                continue;
+            }
+            let Some(call) = self.recovery_call(&task, &operation).await? else { continue; };
+            let request = if task.parent_task_id.is_some() { task.task_id.clone() } else { task.request_id.clone() };
+            let (root, chat, stored_call, canonical) = (self.root.clone(), task.scope.conversation_id.clone(), call.clone(), result["result"].clone());
+            let reference = tokio::task::spawn_blocking(move || crate::storage::gateway::save_tool_result(&root, &chat,
+                &request, &stored_call, &canonical, None)).await
+                .map_err(|_| GatewayError::new("TASK_RECOVERY_WRITE_FAILED", "远端任务回执落盘待重试。", 503))??;
+            let failed = result["result"]["isError"] == true;
+            let receipt = json!({"status":if failed {"error"} else {"completed"},"isError":failed,
+                "content":result["result"],"resultRef":reference});
+            let owned = if task.parent_task_id.is_some() {
+                self.save_blob("worker-log", &serde_json::to_vec(&receipt).map_err(|_| GatewayError::new("INVALID_TASK_RECEIPT", "远端任务回执无法编码。", 409))?).await?
+            } else { self.publish_recovered_root_receipt(&task, &call, &receipt).await?; reference };
+            self.finish_operation(&operation.intent.operation_id, if failed {OperationState::Failed} else {OperationState::Succeeded},
+                Some(owned), Some(json!({"kind":"mcp-remote-task","checkpointEventId":checkpoint.event_id,"remoteTask":result["result"]["remoteTask"]})))?;
+            resolved += 1;
+        }
+        Ok(json!({"resolved":resolved,"pending":pending}))
     }
 
     async fn recovery_call(&self, task: &TaskRecord, operation: &TaskOperation) -> Result<Option<Value>> {
@@ -650,6 +709,8 @@ impl TaskJournal {
             for message in messages.iter().filter(|message| message["Role"] == "assistant"
                 && (message["RequestId"] == task.request_id || message["Id"] == task.request_id))
             {
+                if operation.intent.input_reference.as_ref().and_then(|reference| reference["assistantMessageId"].as_str())
+                    .is_some_and(|id| message["Id"] != id) { continue; }
                 for round in message["ModelTranscript"]["rounds"].as_array().into_iter().flatten() {
                     if operation.intent.input_reference.as_ref().is_some_and(|reference|
                         reference["conversationId"] != task.scope.conversation_id || reference["requestId"] != task.request_id
@@ -658,6 +719,9 @@ impl TaskJournal {
                     for call in round["calls"].as_array().into_iter().flatten() {
                         let mut call = call.clone();
                         call["round"] = round["round"].clone();
+                        if operation.intent.input_reference.as_ref().is_some_and(|reference| reference["assistantMessageId"].is_string()) {
+                            call["assistantMessageId"] = message["Id"].clone();
+                        }
                         candidates.push(call);
                     }
                 }
@@ -752,13 +816,16 @@ impl TaskJournal {
             for message in messages.iter_mut().rev().filter(|message| message["Role"] == "assistant"
                 && (message["RequestId"] == task.request_id || message["Id"] == task.request_id))
             {
+                if call["assistantMessageId"].as_str().is_some_and(|id| message["Id"] != id) { continue; }
                 let mut patched = false;
                 for round in message["ModelTranscript"]["rounds"].as_array_mut().into_iter().flatten()
                     .filter(|round| round["round"] == call["round"])
                 {
                     let mut observations = round["observations"].as_array().cloned().unwrap_or_default();
                     observations.retain(|observation| observation["id"] != call["id"]);
-                    observations.push(json!({"id":call["id"],"name":call["name"],"status":receipt["status"],"ref":receipt["resultRef"]}));
+                    observations.push(json!({"id":call["id"],"name":call["name"],"status":receipt["status"],"ref":receipt["resultRef"],
+                        "verifiedSuccess":super::task::successful_completion_receipt(&receipt),
+                        "completionEvidence":super::task::completed_output_paths(call["name"].as_str().unwrap_or(""), &receipt)}));
                     round["observations"] = json!(observations);
                     patched = true;
                 }

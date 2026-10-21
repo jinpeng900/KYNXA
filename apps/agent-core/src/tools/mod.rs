@@ -101,15 +101,21 @@ pub mod browser;
 pub mod configuration;
 pub mod gateway;
 mod gateway_document_read;
+mod document_packages;
+mod gateway_document_create;
 pub(crate) mod gateway_workspace_preview;
 pub(crate) mod gateway_browser;
 mod gateway_browser_permissions;
 mod gateway_mcp;
+mod gateway_mcp_oauth;
+mod gateway_extension_install;
 mod gateway_tool_memory;
+pub(crate) mod gateway_skill_authoring;
 mod gateway_mcp_budget;
 mod gateway_search;
 pub(crate) mod gateway_process;
 pub(crate) mod gateway_web;
+mod gateway_web_snapshot;
 mod gateway_web_proxy;
 
 pub fn execute_source_io(
