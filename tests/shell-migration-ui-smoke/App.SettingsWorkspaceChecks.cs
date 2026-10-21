@@ -124,7 +124,7 @@ public partial class App
                         Controls = measured });
                     Check(Math.Abs(headingBounds.Left - 24) <= 1 && Math.Abs(contentBounds.Left - 24) <= 1 &&
                         contentBounds.Width > 200 && contentBounds.Right <= page.ActualWidth - 23 &&
-                        frame.ActualWidth <= 821 && page.ScrollableWidth <= 1 &&
+                        Math.Abs(frame.ActualWidth - page.ActualWidth) <= 1 && page.ScrollableWidth <= 1 &&
                         measured.All(item => item.Bounds.Width > 0 && item.Bounds.Left >= 23 && item.Bounds.Right <= page.ActualWidth - 23),
                         state + " " + key + " aligns heading and content at 24 DIP and keeps cards and actions inside the right viewport");
                     if (page.ScrollableHeight > 1)

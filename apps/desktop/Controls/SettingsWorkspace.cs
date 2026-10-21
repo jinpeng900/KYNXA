@@ -47,7 +47,7 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var header = new Grid { Padding = new Thickness(24, 20, 24, 18), ColumnSpacing = 12,
-            HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 820 };
+            HorizontalAlignment = HorizontalAlignment.Left };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _heading = new TextBlock { FontFamily = font, FontSize = 24,
@@ -58,7 +58,7 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         Grid.SetColumn(_headerAction, 1);
         header.Children.Add(_headerAction);
         content.Children.Add(header);
-        content.SizeChanged += (_, args) => header.Width = Math.Min(820, Math.Max(0, args.NewSize.Width));
+        content.SizeChanged += (_, args) => header.Width = Math.Max(0, args.NewSize.Width);
         Grid.SetRow(_pageHost, 1);
         AutomationProperties.SetAutomationId(_pageHost, "SettingsPageHost");
         content.Children.Add(_pageHost);
@@ -133,7 +133,7 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
 
     public static ScrollViewer ScrollPage(FrameworkElement content)
     {
-        var frame = new Border { Child = content, Padding = new Thickness(24, 0, 24, 24), MaxWidth = 820,
+        var frame = new Border { Child = content, Padding = new Thickness(24, 0, 24, 24),
             HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
         var scroll = new ScrollViewer { Content = frame, HorizontalContentAlignment = HorizontalAlignment.Left,
             VerticalContentAlignment = VerticalAlignment.Top, ZoomMode = ZoomMode.Disabled,
@@ -143,11 +143,11 @@ public sealed partial class SettingsWorkspace : UserControl, IDisposable
         void FitWidth(double viewportWidth)
         {
             if (!double.IsFinite(viewportWidth) || viewportWidth <= 0) return;
-            double width = Math.Min(820, viewportWidth);
+            double width = viewportWidth;
             if (double.IsNaN(frame.Width) || Math.Abs(frame.Width - width) > 0.1) frame.Width = width;
         }
-        // A capped stretch child can be arranged wider than its measured extent; ScrollViewer then offsets it by the wrong width.
-        // 仅限制 MaxWidth 的拉伸子项可能按小期望宽度计算偏移、却按大宽度排布；显式左对齐并按视口给出同一宽度。
+        // Keep B's responsive viewport while explicitly binding measured and arranged width to prevent ScrollViewer drift.
+        // 沿用 B 的视口自适应，同时显式统一测量与排布宽度，保留已修复的 ScrollViewer 偏移保护。
         // Sizes are DIPs and change with the viewport; do not multiply content coordinates by monitor scale a second time.
         // 内容尺寸使用 DIP 并随视口变化，不再对坐标重复乘以屏幕缩放比例。
         scroll.SizeChanged += (_, args) => FitWidth(args.NewSize.Width);

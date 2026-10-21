@@ -56,6 +56,23 @@ public static class ShellLayoutMetrics
     public static bool CanShowWorkPanel(double availableWidth, double availableHeight) =>
         availableWidth >= 900 && availableHeight >= 440;
 
+    /// <summary>
+    /// A compact viewport uses the existing workspace as an overlay rather than removing its entry point.
+    /// 紧凑视口复用当前工作区作为覆盖栏，保留入口，不要求聊天与右栏同时容纳在两列内。
+    /// </summary>
+    public static bool CanOpenWorkPanel(double availableWidth, double availableHeight) =>
+        double.IsFinite(availableWidth) && double.IsFinite(availableHeight) && availableWidth > 0 && availableHeight > 0;
+
+    public static double GetWorkPanelOverlayWidth(double availableWidth, double requestedWidth)
+    {
+        if (!double.IsFinite(availableWidth) || availableWidth <= 0) return 0;
+        double maximum = Math.Min(WorkPanelMaximumWidth, availableWidth);
+        double minimum = Math.Min(WorkPanelMinimumWidth, maximum);
+        double requested = double.IsFinite(requestedWidth) && requestedWidth >= WorkPanelMinimumWidth
+            ? requestedWidth : Math.Clamp(availableWidth * 0.8, minimum, Math.Min(576, maximum));
+        return Math.Clamp(requested, minimum, maximum);
+    }
+
     public static double GetWorkPanelMaximumWidth(double availableWidth) =>
         Math.Max(WorkPanelMinimumWidth, Math.Min(WorkPanelMaximumWidth, availableWidth - WorkChatMinimumWidth - WorkPanelGap));
 

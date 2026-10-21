@@ -35,7 +35,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private readonly Dictionary<Guid, Snapshot> _publishedRows = [];
     private Guid[] _publishedOrder = [];
     private bool _hasPublishedSnapshot;
-    private bool _historyHasOlder, _historyHasNewer;
+    private bool _historyHasOlder, _historyHasNewer, _historyHasNewReplies;
     private readonly LinkedList<Guid> _cacheOrder = [];
     private readonly Dictionary<Guid, LinkedListNode<Guid>> _cacheNodes = [];
     private readonly Dictionary<(Guid MessageId, string CallId), ToolDisplayRevision> _toolRevisions = [];
@@ -91,11 +91,11 @@ public sealed class ConversationTranscript : Grid, IDisposable
     public event EventHandler? FindTextStateChanged;
     public bool IsFindTextOpen { get; private set; }
 
-    public void SetHistoryAvailability(Guid conversationId, bool hasOlder, bool hasNewer)
+    public void SetHistoryAvailability(Guid conversationId, bool hasOlder, bool hasNewer, bool hasNewReplies = false)
     {
         if (_conversationId != conversationId) return;
-        _historyHasOlder = hasOlder; _historyHasNewer = hasNewer;
-        Post(new { type = "historyAvailability", conversationId = conversationId.ToString(), hasOlder, hasNewer });
+        _historyHasOlder = hasOlder; _historyHasNewer = hasNewer; _historyHasNewReplies = hasNewReplies;
+        Post(new { type = "historyAvailability", conversationId = conversationId.ToString(), hasOlder, hasNewer, hasNewReplies });
     }
 
     public void ForgetConversation(Guid conversationId, IReadOnlyList<Guid> messageIds)
@@ -136,7 +136,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
             _publishedRows.Clear();
             _publishedOrder = [];
             _hasPublishedSnapshot = false;
-            _historyHasOlder = _historyHasNewer = false;
+            _historyHasOlder = _historyHasNewer = _historyHasNewReplies = false;
             _diagramExportNavigation++;
             _findTextRequest++;
             if (IsFindTextOpen)
@@ -305,6 +305,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                 findTextSelection = UiText.Get("请先取消文字选择，再跳转到匹配内容。"), findTextSearching = UiText.Get("正在查找…"),
                 copy = UiText.Get("复制"), copyMessage = UiText.Get("复制整条消息"), retry = UiText.Get("重试"),
                 copied = UiText.Get("已复制"), copyFailed = UiText.Get("复制失败，请重试。"), jumpToLatest = UiText.Get("跳转到最新消息"),
+                newReplyNotice = UiText.Get("有新回复，跳转查看"),
                 copyBlock = UiText.Get("复制此内容块"), copyCurrentContent = UiText.Get("复制当前内容"), blockPlainText = UiText.Get("文本"),
                 blockWrap = UiText.Get("自动换行"), blockUnwrap = UiText.Get("原样显示"),
                 blockExpand = UiText.Get("展开"), blockCollapse = UiText.Get("收起"), blockLineCount = UiText.Get("{0} 行"),
@@ -841,7 +842,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     {
         return Post(new { type = fullSnapshot ? "render" : "renderPatch", conversationId = conversationId?.ToString() ?? "", revision, openAtBottom, progressiveSnapshot,
             messageOrder,
-            historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer,
+            historyHasOlder = _historyHasOlder, historyHasNewer = _historyHasNewer, historyHasNewReplies = _historyHasNewReplies,
             messages = rendered.Select(item => new { id = item.Row.Id, role = item.Row.Role, content = item.Row.Content,
                 html = item.Cache.Html, reasoningHtml = item.Cache.ReasoningHtml, reasoningState = item.Row.ReasoningState,
                 htmlStableLength = item.Cache.Stream?.StableHtml.Length, htmlStableBlocks = item.Cache.Stream?.StableBlocks,
