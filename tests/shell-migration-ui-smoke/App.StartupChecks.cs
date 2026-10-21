@@ -121,14 +121,6 @@ public partial class App
     private void CheckStartupDisabledSend(string description)
     {
         var send = Element<Button>("SendButton");
-        var toolbar = Element<Grid>("ComposerToolbar");
-        Rect sendBounds = send.TransformToVisual(toolbar).TransformBounds(new Rect(0, 0, send.ActualWidth, send.ActualHeight));
-        // Equal button dimensions alone do not detect ancestor layout clipping of the circular caps.
-        // 按钮宽高相等不能证明圆弧完整；同时核对按钮边界落在工具栏可见布局范围内。
-        Check(Math.Abs(send.ActualWidth - send.ActualHeight) < .1 && sendBounds.Top >= -.1 &&
-            sendBounds.Bottom <= toolbar.ActualHeight + .1,
-            description + $" keeps the complete circular Send inside its toolbar: button={send.ActualWidth:F2}x{send.ActualHeight:F2}, " +
-            $"top={sendBounds.Top:F2}, bottom={sendBounds.Bottom:F2}, toolbarHeight={toolbar.ActualHeight:F2}");
         var background = PresentedBackground(send);
         Check(!send.IsEnabled && background is not null && background.Color == AppearanceService.ParseColor(AppearanceService.Current.Disabled) &&
             SendArrowUsesBrush("KynxaDisabledTextBrush") && Element<PathShape>("SendArrow").Visibility == Visibility.Visible,

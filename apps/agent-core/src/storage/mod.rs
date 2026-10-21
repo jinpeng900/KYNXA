@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ContractError {
     code: &'static str,
     message: String,

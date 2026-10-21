@@ -244,20 +244,22 @@ public partial class App
                 UiText.Initialize(selectedLanguage);
                 var connections = NativeUi.Descendants<Button>(_shell).Single(button =>
                     AutomationProperties.GetName(button) == UiText.Get("连接") && NativeUi.IsVisible(button));
+                int readsBeforeOpening = _gateway.AgentReads;
                 NativeUi.Invoke(connections);
-                await WaitAsync(() => NativeUi.OpenDialog(_shell)?.Title?.ToString() == UiText.Get("连接"),
-                    selectedLanguage + " connections entry opens the feature placeholder");
-                current = NativeUi.OpenDialog(_shell)!;
+                await WaitAsync(() => typeof(Views.ShellPage).GetField("_toolManagementWindow", PrivateInstance)!.GetValue(_shell)
+                    is ToolManagementWindow { Content: FrameworkElement { IsLoaded: true } } window && !window.HasPendingChanges
+                    && _gateway.AgentReads >= readsBeforeOpening + 4,
+                    selectedLanguage + " connections entry opens the implemented management window through isolated reads");
+                var tools = (ToolManagementWindow)typeof(Views.ShellPage).GetField("_toolManagementWindow", PrivateInstance)!.GetValue(_shell)!;
                 await SettleAsync();
-                Check(current.Content?.ToString() == UiText.Get("功能暂未开发") &&
-                    typeof(Views.ShellPage).GetField("_toolManagementWindow", PrivateInstance)!.GetValue(_shell) is null,
-                    selectedLanguage + " connections shows only the localized unavailable message and opens no tool management window");
-                CheckDialogSurface(current, selectedLanguage + " connections");
-                if (selectedLanguage == "en") await CapturePresentedAsync("shell-dialog-connections-en.png");
-                NativeUi.InvokeDialogButton(current, primary: false);
-                await WaitAsync(() => NativeUi.OpenDialog(_shell) is null, "connections close dismisses its native popup");
-                current = null;
-                await SettleAsync();
+                var toolsRoot = (FrameworkElement)tools.Content;
+                Check(NativeUi.OpenDialog(_shell) is null && NativeUi.ByName<Pivot>(toolsRoot, "AgentTabs").SelectedIndex == 0
+                    && !NativeUi.ByName<InfoBar>(toolsRoot, "AgentStatusBar").IsOpen,
+                    selectedLanguage + " connections preserves its actual tools section without an unavailable placeholder");
+                tools.CloseForOwner();
+                await WaitAsync(() => typeof(Views.ShellPage).GetField("_toolManagementWindow", PrivateInstance)!.GetValue(_shell) is null,
+                    "the fixture-owned connections window closes without changes");
+                await ActivateOwnedShortcutWindowAsync();
             }
 
             var englishSchedule = NativeUi.Descendants<Button>(_shell).Single(button =>
@@ -324,17 +326,19 @@ public partial class App
             current = null;
             await SettleAsync();
 
-            current = CreateModalGuardFixture();
+            var tool = new ToolActivity("dialog-appearance-fixture", "workspace.read_file", null, "approval-required",
+                "Read only an isolated synthetic file", ApprovalId: Guid.NewGuid(), WorkspaceRoot: Path.Combine(_directory, "Workspace"));
+            current = ToolApprovalDialog.Create(_shell.XamlRoot, tool);
             var decision = current.ShowAsync();
-            await WaitAsync(() => ReferenceEquals(NativeUi.OpenDialog(_shell), current), "the generic modal fixture opens on the same owner root");
+            await WaitAsync(() => ReferenceEquals(NativeUi.OpenDialog(_shell), current), "the production approval factory opens on the same owner root");
             await SettleAsync();
             Check(current.DefaultButton == ContentDialogButton.None && current.XamlRoot == _shell.XamlRoot,
-                "the generic modal retains explicit decision semantics with no default action");
-            CheckDialogSurface(current, "Generic two-action modal");
-            await CheckDialogButtonStatesAsync(current, "PrimaryButton", accent: false, "Generic modal explicit primary");
-            await CheckDialogButtonStatesAsync(current, "CloseButton", accent: false, "Generic modal cancel");
+                "approval retains explicit decision semantics with no default approval");
+            CheckDialogSurface(current, "Approval");
+            await CheckDialogButtonStatesAsync(current, "PrimaryButton", accent: false, "Approval explicit primary");
+            await CheckDialogButtonStatesAsync(current, "CloseButton", accent: false, "Approval reject");
             NativeUi.InvokeDialogButton(current, primary: false);
-            Check(await decision == ContentDialogResult.None, "the generic modal cancel button returns no action");
+            Check(await decision == ContentDialogResult.None, "the actual approval reject button returns denial");
             current = null;
             await SettleAsync();
 
@@ -346,7 +350,7 @@ public partial class App
         finally
         {
             current?.Hide();
-            if (CurrentRetrievalWindow is not null) ShellField<Window>("_storageSettingsWindow").Close();
+            if (CurrentRetrievalWindow is { } retrieval) retrieval.CloseForOwner();
             AppearanceService.ApplyPreferences(palette.Id, mode, fontSize, custom);
             UiText.Initialize(language);
             await SettleAsync();
@@ -358,13 +362,10 @@ public partial class App
         var knowledge = NativeUi.Descendants<Button>(_shell).Single(button =>
             AutomationProperties.GetName(button) == UiText.Get("知识库") && NativeUi.IsVisible(button));
         NativeUi.Invoke(knowledge);
-        var settings = ShellField<Window>("_storageSettingsWindow");
-        var root = (FrameworkElement)settings.Content;
-        await WaitAsync(() => root.IsLoaded && CurrentRetrievalWindow is { HasPendingChanges: false } &&
-            NativeUi.Descendants<FrameworkElement>(root).Any(page =>
-                AutomationProperties.GetAutomationId(page) == "SettingsPage_retrieval" && page.IsLoaded && NativeUi.IsVisible(page)),
-            "the production retrieval page loads inside its unified settings owner before opening its dialog");
+        await WaitAsync(() => CurrentRetrievalWindow?.Content is FrameworkElement { IsLoaded: true } && !CurrentRetrievalWindow.HasPendingChanges,
+            "the production retrieval owner window is loaded before opening its dialog");
         var retrieval = CurrentRetrievalWindow!;
+        var root = (FrameworkElement)retrieval.Content;
         await WaitAsync(() => NativeUi.ById<Button>(root, "RetrievalAddLinks").IsEnabled, "the retrieval link button becomes available after its reads");
         NativeUi.Invoke(NativeUi.ById<Button>(root, "RetrievalAddLinks"));
         await WaitAsync(() => NativeUi.OpenDialog(root) is not null, "the actual retrieval add-links action opens its modal");
@@ -384,8 +385,8 @@ public partial class App
         NativeUi.InvokeDialogButton(dialog, primary: false);
         await WaitAsync(() => NativeUi.OpenDialog(root) is null && !retrieval.HasPendingChanges,
             "canceling link import completes the original pending operation");
-        settings.Close();
-        await WaitAsync(() => CurrentRetrievalWindow is null, "closing the fixture settings owner releases its embedded retrieval controller");
+        retrieval.CloseForOwner();
+        await WaitAsync(() => CurrentRetrievalWindow is null, "the fixture-owned retrieval window closes cleanly");
         await ActivateOwnedShortcutWindowAsync();
     }
 }

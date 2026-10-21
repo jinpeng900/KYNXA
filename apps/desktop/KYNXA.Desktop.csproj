@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>1.5.0</Version>
+    <Version>1.65.0</Version>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>KYNXA_Desktop</RootNamespace>
@@ -47,6 +47,7 @@
     <Compile Include="..\shared\Tools\AgentApiContracts.cs" Link="Contracts\AgentApiContracts.cs" />
     <Compile Include="..\shared\Chat\ChatApiContracts.cs" Link="Contracts\ChatApiContracts.cs" />
     <Compile Include="..\shared\Chat\TaskApiContracts.cs" Link="Contracts\TaskApiContracts.cs" />
+    <Compile Include="..\shared\Chat\UsageApiContracts.cs" Link="Contracts\UsageApiContracts.cs" />
     <Compile Include="..\shared\Memory\MemoryApiContracts.cs" Link="Contracts\MemoryApiContracts.cs" />
     <Compile Include="..\shared\Memory\RetrievalApiContracts.cs" Link="Contracts\RetrievalApiContracts.cs" />
   </ItemGroup>

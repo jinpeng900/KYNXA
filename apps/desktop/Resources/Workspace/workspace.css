@@ -12,6 +12,10 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
 body { padding: 18px 22px 32px; overflow-wrap: anywhere; }
+/* Slide and sheet viewports own scrolling; outer spacing must fit the available workspace height.
+ * 幻灯片和表格自行管理滚动，外围留白与视口高度对应，避免叠出多余的外层滚动条。 */
+body[data-preview-kind='docx'], body[data-preview-kind='pptx'], body[data-preview-kind='xlsx'] { padding: 12px; }
+body[data-preview-kind='docx'] { overflow: hidden; }
 main { min-width: 0; }
 h1, h2, h3, h4 { line-height: 1.4; margin: 1.3em 0 .6em; }
 h1 { font-size: 1.65em; } h2 { font-size: 1.35em; } h3 { font-size: 1.16em; }
@@ -31,6 +35,8 @@ img { max-width: 100%; height: auto; }
 .image-view { display: flex; min-height: 200px; justify-content: center; align-items: flex-start; }
 .image-view img { cursor: zoom-in; }
 .image-view img.actual-size { max-width: none; cursor: zoom-out; }
+.docx-view { display: block; width: 100%; height: calc(100vh - 24px); min-height: 180px; border: 0; border-radius: 8px; background: var(--appearance-soft); }
+.docx-view:focus-visible { outline: 1px solid var(--appearance-secondary); outline-offset: -1px; }
 .math[data-display='true'] { overflow-x: auto; padding: 6px 0; }
 .mermaid-viewport:focus-visible, .mermaid-viewer-viewport:focus-visible,
 .mermaid-source-details summary:focus-visible, button:focus-visible, a:focus-visible {

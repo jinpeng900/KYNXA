@@ -39,21 +39,6 @@ internal static class PickerMenu
             ItemContainerStyle = (Style)Application.Current.Resources[style]
         };
         list.Resources["ListViewItemSelectionIndicatorVisualEnabled"] = false;
-        // The SDK presenter reads its radius and state colors from the owning list, not the row's CornerRadius.
-        // SDK 呈现器从所属列表读取圆角和状态色，不使用行控件本身的 CornerRadius。
-        list.Resources["ListViewItemCornerRadius"] = Application.Current.Resources["KynxaControlRadius"];
-        foreach ((string target, string source) in new[]
-        {
-            ("ListViewItemBackgroundPointerOver", "ComboBoxItemBackgroundPointerOver"),
-            ("ListViewItemBackgroundPressed", "ComboBoxItemBackgroundPressed"),
-            ("ListViewItemForegroundPointerOver", "ComboBoxItemForegroundPointerOver"),
-            ("ListViewItemForegroundPressed", "ComboBoxItemForegroundPressed"),
-            ("ListViewItemBackgroundSelected", "ComboBoxItemBackgroundSelected"),
-            ("ListViewItemBackgroundSelectedPointerOver", "ComboBoxItemBackgroundSelectedPointerOver"),
-            ("ListViewItemBackgroundSelectedPressed", "ComboBoxItemBackgroundSelectedPressed"),
-            ("ListViewItemForegroundSelected", "ComboBoxItemForegroundSelected")
-        })
-            list.Resources[target] = Application.Current.Resources[source];
         ScrollViewer.SetHorizontalScrollMode(list, ScrollMode.Disabled);
         ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollMode(list, ScrollMode.Enabled);

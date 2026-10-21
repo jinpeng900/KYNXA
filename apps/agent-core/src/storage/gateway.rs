@@ -913,7 +913,7 @@ fn initialize(root: &Path) -> Result<(Value, Option<String>), ContractError> {
 
 /// Cached values are derived from a checked file identity and change stamp, never a writable catalog authority.
 /// 缓存仅来自已核验文件身份与变更时间，不成为独立可写目录；外部替换和原地修改会重新读取校验。
-fn read_catalog_snapshot(root: &Path) -> Result<(Option<Value>, Option<String>), ContractError> {
+pub(crate) fn read_catalog_snapshot(root: &Path) -> Result<(Option<Value>, Option<String>), ContractError> {
     use std::io::Read;
     let path = root.join("catalog.json");
     let Some(mut reader) = managed_files::open_reader(root, &path, 64 * 1024 * 1024)? else {

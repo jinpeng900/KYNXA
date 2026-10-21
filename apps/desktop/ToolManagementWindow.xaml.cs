@@ -41,9 +41,15 @@ public sealed partial class ToolManagementWindow : Window
     private Window? _settingsOwner;
     private McpCatalogResponse _catalog = new([], []);
     private McpConnectionDiagnostic[] _connections = [];
+    /// <summary>
+    /// Longest per-call MCP execution deadline the gateway accepts, in seconds.
+    /// 网关接受的 MCP 单次调用执行期限上限（秒）。
+    /// </summary>
+    private const int MaximumTimeoutSeconds = 21_600;
+
     private sealed record ServerEditorState(string Id, string Name, string Command, string Arguments, bool Enabled,
         string Transport, string Cwd, string EnvRefs, string Url, string HeaderEnv, string Auth,
-        int BrowserMode, bool BrowserVisible, string BrowserEndpoint);
+        int BrowserMode, bool BrowserVisible, string BrowserEndpoint, string Timeout);
 
     public ToolManagementWindow(IAgentApi? api = null, Guid? conversationId = null, Window? settingsOwner = null)
     {
@@ -363,6 +369,7 @@ public sealed partial class ToolManagementWindow : Window
         AgentServerCwdBox.Text = server?.Cwd ?? "";
         AgentServerEnvRefsBox.Text = JsonSerializer.Serialize(server?.EnvRefs ?? []);
         AgentServerUrlBox.Text = server?.Url ?? "";
+        AgentServerTimeoutBox.Text = server?.TimeoutMs is int timeout ? (timeout / 1000).ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
         AgentServerHeaderEnvBox.Text = JsonSerializer.Serialize(server?.HeaderEnv ?? []);
         AgentServerAuthBox.Text = server?.Auth is { } auth ? JsonSerializer.Serialize(auth,
             new JsonSerializerOptions(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }) : "";
@@ -643,12 +650,64 @@ public sealed partial class ToolManagementWindow : Window
 
     private void RefreshConnectionStatus()
     {
+        bool personalOAuth = _config?.McpServers.FirstOrDefault(item => item.Id == _editingServerId)?.Auth?.Type == "oauth-authorization-code";
+        AgentOAuthLoginButton.Visibility = AgentOAuthLogoutButton.Visibility = personalOAuth ? Visibility.Visible : Visibility.Collapsed;
         var state = _connections.FirstOrDefault(item => item.ServerId == _editingServerId);
         string key = state?.State switch { "ready" => "已连接", "connecting" => "正在连接", "error" => "连接失败",
             "auth-required" => "需要认证", _ => "未连接" };
         if (state?.Code is "MCP_ENV_MISSING" or "MCP_CONFIG_REQUIRED" or "MCP_COMMAND_NOT_FOUND") key = "未就绪";
         AgentConnectionStatusLabel.Text = string.Format(UiText.Get("连接状态：{0} · 工具：{1}"), UiText.Get(key), state?.ToolCount ?? 0) +
             (state?.Code is { } code ? " · " + code : "");
+    }
+
+    private CancellationTokenSource? _oauthLogin;
+
+    /// <summary>Browser authorization is user-owned; the desktop receives state only, never tokens.
+    /// 浏览器授权由用户完成；桌面只接收状态，不接收或显示令牌。</summary>
+    private async void OAuthLogin_Click(object sender, RoutedEventArgs e)
+    {
+        if (_closed || _busy || _editingServerId is not { } id) return;
+        if (_serverDirty) { Notice("请先保存当前服务编辑，再连接。", InfoBarSeverity.Warning); return; }
+        _oauthLogin?.Cancel();
+        _oauthLogin?.Dispose();
+        _oauthLogin = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var login = _oauthLogin;
+        login.CancelAfter(TimeSpan.FromMinutes(10));
+        AgentOAuthLoginButton.IsEnabled = false;
+        try
+        {
+            var request = await _api.StartMcpOAuthAsync(id, login.Token);
+            if (!Uri.TryCreate(request.AuthorizationUrl, UriKind.Absolute, out var address) || address.UserInfo.Length > 0 ||
+                (address.Scheme != "https" && !(address.Scheme == "http" && address.IsLoopback))) throw new InvalidDataException();
+            if (!await Windows.System.Launcher.LaunchUriAsync(address)) throw new InvalidOperationException();
+            AgentConnectionStatusLabel.Text = UiText.Get("请在浏览器中完成授权。");
+            while (!_closed && _editingServerId == id)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), login.Token);
+                var status = await _api.GetMcpOAuthStatusAsync(id, request.AuthorizationId, login.Token);
+                if (status.State == "pending") continue;
+                if (status.State == "connected")
+                {
+                    var response = await _api.ReconnectMcpAsync(id, _conversationId, login.Token);
+                    if (!_closed && _editingServerId == id) { AcceptTools(response.Tools); AcceptConnections(response.Connections); }
+                }
+                else if (!_closed && _editingServerId == id) AgentConnectionStatusLabel.Text = status.Message ?? UiText.Get("授权未完成，请重试。");
+                break;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { if (!_closed) Notice("授权未完成，请重试。", InfoBarSeverity.Warning, error); }
+        finally { if (!_closed && ReferenceEquals(_oauthLogin, login)) AgentOAuthLoginButton.IsEnabled = true; }
+    }
+
+    private async void OAuthLogout_Click(object sender, RoutedEventArgs e)
+    {
+        if (_closed || _busy || _editingServerId is not { } id) return;
+        _oauthLogin?.Cancel();
+        SetBusy(true);
+        try { await _api.LogoutMcpOAuthAsync(id, _lifetime.Token); if (!_closed) AgentConnectionStatusLabel.Text = UiText.Get("已退出账号"); }
+        catch (Exception error) { if (!_closed) Notice("账号退出未确认，请重试。", InfoBarSeverity.Warning, error); }
+        finally { if (!_closed) SetBusy(false); }
     }
 
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
@@ -726,13 +785,26 @@ public sealed partial class ToolManagementWindow : Window
             string? cwd = string.IsNullOrWhiteSpace(AgentServerCwdBox.Text) ? null : AgentServerCwdBox.Text.Trim();
             if (!http && cwd is not null && (!Path.IsPathFullyQualified(cwd) || cwd.Contains('\0'))) throw new JsonException();
             string? url = http ? AgentServerUrlBox.Text.Trim() : null;
+            // Seconds in the editor, milliseconds in the contract; empty keeps the gateway default.
+            // 界面以秒填写，合同保存毫秒；留空使用网关默认执行期限。
+            int? timeoutMs = null;
+            if (!string.IsNullOrWhiteSpace(AgentServerTimeoutBox.Text))
+            {
+                if (!int.TryParse(AgentServerTimeoutBox.Text.Trim(), System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int seconds) || seconds is < 1 or > MaximumTimeoutSeconds)
+                    throw new ArgumentException("执行期限须为 1 到 21600 之间的整数秒。");
+                timeoutMs = seconds * 1000;
+            }
             if (http && (!Uri.TryCreate(url, UriKind.Absolute, out var address) || address.UserInfo.Length > 0 ||
                 address.Query.Length > 0 || address.Fragment.Length > 0 || (address.Scheme != "https" && !(address.Scheme == "http" && address.IsLoopback)))) throw new JsonException();
             edited = new(AgentServerIdBox.Text.Trim(), AgentServerNameBox.Text.Trim(), http ? "" : AgentServerCommandBox.Text.Trim(), args,
                 AgentServerEnabledBox.IsChecked == true, previous?.ProtocolVersion, previous?.DisabledTools ?? [], ServerTransport,
                 http ? null : cwd, previous?.Env, http ? null : McpConfigurationInput.ReadReferences(AgentServerEnvRefsBox.Text, headers: false),
                 url, http ? McpConfigurationInput.ReadReferences(AgentServerHeaderEnvBox.Text, headers: true) : null,
-                http ? McpConfigurationInput.ReadAuthentication(AgentServerAuthBox.Text) : previous?.Auth, previous?.StartupTimeoutMs);
+                http ? McpConfigurationInput.ReadAuthentication(AgentServerAuthBox.Text) : previous?.Auth, previous?.StartupTimeoutMs)
+            {
+                TimeoutMs = timeoutMs,
+            };
             if (_editingServerId is null && _config.McpServers.Any(server => server.Id == edited.Id))
                 throw new JsonException();
         }
@@ -770,7 +842,7 @@ public sealed partial class ToolManagementWindow : Window
     private ServerEditorState ReadEditor() => new(AgentServerIdBox.Text, AgentServerNameBox.Text, AgentServerCommandBox.Text,
         AgentServerArgsBox.Text, AgentServerEnabledBox.IsChecked == true, ServerTransport, AgentServerCwdBox.Text,
         AgentServerEnvRefsBox.Text, AgentServerUrlBox.Text, AgentServerHeaderEnvBox.Text, AgentServerAuthBox.Text,
-        AgentBrowserModeBox.SelectedIndex, AgentBrowserVisibleBox.IsChecked == true, AgentBrowserEndpointBox.Text);
+        AgentBrowserModeBox.SelectedIndex, AgentBrowserVisibleBox.IsChecked == true, AgentBrowserEndpointBox.Text, AgentServerTimeoutBox.Text);
 
     private string ServerTransport => AgentServerTransportBox.SelectedIndex == 1 ? "streamable-http" : "stdio";
     private void RefreshTransportFields()
@@ -1042,6 +1114,8 @@ public sealed partial class ToolManagementWindow : Window
     {
         if (_closed) return;
         _closed = true;
+        _oauthLogin?.Cancel();
+        _oauthLogin?.Dispose();
         _lifetime.Cancel();
         _preview?.Cancel();
         UiText.LanguageChanged -= Language_Changed;

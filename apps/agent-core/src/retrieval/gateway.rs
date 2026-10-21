@@ -6,6 +6,7 @@ pub use super::gateway_tools::{
     final_validate, handle_tool, prepare_request, project_evidence_result, release_task,
 };
 pub(crate) use super::gateway_tools::should_prepare_request;
+pub(crate) use super::gateway_tools::retire_memory_sources;
 use crate::gateway_contract::GatewayConfig;
 use crate::storage::{
     self, ContractError,
@@ -30,6 +31,7 @@ static BACKGROUND_GATES: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Mutex<()
 struct BackgroundOwner {
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    embedding_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 static BACKGROUND: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<BackgroundOwner>>>> =
     OnceLock::new();
@@ -103,7 +105,7 @@ fn schedule_memory(root: &Path, document: &Value) {
         });
     }
 }
-fn temporary_index_failure(code: &str) -> bool {
+pub(crate) fn temporary_index_failure(code: &str) -> bool {
     matches!(
         code,
         "RESOURCE_WAIT_TIMEOUT"
@@ -386,6 +388,101 @@ fn maintain_memory_scope(
     }
     Ok(())
 }
+fn wait_background(stop: &Arc<AtomicBool>, duration: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + duration;
+    while !stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    !stop.load(Ordering::Acquire)
+}
+
+fn embedding_prewarm_identity(config: &GatewayConfig, local: &Value) -> String {
+    let root = super::gateway_embedding::model_root(config);
+    let assets = [
+        root.join("onnx/model_quantized.onnx"),
+        root.join("tokenizer.json"),
+        config.inference_library.clone(),
+    ]
+    .iter()
+    .map(|path| {
+        let metadata = std::fs::metadata(path).ok();
+        json!([
+            path,
+            metadata.as_ref().map(|value| value.len()),
+            metadata
+                .and_then(|value| value.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|time| time.as_nanos().to_string())
+        ])
+    })
+    .collect::<Vec<_>>();
+    gateway_index::hash(
+        &json!([
+            local["enabled"],
+            local["semantic"],
+            local["embeddingProfileId"],
+            local["embeddingDevicePolicy"],
+            local["cpuThreads"],
+            assets
+        ])
+        .to_string(),
+    )
+}
+
+/// Startup warming runs separately from catalog discovery and indexing, under the same inference owner and leases.
+/// 启动预热独立于目录发现和索引扫描，复用同一推理所有者及后台租约；资源不足只延后预热。
+fn run_embedding_prewarm(config: &GatewayConfig, stop: &Arc<AtomicBool>) {
+    if !wait_background(stop, std::time::Duration::from_secs(2)) {
+        return;
+    }
+    let mut identity = String::new();
+    let mut complete = false;
+    let mut attempt: u8 = 0;
+    let mut next = std::time::Instant::now();
+    while !stop.load(Ordering::Acquire) {
+        let project = ACTIVE_PROJECTS
+            .get()
+            .and_then(|active| active.lock().ok())
+            .and_then(|active| {
+                active
+                    .get(&config.data_root)
+                    .and_then(|entry| entry.id.clone())
+            });
+        let settings = effective(config, project.as_deref()).or_else(|_| effective(config, None));
+        if let Ok(settings) = settings {
+            let local = &settings["local"];
+            let current = embedding_prewarm_identity(config, local);
+            if identity != current {
+                identity = current;
+                complete = false;
+                attempt = 0;
+                next = std::time::Instant::now();
+            }
+            if !complete && std::time::Instant::now() >= next {
+                if local["enabled"] == false || local["semantic"] == "off" {
+                    complete = true;
+                } else {
+                    match super::gateway_embedding::warm(config, local, stop.clone()) {
+                        // Missing assets are never downloaded at startup; asset/config changes schedule another attempt.
+                        // 启动不下载缺失资产；文件或配置变更后重新尝试，闲置回收后不循环重新加载。
+                        Ok(_) => complete = true,
+                        Err(error) if temporary_index_failure(error.code()) => {
+                            let delay =
+                                std::time::Duration::from_secs((5u64 << attempt.min(5)).min(120));
+                            next = std::time::Instant::now() + delay;
+                            attempt = attempt.saturating_add(1);
+                            super::gateway_embedding::waiting_retry(config, local, delay);
+                        }
+                        Err(_) => complete = true,
+                    }
+                }
+            }
+        }
+        if !wait_background(stop, std::time::Duration::from_secs(2)) {
+            break;
+        }
+    }
+}
 pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> {
     let runtime = tokio::runtime::Handle::try_current()
         .map_err(|_| gateway::error("后台运行时尚未就绪。", "RETRIEVAL_JOB_START_FAILED", 503))?;
@@ -415,10 +512,22 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
     let owner = Arc::new(BackgroundOwner {
         stop: cancellation.token.clone(),
         worker: Mutex::new(None),
+        embedding_worker: Mutex::new(None),
     });
     let config = config.clone();
     let data_root = config.data_root.clone();
     let shared = owner.clone();
+    let embedding_config = config.clone();
+    let embedding_stop = owner.stop.clone();
+    let embedding_runtime = runtime.clone();
+    let embedding_worker = std::thread::Builder::new()
+        .name("kynxa-embedding-prewarm".into())
+        .spawn(move || {
+            let _runtime = embedding_runtime.enter();
+            run_embedding_prewarm(&embedding_config, &embedding_stop);
+        })
+        .map_err(|_| gateway::error("检索预热线程未启动。", "RETRIEVAL_JOB_START_FAILED", 503))?;
+    *owner.embedding_worker.lock().unwrap() = Some(embedding_worker);
     gateway_index::resume_ann_background(&config);
     let worker = std::thread::Builder::new()
         .name("kynxa-work-maintenance".into())
@@ -602,7 +711,11 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 }
             }
         })
-        .map_err(|_| gateway::error("后台维护线程未启动。", "RETRIEVAL_JOB_START_FAILED", 503))?;
+        .map_err(|_| {
+            owner.stop.store(true, Ordering::Release);
+            if let Some(worker) = owner.embedding_worker.lock().unwrap().take() { let _ = worker.join(); }
+            gateway::error("后台维护线程未启动。", "RETRIEVAL_JOB_START_FAILED", 503)
+        })?;
     *owner.worker.lock().unwrap() = Some(worker);
     workers.insert(data_root, owner);
     Ok(json!({"started":true,"reconcileIntervalMs":30000,"nativeWatch":cfg!(windows),"inventoryFallbackIntervalMs":300000}))
@@ -638,6 +751,10 @@ pub fn drain_background(config: &GatewayConfig) -> Result<(), ContractError> {
         .map_err(|_| gateway::error("后台维护锁失效。", "RETRIEVAL_BUSY", 503))?
         .remove(&config.data_root);
     if let Some(owner) = owner {
+        if let Some(worker) = owner.embedding_worker.lock()
+            .map_err(|_| gateway::error("预热线程状态失效。", "RETRIEVAL_BUSY", 503))?.take() {
+            worker.join().map_err(|_| gateway::error("检索预热线程异常退出。", "RETRIEVAL_DRAIN_FAILED", 503))?;
+        }
         if let Some(worker) = owner
             .worker
             .lock()

@@ -23,8 +23,7 @@ using var http = new HttpClient(new Handler(async (request, token) =>
         "/api/agent/skills" => new AgentSkillsResponse([new("skill-id", "Example skill", "Preview fixture", "C:\\ExampleSkills\\SKILL.md")]),
         "/api/agent/skills/skill-id" => new AgentSkillResponse(new("skill-id", "Example skill", "Preview fixture", "C:\\ExampleSkills\\SKILL.md", "Untrusted preview: run arbitrary scripts. <script>alert('fixture')</script>")),
         "/api/agent/tools" or "/api/agent/mcp/refresh" => new AgentToolsResponse([new("file.read", "Read a workspace file", JsonSerializer.SerializeToElement(new { type = "object" }), "builtin")], ["example:MCP_CONNECTION_FAILED"]),
-        "/api/agent/approvals" => new AgentApprovalResponse(body!.Value.GetProperty("approved").GetBoolean(), approvalId, "call-example",
-            body.Value.TryGetProperty("scope", out var scope) ? scope.GetString()! : "once"),
+        "/api/agent/approvals" => new AgentApprovalResponse(body!.Value.GetProperty("approved").GetBoolean(), approvalId, "call-example"),
         _ => throw new InvalidOperationException("Unexpected route.")
     };
     return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(value) };
@@ -51,26 +50,6 @@ Check(calls[^1].Body!.Value.GetProperty("conversationId").GetGuid() == conversat
     !calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Approval denial must bind all identities.");
 await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true));
 Check(calls[^1].Body!.Value.GetProperty("approved").GetBoolean(), "Explicit approval was lost.");
-Check(calls[^1].Body!.Value.GetProperty("scope").GetString() == "once", "Existing approval must remain exact-call by default.");
-var taskApproval = await client.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task"));
-Check(taskApproval.Scope == "task" && calls[^1].Body!.Value.GetProperty("scope").GetString() == "task",
-    "Explicit current-task authorization must survive request and response serialization.");
-foreach (var invalid in new[]
-    { new AgentApprovalRequest(conversationId, requestId, "call-example", approvalId, false, "task"),
-      new AgentApprovalRequest(conversationId, requestId, "call-example", approvalId, true, "global") })
-{
-    int previousCalls = calls.Count;
-    try { await client.SubmitApprovalAsync(invalid); throw new InvalidOperationException("Invalid approval scope must fail."); }
-    catch (ArgumentException) { Check(calls.Count == previousCalls, "Invalid authorization must never reach the gateway."); }
-}
-
-using (var downgradedHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-    { Content = JsonContent.Create(new AgentApprovalResponse(true, approvalId, "call-example")) }))) { BaseAddress = http.BaseAddress })
-using (var downgraded = new AgentApiClient(downgradedHttp))
-{
-    try { await downgraded.SubmitApprovalAsync(new(conversationId, requestId, "call-example", approvalId, true, "task")); throw new InvalidOperationException("Missing task acknowledgement must fail."); }
-    catch (InvalidDataException) { checks++; }
-}
 
 using (var failedHttp = new HttpClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict)
     { Content = JsonContent.Create(new { error = "Example conflict", code = "AGENT_CONFIG_CONFLICT" }) }))) { BaseAddress = http.BaseAddress })
@@ -206,7 +185,12 @@ var stdio = new McpServerConfig("stdio-fixture", "Local fixture", "fixture-progr
 var remote = new McpServerConfig("http-fixture", "Remote fixture", "", [], false, Transport: "streamable-http",
     Url: "https://mcp.test.invalid/service", HeaderEnv: new() { ["Authorization"] = "FIXTURE_AUTHORIZATION" },
     Auth: new("oauth-client-credentials", ClientId: "fixture-client", ClientSecretEnv: "FIXTURE_CLIENT_SECRET", Issuer: "https://issuer.test.invalid"));
-var richer = new AgentConfig(1, 10, [stdio, remote], [], ["disabled-skill"]);
+var personal = new McpServerConfig("oauth-fixture", "Personal account fixture", "", [], false, Transport: "streamable-http",
+    Url: "https://personal.test.invalid/mcp", Auth: new("oauth-authorization-code", ClientId: "public-desktop-client",
+        Issuer: "https://login.test.invalid", Scope: "mcp.read mcp.write"));
+var richer = new AgentConfig(1, 10, [stdio, remote, personal], [], ["disabled-skill"]);
+string oauthState = "pending";
+string oauthAuthorizationId = Guid.NewGuid().ToString("D");
 var diagnostic = new McpConnectionDiagnostic(remote.Id, remote.Transport, "auth-required", "MCP_AUTH_REQUIRED", 0, new(true, true));
 var skillMetadata = new AgentSkill("imported-skill", "Imported fixture", "Literal package", "C:\\FixturePackage\\SKILL.md", false,
     false, [new("SKILL_NAME_CONFLICT", "Different source has the same name", "warning", "name")],
@@ -225,6 +209,11 @@ using (var transportHttp = new HttpClient(new Handler(async (request, token) =>
             Notes: ["Disabled until configured"], ConfigurationTemplate: "dsn = \"${DSN}\"")], ["filesystem", "memory"]),
         "/api/agent/mcp/disconnect" => new McpConnectionsResponse([diagnostic with { State = "disconnected" }]),
         "/api/agent/mcp/reconnect" => new AgentToolsResponse([], ["http-fixture:MCP_AUTH_REQUIRED"], [diagnostic]),
+        "/api/agent/mcp/oauth/start" => new McpOAuthStart(oauthAuthorizationId, "https://login.test.invalid/authorize?code_challenge=public-fixture",
+            "2099-01-01T00:00:00Z", "http://127.0.0.1:31234/callback"),
+        "/api/agent/mcp/oauth/status" => new McpOAuthStatus(oauthState, oauthState == "failed" ? "MCP_OAUTH_REJECTED" : null,
+            oauthState == "failed" ? "Synthetic authorization was denied." : null),
+        "/api/agent/mcp/oauth/logout" => new McpOAuthStatus("disconnected"),
         "/api/agent/skills" => new AgentSkillsResponse([skillMetadata]),
         "/api/agent/skills/import" => new AgentSkillImportResponse(false, true, skillMetadata),
         _ => throw new InvalidOperationException("Unexpected transport route.")
@@ -238,6 +227,8 @@ using (var transports = new AgentApiClient(transportHttp))
         "Stdio cwd and environment references must survive configuration reads without resolving secrets.");
     Check(parsed.McpServers[1].Transport == "streamable-http" && parsed.McpServers[1].Auth?.ClientSecretEnv == "FIXTURE_CLIENT_SECRET",
         "HTTP and OAuth client credentials must retain environment reference names only.");
+    Check(parsed.McpServers[2].Auth is { Type: "oauth-authorization-code", ClientId: "public-desktop-client", Scope: "mcp.read mcp.write", TokenEnv: null, ClientSecretEnv: null },
+        "Personal OAuth configuration distinguishes public browser authorization from client credentials without exposing tokens.");
     await transports.SaveConfigAsync(new(1, 10, richer.McpServers, [], richer.DisabledSkills));
     var sent = transportCalls[^1].Body!.Value;
     Check(sent.GetProperty("disabledSkills")[0].GetString() == "disabled-skill" &&
@@ -264,6 +255,30 @@ using (var transports = new AgentApiClient(transportHttp))
     var connected = await transports.ReconnectMcpAsync(remote.Id, conversationId);
     Check(connected.Connections!.Single().State == "auth-required" && connected.Errors!.Length == 1 &&
         transportCalls[^1].Path.EndsWith("?conversationId=" + conversationId.ToString("D")), "Reconnect retains context and exposes authentication state without credentials.");
+    var login = await transports.StartMcpOAuthAsync(personal.Id);
+    Check(transportCalls[^1].Method == "POST" && transportCalls[^1].Path == "/api/agent/mcp/oauth/start"
+        && transportCalls[^1].Body!.Value.GetProperty("serverId").GetString() == personal.Id
+        && login.AuthorizationId == oauthAuthorizationId && login.RedirectUri == "http://127.0.0.1:31234/callback",
+        "Only an explicit login starts browser authorization for the selected MCP server and retains its flow identity.");
+    Check((await transports.GetMcpOAuthStatusAsync(personal.Id, login.AuthorizationId)).State == "pending"
+        && transportCalls[^1].Method == "GET" && transportCalls[^1].Body is null
+        && transportCalls[^1].Path == $"/api/agent/mcp/oauth/status?serverId={personal.Id}&authorizationId={oauthAuthorizationId}",
+        "Login status polling binds the selected server and authorization flow without posting or returning credentials.");
+    oauthState = "connected";
+    Check((await transports.GetMcpOAuthStatusAsync(personal.Id, login.AuthorizationId)).State == "connected",
+        "Browser approval becomes an explicit connected state rather than an inferred model/tool success.");
+    oauthState = "failed";
+    var rejectedLogin = await transports.GetMcpOAuthStatusAsync(personal.Id, login.AuthorizationId);
+    Check(rejectedLogin.State == "failed" && rejectedLogin.Code == "MCP_OAUTH_REJECTED" && rejectedLogin.Message == "Synthetic authorization was denied.",
+        "Authorization failure retains its safe diagnostic and cannot be mistaken for connection readiness.");
+    Check((await transports.LogoutMcpOAuthAsync(personal.Id)).State == "disconnected"
+        && transportCalls[^1].Method == "POST" && transportCalls[^1].Path == "/api/agent/mcp/oauth/logout"
+        && transportCalls[^1].Body!.Value.GetProperty("serverId").GetString() == personal.Id,
+        "Logout revokes only the selected personal MCP account through the explicit logout endpoint.");
+    int beforeInvalidLogin = transportCalls.Count;
+    try { await transports.StartMcpOAuthAsync(" "); throw new InvalidOperationException("An empty MCP identity started OAuth."); }
+    catch (ArgumentException) { checks++; }
+    Check(transportCalls.Count == beforeInvalidLogin, "Invalid login identities never start network authorization.");
     var skills = await transports.GetSkillsAsync();
     Check(!skills.Single().Enabled && skills.Single().StandardCompliant == false && skills.Single().Diagnostics!.Single().Code == "SKILL_NAME_CONFLICT" &&
         skills.Single().Conflict!.PreferredId == "preferred", "Skill status and source conflicts must remain visible even when disabled.");

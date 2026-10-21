@@ -244,6 +244,78 @@ async fn root_pagination_does_not_let_children_shadow_roots_or_replay_controls()
 }
 
 #[tokio::test]
+async fn a_follow_up_inherits_the_unmet_minimum_duration_of_the_previous_task() {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    let fixture = Fixture::new();
+    let message = |text: &str| json!({"conversationId":fixture.scope.conversation_id,"requestId":uuid::Uuid::new_v4().to_string(),
+        "message":text,"provider":"unconfigured-fixture","model":"fixture","permissionMode":"smart"});
+    let persisted = |task: &kynxa_agent_core_native::storage::task_repository::TaskRecord| -> serde_json::Value {
+        let reference = task.input_reference.as_ref().unwrap();
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(fixture.root.join(reference["relativePath"].as_str().unwrap())).unwrap())
+            .unwrap()["resolvedRunLimits"].clone()
+    };
+    let first = gateway_task_input::accept(&fixture.runtime.config, &message("至少工作一小时，把场景精修好"), None, &"a".repeat(64)).await.unwrap();
+    assert_eq!(persisted(&first)["minActiveMs"], 3_600_000);
+    let follow_up = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
+    let limits = persisted(&follow_up);
+    assert_eq!(limits["minActiveMs"], 3_600_000);
+    assert_eq!(limits["minimumInheritedFrom"], first.task_id);
+    assert_eq!(follow_up.goal, first.goal);
+    assert_eq!(follow_up.acceptance, first.acceptance);
+    assert!(limits["maxDurationMs"].as_u64().unwrap() >= 3_600_000);
+    // A cancelled task does not carry its minimum forward.
+    let repository = TaskRepository::open(&fixture.root).unwrap();
+    let current = repository.load(&follow_up.task_id).unwrap();
+    repository.control(&current.task_id, current.version, kynxa_agent_core_native::storage::task_repository::TaskControl::Cancel).unwrap();
+    let fresh = gateway_task_input::accept(&fixture.runtime.config, &message("你好"), None, &"c".repeat(64)).await.unwrap();
+    assert!(persisted(&fresh).get("minActiveMs").is_none());
+}
+
+#[tokio::test]
+async fn a_new_topic_or_completed_work_never_inherits_an_old_minimum() {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    for (finish_previous, next_message) in [(false, "你好"), (false, "查询今天的天气"),
+        (false, "继续工作，至少只说你好100小时"), (true, "继续")] {
+        let fixture = Fixture::new();
+        let message = |text: &str| json!({"conversationId":fixture.scope.conversation_id,"requestId":uuid::Uuid::new_v4().to_string(),
+            "message":text,"provider":"unconfigured-fixture","model":"fixture","permissionMode":"smart"});
+        let previous = gateway_task_input::accept(&fixture.runtime.config, &message("至少工作一小时，精修教堂；不要座椅"), None, &"a".repeat(64)).await.unwrap();
+        if finish_previous {
+            let journal = TaskJournal::start_existing(&fixture.root, &previous, "fixture", 60_000).unwrap();
+            journal.finish(TaskState::Completed, None).await.unwrap();
+        }
+        let fresh = gateway_task_input::accept(&fixture.runtime.config, &message(next_message), None, &"b".repeat(64)).await.unwrap();
+        let reference = fresh.input_reference.as_ref().unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture.root.join(reference["relativePath"].as_str().unwrap())).unwrap()).unwrap();
+        assert!(saved["resolvedRunLimits"].get("minActiveMs").is_none(), "{next_message}");
+        assert!(saved["resolvedRunLimits"].get("continuedFromTaskId").is_none(), "{next_message}");
+        assert_eq!(fresh.goal, next_message);
+        assert_eq!(fresh.acceptance, vec![next_message.to_owned()]);
+    }
+}
+
+#[tokio::test]
+async fn long_acceptance_keeps_original_requirements_outside_the_small_task_row() {
+    use kynxa_agent_core_native::orchestration::gateway_task_input;
+    let fixture = Fixture::new();
+    let message = |text: &str| json!({"conversationId":fixture.scope.conversation_id,"requestId":uuid::Uuid::new_v4().to_string(),
+        "message":text,"provider":"unconfigured-fixture","model":"fixture","permissionMode":"smart"});
+    let goal = format!("至少精修八小时，{}；保留法线贴图", "金色穹顶与彩窗要求\"\\".repeat(6000));
+    let first = gateway_task_input::accept(&fixture.runtime.config, &message(&goal), None, &"a".repeat(64)).await.unwrap();
+    assert!(serde_json::to_vec(&first.acceptance).unwrap().len() <= 8 * 1024);
+    let read_input = |task: &kynxa_agent_core_native::storage::task_repository::TaskRecord| -> serde_json::Value {
+        let reference = task.input_reference.as_ref().unwrap();
+        serde_json::from_slice(&std::fs::read(fixture.root.join(reference["relativePath"].as_str().unwrap())).unwrap()).unwrap()
+    };
+    let saved = read_input(&first);
+    assert_eq!(saved["input"]["message"], goal);
+    assert_eq!(saved["acceptanceRequirements"][0], goal.split('；').next().unwrap());
+    let continued = gateway_task_input::accept(&fixture.runtime.config, &message("继续"), None, &"b".repeat(64)).await.unwrap();
+    assert_eq!(read_input(&continued)["acceptanceRequirements"], saved["acceptanceRequirements"]);
+    assert!(serde_json::to_vec(&continued.acceptance).unwrap().len() <= 8 * 1024);
+}
+
+#[tokio::test]
 async fn declared_dependencies_and_execution_budget_survive_the_hub_boundary() {
     use kynxa_agent_core_native::orchestration::gateway_task_input;
     let fixture = Fixture::new();
@@ -252,6 +324,8 @@ async fn declared_dependencies_and_execution_budget_survive_the_hub_boundary() {
     let root = gateway_task_input::accept(&fixture.runtime.config, &input, None, &"a".repeat(64))
         .await
         .unwrap();
+    // Effective wall time is measured independently; parallel descendant costs do not multiply the user's limit.
+    // 有效墙钟独立计量；并行后代的成本不能把用户时长上限乘以执行器数量。
     assert_eq!(root.budget.max_execution_ms, Some(3_600_000));
     let journal = TaskJournal::start_existing(&fixture.root, &root, "fixture", 60_000).unwrap();
     let parent = fixture.runtime.child_run(&root, journal.clone()).unwrap();
@@ -445,6 +519,9 @@ async fn burst_controls_utf16_readback_and_elapsed_budget_keep_their_contracts()
         .record_usage(&attempt.token, "elapsed-once", &usage)
         .unwrap();
     assert_eq!(journal.load_current().unwrap().usage.model_duration_ms, 700);
+    assert!(!journal.load_current().unwrap().usage.is_exhausted(&input.budget),
+        "Aggregated child model/tool costs are not the parent's effective wall clock.");
+    journal.repository().record_active_duration(journal.token(),1000).unwrap();
     assert_eq!(
         journal
             .reserve_model_request("after-total-duration")
@@ -571,6 +648,16 @@ async fn wait_returns_latest_bounded_child_report_with_a_verified_full_read_entr
     let report = json!({"summary":"甲😀".repeat(3000),"evidence":[{"resultId":"fixture-proof"}],"verification":[{"exitCode":0,"current":true,"resultRef":{"resultId":"fixture-test"}}]});
     let artifact = child.save_task_blob("task-output", &report).await.unwrap();
     child.finish(TaskState::Completed, None).await.unwrap();
+    let awaiting_review=fixture.runtime.tasks.tool(parent_run.clone(),fixture.context(),"task.wait",
+        json!({"taskIds":[child.task_id()],"timeoutMs":100})).await.unwrap();
+    assert_eq!(awaiting_review["allCompleted"],false,"A settled child still requires explicit parent acceptance.");
+    assert_eq!(awaiting_review["results"][0]["parentAccepted"],false);
+    let full=parent.read_blob(&artifact.reference).await.unwrap();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&full).unwrap(),report);
+    fixture.runtime.tasks.tool(parent_run.clone(),fixture.context(),"task.result",json!({
+        "taskId":child.task_id(),"review":{"decision":"accept","expectedVersion":child.load_current().unwrap().version,
+            "outputRef":artifact.reference,"reason":"The parent inspected the current immutable full child report."}
+    })).await.unwrap();
     let result = fixture
         .runtime
         .tasks
@@ -583,6 +670,7 @@ async fn wait_returns_latest_bounded_child_report_with_a_verified_full_read_entr
         .await
         .unwrap();
     assert_eq!(result["allCompleted"], true);
+    assert_eq!(result["results"][0]["parentAccepted"],true);
     assert_eq!(result["results"][0]["outputRef"], artifact.reference);
     assert!(
         result["results"][0]["summaryPreview"]

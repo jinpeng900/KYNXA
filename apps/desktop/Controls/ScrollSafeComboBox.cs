@@ -1,4 +1,3 @@
-using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 
@@ -10,57 +9,7 @@ namespace KYNXA_Desktop.Controls;
 /// </summary>
 public sealed class ScrollSafeComboBox : ComboBox
 {
-    private ScrollViewer? _dropdownScrollViewer;
-    private Thickness _dropdownBasePadding;
-
-    public ScrollSafeComboBox()
-    {
-        DefaultStyleKey = typeof(ComboBox);
-        DropDownOpened += (_, _) => BeginDropdownLayout();
-        DropDownClosed += (_, _) => EndDropdownLayout();
-        Unloaded += (_, _) => EndDropdownLayout();
-    }
-
-    protected override void OnApplyTemplate()
-    {
-        EndDropdownLayout();
-        base.OnApplyTemplate();
-        if (IsDropDownOpen) BeginDropdownLayout();
-    }
-
-    private void BeginDropdownLayout()
-    {
-        EndDropdownLayout();
-        _dropdownScrollViewer = GetTemplateChild("ScrollViewer") as ScrollViewer;
-        if (_dropdownScrollViewer is null) return;
-        _dropdownBasePadding = _dropdownScrollViewer.Padding;
-        LayoutUpdated += DropdownLayoutUpdated;
-        _dropdownScrollViewer.UpdateLayout();
-        UpdateDropdownGutter();
-    }
-
-    private void DropdownLayoutUpdated(object? sender, object args) => UpdateDropdownGutter();
-
-    private void UpdateDropdownGutter()
-    {
-        if (!IsDropDownOpen || _dropdownScrollViewer is not { } scroll) return;
-        bool hasScrollbar = scroll.ViewportHeight > 0 && scroll.ScrollableHeight > 1 &&
-            scroll.ComputedVerticalScrollBarVisibility == Visibility.Visible;
-        double gutter = hasScrollbar ? (double)Application.Current.Resources["KynxaComboBoxScrollbarGutter"] : 0;
-        var padding = new Thickness(_dropdownBasePadding.Left, _dropdownBasePadding.Top,
-            _dropdownBasePadding.Right + gutter, _dropdownBasePadding.Bottom);
-        // The SDK binds content padding separately from its overlay scrollbar; virtualized rows need no local edits.
-        // SDK 将内容内边距与叠加滚动条分开绑定，无需逐一修改虚拟化选项容器。
-        if (scroll.Padding != padding) scroll.Padding = padding;
-    }
-
-    private void EndDropdownLayout()
-    {
-        LayoutUpdated -= DropdownLayoutUpdated;
-        var scroll = _dropdownScrollViewer;
-        _dropdownScrollViewer = null;
-        if (scroll is not null) scroll.Padding = _dropdownBasePadding;
-    }
+    public ScrollSafeComboBox() => DefaultStyleKey = typeof(ComboBox);
 
     protected override void OnPointerWheelChanged(PointerRoutedEventArgs args)
     {

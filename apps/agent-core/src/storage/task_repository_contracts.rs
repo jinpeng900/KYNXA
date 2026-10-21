@@ -71,6 +71,10 @@ pub struct TaskUsage {
     pub model_duration_ms: u64,
     #[serde(default)]
     pub tool_duration_ms: u64,
+    /// Effective wall time, measured once by this task's executor; descendant costs remain separate.
+    /// 本任务执行者独立测量的有效墙钟；后代模型／工具成本仍单独聚合，不重复累计并行时间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_duration_ms: Option<u64>,
 }
 
 impl TaskUsage {
@@ -80,7 +84,7 @@ impl TaskUsage {
                 .max_known_tokens
                 .is_some_and(|limit| self.input_tokens.saturating_add(self.output_tokens) >= limit)
             || budget.max_execution_ms.is_some_and(|limit| {
-                self.model_duration_ms.saturating_add(self.tool_duration_ms) >= limit
+                self.active_duration_ms.is_some_and(|active| active >= limit)
             })
     }
     pub(crate) fn add(&mut self, delta: &Self) {
@@ -162,6 +166,8 @@ pub struct TaskAttempt {
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
     pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub active_duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -224,6 +230,37 @@ pub struct TaskOperation {
     pub updated_at_ms: i64,
 }
 
+/// Verification kind written when the user accepts that an unverifiable outcome stays unknown.
+/// 用户确认无法核验的结果保持未知时写入的核验类型；它不是成功回执，也不授权重放。
+pub const UNKNOWN_ACKNOWLEDGED_KIND: &str = "user-acknowledged-unknown";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskOperationIdentity {
+    pub task_id: String,
+    pub operation_id: String,
+}
+
+impl TaskOperation {
+    /// The operation stays unknown, but the user accepted continuing without a verified receipt.
+    /// 操作仍是结果未知，但用户已确认在没有核验回执的情况下继续。
+    pub fn is_unknown_acknowledged(&self) -> bool {
+        self.state == OperationState::Unknown
+            && self
+                .verification_reference
+                .as_ref()
+                .is_some_and(|reference| reference["kind"] == UNKNOWN_ACKNOWLEDGED_KIND)
+    }
+
+    /// Unsettled non-observation effects block recovery until verified or acknowledged by the user.
+    /// 未结算的非观察副作用在核验或用户确认前阻塞恢复；已确认的未知结果不再阻塞。
+    pub fn blocks_recovery(&self) -> bool {
+        matches!(self.state, OperationState::Unknown | OperationState::Dispatched)
+            && self.intent.effect != OperationEffect::Observation
+            && !self.is_unknown_acknowledged()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCheckpoint {
@@ -255,6 +292,32 @@ pub enum ModelReservationState {
     Released,
 }
 
+/// Provider counters and explicitly separated client observations; no response bodies or credentials.
+/// 供应商计数与明确分离的网关观测；缺失保持未知，不保留响应正文或凭据。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderTokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_metrics: Option<ModelRequestClientMetrics>,
+}
+
+/// Observed once per original dispatch and recovered with its existing reservation, never by replay.
+/// 每次原始派发只观测一次，随已有预约恢复；不能为补计量重发模型或重做操作。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRequestClientMetrics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_visible_text_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_policy: Option<Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRequestReservation {
@@ -264,7 +327,32 @@ pub struct ModelRequestReservation {
     pub state: ModelReservationState,
     pub dispatched: Option<bool>,
     pub usage: Option<TaskUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<ProviderTokenUsage>,
     pub verification_reference: Option<Value>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelReservationIdentity {
+    pub task_id: String,
+    pub reservation_id: String,
+}
+
+pub const UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND: &str = "user-acknowledged-unknown-cost";
+
+impl ModelRequestReservation {
+    pub fn is_unknown_acknowledged(&self) -> bool {
+        self.state == ModelReservationState::Unknown && self.verification_reference.as_ref()
+            .is_some_and(|reference| reference["kind"] == UNKNOWN_MODEL_COST_ACKNOWLEDGED_KIND)
+    }
+
+    /// Acknowledged unknown costs retain their reservation and uncertainty, but no longer block recovery.
+    /// 用户确认的未知成本保留预约与不确定性，只解除恢复阻挡，不伪造派发、token 或成功状态。
+    pub fn blocks_recovery(&self) -> bool {
+        matches!(self.state, ModelReservationState::Reserved | ModelReservationState::Unknown)
+            && !self.is_unknown_acknowledged()
+    }
 }

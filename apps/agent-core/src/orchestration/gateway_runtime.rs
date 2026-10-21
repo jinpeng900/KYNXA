@@ -62,12 +62,20 @@ pub struct RequestRun {
     emission: Mutex<()>,
     replay: Mutex<ReplayState>,
     pub finished: AtomicBool,
-    task_approved: AtomicBool,
     pub suspending: AtomicBool,
     pub result: Mutex<Option<Value>>,
     observed_context_limits: std::sync::Mutex<Value>,
     pub created: Instant,
     pub resource_wait_ms: AtomicU64,
+    /// Persisted active wall time before this attempt; parallel descendants never add to this clock.
+    /// 本次尝试前已持久化的有效墙钟；并行子任务不会重复计入此时钟。
+    pub active_duration_base_ms: u64,
+    /// Restored background work yields new model admission to current user interaction.
+    /// 后台恢复任务在新增模型准入时让出当前用户交互的优先位置。
+    pub is_background_recovery: AtomicBool,
+    /// Set when repeated recovery made no new model request; the next execute settles instead of retrying.
+    /// 连续恢复没有产生新的模型请求时置位；下一次执行如实收尾，不再重试。
+    pub recovery_stalled: std::sync::atomic::AtomicBool,
 }
 impl RequestRun {
     /// Model-step retries share learned limits only while the verified connection identity stays unchanged.
@@ -91,12 +99,27 @@ impl RequestRun {
         ))
     }
 
+    pub(crate) fn effective_active_ms(&self) -> u64 {
+        self.active_duration_base_ms.saturating_add(self.active_elapsed(self.created).as_millis() as u64)
+    }
+
+    /// A checkpoint advances the current attempt's monotonic wall-time high-water only once.
+    /// 检查点只推进当前尝试的单调墙钟高水位；重复保存不会重复计时。
+    pub(crate) async fn checkpoint_active_duration(&self) -> Result<(), GatewayError> {
+        let Some(journal) = &self.journal else { return Ok(()); };
+        let repository = journal.repository().clone();
+        let token = journal.token().clone();
+        let elapsed = self.active_elapsed(self.created).as_millis() as u64;
+        tokio::task::spawn_blocking(move || repository.record_active_duration(&token, elapsed))
+            .await.map_err(|_| GatewayError::new("TASK_CLOCK_SAVE_FAILED", "任务有效时长保存暂不可用，进度仍保留。", 503))??;
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.native_cancellation
             .token
             .store(true, Ordering::Release);
         self.cancellation.send_replace(true);
-        self.task_approved.store(false, Ordering::Release);
     }
 
     /// Keep one queued control across temporary storage pressure without cancelling its accepted task.
@@ -159,6 +182,16 @@ impl RequestRun {
     }
 
     pub async fn emit(&self, mut event: Value) {
+        // Remote task handles are private recovery evidence, never an unrecognized desktop stream event.
+        // 远端任务句柄属于私有恢复证据，不能作为桌面无法识别的新事件进入聊天流。
+        if event["type"] == "mcp_task_checkpoint" {
+            if let Some(journal) = &self.journal {
+                event["conversationId"] = json!(self.conversation_id);
+                event["requestId"] = json!(self.request_id);
+                if !journal.is_released() { let _ = self.persist_event(journal, "mcp_task_checkpoint", &event, true).await; }
+            }
+            return;
+        }
         let _emission = self.emission.lock().await;
         let replay = self.replay.lock().await;
         if self.finished.load(Ordering::Acquire) {
@@ -301,7 +334,6 @@ impl RequestRun {
         if terminal_event(&event) {
             *self.result.lock().await = Some(event.clone());
             self.finished.store(true, Ordering::Release);
-            self.task_approved.store(false, Ordering::Release);
         }
         let _ = self.events.send(event);
     }
@@ -377,12 +409,14 @@ impl RequestRun {
             emission: Default::default(),
             replay: Default::default(),
             finished: AtomicBool::new(false),
-            task_approved: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
             observed_context_limits: Default::default(),
             created: Instant::now(),
             resource_wait_ms: AtomicU64::new(0),
+            active_duration_base_ms: 0,
+            is_background_recovery: AtomicBool::new(false),
+            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -394,19 +428,6 @@ struct Approval {
     response: oneshot::Sender<bool>,
     expires: Instant,
     deadline_code: &'static str,
-    owner: Weak<RequestRun>,
-    target: Weak<RequestRun>,
-    task_eligible: bool,
-}
-
-impl Approval {
-    fn is_live(&self) -> bool {
-        [&self.owner, &self.target].into_iter().all(|run| {
-            run.upgrade().is_some_and(|run| {
-                !run.finished.load(Ordering::Acquire) && !*run.cancellation.borrow()
-            })
-        })
-    }
 }
 pub struct GatewayRuntime {
     pub config: GatewayConfig,
@@ -425,6 +446,27 @@ pub struct GatewayRuntime {
     background_cancellation: watch::Sender<bool>,
 }
 impl GatewayRuntime {
+    pub(crate) fn live_task_run(&self, task_id: &str) -> Option<Arc<RequestRun>> {
+        self.task_runs.lock().ok().and_then(|runs| runs.get(task_id).and_then(Weak::upgrade))
+            .filter(|run| !run.finished.load(Ordering::Acquire))
+    }
+    /// Reuse live ancestor attempts to renew operational slices without weakening explicit cost caps.
+    /// 复用仍有效的祖先尝试续展运行预算，不改变明确的费用/token上限，也不创建新账本。
+    pub(crate) fn budget_journals(&self, run: &RequestRun) -> Result<Vec<Arc<super::gateway_task_journal::TaskJournal>>, GatewayError> {
+        let Some(own) = &run.journal else { return Ok(Vec::new()); };
+        let mut result = vec![own.clone()];
+        let registered = self.task_journals.lock().map_err(|_| GatewayError::new("TASK_JOURNAL_REGISTRY_FAILED", "任务预算状态暂不可用。", 503))?;
+        let mut parent = own.load_current()?.parent_task_id;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = parent {
+            if !visited.insert(id.clone()) { return Err(GatewayError::new("TASK_DEPENDENCY_CYCLE", "任务关系异常，已有进度保留。", 409)); }
+            let Some(journal) = registered.iter().filter_map(Weak::upgrade)
+                .find(|journal| journal.task_id() == id && journal.check_dispatch_fence().is_ok()) else { break; };
+            parent = journal.load_current()?.parent_task_id;
+            result.push(journal);
+        }
+        Ok(result)
+    }
     pub fn new(config: GatewayConfig) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             models: ModelConfigStore::new(&config.data_home),
@@ -544,8 +586,16 @@ impl GatewayRuntime {
     }
     pub async fn begin_raw(
         self: &Arc<Self>,
+        input: Value,
+        original_message_raw: Option<String>,
+    ) -> Result<Arc<RequestRun>, GatewayError> {
+        self.begin_with_priority(input, original_message_raw, false).await
+    }
+    async fn begin_with_priority(
+        self: &Arc<Self>,
         mut input: Value,
         original_message_raw: Option<String>,
+        background: bool,
     ) -> Result<Arc<RequestRun>, GatewayError> {
         let conversation = checked_id(&input["conversationId"], "conversationId")?;
         let attachments = input.get("attachmentIds").filter(|value| !value.is_null());
@@ -620,6 +670,7 @@ impl GatewayRuntime {
         let _acceptance = acceptance_gate.lock().await;
         let mut runs = self.runs.lock().await;
         if let Some(existing) = runs.get(&request_id) {
+            if !background { existing.is_background_recovery.store(false, Ordering::Release); }
             if existing.conversation_id != conversation || existing.fingerprint != fingerprint {
                 return Err(GatewayError::new(
                     "CHAT_REQUEST_CONFLICT",
@@ -699,12 +750,14 @@ impl GatewayRuntime {
             cancellation_key,
             replay: Default::default(),
             finished: AtomicBool::new(false),
-            task_approved: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
             observed_context_limits: Default::default(),
             created: Instant::now(),
             resource_wait_ms: AtomicU64::new(0),
+            active_duration_base_ms: task.usage.active_duration_ms.unwrap_or(0),
+            is_background_recovery: AtomicBool::new(background),
+            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
         self.task_runs
             .lock()
@@ -846,6 +899,9 @@ impl GatewayRuntime {
         journal: Arc<super::gateway_task_journal::TaskJournal>,
     ) -> Result<Arc<RequestRun>, GatewayError> {
         self.register_journal(&journal)?;
+        let background = task.parent_task_id.as_deref().and_then(|id| self.task_runs.lock().ok()
+            .and_then(|runs| runs.get(id).and_then(Weak::upgrade)))
+            .is_some_and(|parent| parent.is_background_recovery.load(Ordering::Acquire));
         let cancellation_key = new_id();
         let (cancellation, _) = watch::channel(false);
         let (events, _) = broadcast::channel(256);
@@ -869,12 +925,14 @@ impl GatewayRuntime {
             emission: Default::default(),
             replay: Default::default(),
             finished: AtomicBool::new(false),
-            task_approved: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
             observed_context_limits: Default::default(),
             created: Instant::now(),
             resource_wait_ms: AtomicU64::new(0),
+            active_duration_base_ms: task.usage.active_duration_ms.unwrap_or(0),
+            is_background_recovery: AtomicBool::new(background),
+            recovery_stalled: std::sync::atomic::AtomicBool::new(false),
         });
         let mut runs = self.task_runs.lock().map_err(|_| {
             GatewayError::new("TASK_RUN_LOCK_FAILED", "子任务执行者登记失败。", 503)
@@ -916,8 +974,9 @@ impl GatewayRuntime {
         self: &Arc<Self>,
         input: Value,
         original: Option<String>,
+        background: bool,
     ) -> Result<Arc<RequestRun>, GatewayError> {
-        self.begin_raw(input, original).await
+        self.begin_with_priority(input, original, background).await
     }
     pub async fn tool_context(
         &self,
@@ -1026,23 +1085,7 @@ impl GatewayRuntime {
             .ok_or_else(|| GatewayError::new("INVALID_APPROVAL_RECEIPT", "审批回执无效。", 500))?
             .to_owned();
         let (sender, receiver) = oneshot::channel();
-        let mut approvals = self.approvals.lock().await;
-        if run.finished.load(Ordering::Acquire) || *run.cancellation.borrow() {
-            return Ok(false);
-        }
-        if Instant::now() >= expires {
-            return Err(GatewayError::new(
-                deadline_code,
-                "审批或任务有效期已结束，操作未派发。",
-                408,
-            ));
-        }
-        // Serialize grant checks with registration so concurrent child waits cannot miss a task decision.
-        // 授权检查和待审登记共用一把锁，避免并发子任务漏掉刚收到的任务级决定。
-        if run.task_approved.load(Ordering::Acquire) && receipt["taskApprovalEligible"] == true {
-            return Ok(true);
-        }
-        approvals.insert(
+        self.approvals.lock().await.insert(
             id.clone(),
             Approval {
                 conversation: run.conversation_id.clone(),
@@ -1051,12 +1094,8 @@ impl GatewayRuntime {
                 response: sender,
                 expires,
                 deadline_code,
-                owner: Arc::downgrade(run),
-                target: Arc::downgrade(run),
-                task_eligible: receipt["taskApprovalEligible"] == true,
             },
         );
-        drop(approvals);
         run.emit(json!({"type":"approval_required","tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"等待授权","round":round,"order":order}})).await;
         let mut cancellation = run.cancellation.subscribe();
         if *cancellation.borrow() {
@@ -1065,6 +1104,7 @@ impl GatewayRuntime {
         }
         // Expiry and cancellation release the conversation task even without a user decision.
         // 即使用户没有决定，过期与取消也会释放当前会话任务，不把审批永远留在活动槽中。
+        let waiting_started = Instant::now();
         let approved = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "审批或任务有效期已结束，操作未派发。", 408)),
@@ -1076,6 +1116,7 @@ impl GatewayRuntime {
             },
         };
         self.approvals.lock().await.remove(&id);
+        run.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
         approved
     }
     /// Child control can stop an approval wait without leaving a stale approval in the parent's UI.
@@ -1116,25 +1157,7 @@ impl GatewayRuntime {
             })?
             .to_owned();
         let (sender, receiver) = oneshot::channel();
-        let mut approvals = self.approvals.lock().await;
-        if parent.finished.load(Ordering::Acquire)
-            || child.finished.load(Ordering::Acquire)
-            || *parent_cancel.borrow()
-            || *child_cancel.borrow()
-        {
-            return Ok(false);
-        }
-        if Instant::now() >= expires {
-            return Err(GatewayError::new(
-                deadline_code,
-                "子任务审批或任务有效期已结束，操作未派发。",
-                408,
-            ));
-        }
-        if parent.task_approved.load(Ordering::Acquire) && receipt["taskApprovalEligible"] == true {
-            return Ok(true);
-        }
-        approvals.insert(
+        self.approvals.lock().await.insert(
             id.clone(),
             Approval {
                 conversation: parent.conversation_id.clone(),
@@ -1143,16 +1166,13 @@ impl GatewayRuntime {
                 response: sender,
                 expires,
                 deadline_code,
-                owner: Arc::downgrade(parent),
-                target: Arc::downgrade(child),
-                task_eligible: receipt["taskApprovalEligible"] == true,
             },
         );
-        drop(approvals);
         // Child approvals share the parent's user interface, never the parent's active tool sequence.
         // 子审批共用父任务界面，但不能进入父回复的活动工具序号账本。
         parent.emit(json!({"type":"task_approval_required","taskId":child.journal.as_ref().map(|journal| journal.task_id()),
             "tool":{"toolCallId":call["id"],"name":call["name"],"arguments":call["arguments"],"status":"approval-required","approvalId":id,"summary":"子任务等待授权","round":round,"order":order}})).await;
+        let waiting_started = Instant::now();
         let approved = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(expires.into()) => Err(GatewayError::new(deadline_code, "子任务审批或任务有效期已结束，操作未派发。", 408)),
@@ -1163,6 +1183,7 @@ impl GatewayRuntime {
             } else { Ok(result.unwrap_or(false)) },
         };
         self.approvals.lock().await.remove(&id);
+        child.resource_wait_ms.fetch_add(waiting_started.elapsed().as_millis() as u64, Ordering::AcqRel);
         parent.emit(json!({"type":"task_approval_closed","taskId":child.journal.as_ref().map(|journal|journal.task_id()),"approvalId":id,"toolCallId":call["id"],"approved":approved.as_ref().is_ok_and(|approved| *approved),"code":approved.as_ref().err().map(|error|&error.code)})).await;
         approved
     }
@@ -1201,61 +1222,9 @@ impl GatewayRuntime {
             .as_bool()
             .or_else(|| body["allow"].as_bool())
             .ok_or_else(|| GatewayError::new("INVALID_APPROVAL", "审批决定无效。", 400))?;
-        let scope = match body.get("scope") {
-            None => "once",
-            Some(Value::String(scope)) if scope == "once" || scope == "task" => scope,
-            _ => {
-                return Err(GatewayError::new(
-                    "INVALID_APPROVAL_SCOPE",
-                    "审批有效范围无效。",
-                    400,
-                ));
-            }
-        };
-        if scope == "task" && !approved {
-            return Err(GatewayError::new(
-                "INVALID_APPROVAL_SCOPE",
-                "任务级授权必须是明确批准。",
-                400,
-            ));
-        }
-        if !pending.is_live() || pending.response.is_closed() {
-            approvals.remove(id);
-            return Err(GatewayError::new(
-                "APPROVAL_NOT_FOUND",
-                "审批所属操作已结束或取消。",
-                404,
-            ));
-        }
         let pending = approvals.remove(id).unwrap();
-        pending.response.send(approved).map_err(|_| {
-            GatewayError::new("APPROVAL_NOT_FOUND", "审批所属操作已结束或取消。", 404)
-        })?;
-        if scope == "task" {
-            // Keep authorization on the live root attempt, never in saved permission snapshots or replay events.
-            // 授权只保存在活跃根执行中，不写入权限快照或回放事件；恢复与新任务必须重新批准。
-            let owner = pending.owner.upgrade().ok_or_else(|| {
-                GatewayError::new("APPROVAL_NOT_FOUND", "审批所属任务已结束。", 404)
-            })?;
-            owner.task_approved.store(true, Ordering::Release);
-            if owner.finished.load(Ordering::Acquire) || *owner.cancellation.borrow() {
-                owner.task_approved.store(false, Ordering::Release);
-            }
-            let related = approvals
-                .iter()
-                .filter(|(_, approval)| {
-                    approval.task_eligible && Weak::ptr_eq(&approval.owner, &pending.owner)
-                })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for related_id in related {
-                if let Some(approval) = approvals.remove(&related_id) {
-                    let live = approval.is_live() && Instant::now() < approval.expires;
-                    let _ = approval.response.send(live);
-                }
-            }
-        }
-        Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call,"scope":scope}))
+        let _ = pending.response.send(approved);
+        Ok(json!({"approved":approved,"approvalId":id,"toolCallId":pending.call}))
     }
     pub async fn active_requests(&self) -> usize {
         let unfinished = self
@@ -1455,6 +1424,28 @@ mod approval_tests {
         .unwrap();
         Arc::get_mut(&mut run).unwrap().journal = Some(journal);
         run
+    }
+
+    #[tokio::test]
+    async fn remote_task_checkpoints_are_durable_private_evidence_without_public_stream_events() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        run.emit(json!({"type":"mcp_task_checkpoint","operationId":"round-1:remote-write","toolCallId":"remote-write",
+            "recoveryHandle":{"kind":"mcp-task","taskId":"remote-owned-id"}})).await;
+        let replay = run.recovery(0).await.unwrap();
+        assert_eq!(replay.through, 0);
+        assert!(replay.events.iter().all(|event| event["type"] != "mcp_task_checkpoint"));
+        let journal = run.journal.as_ref().unwrap();
+        let checkpoints = journal.repository().recovery_receipts(journal.task_id()).unwrap();
+        assert!(checkpoints.iter().any(|event| event.kind == "mcp_task_checkpoint"
+            && event.payload["operationId"] == "round-1:remote-write"
+            && event.payload["requestId"] == run.request_id));
+        journal.finish(TaskState::Partial, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1664,18 +1655,14 @@ mod approval_tests {
                 response: sender,
                 expires: Instant::now() - Duration::from_millis(1),
                 deadline_code: "TOOL_APPROVAL_EXPIRED",
-                owner: Arc::downgrade(&run),
-                target: Arc::downgrade(&run),
-                task_eligible: false,
             },
         );
-        let decision = json!({"approvalId":"expired","conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":"call","approved":true,"scope":"task"});
+        let decision = json!({"approvalId":"expired","conversationId":run.conversation_id,"requestId":run.request_id,"toolCallId":"call","approved":true});
         assert_eq!(
             runtime.approve(&decision).await.unwrap_err().code,
             "TOOL_APPROVAL_EXPIRED"
         );
         assert!(runtime.approvals.lock().await.is_empty());
-        assert!(!run.task_approved.load(Ordering::Acquire));
         let receipt = json!({"invocation":{"id":new_id()}});
         let call = json!({"id":"call","name":"skill.run","arguments":{}});
         let waiting = {
@@ -1706,7 +1693,6 @@ mod approval_tests {
             "APPROVAL_SCOPE_MISMATCH"
         );
         live["requestId"] = json!(run.request_id);
-        live["scope"] = json!("once");
         assert_eq!(runtime.approve(&live).await.unwrap()["approved"], true);
         assert!(waiting.await.unwrap().unwrap());
         std::fs::remove_dir_all(root).unwrap();
@@ -1731,226 +1717,6 @@ mod approval_tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "TOOL_RUN_TIMEOUT");
-        assert!(runtime.approvals.lock().await.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    fn spawn_approval(
-        runtime: &Arc<GatewayRuntime>,
-        owner: &Arc<RequestRun>,
-        child: Option<Arc<RequestRun>>,
-        call_id: &str,
-    ) -> (Value, tokio::task::JoinHandle<Result<bool, GatewayError>>) {
-        spawn_approval_with_eligibility(runtime, owner, child, call_id, true)
-    }
-
-    fn spawn_approval_with_eligibility(
-        runtime: &Arc<GatewayRuntime>,
-        owner: &Arc<RequestRun>,
-        child: Option<Arc<RequestRun>>,
-        call_id: &str,
-        task_eligible: bool,
-    ) -> (Value, tokio::task::JoinHandle<Result<bool, GatewayError>>) {
-        let runtime = runtime.clone();
-        let owner = owner.clone();
-        let approval_id = new_id();
-        let decision = json!({"approvalId":approval_id,"conversationId":owner.conversation_id,
-            "requestId":owner.request_id,"toolCallId":call_id,"approved":true});
-        let call = json!({"id":call_id,"name":"skill.run","arguments":{}});
-        let receipt = json!({"invocation":{"id":approval_id},"taskApprovalEligible":task_eligible});
-        let waiting = tokio::spawn(async move {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            if let Some(child) = child {
-                runtime
-                    .await_child_approval(&owner, &child, &call, &receipt, 1, 1, deadline)
-                    .await
-            } else {
-                runtime
-                    .await_approval(&owner, &call, &receipt, 1, 1, deadline)
-                    .await
-            }
-        });
-        (decision, waiting)
-    }
-
-    async fn wait_for_pending(runtime: &GatewayRuntime, count: usize) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while runtime.approvals.lock().await.len() != count {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn task_approval_wakes_own_children_and_preserves_exact_once_and_other_task_scope() {
-        let (runtime, root) = runtime();
-        let owner = RequestRun::test_run(16);
-        let child_a = RequestRun::test_run(16);
-        let child_b = RequestRun::test_run(16);
-        let mut other = RequestRun::test_run(16);
-        Arc::get_mut(&mut other).unwrap().conversation_id = owner.conversation_id.clone();
-        let (once, root_wait) = spawn_approval(&runtime, &owner, None, "root-call");
-        let (mut task, child_wait_a) = spawn_approval(&runtime, &owner, Some(child_a), "child-a");
-        let (_, child_wait_b) = spawn_approval(&runtime, &owner, Some(child_b), "child-b");
-        let (_, other_wait) = spawn_approval(&runtime, &other, None, "other-call");
-        wait_for_pending(&runtime, 4).await;
-
-        assert_eq!(runtime.approve(&once).await.unwrap()["scope"], "once");
-        assert!(root_wait.await.unwrap().unwrap());
-        assert!(!owner.task_approved.load(Ordering::Acquire));
-        assert_eq!(runtime.approvals.lock().await.len(), 3);
-
-        task["scope"] = json!("task");
-        let mut mismatched = task.clone();
-        mismatched["toolCallId"] = json!("different-call");
-        assert_eq!(
-            runtime.approve(&mismatched).await.unwrap_err().code,
-            "APPROVAL_SCOPE_MISMATCH"
-        );
-        let mut invalid = task.clone();
-        invalid["approved"] = json!(false);
-        assert_eq!(
-            runtime.approve(&invalid).await.unwrap_err().code,
-            "INVALID_APPROVAL_SCOPE"
-        );
-        invalid["approved"] = json!(true);
-        invalid["scope"] = json!("global");
-        assert_eq!(
-            runtime.approve(&invalid).await.unwrap_err().code,
-            "INVALID_APPROVAL_SCOPE"
-        );
-        assert!(!owner.task_approved.load(Ordering::Acquire));
-
-        assert_eq!(runtime.approve(&task).await.unwrap()["scope"], "task");
-        assert!(child_wait_a.await.unwrap().unwrap());
-        assert!(child_wait_b.await.unwrap().unwrap());
-        assert_eq!(runtime.approvals.lock().await.len(), 1);
-        assert!(!other.task_approved.load(Ordering::Acquire));
-        assert!(!other_wait.is_finished());
-        assert_eq!(
-            runtime.approve(&task).await.unwrap_err().code,
-            "APPROVAL_NOT_FOUND"
-        );
-
-        let (_, future_root) = spawn_approval(&runtime, &owner, None, "future-root");
-        let (_, future_child) = spawn_approval(
-            &runtime,
-            &owner,
-            Some(RequestRun::test_run(16)),
-            "future-child",
-        );
-        assert!(future_root.await.unwrap().unwrap());
-        assert!(future_child.await.unwrap().unwrap());
-        assert_eq!(runtime.approvals.lock().await.len(), 1);
-
-        other.cancel();
-        assert!(!other_wait.await.unwrap().unwrap());
-        owner
-            .finish(json!({"type":"completed","content":"done","reasoning":""}))
-            .await;
-        assert!(!owner.task_approved.load(Ordering::Acquire));
-        let (_, completed_wait) = spawn_approval(&runtime, &owner, None, "after-completion");
-        assert!(!completed_wait.await.unwrap().unwrap());
-        let recovered = RequestRun::test_run(16);
-        assert!(!recovered.task_approved.load(Ordering::Acquire));
-        assert!(runtime.approvals.lock().await.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn task_approval_rejects_cancelled_child_and_revokes_on_root_cancel() {
-        let (runtime, root) = runtime();
-        let owner = RequestRun::test_run(16);
-        let child = RequestRun::test_run(16);
-        let (mut decision, waiting) =
-            spawn_approval(&runtime, &owner, Some(child.clone()), "cancelled-child");
-        wait_for_pending(&runtime, 1).await;
-        decision["scope"] = json!("task");
-        child.cancel();
-        assert_eq!(
-            runtime.approve(&decision).await.unwrap_err().code,
-            "APPROVAL_NOT_FOUND"
-        );
-        assert!(!waiting.await.unwrap().unwrap());
-        assert!(!owner.task_approved.load(Ordering::Acquire));
-
-        let (mut decision, waiting) = spawn_approval(&runtime, &owner, None, "live-root");
-        wait_for_pending(&runtime, 1).await;
-        decision["scope"] = json!("task");
-        runtime.approve(&decision).await.unwrap();
-        assert!(waiting.await.unwrap().unwrap());
-        owner.cancel();
-        assert!(!owner.task_approved.load(Ordering::Acquire));
-        let (_, cancelled_wait) = spawn_approval(&runtime, &owner, None, "after-cancel");
-        assert!(!cancelled_wait.await.unwrap().unwrap());
-        assert!(runtime.approvals.lock().await.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn task_approval_fast_path_rechecks_deadline_after_registry_contention() {
-        let (runtime, root) = runtime();
-        let owner = RequestRun::test_run(16);
-        owner.task_approved.store(true, Ordering::Release);
-        for child in [None, Some(RequestRun::test_run(16))] {
-            let registry = runtime.approvals.lock().await;
-            let operation = runtime.clone();
-            let run = owner.clone();
-            let waiting = tokio::spawn(async move {
-                let call = json!({"id":"timed-call","name":"skill.run","arguments":{}});
-                let receipt = json!({"invocation":{"id":new_id()},"taskApprovalEligible":true});
-                let deadline = Instant::now() + Duration::from_millis(15);
-                if let Some(child) = child {
-                    operation
-                        .await_child_approval(&run, &child, &call, &receipt, 1, 1, deadline)
-                        .await
-                } else {
-                    operation
-                        .await_approval(&run, &call, &receipt, 1, 1, deadline)
-                        .await
-                }
-            });
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            drop(registry);
-            assert_eq!(waiting.await.unwrap().unwrap_err().code, "TOOL_RUN_TIMEOUT");
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn task_approval_keeps_pending_and_future_boundary_exceptions_explicit() {
-        let (runtime, root) = runtime();
-        let owner = RequestRun::test_run(16);
-        let (mut task, task_wait) = spawn_approval(&runtime, &owner, None, "normal-call");
-        let (outside, outside_wait) =
-            spawn_approval_with_eligibility(&runtime, &owner, None, "outside-path", false);
-        let (sensitive, sensitive_wait) = spawn_approval_with_eligibility(
-            &runtime,
-            &owner,
-            Some(RequestRun::test_run(16)),
-            "child-sensitive-read",
-            false,
-        );
-        wait_for_pending(&runtime, 3).await;
-        task["scope"] = json!("task");
-        runtime.approve(&task).await.unwrap();
-        assert!(task_wait.await.unwrap().unwrap());
-        assert_eq!(runtime.approvals.lock().await.len(), 2);
-        assert!(!outside_wait.is_finished() && !sensitive_wait.is_finished());
-        let (binding, binding_wait) =
-            spawn_approval_with_eligibility(&runtime, &owner, None, "future-binding", false);
-        wait_for_pending(&runtime, 3).await;
-        assert!(!binding_wait.is_finished());
-        for decision in [outside, sensitive, binding] {
-            assert_eq!(runtime.approve(&decision).await.unwrap()["scope"], "once");
-        }
-        assert!(outside_wait.await.unwrap().unwrap());
-        assert!(sensitive_wait.await.unwrap().unwrap());
-        assert!(binding_wait.await.unwrap().unwrap());
-        let (_, normal_wait) = spawn_approval(&runtime, &owner, None, "future-normal");
-        assert!(normal_wait.await.unwrap().unwrap());
         assert!(runtime.approvals.lock().await.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }

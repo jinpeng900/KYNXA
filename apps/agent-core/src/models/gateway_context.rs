@@ -328,15 +328,20 @@ async fn summarize_current_step(
         .iter()
         .filter(|record| {
             record["kind"] == "original-source"
+                && record["source"]["evidenceUsable"] != false
                 && protocol::string(&record["excerpt"]).trim().is_empty()
         })
         .count();
     let mut sources = protocol::array(&plan["checkpointEvidence"])
         .iter()
-        .filter(|record| record["kind"] == "original-source" && !protocol::string(&record["excerpt"]).trim().is_empty())
+        .filter(|record| record["kind"] == "original-source" && record["source"]["evidenceUsable"] != false
+            && !protocol::string(&record["excerpt"]).trim().is_empty())
         .map(|record| json!({"tool":record["tool"],"resultRef":record["resultRef"],"source":record["source"]}))
         .collect::<Vec<_>>();
     for source in protocol::array(&previous["sources"]) {
+        if source["source"]["evidenceUsable"] == false {
+            continue;
+        }
         if !sources
             .iter()
             .any(|candidate| candidate["resultRef"]["id"] == source["resultRef"]["id"])
@@ -2180,6 +2185,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pending_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn current_step_summary_excludes_unusable_web_sources_and_prior_facts_without_model_calls() {
+        use crate::storage::gateway as data;
+        let root = std::env::temp_dir().join(format!("kynxa-unusable-web-summary-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let chat = uuid::Uuid::new_v4().to_string();
+        let request = uuid::Uuid::new_v4().to_string();
+        data::ensure_conversation(&root, &chat, "isolated blocked webpage summary").unwrap();
+        let canonical = json!({"url":"https://example.org/challenge","content":"CHALLENGE_BODY_IS_NOT_A_FACT",
+            "evidenceUsable":false,"needsHumanVerification":true});
+        let reference = data::save_tool_result(&root, &chat, &request,
+            &json!({"id":"blocked-page","name":"web.fetch"}), &canonical, None).unwrap();
+        let metadata = super::super::tool_context::source_metadata(&canonical);
+        let plan = json!({"checkpointEvidence":[{"kind":"original-source","tool":"web.fetch","status":"completed",
+            "resultRef":reference,"source":metadata,"excerpt":"CHALLENGE_BODY_IS_NOT_A_FACT"}]});
+        let previous = json!({"facts":[{"resultId":reference["id"],"text":"OLD_CHALLENGE_FACT_MUST_BE_REMOVED"}],
+            "sources":[{"tool":"web.fetch","resultRef":reference,"source":metadata,
+                "processedCharacters":1,"totalCharacters":100}]});
+        let budget = json!({"dataRoot":root,"conversationId":chat,"requestId":request,
+            "contextWindowTokens":4096,"providerMaxInputTokens":4096});
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let executor: SummaryExecutor = Arc::new(move |_, _| {
+            counted.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Err(ModelError::new("UNEXPECTED_SUMMARY_CALL", "Blocked pages are not factual sources.", 500)) })
+        });
+        let (_owner, cancel) = watch::channel(false);
+        let (summary, audit) = summarize_current_step(&json!({"protocol":"openai-completions"}), "fixture",
+            &budget, 2048, 1024, &plan, &previous, &[json!("retain actual source facts")], cancel, Some(&executor))
+            .await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert_eq!(audit["modelCalls"], 0);
+        let summary = summary.unwrap();
+        assert!(protocol::array(&summary["facts"]).is_empty());
+        assert!(protocol::array(&summary["sources"]).is_empty());
+        assert_eq!(summary["completedSources"], 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

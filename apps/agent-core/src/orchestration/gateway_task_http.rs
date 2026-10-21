@@ -16,7 +16,7 @@ pub async fn handle(
     query: &[(String, String)],
     body: &Value,
 ) -> Option<Result<(u16, Value), GatewayError>> {
-    if path != "/api/tasks" && !path.starts_with("/api/tasks/") {
+    if path != "/api/usage/summary" && path != "/api/tasks" && !path.starts_with("/api/tasks/") {
         return None;
     }
     Some(execute(runtime, method, path, query, body).await)
@@ -44,10 +44,28 @@ async fn execute(
     )?;
     let root = runtime.config.data_root.clone();
     let chat = conversation.clone();
-    let relationship = tokio::task::spawn_blocking(move || data::relationship(&root, &chat))
+    let usage_read = path == "/api/usage/summary";
+    let relationship = tokio::task::spawn_blocking(move || {
+        // Usage polling reads saved ownership without repairing unrelated layouts on every refresh.
+        // 用量轮询只读取正式归属，不在每次刷新时触发其他聊天的布局修复。
+        if usage_read { data::current_relationship(&root, &chat) }
+        else { data::relationship(&root, &chat) }
+    })
         .await
         .map_err(|_| GatewayError::new("TASK_SCOPE_UNAVAILABLE", "任务范围读取失败。", 500))??;
     let project = relationship["projectId"].as_str();
+    if path == "/api/usage/summary" {
+        if method != "GET" { return Err(GatewayError::new("METHOD_NOT_ALLOWED", "用量统计仅支持读取。", 405)); }
+        let selected_project = parameter(query, "projectId");
+        if selected_project.is_some() && selected_project != project { return Err(denied()); }
+        let mut summary = runtime.tasks.usage_summary(
+            if selected_project.is_some() { None } else { Some(&conversation) }, selected_project).await?;
+        // Keep the authorized chat identity even when the user explicitly selects its whole work.
+        // 用户显式选择整个工作时仍回传已核验的聊天身份，不允许借其他工作ID扩大查询范围。
+        summary["conversationId"] = Value::String(conversation);
+        summary["projectId"] = project.map(|id| Value::String(id.to_owned())).unwrap_or(Value::Null);
+        return Ok((200, summary));
+    }
     if path == "/api/tasks/recoverable" && method == "GET" {
         if parameter(query, "projectId") != project { return Err(denied()); }
         let limit = parameter(query, "limit").and_then(|value| value.parse::<usize>().ok()).unwrap_or(50).clamp(1, 100);
@@ -111,6 +129,46 @@ async fn execute(
             runtime
                 .tasks
                 .events(&task_id, after, limit)
+                .await
+                .map(|value| (200, value))
+        }
+        ("POST", Some("control")) if body["action"] == "acknowledge-unknown" && body["operations"].is_array() => {
+            let version = body["expectedVersion"].as_u64().ok_or_else(|| GatewayError::new("TASK_VERSION_REQUIRED", "任务控制需要当前版本。", 400))?;
+            let identities = serde_json::from_value::<Vec<crate::storage::task_repository::TaskOperationIdentity>>(body["operations"].clone())
+                .map_err(|_| GatewayError::new("TASK_UNKNOWN_OPERATIONS_REQUIRED", "须列出要确认的未知操作身份。", 400))?;
+            runtime.tasks.acknowledge_unknown_operations_scoped(&task_id, version, identities).await.map(|value| (200, value))
+        }
+        ("POST", Some("control")) if body["action"] == "acknowledge-unknown-costs" => {
+            let version = body["expectedVersion"].as_u64().ok_or_else(|| GatewayError::new("TASK_VERSION_REQUIRED", "任务控制需要当前版本。", 400))?;
+            let identities = serde_json::from_value::<Vec<crate::storage::task_repository::ModelReservationIdentity>>(body["modelReservationIds"].clone())
+                .map_err(|_| GatewayError::new("TASK_UNKNOWN_RESERVATIONS_REQUIRED", "须列出要确认的未知成本预约。", 400))?;
+            runtime.tasks.acknowledge_unknown_costs(&task_id, version, identities).await.map(|value| (200, value))
+        }
+        ("POST", Some("control")) if body["action"] == "acknowledge-unknown" => {
+            // The user confirms listed outcomes remain unknown; recovery continues without replaying them.
+            // 用户确认所列结果保持未知；恢复继续但不重放这些操作，也不改记为成功。
+            let version = body["expectedVersion"].as_u64().ok_or_else(|| {
+                GatewayError::new("TASK_VERSION_REQUIRED", "任务控制需要当前版本。", 400)
+            })?;
+            let operation_ids = body["operationIds"]
+                .as_array()
+                .filter(|items| !items.is_empty())
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|item| item.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        "TASK_UNKNOWN_OPERATIONS_REQUIRED",
+                        "须列出要确认的未知操作。",
+                        400,
+                    )
+                })?;
+            runtime
+                .tasks
+                .acknowledge_unknown(&task_id, version, operation_ids)
                 .await
                 .map(|value| (200, value))
         }

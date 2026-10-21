@@ -8,8 +8,8 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, io::{Read, Write}, path::{Path, PathBuf}, process::Stdio,
-    sync::{Arc, Mutex as StateMutex, OnceLock, atomic::{AtomicBool, Ordering}}, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::{Child, Command}, sync::{Mutex, watch}};
+    sync::{Arc, Mutex as StateMutex, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::Duration};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::{Child, Command}, sync::{Mutex, Notify, watch}};
 
 const RELEASE: &str = "b11669";
 const MIB: u64 = 1024 * 1024;
@@ -131,16 +131,62 @@ impl Drop for Process {
 struct Engine {
     gate: Mutex<()>, process: Mutex<Option<Process>>, state: StateMutex<Value>,
     monitor: StateMutex<Option<tokio::task::JoinHandle<()>>>, closing: AtomicBool, suspended: AtomicBool,
+    loading: StateMutex<Option<Arc<SharedLoad>>>,
+}
+struct SharedLoad {
+    result: watch::Sender<Option<Result<(), ModelError>>>,
+    cancellation: watch::Sender<bool>,
+    task: StateMutex<Option<tokio::task::JoinHandle<()>>>,
+    foreground: AtomicBool,
+    foreground_waiters: AtomicUsize,
+    priority_changed: Notify,
+    endpoint: String,
+}
+struct ForegroundLoadWaiter(Arc<SharedLoad>);
+impl Drop for ForegroundLoadWaiter {
+    fn drop(&mut self) {
+        if self.0.foreground_waiters.fetch_sub(1,Ordering::AcqRel) == 1 {
+            self.0.foreground.store(false,Ordering::Release);
+            self.0.priority_changed.notify_waiters();
+        }
+    }
+}
+struct LoadCompletion(Arc<SharedLoad>);
+impl Drop for LoadCompletion {
+    fn drop(&mut self) {
+        let unfinished = self.0.result.borrow().is_none();
+        if unfinished {
+            self.0.result.send_replace(Some(Err(error("LOCAL_MODEL_LOAD_LOST", "本地模型准备任务意外退出，已有任务进度已保留。", 503))));
+        }
+    }
+}
+impl SharedLoad {
+    async fn wait(&self, mut cancellation: watch::Receiver<bool>) -> Result<(), ModelError> {
+        let mut result = self.result.subscribe();
+        loop {
+            if *cancellation.borrow() { return Err(ModelError::cancelled()); }
+            if let Some(result) = result.borrow_and_update().clone() { return result; }
+            tokio::select! {
+                changed = result.changed() => if changed.is_err() { return Err(error("LOCAL_MODEL_LOAD_LOST", "本地模型准备状态不可用。", 503)); },
+                _ = gateway::cancelled(&mut cancellation) => return Err(ModelError::cancelled()),
+            }
+        }
+    }
 }
 impl Default for Engine {
     fn default() -> Self { Self { gate:Mutex::new(()), process:Mutex::new(None),
         state:StateMutex::new(json!({"state":"stopped","activeRequests":0,"runtimeVersion":RELEASE,
             "modelIdentityVerified":false,"supportsTools":null,"toolCallingMode":"unknown","toolCapabilityState":"unknown"})),
-        monitor:StateMutex::new(None),closing:AtomicBool::new(false),suspended:AtomicBool::new(false) } }
+        monitor:StateMutex::new(None),closing:AtomicBool::new(false),suspended:AtomicBool::new(false),loading:StateMutex::new(None) } }
 }
 static ENGINES: OnceLock<StateMutex<HashMap<(PathBuf, String), Arc<Engine>>>> = OnceLock::new();
 static INSTALLS: OnceLock<Mutex<()>> = OnceLock::new();
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static STOPPING_ROOTS: OnceLock<StateMutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+fn shutting_down(root: &Path) -> bool {
+    SHUTTING_DOWN.load(Ordering::Acquire) || STOPPING_ROOTS.get().is_some_and(|roots| roots.lock().unwrap().contains_key(root))
+}
 
 fn error(code: &str, text: &str, status: u16) -> ModelError { ModelError::new(code, text, status) }
 fn io_error(source: std::io::Error) -> ModelError {
@@ -234,7 +280,11 @@ async fn install_runtime(root: &Path, asset: &'static Asset, owner: &Arc<Engine>
     }
     let directory = root.join("LocalRuntime/llama.cpp").join(RELEASE).join(asset.backend);
     if directory.join(".ready").is_file() { if let Some(path) = executable(&directory, 2) { return Ok(path); } }
-    let _install = INSTALLS.get_or_init(Default::default).lock().await;
+    let mut cancellation = token.clone();
+    let _install = tokio::select! {
+        guard = INSTALLS.get_or_init(Default::default).lock() => guard,
+        _ = gateway::cancelled(&mut cancellation) => return Err(ModelError::cancelled()),
+    };
     if directory.join(".ready").is_file() { if let Some(path) = executable(&directory, 2) { return Ok(path); } }
     cancelled(token, owner)?;
     tokio::fs::create_dir_all(&directory).await.map_err(io_error)?;
@@ -338,11 +388,32 @@ fn residency_plan(bytes: u64, requested: u64, host_available: u64, gpu_capacity:
     let gpu = total.min(gpu_capacity);
     (context, total.saturating_sub(gpu).saturating_add(host_buffers), gpu)
 }
-async fn admit(bytes: u64, gpu_bytes: u64, token: watch::Receiver<bool>) -> Result<ResourceLease, ModelError> {
+async fn admit(bytes: u64, gpu_bytes: u64, mut token: watch::Receiver<bool>, load: &SharedLoad) -> Result<ResourceLease, ModelError> {
     let service = crate::resources::gateway::global().ok_or_else(|| error("RESOURCE_RUNTIME_UNAVAILABLE", "本地模型资源服务尚未就绪。", 503))?;
-    service.acquire_waiting(json!({"taskId":format!("local-model-{}", uuid::Uuid::new_v4()),"workspaceId":"managed-local-models",
-        "kind":"foreground","workload":"compute","cpuThreads":0,"memoryBytes":bytes,"gpuMemoryBytes":gpu_bytes,"waitMs":30000,"ttlMs":30000}), token)
-        .await.map_err(map_error)
+    loop {
+        let changed = load.priority_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let foreground = load.foreground.load(Ordering::Acquire);
+        let (cancel, receiver) = watch::channel(false);
+        let pending = service.acquire_waiting(json!({"taskId":format!("local-model-{}", uuid::Uuid::new_v4()),"workspaceId":"managed-local-models",
+            "kind":if foreground {"foreground"}else{"background"},"workload":"compute","cpuThreads":0,"memoryBytes":bytes,"gpuMemoryBytes":gpu_bytes,"waitMs":30000,"ttlMs":30000}), receiver);
+        tokio::pin!(pending);
+        tokio::select! {
+            result = &mut pending => return result.map_err(map_error),
+            _ = gateway::cancelled(&mut token) => {
+                cancel.send_replace(true);
+                if let Ok(lease) = pending.await { lease.release().await; }
+                return Err(ModelError::cancelled());
+            },
+            _ = &mut changed => {
+                // A priority change retires only this queued admission, preserving the same owned load and its other waiters.
+                // 优先级变化只撤销本次准入排队，保留同一装载及其他观察者，不杀正在装载的进程。
+                cancel.send_replace(true);
+                if let Ok(lease) = pending.await { lease.release().await; }
+            },
+        }
+    }
 }
 fn local_client() -> Result<reqwest::Client, ModelError> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -529,7 +600,7 @@ pub async fn refresh_status(root: &Path, connection: &Value, model: &str) -> Res
 
 pub fn preparation_status(observed: &Value) -> Value {
     let ready = observed["state"] == "ready" && observed["modelIdentityVerified"] == true;
-    let mut prepared = json!({"state":if ready {"ready"}else if observed["state"]=="sleeping" {"sleeping"}else{"unloaded"},
+    let mut prepared = json!({"state":if ready {"ready"}else if observed["state"]=="sleeping" {"sleeping"}else if matches!(observed["state"].as_str(),Some("loading"|"preparing-runtime"|"waiting-resource")){"loading"}else{"unloaded"},
         "connectionReady":ready,"modelReady":ready,"available":true,
         "preparationKind":"managed-local-model","inferenceVerified":false,"code":observed["code"]});
     for field in ["modelIdentityVerified", "loadedModelPath", "processId", "baseUrl", "supportsTools", "toolCallingMode", "toolCapabilityState"] {
@@ -559,12 +630,59 @@ fn download_client() -> Result<reqwest::Client, ModelError> {
 }
 
 pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::Receiver<bool>) -> Result<(), ModelError> {
+    ensure_with_priority(root, connection, model, token, true).await
+}
+
+/// Model loading belongs to the engine lifecycle, not a settings observer's 60/90-second wait.
+/// 装载归推理引擎生命周期；设置观察者的 60/90 秒等待或单个会话取消不能销毁其他等待者所需装载。
+pub async fn ensure_with_priority(root: &Path, connection: &Value, model: &str, token: watch::Receiver<bool>, foreground: bool) -> Result<(), ModelError> {
     if !is_managed(connection) { return Ok(()); }
     let id = identity(connection, model)?.to_owned();
     let owner = engine(root, &id);
-    if SHUTTING_DOWN.load(Ordering::Acquire) { return Err(ModelError::cancelled()); }
+    if shutting_down(root) { return Err(ModelError::cancelled()); }
+    if owner.closing.load(Ordering::Acquire) && owner.state.lock().unwrap()["state"] == "stopped" {
+        owner.closing.store(false, Ordering::Release);
+    }
+    cancelled(&token, &owner)?;
+    let endpoint = connection["baseUrl"].as_str().unwrap_or("").trim_end_matches('/').to_owned();
+    let load = {
+        let mut loading = owner.loading.lock().unwrap();
+        if let Some(load) = loading.as_ref().filter(|load| load.result.borrow().is_none()) {
+            if load.endpoint != endpoint { return Err(error("LOCAL_MODEL_CONFIG_CHANGED","本地模型正在按另一连接配置准备，请重新选择当前配置。",409)); }
+            load.clone()
+        } else {
+            let (result, _) = watch::channel(None);
+            let (cancellation, receiver) = watch::channel(false);
+            let load = Arc::new(SharedLoad { result, cancellation, task:StateMutex::new(None), foreground:AtomicBool::new(false), foreground_waiters:AtomicUsize::new(0), priority_changed:Notify::new(), endpoint });
+            let task_load = load.clone();
+            let root = root.to_owned();
+            let connection = connection.clone();
+            let model = model.to_owned();
+            let task = tokio::spawn(async move {
+                let _completion = LoadCompletion(task_load.clone());
+                let result = ensure_owned(&root, &connection, &model, receiver, &task_load).await;
+                task_load.result.send_replace(Some(result));
+            });
+            *load.task.lock().unwrap() = Some(task);
+            *loading = Some(load.clone());
+            load
+        }
+    };
+    let _priority = if foreground {
+        if load.foreground_waiters.fetch_add(1,Ordering::AcqRel) == 0 {
+            load.foreground.store(true,Ordering::Release);
+            load.priority_changed.notify_waiters();
+        }
+        Some(ForegroundLoadWaiter(load.clone()))
+    } else { None };
+    load.wait(token).await
+}
+
+async fn ensure_owned(root: &Path, connection: &Value, model: &str, token: watch::Receiver<bool>, load: &SharedLoad) -> Result<(), ModelError> {
+    let id = identity(connection, model)?.to_owned();
+    let owner = engine(root, &id);
     let _singleflight = owner.gate.lock().await;
-    if SHUTTING_DOWN.load(Ordering::Acquire) { return Err(ModelError::cancelled()); }
+    if shutting_down(root) { return Err(ModelError::cancelled()); }
     if owner.suspended.load(Ordering::Acquire) {
         return Err(error("LOCAL_MODEL_BUSY", "本地模型配置正在更新，请稍后继续。", 409));
     }
@@ -591,7 +709,8 @@ pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::
             if running.lease.is_none() {
                 let requested = owner.state.lock().unwrap()["memoryBytes"].as_u64().unwrap_or(512 * MIB);
                 let gpu = owner.state.lock().unwrap()["gpuMemoryBytes"].as_u64().unwrap_or(0);
-                running.lease = Some(admit(requested, gpu, token.clone()).await?);
+                patch(&owner, json!({"state":"waiting-resource"}));
+                running.lease = Some(admit(requested, gpu, token.clone(), load).await?);
             }
             if needs_wake {
                 patch(&owner, json!({"state":"loading"}));
@@ -618,7 +737,8 @@ pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::
     let asset = if vulkan { &VULKAN } else { &CPU };
     let path = install_runtime(root, asset, &owner, &token).await?;
     cancelled(&token, &owner)?;
-    let lease = admit(memory, gpu_memory, token.clone()).await?;
+    patch(&owner, json!({"state":"waiting-resource"}));
+    let lease = admit(memory, gpu_memory, token.clone(), load).await?;
     let mut command = Command::new(&path);
     command.current_dir(path.parent().unwrap()).env_clear();
     for key in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
@@ -651,14 +771,19 @@ pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::
             patch(&diagnostic_owner, json!({"runtimeDiagnostic":String::from_utf8_lossy(&tail)}));
         }
     });
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut progress_at = tokio::time::Instant::now();
+    let mut last_diagnostic = Value::Null;
     let loaded = loop {
         if let Err(error) = cancelled(&token, &owner) { break Err(error); }
         if child.try_wait().map_err(io_error)?.is_some() { break Err(error("LOCAL_MODEL_START_FAILED", "本地推理服务退出，请检查模型与可用内存。", 503)); }
         if response(&base, "/health").await.is_ok() {
             break observe_model(&owner, &base, child.id().unwrap_or(0), &files).await;
         }
-        if tokio::time::Instant::now() >= deadline { break Err(error("LOCAL_MODEL_LOAD_TIMEOUT", "本地模型装载尚未完成，请重试或调整模型大小。", 504)); }
+        let diagnostic = owner.state.lock().unwrap()["runtimeDiagnostic"].clone();
+        if diagnostic != last_diagnostic { last_diagnostic = diagnostic; progress_at = tokio::time::Instant::now(); }
+        // Only a genuinely stalled owned startup expires; continuing load diagnostics extend its lifetime.
+        // 只有真正无装载进展的自有启动才到期；持续产生装载诊断时继续等待，不用观察期限反复冷装。
+        if progress_at.elapsed() >= Duration::from_secs(900) { break Err(error("LOCAL_MODEL_LOAD_STALLED", "本地模型长时间没有装载进展，请检查运行时诊断。", 504)); }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     if let Err(mut error) = loaded {
@@ -692,7 +817,6 @@ pub async fn ensure(root: &Path, connection: &Value, model: &str, token: watch::
 
 pub async fn stop(root: &Path, id: &str) -> Result<(), ModelError> {
     let owner = engine(root, id);
-    let _gate = owner.gate.try_lock().map_err(|_| error("LOCAL_MODEL_BUSY", "本地模型正在准备，请稍后停止或切换。", 409))?;
     {
         let mut state = owner.state.lock().unwrap();
         if state["activeRequests"].as_u64().unwrap_or(0) > 0 {
@@ -701,6 +825,8 @@ pub async fn stop(root: &Path, id: &str) -> Result<(), ModelError> {
         state["state"] = json!("stopping");
         owner.closing.store(true, Ordering::Release);
     }
+    if let Some(load) = owner.loading.lock().unwrap().as_ref() { load.cancellation.send_replace(true); }
+    let _gate = owner.gate.lock().await;
     terminate(&owner).await
 }
 pub struct MutationGuard(Arc<Engine>);
@@ -738,20 +864,88 @@ pub async fn shutdown() {
     shutdown_matching(None).await;
 }
 async fn shutdown_matching(root: Option<&Path>) {
-    SHUTTING_DOWN.store(true, Ordering::Release);
+    // A storage runtime retires only its own model root; unrelated isolated runtimes must remain available.
+    // 存储运行时只停止自己的模型根目录，不能取消其他隔离运行时的模型等待和装载。
+    if let Some(root) = root { *STOPPING_ROOTS.get_or_init(Default::default).lock().unwrap().entry(root.to_owned()).or_default() += 1; }
+    else { SHUTTING_DOWN.store(true, Ordering::Release); }
     let owners = ENGINES.get().and_then(|engines| engines.lock().ok())
         .map(|engines| engines.iter().filter(|((home, _), _)| root.is_none_or(|root| home == root))
             .map(|(_, engine)| engine.clone()).collect::<Vec<_>>()).unwrap_or_default();
-    for owner in &owners { owner.closing.store(true, Ordering::Release); }
+    for owner in &owners {
+        owner.closing.store(true, Ordering::Release);
+        if let Some(load) = owner.loading.lock().unwrap().as_ref() { load.cancellation.send_replace(true); }
+    }
     for owner in owners { let _gate = owner.gate.lock().await; let _ = terminate(&owner).await; }
     // Storage migration creates a new runtime in the same process after the old lifecycle has drained.
     // 存储迁移排空旧生命周期后会在同进程创建新运行时；停机围栏不能永久阻止新根目录启动。
-    SHUTTING_DOWN.store(false, Ordering::Release);
+    if let Some(root) = root {
+        let mut roots = STOPPING_ROOTS.get().unwrap().lock().unwrap();
+        if let Some(count) = roots.get_mut(root) { *count = count.saturating_sub(1); }
+        roots.retain(|_, count| *count > 0);
+    } else { SHUTTING_DOWN.store(false, Ordering::Release); }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_load() -> Arc<SharedLoad> {
+        let (result, _) = watch::channel(None);
+        let (cancellation, _) = watch::channel(false);
+        Arc::new(SharedLoad { result, cancellation, task:StateMutex::new(None), foreground:AtomicBool::new(false), foreground_waiters:AtomicUsize::new(0), priority_changed:Notify::new(), endpoint:"http://127.0.0.1:19384/v1".into() })
+    }
+
+    #[tokio::test]
+    async fn observer_timeout_and_cancel_preserve_the_same_shared_load_for_other_waiters() {
+        let root = std::env::temp_dir().join(format!("kynxa-shared-load-{}",uuid::Uuid::new_v4()));
+        let id = "shared-load-fixture";
+        let owner = engine(&root, id);
+        let load = pending_load();
+        *owner.loading.lock().unwrap() = Some(load.clone());
+        patch(&owner,json!({"state":"loading"}));
+        let connection = json!({"providerId":format!("kynxa-local-{id}"),"managedLocal":true,"baseUrl":"http://127.0.0.1:19384/v1"});
+        let (_observer, token) = watch::channel(false);
+        assert!(tokio::time::timeout(Duration::from_millis(10),ensure_with_priority(&root,&connection,id,token,false)).await.is_err());
+        assert!(!*load.cancellation.borrow(),"A settings observation deadline must not cancel model loading.");
+        let (cancel, token) = watch::channel(false);
+        cancel.send_replace(true);
+        assert_eq!(load.wait(token).await.unwrap_err().code,"ABORT_ERR");
+        assert!(!*load.cancellation.borrow());
+        let (_request, token) = watch::channel(false);
+        let waiting_root = root.clone();
+        let waiting_connection = connection.clone();
+        let request = tokio::spawn(async move {ensure_with_priority(&waiting_root,&waiting_connection,id,token,true).await});
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !load.foreground.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(Arc::ptr_eq(owner.loading.lock().unwrap().as_ref().unwrap(),&load));
+        load.result.send_replace(Some(Ok(())));
+        request.await.unwrap().unwrap();
+        assert_eq!(load.foreground_waiters.load(Ordering::Acquire),0);
+        assert!(!load.foreground.load(Ordering::Acquire),"A completed/cancelled foreground observer must not leave a background load permanently promoted.");
+        ENGINES.get().unwrap().lock().unwrap().remove(&(root,id.into()));
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_cancels_the_shared_loader_and_waits_for_owned_cleanup() {
+        let root = std::env::temp_dir().join(format!("kynxa-stop-load-{}",uuid::Uuid::new_v4()));
+        let id = "stop-load-fixture";
+        let owner = engine(&root,id);
+        let load = pending_load();
+        *owner.loading.lock().unwrap() = Some(load.clone());
+        patch(&owner,json!({"state":"loading"}));
+        let gate = owner.gate.lock().await;
+        let stopped_root = root.clone();
+        let stopping = tokio::spawn(async move {stop(&stopped_root,id).await});
+        tokio::time::timeout(Duration::from_secs(1),async {
+            while !*load.cancellation.borrow() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert!(!stopping.is_finished(),"Stop must wait for the owned loading phase to release its lifecycle gate.");
+        drop(gate);
+        stopping.await.unwrap().unwrap();
+        assert_eq!(owner.state.lock().unwrap()["state"],"stopped");
+        ENGINES.get().unwrap().lock().unwrap().remove(&(root,id.into()));
+    }
 
     #[tokio::test]
     async fn exact_token_preflight_sends_complete_request_without_inference() {

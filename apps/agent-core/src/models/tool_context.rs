@@ -71,6 +71,29 @@ pub(crate) fn source_excerpt(content: &Value, maximum: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Keep bounded machine recovery state when verbose redirect diagnostics stay only in the archive.
+/// 冗长跳转诊断仅留在归档；压缩上下文仍保留有界的机器恢复状态。
+fn compact_failure_details(value: &Value) -> Value {
+    let mut details = serde_json::Map::new();
+    for field in ["failureOrigin", "httpStatus", "upstreamStatus", "rpcCode", "providerCode", "retryable"] {
+        if let Some(value) = value.get(field).filter(|value| !value.is_null() && value.to_string().len() <= 128) {
+            details.insert(field.into(), value.clone());
+        }
+    }
+    if let Some(recovery) = value.get("recovery").filter(|value| value.is_object()) {
+        let mut projected = serde_json::Map::new();
+        for field in ["action", "tool", "retrySameUrl"] {
+            if let Some(value) = recovery.get(field).filter(|value| !value.is_null() && value.to_string().len() <= 256) {
+                projected.insert(field.into(), value.clone());
+            }
+        }
+        if !projected.is_empty() {
+            details.insert("recovery".into(), Value::Object(projected));
+        }
+    }
+    Value::Object(details)
+}
+
 /// Extract actual receipt locators; large bodies, media and reasoning never become source metadata.
 /// 提取真实回执定位字段；大正文、媒体和推理不能混入来源元数据，也不能依据摘要猜测版本。
 pub(crate) fn source_metadata(content: &Value) -> Value {
@@ -111,6 +134,14 @@ pub(crate) fn source_metadata(content: &Value) -> Value {
         "sourceVersion",
         "loadableNames",
         "omittedMetadataFields",
+        "evidenceUsable",
+        "needsHumanVerification",
+        "requiresRendering",
+        "pagination",
+        "recovery",
+        "code",
+        "retryAfterMs",
+        "details",
     ] {
         let Some(value) = source.get(field).filter(|value| !value.is_null()) else {
             continue;
@@ -118,6 +149,12 @@ pub(crate) fn source_metadata(content: &Value) -> Value {
         if value.to_string().len() <= 2048 {
             metadata.insert(field.into(), value.clone());
         } else {
+            if field == "details" {
+                let bounded = compact_failure_details(value);
+                if bounded.as_object().is_some_and(|value| !value.is_empty()) {
+                    metadata.insert(field.into(), bounded);
+                }
+            }
             omitted.push(field);
         }
     }
@@ -440,6 +477,70 @@ mod checkpoint_evidence_tests {
             source_metadata(&json!("{\"path\":\"/work/actual.md\"}"))["path"],
             "/work/actual.md"
         );
+    }
+
+    #[test]
+    fn failure_metadata_keeps_machine_recovery_when_redirect_details_exceed_the_bound() {
+        let metadata = source_metadata(&json!({"code":"WEB_HTTP_FAILED","retryAfterMs":1500,
+            "details":{"failureOrigin":"provider-http","httpStatus":503,"upstreamStatus":503,"rpcCode":-32000,
+                "providerCode":"temporarily_unavailable","retryable":true,"redirects":["x".repeat(4096)],
+                "recovery":{"action":"use-another-enabled-read-path","tool":"web.search","retrySameUrl":true,
+                    "notice":"x".repeat(4096)}}}));
+        assert_eq!(metadata["code"], "WEB_HTTP_FAILED");
+        assert_eq!(metadata["retryAfterMs"], 1500);
+        assert_eq!(metadata["details"]["httpStatus"], 503);
+        assert_eq!(metadata["details"]["providerCode"], "temporarily_unavailable");
+        assert_eq!(metadata["details"]["recovery"]["tool"], "web.search");
+        assert_eq!(metadata["details"]["recovery"]["retrySameUrl"], true);
+        assert!(metadata["details"].get("redirects").is_none());
+        assert!(metadata["details"].to_string().len() <= 2048);
+        assert_eq!(metadata["omittedMetadataFields"], json!(["details"]));
+    }
+
+    #[test]
+    fn repeated_checkpoints_keep_tool_failures_and_unusable_webpages_as_controls() {
+        let error = json!({"callId":"failed-read","name":"web.fetch","status":"error","executed":false,
+            "arguments":{"url":"https://example.org/old"},"resultRef":archive(),"sourceMetadata":{
+                "code":"WEB_HTTP_FAILED","retryAfterMs":1500,
+                "details":{"upstreamStatus":404,"recovery":{"action":"locate-current-source","tool":"web.search","retrySameUrl":false}}}});
+        let challenge = json!({"callId":"verification-read","name":"web.fetch","status":"completed","executed":true,
+            "arguments":{"url":"https://example.org/challenge"},"resultRef":archive(),
+            "originalExcerpt":"CHALLENGE_BODY_IS_NOT_A_FACT","sourceMetadata":{
+                "url":"https://example.org/challenge","evidenceUsable":false,"needsHumanVerification":true,
+                "requiresRendering":false,"pagination":{"restarted":true},
+                "recovery":{"action":"user-verification-or-another-enabled-source","retrySameUrl":false}}});
+        let mut evidence = vec![original_evidence(&error, &HashSet::new()).unwrap(),
+            original_evidence(&challenge, &HashSet::new()).unwrap()];
+        assert_eq!(evidence[0]["kind"], "tool-error");
+        assert_eq!(evidence[1]["kind"], "source-unavailable");
+        assert!(evidence.iter().all(|record| record.get("excerpt").is_none()));
+        let unknown_effect = compact_evidence(&json!({"kind":"effect","status":"unknown",
+            "tool":"process.run","resultRef":archive(),"source":{"evidenceUsable":false}}));
+        assert_eq!(unknown_effect["kind"], "effect");
+        assert_eq!(unknown_effect["status"], "unknown");
+        let mut state = ToolContextState::default();
+        for _ in 0..2 {
+            let plan = json!({"public":[],"receipts":[{"status":"error"},{"status":"completed"}],
+                "checkpointEvidence":evidence,"checkpointControlRefs":[],
+                "checkpointCapabilities":{"loadableNames":[]},"omittedEvidence":0});
+            let checkpoint = state.apply("models.lifecycle.toolContext.checkpointFinalize",
+                &json!({"plan":plan,"resultRef":archive(),"latestPublicText":"","budgetTokens":1024})).unwrap();
+            let note: Value = serde_json::from_str(string(&checkpoint["message"]["content"])).unwrap();
+            let failed = array(&note["evidence"]).iter().find(|record| record["kind"] == "tool-error").unwrap();
+            assert_eq!(failed["status"], "error");
+            assert_eq!(failed["executed"], false);
+            assert_eq!(failed["code"], "WEB_HTTP_FAILED");
+            assert_eq!(failed["retryAfterMs"], 1500);
+            assert_eq!(failed["details"]["recovery"]["tool"], "web.search");
+            let blocked = array(&note["evidence"]).iter().find(|record| record["kind"] == "source-unavailable").unwrap();
+            assert_eq!(blocked["evidenceUsable"], false);
+            assert_eq!(blocked["needsHumanVerification"], true);
+            assert_eq!(blocked["pagination"]["restarted"], true);
+            assert_eq!(blocked["recovery"]["retrySameUrl"], false);
+            assert!(!note.to_string().contains("CHALLENGE_BODY_IS_NOT_A_FACT"));
+            assert!(checkpoint["metrics"]["checkpointProjectedTokens"].as_u64().unwrap() <= 1024);
+            evidence = array(&checkpoint["source"]["checkpointEvidence"]).to_vec();
+        }
     }
 
     #[test]
@@ -794,7 +895,8 @@ fn capability_result(name: &str) -> bool {
 fn evidence_priority(evidence: &Value) -> u8 {
     if evidence["kind"] == "effect" && evidence["status"] != "completed" {
         0
-    } else if evidence["kind"] == "original-source" || evidence["kind"] == "working-summary-read" {
+    } else if evidence["kind"] == "original-source" || evidence["kind"] == "working-summary-read"
+        || evidence["kind"] == "tool-error" || evidence["kind"] == "source-unavailable" {
         1
     } else if evidence["kind"] == "document-work-read" {
         1
@@ -870,10 +972,10 @@ pub(crate) fn evidence_identity(evidence: &Value) -> String {
 fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<Value> {
     let name = string(&source["name"]);
     let status = string(&source["status"]);
-    if capability_result(name)
-        || source["executed"] == false
-        || !matches!(status, "completed" | "unknown" | "cancelled")
-        || !reference(&source["resultRef"])
+    if !reference(&source["resultRef"])
+        || (status != "error" && (capability_result(name)
+            || source["executed"] == false
+            || !matches!(status, "completed" | "unknown" | "cancelled")))
     {
         return None;
     }
@@ -882,6 +984,14 @@ fn original_evidence(source: &Value, control_refs: &HashSet<String>) -> Option<V
     let mut evidence = json!({"callId":source["callId"], "tool":name, "status":status,
         "resultRef":source["resultRef"], "arguments":arguments, "source":metadata,
         "excerpt":output_excerpt(string(&source["originalExcerpt"]),512), "excerptComplete":false, "instructionAuthority":false});
+    if status == "error" || status == "completed" && evidence["source"]["evidenceUsable"] == false {
+        // A settled failure or verification page is control evidence, never factual source text.
+        // 已结算失败或验证页面属于控制证据，不能将其正文当成事实来源。
+        evidence["kind"] = json!(if status == "error" { "tool-error" } else { "source-unavailable" });
+        evidence["executed"] = source["executed"].clone();
+        evidence.as_object_mut().unwrap().remove("excerpt");
+        return Some(evidence);
+    }
     if name == "task.document" {
         // Saved findings are derived work; they cannot become another raw document to summarize.
         // 已存成果属于派生工作；回读不能增加原始文档或触发对成果再次摘要。
@@ -992,6 +1102,14 @@ fn compact_evidence(record: &Value) -> Value {
         "lineRange",
         "sourceIdentity",
         "sourceVersion",
+        "evidenceUsable",
+        "needsHumanVerification",
+        "requiresRendering",
+        "pagination",
+        "recovery",
+        "code",
+        "retryAfterMs",
+        "details",
     ] {
         let value = source
             .get(field)
@@ -1004,7 +1122,15 @@ fn compact_evidence(record: &Value) -> Value {
             output[field] = value.clone();
         }
     }
-    if record["kind"] == "effect" {
+    if record["kind"] == "tool-error" || record["kind"] == "source-unavailable"
+        || (record["kind"] != "effect" && source["evidenceUsable"] == false) {
+        output["kind"] = json!(if record["kind"] == "tool-error" { "tool-error" } else { "source-unavailable" });
+        output["status"] = record["status"].clone();
+        output["instructionAuthority"] = json!(false);
+        if let Some(executed) = record.get("executed").filter(|value| value.is_boolean()) {
+            output["executed"] = executed.clone();
+        }
+    } else if record["kind"] == "effect" {
         output["kind"] = json!("effect");
         output["status"] = record["status"].clone();
     } else if record["kind"] == "coverage" {

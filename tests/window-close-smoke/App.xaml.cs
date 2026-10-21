@@ -249,12 +249,20 @@ public partial class App : Application
     {
         try
         {
-            await CheckSlowSaveAsync();
-            await CheckFailedSaveAsync();
-            await CheckPendingDialogAsync();
-            await CheckMigrationGuardAsync();
-            await CheckSaveDeadlineAsync();
-            await CheckMigrationDuringCloseAsync();
+            if (Environment.GetEnvironmentVariable("KYNXA_WINDOW_TRAY_ONLY") == "1")
+            {
+                await CheckTrayLifecycleAsync();
+                await CheckTrayExitRecoveryAsync();
+            }
+            else
+            {
+                await CheckSlowSaveAsync();
+                await CheckFailedSaveAsync();
+                await CheckPendingDialogAsync();
+                await CheckMigrationGuardAsync();
+                await CheckSaveDeadlineAsync();
+                await CheckMigrationDuringCloseAsync();
+            }
             Check(_unhandled is null, "all linked production close flows finish without unhandled native UI errors");
             File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native window-close UI checks.");
         }

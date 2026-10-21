@@ -100,6 +100,11 @@ Check(transport.Path == $"/api/tasks/recoverable?conversationId={conversation:D}
 transport.Reply = _ => Reply(new TaskListResponse([hiddenRecovery], false, null));
 await api.RecoverableAsync(conversation, project, nextId);
 Check(transport.Path!.EndsWith($"&afterTaskId={nextId:D}"), "Recovery choices can load every page without truncating to the ambiguous shortcut's two roots.");
+var partial = task with { State = "partial", Usage = task.Usage with { ActiveDurationMs = 12_345 }, StopReason = "remaining-acceptance" };
+transport.Reply = _ => Reply(new TaskListResponse([partial], false, null));
+Check((await api.RecoverableAsync(conversation, project)).Tasks[0] is { State: "partial", Usage.ActiveDurationMs: 12_345 }
+    && TaskStates.CanResume("partial") && !TaskStates.CanResume("completed") && !TaskStates.CanResume("cancelled"),
+    "Partial progress remains explicitly resumable with effective wall time; completed and cancelled work remains ended.");
 foreach (var invalidRoot in new[] { sameWorkChat, task with { State = "completed" }, task with { ParentTaskId = nextId } })
 {
     transport.Reply = _ => Reply(new TaskListResponse([invalidRoot], false, null));
@@ -130,6 +135,83 @@ var notYetResumed = await api.ControlAsync(conversation, nextId, waitingRecovery
 Check(notYetResumed.Task.TaskId == nextId && notYetResumed.Task.State == "waiting-verification" &&
     notYetResumed.Recovery!.Value.GetProperty("pending")[0].GetProperty("message").GetString() == "上次请求结果仍待核实。",
     "An explicit root selection retains its identity and unresolved recovery evidence without reporting a successful resume.");
+// Confirming an unknown outcome names the formal operation IDs; the gateway keeps them unknown.
+// 确认未知结果须列出正式操作 ID；网关仍将其记为未知，不改记成功。
+var unknownOperation = new TaskOperation(nextId, Guid.NewGuid(), new("round-1-host-run", "host-run", "terminal.host.run", "irreversible"),
+    "unknown", null, null, 300);
+var acknowledgedOperation = unknownOperation with
+{
+    VerificationReference = JsonSerializer.SerializeToElement(new { kind = TaskOperationStates.UnknownAcknowledgedKind, outcome = "unknown" })
+};
+Check(TaskOperationStates.NeedsUnknownAcknowledgement(unknownOperation)
+    && !TaskOperationStates.NeedsUnknownAcknowledgement(acknowledgedOperation)
+    && TaskOperationStates.IsUnknownAcknowledged(acknowledgedOperation)
+    && !TaskOperationStates.NeedsUnknownAcknowledgement(unknownOperation with { Intent = unknownOperation.Intent with { Effect = "observation" } }),
+    "Only unacknowledged non-observation unknown outcomes need user confirmation.");
+transport.Reply = _ => Reply(new TaskControlResponse(waitingRecovery with { State = "queued", Version = waitingRecovery.Version + 2 }, [nextId],
+    AcknowledgedOperationIds: ["round-1-host-run"]));
+var acknowledgedResume = await api.AcknowledgeUnknownAsync(conversation, nextId, waitingRecovery.Version, ["round-1-host-run"], project);
+using (var body = JsonDocument.Parse(transport.Body!))
+    Check(transport.Path == $"/api/tasks/{nextId:D}/control" && body.RootElement.GetProperty("action").GetString() == "acknowledge-unknown"
+        && body.RootElement.GetProperty("operationIds")[0].GetString() == "round-1-host-run"
+        && body.RootElement.GetProperty("expectedVersion").GetUInt64() == waitingRecovery.Version,
+        "Unknown-outcome confirmation submits the explicit operation IDs and the observed task version.");
+Check(acknowledgedResume.AcknowledgedOperationIds![0] == "round-1-host-run" && acknowledgedResume.Task.State == "queued",
+    "The confirmation response reports the accepted operations and the resumed root.");
+int beforeEmptyConfirmation = transport.Requests;
+try { await api.AcknowledgeUnknownAsync(conversation, nextId, waitingRecovery.Version, [], project); throw new Exception("Empty confirmation was accepted."); }
+catch (ArgumentException) { checks++; }
+Check(transport.Requests == beforeEmptyConfirmation, "An empty unknown-outcome confirmation never reaches the gateway.");
+
+// Local call IDs may repeat in different children; confirmations preserve the complete owner identity.
+// 不同子任务可复用局部调用ID；确认必须保留完整归属身份，未知成本不能被客户端推算成成功或零用量。
+var sibling = child with { TaskId = Guid.NewGuid(), ParentTaskId = nextId };
+var descendantOperation = unknownOperation with { TaskId = child.TaskId };
+var siblingOperation = unknownOperation with { TaskId = sibling.TaskId };
+var unknownCost = new TaskModelReservation(child.TaskId, "child-model-unknown", "unknown");
+transport.Reply = _ => Reply(new TaskDetailResponse(waitingRecovery, [child with { ParentTaskId = nextId }, sibling], [], null, [],
+    [descendantOperation, siblingOperation], [unknownCost]));
+var recoveryDetail = await api.GetAsync(conversation, nextId, project);
+Check(recoveryDetail.RecoveryOperations!.Length == 2 && recoveryDetail.RecoveryOperations.Select(item => item.TaskId).Distinct().Count() == 2
+    && recoveryDetail.RecoveryModelReservations!.Single() is { State: "unknown", VerificationReference: null },
+    "Recovery detail retains sibling operation identities and unknown model costs without inventing verification.");
+var preservedAttempt = Guid.NewGuid();
+transport.Reply = _ => Reply(new TaskControlResponse(waitingRecovery with { CurrentAttemptId = preservedAttempt, Version = waitingRecovery.Version + 1 }, [nextId]));
+var scoped = await api.AcknowledgeUnknownScopedAsync(conversation, nextId, waitingRecovery.Version,
+    [new(child.TaskId, "round-1-host-run"), new(sibling.TaskId, "round-1-host-run")], project);
+using (var body = JsonDocument.Parse(transport.Body!))
+{
+    var operations = body.RootElement.GetProperty("operations");
+    Check(transport.Path == $"/api/tasks/{nextId:D}/control" && operations.GetArrayLength() == 2
+        && operations[0].GetProperty("taskId").GetGuid() == child.TaskId && operations[1].GetProperty("taskId").GetGuid() == sibling.TaskId
+        && operations[0].GetProperty("operationId").GetString() == operations[1].GetProperty("operationId").GetString()
+        && body.RootElement.GetProperty("action").GetString() == "acknowledge-unknown",
+        "Scoped confirmation distinguishes identical local operation IDs in two descendants.");
+}
+Check(scoped.Task.State == "waiting-verification" && scoped.Task.CurrentAttemptId == preservedAttempt,
+    "Accepting one unknown category keeps the original live attempt while other verification is pending.");
+var acceptedCost = await api.AcknowledgeUnknownCostsAsync(conversation, nextId, waitingRecovery.Version,
+    [new(child.TaskId, "child-model-unknown")], project);
+using (var body = JsonDocument.Parse(transport.Body!))
+    Check(body.RootElement.GetProperty("action").GetString() == "acknowledge-unknown-costs"
+        && body.RootElement.GetProperty("expectedVersion").GetUInt64() == waitingRecovery.Version
+        && body.RootElement.GetProperty("modelReservationIds")[0].GetProperty("taskId").GetGuid() == child.TaskId
+        && body.RootElement.GetProperty("modelReservationIds")[0].GetProperty("reservationId").GetString() == "child-model-unknown",
+        "Unknown model cost confirmation carries the current root version and reservation owner's exact identity.");
+Check(acceptedCost.Task.Usage == waitingRecovery.Usage, "Acknowledging unknown costs does not manufacture billing usage.");
+int beforeInvalidIdentity = transport.Requests;
+foreach (var invalidConfirmation in new Func<Task>[] {
+    () => api.AcknowledgeUnknownScopedAsync(conversation, nextId, waitingRecovery.Version, [new(Guid.Empty, "op")], project),
+    () => api.AcknowledgeUnknownCostsAsync(conversation, nextId, waitingRecovery.Version, [new(child.TaskId, " ")], project),
+    () => api.AcknowledgeUnknownCostsAsync(conversation, nextId, waitingRecovery.Version, [], project) })
+{
+    try { await invalidConfirmation(); throw new Exception("Invalid owner identity reached the control API."); }
+    catch (ArgumentException) { checks++; }
+}
+Check(transport.Requests == beforeInvalidIdentity, "Invalid operation/cost identities never dispatch controls.");
+transport.Reply = _ => Reply(new TaskControlResponse(partial with { State = "queued", Version = partial.Version + 1 }, [taskId]));
+Check((await api.ControlAsync(conversation, taskId, partial.Version, "resume", project)).Task.Usage.ActiveDurationMs == 12_345,
+    "Partial resume preserves the same task's accrued effective time and progress.");
 var steeringMessage = Guid.NewGuid();
 transport.Reply = _ => Reply(new TaskControlResponse(task with { State = "queued", Version = 5 }, [taskId], true));
 var steered = await api.SteerAsync(conversation, taskId, 4, steeringMessage, "保留已有结果，只补缺少的实验", "update", project);

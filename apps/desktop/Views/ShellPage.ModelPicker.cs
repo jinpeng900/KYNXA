@@ -167,8 +167,6 @@ public sealed partial class ShellPage
         };
         var models = PickerMenu.CreateList("ModelPickerList", UiText.Get("模型列表"));
         UiLocalization.Bind(models, AutomationProperties.NameProperty, "模型列表");
-        // Auxiliary labels inherit native state foregrounds so selected high-contrast rows remain readable.
-        // 辅助文字继承原生状态前景色，避免高对比度选中行仍使用普通行的文字颜色。
         models.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
                 <Grid ColumnSpacing="8">
@@ -178,10 +176,10 @@ public sealed partial class ShellPage
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="3" Padding="0,4">
                         <TextBlock Text="{Binding Name}" ToolTipService.ToolTip="{Binding Name}" FontSize="13" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding ProviderName}" ToolTipService.ToolTip="{Binding ProviderName}" FontSize="11" Opacity="0.8" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding ModelId}" ToolTipService.ToolTip="{Binding ModelId}" Visibility="{Binding ModelIdVisibility}" FontSize="11" Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding ProviderName}" ToolTipService.ToolTip="{Binding ProviderName}" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding ModelId}" ToolTipService.ToolTip="{Binding ModelId}" Visibility="{Binding ModelIdVisibility}" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
-                    <FontIcon Grid.Column="1" Glyph="&#xE73E;" FontSize="12" Margin="0,7,0,0" VerticalAlignment="Top" IsHitTestVisible="False" Visibility="{Binding CurrentVisibility}" />
+                    <FontIcon Grid.Column="1" Glyph="&#xE73E;" FontSize="12" Margin="0,7,0,0" VerticalAlignment="Top" IsHitTestVisible="False" Visibility="{Binding CurrentVisibility}" Foreground="{StaticResource KynxaSecondaryTextBrush}" />
                 </Grid>
             </DataTemplate>
             """);
@@ -261,8 +259,7 @@ public sealed partial class ShellPage
         }
         var search = new TextBox
         {
-            FontSize = 12, Margin = new Thickness(6, 4, 6, 8), MinHeight = 34,
-            Style = (Style)Application.Current.Resources["KynxaPopupSearchBoxStyle"]
+            FontSize = 12, Margin = new Thickness(6, 4, 6, 8), MinHeight = 34
         };
         AutomationProperties.SetAutomationId(search, "ModelPickerSearchBox");
         UiLocalization.Bind(search, TextBox.PlaceholderTextProperty, "搜索模型或连接");

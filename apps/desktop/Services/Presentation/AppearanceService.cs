@@ -217,38 +217,9 @@ public static class AppearanceService
         // 普通原生选区使用白字；高对比度保留系统选区前景与背景的配对。
         SetBrush("TextControlSelectionHighlightColor", palette.Accent);
         SetBrush("TextOnAccentFillColorPrimaryBrush", palette.OnAccent);
-        ApplyPopupPalette(palette);
+        foreach (string key in new[] { "ComboBoxItemBorderBrushSelected", "ComboBoxItemBorderBrushSelectedPointerOver", "ComboBoxItemBorderBrushSelectedPressed" })
+            SetBrush(key, palette.Soft);
         Changed?.Invoke(null, EventArgs.Empty);
-    }
-
-    private static void ApplyPopupPalette(AppearancePalette palette)
-    {
-        // Every selection state shares the application tint; high contrast keeps the OS highlight pair.
-        // 所有选中状态共用应用强调色浅底；高对比度继续使用系统高亮前景与背景配对。
-        string selectedBackground = palette.IsHighContrast ? palette.Accent : palette.Soft;
-        string selectedForeground = palette.IsHighContrast ? palette.OnAccent : palette.Text;
-        foreach (string state in new[] { "Selected", "SelectedUnfocused", "SelectedPointerOver", "SelectedPressed" })
-        {
-            SetBrush("ComboBoxItemBackground" + state, selectedBackground);
-            SetBrush("ComboBoxItemForeground" + state, selectedForeground);
-            SetBrush("ComboBoxItemBorderBrush" + state, selectedBackground);
-        }
-        SetBrush("ComboBoxItemPillFillBrush", palette.IsHighContrast ? palette.OnAccent : palette.AccentText);
-
-        foreach (string state in new[] { "PointerOver", "Pressed" })
-        {
-            string background = palette.IsHighContrast ? palette.Accent
-                : state == "PointerOver" ? palette.ControlHover : palette.ControlPressed;
-            string foreground = palette.IsHighContrast ? palette.OnAccent : palette.Text;
-            foreach (string control in new[] { "ComboBoxItem", "MenuFlyoutItem", "MenuFlyoutSubItem" })
-            {
-                SetBrush(control + "Background" + state, background);
-                SetBrush(control + "Foreground" + state, foreground);
-            }
-        }
-        SetBrush("MenuFlyoutSubItemBackgroundSubMenuOpened", palette.IsHighContrast ? palette.Accent : palette.ControlHover);
-        SetBrush("MenuFlyoutSubItemForegroundSubMenuOpened", palette.IsHighContrast ? palette.OnAccent : palette.Text);
-        SetBrush("MenuFlyoutSubItemChevronSubMenuOpened", palette.IsHighContrast ? palette.OnAccent : palette.Text);
     }
 
     internal static AppearancePalette ResolvePalette(AppearancePalette preset, bool dark, string? customAccent)
@@ -276,28 +247,26 @@ public static class AppearanceService
             };
         }
 
-        // Neutral near-black surfaces keep depth without tinting the whole interface blue-gray.
-        // 中性近黑表面以明度区分层次，避免整个界面泛蓝灰。
-        const string main = "#0C0C0C";
-        const string sidebar = "#141414";
-        const string text = "#ECECEC";
+        const string main = "#181B21";
+        const string sidebar = "#20242C";
+        const string text = "#E8EBF0";
         string darkSoft = Blend(sidebar, customAccent ?? preset.Accent, 0.22);
         string textBackground = Luminance(ParseColor(darkSoft)) > Luminance(ParseColor(sidebar)) ? darkSoft : sidebar;
         return preset with
         {
             IsDark = true, Main = main, Sidebar = sidebar, Soft = darkSoft,
-            Border = "#353535", Selection = Blend(sidebar, customAccent ?? preset.Accent, 0.32),
+            Border = "#46505E", Selection = Blend(sidebar, "#8FB4FF", 0.32),
             Text = EnsureContrast(text, textBackground, lighten: true),
-            Secondary = EnsureContrast("#B8B8B8", textBackground, lighten: true),
-            Muted = EnsureContrast("#A0A0A0", textBackground, lighten: true),
+            Secondary = EnsureContrast("#B6BEC9", textBackground, lighten: true),
+            Muted = EnsureContrast("#A5AEBB", textBackground, lighten: true),
             Accent = accent, AccentHover = Blend(accent, "#000000", 0.1),
             AccentPressed = Blend(accent, "#000000", 0.18),
             AccentText = EnsureContrast(customAccent ?? preset.Accent, textBackground, lighten: true),
             Success = EnsureContrast("#82C8A0", textBackground, lighten: true),
             Error = EnsureContrast("#F2A59D", textBackground, lighten: true),
             Warning = EnsureContrast("#EAC574", textBackground, lighten: true),
-            ReplySurface = sidebar, ControlHover = "#202020",
-            ControlPressed = "#292929", Disabled = "#303030", DisabledText = "#A0A0A0",
+            ReplySurface = sidebar, ControlHover = Blend(main, text, 0.08),
+            ControlPressed = Blend(main, text, 0.13), Disabled = "#3B414C", DisabledText = "#A5AEBB",
             CodeKeyword = "#C6A2F5", CodeString = "#9EC8F2", CodeComment = "#A0BB8A",
             CodeNumber = "#8FBDF8", CodeType = "#88C6A2", CodeFunction = "#E0B090"
         };

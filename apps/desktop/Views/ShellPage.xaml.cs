@@ -49,8 +49,8 @@ public sealed partial class ShellPage : Page
         InitializeWorkTabs();
         InitializeTaskPanel();
         InitializePromptQueue();
-        InitializeInlineApprovals();
         InitializeMessageAttachments();
+        InitializeUsageSummary();
         MountedWorkspace.OpenRequested += MountedWorkspaceOpenRequested;
         MountedWorkspace.ChangeRequested += MountedWorkspaceChangeRequested;
         MountedWorkspace.UnmountRequested += MountedWorkspaceUnmountRequested;
@@ -106,6 +106,7 @@ public sealed partial class ShellPage : Page
                 (double minimumComposerWidth, double maximumComposerWidth) = GetComposerWidthRange(available);
                 ComposerHost.Width = Math.Clamp(_layout.ComposerWidth, minimumComposerWidth, maximumComposerWidth);
                 PromptQueue.Width = Math.Max(0, ComposerHost.Width - 32);
+                UsageSummary.Width = Math.Max(0, ComposerHost.Width - 32);
             }
 
             double maximumComposerHeight = GetComposerHeightMaximum();
@@ -152,7 +153,7 @@ public sealed partial class ShellPage : Page
         MainContentHost.Translation = UsesConversationLayout ? Vector3.Zero : new Vector3(0, (float)-upwardOffset, 0);
         // The transcript fills the remaining grid column as the work panel resizes.
         // 工作面板调整宽度时，聊天填满网格中剩余的列空间。
-        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 64);
+        ConversationMessages.Margin = new Thickness(0, 54, 0, ComposerHost.SurfaceHeight + 64 + UsageSummaryHeight);
 
         AmbientLargeWave.Width = Math.Clamp(width * 0.72, 320, 1000);
         AmbientLargeWave.Height = Math.Clamp(height * 0.42, 180, 340);
@@ -161,8 +162,7 @@ public sealed partial class ShellPage : Page
     }
 
     private double GetComposerHeightMaximum() =>
-        Math.Min(ShellLayoutMetrics.GetComposerHeightMaximum(PrimaryContentSlot.ActualHeight, ComposerHost.FooterHeight),
-            _approvalComposerHeightLimit);
+        ShellLayoutMetrics.GetComposerHeightMaximum(Math.Max(0, PrimaryContentSlot.ActualHeight - UsageSummaryHeight), ComposerHost.FooterHeight);
 
     private void SaveLayout() => _layoutStateService.Save(_layout);
 

@@ -37,7 +37,7 @@ fn output_tokens(value: Option<&Value>) -> Result<f64, String> {
 fn output_budget(args: &Value) -> Result<Value, String> {
     let window = integer(
         args.get("contextWindowTokens"),
-        2048.0,
+        512.0,
         2_000_000.0,
         "INVALID_CONTEXT_WINDOW",
     )?;
@@ -47,14 +47,14 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     };
     let provider_output = match args.get("providerMaxOutputTokens") {
         None => f64::INFINITY,
-        value => integer(value, 256.0, f64::MAX, "INVALID_OUTPUT_BUDGET")?,
+        value => integer(value, 1.0, f64::MAX, "INVALID_OUTPUT_BUDGET")?,
     };
     let provider_input = match args.get("providerMaxInputTokens") {
         None => f64::INFINITY,
-        value => integer(value, 256.0, f64::MAX, "INVALID_OUTPUT_BUDGET")?,
+        value => integer(value, 1.0, f64::MAX, "INVALID_OUTPUT_BUDGET")?,
     };
     let requested = output_tokens(args.get("requestedOutputTokens"))?;
-    let safety = (window * 0.1).ceil().clamp(256.0, 8192.0);
+    let safety = (window * 0.1).ceil().clamp((window / 4.0).min(256.0), 8192.0);
     let usable = window - safety;
     let provider_input_budget = provider_input - safety;
     if required > provider_input_budget {
@@ -71,9 +71,12 @@ fn output_budget(args: &Value) -> Result<Value, String> {
     } else {
         0.3
     };
-    let context_output = (usable * share).floor().min(usable - required);
+    // Tiny measured windows may carry a short answer; immutable input still has to fit honestly.
+    // 实测极小窗口可容纳短答复，但不可缩减的必要输入仍必须真正放得下。
+    let minimum_output = if window < 2048.0 { 32.0 } else { 256.0 };
+    let context_output = (usable * share).floor().max(minimum_output).min(usable - required);
     let output = requested.min(provider_output).min(context_output);
-    if output < 256.0 {
+    if output < minimum_output {
         return Err("CONTEXT_INPUT_TOO_LARGE".to_owned());
     }
     let reduced = output < requested;
@@ -98,4 +101,20 @@ fn output_budget(args: &Value) -> Result<Value, String> {
         result["providerMaxInputTokens"] = value.clone();
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tiny_window_tests {
+    use super::*;
+
+    #[test]
+    fn measured_small_windows_reserve_real_input_and_can_emit_short_answers() {
+        for window in [512, 1024, 2048] {
+            let budget = calculate("context.outputBudget", &json!({"contextWindowTokens":window,"requiredInputTokens":128,"phase":"tool"})).unwrap();
+            assert!(budget["inputBudgetTokens"].as_u64().unwrap() >= 128);
+            assert!(budget["maxOutputTokens"].as_u64().unwrap() >= 32);
+            assert!(budget["inputBudgetTokens"].as_u64().unwrap() + budget["maxOutputTokens"].as_u64().unwrap() + budget["safetyMarginTokens"].as_u64().unwrap() <= window);
+        }
+        assert_eq!(calculate("context.outputBudget", &json!({"contextWindowTokens":512,"requiredInputTokens":400})).unwrap_err(), "CONTEXT_INPUT_TOO_LARGE");
+    }
 }

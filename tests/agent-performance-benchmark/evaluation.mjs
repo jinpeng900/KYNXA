@@ -43,17 +43,48 @@ export function benchmarkPlan() {
  */
 export function readUsage(protocol, payload) {
   const usage = payload?.usage ?? {};
-  let inputTokens = integer(protocol === 'openai-completions' ? usage.prompt_tokens : usage.input_tokens);
-  const outputTokens = integer(protocol === 'openai-completions' ? usage.completion_tokens : usage.output_tokens);
-  const cacheReadTokens = integer(usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens
-    ?? usage.input_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens);
-  const cacheWriteTokens = integer(usage.cache_creation_input_tokens);
-  if (protocol === 'anthropic-messages' && inputTokens !== null)
-    inputTokens += (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+  const firstInteger = (...values) => values.map(integer).find(value => value !== null) ?? null;
+  const add = (...values) => values.every(value => value !== null) ? integer(values.reduce((sum, value) => sum + value, 0)) : null;
+  let inputTokens = firstInteger(usage.prompt_tokens, usage.input_tokens);
+  let outputTokens = firstInteger(usage.completion_tokens, usage.output_tokens);
+  let cacheReadTokens, cacheWriteTokens;
+  if (protocol === 'anthropic-messages') {
+    cacheReadTokens = integer(usage.cache_read_input_tokens);
+    cacheWriteTokens = integer(usage.cache_creation_input_tokens);
+    const component = field => usage[field] == null ? 0 : integer(usage[field]);
+    inputTokens = add(inputTokens, component('cache_read_input_tokens'), component('cache_creation_input_tokens'));
+  } else {
+    cacheReadTokens = firstInteger(usage.prompt_tokens_details?.cached_tokens,
+      usage.input_tokens_details?.cached_tokens, usage.prompt_cache_hit_tokens);
+    cacheWriteTokens = firstInteger(usage.input_tokens_details?.cache_write_tokens,
+      usage.prompt_tokens_details?.cache_write_tokens);
+    if (protocol === 'ollama') {
+      inputTokens ??= integer(usage.prompt_eval_count);
+      outputTokens ??= integer(usage.eval_count);
+    }
+  }
+  // Match the native usage projection: reject impossible parts, never invent missing cache counters.
+  // 与原生用量投影一致：排除超过总输入的分项，缺失的缓存计数不能补成实测零值。
+  if (inputTokens !== null && cacheReadTokens > inputTokens) cacheReadTokens = null;
+  if (inputTokens !== null && cacheWriteTokens !== null && (cacheWriteTokens > inputTokens
+    || cacheReadTokens !== null && (add(cacheReadTokens, cacheWriteTokens) ?? Infinity) > inputTokens)) cacheWriteTokens = null;
+  let uncachedInputTokens = null, cacheMissTokens = null;
+  const misses = integer(usage.prompt_cache_miss_tokens);
+  if (protocol === 'anthropic-messages') uncachedInputTokens = integer(usage.input_tokens);
+  else if (misses !== null) {
+    if (inputTokens !== null && misses <= inputTokens
+      && (cacheReadTokens === null || add(cacheReadTokens, misses) === inputTokens)) {
+      cacheMissTokens = misses;
+      // DeepSeek misses include cache creation; only the remaining ordinary input is disjoint from writes.
+      // DeepSeek 未命中含缓存创建；普通未缓存输入须扣除已报告的写入，避免分项重算或阻断结算。
+      uncachedInputTokens = cacheWriteTokens === null ? misses : integer(misses - cacheWriteTokens);
+    }
+  } else if (inputTokens !== null && cacheReadTokens !== null && cacheWriteTokens !== null)
+    uncachedInputTokens = integer(inputTokens - cacheReadTokens - cacheWriteTokens);
   return { status: inputTokens !== null && outputTokens !== null ? 'reported' : 'unknown', inputTokens, outputTokens,
-    totalTokens: inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null,
+    totalTokens: add(inputTokens, outputTokens),
     providerTotalTokens: integer(usage.total_tokens), cacheReadTokens, cacheWriteTokens,
-    cacheMissTokens: integer(usage.prompt_cache_miss_tokens) };
+    cacheMissTokens, uncachedInputTokens };
 }
 
 function parseToolResult(activity) {
@@ -215,6 +246,10 @@ function costFor(runs) {
     outputTokens: complete ? known('outputTokens') : null, totalTokens: complete ? known('totalTokens') : null,
     knownInputTokens: known('inputTokens'), knownOutputTokens: known('outputTokens'),
     knownCacheReadTokens: known('cacheReadTokens'), knownCacheWriteTokens: known('cacheWriteTokens'),
+    cacheReadTokens: calls.length > 0 && calls.every(call => integer(call.usage.cacheReadTokens) !== null) ? known('cacheReadTokens') : null,
+    cacheWriteTokens: calls.length > 0 && calls.every(call => integer(call.usage.cacheWriteTokens) !== null) ? known('cacheWriteTokens') : null,
+    knownCacheReadRequests: calls.filter(call => integer(call.usage.cacheReadTokens) !== null).length,
+    knownCacheWriteRequests: calls.filter(call => integer(call.usage.cacheWriteTokens) !== null).length,
     modelTimeMs: calls.reduce((sum, call) => sum + call.durationMs, 0),
     callsMissingUsage: calls.filter(call => call.usage.status !== 'reported').length,
     monetaryCost: null, monetaryCostReason: 'No pricing table or billing claim; resource cost includes failed calls.' };

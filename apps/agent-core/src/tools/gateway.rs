@@ -50,6 +50,7 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
     pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
     pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
     configuration_updates: tokio::sync::RwLock<()>,
@@ -76,6 +77,7 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
             configuration_updates: Default::default(),
@@ -342,13 +344,28 @@ pub async fn verify_unknown_effects(
     records: &[Value],
     observation: &Value,
 ) -> Result<Vec<Value>, GatewayError> {
+    let mut proofs = Vec::new();
+    if observation["call"]["name"] == "mcp.task.result" {
+        let result = &observation["result"]["content"];
+        let proof = &result["_mcpTaskProof"];
+        if result["isError"] != true && proof["terminalStatus"] == "completed" {
+            for record in records {
+                let handle = record["result"].get("recoveryHandle").unwrap_or(&record["result"]["content"]["recoveryHandle"]);
+                if handle["kind"] == "mcp-task" && handle["taskId"] == proof["taskId"]
+                    && handle["serverId"] == proof["serverId"] && handle["configurationFingerprint"] == proof["configurationFingerprint"]
+                    && record["call"]["id"] == proof["toolCallId"] {
+                    proofs.push(json!({"toolCallId":record["call"]["id"],"observationToolCallId":observation["call"]["id"],
+                        "outcome":"dispatch-confirmed","result":{"value":result,"isError":false,"status":"completed"}}));
+                }
+            }
+        }
+    }
     let indexes = native(
         ctx,
         "broker.completion.recoveryCandidates",
         json!({"records":records,"observation":observation}),
     )
     .await?;
-    let mut proofs = Vec::new();
     for index in indexes
         .as_array()
         .into_iter()
@@ -393,6 +410,9 @@ pub fn builtin_catalog() -> Vec<Value> {
         serde_json::from_str(include_str!("gateway-catalog.json")).expect("checked tool catalog");
     let mut tools = catalog["tools"].as_array().cloned().unwrap_or_default();
     tools.extend(super::gateway_browser::descriptors());
+    tools.extend(super::gateway_mcp::task_descriptors());
+    tools.extend(super::gateway_skill_authoring::descriptors());
+    tools.extend(super::gateway_extension_install::descriptors());
     tools
 }
 
@@ -496,7 +516,7 @@ pub(super) fn validate_schema(schema: &Value, value: &Value, label: &str) -> Res
 }
 
 pub(crate) fn workspace_path_tool(name: &str, arguments: &Value) -> bool {
-    name.starts_with("filesystem.") || ["document.read","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.host.run","terminal.host.start"].contains(&name)
+    name.starts_with("filesystem.") || ["document.read","document.create","terminal.run","terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.host.run","terminal.host.start"].contains(&name)
         || name == "artifact.open" && !arguments["url"].is_string()
 }
 
@@ -543,7 +563,7 @@ pub(crate) fn restrict_workspace_context(ctx: &mut GatewayToolContext, snapshot:
 }
 
 pub(crate) async fn select_workspace_context(ctx: &GatewayToolContext, arguments: &Value) -> Result<GatewayToolContext, GatewayError> {
-    let selected = if arguments["input"].is_string() && arguments["sessionId"].is_string() {
+    let selected = if (arguments["input"].is_string() || arguments["command"].is_string()) && arguments["sessionId"].is_string() {
         super::gateway_workspace_terminal::session_mount(ctx,arguments["sessionId"].as_str().unwrap()).await?
     } else { operation_mount_binding(ctx, arguments)? };
     if selected.is_null() { return Ok(ctx.clone()); }
@@ -649,7 +669,7 @@ pub(super) async fn filesystem(
     args: Value,
     ctx: &GatewayToolContext,
 ) -> Result<Value, GatewayError> {
-    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir");
+    let missing = matches!(name, "filesystem.write" | "filesystem.mkdir" | "document.create");
     let (path, outside) = canonical_authorized(ctx, args["path"].as_str().unwrap_or("."), missing)?;
     let requested = args["path"].as_str().unwrap_or(".");
     let requested = if Path::new(requested).is_absolute() {
@@ -708,6 +728,14 @@ pub(super) async fn filesystem(
         let result = super::gateway_document_read::read(args, path, binding.clone(), ctx).await?;
         observe_code_target(ctx, &binding)?;
         return Ok(result);
+    }
+    if name == "document.create" {
+        // Only the authorized canonical binding reaches the binary writer; model fields cannot supply it.
+        // 二进制写入只接收本层授权的规范路径绑定，模型参数不能自行提供该绑定。
+        let mut input = args;
+        input["path"] = json!(super::local_files::path_text(&path));
+        input["_pathBinding"] = binding;
+        return super::gateway_document_create::create(ctx, input).await;
     }
     if name == "filesystem.search" {
         let identity = json!({"conversationId":ctx.conversation_id,"projectId":ctx.project_id,"workspaceRoot":ctx.workdir,
@@ -821,27 +849,9 @@ pub(super) async fn filesystem(
     Ok(result)
 }
 
-fn approval(name: &str, args: &Value, ctx: &GatewayToolContext) -> Value {
-    // A task-wide decision cannot silently authorize another directory or disclose a sensitive file.
-    // 任务级决定不能悄悄授权另一个目录或披露敏感文件；这些调用仍逐次绑定明确审批。
-    let task_eligible = name != "work.folder.bind"
-        && (!workspace_path_tool(name, args)
-            || canonical_authorized(
-                ctx,
-                args["path"]
-                    .as_str()
-                    .or_else(|| args["cwd"].as_str())
-                    .unwrap_or("."),
-                true,
-            )
-            .is_ok_and(|(path, outside)| {
-                !outside
-                    && !super::service_skills::private_resource(&super::local_files::path_text(
-                        &path,
-                    ))
-            }));
+pub(crate) fn approval(name: &str, args: &Value, ctx: &GatewayToolContext) -> Value {
     json!({"requiresApproval":true,"status":"not-dispatched","invocation":{"id":uuid::Uuid::new_v4().to_string(),"name":name,
-        "arguments":args,"conversationId":ctx.conversation_id,"projectId":ctx.project_id},"taskApprovalEligible":task_eligible})
+        "arguments":args,"conversationId":ctx.conversation_id,"projectId":ctx.project_id}})
 }
 
 async fn bind_work(args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -925,7 +935,7 @@ async fn execute_inner(
     };
     if let Some(descriptor) = descriptors
         .iter()
-        .find(|descriptor| descriptor["name"] == tool_name && !tool_name.starts_with("mcp."))
+        .find(|descriptor| descriptor["name"] == tool_name && (!tool_name.starts_with("mcp.") || super::gateway_mcp::builtin_task(tool_name)))
     {
         validate_schema(&descriptor["inputSchema"], &args, tool_name)?;
     }
@@ -956,11 +966,11 @@ async fn execute_inner(
             return Ok(opened);
         }
     }
-    if tool_name.starts_with("mcp.") {
+    if tool_name.starts_with("mcp.") && !super::gateway_mcp::builtin_task(tool_name) {
         super::gateway_mcp::authorized_server(tool_name, ctx)?;
     }
     let options = json!({"outsideWorkspace":(["terminal.host.run","terminal.host.start","terminal.host.stop",
-        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.close"].contains(&tool_name)
+        "terminal.workspace.open","terminal.workspace.write","terminal.workspace.run","terminal.workspace.close"].contains(&tool_name)
         || tool_name.starts_with("mcp.")),"verifiedSandbox":false});
     let needs = super::policy::calculate(
         "tools.needsApproval",
@@ -979,7 +989,7 @@ async fn execute_inner(
         && !ctx.approved
         && !read_browser
         && !tool_name.starts_with("filesystem.")
-        && !["document.read", "artifact.open"].contains(&tool_name)
+        && !["document.read", "document.create", "artifact.open"].contains(&tool_name)
         && !tool_name.starts_with("skill.")
         && !["tool.search", "tool.load", "web.search"].contains(&tool_name)
     {
@@ -1008,7 +1018,7 @@ async fn execute_inner(
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
-    if tool_name.starts_with("filesystem.") || ["document.read", "artifact.open"].contains(&tool_name) {
+    if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
     if tool_name.starts_with("terminal.workspace.") {
@@ -1020,6 +1030,12 @@ async fn execute_inner(
     if tool_name.starts_with("browser.") {
         return Box::pin(super::gateway_browser::execute(tool_name, args, ctx)).await;
     }
+    if super::gateway_extension_install::supports(tool_name) {
+        return super::gateway_extension_install::execute(tool_name,args,ctx).await;
+    }
+    if super::gateway_mcp::builtin_task(tool_name) {
+        return super::gateway_mcp::execute_task(tool_name,args,ctx).await;
+    }
     if tool_name.starts_with("mcp.") {
         return super::gateway_mcp::execute(tool_name, args, ctx).await;
     }
@@ -1028,6 +1044,9 @@ async fn execute_inner(
     }
     if tool_name == "web.search" {
         return super::gateway_search::search(args, ctx).await;
+    }
+    if super::gateway_skill_authoring::supports(tool_name) {
+        return super::gateway_skill_authoring::execute(tool_name,args,ctx).await;
     }
     if tool_name.starts_with("skill.") {
         return skills(tool_name, args, ctx).await;
@@ -1319,6 +1338,10 @@ pub async fn execute(
 
 /// Cache only discovery metadata; reading or running a skill always obtains its current original body.
 /// 只缓存发现元信息；读取或运行技能始终取得当前原文，缓存不提供执行或权限依据。
+pub(crate) fn invalidate_skill_metadata(ctx: &GatewayToolContext) {
+    if let Ok(mut cache) = ctx.runtime.skill_headers.lock() { cache.clear(); }
+}
+
 async fn skill_metadata(
     path: &Path,
     version: super::local_files::FileVersion,
@@ -1378,17 +1401,28 @@ pub(crate) async fn relevant_skill_headers(
     // Reuse bilingual task signals so Chinese requests can find the shipped English skill names.
     // 复用双语任务信号，使中文要求也能找到随包英文技能名，不增加模型判断调用。
     let signals = super::discovery::selection_signals(&json!({"message":query}));
-    let topics = [
+    let mut topics = [
         ("web", "web-research"), ("browser", "browser-workflow"),
         ("desktop", "desktop-workflow"), ("hostTerminal", "terminal-workflow"),
-        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect safe-file-edit"),
+        ("deviceState", "terminal-workflow"), ("docs", "workspace-inspect"),
     ].into_iter().filter(|(signal, _)| signals[*signal] == true)
-        .map(|(_, topic)| topic).collect::<Vec<_>>().join(" ");
+        .map(|(_, topic)| topic).collect::<Vec<_>>();
+    topics.extend(super::discovery::authoring_topics(query));
+    if super::intent::matches(r"代码|编程|修复|重构|\b(?:code|coding|refactor|debug|implementation)\b", &query.to_lowercase()) {
+        topics.push("code-workflow");
+    }
+    if super::intent::matches(r"记忆|记住|偏好|\b(?:memory|remember|preference)\b", &query.to_lowercase()) {
+        topics.push("memory-workflow");
+    }
+    if super::intent::matches(r"修改|编辑|删除|新建文件|\b(?:edit|modify|delete)\b", &query.to_lowercase()) {
+        topics.push("safe-file-edit");
+    }
+    let topics = topics.join(" ");
     let query = format!("{topics} {query}");
     let indices = super::discovery::calculate("tools.searchTools", &json!({"query":query,"descriptors":headers}))
         .map_err(|code| failure(&code, "技能头索引不可用。", 500))?;
     Ok(indices.as_array().into_iter().flatten().filter_map(Value::as_u64)
-        .filter_map(|index| headers.get(index as usize).cloned()).take(6).collect())
+        .filter_map(|index| headers.get(index as usize).cloned()).take(16).collect())
 }
 
 async fn skills(name: &str, args: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
@@ -1796,6 +1830,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
         .fetch_add(1, Ordering::AcqRel);
     let result = native(ctx, "config.update", json!({"input":input})).await?;
     ctx.runtime.web_search.clear_queries();
+    ctx.runtime.web_fetch.clear();
     super::gateway_mcp::reset(ctx).await;
     ctx.runtime.schemas.write().await.clear();
     let mut updated = ctx.clone();
@@ -1908,6 +1943,15 @@ pub async fn handle_route(
         ("POST", "/api/agent/mcp/refresh") => {
             json!({"tools":catalog(&configured).await?,"errors":[],"connections":super::gateway_mcp::diagnostics(&configured).await})
         }
+        ("POST", "/api/agent/mcp/oauth/start") => {
+            super::gateway_mcp_oauth::start(body["serverId"].as_str().unwrap_or(""), &configured).await?
+        }
+        ("GET", "/api/agent/mcp/oauth/status") => {
+            super::gateway_mcp_oauth::status(query.get("serverId").map(String::as_str).unwrap_or(""), query.get("authorizationId").map(String::as_str).unwrap_or(""), &configured).await?
+        }
+        ("POST", "/api/agent/mcp/oauth/logout") => {
+            super::gateway_mcp_oauth::logout(body["serverId"].as_str().unwrap_or(""), &configured).await?
+        }
         ("POST", "/api/agent/mcp/disconnect") | ("POST", "/api/agent/mcp/reconnect") => {
             let id = body["serverId"]
                 .as_str()
@@ -2003,7 +2047,7 @@ pub async fn handle_route(
     Ok(Some((200, result)))
 }
 
-async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+pub(crate) async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
     let directory = body["directory"]
         .as_str()
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "请指定导入目录。", 400))?;
@@ -2045,11 +2089,13 @@ async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, Ga
             400,
         ));
     }
-    let target = ctx.extension_root.join("Skills").join(name);
+    let scope=body["scope"].as_str().unwrap_or("global");
+    let import_root=match scope {"project"=>ctx.workdir.join(".kynxa"),"global"=>ctx.extension_root.clone(),_=>return Err(failure("INVALID_SKILL_SCOPE","技能范围须为 project 或 global。",400))};
+    let target = import_root.join(if scope=="project" {"skills"} else {"Skills"}).join(name);
     let result = native(
         ctx,
         "skill.import",
-        json!({"root":ctx.extension_root,"target":target,"files":inspected["inventory"]["files"]}),
+        json!({"root":import_root,"scope":scope,"target":target,"files":inspected["inventory"]["files"]}),
     )
     .await?;
     let identity = native(
@@ -2060,19 +2106,27 @@ async fn import_skill(body: Value, ctx: &GatewayToolContext) -> Result<Value, Ga
     .await?;
     let mut skill = skills("skill.read", json!({"id":identity["id"]}), ctx).await?;
     skill["enabled"] = json!(true);
-    Ok(json!({"imported":result["imported"],"reused":result["reused"],"skill":skill}))
+    Ok(json!({"imported":result["imported"],"reused":result["reused"],"scope":scope,"skill":skill,"runtimeVerified":false}))
 }
 
 pub async fn shutdown(ctx: &GatewayToolContext) {
+    super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown(ctx).await;
     super::gateway_process::shutdown(ctx).await;
     super::gateway_mcp::shutdown(ctx).await;
     super::gateway_browser::shutdown(ctx).await;
 }
 
+/// Resume a journaled MCP task without replaying its original mutation.
+/// 恢复事件日志中的 MCP 任务身份，禁止重做原写操作。
+pub async fn recover_mcp_task_checkpoint(handle: &Value, original_call_id: &str, ctx: &GatewayToolContext) -> Result<Value, GatewayError> {
+    super::gateway_mcp::recover_checkpoint(handle, original_call_id, ctx).await
+}
+
 /// Migration requires verified cleanup; best-effort application shutdown is not a readiness receipt.
 /// 迁移必须取得核验清理结果；尽力退出应用不能作为迁移就绪回执。
 pub async fn shutdown_checked(ctx: &GatewayToolContext) -> Result<(), GatewayError> {
+    super::gateway_mcp_oauth::shutdown(ctx).await;
     super::gateway_workspace_terminal::shutdown_checked(ctx).await?;
     super::gateway_process::shutdown_checked(ctx).await?;
     super::gateway_mcp::shutdown_checked(ctx).await?;
@@ -2111,50 +2165,6 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn task_approval_receipts_preserve_directory_sensitive_and_binding_boundaries() {
-        let (mut ctx, _sender) = test_context();
-        let root = ctx.workdir.parent().unwrap().to_owned();
-        ctx.permission_mode = "ask".into();
-        ctx.project_id = Some(uuid::Uuid::new_v4().to_string());
-        std::fs::write(root.join("outside.txt"), "not read by approval fixture").unwrap();
-        std::fs::write(ctx.workdir.join(".env"), "SYNTHETIC=NOT_A_SECRET").unwrap();
-        let inside = execute(
-            "filesystem.write",
-            json!({"path":"new.txt","content":"not dispatched","expectedHash":null}),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(inside["taskApprovalEligible"], true);
-        assert!(!ctx.workdir.join("new.txt").exists());
-        let outside = execute(
-            "filesystem.read",
-            json!({"path":root.join("outside.txt"),"reason":"fixture only"}),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(outside["taskApprovalEligible"], false);
-        let sensitive = execute("filesystem.read", json!({"path":".env"}), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(sensitive["taskApprovalEligible"], false);
-        let binding = execute(
-            "work.folder.bind",
-            json!({"path":ctx.workdir,"reason":"fixture only"}),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(binding["taskApprovalEligible"], false);
-        assert_eq!(
-            approval("terminal.host.run", &json!({"cwd":root}), &ctx)["taskApprovalEligible"],
-            false
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[tokio::test]
     async fn mounted_files_keep_default_identity_and_revoke_only_the_removed_root() {
@@ -2591,6 +2601,25 @@ mod tests {
         ctx.config["disabledSkills"] = json!([]);
         std::fs::remove_file(&path).unwrap();
         assert!(skills("skill.list", json!({}), &ctx).await.unwrap()["skills"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn document_skill_discovery_reads_only_relevant_headers_until_explicit_read() {
+        let (ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        for name in ["document-authoring", "slides-authoring", "spreadsheets-authoring", "memory-workflow"] {
+            let directory = root.join("official/Skills").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("SKILL.md"), format!("---\nname: {name}\ndescription: {name} native workflow\n---\nPRIVATE-BODY-{name}\n")).unwrap();
+        }
+        let headers = relevant_skill_headers(&ctx, "生成一份报告.docx").await.unwrap();
+        assert_eq!(headers[0]["name"], "document-authoring");
+        assert!(headers.len() <= 16);
+        assert!(headers.iter().all(|header| header.get("content").is_none()));
+        assert!(!serde_json::to_string(&headers).unwrap().contains("PRIVATE-BODY"));
+        let loaded = execute("skill.read", json!({"id":headers[0]["id"]}), &ctx).await.unwrap();
+        assert!(loaded["content"].as_str().unwrap().contains("PRIVATE-BODY-document-authoring"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
