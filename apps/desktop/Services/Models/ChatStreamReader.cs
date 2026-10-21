@@ -128,6 +128,14 @@ public static class ChatStreamReader
                                 throw new InvalidDataException(UiText.Get("工具事件无效。"));
                             if (streamEvent.Type == "tool_result") { activeToolCalls.Remove(toolCallId); terminalOutputSequences.Remove(toolCallId); }
                             break;
+                        case "approval_closed":
+                            // Closing an approval changes neither the active tool nor the reply's terminal state.
+                            // 审批关闭不结束工具或回复；后续真实工具回执仍必须正常接收。
+                            if (streamEvent.ApprovalId is not Guid closedId || closedId == Guid.Empty ||
+                                string.IsNullOrWhiteSpace(streamEvent.ToolCallId) || streamEvent.ToolCallId.Length > 200 ||
+                                streamEvent.TaskId == Guid.Empty || streamEvent.Scope is not (null or "once" or "task"))
+                                throw new InvalidDataException(UiText.Get("工具事件无效。"));
+                            break;
                         case "terminal_output":
                             if (!HostTerminalOutputRules.IsValid(streamEvent.Terminal) ||
                                 !activeToolCalls.TryGetValue(streamEvent.Terminal!.ToolCallId, out var terminalCall) || terminalCall.Name != "terminal.host.run" ||
@@ -221,7 +229,7 @@ public static class ChatStreamReader
             || string.IsNullOrWhiteSpace(tool.Name) || tool.Name.Length > 200 || tool.Arguments is not { ValueKind: JsonValueKind.Object }
             || tool.Arguments.Value.GetRawText().Length > MaximumToolArgumentCharacters
             || string.IsNullOrWhiteSpace(tool.Summary) || tool.Summary.Length > 4096
-            || tool.Result?.Length > 65536)
+            || tool.Result?.Length > 65536 || tool.TaskApprovalDescription?.Length > 2048)
             throw new InvalidDataException(UiText.Get("工具事件无效。"));
         bool validStatus = streamEvent.Type switch
         {

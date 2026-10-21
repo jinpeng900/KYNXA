@@ -24,6 +24,7 @@ public partial class App : Application
     private readonly bool _browserOnly = Environment.GetCommandLineArgs().Contains("--browser-only", StringComparer.Ordinal);
     private readonly bool _managementLayoutOnly = Environment.GetCommandLineArgs().Contains("--management-layout-only", StringComparer.Ordinal);
     private readonly bool _personalOAuthOnly = Environment.GetCommandLineArgs().Contains("--personal-oauth-only", StringComparer.Ordinal);
+    private readonly bool _inlineApprovalOnly = Environment.GetCommandLineArgs().Contains("--inline-approval-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -80,6 +81,16 @@ public partial class App : Application
     {
         try
         {
+            if (_inlineApprovalOnly)
+            {
+                await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled,
+                    "inline approval fixture loads only isolated configuration");
+                await CheckInlineApprovalCardAsync();
+                Check(_unhandled is null && _api.Connections == 0 && _api.Saves == 0,
+                    "inline approval has no configuration, connection or unhandled error side effects");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native tool UI checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_personalOAuthOnly)
             {
                 await CheckPersonalOAuthAsync();
@@ -270,6 +281,7 @@ public partial class App : Application
             Check(tools.Items.Count == 1 && Element<InfoBar>("AgentStatusBar") is { Severity: InfoBarSeverity.Warning } status &&
                 status.Message.Contains("example:MCP_CONNECTION_FAILED"), "partial MCP failures retain tools and expose the safe error code");
             await CheckApprovalAsync();
+            await CheckInlineApprovalCardAsync();
             await CheckMcpToolsAsync();
             await CheckResultAsync();
             await CheckDialogPolishAsync();

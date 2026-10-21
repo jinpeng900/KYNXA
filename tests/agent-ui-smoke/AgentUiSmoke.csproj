@@ -13,6 +13,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../apps/desktop/Controls/ScrollSafeComboBox.cs" Link="ScrollSafeComboBox.cs" />
+    <Compile Include="../../apps/desktop/Controls/InlineToolApprovalCard.cs" Link="InlineToolApprovalCard.cs" />
     <Compile Include="../../apps/desktop/Models/UI/AppearancePalette.cs" Link="AppearancePalette.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/AppearanceService.cs" Link="AppearanceService.cs" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
