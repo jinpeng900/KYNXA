@@ -1,5 +1,6 @@
 using System.Text.Json;
 using KYNXA_Desktop.Controls;
+using KYNXA_Desktop.Services;
 using KYNXA_Desktop.ViewModels;
 
 namespace TranscriptUiSmoke;
@@ -154,11 +155,18 @@ public partial class App
         try
         {
             await EvalAsync<bool>("(()=>{window.__nativeMergeHistoryAvailability=null;window.__nativeMergeHistoryListener=event=>{if(event.data?.type==='historyAvailability')window.__nativeMergeHistoryAvailability=event.data;};window.chrome.webview.addEventListener('message',__nativeMergeHistoryListener);return true;})()");
-            _transcript.SetHistoryAvailability(conversationId, true, true);
+            _transcript.SetHistoryAvailability(conversationId, true, true, hasNewReplies: true);
             await WaitAsync("__nativeMergeHistoryAvailability?.conversationId===" + JsonSerializer.Serialize(conversationId.ToString())
                 + " && __nativeMergeHistoryAvailability.hasOlder && __nativeMergeHistoryAvailability.hasNewer",
                 "native page availability reaches the real WebView before navigation");
             await WaitAsync("!document.getElementById('jump-to-latest').hidden", "a loaded historical window exposes native latest-page navigation");
+            await WaitAsync("document.getElementById('jump-to-latest').classList.contains('has-new-replies') && document.getElementById('jump-to-latest').textContent.includes(" + JsonSerializer.Serialize(UiText.Get("有新回复，跳转查看")) + ")",
+                "a retained latest page advertises new replies without replacing the historical page");
+            double readingTop = await EvalAsync<double>("scrollY");
+            _transcript.SetHistoryAvailability(conversationId, true, true, hasNewReplies: true);
+            await Task.Delay(60);
+            Check(Math.Abs(await EvalAsync<double>("scrollY") - readingTop) < 1,
+                "updating the new-reply notice never pulls the reader away from the current history position");
             await EvalAsync<bool>("(()=>{document.getElementById('jump-to-latest').click();return true;})()");
             var request = await latest.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(request.ConversationId == conversationId && request.Direction == "latest",
@@ -166,6 +174,8 @@ public partial class App
             _transcript.SetHistoryAvailability(conversationId, true, false);
             await WaitAsync("__nativeMergeHistoryAvailability?.hasOlder && __nativeMergeHistoryAvailability.hasNewer===false",
                 "the latest-page availability change settles before requesting older history");
+            Check(await EvalAsync<bool>("!document.getElementById('jump-to-latest').classList.contains('has-new-replies')"),
+                "accepting the latest page clears the old pending-page notice");
             await EvalAsync<bool>("(()=>{scrollTo({top:0,behavior:'instant'});return true;})()");
             await WaitAsync("scrollY<1", "history fixture reaches the start of its loaded page");
             await EvalAsync<bool>("(()=>{window.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true}));return true;})()");

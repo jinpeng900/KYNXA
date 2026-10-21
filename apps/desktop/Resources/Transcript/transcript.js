@@ -8,7 +8,7 @@
   const COPY_SUCCESS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg>';
   const uiStrings = {
     conversation: '对话', transcript: '聊天记录', copy: '复制', copyMessage: '复制整条消息', retry: '重试',
-    copied: '已复制', copyFailed: '复制失败，请重试。', jumpToLatest: '跳转到最新消息',
+    copied: '已复制', copyFailed: '复制失败，请重试。', jumpToLatest: '跳转到最新消息', newReplyNotice: '有新回复，跳转查看',
     copyBlock: '复制此内容块', copyCurrentContent: '复制当前内容', blockPlainText: '文本',
     blockWrap: '自动换行', blockUnwrap: '原样显示', blockExpand: '展开', blockCollapse: '收起',
     blockLineCount: '{0} 行', blockClearSelection: '请先取消文字选择，再调整显示。',
@@ -79,7 +79,8 @@
   let bottomNavigationPending = false, navigationGeneration = 0;
   let bottomFollowingPaused = false, lastScrollTop = scrollY;
   let historyIntent = false, historyRequestTimer = 0;
-  let historyHasOlder = false, historyHasNewer = false;
+  let historyHasOlder = false, historyHasNewer = false, historyHasNewReplies = false;
+  let hasUnseenReplies = false;
   let conversationNavigationGeneration = 0, restoredReadingNavigation = null;
   let searchingLoadedMessages = false;
   let nextCopyRequest = 0, copyFeedbackTimer = 0, copyFeedbackEntry = null;
@@ -297,9 +298,7 @@
     document.documentElement.lang = command.language === 'en' ? 'en' : 'zh-CN';
     document.title = uiStrings.conversation;
     messages.setAttribute('aria-label', uiStrings.transcript);
-    jumpButton.textContent = '↓ ' + uiStrings.jumpToLatest;
-    jumpButton.setAttribute('aria-label', uiStrings.jumpToLatest);
-    jumpButton.title = uiStrings.jumpToLatest;
+    updateJumpButton();
     // Localize only application controls; message DOM and browser selections stay intact.
     // 只本地化应用控件；消息 DOM 与浏览器选择保持不变。
     for (const entry of entries.values()) localizeEntry(entry);
@@ -329,7 +328,32 @@
     });
   }
   const atBottom = () => document.documentElement.scrollHeight - innerHeight - scrollY <= 36;
-  const updateJumpButton = () => { jumpButton.hidden = entries.size === 0 || atBottom() && !historyHasNewer; };
+  const updateJumpButton = () => {
+    if (following && atBottom() && !historyHasNewer && !activeSelection() && !pointerSelecting) hasUnseenReplies = false;
+    const unread = hasUnseenReplies || historyHasNewReplies;
+    const label = unread ? uiStrings.newReplyNotice : uiStrings.jumpToLatest;
+    if (jumpButton.textContent !== '↓ ' + label) jumpButton.textContent = '↓ ' + label;
+    jumpButton.setAttribute('aria-label', label); jumpButton.title = label;
+    jumpButton.classList.toggle('has-new-replies', unread);
+    jumpButton.hidden = entries.size === 0 || atBottom() && !historyHasNewer && !unread;
+  };
+  function noteUnseenReplies(snapshot) {
+    if (following || hasUnseenReplies || !entries.size) return;
+    const nextOrder = Array.isArray(snapshot.messageOrder) ? snapshot.messageOrder : snapshot.messages.map(message => message.id);
+    const tailIndex = nextOrder.indexOf(messageOrder?.at(-1));
+    // Only new tail replies and changed prose count: older-page hydration and elapsed-clock updates must not raise alerts.
+    // 仅新增尾部回复或正文变化提示未读；补载旧页与计时刷新不能误报，也不抢占阅读锚点及选区。
+    hasUnseenReplies = snapshot.messages.some(message => {
+      if (message.role !== 'assistant') return false;
+      const previous = entries.get(String(message.id))?.message;
+      const segments = message.assistantSegments || [];
+      const hasProse = !!message.content || segments.some(segment => !!segment.content);
+      if (!hasProse) return false;
+      if (!previous) return tailIndex >= 0 && nextOrder.indexOf(message.id) > tailIndex;
+      return message.content !== previous.content || segments.some((segment, index) =>
+        !!segment.content && segment.content !== previous.assistantSegments?.[index]?.content);
+    });
+  }
   const activeSelection = () => {
     const selection = getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
@@ -372,6 +396,7 @@
     navigationGeneration++;
   }
   function jumpToLatest() {
+    hasUnseenReplies = false;
     if (historyHasNewer && !activeSelection()) {
       beginBottomNavigation(); followBottom();
       send({ type: 'history', direction: 'latest', conversationId });
@@ -853,7 +878,8 @@
   function openConversation(id) {
     if (conversationId === id) return;
     historyIntent = false; clearTimeout(historyRequestTimer); historyRequestTimer = 0;
-    historyHasOlder = historyHasNewer = false; messageOrder = null;
+    const outgoingUnseenReplies = hasUnseenReplies;
+    historyHasOlder = historyHasNewer = historyHasNewReplies = false; messageOrder = null;
     // Capture the outgoing viewport before selection cleanup or DOM replacement can change it.
     // 清理选区或替换 DOM 前记录当前视口，连同阅读锚点和底部跟随状态一起缓存。
     const view = { top: scrollY, left: scrollX, following: following && (bottomNavigationPending || atBottom()), anchors: scrollAnchors() };
@@ -884,7 +910,7 @@
         const fragment = document.createDocumentFragment();
         while (messages.firstChild) fragment.append(messages.firstChild);
         removeCached(conversationId);
-        conversations.set(conversationId, { entries, fragment, characters, nodes, view, search });
+        conversations.set(conversationId, { entries, fragment, characters, nodes, view, search, hasUnseenReplies: outgoingUnseenReplies });
         cachedCharacters += characters; cachedNodes += nodes;
         while (conversations.size > 4 || cachedCharacters > maxCachedCharacters || cachedNodes > maxCachedNodes)
           removeCached(conversations.keys().next().value);
@@ -892,6 +918,7 @@
     }
     viewportObserver.disconnect(); visibleEntries.clear(); mountedEntries.clear();
     entries = restored?.entries || new Map();
+    hasUnseenReplies = restored?.hasUnseenReplies === true;
     messages.replaceChildren(...(restored ? [restored.fragment] : []));
     conversationId = id;
     renderMath(messages);
@@ -924,6 +951,7 @@
     if (!snapshot || !Array.isArray(snapshot.messages)) return;
     const changedConversation = conversationId !== snapshot.conversationId;
     if (changedConversation) openConversation(snapshot.conversationId);
+    if (!changedConversation) noteUnseenReplies(snapshot);
     if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     else if (snapshot.type !== 'renderPatch') messageOrder = snapshot.messages.map(message => message.id);
     if (snapshot.progressiveSnapshot) {
@@ -933,6 +961,7 @@
       return;
     }
     historyHasOlder = snapshot.historyHasOlder === true; historyHasNewer = snapshot.historyHasNewer === true;
+    historyHasNewReplies = snapshot.historyHasNewReplies === true;
     // Cached reading positions and real upward input survive delayed initial snapshots.
     // 缓存阅读位置与用户真实上滚均保留，不被延迟到达的首屏快照覆盖。
     if ((changedConversation || snapshot.openAtBottom && following && !activeSelection() && !pointerSelecting) && !restoringReadingNavigation()) {
@@ -947,7 +976,7 @@
         const entry = entries.get(String(message.id));
         if (entry?.mounted) { updateElapsedState(entry, message); updateMessageTime(entry, message); }
       }
-      synchronizeElapsedTimer(); return;
+      synchronizeElapsedTimer(); updateJumpButton(); return;
     }
     const anchors = following ? [] : scrollAnchors();
     applying = true;
@@ -993,6 +1022,7 @@
   }
   function applyTranscriptPatch(snapshot) {
     if (!snapshot || snapshot.conversationId !== conversationId || !Array.isArray(snapshot.messages)) return;
+    noteUnseenReplies(snapshot);
     const replacements = new Map(snapshot.messages.map(message => [String(message.id), message]));
     if (Array.isArray(snapshot.messageOrder)) messageOrder = snapshot.messageOrder;
     const latest = pending?.conversationId === conversationId ? pending.messages
@@ -1254,6 +1284,7 @@
     else if (command?.type === 'openConversation') openConversation(command.conversationId);
     else if (command?.type === 'historyAvailability' && command.conversationId === conversationId) {
       historyHasOlder = command.hasOlder === true; historyHasNewer = command.hasNewer === true;
+      historyHasNewReplies = command.hasNewReplies === true;
       updateJumpButton();
     }
     else if (command?.type === 'forgetConversation' && command.conversationId !== conversationId) removeCached(command.conversationId);

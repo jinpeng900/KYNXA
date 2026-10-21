@@ -19,9 +19,24 @@ for (double available = 320; available <= 3200; available += 10)
         Check(available - width - ShellLayoutMetrics.WorkPanelGap >= 420, "Right panel squeezed the chat below its minimum.");
     }
 }
-Check(!ShellLayoutMetrics.CanShowWorkPanel(899, 900), "Narrow window should hide the right panel.");
-Check(!ShellLayoutMetrics.CanShowWorkPanel(1400, 439), "Short window should hide the right panel.");
+Check(!ShellLayoutMetrics.CanShowWorkPanel(899, 900), "Narrow windows should use an overlay instead of an inline right column.");
+Check(!ShellLayoutMetrics.CanShowWorkPanel(1400, 439), "Short windows should use an overlay instead of an inline right column.");
 Check(ShellLayoutMetrics.CanShowWorkPanel(900, 440), "Right panel should fit at the minimum supported size.");
+Check(ShellLayoutMetrics.CanOpenWorkPanel(600, 360) && ShellLayoutMetrics.CanOpenWorkPanel(1400, 300),
+    "Compact windows must retain the workspace entry and existing terminal/browser viewers.");
+foreach (double available in new[] { 120d, 240, 320, 600, 1400, 3200 })
+foreach (double requested in new[] { 0d, -1, 320, 432, 1600, double.MaxValue, double.NaN, double.PositiveInfinity })
+{
+    double overlay = ShellLayoutMetrics.GetWorkPanelOverlayWidth(available, requested);
+    Check(double.IsFinite(overlay) && overlay > 0 && overlay <= Math.Min(available, ShellLayoutMetrics.WorkPanelMaximumWidth),
+        "Overlay geometry must stay inside its actual viewport even below the normal pane minimum.");
+}
+foreach (double invalid in new[] { 0d, -1, double.NaN, double.NegativeInfinity, double.PositiveInfinity })
+{
+    Check(!ShellLayoutMetrics.CanOpenWorkPanel(invalid, 600) && !ShellLayoutMetrics.CanOpenWorkPanel(1000, invalid),
+        "Unavailable geometry must not create an overlay outside the viewport.");
+    Check(ShellLayoutMetrics.GetWorkPanelOverlayWidth(invalid, 432) == 0, "An unmeasured overlay has no artificial width.");
+}
 double preferred = 1400;
 double narrow = ShellLayoutMetrics.GetWorkPanelWidth(1000, preferred);
 double restored = ShellLayoutMetrics.GetWorkPanelWidth(2200, preferred);
