@@ -45,6 +45,13 @@ pub fn is_read_only(name: &str) -> bool {
         || PARALLEL_READS.contains(&name)
         || READ_TOOLS.contains(&name) && !["memory.propose", "tool.load"].contains(&name)
         || BROWSER_OBSERVATIONS.contains(&name)
+        || can_parallel(&json!({"name":name}))
+}
+
+/// Reading a delivery is observational; recording its acceptance or revision changes formal task state.
+/// 读取交付属于观察；记录接纳或退回会修改正式任务状态，不能伪装成只读回执。
+pub fn is_read_only_call(name: &str, arguments: &Value) -> bool {
+    is_read_only(name) && !(name=="task.result" && arguments["review"].is_object())
 }
 
 #[cfg(test)]
@@ -237,6 +244,9 @@ const BROWSER_OBSERVATIONS: &[&str] = &[
     "browser.wait",
 ];
 const PARALLEL_READS: &[&str] = &[
+    "skill.validate",
+    "mcp.task.status",
+    "mcp.task.result",
     "attachment.read",
     "artifact.open",
     "filesystem.read",
@@ -265,6 +275,8 @@ const READ_TOOLS: &[&str] = &[
     "task.wait",
     "task.read",
     "task.result",
+    "mcp.task.status",
+    "mcp.task.result",
     "filesystem.list",
     "filesystem.read",
     "document.read",
@@ -278,6 +290,7 @@ const READ_TOOLS: &[&str] = &[
     "skill.resource.read",
     "skill.inspect",
     "skill.check",
+    "skill.validate",
     "conversation.history.search",
     "conversation.history.read",
     "knowledge.search",
@@ -298,6 +311,7 @@ const REVERSIBLE_TOOLS: &[&str] = &[
     "task.delegate",
     "task.control",
     "filesystem.write",
+    "document.create",
     "filesystem.edit",
     "filesystem.mkdir",
     "work.folder.bind",

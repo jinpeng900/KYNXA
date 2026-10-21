@@ -1,30 +1,18 @@
 # 正式 Shell UI 迁移隔离验收
 
-## 输入区上方的非模态审批
-
-```powershell
-pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario inline-approval
-```
-
-`App.InlineApprovalChecks.cs` 通过正式 `QueueToolApproval` 入口分别传入主回复和子任务的虚构审批，再使用卡片真实按钮及正式 `AgentApiClient` 向隔离回环审批端点提交。场景不启动模型流、工具或外站；没有模拟后端自动执行的声明。核对一句话摘要、详情默认收起及按需展开、没有 ContentDialog／模态状态、出现时不抢草稿焦点和选区、遮盖排队项时保留高度与输入框位置、提交后恢复相同队列对象与顺序。实际会话搜索切换 A／B 后核对各自待审批身份，不因切换作出决定。
-
-专项覆盖批准一次／当前任务全部批准／拒绝的 HTTP 身份与范围、挂起响应期间按钮及事件防重复、HTTP 503 在原卡片显示错误后重试、真实 `TOOL_RUN_TIMEOUT` 错误码移除过期审批、子任务精确关闭和回复取消移除。全部批准不会修改保存的输入区权限模式。深色宽窗、浅色窄窗及窄窗展开输入区／审批详情检查卡片比输入框窄且居中在其上方，三个操作均在卡片内，保存原生窗口截图和 `shell-inline-approval-geometry.json`。截图与结果以本轮实际执行为准，不把测试源码当成已通过。
-
-原 `dialogs`／`shortcut-tooltip`／完整入口的模态守卫改用通用 ContentDialog 夹具，继续验证其他功能弹窗对快捷键的保护；这类模态检查不再代表实际工具审批。旧独立 `agent-ui-smoke` 的模态组件检查属于兼容 helper 验证，不能替代当前 Shell 的非模态审批专项。
-
-## 原生对话框主题、圆角及连接占位
+## 原生对话框主题、圆角及连接入口
 
 ```powershell
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario dialogs
 ```
 
-`App.DialogChecks.cs` 点击生产定时任务与连接入口，以实际 F1 打开键盘操作帮助，并核对浅色、深色及自定义强调色在同一个已打开原生 ContentDialog 上即时生效。真实 SDK 模板中的外层 `BackgroundElement` 与内层 `DialogSpace` 均需为 16 DIP 圆角；表面、边框及文字引用应用共享画刷。逐状态读取真实按钮呈现层，核对默认操作和普通取消／拒绝操作的 Normal、PointerOver、Pressed 背景、前景、至少 4.5:1 文字对比度和 8 DIP 按钮圆角。状态检查调用原生 VisualStateManager，不声称对话框按钮使用了真实鼠标按下。
+`App.DialogChecks.cs` 点击生产定时任务入口，以实际 F1 打开键盘操作帮助，并核对浅色、深色及自定义强调色在同一个已打开原生 ContentDialog 上即时生效。真实 SDK 模板中的外层 `BackgroundElement` 与内层 `DialogSpace` 均需为 16 DIP 圆角；表面、边框及文字引用应用共享画刷。逐状态读取真实按钮呈现层，核对默认操作和普通取消／拒绝操作的 Normal、PointerOver、Pressed 背景、前景、至少 4.5:1 文字对比度和 8 DIP 按钮圆角。状态检查调用原生 VisualStateManager，不声称对话框按钮使用了真实鼠标按下。
 
-单操作对话框还比较实际按钮与 `BackgroundElement` 的水平中心，误差不超过 1 DIP，覆盖中英文定时／帮助／连接及项目错误提示。短按钮为 130×36 DIP、左右内边距各 24 DIP；中文“知道了”原文保持不变，文字本地字距为 180，并核对实际排版宽度增加，避免只读取继承属性而误计生效。同一生产定时弹窗临时使用较长标签，验证宽度在 202 DIP 上限内自然增长，随后恢复原文和尺寸；英语及其他标签恢复原生内容模板和字距。多操作的重命名、通用模态夹具、检索窗口保留分列与间隔。实际文字／按钮边界、模板和间距写入 `shell-dialog-action-layout.json`，英文及长标签另保存截图。
+单操作对话框还比较实际按钮与 `BackgroundElement` 的水平中心，误差不超过 1 DIP，覆盖中英文定时／帮助及项目错误提示。短按钮为 130×36 DIP、左右内边距各 24 DIP；中文“知道了”原文保持不变，文字本地字距为 180，并核对实际排版宽度增加，避免只读取继承属性而误计生效。同一生产定时弹窗临时使用较长标签，验证宽度在 202 DIP 上限内自然增长，随后恢复原文和尺寸；英语及其他标签恢复原生内容模板和字距。多操作的重命名、审批、检索窗口保留分列与间隔。实际文字／按钮边界、模板和间距写入 `shell-dialog-action-layout.json`，英文及长标签另保存截图。
 
-场景还核对实际 Escape 关闭、关闭后的主题订阅生命周期、中文及英文连接入口只显示“功能暂未开发”、重命名的空名称禁用及取消结果、通用双操作模态无默认动作及明确取消。生产检索窗口中的添加链接弹窗保留自己的 XamlRoot，空链接验证仍取消提交，切换主题和取消导入仍保持原操作生命周期。草稿、会话 ID、消息对象及模拟网关零写入必须保持；不访问正式数据或调用模型。
+场景还核对实际 Escape 关闭、关闭后的主题订阅生命周期、中文及英文连接入口打开既有管理窗口并选中工具页、重命名的空名称禁用及取消结果、工具审批无默认批准及明确拒绝。连接窗口仅使用四个隔离只读接口，关闭后返回原主窗口；不显示未开发占位。生产检索窗口中的添加链接弹窗保留自己的 XamlRoot，空链接验证仍取消提交，切换主题和取消导入仍保持原操作生命周期。草稿、会话 ID、消息对象及模拟网关零写入必须保持；不访问正式数据或调用模型。
 
-截图为 `shell-dialog-schedule-light.png`、`shell-dialog-schedule-dark.png`、`shell-dialog-keyboard-custom-light.png`、`shell-dialog-keyboard-custom-dark.png`、`shell-dialog-schedule-long-action-zh.png`、`shell-dialog-connections-en.png` 和 `shell-dialog-rename-dark.png`。集中入口成功标记为 `PASS: ... production Shell native dialog checks.`；默认完整入口也包含这组。文档列出验收条件，不替代本轮原生运行结果。
+截图为 `shell-dialog-schedule-light.png`、`shell-dialog-schedule-dark.png`、`shell-dialog-keyboard-custom-light.png`、`shell-dialog-keyboard-custom-dark.png`、`shell-dialog-schedule-long-action-zh.png` 和 `shell-dialog-rename-dark.png`。集中入口成功标记为 `PASS: ... production Shell native dialog checks.`；默认完整入口也包含这组。文档列出验收条件，不替代本轮原生运行结果。
 
 ## 功能窗口首次呈现与原生关闭背景
 
@@ -76,7 +64,7 @@ dotnet run --project tests/shell-migration-ui-smoke/ShellMigrationUiSmoke.csproj
 
 `App.StartupChecks.cs` 在正式页面加载前挂起模拟网关的首次目录响应，核对目录尚未返回时的工作提示、灰色禁用发送按钮、禁用箭头和44 DIP工作页脚。检查跨实际渲染帧的位置稳定，再在加载期间切换聊天并输入虚构草稿，释放响应后核对模式、草稿、发送可用状态及原生矩形坐标；恢复工作模式后的位置也应一致。挂起只作用于首次目录GET，模型列表和健康检查独立，失败和退出都会释放或取消门闩。截图为 `shell-startup-before-catalog.png`、`shell-startup-chat-after-catalog.png`，坐标保存在 `shell-startup-geometry.json`；不等待真实网关，也不读取日常数据。
 
-覆盖范围：正式页面初始化、已配置/失败/恢复模型状态，真实模型菜单按连接 ID 和模型 ID 搜索、无匹配提示、固定底部配置入口、失败后的缓存列表及重试，同名模型按连接和模型 ID 对选中，项目操作前后发送按钮恢复；会话标题搜索、聊天和工作模式间草稿恢复、稳定聊天及消息 ID、800 DIP 临时抽屉、放宽后的已保存侧栏宽度、通用 ContentDialog 对新快捷键和导航的阻止、整段会话的可见 Markdown 投影及快照。快捷键模态守卫和项目操作门控调用真实处理函数；项目操作只挂起本地测试委托，文件选择器交互不在本夹具范围。
+覆盖范围：正式页面初始化、已配置/失败/恢复模型状态，真实模型菜单按连接 ID 和模型 ID 搜索、无匹配提示、固定底部配置入口、失败后的缓存列表及重试，同名模型按连接和模型 ID 对选中，项目操作前后发送按钮恢复；会话标题搜索、聊天和工作模式间草稿恢复、稳定聊天及消息 ID、800 DIP 临时抽屉、放宽后的已保存侧栏宽度、生产工具审批弹窗对新快捷键和导航的阻止、整段会话的可见 Markdown 投影及快照。快捷键模态守卫和项目操作门控调用真实处理函数；项目操作只挂起本地测试委托，文件选择器交互不在本夹具范围。
 
 截图包含 `shell-migration-model-menu.png`、`shell-migration-drawer-search-800.png` 和 `shell-migration-wide.png`。捕获前核对搜索行的真实文本，等待弹出动画、XAML Rendered 事件和桌面合成刷新；失败时另保存 `shell-migration-failure.png`。模型选择仅保存临时 Desktop 下的 UI 偏好，模拟网关仍禁止 POST 等写入。
 
@@ -101,7 +89,7 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProcessor -Scenario body-search
 ```
 
-脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。通用 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
+脚本根据 `-Scenario` 将对应专项参数直接交给已注册本轮调试身份的应用。`App.ShortcutTooltipChecks.cs` 承载真实生产页面，将指针移到页面原生区域及搜索按钮，观察实际打开的 Popup 与可见文本；搜索按钮的中文及英文完整提示必须仍能真实打开。工具提示的逻辑所有者不一定在 Popup.Child 的可视后代中，因此页面附加 ToolTip 仅作诊断，不以其空值证明没有自动提示。向夹具自己的前台窗口发送 Ctrl+F、Escape、Ctrl+L 和鼠标滚轮，再核对搜索、输入焦点及长正文的实际滚动距离；仅视图中的虚构长文在 finally 恢复。审批 ContentDialog 打开时真实快捷键必须保留模态焦点、会话和草稿。检查始终使用虚构网关，无模型请求和正式写入。此组也追加到原完整入口，不替换原有检查。
 
 `body-search` 仅执行初始化、空会话查找与正文键盘专项：真实 Enter／Shift+Enter 导航、鼠标点击原生输入框后 F3／Shift+F3 导航、Ctrl+F 返回搜索框，以及原生输入框中的 Escape。通过匹配索引核对每次按键只移动一处，保留草稿与会话，受控原生输入法组合状态仍阻止快捷键。后台启动的自有窗口若被桌面置顶窗口遮挡，夹具仅在激活期间临时提高自己的置顶层级，核验标题栏命中后点击，并在 finally 恢复原设置；不操作其他应用窗口。成功标记为 `PASS: ... production Shell body-search keyboard checks.`。
 
@@ -134,14 +122,6 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 
 实际文字检查在强制 GC 后双向切换语言，直接核对已实现的字号标题和五套配色名称，并记录 `shell-appearance-settings-400-language.json`；仅检查自动化名称或窗口几何不能证明英文已经显示。另释放一个真实原生绑定控件，确认翻译值源可被回收，防止全局本地化注册强持有窗口。
 
-深黑配色检查在现有预设与极端强调色组合中验证中性 RGB 通道、`#0C0C0C` 主背景、`#141414` 表面和悬停／按下的明度层次，并保留语义文字至少 4.5:1 的对比度要求。真实主窗口与设置窗口核对共享画刷及 WebView 实际底色；切换深浅模式后移开输入焦点，以原生 VisualStateManager 呈现普通状态并读取 ComboBox／TextBox 的真实模板背景，检查浅色不残留深黑填充。复用 `shell-appearance-dark-custom-settings.png` 和 `shell-appearance-dark-transcript.png`，该状态检查不声称使用了物理鼠标悬停。
-
-`App.PopupAppearanceChecks.cs` 通过统一设置分类，在深浅主题及两种自定义强调色下实际打开生产语言／字号下拉框，读取原生弹出外框的 16 DIP 圆角、行背景的 8 DIP 圆角、内缩及选中标记；选中四态逐一核对淡强调色和至少 4.5:1 文字对比度，并使用真实 SendInput 验证选中项悬停及 Down／Enter 选择。主题模式按新的分段选择器检查共享配色、圆角和胶囊视觉；使用原生 VisualStateManager 核对悬停／按下状态，不改变选中键。生产工作菜单与使用隐式样式的普通／勾选／子菜单行检查悬停、按下和子菜单展开背景，箭头要求至少 3:1 对比度；菜单状态使用原生 VisualStateManager，不声称物理按下。合成系统高对比色验证 Highlight／HighlightText 资源配对，不改变 Windows 辅助设置。结果为 `shell-popup-appearance.json`；`shell-popup-{dropdown/menu}-{light/dark}-ui-render.png` 是实际原生 UI 元素渲染，并非操作系统屏幕截图，SDK 不支持渲染时保留 `.unavailable.txt`。全过程保留草稿、活动会话与正式消息，模拟网关无写入。
-
-`App.PickerPopupAppearanceChecks.cs` 补充真实字号列表与原生滚动条间距、模型选择的两个入口、会话搜索按钮及快捷键入口，以及同组权限浮层。读取实际 `ListViewItemPresenter` 和其背景 Border 的圆角、选中与交互画刷，核对搜索框的真实模板圆角及辅助文字对比度；以生产字号列表测滚动条分隔。模型／搜索结果不足以滚动时，夹具只限制该测试弹出层的列表高度以实现原生滚动条，不声称修改了正式菜单高度。项目选择器复用同一个列表工厂，本专项未单独打开验证。预览沿用原生 UI 元素渲染，实际通过结果以本轮运行日志为准。
-
-`-Scenario dropdown-spacing` 复用上述生产设置下拉检查，核对语言短列表两侧窄留白且对称、下拉外框与原选择框宽度对齐、字号高亮到展开滚动条约 4 DIP 间距，包含深浅色、原生悬停与 Down／Enter 选择。还通过本地模型分类检查加载策略与筛选两个分段选择器，使用显式开启的回环空模型目录和隔离安装路径，保留策略选择、不提交设置；核对共享配色、圆角和胶囊视觉。分类往返检查目录只读一次、缓存页面与控件复用，并确认外观页滚动位置及窗口大小保留。对应元素渲染与观察保存为 `shell-local-models-*`、`shell-local-model-selectors.json`。该入口不重复未改动的 PickerMenu 模型和会话搜索浮层检查，也不把它的结果计为这些入口的新一轮覆盖。
-
 还核对旧版偏好缺少配色字段及未知预设值的默认回退，以及真实输入框获得和离开焦点时外框画刷的切换。证据文件为 `shell-appearance-observations.json`、`shell-appearance-settings-400-en.png`、`shell-appearance-settings-wide.png` 和 `shell-appearance-mist-blue-wide.png`。集中入口成功标记为 `PASS: ... production Shell appearance checks.`。这些是需要实际运行的验收条件，文档描述本身不代表本轮已经通过。
 
 原生输入框的选中文字为白色，逐套读取真实 `Prompt.SelectionHighlightColor`，要求不透明、与该套强调色一致且对白字对比度至少 4.5:1。另实际聚焦主输入框并全选原草稿，生成 `shell-appearance-native-selection.png/json` 核对显示效果；WebView 继续验证浅色选区与原文字选择保留，不把两种控件的选区背景混为一谈。
@@ -163,8 +143,6 @@ pwsh -NoProfile -File tests/shell-migration-ui-smoke/run-checks.ps1 -SingleProce
 展开状态只预留 4 DIP 拖动列，底部图标原坐标保留，比较最左设置与最右状态图标到可见侧栏边缘的实际空白均为 20 DIP。完整 8 DIP `SidebarGrip` 跨越较窄预留列，两侧各覆盖 2 DIP；实际 MOVE 进入两处覆盖范围并等待 `PointerEntered`，核对坐标、层级及未开始拖动。原拖动、保存、取消、复位的控件接线检查继续执行。
 
 800 DIP 紧凑模式分别以新收起按钮、原遮罩按钮和生产 `TryDismissCompactSidebar` 的 Escape 处理路径关闭临时抽屉，核对焦点及保存偏好，再恢复宽窗。测试同时覆盖原本展开和原本折叠两种宽窗偏好。Escape 在本场景调用生产处理方法，不发送系统按键；真实按钮使用原生 Invoke，而非直接调用点击方法，因此不要求键盘输入获得前台焦点。
-
-紧凑抽屉还在深浅两种主题下，以前台守卫和真实 SendInput 移入关闭遮罩，核对悬停时仍为半透明背景；按下外观使用原生 VisualStateManager 检查，随后另以真实鼠标单击验证关闭及焦点返回。采样侧栏右侧可见草稿首行的 256 个实际屏幕像素，检查原本字形对比存在，且悬停、按下后像素保持不变，避免不透明整块遮住内容。结果保存到 `shell-sidebar-scrim-feedback.json`，截图为 `shell-sidebar-scrim-{dark/light}-{hover/pressed}.png`；测试结束恢复原主题与侧栏偏好。
 
 透明分隔线检查读取真实 `ResizeGrip` 的悬停状态画刷、八 DIP 命中区域及 `HitTarget`，并触发该控件实例已接线的拖动、完成、取消和重置事件，验证生产宽度逻辑和保存仍可用。还核对 `ShellGrid` 与侧栏实际背景画刷颜色相同且不透明，使透明拖动列连续显示侧栏颜色，主内容区保留独立背景；宽窗与最小宽度截图供实际边界复核。这是原生控件与接线回归，不冒充实际鼠标拖动验收。整个场景保留草稿、活动聊天 ID、原消息对象和正文，模拟网关写入始终为零，结束时恢复夹具原布局及语言。
 

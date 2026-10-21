@@ -208,7 +208,7 @@ fn binary_content_response(bytes: Vec<u8>, mime_type: &str, version: &str, heade
 }
 
 pub fn health() -> Value {
-    json!({
+    let mut status = json!({
         "service": "kynxa-model-gateway",
         "status": "ok",
         "runtime": "rust",
@@ -226,7 +226,15 @@ pub fn health() -> Value {
         "retrievalProtocol": 1,
         "taskProtocol": 1,
         "documentParsingProtocol": 2
-    })
+    });
+    // Explicit development runs must prove both arms reached the intended native sending policy.
+    // 显式开发评测须核对两组真实原生排序策略，防止旧构建忽略开关却产生伪对照。
+    if let Ok(order) = std::env::var("KYNXA_BENCHMARK_TOOL_ORDER") {
+        if matches!(order.as_str(), "stable" | "relevance") {
+            status["benchmarkToolOrder"] = json!(order);
+        }
+    }
+    status
 }
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
@@ -510,6 +518,16 @@ async fn handle_request(
             Err(error) => response(Err(error)),
         };
     }
+    let attachment_page_number = |name, fallback| crate::storage::gateway::query_value(&query, name)
+        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);
+    if method == Method::GET && let Some(tail) = path.strip_prefix("/api/projects/") {
+        let parts = tail.split('/').collect::<Vec<_>>();
+        if let [project, "attachments"] = parts.as_slice() {
+            return response(crate::orchestration::gateway_attachments::project_list(&runtime, project,
+                attachment_page_number("offset", 0), attachment_page_number("limit", 50).clamp(1, 200))
+                .await.map(|value| (200, value)));
+        }
+    }
     if let Some(tail) = path.strip_prefix("/api/conversations/") {
         let parts = tail.split('/').collect::<Vec<_>>();
         if parts.get(1) == Some(&"attachments") {
@@ -517,14 +535,22 @@ async fn handle_request(
             let message = crate::storage::gateway::query_value(&query, "messageId").unwrap_or("");
             return match (method.as_str(), parts.as_slice()) {
                 ("POST", [_, "attachments", "import"]) => response(crate::orchestration::gateway_attachments::import(&runtime, conversation, &body).await.map(|value| (200, value))),
-                ("GET", [_, "attachments"]) => response(crate::orchestration::gateway_attachments::list(&runtime, conversation, message).await.map(|value| (200, value))),
-                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content(&runtime, conversation, message, attachment).await {
-                    Ok(content) => {
-                        if crate::storage::gateway::query_value(&query, "version").is_some_and(|version| version != content.sha256) {
-                            response(Err(GatewayError::new("ATTACHMENT_VERSION_CHANGED", "附件预览版本已变化，请重新打开。", 409)))
-                        } else { binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers) }
-                    },
+                ("GET", [_, "attachments"]) => response(if message.is_empty() {
+                    crate::orchestration::gateway_attachments::conversation_list(&runtime, conversation,
+                        attachment_page_number("offset", 0), attachment_page_number("limit", 50).clamp(1, 200)).await
+                } else {
+                    crate::orchestration::gateway_attachments::list(&runtime, conversation, message).await
+                }.map(|value| (200, value))),
+                ("GET", [_, "attachments", attachment, "content"]) => match crate::orchestration::gateway_attachments::content_representation(&runtime, conversation, message, attachment,
+                    crate::storage::gateway::query_value(&query, "version"), crate::storage::gateway::query_value(&query, "representation")).await {
+                    Ok(content) => binary_content_response(content.bytes, &content.mime_type, &content.sha256, &headers),
                     Err(error) => response(Err(error)),
+                },
+                ("GET", [_, "attachments", attachment, "preview"]) => {
+                    let offset = crate::storage::gateway::query_value(&query, "offset").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+                    let arguments = json!({"version":crate::storage::gateway::query_value(&query, "version"),
+                        "representation":crate::storage::gateway::query_value(&query, "representation"),"offset":offset});
+                    response(crate::orchestration::gateway_attachments::preview(&runtime, conversation, message, attachment, &arguments).await.map(|value| (200, value)))
                 },
                 ("GET", [_, "attachments", attachment, "text"]) => {
                     let number = |name, fallback| crate::storage::gateway::query_value(&query, name).and_then(|value| value.parse::<usize>().ok()).unwrap_or(fallback);

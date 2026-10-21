@@ -1,4 +1,4 @@
-# KYNXA 1.6
+# KYNXA 1.65
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
@@ -6,15 +6,15 @@
 
 **KYNXA** 是面向 Windows 的本地优先个人 Agent 应用，将云端与本地模型、长任务、文档检索、工具，以及文件／网页／终端工作区整合在桌面中。
 
-**桌面发行版本：`1.6`（安装包版本 `1.6.0`）· Windows x64 · 持续开发中**
+**桌面发行版本：`1.65`（安装包版本 `1.65.0`）· Windows x64 · 持续开发中**
 
-1.6 增加 DOCX／PPTX／XLSX 原格式预览、可操作首屏与后台资源准备、原生 Office 文档生成，以及更准确的终端执行回执。成品下载见 [1.6 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.6.0)，架构与使用入口见 [文档索引](docs/README.md)。
+1.65 改进长任务续跑与恢复、结果未知操作核验、模型请求与缓存用量统计、检索缓存和后台预热，以及设置界面和文档预览。继续保留 DOCX／PPTX／XLSX 原格式预览、原生 Office 文档生成和终端执行回执。成品下载见 [1.65 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0)，架构与使用入口见 [文档索引](docs/README.md)。
 
-**成品与源码说明：** 1.6 成品包包含尚未推送到 `main` 的本地实现。本次 README 更新不包含这些功能源码，因此直接拉取当前 GitHub 源码构建，可能尚不具备下列全部 1.6 成品功能。
+**成品与源码说明：** 从源码构建已发布版本时，请使用对应的发布标签；不同分支或修订可能包含不同实现。
 
-本轮 **89 项 Windows UI 定向检查、6 项 Rust 工作区预览测试通过**，Debug Full 桌面 **零警告、零错误构建**。这些结果针对本次预览及交互路径，不等于所有模型、网站、安装场景或大库检索质量均已覆盖；历史验证结果保留在 [1.5.3 补丁说明](docs/releases/1.5.3.md)。
+验证采用 Rust、HTTP／SSE 和 Windows UI 定向检查，覆盖实际执行的路径，不等于所有模型、网站、安装场景或大库检索质量均已覆盖；历史验证结果保留在 [1.5.3 补丁说明](docs/releases/1.5.3.md)。
 
-## 1.6 成品能力
+## 1.65 成品能力
 
 | 领域 | 已接入的功能 |
 | --- | --- |
@@ -40,14 +40,14 @@ DOCX 先显示可操作页面，嵌入字体和图片在后台补齐；长文档
 
 ## 安装与数据位置
 
-所有下载均作为附件发布于 [1.6 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.6.0)：
+安装包以 EXE 和 ZIP 附件发布于 [1.65 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0)：
 
 | 下载 | 用途 |
 | --- | --- |
-| [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
-| [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-online-setup.exe) | 安装时下载并校验完整运行载荷。 |
-| [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
-| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.6.0/KYNXA-1.6.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
+| [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
+| [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-online-setup.exe) | 安装时下载并校验完整运行载荷。 |
+| [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
+| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5／BGE、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 

@@ -15,7 +15,7 @@ public static class AssistantSegmentRules
 {
     public static bool IsValid(AssistantSegment? segment) => segment is not null &&
         !string.IsNullOrWhiteSpace(segment.Id) && segment.Id.Length <= 128 && segment.Id.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_') &&
-        segment.Round is >= 1 and <= 128 && segment.Order is >= 0 and <= 1024 &&
+        segment.Round is >= 1 and <= 512 && segment.Order is >= 0 and <= 8192 &&
         segment.Phase is "commentary" or "final_answer" && segment.Status is "streaming" or "completed" or "interrupted" &&
         (!segment.IsAnswerContinuation || segment.Phase == "commentary" && segment.Status == "completed") &&
         segment.Content is not null && segment.Reasoning is not null &&
@@ -23,7 +23,7 @@ public static class AssistantSegmentRules
 
     public static bool IsValidSequence(IReadOnlyList<AssistantSegment> segments)
     {
-        if (segments.Count > 128) return false;
+        if (segments.Count > 512) return false;
         var ids = new HashSet<string>(StringComparer.Ordinal);
         int lastRound = 0, lastOrder = -1;
         bool final = false;
@@ -64,9 +64,11 @@ public sealed record McpServerConfig(string Id, string Name, string Command, str
     Dictionary<string, string>? Env = null, Dictionary<string, string>? EnvRefs = null, string? Url = null,
     Dictionary<string, string>? HeaderEnv = null, McpAuthentication? Auth = null, int? StartupTimeoutMs = null,
     string? Origin = null, string? PresetId = null, bool? Overridden = null,
-    bool Trusted = false, bool BackgroundTask = false, int PrewarmPriority = 0);
+    bool Trusted = false, bool BackgroundTask = false, int PrewarmPriority = 0, int? TimeoutMs = null);
 public sealed record McpAuthentication(string Type, string? TokenEnv = null, string? ClientId = null,
     string? ClientSecretEnv = null, string? Issuer = null, string? Scope = null);
+public sealed record McpOAuthStart(string AuthorizationId, string AuthorizationUrl, string? ExpiresAt = null, string? RedirectUri = null);
+public sealed record McpOAuthStatus(string State, string? Code = null, string? Message = null);
 public sealed record AgentConfig(int Version, long Revision, McpServerConfig[] McpServers, string[] SkillDirectories,
     string[]? DisabledSkills = null, string[]? DisabledOfficialMcpServers = null,
     string? OfficialToolsRoot = null, string? UserToolsRoot = null, string? OfficialPackageVersion = null);
@@ -95,8 +97,5 @@ public sealed record McpPreset(string Id, string Name, string Description, McpSe
     string[]? Notes = null, string? ConfigurationTemplate = null);
 public sealed record McpCatalogResponse(McpPreset[] Presets, string[] ReusedCapabilities);
 public sealed record AgentToolsResponse(AgentTool[] Tools, string[]? Errors = null, McpConnectionDiagnostic[]? Connections = null);
-/// <summary>A decision bound to an exact pending call; task scope lasts only for its active root execution.</summary>
-/// <remarks>决定绑定原待审调用；task 范围仅在所属根任务的当前执行期间有效，不修改权限快照。</remarks>
-public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId,
-    bool Approved, string Scope = "once");
-public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId, string Scope = "once");
+public sealed record AgentApprovalRequest(Guid ConversationId, Guid RequestId, string ToolCallId, Guid ApprovalId, bool Approved);
+public sealed record AgentApprovalResponse(bool Approved, Guid ApprovalId, string ToolCallId);

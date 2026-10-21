@@ -26,6 +26,7 @@ public sealed partial class RetrievalSettingsWindow
     private readonly Button _rebuild = new();
     private readonly Button _cancelJob = new();
     private readonly DispatcherTimer _jobTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly Grid _settingsRoot = new();
     private readonly Grid _titleBar = new();
 
@@ -83,6 +84,7 @@ public sealed partial class RetrievalSettingsWindow
         _settingsPanel.Children.Add(Row("语义检索", _semanticMode));
         _settingsPanel.Children.Add(Row("复杂查询重排", _rerankMode));
         _settingsPanel.Children.Add(Row("内置中英文模型", _embeddingStatus));
+        AutomationProperties.SetAutomationId(_embeddingStatus, "RetrievalEmbeddingStatus");
 
         var sourcesActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var addFile = ActionButton("添加文件", "RetrievalAddFile");
@@ -117,10 +119,17 @@ public sealed partial class RetrievalSettingsWindow
 
         root.Loaded += async (_, _) =>
         {
-            if (_loaded || _closed) return;
+            if (_closed) return;
+            StartStatusObservation();
+            if (_loaded)
+            {
+                await PollStatusAsync();
+                return;
+            }
             _loaded = true;
             await RunOperationAsync(LoadAsync);
         };
+        root.Unloaded += (_, _) => StopStatusObservation();
         foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
             picker.SelectionChanged += async (_, _) => { if (!_rendering) await SaveAsync(); };
         _inherit.Checked += async (_, _) => { if (!_rendering) await SaveAsync(); };
@@ -135,6 +144,7 @@ public sealed partial class RetrievalSettingsWindow
         });
         refresh.Click += async (_, _) => await RunOperationAsync(LoadAsync);
         _jobTimer.Tick += async (_, _) => await PollJobAsync();
+        _statusTimer.Tick += async (_, _) => await PollStatusAsync();
         _settingsHost.IsEnabled = false;
     }
 

@@ -128,7 +128,14 @@ namespace KYNXA_Desktop.Views
         }
 
         public void SetMetadataBusy(bool busy) => _projectActionPending = busy;
-        public void AttachSecondary(Window window) => _modelManagementWindow = window;
+        public void AttachSecondary(Window window)
+        {
+            _modelManagementWindow = window;
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_modelManagementWindow, window)) _modelManagementWindow = null;
+            };
+        }
 
         public async Task<ContentDialogResult> ShowPendingMetadataDialogAsync()
         {

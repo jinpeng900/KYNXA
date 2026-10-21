@@ -336,11 +336,14 @@
         "orchestration/gateway_loop.rs",
         "orchestration/gateway_runtime.rs",
         "orchestration/gateway_attachments.rs",
+        "orchestration/gateway_tool_batch.rs",
         "resources/gateway.rs",
         "retrieval/gateway.rs",
         "retrieval/gateway_documents.rs",
         "retrieval/gateway_message_attachments.rs",
         "retrieval/gateway_embedding.rs",
+        "retrieval/gateway_cache.rs",
+        "retrieval/cache_candidates.rs",
         "retrieval/gateway_index.rs",
         "retrieval/gateway_watch.rs",
         "retrieval/gateway_structure.rs",
@@ -376,6 +379,7 @@
         "storage/tool_memory.rs",
         "tools/gateway.rs",
         "tools/gateway_document_read.rs",
+        "tools/gateway_document_create.rs",
         "tools/gateway_workspace_preview.rs",
         "tools/gateway_attachment_read.rs",
         "tools/gateway_workspace_changes.rs",
@@ -383,6 +387,9 @@
         "tools/gateway_browser.rs",
         "tools/gateway_browser_permissions.rs",
         "tools/gateway_mcp.rs",
+        "tools/gateway_mcp_oauth.rs",
+        "tools/gateway_skill_authoring.rs",
+        "tools/gateway_extension_install.rs",
         "tools/gateway_tool_memory.rs",
         "tools/gateway_mcp_budget.rs",
         "tools/gateway_process.rs",
@@ -479,6 +486,11 @@
           "path": "orchestration/gateway_attachments.rs",
           "allowedDomains": ["storage", "retrieval", "tools"],
           "purpose": "Message-scoped attachment import and model context / 消息范围附件导入与模型上下文"
+        },
+        {
+          "path": "orchestration/gateway_tool_batch.rs",
+          "allowedDomains": ["storage", "tools", "resources", "retrieval"],
+          "purpose": "Bounded same-step read scheduling with ordered receipts / 同轮只读调用的有界调度与有序回执"
         },
         {
           "path": "retrieval/gateway_message_attachments.rs",
@@ -631,6 +643,11 @@
           "purpose": "Authorized direct file-document extraction without an index / 已授权文件的直接文档解析，不依赖索引"
         },
         {
+          "path": "tools/gateway_document_create.rs",
+          "allowedDomains": [],
+          "purpose": "Authorized document generation, validation and atomic binary publication / 授权文档生成、校验与二进制原子发布"
+        },
+        {
           "path": "tools/gateway_workspace_preview.rs",
           "allowedDomains": [
             "retrieval"
@@ -654,9 +671,24 @@
         {
           "path": "tools/gateway_mcp.rs",
           "allowedDomains": [
-            "resources"
+            "resources", "storage"
           ],
-          "purpose": "Actual MCP transports and callback lifetime / 真实 MCP 传输与回调生命周期"
+          "purpose": "Actual MCP transports, callback lifetime and owned recovery receipts / 真实 MCP 传输、回调生命周期及所属恢复回执"
+        },
+        {
+          "path": "tools/gateway_mcp_oauth.rs",
+          "allowedDomains": [],
+          "purpose": "Personal OAuth browser handoff and protected credential lifetime / 个人OAuth浏览器授权与受保护凭据生命周期"
+        },
+        {
+          "path": "tools/gateway_skill_authoring.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Versioned application Skill authoring with formal validation evidence / 基于正式验证证据的应用Skill版本化编写"
+        },
+        {
+          "path": "tools/gateway_extension_install.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Explicit extension installation and verified configuration handoff / 显式扩展安装及核验后的配置接线"
         },
         {
           "path": "tools/gateway_browser.rs",
@@ -734,6 +766,11 @@
           "purpose": "Real resource leases and inference lifetime / 真实资源租约与推理生命周期"
         },
         {
+          "path": "retrieval/gateway_cache.rs",
+          "allowedDomains": ["storage", "resources"],
+          "purpose": "Optional process cache memory admission and owned shared computation / 可选进程缓存内存准入与有生命周期的共享计算"
+        },
+        {
           "path": "retrieval/gateway_documents.rs",
           "allowedDomains": [
             "storage",
@@ -790,7 +827,7 @@
         {
           "path": "orchestration/gateway_task_journal.rs",
           "allowedDomains": [
-            "storage"
+            "storage", "tools"
           ],
           "purpose": "Attempt-scoped event and checkpoint I/O / 尝试范围事件及检查点 I/O"
         },

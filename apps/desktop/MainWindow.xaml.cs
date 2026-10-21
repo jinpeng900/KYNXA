@@ -13,6 +13,10 @@ namespace KYNXA_Desktop;
 /// </summary>
 public sealed partial class MainWindow : Window
 {
+    private readonly Services.MainWindowTrayService _trayService;
+
+    internal void RequestExit() => _trayService.RequestExit();
+
     private void MoreOptions_Click(object sender, RoutedEventArgs e)
     {
         if (RootFrame.Content is ShellPage page && sender is FrameworkElement anchor)
@@ -37,5 +41,6 @@ public sealed partial class MainWindow : Window
 
         RootFrame.Navigate(typeof(ShellPage));
         Services.AppearanceService.TrackWindow(this);
+        _trayService = new Services.MainWindowTrayService(this);
     }
 }

@@ -59,7 +59,9 @@ internal static class HostTerminalRunner
                 }
             };
             Check(SetInformationJobObject(jobHandle, 9, ref limits, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()), "Set host terminal job limits");
-            var output = new BoundedOutput(jobHandle, shell == "cmd", truncateOnOverflow: request.BackgroundJob);
+            // Large logs only limit what is retained; the command keeps running and its real exit decides completion.
+            // 大量日志只限制保留内容；命令继续运行，由真实退出决定是否完成，不再因输出量终止进程树。
+            var output = new BoundedOutput(jobHandle, shell == "cmd", truncateOnOverflow: true);
             var (stdout, stderr) = StartHostShell(shell, request.Script!, cwd, jobHandle, ref processInformation, output, cancellationToken);
             started = true;
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
@@ -86,14 +88,14 @@ internal static class HostTerminalRunner
             await Task.WhenAll(stdout, stderr);
             // Log retention is independent of a negotiated background job's observed completion.
             // 已协商后台作业的日志保留上限不改变已观测到的正常完成事实。
-            bool completed = normalExit && (request.BackgroundJob || !output.Truncated);
+            bool completed = normalExit;
             return new
             {
                 protocolVersion = 1, boundary = "host-terminal", completed, outcome = completed ? "completed" : "unknown",
                 shell, cwd, exitCode = unchecked((int)exitCode), stdout = await stdout, stderr = await stderr,
                 timedOut, cancelled, processId = processInformation.ProcessId, activeProcessesAfterExit = 0,
                 outputTruncated = output.Truncated, outputLimitExceeded = output.Truncated,
-                outputOverflowPolicy = request.BackgroundJob ? "truncate" : "terminate",
+                outputOverflowPolicy = "truncate-keep-tail", omittedOutputBytes = output.OmittedBytes,
                 elapsedMs = elapsed.ElapsedMilliseconds, maxOutputBytes = MaximumOutputBytes, capturedOutputBytes = output.CapturedBytes,
                 outputEncoding = shell == "cmd" ? "utf-8-or-oem-per-line" : "utf-8",
                 runtimeArguments = shell == "cmd" ? new[] { "/d", "/s", "/c" } : new[] { "-NoProfile", "-NonInteractive", "-Command" }
@@ -276,6 +278,9 @@ internal static class HostTerminalRunner
         private long _lastPublishedMs = -1000;
         internal bool Truncated => Volatile.Read(ref _truncated) != 0;
         internal long CapturedBytes => Volatile.Read(ref _capturedBytes);
+        internal long OmittedBytes => Math.Max(0, Volatile.Read(ref _bytes) - Volatile.Read(ref _capturedBytes) - Volatile.Read(ref _tailBytes));
+        private long _tailBytes;
+        private const int TailBytes = 64 * 1024;
 
         internal void StartEvents()
         {
@@ -287,6 +292,10 @@ internal static class HostTerminalRunner
             using var stream = new FileStream(new SafeFileHandle(handle, ownsHandle: true), FileAccess.Read);
             using var stored = new MemoryStream();
             using var line = new MemoryStream();
+            // Keep the most recent overflow bytes too: build and test failures are usually at the end of the log.
+            // 同时保留最近的超量输出：构建与测试失败通常出现在日志末尾。
+            byte[] tail = new byte[TailBytes];
+            long tailWritten = 0;
             byte[] buffer = new byte[4096];
             int count;
             while ((count = stream.Read(buffer)) != 0)
@@ -295,6 +304,8 @@ internal static class HostTerminalRunner
                 int accepted = (int)Math.Clamp(MaximumOutputBytes - (total - count), 0, count);
                 stored.Write(buffer, 0, accepted);
                 Interlocked.Add(ref _capturedBytes, accepted);
+                for (int index = accepted; index < count; index++)
+                    tail[(tailWritten++) % TailBytes] = buffer[index];
                 var decoded = new StringBuilder();
                 for (int index = 0; index < accepted; index++)
                 {
@@ -312,7 +323,19 @@ internal static class HostTerminalRunner
             }
             if (line.Length != 0) PublishDelta(channel, DecodeOutput(line.ToArray(), cmdOutput));
             lock (_eventLock) FlushEvents();
-            return DecodeOutput(stored.ToArray(), cmdOutput);
+            string head = DecodeOutput(stored.ToArray(), cmdOutput);
+            if (tailWritten == 0) return head;
+            int kept = (int)Math.Min(tailWritten, TailBytes);
+            byte[] recent = new byte[kept];
+            for (int index = 0; index < kept; index++)
+                recent[index] = tail[(tailWritten - kept + index) % TailBytes];
+            // Start the tail at a line boundary so a split multibyte character is not shown.
+            // 尾部从行边界开始，避免显示被截断的多字节字符。
+            int start = tailWritten > TailBytes ? Array.IndexOf(recent, (byte)'\n') + 1 : 0;
+            if (start <= 0 || start >= kept) start = 0;
+            Interlocked.Add(ref _tailBytes, kept - start);
+            long omitted = tailWritten - (kept - start);
+            return head + $"\n[... {omitted} bytes omitted ...]\n" + DecodeOutput(recent[start..], cmdOutput);
         });
 
         private void PublishDelta(string channel, string delta)

@@ -602,7 +602,7 @@ fn sqlite_bootstrap_rejects_a_future_database_before_schema_changes() {
     fs::create_dir(&directory).unwrap();
     let path = directory.join("retrieval.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("CREATE TABLE future_owner(value TEXT);INSERT INTO future_owner VALUES ('preserve');PRAGMA user_version=6;").unwrap();
+    connection.execute_batch("CREATE TABLE future_owner(value TEXT);INSERT INTO future_owner VALUES ('preserve');PRAGMA user_version=7;").unwrap();
     drop(connection);
     let original = fs::read(&path).unwrap();
     let error = super::sqlite_bootstrap::apply(
@@ -612,6 +612,85 @@ fn sqlite_bootstrap_rejects_a_future_database_before_schema_changes() {
     .unwrap_err();
     assert_eq!(error.code, "UNSUPPORTED_RETRIEVAL_INDEX_VERSION");
     assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+fn legacy_retrieval_fixture(duplicate_chunk: bool) -> (Fixture, PathBuf) {
+    let fixture = Fixture::new();
+    let directory = fixture.root.join("Index");
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("retrieval.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let schema = super::sqlite_schema::RETRIEVAL_SCHEMA.replace("\r\n", "\n")
+        .replace("TEXT NOT NULL PRIMARY KEY", "TEXT PRIMARY KEY")
+        .replace(",\n    UNIQUE(source_id,chunk_index)", "");
+    connection.execute_batch(&schema).unwrap();
+    connection.execute_batch("INSERT INTO sources(source_id,scope_key,source_type,title,locator,text,content_hash,source_revision,binding_revision,active_generation,updated_at) VALUES ('source','project:fixture','knowledge','Legacy title','{}','Golden cathedral','hash','v1',1,1,'fixture');
+        INSERT INTO chunks(chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,chunker_version,tokenizer_version) VALUES ('chunk','source',0,'Golden cathedral','golden cathedral','hash',0,16,1,1,'fixture','fixture');PRAGMA user_version=5;").unwrap();
+    if duplicate_chunk {
+        connection.execute_batch("INSERT INTO chunks(chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,chunker_version,tokenizer_version) SELECT 'duplicate',source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,chunker_version,tokenizer_version FROM chunks;").unwrap();
+    }
+    drop(connection);
+    (fixture, path)
+}
+
+#[test]
+fn retrieval_integrity_migration_preserves_fts_rows_and_rejects_duplicate_source_ordinals() {
+    let (fixture,path) = legacy_retrieval_fixture(false);
+    super::sqlite_bootstrap::apply("storage.index.bootstrap", &json!({"root":fixture.path(),"path":path,"epoch":"fixture"})).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(connection.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0)).unwrap(),6);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH 'golden'",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(connection.query_row("SELECT text FROM chunks WHERE chunk_id='chunk'",[],|row|row.get::<_,String>(0)).unwrap(),"Golden cathedral");
+    assert!(connection.execute_batch("INSERT INTO chunks(chunk_id,source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,chunker_version,tokenizer_version) SELECT 'duplicate',source_id,chunk_index,text,lexical_text,chunk_hash,start_offset,end_offset,start_line,end_line,chunker_version,tokenizer_version FROM chunks;").is_err());
+    assert!(connection.execute("INSERT INTO retrieval_metadata(key,value) VALUES (NULL,'invalid')",[]).is_err());
+}
+
+#[test]
+fn duplicate_legacy_chunks_prevent_migration_and_preserve_every_original_row() {
+    let (fixture,path) = legacy_retrieval_fixture(true);
+    let error = super::sqlite_bootstrap::apply("storage.index.bootstrap", &json!({"root":fixture.path(),"path":path,"epoch":"fixture"})).unwrap_err();
+    assert_eq!(error.code,"STORAGE_INTEGRITY_MIGRATION_REQUIRED");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(connection.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0)).unwrap(),5);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM chunks",[],|row|row.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '__kynxa_integrity_%'",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+}
+
+#[test]
+fn conversation_integrity_migration_keeps_catalog_rows_and_nonnullable_keys() {
+    let fixture = Fixture::new();
+    let directory=fixture.root.join("Index");
+    fs::create_dir(&directory).unwrap();
+    let path=directory.join("search.sqlite");
+    let connection=rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE projects(id TEXT PRIMARY KEY COLLATE NOCASE,name TEXT NOT NULL,workspace_path TEXT,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL);
+        CREATE TABLE sessions(id TEXT PRIMARY KEY COLLATE NOCASE,project_id TEXT REFERENCES projects(id),title TEXT NOT NULL,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL,workspace_path TEXT);
+        INSERT INTO projects VALUES ('project','preserved','workspace',0,0,0);INSERT INTO sessions VALUES ('session','project','preserved chat',0,0,0,'workspace');
+        INSERT INTO metadata VALUES ('fingerprint','fixture');INSERT INTO metadata VALUES ('catalog_revision','1');PRAGMA user_version=1;").unwrap();
+    drop(connection);
+    let data=json!({"fingerprint":"fixture","revision":1,"projects":[{"id":"project"}],"sessions":[{"id":"session"}]});
+    let result=super::conversation_index::apply("storage.catalogIndex.rebuild",&json!({"root":fixture.path(),"data":data})).unwrap();
+    assert_eq!(result["rebuilt"],false,"a constraint migration must not rebuild or replace valid catalog rows");
+    let connection=rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(connection.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(connection.query_row("SELECT title FROM sessions",[],|row|row.get::<_,String>(0)).unwrap(),"preserved chat");
+    assert!(connection.execute("INSERT INTO metadata VALUES (NULL,'invalid')",[]).is_err());
+}
+
+#[test]
+fn integrity_migration_rolls_back_earlier_copies_when_a_later_constraint_fails() {
+    let connection=rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE first(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
+        CREATE TABLE second(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
+        INSERT INTO first VALUES ('original-first',1);INSERT INTO second VALUES ('original-second',2);PRAGMA user_version=1;").unwrap();
+    let error=super::sqlite_store::migrate_integrity(&connection,2,&[("first",""),("second","CHECK(value<0)")],&[]).unwrap_err();
+    assert_eq!(error.code,"STORAGE_INTEGRITY_MIGRATION_REQUIRED");
+    assert_eq!(connection.query_row("SELECT key FROM first",[],|row|row.get::<_,String>(0)).unwrap(),"original-first");
+    assert_eq!(connection.query_row("SELECT key FROM second",[],|row|row.get::<_,String>(0)).unwrap(),"original-second");
+    assert_eq!(connection.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(connection.query_row("PRAGMA foreign_keys",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '__kynxa_integrity_%'",[],|row|row.get::<_,i64>(0)).unwrap(),0);
 }
 
 #[test]

@@ -15,6 +15,80 @@ pub fn failure(error: impl std::fmt::Display) -> ContractError {
         500,
     )
 }
+
+/// Upgrade relational constraints in one transaction, preserving rows, column order, indexes and triggers.
+/// 在同一事务中升级关系约束，保留全部记录、列序、索引与触发器；旧记录不合格时回滚，不删数据。
+pub(crate) fn migrate_integrity(
+    connection: &Connection,
+    target_version: i64,
+    tables: &[(&str, &str)],
+    preflight: &[&str],
+) -> Result<(), ContractError> {
+    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(failure)?;
+    if current >= target_version { return Ok(()); }
+    let rejected = |message: &str| ContractError::new(
+        format!("Integrity migration requires review; original records are preserved. / 完整性迁移需核对旧记录，原数据已保留：{message}"),
+        "STORAGE_INTEGRITY_MIGRATION_REQUIRED", 409);
+    if !connection.is_autocommit() { return Err(rejected("an existing transaction is active")); }
+    let foreign_keys: i64 = connection.query_row("PRAGMA foreign_keys", [], |row|row.get(0)).map_err(failure)?;
+    let legacy_alter: i64 = connection.query_row("PRAGMA legacy_alter_table", [], |row|row.get(0)).map_err(failure)?;
+    if let Err(error) = connection.execute_batch("PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON;BEGIN IMMEDIATE") {
+        let _ = connection.execute_batch(&format!("PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}"));
+        return Err(failure(error));
+    }
+    let result = (|| {
+        let locked_version:i64 = connection.query_row("PRAGMA user_version", [], |row|row.get(0)).map_err(failure)?;
+        if locked_version >= target_version {
+            connection.execute_batch("COMMIT").map_err(failure)?;
+            return Ok(());
+        }
+        for query in preflight {
+            let invalid: bool = connection.query_row(query, [], |row| row.get(0)).map_err(failure)?;
+            if invalid { return Err(rejected(query)); }
+        }
+        let invalid_foreign_key: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)", [], |row|row.get(0)).map_err(failure)?;
+        if invalid_foreign_key { return Err(rejected("foreign-key ownership mismatch")); }
+        let primary_key = regex::Regex::new(r"(?i)\bTEXT\s+PRIMARY\s+KEY\b").unwrap();
+        let mut rebuilt = Vec::new();
+        let mut ancillary = Vec::new();
+        for (table, constraints) in tables {
+            let mut statement = connection.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").map_err(failure)?;
+            let sql = statement.query_map([table], |row| row.get::<_,String>(0)).map_err(failure)?.next().transpose().map_err(failure)?;
+            let Some(sql) = sql else { continue; };
+            drop(statement);
+            let null_primary: bool = connection.query_row(&format!(
+                "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {})",
+                rows(connection, &format!("PRAGMA table_info(\"{table}\")"), vec![])?.iter()
+                    .filter(|column| column["pk"].as_i64().unwrap_or(0)>0)
+                    .map(|column| format!("\"{}\" IS NULL", column["name"].as_str().unwrap_or("").replace('"', "\"\"")))
+                    .collect::<Vec<_>>().join(" OR ")
+            ), [], |row|row.get(0)).map_err(failure)?;
+            if null_primary { return Err(rejected(&format!("{table}: null primary key"))); }
+            let saved = rows(connection,"SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",vec![sql_text(*table)])?;
+            ancillary.extend(saved.into_iter().filter_map(|row|row["sql"].as_str().map(str::to_owned)));
+            let opening = sql.find('(').ok_or_else(||rejected("table definition is invalid"))?;
+            let mut definition = primary_key.replace_all(&sql[opening..], "TEXT NOT NULL PRIMARY KEY").into_owned();
+            if !constraints.is_empty() {
+                let closing = definition.rfind(')').ok_or_else(||rejected("table definition is invalid"))?;
+                definition.insert_str(closing, &format!(", {constraints}"));
+            }
+            let temporary = format!("__kynxa_integrity_{table}");
+            connection.execute_batch(&format!("CREATE TABLE \"{temporary}\" {definition};INSERT INTO \"{temporary}\" SELECT * FROM \"{table}\";"))
+                .map_err(|error|rejected(&error.to_string()))?;
+            rebuilt.push((*table, temporary));
+        }
+        for (table, _) in &rebuilt { connection.execute_batch(&format!("DROP TABLE \"{table}\";")).map_err(failure)?; }
+        for (table, temporary) in &rebuilt { connection.execute_batch(&format!("ALTER TABLE \"{temporary}\" RENAME TO \"{table}\";")).map_err(failure)?; }
+        for sql in ancillary { connection.execute_batch(&sql).map_err(failure)?; }
+        let invalid_foreign_key: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)", [], |row|row.get(0)).map_err(failure)?;
+        if invalid_foreign_key { return Err(rejected("migrated foreign-key ownership mismatch")); }
+        connection.execute_batch(&format!("PRAGMA user_version={target_version};COMMIT")).map_err(failure)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = connection.execute_batch("ROLLBACK"); }
+    connection.execute_batch(&format!("PRAGMA foreign_keys={foreign_keys};PRAGMA legacy_alter_table={legacy_alter}")).map_err(failure)?;
+    result
+}
 pub fn cancelled() -> Result<(), ContractError> {
     if cancellation::is_cancelled() {
         Err(ContractError::new(
@@ -147,7 +221,7 @@ pub fn open(root: &Path, path: &Path, create: bool) -> Result<Connection, Contra
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(failure)?;
-    if version > 5 {
+    if version > 6 {
         return Err(ContractError::new(
             "A newer retrieval index exists. / 检索索引由更新版本创建，原文件已保留。",
             "UNSUPPORTED_RETRIEVAL_INDEX_VERSION",

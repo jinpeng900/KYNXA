@@ -35,6 +35,7 @@ public sealed partial class ShellPage
             queue.Insert(target, move.Prompt);
             RefreshPromptQueue();
         };
+        InitializeUnknownOutcomeCard();
     }
 
     private List<QueuedPrompt> QueueFor(Guid chatId)
@@ -48,8 +49,9 @@ public sealed partial class ShellPage
         if (PromptQueue is null) return;
         Guid? chatId = ActiveChatId;
         var messages = chatId is Guid id && _queuedPrompts.TryGetValue(id, out var queue) ? queue : [];
-        PromptQueue.ShowMessages(messages, chatId is Guid active
+        PromptQueue.ShowMessages(messages, chatId is Guid active && !HasUnknownOutcome(active)
             && (IsReplyInProgress(active) || _pausedTaskIds.ContainsKey(active)));
+        PresentUnknownOutcome();
     }
 
     private bool TryQueuePrompt()
@@ -73,7 +75,9 @@ public sealed partial class ShellPage
 
     private async Task SteerQueuedPromptAsync(Guid chatId, QueuedPrompt prompt)
     {
-        if (_chatClosing || prompt.IsSubmitting || !_steeringPromptChats.Add(chatId)) return;
+        // A pending unknown-outcome decision must not be bypassed by steering a queued message into the task.
+        // 结果未知待用户决定时，不能把排队消息作为引导插入任务。
+        if (_chatClosing || prompt.IsSubmitting || HasUnknownOutcome(chatId) || !_steeringPromptChats.Add(chatId)) return;
         prompt.IsSubmitting = true;
         QueueFor(chatId).Remove(prompt);
         RefreshPromptQueue();
@@ -98,7 +102,10 @@ public sealed partial class ShellPage
         try
         {
             var queue = QueueFor(chatId);
-            while (!_chatClosing && !_savingOnClose && !_pausedTaskIds.ContainsKey(chatId)
+            // Check for an unknown-outcome decision first; queued messages wait untouched until the user resolves it.
+            // 先确认是否有待决定的未知结果；有则排队消息原样保留，不自动派发。
+            if (queue.Count > 0) await RefreshUnknownOutcomeAsync(chatId);
+            while (!_chatClosing && !_savingOnClose && !_pausedTaskIds.ContainsKey(chatId) && !HasUnknownOutcome(chatId)
                 && !IsReplyInProgress(chatId) && !_steeringPromptChats.Contains(chatId) && queue.Count > 0)
             {
                 var prompt = queue[0];

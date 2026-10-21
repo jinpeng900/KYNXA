@@ -4,7 +4,6 @@ using KYNXA_Desktop.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 namespace KYNXA_Desktop.Views;
@@ -54,12 +53,12 @@ public sealed partial class ShellPage
     private sealed partial class AppearanceSettingsSection : IDisposable
     {
         private sealed record PaletteCard(AppearancePalette Palette, Button Button, Border Frame, TextBlock Check,
-            Action<AppearancePalette> UpdatePreview, Action RefreshFrame);
+            Action<AppearancePalette> UpdatePreview);
 
         private readonly Func<AppearancePreferences, string?> _savePreferences;
         private readonly List<PaletteCard> _cards = [];
-        private readonly Grid _paletteGrid = new() { ColumnSpacing = 12, RowSpacing = 12,
-            HorizontalAlignment = HorizontalAlignment.Stretch };
+        private readonly Grid _paletteGrid = new() { ColumnSpacing = 10, RowSpacing = 10, Width = 460, MaxWidth = 460,
+            HorizontalAlignment = HorizontalAlignment.Left };
         private readonly InfoBar _status = new() { IsOpen = false, IsClosable = false };
         private readonly Button _resetButton;
         private readonly SegmentedSelector _modePicker;
@@ -214,10 +213,11 @@ public sealed partial class ShellPage
             AutomationProperties.SetAutomationId(_status, "AppearanceSettingsStatus");
             AutomationProperties.SetLiveSetting(_status, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
             Root.Children.Add(_status);
+            Root.SizeChanged += AppearanceRootSizeChanged;
             _paletteGrid.SizeChanged += PaletteGridSizeChanged;
             AppearanceService.Changed += RefreshSelection;
             UiText.LanguageChanged += RefreshSelection;
-            UpdateColumns(1);
+            UpdateColumns(2);
             RefreshSelection(null, EventArgs.Empty);
         }
 
@@ -291,103 +291,51 @@ public sealed partial class ShellPage
                     previewBrushes.Add(key, brush = new SolidColorBrush(AppearanceService.ParseColor(color)));
                 return brush;
             }
-            var preview = new Grid { Height = 64, Background = Brush("main", palette.Main), CornerRadius = new CornerRadius(9),
-                BorderBrush = Brush("border", palette.Border), BorderThickness = new Thickness(1), ColumnSpacing = 8 };
-            preview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });
+            var preview = new Grid { Height = 42, Background = Brush("main", palette.Main), CornerRadius = new CornerRadius(7),
+                BorderBrush = Brush("border", palette.Border), BorderThickness = new Thickness(1), ColumnSpacing = 6 };
+            preview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(23) });
             preview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var sidebar = new StackPanel { Spacing = 5, Padding = new Thickness(6, 10, 6, 0), Background = Brush("sidebar", palette.Sidebar),
-                CornerRadius = new CornerRadius(8, 0, 0, 8) };
+            var sidebar = new StackPanel { Spacing = 3, Padding = new Thickness(4, 7, 4, 0), Background = Brush("sidebar", palette.Sidebar),
+                CornerRadius = new CornerRadius(6, 0, 0, 6) };
             sidebar.Children.Add(new Border { Height = 4, Background = Brush("accent", palette.Accent), CornerRadius = new CornerRadius(2) });
             sidebar.Children.Add(new Border { Height = 3, Background = Brush("border", palette.Border), CornerRadius = new CornerRadius(2) });
             sidebar.Children.Add(new Border { Height = 3, Background = Brush("border", palette.Border), CornerRadius = new CornerRadius(2) });
             preview.Children.Add(sidebar);
-            var messages = new Grid { Margin = new Thickness(0, 9, 10, 9), RowSpacing = 7 };
-            messages.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            messages.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            messages.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var bubbleRow = new Grid();
-            bubbleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.45, GridUnitType.Star) });
-            bubbleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.55, GridUnitType.Star) });
-            var bubble = new Border { Height = 10, Background = Brush("soft", palette.Soft), CornerRadius = new CornerRadius(5) };
-            Grid.SetColumn(bubble, 1);
-            bubbleRow.Children.Add(bubble);
-            messages.Children.Add(bubbleRow);
-            var reply = new Grid { RowSpacing = 4, VerticalAlignment = VerticalAlignment.Center };
-            foreach (double width in new[] { 0.4, 0.25, 0.35 })
-                reply.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(width, GridUnitType.Star) });
-            reply.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            reply.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var firstLine = new Border { Height = 3, Background = Brush("border", palette.Border), CornerRadius = new CornerRadius(2) };
-            Grid.SetColumnSpan(firstLine, 2);
-            reply.Children.Add(firstLine);
-            var secondLine = new Border { Height = 3, Background = Brush("border", palette.Border), CornerRadius = new CornerRadius(2) };
-            Grid.SetRow(secondLine, 1);
-            reply.Children.Add(secondLine);
-            Grid.SetRow(reply, 1);
-            messages.Children.Add(reply);
-            var composer = new Grid { ColumnSpacing = 6, VerticalAlignment = VerticalAlignment.Bottom };
-            composer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            composer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            composer.Children.Add(new Border { Height = 8, Background = Brush("sidebar", palette.Sidebar), CornerRadius = new CornerRadius(4) });
-            var send = new Border { Width = 6, Height = 6, Background = Brush("accent", palette.Accent), CornerRadius = new CornerRadius(3),
-                VerticalAlignment = VerticalAlignment.Center };
-            Grid.SetColumn(send, 1);
-            composer.Children.Add(send);
-            Grid.SetRow(composer, 2);
-            messages.Children.Add(composer);
+            var messages = new StackPanel { Spacing = 4, Margin = new Thickness(0, 7, 7, 0) };
+            messages.Children.Add(new Border { Height = 8, Width = 31, HorizontalAlignment = HorizontalAlignment.Right,
+                Background = Brush("soft", palette.Soft), CornerRadius = new CornerRadius(4) });
+            messages.Children.Add(new Border { Height = 3, Width = 35, HorizontalAlignment = HorizontalAlignment.Left,
+                Background = Brush("border", palette.Border), CornerRadius = new CornerRadius(2) });
+            messages.Children.Add(new Border { Height = 8, Width = 8, HorizontalAlignment = HorizontalAlignment.Right,
+                Background = Brush("accent", palette.Accent), CornerRadius = new CornerRadius(4) });
             Grid.SetColumn(messages, 1);
             preview.Children.Add(messages);
             AutomationProperties.SetAccessibilityView(preview, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
 
-            var nameRow = new Grid { ColumnSpacing = 8, MinHeight = 20 };
-            nameRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var nameRow = new Grid { ColumnSpacing = 6 };
             nameRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             nameRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var swatch = new Border { Width = 6, Height = 6, CornerRadius = new CornerRadius(3),
-                Background = Brush("accent", palette.Accent), VerticalAlignment = VerticalAlignment.Center };
-            AutomationProperties.SetAccessibilityView(swatch, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
-            nameRow.Children.Add(swatch);
-            var name = new TextBlock { FontFamily = font, FontSize = 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
+            var name = new TextBlock { FontFamily = font, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis,
                 Foreground = AppearanceService.GetBrush("KynxaTextBrush") };
             UiLocalization.Bind(name, TextBlock.TextProperty, palette.NameKey);
-            Grid.SetColumn(name, 1);
             var check = new TextBlock { Text = "\uE73E", FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 13,
                 Width = 16, VerticalAlignment = VerticalAlignment.Center,
                 Foreground = AppearanceService.GetBrush("KynxaAccentTextBrush") };
-            Grid.SetColumn(check, 2);
+            Grid.SetColumn(check, 1);
             nameRow.Children.Add(name);
             nameRow.Children.Add(check);
-            var body = new StackPanel { Spacing = 10 };
+            var body = new StackPanel { Spacing = 5 };
             body.Children.Add(preview);
             body.Children.Add(nameRow);
-            var frame = new Border { Padding = new Thickness(12), CornerRadius = new CornerRadius(14),
+            var frame = new Border { Padding = new Thickness(8), CornerRadius = new CornerRadius(12),
                 BorderThickness = new Thickness(1), Child = body };
             var button = new Button { Content = frame, Padding = new Thickness(0), Margin = new Thickness(0), MinWidth = 0,
-                Height = 124,
+                Height = 86,
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                VerticalContentAlignment = VerticalAlignment.Stretch,
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0),
-                CornerRadius = new CornerRadius(14), UseSystemFocusVisuals = true };
+                CornerRadius = new CornerRadius(12), UseSystemFocusVisuals = true };
             button.Resources["SystemControlFocusVisualPrimaryBrush"] = AppearanceService.GetBrush("KynxaFocusBrush");
             AutomationProperties.SetAutomationId(button, "AppearancePalette_" + palette.Id);
-            bool hovered = false, pressed = false;
-            void RefreshFrame()
-            {
-                bool selected = palette.Id == AppearanceService.Current.Id;
-                frame.Background = AppearanceService.GetBrush(selected ? "KynxaSelectionBrush" : pressed
-                    ? "KynxaControlPressedBrush" : hovered ? "KynxaControlHoverBrush" : "KynxaSettingsCardBrush");
-                frame.BorderBrush = AppearanceService.GetBrush(AppearanceService.Current.IsHighContrast && selected
-                    ? "KynxaFocusBrush" : selected || hovered ? "KynxaAccentTextBrush" : "KynxaDividerBrush");
-                frame.BorderThickness = new Thickness(AppearanceService.Current.IsHighContrast && selected ? 2 : 1);
-            }
-            // Update the visible frame directly; the native button hover background is behind this opaque card.
-            // 直接更新可见卡框；原生按钮的悬停底色位于不透明卡片之后，无法单独提供反馈。
-            button.PointerEntered += (_, _) => { hovered = true; RefreshFrame(); };
-            button.PointerExited += (_, _) => { hovered = false; pressed = false; RefreshFrame(); };
-            button.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => { pressed = true; RefreshFrame(); }), true);
-            button.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => { pressed = false; RefreshFrame(); }), true);
-            button.PointerCanceled += (_, _) => { pressed = false; RefreshFrame(); };
             return new PaletteCard(palette, button, frame, check, effectivePalette =>
             {
                 previewBrushes["main"].Color = AppearanceService.ParseColor(effectivePalette.Main);
@@ -395,7 +343,7 @@ public sealed partial class ShellPage
                 previewBrushes["border"].Color = AppearanceService.ParseColor(effectivePalette.Border);
                 previewBrushes["accent"].Color = AppearanceService.ParseColor(effectivePalette.Accent);
                 previewBrushes["soft"].Color = AppearanceService.ParseColor(effectivePalette.Soft);
-            }, RefreshFrame);
+            });
         }
 
         private void SelectPalette(string paletteId)
@@ -428,7 +376,10 @@ public sealed partial class ShellPage
             foreach (var card in _cards)
             {
                 bool selected = card.Palette.Id == AppearanceService.Current.Id;
-                card.RefreshFrame();
+                card.Frame.Background = AppearanceService.GetBrush(selected ? "KynxaSelectionBrush" : "KynxaSettingsCardBrush");
+                card.Frame.BorderBrush = AppearanceService.GetBrush(AppearanceService.Current.IsHighContrast && selected
+                    ? "KynxaFocusBrush" : "KynxaDividerBrush");
+                card.Frame.BorderThickness = new Thickness(AppearanceService.Current.IsHighContrast && selected ? 2 : 1);
                 // Update retained preview brushes to reflect the active mode without rebuilding card controls.
                 // 仅更新已有缩略图画刷来跟随当前明暗模式，不重建配色卡控件。
                 card.UpdatePreview(AppearanceService.Current.IsHighContrast ? AppearanceService.Current :
@@ -455,13 +406,12 @@ public sealed partial class ShellPage
             _resetButton.IsEnabled = _accentDirty || CurrentPreferences() != new AppearancePreferences(AppearanceService.DefaultPaletteId, "light", 15, null);
         }
 
+        private void AppearanceRootSizeChanged(object sender, SizeChangedEventArgs args)
+            => _paletteGrid.Width = Math.Min(460, Math.Max(0, args.NewSize.Width));
+
         private void PaletteGridSizeChanged(object sender, SizeChangedEventArgs args)
         {
-            double spacing = _paletteGrid.ColumnSpacing;
-            int columns = Math.Clamp((int)((args.NewSize.Width + spacing) / (180 + spacing)), 1, _cards.Count);
-            // Five choices use balanced 1/2/3/5-column rows instead of leaving one card alone below four.
-            // 五种配色按 1／2／3／5 列平衡换行，避免四张上排、一张孤立在下排。
-            if (columns == 4) columns = 3;
+            int columns = args.NewSize.Width >= 320 ? 2 : 1;
             if (columns != _columnCount) UpdateColumns(columns);
         }
 
@@ -487,6 +437,7 @@ public sealed partial class ShellPage
             _isDisposed = true;
             AppearanceService.Changed -= RefreshSelection;
             UiText.LanguageChanged -= RefreshSelection;
+            Root.SizeChanged -= AppearanceRootSizeChanged;
             _paletteGrid.SizeChanged -= PaletteGridSizeChanged;
             _modePicker.Dispose();
         }

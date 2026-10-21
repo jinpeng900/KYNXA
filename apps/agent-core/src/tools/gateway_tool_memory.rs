@@ -183,7 +183,7 @@ pub(crate) async fn remember_catalog(
     }
 }
 
-fn learning_outcome(result: &Result<Value, GatewayError>) -> Option<(bool, Option<&str>)> {
+fn learning_outcome<'a>(name: &str, result: &'a Result<Value, GatewayError>) -> Option<(bool, Option<&'a str>)> {
     match result {
         Ok(value) => {
             let status = value["status"].as_str().unwrap_or("");
@@ -195,6 +195,14 @@ fn learning_outcome(result: &Result<Value, GatewayError>) -> Option<(bool, Optio
                 return None;
             }
             let failed = value["isError"] == true || ["failed", "error"].contains(&status);
+            // Transport success does not make a challenge page usable evidence or an unvalidated file a deliverable.
+            // 传输成功不能把验证页面变成可用证据，也不能把未核验文件当成已交付成果。
+            if !failed && value["evidenceUsable"] == false {
+                return Some((false,Some(value["code"].as_str().unwrap_or("WEB_EVIDENCE_UNUSABLE"))));
+            }
+            if !failed && name == "document.create" && value["validated"] != true {
+                return None;
+            }
             Some((!failed, value["code"].as_str()))
         }
         Err(error) => {
@@ -219,7 +227,7 @@ pub(crate) async fn remember_outcome(
     // Discovery calls are infrastructure, not evidence that a user action succeeded.
     // 工具发现属于基础设施；等待、审批及未知结果也不计作动作成功。
     if name.starts_with("tool.") { return; }
-    let Some((succeeded, error_code)) = learning_outcome(result) else { return; };
+    let Some((succeeded, error_code)) = learning_outcome(name,result) else { return; };
     let name = name.to_owned();
     let error_code = error_code.map(str::to_owned);
     let root = ctx.data_home.clone();
@@ -281,6 +289,18 @@ pub(crate) fn rank_tool_hints(ctx: &GatewayToolContext, descriptors: &[Value], h
 mod tests {
     use super::*;
 
+    #[test]
+    fn tool_memory_learns_usable_evidence_and_validated_documents_only() {
+        assert_eq!(learning_outcome("web.fetch",&Ok(json!({"evidenceUsable":false,"needsHumanVerification":true}))),Some((false,Some("WEB_EVIDENCE_UNUSABLE"))));
+        assert_eq!(learning_outcome("web.fetch",&Ok(json!({"evidenceUsable":false,"code":"WEB_RENDER_REQUIRED"}))),Some((false,Some("WEB_RENDER_REQUIRED"))));
+        assert_eq!(learning_outcome("web.fetch",&Ok(json!({"evidenceUsable":true}))),Some((true,None)));
+        for value in [json!({}),json!({"validated":false}),json!({"validated":true,"status":"pending"}),json!({"validated":true,"status":"unknown"}),json!({"validated":true,"executed":false})] {
+            assert_eq!(learning_outcome("document.create",&Ok(value)),None);
+        }
+        assert_eq!(learning_outcome("document.create",&Ok(json!({"validated":true,"status":"completed"}))),Some((true,None)));
+        assert_eq!(learning_outcome("document.create",&Ok(json!({"validated":false,"isError":true,"code":"DOCUMENT_VALIDATION_FAILED"}))),Some((false,Some("DOCUMENT_VALIDATION_FAILED"))));
+    }
+
     #[tokio::test]
     async fn tool_memory_learns_real_reads_restarts_and_keeps_chat_call_free() {
         let (mut ctx, _keep) = super::super::gateway::test_context();
@@ -330,6 +350,15 @@ mod tests {
         ctx.runtime = Arc::new(super::super::gateway::ToolRuntime::default());
         synchronize(&ctx).await;
         assert!(super::super::gateway_mcp::reusable_catalog(&ctx).is_empty());
+        remember_outcome("web.fetch",&Ok(json!({"evidenceUsable":false,"content":"CHALLENGE_BODY_MUST_NOT_PERSIST"})),Duration::from_millis(25),&ctx).await;
+        ctx.runtime = Arc::new(super::super::gateway::ToolRuntime::default());
+        synchronize(&ctx).await;
+        let persisted=std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted.contains("CHALLENGE_BODY_MUST_NOT_PERSIST"));
+        let persisted:Value=serde_json::from_str(&persisted).unwrap();
+        assert_eq!(persisted["entries"]["web.fetch"]["experience"]["successes"],0);
+        assert_eq!(persisted["entries"]["web.fetch"]["experience"]["failures"],1);
+        assert_eq!(persisted["entries"]["web.fetch"]["experience"]["lastErrorCode"],"WEB_EVIDENCE_UNUSABLE");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

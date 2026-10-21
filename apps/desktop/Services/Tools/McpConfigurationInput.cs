@@ -26,6 +26,9 @@ public static class McpConfigurationInput
         if (string.IsNullOrWhiteSpace(text)) return null;
         var auth = JsonSerializer.Deserialize<McpAuthentication>(text, JsonOptions) ?? throw new JsonException();
         if (auth.Type == "bearer-env" && IsEnvironmentName(auth.TokenEnv)) return auth;
+        if (auth.Type == "oauth-authorization-code" && !string.IsNullOrWhiteSpace(auth.ClientId) &&
+            (string.IsNullOrWhiteSpace(auth.Issuer) || (Uri.TryCreate(auth.Issuer, UriKind.Absolute, out var personalIssuer) &&
+            personalIssuer.Scheme == "https" && personalIssuer.UserInfo.Length == 0 && personalIssuer.Query.Length == 0 && personalIssuer.Fragment.Length == 0))) return auth;
         if (auth.Type == "oauth-client-credentials" && !string.IsNullOrWhiteSpace(auth.ClientId) && IsEnvironmentName(auth.ClientSecretEnv) &&
             Uri.TryCreate(auth.Issuer, UriKind.Absolute, out var issuer) && issuer.Scheme == "https" && issuer.UserInfo.Length == 0 &&
             issuer.Query.Length == 0 && issuer.Fragment.Length == 0) return auth;

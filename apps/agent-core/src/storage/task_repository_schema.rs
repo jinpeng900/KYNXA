@@ -7,7 +7,7 @@ PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;
 BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS tasks (
- task_id TEXT PRIMARY KEY,
+ task_id TEXT NOT NULL PRIMARY KEY,
  request_key TEXT NOT NULL UNIQUE,
  fingerprint TEXT NOT NULL,
  parent_task_id TEXT REFERENCES tasks(task_id),
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_unfinished ON tasks(state,task_id);
 CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_task_id,task_id);
 CREATE INDEX IF NOT EXISTS tasks_conversation ON tasks(conversation_id,task_id);
+CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id,task_id);
 CREATE INDEX IF NOT EXISTS tasks_paused_roots ON tasks(conversation_id,project_id,task_id)
  WHERE parent_task_id IS NULL AND state='paused';
 CREATE TABLE IF NOT EXISTS task_dependencies (
@@ -33,13 +34,14 @@ CREATE TABLE IF NOT EXISTS task_dependencies (
  CHECK(task_id<>dependency_id)
 );
 CREATE TABLE IF NOT EXISTS task_attempts (
- attempt_id TEXT PRIMARY KEY,
+ attempt_id TEXT NOT NULL PRIMARY KEY,
  task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
  execution_version INTEGER NOT NULL,
  ended INTEGER NOT NULL,
  lease_expires_at_ms INTEGER NOT NULL,
  document TEXT NOT NULL,
- UNIQUE(task_id,execution_version)
+ UNIQUE(task_id,execution_version),
+ UNIQUE(task_id,attempt_id)
 );
 CREATE TABLE IF NOT EXISTS task_events (
  task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
@@ -58,9 +60,12 @@ CREATE TABLE IF NOT EXISTS task_operations (
  attempt_id TEXT NOT NULL,
  fingerprint TEXT NOT NULL,
  document TEXT NOT NULL,
- PRIMARY KEY(task_id,operation_id)
+ PRIMARY KEY(task_id,operation_id),
+ FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)
 );
 CREATE INDEX IF NOT EXISTS task_events_kind ON task_events(task_id,json_extract(document,'$.kind'),sequence);
+CREATE INDEX IF NOT EXISTS task_child_reviews ON task_events(task_id,json_extract(document,'$.payload.childTaskId'),sequence)
+ WHERE json_extract(document,'$.kind')='task.child.review';
 CREATE INDEX IF NOT EXISTS task_operations_unsettled ON task_operations(task_id,state,effect);
 CREATE TABLE IF NOT EXISTS task_checkpoints (
  task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
@@ -91,14 +96,15 @@ CREATE TABLE IF NOT EXISTS task_model_reservations (
  state TEXT NOT NULL,
  settlement_fingerprint TEXT,
  document TEXT NOT NULL,
- PRIMARY KEY(task_id,reservation_id)
+ PRIMARY KEY(task_id,reservation_id),
+ FOREIGN KEY(task_id,attempt_id) REFERENCES task_attempts(task_id,attempt_id)
 );
 CREATE INDEX IF NOT EXISTS task_model_reservations_pending ON task_model_reservations(task_id,state);
 CREATE TABLE IF NOT EXISTS task_cleanup_plans (
- cleanup_id TEXT PRIMARY KEY,
+ cleanup_id TEXT NOT NULL PRIMARY KEY,
  conversation_id TEXT NOT NULL UNIQUE,
  document TEXT NOT NULL
 );
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 COMMIT;
 "#;

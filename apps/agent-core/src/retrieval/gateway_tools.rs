@@ -88,6 +88,32 @@ pub fn release_task(conversation: &str, request: &str) {
         }
     }
 }
+/// Retire only revoked memory projections; formal archives and unrelated evidence remain intact.
+/// 仅撤出已失效记忆的派生投影，保留正式归档、成功回执及其他来源的版本核验。
+pub(crate) fn retire_memory_sources(context: &Value, invalid_sources: &Value) -> ContractResult {
+    let identities = invalid_sources.as_array().into_iter().flatten()
+        .filter_map(|source| source["memoryId"].as_str()).collect::<std::collections::HashSet<_>>();
+    if identities.is_empty() { return Ok(json!({"retired":0})); }
+    let key = task_key(context)?;
+    let evidence = TASKS.get_or_init(Default::default).lock()
+        .map_err(|_|gateway::error("证据状态暂时不可用。","STORAGE_IO_FAILED",500))?
+        .get(&key).cloned();
+    let Some(evidence) = evidence else { return Ok(json!({"retired":0})); };
+    let mut evidence = evidence.lock()
+        .map_err(|_|gateway::error("证据状态暂时不可用。","STORAGE_IO_FAILED",500))?;
+    let retired = evidence.readings.iter().filter_map(|(key,(reference,fragments))| {
+        fragments.iter().any(|fragment| fragment.locator["memoryId"].as_str().is_some_and(|id| {
+            identities.contains(id) && reference["sourceId"].as_str() == Some(
+                gateway_index::hash(&json!(["memory",reference["scopeKey"],id]).to_string()).as_str())
+        })).then(||key.clone())
+    }).collect::<Vec<_>>();
+    for key in &retired {
+        evidence.ledger.apply("retrieval.evidence-invalidate-source",&json!({"sourceKey":key}))
+            .map_err(|_|gateway::error("记忆证据失效状态无效。","INVALID_RETRIEVAL_EVIDENCE",500))?;
+        evidence.readings.remove(key);
+    }
+    Ok(json!({"retired":retired.len()}))
+}
 /// Removing a formal chat evicts only its derived task evidence; active holders still face final scope checks.
 /// 删除正式聊天仅撤出它的派生任务证据；已持有对象的调用仍必须通过最终范围核验。
 pub(crate) fn release_conversation_tasks(conversation: &str) {
@@ -602,6 +628,37 @@ pub fn handle_tool(
     context: &Value,
     config: &GatewayConfig,
 ) -> Option<ContractResult> {
+    handle_tool_attempt(name, input, context, config, 0)
+}
+
+fn retry_changed_search_scope(
+    scopes: &Value,
+    input: &Value,
+    context: &Value,
+    config: &GatewayConfig,
+    attempt: u8,
+) -> Option<ContractResult> {
+    match authorized(config, context) {
+        Ok(current) if current == *scopes => None,
+        Ok(_) if attempt < 2 => {
+            handle_tool_attempt("knowledge.search", input, context, config, attempt + 1)
+        }
+        Ok(_) => Some(Err(gateway::error(
+            "检索范围正在更新，请使用最新范围重试。",
+            "RETRIEVAL_QUERY_CHANGED",
+            409,
+        ))),
+        Err(error) => Some(Err(error)),
+    }
+}
+
+fn handle_tool_attempt(
+    name: &str,
+    input: &Value,
+    context: &Value,
+    config: &GatewayConfig,
+    scope_attempt: u8,
+) -> Option<ContractResult> {
     if name.starts_with("conversation.history.") {
         return Some(super::gateway_history::handle(config, name, input, context));
     }
@@ -652,6 +709,12 @@ pub fn handle_tool(
                         .as_str(),
                 )?;
                 query["ann"] = settings["local"]["ann"].clone();
+                // Reuse inference only within the freshly authorized conversation scope.
+                // 推理缓存只在本次重新授权的会话范围内复用，最终来源和权限检查仍照常执行。
+                let cache_scope = json!({
+                    "scopeKeys":scopes,"conversationId":context["conversationId"],
+                    "permissionMode":context["permissionMode"]
+                });
                 // Exact locators first reuse the current-source check; cached headings alone cannot suppress semantic search.
                 // 精确路径和符号先核对当前原文；仅有缓存标题命中不能据此跳过语义补充。
                 let targeted = ["path", "symbol"].iter().any(|field| input[*field].as_str().is_some_and(|value| !value.is_empty()));
@@ -676,10 +739,10 @@ pub fn handle_tool(
                 }
                 if !exact_current_target && settings["local"]["semantic"] != "off" {
                     let text = input["query"].as_str().unwrap_or("").to_string();
-                    match super::gateway_embedding::embed(
+                    match super::gateway_embedding::embed_query_cached(
                         config,
                         &[text],
-                        crate::models::gateway_inference::EmbedKind::Query,
+                        &cache_scope,
                         &settings["local"],
                         crate::service_cancellation::current_token()
                             .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
@@ -698,6 +761,11 @@ pub fn handle_tool(
                         }
                     }
                 }
+                // Scope changes during shared inference restart this lookup internally.
+                // 共享推理期间范围变化时，在内部按最新授权重查，不向模型交付旧范围内容。
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                    return retried;
+                }
                 let mut result = if query["queryVector"].is_null() && preliminary.is_some() {
                     preliminary.unwrap()
                 } else { gateway_index::search(config, &query)? };
@@ -710,10 +778,11 @@ pub fn handle_tool(
                         as usize;
                     let plan = super::fusion::rerank_plan(result["items"].as_array().unwrap(), input, count);
                     if !plan.texts.is_empty() {
-                        match super::gateway_embedding::rerank(
+                        match super::gateway_embedding::rerank_cached(
                             config,
                             input["query"].as_str().unwrap_or(""),
                             &plan.texts,
+                            &cache_scope,
                             &settings["local"],
                             crate::service_cancellation::current_token()
                                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
@@ -736,6 +805,9 @@ pub fn handle_tool(
                     } else {
                         result["reranking"] = json!({"state":"skipped","reason":plan.reason,"candidateCount":0});
                     }
+                }
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                    return retried;
                 }
                 let selected = select_evidence(&result["items"], input, &budget)?;
                 result["items"] = selected["items"].clone();
@@ -788,6 +860,9 @@ pub fn handle_tool(
                 result["semanticDiagnostic"] = query["semanticDiagnostic"].clone();
                 result["retrievalStrategy"] = json!(if exact_current_target { "verified-exact-target" }
                     else if query["queryVector"].is_array() { "hybrid" } else { "lexical-structure" });
+                if let Some(retried) = retry_changed_search_scope(&scopes, input, context, config, scope_attempt) {
+                    return retried;
+                }
                 Ok(result)
             }
             "knowledge.read" => {
@@ -1125,6 +1200,30 @@ fn resolve_canonical(text: &str) -> ContractResult {
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
+
+    #[test]
+    fn retiring_revoked_memory_keeps_other_sources_and_other_request_evidence() {
+        let chat=gateway::new_id();let request=gateway::new_id();
+        let context=json!({"conversationId":chat,"requestId":request});
+        let other=json!({"conversationId":chat,"requestId":gateway::new_id()});
+        let memory_id=gateway::new_id();let scope=format!("user:{}",gateway::new_id());
+        let reference=json!({"scopeKey":scope,"sourceId":gateway_index::hash(&json!(["memory",scope,memory_id]).to_string())});
+        let fragment=ReadFragment {reference:reference.clone(),source_ref:"saved-memory".into(),
+            text:"Withdrawn preference".into(),start_offset:0,end_offset:20,
+            locator:json!({"memoryId":memory_id}),binding_revision:json!(0)};
+        let current=task(&context).unwrap();let unrelated=task(&other).unwrap();
+        current.lock().unwrap().readings.insert("revoked".into(),(reference.clone(),vec![fragment.clone()]));
+        current.lock().unwrap().readings.insert("file".into(),(json!({"sourceId":"actual-file"}),vec![fragment.clone()]));
+        unrelated.lock().unwrap().readings.insert("other-request".into(),(reference,vec![fragment]));
+        let invalid=json!([{"memoryId":memory_id,"code":"MEMORY_SOURCE_UNAVAILABLE"}]);
+        assert_eq!(retire_memory_sources(&context,&invalid).unwrap()["retired"],1);
+        assert!(!current.lock().unwrap().readings.contains_key("revoked"));
+        assert!(current.lock().unwrap().readings.contains_key("file"));
+        assert!(unrelated.lock().unwrap().readings.contains_key("other-request"));
+        assert_eq!(retire_memory_sources(&context,&invalid).unwrap()["retired"],0);
+        release_task(&chat,&request);
+        release_task(&chat,other["requestId"].as_str().unwrap());
+    }
     #[test]
     fn task_mount_snapshot_excludes_later_root_from_reads_and_search_candidates() {
         let root = std::env::temp_dir().join("kynxa-mount-snapshot");

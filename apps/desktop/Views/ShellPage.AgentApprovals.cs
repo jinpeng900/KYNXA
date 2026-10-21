@@ -1,136 +1,142 @@
 using KYNXA.Contracts;
-using KYNXA_Desktop.Controls;
 using KYNXA_Desktop.Services;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
+    private readonly SemaphoreSlim _approvalSurface = new(1, 1);
     private readonly Dictionary<Guid, ApprovalPresentation> _approvalPresentations = [];
-    private Guid? _visibleApprovalId;
-    private long _approvalSequence;
-
-    private sealed class ApprovalPresentation(PendingChatReply pending, ToolActivity tool, Guid? taskId, long sequence)
+    private TaskCompletionSource<bool> _approvalConversationChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Guid? _approvalPresentedConversationId;
+    private bool _approvalRootAvailable;
+    private sealed record ApprovalPresentation(PendingChatReply Pending, Guid? TaskId, CancellationTokenSource Cancellation)
     {
-        public PendingChatReply Pending { get; } = pending;
-        public ToolActivity Tool { get; } = tool;
-        public Guid? TaskId { get; } = taskId;
-        public long Sequence { get; } = sequence;
-        public CancellationTokenRegistration CancellationRegistration { get; set; }
-        public bool IsSubmitting { get; set; }
-        public string? Error { get; set; }
+        public CancellationTokenSource? DisplayCancellation { get; set; }
     }
 
     private bool IsCurrentApproval(PendingChatReply pending) => !_chatClosing && !pending.Cancellation.IsCancellationRequested &&
         ActiveChatId == pending.ConversationId && _pendingReplies.TryGetValue(pending.ConversationId, out var current) && current == pending;
 
-    private void NotifyApprovalConversationChanged() => RefreshInlineApproval();
+    private void NotifyApprovalConversationChanged()
+    {
+        bool rootAvailable = XamlRoot is not null;
+        if (_approvalPresentedConversationId == ActiveChatId && _approvalRootAvailable == rootAvailable) return;
+        _approvalPresentedConversationId = ActiveChatId;
+        _approvalRootAvailable = rootAvailable;
+        var previous = _approvalConversationChanged;
+        _approvalConversationChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var presentation in _approvalPresentations.Values.ToArray())
+            if (!IsCurrentApproval(presentation.Pending) || !rootAvailable) presentation.DisplayCancellation?.Cancel();
+        previous.TrySetResult(true);
+    }
+
+    private async Task WaitForApprovalConversationAsync(ApprovalPresentation presentation)
+    {
+        // Inactive conversations retain their pending decision without holding the global dialog surface.
+        // 非当前聊天保留待审批状态，只等待聊天激活事件，不占用全局弹窗位置。
+        while (!IsCurrentApproval(presentation.Pending) || XamlRoot is null)
+            await _approvalConversationChanged.Task.WaitAsync(presentation.Cancellation.Token);
+    }
 
     private void QueueToolApproval(PendingChatReply pending, ToolActivity tool, Guid? taskId = null)
     {
-        if (tool.ApprovalId is not Guid approvalId || approvalId == Guid.Empty || pending.Cancellation.IsCancellationRequested ||
-            _approvalPresentations.ContainsKey(approvalId)) return;
-        var presentation = new ApprovalPresentation(pending, tool, taskId, ++_approvalSequence);
+        if (tool.ApprovalId is not Guid approvalId || _approvalPresentations.ContainsKey(approvalId)) return;
+        var presentation = new ApprovalPresentation(pending, taskId,
+            CancellationTokenSource.CreateLinkedTokenSource(pending.Cancellation.Token));
         _approvalPresentations.Add(approvalId, presentation);
-        // Cancellation only dismisses this request; navigation and hiding never supply a decision.
-        // 取消只移除此请求；导航及隐藏卡片均不替用户作出审批决定。
-        presentation.CancellationRegistration = pending.Cancellation.Token.Register(() => DispatcherQueue.TryEnqueue(() =>
-        {
-            RemoveInlineApproval(approvalId, presentation);
-            RefreshInlineApproval();
-        }));
-        RefreshInlineApproval();
+        _ = PresentQueuedApprovalAsync(approvalId, tool, presentation);
     }
 
-    private void RefreshInlineApproval()
+    private async Task PresentQueuedApprovalAsync(Guid approvalId, ToolActivity tool, ApprovalPresentation presentation)
     {
-        foreach (var item in _approvalPresentations.ToArray())
-            if (item.Value.Pending.Cancellation.IsCancellationRequested)
-                RemoveInlineApproval(item.Key, item.Value);
-        // Dictionary slots can be reused after another chat's approval closes; preserve explicit arrival order.
-        // 其他聊天的审批关闭后字典槽位会被重用，展示顺序必须使用明确的到达序号。
-        var eligible = _approvalPresentations.Where(item => IsCurrentApproval(item.Value.Pending))
-            .OrderBy(item => item.Value.Sequence).ToArray();
-        if (!IsLoaded || XamlRoot is null || eligible.Length == 0)
-        {
-            HideInlineApproval();
-            return;
-        }
-        var selected = eligible.FirstOrDefault(item => item.Key == _visibleApprovalId);
-        if (selected.Value is null) selected = eligible[0];
-        _visibleApprovalId = selected.Key;
-        InlineApprovalCard.Configure(selected.Value.Tool, Array.FindIndex(eligible, item => item.Key == selected.Key) + 1, eligible.Length);
-        InlineApprovalCard.SetSubmitting(selected.Value.IsSubmitting);
-        if (selected.Value.Error is { } error) InlineApprovalCard.ShowError(error);
-        ShowInlineApproval();
-    }
-
-    private async void InlineApprovalDecisionRequested(object? sender, ToolApprovalChoice choice)
-    {
-        if (_visibleApprovalId is not Guid approvalId || !_approvalPresentations.TryGetValue(approvalId, out var presentation) ||
-            presentation.IsSubmitting || !IsCurrentApproval(presentation.Pending)) return;
-        presentation.IsSubmitting = true;
-        presentation.Error = null;
-        RefreshInlineApproval();
-        var cancellation = presentation.Pending.Cancellation.Token;
+        var cancellation = presentation.Cancellation.Token;
         try
         {
+            bool? decision = null;
+            while (decision is null)
+            {
+                await WaitForApprovalConversationAsync(presentation);
+                var changed = _approvalConversationChanged.Task;
+                using var display = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                presentation.DisplayCancellation = display;
+                bool acquired = false;
+                try
+                {
+                    await _approvalSurface.WaitAsync(display.Token); acquired = true;
+                    if (IsCurrentApproval(presentation.Pending))
+                        decision = await RequestToolApprovalAsync(presentation.Pending, tool, display.Token);
+                }
+                catch (OperationCanceledException) when (display.IsCancellationRequested && !cancellation.IsCancellationRequested) { }
+                finally
+                {
+                    if (acquired) _approvalSurface.Release();
+                    presentation.DisplayCancellation = null;
+                }
+                if (decision is null && IsCurrentApproval(presentation.Pending)) await changed.WaitAsync(cancellation);
+            }
+            cancellation.ThrowIfCancellationRequested();
+            // The user's explicit decision is sent once, after releasing the presentation semaphore.
+            // 用户明确作出的决定只提交一次；提交期间不占弹窗位置，切换聊天不重放请求。
             await _agentApiClient.SubmitApprovalAsync(new(presentation.Pending.ConversationId, presentation.Pending.Message.Id,
-                presentation.Tool.ToolCallId, approvalId, choice != ToolApprovalChoice.Reject,
-                choice == ToolApprovalChoice.Task ? "task" : "once"), cancellation);
-            // Retire only the acknowledged identity. The gateway closes other task-granted requests through stream events.
-            // 仅移除已确认的审批身份；同一任务获批的其他请求由网关事件逐条关闭。
-            RemoveInlineApproval(approvalId, presentation);
+                tool.ToolCallId, approvalId, decision.Value), cancellation);
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { RemoveInlineApproval(approvalId, presentation); }
-        catch (GatewayApiException error) when (error.ErrorCode is "APPROVAL_NOT_FOUND" or "TOOL_APPROVAL_EXPIRED" or "TOOL_RUN_TIMEOUT" or "TASK_DEADLINE_EXCEEDED")
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception error) when (error is System.Net.Http.HttpRequestException or InvalidOperationException
+            or InvalidDataException or System.Text.Json.JsonException or OperationCanceledException)
         {
-            // An authoritative expired/closed identity cannot be retried; transport failures remain recoverable below.
-            // 网关明确确认过期或关闭的身份不能重试；传输失败则仍由下方保留重试入口。
-            RemoveInlineApproval(approvalId, presentation);
+            if (!_chatClosing && !cancellation.IsCancellationRequested)
+                ShowActionFeedback(UiText.Get("工具审批未确认，请查看任务状态。"));
         }
-        catch (Exception error) when (error is System.Net.Http.HttpRequestException or InvalidOperationException or
-            InvalidDataException or System.Text.Json.JsonException or OperationCanceledException)
+        finally
         {
             if (_approvalPresentations.TryGetValue(approvalId, out var current) && current == presentation)
-            {
-                presentation.IsSubmitting = false;
-                presentation.Error = UiText.Get("审批提交失败，请重试。");
-            }
+                _approvalPresentations.Remove(approvalId);
+            presentation.Cancellation.Dispose();
         }
-        finally { RefreshInlineApproval(); }
-    }
-
-    private void RemoveInlineApproval(Guid approvalId, ApprovalPresentation presentation)
-    {
-        if (!_approvalPresentations.TryGetValue(approvalId, out var current) || current != presentation) return;
-        _approvalPresentations.Remove(approvalId);
-        presentation.CancellationRegistration.Dispose();
     }
 
     private void CloseTaskApproval(Guid approvalId, Guid? taskId)
     {
         if (_approvalPresentations.TryGetValue(approvalId, out var presentation) && presentation.TaskId == taskId)
-            RemoveInlineApproval(approvalId, presentation);
-        RefreshInlineApproval();
+            presentation.Cancellation.Cancel();
     }
 
     private void CloseReplyApprovals(PendingChatReply pending)
     {
-        foreach (var item in _approvalPresentations.Where(item => item.Value.Pending == pending).ToArray())
-            RemoveInlineApproval(item.Key, item.Value);
-        RefreshInlineApproval();
+        foreach (var presentation in _approvalPresentations.Values.Where(item => item.Pending == pending).ToArray())
+            presentation.Cancellation.Cancel();
+    }
+
+    private async Task<bool?> RequestToolApprovalAsync(PendingChatReply pending, ToolActivity tool, CancellationToken cancellationToken)
+    {
+        if (tool.ApprovalId is null) throw new InvalidDataException(UiText.Get("工具审批缺少请求标识。"));
+        if (!IsCurrentApproval(pending) || XamlRoot is null) return null;
+        // A new approval takes the dialog surface from a history preview, without deciding for the user.
+        // 新的审批可以占用历史预览的对话框，但不能替用户作出决定。
+        if (_toolResultClosed is { } preview)
+        {
+            _toolResultCancellation?.Cancel();
+            await preview.Task.WaitAsync(cancellationToken);
+        }
+        if (!IsCurrentApproval(pending) || XamlRoot is null || cancellationToken.IsCancellationRequested) return null;
+        bool? decision = null;
+        var dialog = ToolApprovalDialog.Create(XamlRoot, tool);
+        dialog.PrimaryButtonClick += (_, _) => decision = true;
+        dialog.CloseButtonClick += (_, _) => decision = false;
+        using var cancellation = cancellationToken.Register(() => DispatcherQueue.TryEnqueue(() => dialog.Hide()));
+        try { await dialog.ShowAsync(); }
+        catch (InvalidOperationException) { return null; }
+        // A closed presentation cannot grant permission; actual task cancellation belongs to the gateway control API.
+        // 已关闭的展示不能授予权限；正式任务取消属于网关控制 API。
+        if (_chatClosing || cancellationToken.IsCancellationRequested || !IsCurrentApproval(pending)) return null;
+        return decision;
     }
 
     private void AcceptToolActivity(PendingChatReply pending, ToolActivity tool)
     {
-        if (tool.Status != "approval-required")
-        {
-            foreach (var item in _approvalPresentations.Where(item => item.Value.Pending == pending &&
-                item.Value.TaskId is null && item.Value.Tool.ToolCallId == tool.ToolCallId).ToArray())
-                RemoveInlineApproval(item.Key, item.Value);
-            RefreshInlineApproval();
-        }
         var activities = pending.Message.ToolActivities;
         int index = activities.FindIndex(item => item.ToolCallId == tool.ToolCallId);
         if (index < 0) activities.Add(tool);

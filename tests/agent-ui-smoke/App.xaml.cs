@@ -23,6 +23,7 @@ public partial class App : Application
     private readonly bool _computerToolsOnly = Environment.GetCommandLineArgs().Contains("--computer-tools-only", StringComparer.Ordinal);
     private readonly bool _browserOnly = Environment.GetCommandLineArgs().Contains("--browser-only", StringComparer.Ordinal);
     private readonly bool _managementLayoutOnly = Environment.GetCommandLineArgs().Contains("--management-layout-only", StringComparer.Ordinal);
+    private readonly bool _personalOAuthOnly = Environment.GetCommandLineArgs().Contains("--personal-oauth-only", StringComparer.Ordinal);
     private string ResultPath => Path.Combine(_directory, "result.txt");
 
     public App()
@@ -45,6 +46,7 @@ public partial class App : Application
         _api = new FakeAgentApi(Path.Combine(_directory, "Skills"));
         if (_officialToolsOnly) _api.InstallOfficialLayers();
         if (_browserOnly) _api.InstallBrowserFixtures();
+        if (_personalOAuthOnly) _api.InstallPersonalOAuthFixtures();
         _anchor = new Window { Content = new Grid() };
         _anchor.AppWindow.Hide();
         _window = new ToolManagementWindow(_api, Guid.NewGuid());
@@ -78,6 +80,13 @@ public partial class App : Application
     {
         try
         {
+            if (_personalOAuthOnly)
+            {
+                await CheckPersonalOAuthAsync();
+                Check(_unhandled is null, "personal OAuth controls have no unhandled UI error");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) + $"\nPASS: {_checks.Count} native personal OAuth UI checks.\nPreviews: {_directory}");
+                return;
+            }
             if (_managementLayoutOnly)
             {
                 await WaitAsync(() => _root.XamlRoot is not null && _api.Reads == 1 && Button("AgentRefreshButton").IsEnabled,

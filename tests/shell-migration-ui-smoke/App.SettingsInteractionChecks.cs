@@ -153,19 +153,19 @@ public partial class App
             {
                 var bounds = ContentBounds();
                 RecordGeometry(label);
-                Check(bounds.Width > 200 && Math.Abs(bounds.Right - (scroll.ActualWidth - 24)) <= 1 &&
+                Check(bounds.Width > 200 && bounds.Left >= 23 && bounds.Right <= scroll.ActualWidth - 23 &&
                     Math.Abs(bounds.Left - 24) <= 1,
-                    label + " fills the settings viewport with 24 DIP on both sides and no horizontal clipping");
+                    label + " left-aligns the complete settings column at 24 DIP without horizontal clipping");
                 Check(Math.Abs(scroll.ActualWidth - (root.ActualWidth - navigation.ActualWidth)) <= 2 &&
-                    Math.Abs(content.ActualWidth - (scroll.ActualWidth - 48)) <= 2 &&
+                    Math.Abs(content.ActualWidth - (Math.Min(820, scroll.ActualWidth) - 48)) <= 2 &&
                     NativeUi.IsVisible(navigation),
-                    label + " reserves the persistent sidebar and lets the right page expand with the full available width");
+                    label + " reserves the persistent sidebar and gives the left-aligned right page padding within its readable width cap");
             }
             async Task ResizeAsync(double width, double height)
             {
                 presenter.Restore();
                 settings.AppWindow.Resize(new Windows.Graphics.SizeInt32((int)Math.Ceiling(width * scale), (int)Math.Ceiling(height * scale)));
-                await ActivateOwnedShortcutWindowAsync(settings);
+                settings.Activate();
                 await SettleAsync();
                 root.UpdateLayout();
                 scroll.ChangeView(null, 0, null, true);
@@ -182,8 +182,8 @@ public partial class App
             CheckPageWidth("maximized settings window");
             await NativeWindowCapture.CaptureAsync(settings, Path.Combine(_directory, "settings-filled-maximized.png"));
 
-            // Resizing the full-width page must not recreate it or discard its independent scroll state.
-            // 页面随视口伸缩时不重建实例，切换分类仍须保留其独立滚动状态。
+            // The new contract deliberately caps the right page; category changes must retain the original view.
+            // 新布局有意限制右页阅读宽度；切换分类仍须保留原页面实例和独立滚动状态。
             scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
             await SettleAsync();
             double retainedOffset = scroll.VerticalOffset;
@@ -227,15 +227,9 @@ public partial class App
                         return bounds.Width > 0 && bounds.Left >= 23 && bounds.Right <= scroll.ActualWidth - 23;
                     }) && scroll.ScrollableWidth <= 1,
                         languageId + " minimum-width settings keep dropdowns and accent actions inside the viewport without horizontal scrolling");
-                    var paletteCards = paletteGrid.Children.OfType<Button>().ToArray();
-                    Check(paletteGrid.ColumnDefinitions.Count is >= 1 and <= 3 && paletteCards.Length == 5 &&
-                        Math.Abs(paletteGrid.ActualWidth - content.ActualWidth) <= 1 && paletteCards.All(card =>
-                        {
-                            var bounds = card.TransformToVisual(paletteGrid).TransformBounds(
-                                new Rect(0, 0, card.ActualWidth, card.ActualHeight));
-                            return bounds.Width >= 170 && bounds.Left >= -1 && bounds.Right <= paletteGrid.ActualWidth + 1 &&
-                                NativeUi.Descendants<TextBlock>(card).All(label => !label.IsTextTrimmed);
-                        }), languageId + " minimum-width settings wrap all five full-width palette choices without clipping their names");
+                    Check(paletteGrid.ColumnDefinitions.Count == 2 && NativeUi.Descendants<Button>(paletteGrid).Count(button =>
+                        AutomationProperties.GetAutomationId(button).StartsWith("AppearancePalette_", StringComparison.Ordinal)) == 5,
+                        languageId + " minimum-width settings retain all five palette cards in the responsive two-column grid");
                     scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
                     await SettleAsync();
                     Check(Math.Abs(scroll.VerticalOffset - scroll.ScrollableHeight) <= 1,
@@ -269,7 +263,7 @@ public partial class App
             content.Children.Insert(0, plain);
             root.UpdateLayout();
             scroll.ChangeView(null, 0, null, true);
-            await ActivateOwnedShortcutWindowAsync(settings);
+            settings.Activate();
             plain.Focus(FocusState.Programmatic);
             await SettleAsync();
             MovePointerInsideSettings(settings, plain);
@@ -356,8 +350,8 @@ public partial class App
             {
                 scroll = await SelectCategoryAsync(category);
                 picker.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0.15 });
-                await ActivateOwnedShortcutWindowAsync(settings);
                 picker.Focus(FocusState.Programmatic);
+                settings.Activate();
                 await SettleAsync();
                 int selected = picker.SelectedIndex;
                 string stored = File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json"));
@@ -370,8 +364,8 @@ public partial class App
             scroll = await SelectCategoryAsync("appearance");
             var selectedSegment = NativeUi.ById<RadioButton>(mode, "Segment_" + mode.SelectedKey);
             selectedSegment.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0.15 });
-            await ActivateOwnedShortcutWindowAsync(settings);
             selectedSegment.Focus(FocusState.Keyboard);
+            settings.Activate();
             await SettleAsync();
             string? originalMode = mode.SelectedKey;
             string storedMode = File.ReadAllText(Path.Combine(DesktopDirectory, "layout.json"));

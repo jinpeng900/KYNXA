@@ -140,8 +140,7 @@ public sealed partial class ShellPage
         return true;
     }
 
-    private async void ConnectionsNavigation_Click(object sender, RoutedEventArgs e) =>
-        await ShowFeatureInfoAsync("连接", "功能暂未开发");
+    private void ConnectionsNavigation_Click(object sender, RoutedEventArgs e) => OpenAgentTools();
     private void SkillsNavigation_Click(object sender, RoutedEventArgs e) => OpenAgentTools(skills: true);
     private void KnowledgeNavigation_Click(object sender, RoutedEventArgs e)
     {
@@ -283,11 +282,7 @@ public sealed partial class ShellPage
             .Concat(_projects.Where(project => !project.IsArchived).SelectMany(project => project.Chats
                 .Where(chat => !chat.IsArchived).OrderByDescending(chat => chat.IsPinned)
                 .Select(chat => new HistorySearchRow(chat.Id, project.Id, chat.Title, project.Name)))).ToArray();
-        var search = new TextBox
-        {
-            PlaceholderText = UiText.Get("搜索会话标题或项目"), Margin = new Thickness(4, 4, 4, 8),
-            Style = (Style)Application.Current.Resources["KynxaPopupSearchBoxStyle"]
-        };
+        var search = new TextBox { PlaceholderText = UiText.Get("搜索会话标题或项目"), Margin = new Thickness(4, 4, 4, 8) };
         AutomationProperties.SetName(search, UiText.Get("搜索会话"));
         AutomationProperties.SetAutomationId(search, "HistorySearchBox");
         var results = PickerMenu.CreateList("HistorySearchResults", UiText.Get("搜索结果"));
@@ -301,13 +296,11 @@ public sealed partial class ShellPage
         rowStyle.Setters.Add(new Setter(FrameworkElement.MinHeightProperty, 54d));
         rowStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 4, 16, 4)));
         results.ItemContainerStyle = rowStyle;
-        // Keep scope text subordinate while inheriting the row's selected foreground pair.
-        // 归属文字保留层级，同时继承行选中状态的前景与背景配对。
         results.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
                 <StackPanel Spacing="3" Padding="0,5">
                     <TextBlock Text="{Binding Title}" ToolTipService.ToolTip="{Binding Title}" FontSize="13" TextTrimming="CharacterEllipsis" />
-                    <TextBlock Text="{Binding Scope}" ToolTipService.ToolTip="{Binding Scope}" FontSize="11" Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding Scope}" ToolTipService.ToolTip="{Binding Scope}" FontSize="11" Foreground="{StaticResource KynxaSecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
             </DataTemplate>
             """);

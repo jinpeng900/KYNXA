@@ -23,6 +23,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
 {
     private const string PreviewHost = "kynxa-workspace.local";
     private const string PreviewPage = "https://" + PreviewHost + "/Workspace/index.html";
+    private const string DocumentContentHost = "kynxa-workspace-content.local";
     private static Task<CoreWebView2Environment>? _previewEnvironment;
     private static Task<CoreWebView2Environment>? _websiteEnvironment;
     private readonly WorkspacePreviewApiClient _api = new();
@@ -63,6 +64,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         public bool Preparing { get; set; }
         public bool Closed { get; set; }
         public string? Error { get; set; }
+        public Task? PdfFallback { get; set; }
+        public bool PdfFallbackQueued { get; set; }
     }
     private sealed class BrowserView(string key, bool website)
     {
@@ -76,11 +79,16 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         public string? RenderedSignature { get; set; }
         public Uri? ContentAddress { get; set; }
         public bool Preparing { get; set; }
+        public bool BackgroundPreparing { get; set; }
         public DocumentWork? Work { get; set; }
         public TaskCompletionSource Rendered { get; set; } = NewReady();
         public long RenderId { get; set; }
         public TaskCompletionSource Navigated { get; set; } = NewReady();
         public bool Closed { get; set; }
+    }
+    private sealed class DirectDocumentPreviewException : Exception
+    {
+        public DirectDocumentPreviewException() : base("Office direct rendering needs the page converter.") { }
     }
     private readonly Grid _viewport = new();
     private readonly Grid _toolbar = new() { ColumnSpacing = 4, Padding = new Thickness(6, 4, 6, 4) };
@@ -129,6 +137,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     internal WebView2? PreparedResourceBrowser(Guid conversationId, string path) =>
         _views.TryGetValue($"{conversationId:D}:file:{path}", out var view) && view.RenderedSignature is not null
             && !view.Preparing && !view.Closed ? view.Browser : null;
+    internal bool IsResourcePreparingInBackground(Guid conversationId, string path) =>
+        _views.TryGetValue($"{conversationId:D}:file:{path}", out var view) && !view.Closed && view.BackgroundPreparing;
 
     public ConversationDocumentPanel()
     {
@@ -170,7 +180,11 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         _address.KeyDown += AddressKeyDown;
         _browserOptions.Click += (_, _) => ShowWebsiteDataMenu();
         AutomationProperties.SetName(_address, UiText.Get("网页地址"));
-        Loaded += (_, _) => _loaded.TrySetResult();
+        Loaded += (_, _) =>
+        {
+            _loaded.TrySetResult();
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = WarmPreviewEnvironmentAsync());
+        };
         AppearanceService.Changed += AppearanceChanged;
         UiText.LanguageChanged += LanguageChanged;
         SetToolbarMode(false); ApplyAppearance();
@@ -250,6 +264,8 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         // 附件客户端返回的不可变版本属于合法地址；仍精确限制同源、消息与附件路径，不能放行任意查询。
         string query = $"messageId={work.MessageId:D}";
         if (!string.IsNullOrEmpty(version)) query += "&version=" + Uri.EscapeDataString(version);
+        if (work.Preview?.Kind == "pdf" && !string.Equals(Path.GetExtension(work.Attachment.Name), ".pdf", StringComparison.OrdinalIgnoreCase))
+            query += "&representation=pdf";
         var expected = new Uri(ModelGatewayService.Address,
             $"/api/conversations/{work.ConversationId:D}/attachments/{work.Attachment.Id:D}/content?{query}");
         if (address != expected) throw new InvalidDataException(UiText.Get("文件预览地址无效。"));
@@ -325,9 +341,15 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         // Hardware-scaled slots bound background work while the selected queued document goes first.
         // 按硬件分配后台额度，当前选中的排队文档优先，不让切换反复触发读取。
-        while (!_disposed && _preparingDocuments < PreparationConcurrency() && _pendingDocuments.Count > 0)
+        int concurrency = PreparationConcurrency();
+        while (!_disposed && _preparingDocuments < concurrency && _pendingDocuments.Count > 0)
         {
             var work = _pendingDocuments.FirstOrDefault(item => item.Key == _activeKey) ?? _pendingDocuments[0];
+            int background = _views.Values.Count(view => !view.Closed && !view.Preparing && view.BackgroundPreparing);
+            // Bound automatic background admission, while reserving one preparation slot for the selected document.
+            // 自动后台准入受硬件额度限制，同时为当前选中文档保留一个准备名额。
+            if (_preparingDocuments + background >= concurrency
+                && (work.Key != _activeKey || _preparingDocuments > 0)) break;
             _pendingDocuments.Remove(work); work.Queued = false;
             if (!IsLive(work)) { work.Completion.TrySetResult(); continue; }
             work.Preparing = true; _preparingDocuments++;
@@ -377,7 +399,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         {
             ++_generation;
             foreach (var tab in _chromeViews.Values) tab.View.SetActive(false);
-            foreach (var view in _views.Values) { view.Active = false; if (!view.Preparing) _ = SuspendAsync(view); }
+            foreach (var view in _views.Values) DeactivateView(view);
             if (_website?.CoreWebView2 is { } browser) browser.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
         }
         else
@@ -425,7 +447,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (work.View is { } view && ReferenceEquals(view.Work, work))
             {
                 view.Preparing = false;
-                if (!IsSelected(work)) { view.Active = false; view.Browser.Visibility = Visibility.Collapsed; _ = SuspendAsync(view); }
+                if (!IsSelected(work)) DeactivateView(view);
             }
             work.Completion.TrySetResult();
             if (work.Closed) work.Cancellation.Dispose();
@@ -481,10 +503,11 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         while (IsLive(work) && work.Preview is { } preview)
         {
             bool source = work.ShowSource;
-            string signature = $"{preview.Version}:{source}:{preview.Text?.Length ?? 0}";
+            string signature = $"{preview.Kind}:{preview.Version}:{source}:{preview.Text?.Length ?? 0}";
             if (view.RenderedSignature == signature) return;
             if ((preview.Kind == "pdf" && !source || preview.Kind == "html") && work.ContentAddress is { } address)
             {
+                view.BackgroundPreparing = false;
                 Uri target = _navigationUris.TryGetValue(work.Key, out var saved) && IsViewContentAddress(view, saved.AbsoluteUri) ? saved : address;
                 if (view.Browser.CoreWebView2.Source != target.AbsoluteUri)
                 {
@@ -508,15 +531,62 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
                     : code ? await Task.Run(() => HighlightCode(text, language), cancellationToken) : "";
                 if (!IsLive(work)) return;
                 if (work.ShowSource != source || !ReferenceEquals(work.Preview, preview)) continue;
-                view.Rendered = NewReady();
+                view.Rendered = NewReady(); view.BackgroundPreparing = false;
                 view.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "show", key = work.Key,
                     renderId = ++view.RenderId,
-                    kind = source ? "text" : code ? "code" : preview.Kind, text, html, contentUrl = work.ContentAddress?.AbsoluteUri,
+                    kind = source ? "text" : code ? "code" : preview.Kind, text, html,
+                    contentUrl = IsDirectOfficeDocument(preview.Kind) ? DocumentContentAddress(preview.Kind, preview.Version) : work.ContentAddress?.AbsoluteUri,
                     state = _viewStates.GetValueOrDefault(work.Key), title = work.Title ?? preview.Title }));
-                await view.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken);
+                try { await view.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken); }
+                catch (Exception error) when (IsDirectOfficeDocument(preview.Kind)
+                    && error is DirectDocumentPreviewException or TimeoutException)
+                {
+                    // A failed direct render changes only this file's representation, never the user's selected tab.
+                    // 直接渲染失败只替换本文件的表示形式，不切换用户当前标签，也不重复打开产物。
+                    if (!IsLive(work)) return;
+                    await RequestPdfFallbackAsync(work);
+                    if (!IsLive(work)) return;
+                    continue;
+                }
                 view.RenderedSignature = signature;
             }
             if (work.ShowSource == source && ReferenceEquals(work.Preview, preview)) return;
+        }
+    }
+
+    private Task RequestPdfFallbackAsync(DocumentWork work) => work.PdfFallback ??= ReadPdfFallbackAsync(work);
+
+    private async Task ReadPdfFallbackAsync(DocumentWork work)
+    {
+        var token = work.Cancellation.Token;
+        var preview = work.Attachment is { } attachment && work.MessageId is { } messageId
+            ? await _attachments.ReadPreviewAsync(work.ConversationId, messageId, attachment,
+                cancellationToken: token, representation: "pdf")
+            : await _api.ReadAsync(work.ConversationId, work.Path, userSelected: work.UserSelected,
+                cancellationToken: token, mountId: work.MountId, representation: "pdf");
+        if (!IsLive(work)) return;
+        if (IsDirectOfficeDocument(preview.Kind)) throw new DirectDocumentPreviewException();
+        work.Preview = preview;
+        work.ContentAddress = ContentAddress(work, preview.ContentUrl);
+        if (work.View is { } view) view.ContentAddress = work.ContentAddress;
+        CacheDocument(work);
+    }
+
+    private async Task RequeuePdfFallbackAsync(DocumentWork work)
+    {
+        try
+        {
+            // A later page can fail after the initial shown receipt; coalesce the same fallback and retain tab ownership.
+            // 后续页可能在首屏 shown 回执后失败；合并同一文件的转换请求，保留原标签与当前选择。
+            await RequestPdfFallbackAsync(work);
+            if (work.Preparing) await work.Completion.Task;
+            if (!IsLive(work)) return;
+            await QueueDocument(work);
+        }
+        catch (OperationCanceledException) when (work.Cancellation.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            if (IsLive(work)) { work.Error = error.Message; if (IsSelected(work)) Fail(error); }
         }
     }
 
@@ -575,8 +645,16 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         core.PermissionRequested += (_, args) => args.State = CoreWebView2PermissionState.Deny;
         core.DownloadStarting += (_, args) => args.Cancel = true;
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
-        core.WebResourceRequested += (_, args) =>
+        core.WebResourceRequested += (sender, args) =>
         {
+            if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var documentUri)
+                && documentUri.Scheme == "https" && documentUri.Host == DocumentContentHost
+                && documentUri.AbsolutePath is "/Workspace/document.docx" or "/Workspace/document.pptx" or "/Workspace/document.xlsx")
+            {
+                var deferral = args.GetDeferral();
+                _ = SupplyDocumentContentAsync(view, args, environment, deferral.Complete);
+                return;
+            }
             if (Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var uri) &&
                 (uri.Scheme == "https" && uri.Host == PreviewHost || IsViewContentAddress(view, args.Request.Uri)
                     || uri.Scheme is "chrome-extension" or "edge-extension" or "data" or "blob")) return;
@@ -591,6 +669,54 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         core.Navigate(PreviewPage);
         await view.Ready.Task.WaitAsync(TimeSpan.FromSeconds(20));
         ApplyAppearance();
+    }
+
+    private static bool IsDirectOfficeDocument(string kind) => kind is "docx" or "pptx" or "xlsx";
+
+    private static string DocumentContentAddress(string kind, string version) =>
+        "https://" + DocumentContentHost + "/Workspace/document." + kind + "?version=" + Uri.EscapeDataString(version);
+
+    private async Task SupplyDocumentContentAsync(BrowserView view, CoreWebView2WebResourceRequestedEventArgs args,
+        CoreWebView2Environment environment, Action completeDeferral)
+    {
+        try
+        {
+            var work = view.Work;
+            if (args.Request.Method != "GET" || work?.Preview is not { } preview || !IsDirectOfficeDocument(preview.Kind)
+                || !IsLive(work) || view.Browser.CoreWebView2.Source != PreviewPage
+                || args.Request.Uri != DocumentContentAddress(preview.Kind, preview.Version) || work.ContentAddress is not { } address)
+            {
+                args.Response = environment.CreateWebResourceResponse(null, 403, "Forbidden", "");
+                return;
+            }
+            // Mapped static hosts bypass this event; a separate host serves only this view's verified original.
+            // 静态目录映射不会触发此事件；独立代理域只返回此视图已核验的原件，不开放其他文件或地址。
+            var bytes = await _api.ReadDocumentContentAsync(address, work.Cancellation.Token);
+            if (!IsLive(work) || !ReferenceEquals(work.Preview, preview))
+            {
+                args.Response = environment.CreateWebResourceResponse(null, 409, "Conflict", "");
+                return;
+            }
+            string mimeType = preview.Kind switch
+            {
+                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                _ => "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            };
+            args.Response = environment.CreateWebResourceResponse(new MemoryStream(bytes, writable: false).AsRandomAccessStream(), 200, "OK",
+                $"Content-Type: {mimeType}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: https://kynxa-workspace.local\r\n");
+        }
+        catch (Exception error)
+        {
+            Debug.WriteLine($"Workspace Office content: {error.GetType().Name}");
+            try { args.Response = environment.CreateWebResourceResponse(null, 502, "Document unavailable", ""); }
+            catch (Exception closed) { Debug.WriteLine($"Workspace Office response: {closed.GetType().Name}"); }
+        }
+        finally
+        {
+            try { completeDeferral(); }
+            catch (Exception closed) { Debug.WriteLine($"Workspace Office deferral: {closed.GetType().Name}"); }
+        }
     }
 
     private Task OpenWebsiteAsync(Uri address, long generation) => OpenChromeAsync(address, generation);
@@ -663,10 +789,7 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             }
             foreach (var cached in _views.Values)
             {
-                cached.Active = false;
-                cached.Browser.Opacity = 0; cached.Browser.IsHitTestVisible = false;
-                cached.Browser.Visibility = cached.Preparing ? Visibility.Visible : Visibility.Collapsed;
-                if (!cached.Preparing) _ = SuspendAsync(cached);
+                DeactivateView(cached);
             }
             _address.Text = _chrome.Address ?? address.AbsoluteUri;
             SetToolbarMode(true);
@@ -710,9 +833,35 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
             if (type == "state" && message.TryGetProperty("state", out var state)) { CacheState(messageKey, state.GetRawText()); return; }
             if (type == "shown")
             {
-                if (messageKey == view.Key && (!message.TryGetProperty("renderId", out var renderId) || renderId.GetInt64() == view.RenderId))
-                    view.Rendered.TrySetResult();
+                if (messageKey != view.Key || message.TryGetProperty("renderId", out var renderId) && renderId.GetInt64() != view.RenderId) return;
+                view.Rendered.TrySetResult();
                 if (_enabled && messageKey == _activeKey && !_isWebsite) Reveal(view.Browser);
+                return;
+            }
+            if (type is "preparing" or "settled")
+            {
+                if (messageKey != view.Key || view.Browser.CoreWebView2.Source != PreviewPage
+                    || !message.TryGetProperty("renderId", out var backgroundRender) || backgroundRender.GetInt64() != view.RenderId) return;
+                view.BackgroundPreparing = type == "preparing";
+                if (view.BackgroundPreparing) view.Browser.CoreWebView2.Resume();
+                if (!view.Active) DeactivateView(view);
+                if (!view.BackgroundPreparing) { TrimRetainedViews(); DispatchDocuments(); }
+                return;
+            }
+            if (type is "docx-failed" or "pptx-failed" or "xlsx-failed")
+            {
+                if (messageKey == view.Key && view.Work is { } failedWork && IsLive(failedWork)
+                    && failedWork.Preview is { } failedPreview && IsDirectOfficeDocument(failedPreview.Kind)
+                    && type == failedPreview.Kind + "-failed"
+                    && message.TryGetProperty("renderId", out var failedRender) && failedRender.GetInt64() == view.RenderId)
+                {
+                    if (!view.Rendered.TrySetException(new DirectDocumentPreviewException())
+                        && view.Rendered.Task.IsCompletedSuccessfully && !failedWork.PdfFallbackQueued)
+                    {
+                        failedWork.PdfFallbackQueued = true;
+                        _ = RequeuePdfFallbackAsync(failedWork);
+                    }
+                }
                 return;
             }
             if (messageKey != _activeKey) return;
@@ -777,15 +926,21 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         if (_views.TryGetValue(key, out var cached)) { cached.LastUsed = ++_viewClock; return cached; }
         var view = new BrowserView(key, website) { LastUsed = ++_viewClock };
         _views[key] = view;
+        TrimRetainedViews(key);
+        return view;
+    }
+
+    private void TrimRetainedViews(string? retainedKey = null)
+    {
         while (_views.Count > MaximumRetainedViews)
         {
-            var oldest = _views.Values.Where(item => item.Key != key && !item.Preparing && item.Initialization?.IsCompleted != false)
+            var oldest = _views.Values.Where(item => item.Key != retainedKey && !item.Active && !item.Preparing
+                && !item.BackgroundPreparing && item.Initialization?.IsCompleted != false)
                 .OrderBy(item => item.LastUsed).FirstOrDefault();
             if (oldest is null) break;
             _views.Remove(oldest.Key); oldest.Closed = true;
             _viewport.Children.Remove(oldest.Browser); oldest.Browser.Close();
         }
-        return view;
     }
 
     private void ActivateView(WebView2 active)
@@ -795,13 +950,21 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         {
             bool selected = ReferenceEquals(view.Browser, active);
             view.Active = selected;
-            view.Browser.Visibility = selected || view.Preparing ? Visibility.Visible : Visibility.Collapsed;
-            if (!selected) { view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false; }
+            if (selected) view.Browser.Visibility = Visibility.Visible;
+            else DeactivateView(view);
             if (view.Browser.CoreWebView2 is not { } core) continue;
             core.MemoryUsageTargetLevel = selected ? CoreWebView2MemoryUsageTargetLevel.Normal : CoreWebView2MemoryUsageTargetLevel.Low;
             if (selected) core.Resume();
-            else if (!view.Preparing) _ = SuspendAsync(view);
         }
+    }
+
+    private static void DeactivateView(BrowserView view)
+    {
+        view.Active = false; view.Browser.Opacity = 0; view.Browser.IsHitTestVisible = false;
+        // First-paint admission and background settling are separate: keep unfinished hidden work alive without taking input.
+        // 首屏准入与后台完成分开；未完成的隐藏视图继续准备，但不能抢占用户输入。
+        view.Browser.Visibility = view.Preparing || view.BackgroundPreparing ? Visibility.Visible : Visibility.Collapsed;
+        if (!view.Preparing && !view.BackgroundPreparing) _ = SuspendAsync(view);
     }
 
     private void CacheState(string key, string state)
@@ -931,6 +1094,24 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
         }
         finally { Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", overriddenFolder); }
     }
+
+    private async Task WarmPreviewEnvironmentAsync()
+    {
+        if (_disposed || _previewEnvironment is not null) return;
+        Task<CoreWebView2Environment>? preparation = null;
+        try
+        {
+            // Low-priority environment-only preparation creates no document controller and is never awaited by chat or startup.
+            // 低优先级仅准备共享环境，不创建文档控制器，也不进入聊天或启动的等待链路。
+            preparation = _previewEnvironment ??= CreateEnvironmentAsync(Path.Combine(ApplicationPaths.WebViewDirectory, "WorkspacePreview"));
+            await preparation;
+        }
+        catch (Exception error)
+        {
+            if (ReferenceEquals(_previewEnvironment, preparation)) _previewEnvironment = null;
+            Debug.WriteLine($"Workspace environment warmup: {error.GetType().Name}");
+        }
+    }
     private static Button QuietIcon(string glyph, string label)
     {
         var button = QuietButton("", label);
@@ -1005,11 +1186,11 @@ public sealed class ConversationDocumentPanel : Grid, IDisposable
     {
         try
         {
-            if (view.Closed || view.Preparing || view.Browser.CoreWebView2 is not { } core) return;
+            if (view.Closed || view.Active || view.Preparing || view.BackgroundPreparing || view.Browser.CoreWebView2 is not { } core) return;
             await core.TrySuspendAsync();
             // A fast switch may select this view before its earlier suspend operation has completed.
             // 快速切回可能早于旧挂起完成；以最新选择恢复，不能让晚到的挂起冻结当前页面。
-            if (!view.Closed && (view.Active || view.Preparing)) core.Resume();
+            if (!view.Closed && (view.Active || view.Preparing || view.BackgroundPreparing)) core.Resume();
         }
         catch (Exception error) { Debug.WriteLine($"Workspace suspend: {error.GetType().Name}"); }
     }

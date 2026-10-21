@@ -25,15 +25,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     private TaskCompletionSource? _initialCatalogGate;
     private int _catalogReads, _modelReads, _writes, _screenshotReads, _retrievalReads, _agentReads;
     private int _localModelReads, _memoryReads;
-
-    private readonly List<AgentApprovalRequest> _approvalRequests = [];
-    private TaskCompletionSource? _approvalGate;
-    public bool EnableApprovals { get; set; }
-    public int NextApprovalStatus { get; set; }
-    public string? NextApprovalCode { get; set; }
-    public AgentApprovalRequest[] ApprovalRequests { get { lock (_sync) return _approvalRequests.ToArray(); } }
-    public void HoldApprovals() { lock (_sync) _approvalGate = new(TaskCreationOptions.RunContinuationsAsynchronously); }
-    public void ReleaseApprovals() { lock (_sync) { _approvalGate?.TrySetResult(); _approvalGate = null; } }
+    private int _retrievalSettingsReads, _retrievalProvidersReads, _retrievalSourcesReads, _retrievalStatusReads;
 
     private TaskCompletionSource? _pausedRecoveryGate;
     private int _pausedReads, _streamRequests;
@@ -48,6 +40,11 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int Writes => Volatile.Read(ref _writes);
     public int ScreenshotReads => Volatile.Read(ref _screenshotReads);
     public int RetrievalReads => Volatile.Read(ref _retrievalReads);
+    // Initialization must stay cached; background status observation is intentionally repeatable.
+    // 初始化配置必须缓存；后台状态观察允许重复读取，不能与页面重载混记。
+    public (int Settings, int Providers, int Sources) RetrievalInitialReads =>
+        (Volatile.Read(ref _retrievalSettingsReads), Volatile.Read(ref _retrievalProvidersReads), Volatile.Read(ref _retrievalSourcesReads));
+    public int RetrievalStatusReads => Volatile.Read(ref _retrievalStatusReads);
     public int AgentReads => Volatile.Read(ref _agentReads);
     public int LocalModelReads => Volatile.Read(ref _localModelReads);
     public int MemoryReads => Volatile.Read(ref _memoryReads);
@@ -57,7 +54,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
     public int StreamRequests => Volatile.Read(ref _streamRequests);
     public int ChromeOpenRequests => Volatile.Read(ref _chromeOpenRequests);
     public int ActivationRequests => Volatile.Read(ref _activationRequests);
-    public bool EnableLocalModelReads { get; set; }
     public bool EnablePromptSends { get; set; }
     public bool EnableAttachmentImports { get; set; }
     public int AttachmentImports { get; private set; }
@@ -180,39 +176,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         return true;
     }
 
-    private async Task RespondToApprovalAsync(HttpListenerContext context)
-    {
-        var request = await JsonSerializer.DeserializeAsync<AgentApprovalRequest>(context.Request.InputStream,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web), _shutdown.Token)
-            ?? throw new InvalidDataException("An approval request is required.");
-        if (request.ConversationId != WorkChatId && request.ConversationId != StandaloneChatId ||
-            request.RequestId == Guid.Empty || request.ApprovalId == Guid.Empty || string.IsNullOrWhiteSpace(request.ToolCallId) ||
-            request.Scope is not ("once" or "task") || request.Scope == "task" && !request.Approved)
-            throw new InvalidDataException("Approval escaped its synthetic scope or exact call identity.");
-        Task gate;
-        int status;
-        string? code;
-        lock (_sync)
-        {
-            _approvalRequests.Add(request);
-            gate = _approvalGate?.Task ?? Task.CompletedTask;
-            status = NextApprovalStatus;
-            code = NextApprovalCode;
-            NextApprovalStatus = 0;
-            NextApprovalCode = null;
-        }
-        // Hold only this owned response to observe production busy state and retries without a real model or tool.
-        // 仅挂起自有审批响应，观察生产提交状态和重试，不调用真实模型或工具。
-        await gate.WaitAsync(_shutdown.Token);
-        context.Response.StatusCode = status == 0 ? 200 : status;
-        context.Response.ContentType = "application/json";
-        object result = status == 0
-            ? new AgentApprovalResponse(request.Approved, request.ApprovalId, request.ToolCallId, request.Scope)
-            : new { error = status == 409 ? "Approval expired." : "Synthetic approval unavailable.", code };
-        await context.Response.OutputStream.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(result,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web)), _shutdown.Token);
-    }
-
     private async Task ListenAsync()
     {
         try
@@ -234,11 +197,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
         {
             object result;
             string path = context.Request.Url!.AbsolutePath;
-            if (EnableApprovals && context.Request.HttpMethod == "POST" && path == "/api/agent/approvals")
-            {
-                await RespondToApprovalAsync(context);
-                return;
-            }
             if (context.Request.HttpMethod == "POST" && path == "/api/retrieval/activate")
             {
                 await ActivateRetrievalAsync(context);
@@ -307,6 +265,14 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 conversationProtocol = 1, memoryProtocol = 1, contextProtocol = 3, agentProtocol = 5, officialToolsProtocol = 2,
                 hostTerminalProtocol = 3, browserAutomationProtocol = 2, extensionStorageProtocol = 1, toolStreamProtocol = 3,
                 retrievalProtocol = 1, modelDataHome = ApplicationPaths.ModelHome, extensionRoot = ExtensionPaths.Root };
+            else if (path == "/api/usage/summary")
+            {
+                if (context.Request.QueryString.Count != 1 ||
+                    !Guid.TryParse(context.Request.QueryString["conversationId"], out var conversation) || conversation == Guid.Empty)
+                    throw new InvalidOperationException("Usage reads must retain an explicit synthetic conversation scope.");
+                result = new ConversationUsageSnapshot("conversation", conversation,
+                    conversation == WorkChatId ? ProjectId : null, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, 0);
+            }
             else if (path is "/api/tasks" or "/api/tasks/recoverable" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
                 result = new TaskListResponse([], false, null);
             else if (path == "/api/tasks/paused" && Guid.TryParse(context.Request.QueryString["conversationId"], out _))
@@ -350,14 +316,6 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                         ["fixture-model", "fixture-secondary"], false, "openai-completions"),
                     new("second-provider", "Second fixture provider", "https://second.example.invalid/v1",
                         ["fixture-model"], false, "openai-completions")]);
-            }
-            else if (EnableLocalModelReads && path == "/api/local-models" && string.IsNullOrEmpty(context.Request.Url.Query))
-            {
-                // Serve only the opt-in empty catalog; all local-model POST actions remain unexpected writes.
-                // 仅按显式开关提供空目录读取；本地模型的所有 POST 动作仍作为意外写入拒绝。
-                Interlocked.Increment(ref _localModelReads);
-                result = new LocalModelsSnapshot { Enabled = false, InstallDirectory = Path.Combine(_fixtureDirectory, "LocalModels"),
-                    LoadPolicy = "auto", Models = [] };
             }
             else if (TryAgentManagementRead(context.Request, out var agentManagement)) result = agentManagement!;
             else if (EnableSettingsReads && path == "/api/memory/user" && string.IsNullOrEmpty(context.Request.Url.Query))
@@ -403,17 +361,20 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
             else if (path == "/api/retrieval/settings")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalSettingsReads);
                 result = new RetrievalSettingsDocument(1, 13, new(true, "auto", "fixture-embedding"),
                     new("off", "auto", "standard", "auto"), new(4 * 1024 * 1024, 16 * 1024 * 1024));
             }
             else if (path == "/api/retrieval/status")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalStatusReads);
                 result = new RetrievalStatus("sqlite", 0, 0, new("unavailable", "fixture-embedding", 384, false), []);
             }
             else if (path == "/api/retrieval/providers")
             {
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalProvidersReads);
                 result = new RetrievalProvidersResponse([new("auto", "Automatic fixture provider", false)]);
             }
             else if (path == "/api/retrieval/sources" && string.IsNullOrEmpty(context.Request.Url.Query))
@@ -421,6 +382,7 @@ internal sealed class ShellGatewayFixture : IAsyncDisposable
                 // Only global synthetic reads are supported; the fixture still refuses imports, rebuilds and all writes.
                 // 仅提供全局虚构读取；夹具仍拒绝导入、重建及所有写入。
                 Interlocked.Increment(ref _retrievalReads);
+                Interlocked.Increment(ref _retrievalSourcesReads);
                 result = new RetrievalSourcesResponse([]);
             }
             else if (TryHistoryPage(context.Request, out var history)) result = history!;

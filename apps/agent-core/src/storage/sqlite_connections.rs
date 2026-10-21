@@ -360,7 +360,7 @@ fn acquire_owned(
         .map_err(sqlite_store::failure)?
         .query_row([], |row| row.get(0))
         .map_err(sqlite_store::failure)?;
-    if version > 5 {
+    if version > 6 {
         return Err(ContractError::new(
             "A newer retrieval index exists. / 检索索引由更新版本创建，原文件已保留。",
             "UNSUPPORTED_RETRIEVAL_INDEX_VERSION",

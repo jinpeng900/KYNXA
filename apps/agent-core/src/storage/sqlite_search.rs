@@ -204,35 +204,20 @@ fn collect_vectors(
     query.channels["vector"] = verified["items"].clone();
     Ok(())
 }
-fn begin(arguments: &Value) -> ContractResult {
-    cancelled()?;
-    let scopes = scopes(arguments)?;
-    let root = Path::new(arguments["root"].as_str().unwrap_or(""));
-    let path = Path::new(arguments["path"].as_str().unwrap_or(""));
-    let mut connection = sqlite_connections::acquire(
-        root,
-        path,
-        arguments["timeoutMs"].as_u64().unwrap_or(120_000),
-    )?;
-    connection.execute_batch("BEGIN").map_err(failure)?;
-    let snapshot = sqlite_channels::snapshots(&connection, Some(&scopes))?;
-    let mut args = arguments.clone();
-    args["limit"] = json!(
-        arguments["candidateLimit"]
-            .as_u64()
-            .unwrap_or(40)
-            .clamp(1, 160)
-    );
-    args["metadataOnly"] = Value::Bool(true);
-    let lexical = if arguments["expression"]
+fn candidate_channels(
+    connection: &mut sqlite_connections::SqliteConnectionLease,
+    args: &Value,
+    scopes: &[Value],
+) -> ContractResult {
+    let lexical = if args["expression"]
         .as_str()
         .is_some_and(|expression| !expression.is_empty())
     {
-        sqlite_lexical::query(&mut connection, &args)?["items"].clone()
+        sqlite_lexical::query(connection, args)?["items"].clone()
     } else {
         json!([])
     };
-    let mut channels = sqlite_channels::candidates(&connection, &args, &scopes)?;
+    let mut channels = sqlite_channels::candidates(connection, args, scopes)?;
     channels["lexical"] = lexical;
     if let Some(literal) = channels["literal"].as_array().cloned() {
         channels["lexical"]
@@ -247,6 +232,42 @@ fn begin(arguments: &Value) -> ContractResult {
     object.insert("symbol".to_owned(), symbols);
     object.insert("path".to_owned(), paths);
     object.insert("vector".to_owned(), json!([]));
+    Ok(channels)
+}
+
+fn begin(arguments: &Value) -> ContractResult {
+    cancelled()?;
+    let scopes = scopes(arguments)?;
+    let root = Path::new(arguments["root"].as_str().unwrap_or(""));
+    let path = Path::new(arguments["path"].as_str().unwrap_or(""));
+    // The I/O boundary has admitted memory already; storage only checks in-memory eligibility.
+    // I/O 边界已完成内存准入，存储层只读取内存中的缓存可用状态。
+    let cache_admitted = crate::retrieval::cache_candidates::admitted();
+    let mut connection = sqlite_connections::acquire(
+        root,
+        path,
+        arguments["timeoutMs"].as_u64().unwrap_or(120_000),
+    )?;
+    connection.execute_batch("BEGIN").map_err(failure)?;
+    let mut snapshot = sqlite_channels::snapshots(&connection, Some(&scopes))?;
+    let mut args = arguments.clone();
+    args["limit"] = json!(
+        arguments["candidateLimit"]
+            .as_u64()
+            .unwrap_or(40)
+            .clamp(1, 160)
+    );
+    args["metadataOnly"] = Value::Bool(true);
+    let identity = connection.database_identity();
+    let (channels, cache_receipt) = crate::retrieval::cache_candidates::reuse(
+        &args,
+        &snapshot,
+        identity,
+        cache_admitted,
+        || candidate_channels(&mut connection, &args, &scopes),
+        cancelled,
+    )?;
+    snapshot["candidateCache"] = cache_receipt;
     let has_vector = arguments["queryVector"].is_array() && arguments["profile"].is_string();
     let descriptors = if has_vector {
         let mut descriptor_args = identity_arguments(arguments);

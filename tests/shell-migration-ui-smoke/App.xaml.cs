@@ -36,7 +36,6 @@ public partial class App : Application
     private bool _shortcutTooltipOnly;
     private bool _bodySearchOnly;
     private bool _appearanceOnly;
-    private bool _dropdownSpacingOnly;
     private bool _appearanceTransferOnly;
     private bool _sidebarControlsOnly;
     private bool _sidebarRoundnessOnly;
@@ -46,8 +45,8 @@ public partial class App : Application
     private bool _dialogsOnly;
     private bool _windowPresentationOnly;
 
-    private bool _inlineApprovalOnly;
     private bool _promptSendOnly;
+    private bool _steeringTimerOnly;
     private bool _workspaceAutoOpenOnly;
     private string DataDirectory => Path.Combine(_directory, "Data");
     private string DesktopDirectory => Path.Combine(DataDirectory, "Desktop");
@@ -95,9 +94,6 @@ public partial class App : Application
         _appearanceOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-only", StringComparer.Ordinal);
-        _dropdownSpacingOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Contains("--dropdown-spacing-only", StringComparer.Ordinal) ||
-            Environment.GetCommandLineArgs().Contains("--dropdown-spacing-only", StringComparer.Ordinal);
         _appearanceTransferOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--appearance-transfer-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--appearance-transfer-only", StringComparer.Ordinal);
@@ -123,12 +119,12 @@ public partial class App : Application
             .Contains("--window-presentation-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--window-presentation-only", StringComparer.Ordinal);
 
-        _inlineApprovalOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Contains("--inline-approval-only", StringComparer.Ordinal) ||
-            Environment.GetCommandLineArgs().Contains("--inline-approval-only", StringComparer.Ordinal);
         _promptSendOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--prompt-send-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--prompt-send-only", StringComparer.Ordinal);
+        _steeringTimerOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--steering-timer-only", StringComparer.Ordinal) ||
+            Environment.GetCommandLineArgs().Contains("--steering-timer-only", StringComparer.Ordinal);
         _workspaceAutoOpenOnly = args.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Contains("--workspace-auto-open-only", StringComparer.Ordinal) ||
             Environment.GetCommandLineArgs().Contains("--workspace-auto-open-only", StringComparer.Ordinal);
@@ -427,10 +423,12 @@ public partial class App : Application
 
     private async Task CheckModalGuardAsync()
     {
-        var dialog = CreateModalGuardFixture();
+        var tool = new ToolActivity("fixture-approval", "workspace.read_file", null, "approval-required", "Read the synthetic mounted file",
+            ApprovalId: Guid.NewGuid(), WorkspaceRoot: Path.Combine(_directory, "Workspace"));
+        var dialog = ToolApprovalDialog.Create(_shell.XamlRoot, tool);
         var showing = dialog.ShowAsync();
-        await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "generic modal fixture occupies the real Shell XamlRoot");
-        Check((bool)Call("HasPresentationModal")!, "modal guard sees a real generic ContentDialog, not only feature-help dialogs");
+        await WaitAsync(() => NativeUi.OpenDialog(_shell) is not null, "production approval dialog occupies the real Shell XamlRoot");
+        Check((bool)Call("HasPresentationModal")!, "modal guard sees a production approval ContentDialog, not only feature-help dialogs");
         Guid? originalId = ActiveId;
         string originalDraft = Prompt.Text;
         int retrievalReads = _gateway.RetrievalReads;
@@ -448,11 +446,11 @@ public partial class App : Application
             CurrentRetrievalWindow is null && _gateway.RetrievalReads == retrievalReads &&
             VisualTreeHelper.GetOpenPopupsForXamlRoot(_shell.XamlRoot).Where(popup => popup.IsOpen && popup.Child is not null)
                 .All(popup => !NativeUi.Descendants<TextBox>(popup.Child!).Any(text => AutomationProperties.GetAutomationId(text) == "HistorySearchBox")),
-            "production new/search/composer shortcuts, knowledge entry and navigation menu leave modal focus, identity and draft intact");
+            "production new/search/composer shortcuts, knowledge entry and navigation menu leave approval focus, identity and draft intact");
         NativeUi.InvokeDialogButton(dialog, primary: false);
         await showing;
         await SettleAsync();
-        Check(!(bool)Call("HasPresentationModal")!, "modal guard releases after closing the generic modal");
+        Check(!(bool)Call("HasPresentationModal")!, "modal guard releases after closing the approval dialog");
     }
 
     private async Task RunAsync()
@@ -469,7 +467,7 @@ public partial class App : Application
             ResizeInDips(1440, 900);
             await WaitAsync(() => Element<Grid>("ShellGrid").ActualWidth >= 980 && NativeUi.IsVisible(Element<Button>("HistorySearchButton")),
                 "the initialized fixture has a realized wide sidebar before search automation");
-            if (_promptSendOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
+            if (_promptSendOnly || _steeringTimerOnly || _workspaceAutoOpenOnly || _settingsWorkspaceOnly) _gateway.ReleaseInitialCatalog();
             else await CheckInitialHomeAsync();
             await WaitAsync(() => _shell.IsLoaded && _shell.XamlRoot is not null && _gateway.CatalogReads == 1 &&
                 (bool)typeof(ShellPage).GetField("_projectsReady", PrivateInstance)!.GetValue(_shell)! && _gateway.ModelReads >= 1 &&
@@ -486,15 +484,6 @@ public partial class App : Application
             Check(status.Contains("已选择模型") && status.Contains("不代表模型调用已验证"),
                 "configured model status truthfully distinguishes selection from a verified provider request");
             Check(!Element<Button>("SendButton").IsEnabled, "empty initialized composer cannot send");
-            if (_inlineApprovalOnly)
-            {
-                await CheckInlineApprovalAsync();
-                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
-                    "inline approvals only reach the isolated approval endpoint without formal writes or model requests");
-                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
-                    $"\nPASS: {_checks.Count} production Shell inline approval checks.\nPreviews: {_directory}");
-                return;
-            }
             if (_settingsWorkspaceOnly)
             {
                 await CheckSettingsWorkspaceAsync();
@@ -534,15 +523,26 @@ public partial class App : Application
             if (_workspaceAutoOpenOnly)
             {
                 await CheckWorkspaceAutoOpenAsync();
+                await CheckWorkspaceResourcesAsync();
                 Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
                     "workspace opening dispatch stays inside the synthetic gateway without model calls or formal writes");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
                     $"\nPASS: {_checks.Count} production Shell workspace auto-open checks.\nArtifacts: {_directory}");
                 return;
             }
+            if (_steeringTimerOnly)
+            {
+                await CheckSteeringTimerAsync();
+                Check(_gateway.Writes == 0 && _gateway.StreamRequests == 0 && _gateway.Failure is null && _unhandled is null,
+                    "guidance timing checks use programmatic fixture input without model requests or formal writes");
+                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
+                    $"\nPASS: {_checks.Count} production Shell steering timer checks.\nArtifacts: {_directory}");
+                return;
+            }
             if (_promptSendOnly)
             {
                 await CheckPromptSendAsync();
+                await CheckSteeringTimerAsync();
                 Check(_gateway.Failure is null && _unhandled is null,
                     "focused prompt sends complete without production storage or upstream model access");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
@@ -605,15 +605,6 @@ public partial class App : Application
                     "focused shortcut tooltip checks complete without formal data writes or unhandled errors");
                 File.AppendAllText(ResultPath, string.Join("\n", _checks) +
                     $"\nPASS: {_checks.Count} production Shell shortcut tooltip checks.\nPreviews: {_directory}");
-                return;
-            }
-            if (_dropdownSpacingOnly)
-            {
-                await CheckDropdownSpacingAsync();
-                Check(_gateway.Writes == 0 && _gateway.Failure is null && _unhandled is null,
-                    "focused dropdown spacing checks preserve formal data and complete without unhandled errors");
-                File.AppendAllText(ResultPath, string.Join("\n", _checks) +
-                    $"\nPASS: {_checks.Count} production Shell dropdown spacing checks.\nPreviews: {_directory}");
                 return;
             }
             if (_appearanceOnly)

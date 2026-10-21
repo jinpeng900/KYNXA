@@ -91,7 +91,7 @@ pub(crate) fn inspect(root: &Path) -> Result<(PathBuf, bool), ContractError> {
             .map_err(io_error)?;
         if count >= 64
             && &buffer[..16] == b"SQLite format 3\0"
-            && u32::from_be_bytes(buffer[60..64].try_into().unwrap()) > 1
+            && u32::from_be_bytes(buffer[60..64].try_into().unwrap()) > 2
         {
             return Err(failure(
                 "索引由更新版本的软件创建，请使用新版软件打开。",
@@ -152,7 +152,7 @@ fn state(path: &Path, data: &Value) -> Result<(bool, bool), ContractError> {
     let result = (|| -> rusqlite::Result<(bool, bool)> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version != 1 {
+        if version != 2 {
             return Ok((true, false));
         }
         let mut check = connection.prepare("PRAGMA quick_check")?;
@@ -196,10 +196,10 @@ fn state(path: &Path, data: &Value) -> Result<(bool, bool), ContractError> {
 fn write_database(path: &Path, data: &Value) -> Result<(), ContractError> {
     let connection = Connection::open(path).map_err(io_error)?;
     connection.execute_batch("PRAGMA journal_mode=DELETE;PRAGMA synchronous=FULL;PRAGMA foreign_keys=ON;BEGIN IMMEDIATE;
-        CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        CREATE TABLE projects(id TEXT PRIMARY KEY COLLATE NOCASE,name TEXT NOT NULL,workspace_path TEXT,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL);
-        CREATE TABLE sessions(id TEXT PRIMARY KEY COLLATE NOCASE,project_id TEXT REFERENCES projects(id),title TEXT NOT NULL,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL,workspace_path TEXT);
-        CREATE INDEX sessions_project_order ON sessions(project_id,sort_order);PRAGMA user_version=1;").map_err(io_error)?;
+        CREATE TABLE metadata(key TEXT NOT NULL PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE projects(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE,name TEXT NOT NULL,workspace_path TEXT,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL);
+        CREATE TABLE sessions(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE,project_id TEXT REFERENCES projects(id),title TEXT NOT NULL,sort_order INTEGER NOT NULL,pinned INTEGER NOT NULL,archived INTEGER NOT NULL,workspace_path TEXT);
+        CREATE INDEX sessions_project_order ON sessions(project_id,sort_order);PRAGMA user_version=2;").map_err(io_error)?;
     for row in data["projects"].as_array().unwrap() {
         cancelled()?;
         connection
@@ -281,6 +281,16 @@ fn apply_service(operation: &str, arguments: &Value) -> ContractResult {
     }
     if operation != "storage.catalogIndex.rebuild" {
         return Err(invalid());
+    }
+    if exists {
+        // Keep the existing corrupt-index backup path; only a readable old schema enters migration.
+        // 保留已有损坏索引备份路径；只有可读的旧版结构进入约束迁移，非法旧记录不被重建删除。
+        if let Ok(connection) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
+            if connection.query_row("PRAGMA user_version", [], |row|row.get::<_,i64>(0)).ok() == Some(1) {
+                super::sqlite_store::migrate_integrity(&connection, 2,
+                    &[("metadata", ""), ("projects", ""), ("sessions", "")], &[])?;
+            }
+        }
     }
     let data = &arguments["data"];
     let original = if exists {

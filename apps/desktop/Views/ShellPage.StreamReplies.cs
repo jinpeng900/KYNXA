@@ -55,6 +55,7 @@ public sealed partial class ShellPage
     private void UpdateSendButtonState()
     {
         if (SendButton is null) return;
+        RefreshUsageSummaryScope();
         bool active = ActiveChatId is Guid id && _pendingReplies.ContainsKey(id);
         bool hasInput = !string.IsNullOrWhiteSpace(PromptTextBox.Text) || HasAttachmentDrafts;
         SendButton.IsEnabled = active || (!_sendingPrompt && _projectsReady && !_projectActionPending
@@ -186,6 +187,9 @@ public sealed partial class ShellPage
                                 if (pending.StopRequested) await StopPendingReplyAsync(pending);
                                 break;
                             case "task_progress":
+                                if (update.Phase == "waiting-verification") _ = RefreshUnknownOutcomeAsync(pending.ConversationId);
+                                TaskPanel.NotifyChanged(pending.ConversationId);
+                                continue;
                             case "task_tool_call":
                             case "task_tool_result":
                             case "task_finished":

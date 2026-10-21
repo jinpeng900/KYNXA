@@ -24,13 +24,5 @@
     -->
     <Thickness x:Key="KynxaSidebarSurfaceInset">4,2,4,2</Thickness>
     <CornerRadius x:Key="KynxaMenuRadius">16</CornerRadius>
-    <CornerRadius x:Key="OverlayCornerRadius">16</CornerRadius>
-    <Thickness x:Key="KynxaPopupItemMargin">2,1,2,1</Thickness>
-    <!-- Keep short menus compact; only scrolling popups reserve a separate content gutter.
-         短菜单保持紧凑，仅实际滚动的弹出层预留独立内容槽。
-    -->
-    <Thickness x:Key="KynxaComboBoxItemMargin">0</Thickness>
-    <x:Double x:Key="KynxaComboBoxScrollbarGutter">12</x:Double>
-    <Thickness x:Key="KynxaPopupListItemMargin">0,0,16,0</Thickness>
     <CornerRadius x:Key="KynxaComposerRadius">24</CornerRadius>
 </ResourceDictionary>

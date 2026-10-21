@@ -1,6 +1,32 @@
 # Public retrieval evaluation / 公开检索评测
 
-2026-10-12 原生迁移说明：下文的生产索引执行命令属于迁移前 Node 网关。`run-scifact.mjs`、`run-peer-scifact.mjs`、`run-rerank-existing.mjs`、`run-latency-existing.mjs`、`run-windows-paired-scifact.mjs` 及旧证据投影/审核依赖 `apps/model-gateway`，尚未适配当前原生网关。保留原说明与成绩作为历史证据，不能在原生迁移后直接运行或声称已重测。
+2026-10-21：新增下述原生 Rust 词法开发评估入口。后面的公开语料成绩与 Node 执行命令仍属于历史证据；两者不可混算。
+
+## 原生词法开发评估 / Native lexical development evaluation
+
+入口为 `apps/agent-core/tests/retrieval_evaluation.rs`，固定语料为 [native-baseline.json](datasets/native-baseline.json)：40 篇合成短文、15 条查询，其中 11 条主查询、3 条改写诊断查询、1 条无答案查询。数据集继承 PR #6 的开发快照，文中描述是固定测试文本，不是当前产品行为的权威说明；修改金标或原文需更新数据集版本。
+
+```powershell
+cargo test --manifest-path apps/agent-core/Cargo.toml --test retrieval_evaluation -- --nocapture
+```
+
+测试在独立临时目录调用当前生产 `gateway_index::publish/search`，以 `document/user` 范围发布，定位信息同时包含 `path` 与 `relativePath`；走词法、字面、符号、路径的真实融合链路。它不读取用户目录、不下载或加载检索模型、不测语义向量和重排。临时 SQLite 连接会在删除测试目录前关闭。这里的候选数量仅是本评估请求参数，不改变生产默认值或上限。
+
+报告保留数据集 SHA-256、索引状态和逐查询 `document@10` 的 nDCG、Recall、MRR；分块按生产返回顺序去重为文档。二值相关性的 DCG 为 `Σ relevance / log2(rank + 2)`，Recall 为前 10 个文档中相关文档数除以金标文档数，MRR 为首个相关文档排名的倒数。主查询与诊断查询分别取均值；无答案查询展示实际候选、不给相关性均值计零，也不把“有检索候选”误判为“答案已存在”。
+
+默认仅在测试输出中记录分数与逐查询结果。需要完整块身份、哈希、偏移、摘录和返回元数据时，可在执行前指定现有父目录中的报告文件：
+
+```powershell
+$env:KYNXA_RETRIEVAL_EVALUATION_REPORT = Join-Path $env:TEMP 'kynxa-native-lexical-evaluation.json'
+cargo test --manifest-path apps/agent-core/Cargo.toml --test retrieval_evaluation -- --nocapture
+Remove-Item Env:KYNXA_RETRIEVAL_EVALUATION_REPORT
+```
+
+整体分数按本次实际执行记录，不复制旧版分数门槛；四条明确字面锚点要求 Recall@10 为 1，作为基础功能回归。这个小型开发集不能证明开放中文检索、英文检索、语义或重排的普遍效果，也不替代下面公开语料的完整评测。
+
+## 历史原生迁移说明 / Historical migration status
+
+2026-10-12 原生迁移说明：历史章节的生产索引执行命令属于迁移前 Node 网关。`run-scifact.mjs`、`run-peer-scifact.mjs`、`run-rerank-existing.mjs`、`run-latency-existing.mjs`、`run-windows-paired-scifact.mjs` 及旧证据投影/审核依赖 `apps/model-gateway`，尚未适配当前原生网关。保留原说明与成绩作为历史证据，不能在原生迁移后直接运行或声称已重测。
 
 After the native migration, the execution commands below are historical Node gateway commands. The old production-index and evidence adapters have not been ported to the current Rust gateway. Frozen datasets, scoring definitions, vector caches and original reports remain valid historical evidence; they are not current native acceptance results.
 
