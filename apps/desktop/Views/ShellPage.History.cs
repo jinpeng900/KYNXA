@@ -173,7 +173,8 @@ public sealed partial class ShellPage
     private void PublishHistoryAvailability(HistoryState state)
     {
         if (ActiveChatId == state.Chat.Id)
-            ConversationMessages.SetHistoryAvailability(state.Chat.Id, state.Window.HasOlder, state.Window.HasNewer || state.LatestPagePending);
+            ConversationMessages.SetHistoryAvailability(state.Chat.Id, state.Window.HasOlder,
+                state.Window.HasNewer || state.LatestPagePending, hasNewReplies: state.LatestPagePending);
     }
 
     private void TrimInactiveHistory()

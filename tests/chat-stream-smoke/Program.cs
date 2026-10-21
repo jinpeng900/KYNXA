@@ -44,6 +44,13 @@ foreach (string state in new[] { "completed", "partial", "verification-failed", 
         "SSE transport and task outcome dimensions were not retained independently.");
 }
 Check((await Read(prefix + Frame(Event("completed", content: "legacy"))))[^1].DurationMs == 0, "Old duration default changed");
+var generationTiming = Event("generation_timing") with { GenerationElapsedMs = 120000, GenerationActive = true };
+var timingOnly = await Read(prefix + Frame(generationTiming) + Frame(Event("content_snapshot", content: "", reasoning: "")) + Frame(complete));
+Check(timingOnly.Count == 4 && timingOnly[1].GenerationElapsedMs == 120000 && timingOnly[1].GenerationActive == true
+    && timingOnly[^1].DurationMs == 6789, "Tool-only timing must neither require prose nor finish the stream.");
+var invalidTiming = await Read(prefix + Frame(generationTiming with { GenerationElapsedMs = -1 }) + Frame(complete));
+Check(invalidTiming.Count == 2 && invalidTiming[^1].Content == complete.Content,
+    "Invalid optional display timing must not interrupt the reply.");
 foreach (long invalidDuration in new[] { -1L, ChatDurationRules.MaximumDurationMs + 1 })
     await ExpectAsync<InvalidDataException>(() => Read(prefix + Frame(complete with { DurationMs = invalidDuration })), "Invalid stream duration accepted");
 Check((await Read(prefix + Frame(Event("error", content: "已收到", reasoning: "思考", error: "连接中断"))))[^1].Error == "连接中断", "Error event lost partial content");
@@ -404,6 +411,36 @@ await ExpectAsync<InvalidDataException>(async () =>
 }, "Over-budget tool argument frames were accepted.");
 
 var legacyText = JsonSerializer.Deserialize<ChatMessageState>("\"原有问题\"")!;
+var timedReply = new ChatMessageState { Role = "assistant", Status = "streaming" };
+Check(timedReply.GenerationTimingState == "unknown" && timedReply.GenerationElapsedMs is null, "Preparation cannot pretend generation has started.");
+timedReply.ApplyGenerationTiming(120000, true);
+Check(timedReply.GenerationTimingState == "live" && timedReply.GenerationElapsedMs >= 120000, "A tool-only timing event restores cumulative duration.");
+timedReply.Status = "interrupted";
+long frozenElapsed = timedReply.GenerationElapsedMs!.Value;
+await Task.Delay(25);
+Check(timedReply.GenerationTimingState == "settled" && timedReply.GenerationElapsedMs == frozenElapsed,
+    "Pause freezes and retains the clock without adding waiting time.");
+timedReply.Status = "streaming";
+Check(timedReply.GenerationTimingState == "paused" && timedReply.GenerationElapsedMs == frozenElapsed,
+    "Resumed preparation retains elapsed time while the model is not active.");
+timedReply.ApplyGenerationTiming(frozenElapsed, true);
+var nextAnchor = new ChatMessageState { Role = "assistant", Status = "streaming" };
+nextAnchor.InheritGenerationTiming(timedReply);
+timedReply.Status = "interrupted";
+Check(nextAnchor.GenerationClockId == timedReply.GenerationClockId && nextAnchor.GenerationTimingState == "live"
+    && nextAnchor.GenerationElapsedMs >= frozenElapsed, "Steering retains one task clock before freezing the old reply.");
+nextAnchor.Status = "error";
+Check(nextAnchor.GenerationElapsedMs >= frozenElapsed && nextAnchor.GenerationStartedTimestamp is null,
+    "A failed reply retains known time and stops ticking.");
+var freshRetry = new ChatMessageState { Id = timedReply.Id, Role = "assistant", Status = "streaming", DurationMs = 3200 };
+Check(freshRetry.GenerationTimingState == "unknown" && freshRetry.GenerationElapsedMs is null
+    && freshRetry.GenerationClockId != timedReply.GenerationClockId, "Same-ID fresh retries cannot reuse old duration or cached clock identity.");
+var restartedReply = JsonSerializer.Deserialize<ChatMessageState>("{\"Role\":\"assistant\",\"Content\":\"saved progress\",\"Status\":\"interrupted\",\"DurationMs\":90000}")!;
+restartedReply.ApplyGenerationTiming(restartedReply.GenerationElapsedMs!.Value, false);
+restartedReply.Status = "streaming";
+Check(restartedReply.GenerationTimingState == "paused" && restartedReply.GenerationElapsedMs == 90000,
+    "Restarted recovery must retain persisted time while preparing, before the next model-start event.");
+Check(!JsonSerializer.Serialize(nextAnchor).Contains("GenerationClock"), "Process-local timing must not leak into formal message JSON.");
 Check(legacyText.Content == "原有问题" && legacyText.Role == "user" && legacyText.Status == "completed", "Legacy plain text failed");
 var legacyObject = JsonSerializer.Deserialize<ChatMessageState>("{\"Role\":\"assistant\",\"Content\":\"旧回复\"}")!;
 Check(legacyObject.Status == "completed" && legacyObject.Reasoning == "" && legacyObject.ReasoningDurationMs == 0 && legacyObject.DurationMs == 0, "Legacy object defaults failed");

@@ -359,5 +359,17 @@ public static partial class UiText
         ["外观导入失败。请使用有效的 KYNXA 外观 JSON 文件（版本 1，不超过 16 KB），当前外观已保留。"] = "Import failed. Use a valid KYNXA appearance JSON file (version 1, up to 16 KB). Your current appearance has been kept.",
         ["外观导出失败，请检查所选位置后重试。"] = "Export failed. Check the selected location and try again.",
         ["功能暂未开发"] = "This feature is not available yet.",
+        ["有新回复，跳转查看"] = "New replies — jump to latest",
+        ["本次操作已批准，当前网关未建立任务授权。"] = "This operation was approved, but the gateway did not create a task grant.",
+        ["本任务内授权"] = "Allow for this task",
+        ["等待你的批准"] = "Awaiting your approval",
+        ["查看操作详情"] = "View operation details",
+        ["正在确认审批…"] = "Confirming approval…",
+        ["本任务内允许写入同一文件；每次仍校验当前文件哈希。暂停后保留，重启后需重新批准。"] =
+            "Allow writes to the same file in this task; its current hash is checked every time. Kept across pauses; approve again after restarting.",
+        ["本任务内允许相同工具、参数与工作范围；更换目标或配置需再次批准。暂停后保留，重启后需重新批准。"] =
+            "Allow the same tool, parameters and workspace in this task. Changed targets or configuration require approval again. Kept across pauses; approve again after restarting.",
+        ["当前调用不具备有效任务范围，仅可单次批准。"] =
+            "This invocation has no active task scope; only one-time approval is available.",
     };
 }

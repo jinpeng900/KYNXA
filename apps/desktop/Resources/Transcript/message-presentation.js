@@ -53,8 +53,8 @@
       content: visibleSegments.map(segment => segment.content || '').filter(hasText).join('\n\n') };
   }
 
-  function elapsedText(durationMs, strings, { live = false } = {}) {
-    if (!Number.isSafeInteger(durationMs) || durationMs < 0 || !live && durationMs === 0) return '';
+  function elapsedText(durationMs, strings, { live = false, known = false } = {}) {
+    if (!Number.isSafeInteger(durationMs) || durationMs < 0 || !live && !known && durationMs === 0) return '';
     const seconds = live ? Math.floor(durationMs / 1000) : Math.ceil(durationMs / 1000);
     const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60), remainingSeconds = seconds % 60;
     const key = hours ? 'elapsedHoursMinutesSeconds' : minutes ? 'elapsedMinutesSeconds' : 'elapsedSeconds';
