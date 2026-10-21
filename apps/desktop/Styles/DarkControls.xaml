@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ResourceDictionary.ThemeDictionaries>
+        <!-- Only dark controls use these aliases; no Default fallback can leak the dark surface into Light or HighContrast.
+             仅深色控件使用这些别名；不设置 Default 回退，避免浅色或高对比度沿用深色表面。
+             Shared palette brushes update in place; SDK templates retain their focus, keyboard and accessibility behavior.
+             共享配色画刷原位更新；SDK 模板继续负责焦点、键盘和无障碍行为。
+        -->
+        <ResourceDictionary x:Key="Dark">
+            <StaticResource x:Key="ButtonBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ButtonBackgroundDisabled" ResourceKey="KynxaSendDisabledBrush" />
+            <StaticResource x:Key="ButtonForeground" ResourceKey="KynxaTextBrush" />
+            <StaticResource x:Key="ButtonForegroundDisabled" ResourceKey="KynxaDisabledTextBrush" />
+            <StaticResource x:Key="ButtonBorderBrush" ResourceKey="KynxaDividerBrush" />
+
+            <StaticResource x:Key="TextControlBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="TextControlBackgroundPointerOver" ResourceKey="KynxaControlHoverBrush" />
+            <StaticResource x:Key="TextControlBackgroundFocused" ResourceKey="KynxaMainBrush" />
+            <StaticResource x:Key="TextControlBackgroundDisabled" ResourceKey="KynxaSendDisabledBrush" />
+            <StaticResource x:Key="TextControlBorderBrush" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="TextControlBorderBrushPointerOver" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="TextControlForegroundDisabled" ResourceKey="KynxaDisabledTextBrush" />
+
+            <StaticResource x:Key="ComboBoxBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ComboBoxBackgroundUnfocused" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ComboBoxBackgroundFocused" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ComboBoxBackgroundPointerOver" ResourceKey="KynxaControlHoverBrush" />
+            <StaticResource x:Key="ComboBoxBackgroundPressed" ResourceKey="KynxaControlPressedBrush" />
+            <StaticResource x:Key="ComboBoxBackgroundDisabled" ResourceKey="KynxaSendDisabledBrush" />
+            <StaticResource x:Key="ComboBoxBorderBrush" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="ComboBoxBorderBrushPointerOver" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="ComboBoxForegroundDisabled" ResourceKey="KynxaDisabledTextBrush" />
+            <StaticResource x:Key="ComboBoxDropDownBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ComboBoxDropDownBorderBrush" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="ComboBoxDropDownBackgroundPointerOver" ResourceKey="KynxaControlHoverBrush" />
+            <StaticResource x:Key="ComboBoxDropDownBackgroundPointerPressed" ResourceKey="KynxaControlPressedBrush" />
+            <StaticResource x:Key="ComboBoxFocusedDropDownBackgroundPointerOver" ResourceKey="KynxaControlHoverBrush" />
+            <StaticResource x:Key="ComboBoxFocusedDropDownBackgroundPointerPressed" ResourceKey="KynxaControlPressedBrush" />
+
+            <StaticResource x:Key="MenuFlyoutPresenterBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="MenuFlyoutPresenterBorderBrush" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="FlyoutPresenterBackground" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="FlyoutBorderThemeBrush" ResourceKey="KynxaDividerBrush" />
+            <StaticResource x:Key="ToolTipBackgroundBrush" ResourceKey="KynxaSettingsCardBrush" />
+            <StaticResource x:Key="ToolTipForegroundBrush" ResourceKey="KynxaTextBrush" />
+            <StaticResource x:Key="ToolTipBorderBrush" ResourceKey="KynxaDividerBrush" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>
