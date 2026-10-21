@@ -405,6 +405,9 @@ public sealed partial class ShellPage
             var pending = new PendingChatReply(chat.Id, original.Id, original.Content, message.Provider, message.Model,
                 _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true, StreamRequestId = requestId };
             pending.TaskRegistered.TrySetResult(task.TaskId);
+            // Seed persisted timing before entering streaming; process-local clocks do not survive a restart.
+            // 先接续正式累计值再进入恢复准备；重启后没有本机时钟，等待新模型启动期间也要保留已有用时。
+            if (message.GenerationElapsedMs is long resumedElapsed) message.ApplyGenerationTiming(resumedElapsed, false);
             message.Status = "streaming"; message.Error = string.Empty;
             pending.Content.Append(message.Content); pending.Reasoning.Append(message.Reasoning);
             foreach (var segment in message.AssistantSegments)

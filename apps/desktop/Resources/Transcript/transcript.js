@@ -94,7 +94,7 @@
     const durationMs = entry.elapsedMode === 'live'
       ? Math.floor(Math.max(0, performance.now() - entry.generationStartedAtMs)) : entry.finalDurationMs;
     const text = entry.elapsedMode ? window.KynxaMessagePresentation.elapsedText(durationMs, uiStrings,
-      { live: entry.elapsedMode === 'live' }) : '';
+      { live: entry.elapsedMode === 'live', known: entry.elapsedKnown === true }) : '';
     setToolText(entry.elapsed, text);
     // Reused snapshots must not mutate unchanged attributes or disturb the cached selection surface.
     // 复用快照时不重复写入未变属性，保留缓存聊天的选区与展示节点。
@@ -111,22 +111,47 @@
     else if (!hasVisibleClock && elapsedTimer !== null) { clearInterval(elapsedTimer); elapsedTimer = null; }
   }
   function updateElapsedState(entry, message) {
-    const presentation = presentationFor(message);
-    if (presentation.mode === 'final' || message.status === 'completed' && !message.streaming
-        && Number.isSafeInteger(message.durationMs) && message.durationMs > 0) {
-      entry.elapsedMode = 'final'; entry.finalDurationMs = message.durationMs;
-      liveElapsedEntries.delete(entry);
-    } else if (message.role === 'assistant' && message.streaming && Number.isSafeInteger(message.generationElapsedMs)
-        && message.generationElapsedMs >= 0) {
-      // A continued task may supply an earlier origin; updates can never move its live clock back to zero.
-      // 接续任务可补回更早的起点；活动计时仅向前累计，更新不能将其归零。
-      const generationStartedAtMs = performance.now() - message.generationElapsedMs;
-      entry.generationStartedAtMs = entry.elapsedMode === 'live'
-        ? Math.min(entry.generationStartedAtMs, generationStartedAtMs) : generationStartedAtMs;
-      entry.elapsedMode = 'live'; liveElapsedEntries.add(entry);
-    } else {
-      entry.elapsedMode = null; delete entry.generationStartedAtMs; liveElapsedEntries.delete(entry);
+    const now = performance.now(), isKnownDuration = value => Number.isSafeInteger(value) && value >= 0;
+    const previousElapsedMs = entry.elapsedMode === 'live' && Number.isFinite(entry.generationStartedAtMs)
+      ? Math.floor(Math.max(0, now - entry.generationStartedAtMs))
+      : entry.elapsedMode && isKnownDuration(entry.finalDurationMs) ? entry.finalDurationMs : null;
+    const elapsedMs = isKnownDuration(message.generationElapsedMs) ? message.generationElapsedMs : null;
+    const hasTotal = isKnownDuration(message.durationMs) && message.durationMs > 0;
+    const hasTimingState = ['live', 'paused', 'settled', 'unknown'].includes(message.generationTimingState);
+    const clockId = hasTimingState && typeof message.generationClockId === 'string' ? message.generationClockId : null;
+    let mode = null, durationMs = 0;
+    if (message.role === 'assistant' && hasTimingState) {
+      // Timing belongs to the generation, independently of prose phases or transport completion.
+      // 计时归属于生成任务，不受正文阶段或传输是否结束影响；新尝试必须使用新的时钟身份。
+      const retainedElapsedMs = entry.generationClockId === clockId ? previousElapsedMs : null;
+      if (message.generationTimingState === 'live' && (elapsedMs !== null || retainedElapsedMs !== null)) {
+        mode = 'live'; durationMs = Math.max(elapsedMs ?? 0, retainedElapsedMs ?? 0);
+      } else if (['paused', 'settled'].includes(message.generationTimingState)
+          && (elapsedMs !== null || retainedElapsedMs !== null || message.generationTimingState === 'settled' && hasTotal)) {
+        mode = message.generationTimingState === 'paused' ? 'paused' : 'final';
+        durationMs = mode === 'final' && hasTotal ? message.durationMs : elapsedMs ?? retainedElapsedMs;
+      }
+    } else if (message.role === 'assistant') {
+      // Older snapshots lack clock identity. Preserve their preparation reset, but never erase
+      // an established clock just because the final prose arrived before its official total.
+      // 旧快照没有时钟身份，保留准备阶段清零行为；最终正文先于正式总时长到达时不抹掉已知计时。
+      const presentation = presentationFor(message);
+      if (message.streaming && elapsedMs !== null) {
+        mode = 'live'; durationMs = Math.max(elapsedMs, entry.elapsedMode === 'live' ? previousElapsedMs ?? 0 : 0);
+      } else if (hasTotal && (presentation.mode === 'final' || message.status === 'completed' && !message.streaming)) {
+        mode = 'final'; durationMs = message.durationMs;
+      } else if (presentation.mode === 'final' && previousElapsedMs !== null) {
+        mode = 'final'; durationMs = previousElapsedMs;
+      } else if (!message.streaming && ['interrupted', 'error'].includes(message.status)
+          && (previousElapsedMs !== null || hasTotal)) {
+        mode = 'paused'; durationMs = previousElapsedMs ?? message.durationMs;
+      }
     }
+    entry.elapsedMode = mode; entry.elapsedKnown = mode !== null;
+    entry.generationClockId = clockId; entry.finalDurationMs = durationMs;
+    if (mode === 'live') {
+      entry.generationStartedAtMs = now - durationMs; liveElapsedEntries.add(entry);
+    } else { delete entry.generationStartedAtMs; liveElapsedEntries.delete(entry); }
     refreshElapsedText(entry);
   }
   function statusText(message, presentation = presentationFor(message)) {
@@ -604,7 +629,7 @@
     if (!entry.mounted) { entry.message = message; return; }
     const old = entry.message;
     updateElapsedState(entry, message);
-    if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
+    if (old && ['role', 'content', 'html', 'htmlStableLength', 'htmlStableBlocks', 'reasoningHtml', 'reasoningTitle', 'reasoningState', 'reasoningSeconds', 'status', 'waiting', 'streaming', 'error', 'canRetry', 'durationMs', 'generationElapsedMs', 'generationTimingState', 'generationClockId', 'presentationMode', 'createdAtMs', 'endRecordedAtMs', 'taskCompletionState']
       .every(key => old[key] === message[key]) && !old.toolActivities?.length && !message.toolActivities?.length &&
       !old.assistantSegments?.length && !message.assistantSegments?.length &&
       JSON.stringify(old.attachments || []) === JSON.stringify(message.attachments || [])) return;

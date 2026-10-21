@@ -71,7 +71,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
     private sealed record Snapshot(Guid Id, string Role, string Content, string Reasoning, bool Streaming,
         string? ReasoningState, long ReasoningSeconds, bool Waiting, string Status, string Error, bool CanRetry,
         ToolActivity[] ToolActivities, AssistantSegment[] AssistantSegments, string Mode, long DurationMs,
-        long? GenerationElapsedMs, long? GenerationStartedTimestamp,
+        long? GenerationElapsedMs, long? GenerationStartedTimestamp, string GenerationTimingState, Guid GenerationClockId,
         long? CreatedAtMs, long? EndRecordedAtMs, string TaskCompletionState, AttachmentDisplay[] Attachments);
     private sealed record AttachmentDisplay(Guid Id, string Name, string ContentType, long SizeBytes, string Status,
         string? Error, string? ThumbnailUrl);
@@ -784,9 +784,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
             visible.Mode == "active" && row.IsThinking ? "thinking" : null, 0,
             row.IsWaiting, row.Message.Status, row.Message.Error, row.RetryVisibility == Visibility.Visible,
             visible.Tools, segments, visible.Mode, row.Message.DurationMs,
-            row.IsStreaming && row.Message.GenerationStartedTimestamp is long generationStarted
-                ? Math.Max(0, (long)Stopwatch.GetElapsedTime(generationStarted).TotalMilliseconds) : null,
-            row.IsStreaming ? row.Message.GenerationStartedTimestamp : null,
+            row.Message.GenerationElapsedMs, row.Message.GenerationStartedTimestamp,
+            row.Message.GenerationTimingState, row.Message.GenerationClockId,
             row.Message.CreatedAt > DateTimeOffset.UnixEpoch ? row.Message.CreatedAt.ToUnixTimeMilliseconds() : null,
             MessageTimePresentation.GetEnd(row.ConversationId, row.Message)?.ToUnixTimeMilliseconds(), row.Message.TaskCompletionState,
             row.Message.Attachments.Select(attachment => AttachmentView(row.ConversationId, row.Message.Id, attachment)).ToArray());
@@ -853,6 +852,7 @@ public sealed class ConversationTranscript : Grid, IDisposable
                     contentType = attachment.ContentType, sizeBytes = attachment.SizeBytes, status = attachment.Status,
                     error = attachment.Error, thumbnailUrl = attachment.ThumbnailUrl }),
                 generationElapsedMs = item.Row.GenerationElapsedMs,
+                generationTimingState = item.Row.GenerationTimingState, generationClockId = item.Row.GenerationClockId,
                 createdAtMs = item.Row.CreatedAtMs, endRecordedAtMs = item.Row.EndRecordedAtMs,
                 streaming = item.Row.Streaming, waiting = item.Row.Waiting, error = item.Row.Error, canRetry = item.Row.CanRetry,
                 assistantSegments = item.Cache.Segments.Select(segment => new { id = segment.Source.Id,
@@ -879,6 +879,8 @@ public sealed class ConversationTranscript : Grid, IDisposable
         previous.Waiting == current.Waiting && previous.Status == current.Status && previous.Error == current.Error &&
         previous.CanRetry == current.CanRetry && previous.Mode == current.Mode && previous.DurationMs == current.DurationMs &&
         previous.GenerationStartedTimestamp == current.GenerationStartedTimestamp &&
+        previous.GenerationTimingState == current.GenerationTimingState && previous.GenerationClockId == current.GenerationClockId &&
+        (current.GenerationTimingState == "live" || previous.GenerationElapsedMs == current.GenerationElapsedMs) &&
         previous.CreatedAtMs == current.CreatedAtMs && previous.EndRecordedAtMs == current.EndRecordedAtMs &&
         previous.TaskCompletionState == current.TaskCompletionState && previous.Attachments.SequenceEqual(current.Attachments) &&
         previous.AssistantSegments.SequenceEqual(current.AssistantSegments) && previous.ToolActivities.SequenceEqual(current.ToolActivities);
