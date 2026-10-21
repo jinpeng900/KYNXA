@@ -266,14 +266,14 @@ public sealed partial class LocalModelsPage
             "SystemControlHighlightAccentBrush", "AccentTextFillColorPrimaryBrush", "AccentTextFillColorSecondaryBrush" })
             resources[key] = focus;
         foreach (string key in new[] { "SystemControlFocusVisualPrimaryBrush", "TextControlBorderBrushFocused",
-            "ComboBoxBorderBrushFocused", "ComboBoxBackgroundBorderBrushFocused", "ComboBoxItemPillFillBrush", "ListViewItemFocusBorderBrush",
+            "ComboBoxBorderBrushFocused", "ComboBoxBackgroundBorderBrushFocused", "ListViewItemFocusBorderBrush",
             "ToggleSwitchFillOn", "ToggleSwitchFillOnPointerOver", "ToggleSwitchFillOnPressed", "ToggleSwitchStrokeOn",
             "ToggleSwitchStrokeOnPointerOver", "ToggleSwitchStrokeOnPressed", "CheckBoxCheckBackgroundFillChecked",
             "CheckBoxCheckBackgroundFillCheckedPointerOver", "CheckBoxCheckBackgroundFillCheckedPressed", "CheckBoxCheckBorderBrushChecked" })
             resources[key] = focus;
-        foreach (string key in new[] { "ComboBoxItemBorderBrushSelected", "ComboBoxItemBorderBrushSelectedPointerOver", "ComboBoxItemBorderBrushSelectedPressed",
-            "ComboBoxItemBackgroundSelected", "ComboBoxItemBackgroundSelectedPointerOver", "ComboBoxItemBackgroundSelectedPressed",
-            "ListViewItemBackgroundSelected", "ListViewItemBackgroundSelectedPointerOver", "ListViewItemBackgroundSelectedPressed" })
+        // Keep dropdown selection under the shared accent and high-contrast palette.
+        // 下拉选中沿用共享强调色及高对比度配色，避免页面局部中性色覆盖选中背景与标记。
+        foreach (string key in new[] { "ListViewItemBackgroundSelected", "ListViewItemBackgroundSelectedPointerOver", "ListViewItemBackgroundSelectedPressed" })
             resources[key] = AppearanceService.GetBrush("KynxaControlHoverBrush");
     }
 
