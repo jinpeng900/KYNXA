@@ -37,7 +37,8 @@ public sealed record ChatStreamEvent(string Type, Guid ConversationId, Guid Requ
     Guid? ReplyMessageId = null, Guid? UserMessageId = null, Guid? SupersededReplyMessageId = null,
     string? SessionId = null, int? Cols = null, int? Rows = null, string? Title = null, string? Workdir = null,
     Guid? MountId = null, string? MountName = null, string? ToolCallId = null,
-    bool? Approved = null, string? Scope = null);
+    bool? Approved = null, string? Scope = null,
+    long? GenerationElapsedMs = null, bool? GenerationActive = null);
 
 public static class ChatDurationRules
 {

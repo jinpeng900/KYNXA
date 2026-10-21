@@ -27,6 +27,7 @@
     <Compile Include="../../apps/desktop/Controls/ConversationUnknownOutcomeCard.cs" Link="ConversationUnknownOutcomeCard.cs" />
     <Compile Include="../../apps/desktop/Controls/ConversationAttachmentDrafts.cs" Link="ConversationAttachmentDrafts.cs" />
     <Compile Include="../../apps/desktop/Controls/ConversationWorkspaceHome.cs" Link="ConversationWorkspaceHome.cs" />
+    <Compile Include="../../apps/desktop/Controls/SegmentedSelector*.cs" Link="%(Filename)%(Extension)" />
     <Compile Include="../../apps/desktop/Controls/ConversationWorkTabs.cs" Link="ConversationWorkTabs.cs" />
     <Compile Include="../../apps/desktop/Controls/ConversationDocumentPanel.cs" Link="ConversationDocumentPanel.cs" />
     <Compile Include="../../apps/desktop/Services/Presentation/ConversationWorkTabState.cs" Link="ConversationWorkTabState.cs" />

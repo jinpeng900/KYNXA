@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Diagnostics;
 using KYNXA.Contracts;
 
 namespace KYNXA_Desktop.Models.UI;
@@ -12,7 +13,16 @@ public sealed class ChatMessageState
     public string Content { get; set; } = string.Empty;
     public List<ChatAttachment> Attachments { get; set; } = [];
     public string Reasoning { get; set; } = string.Empty;
-    public string Status { get; set; } = "completed";
+    private string _status = "completed";
+    public string Status
+    {
+        get => _status;
+        set
+        {
+            if (_status == "streaming" && value != "streaming") FreezeGenerationTiming();
+            _status = value;
+        }
+    }
     public string Error { get; set; } = string.Empty;
     // Steering freezes prior output above the guidance and links the next reply to that guidance.
     // 引导前的输出停留在上方，新回复关联引导消息；历史正文保持可见。
@@ -38,6 +48,68 @@ public sealed class ChatMessageState
     // 活动计时仅存在于当前进程；正式总用时仍由网关保存，不持久化 Stopwatch 时间戳。
     [JsonIgnore]
     public long? GenerationStartedTimestamp { get; set; }
+    [JsonIgnore]
+    public Guid GenerationClockId { get; private set; } = Guid.NewGuid();
+    private long _generationElapsedBaseMs;
+    private bool _generationTimingKnown;
+
+    [JsonIgnore]
+    public long? GenerationElapsedMs
+    {
+        get
+        {
+            if (Status != "streaming" && ChatDurationRules.IsValid(DurationMs) && DurationMs > 0) return DurationMs;
+            if (GenerationStartedTimestamp is not long started) return _generationTimingKnown ? _generationElapsedBaseMs : null;
+            long elapsed = (long)Math.Clamp(Stopwatch.GetElapsedTime(started).TotalMilliseconds, 0, ChatDurationRules.MaximumDurationMs);
+            return _generationElapsedBaseMs + Math.Min(elapsed, ChatDurationRules.MaximumDurationMs - _generationElapsedBaseMs);
+        }
+    }
+    [JsonIgnore]
+    public string GenerationTimingState => GenerationElapsedMs is null ? "unknown"
+        : Status != "streaming" ? "settled" : GenerationStartedTimestamp is not null ? "live" : "paused";
+
+    /// <summary>Start after generation preparation, or restore the gateway's known cumulative timing.</summary>
+    /// <remarks>生成准备完成后启表；恢复时沿用网关已知累计值，准备与暂停期间不偷偷累计。</remarks>
+    public void StartGenerationTiming()
+    {
+        _generationTimingKnown = true;
+        GenerationStartedTimestamp ??= Stopwatch.GetTimestamp();
+    }
+
+    // Restore the gateway's cumulative clock independently of visible reply segments.
+    // 网关累计计时独立于可见回复分段；恢复等待时保持已知值，不把离线时间算进去。
+    public void ApplyGenerationTiming(long elapsedMs, bool active)
+    {
+        if (!ChatDurationRules.IsValid(elapsedMs)) return;
+        long current = GenerationElapsedMs ?? 0;
+        _generationElapsedBaseMs = active && GenerationStartedTimestamp is not null ? Math.Max(current, elapsedMs) : elapsedMs;
+        _generationTimingKnown = true;
+        GenerationStartedTimestamp = active ? Stopwatch.GetTimestamp() : null;
+    }
+
+    private void FreezeGenerationTiming()
+    {
+        if (GenerationElapsedMs is not long elapsed) return;
+        _generationElapsedBaseMs = elapsed;
+        _generationTimingKnown = true;
+        GenerationStartedTimestamp = null;
+    }
+
+    // Steering changes the visible reply anchor while retaining the same task clock.
+    // 中途引导只更换展示回复锚点，保留同一任务时钟，真正的新回复使用新的时钟标识。
+    public void InheritGenerationTiming(ChatMessageState source)
+    {
+        if (source.GenerationElapsedMs is not long elapsed) return;
+        if (GenerationElapsedMs is long existing && existing > elapsed)
+        {
+            GenerationClockId = source.GenerationClockId;
+            return;
+        }
+        _generationElapsedBaseMs = source.GenerationStartedTimestamp is not null ? source._generationElapsedBaseMs : elapsed;
+        _generationTimingKnown = true;
+        GenerationStartedTimestamp = source.GenerationStartedTimestamp;
+        GenerationClockId = source.GenerationClockId;
+    }
     public List<ToolActivity> ToolActivities { get; set; } = [];
     public List<AssistantSegment> AssistantSegments { get; set; } = [];
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;

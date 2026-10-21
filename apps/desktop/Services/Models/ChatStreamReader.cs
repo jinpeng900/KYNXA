@@ -52,6 +52,11 @@ public static class ChatStreamReader
                         throw new InvalidDataException(UiText.Get("模型流返回的会话或请求信息不匹配。"));
                     if (!ChatDurationRules.IsValid(streamEvent.DurationMs))
                         throw new InvalidDataException(UiText.Get("模型流返回了无法识别的数据。"));
+                    // Optional display timing must never terminate an otherwise valid reply stream.
+                    // 可选展示计时缺失或越界时忽略，不因此结束有效回复，也不改写正式结算用时。
+                    if (streamEvent.GenerationElapsedMs is not long elapsed || !ChatDurationRules.IsValid(elapsed)
+                        || streamEvent.GenerationActive is null)
+                        streamEvent = streamEvent with { GenerationElapsedMs = null, GenerationActive = null };
                     if (!hasStarted && streamEvent.Type != "started")
                         throw new InvalidDataException(UiText.Get("模型流缺少开始事件。"));
                     bool isTerminalEvent = false;
@@ -63,6 +68,9 @@ public static class ChatStreamReader
                             if (streamEvent.TaskId == Guid.Empty || streamEvent.RootRequestTaskId == Guid.Empty)
                                 throw new InvalidDataException(UiText.Get("任务事件无效。"));
                             rootTaskId = streamEvent.RootRequestTaskId ?? streamEvent.TaskId;
+                            break;
+                        case "generation_timing":
+                            if (streamEvent.GenerationElapsedMs is null) continue;
                             break;
                         case "reply_anchor":
                             if (streamEvent.ReplyMessageId is not Guid replyMessageId || replyMessageId == Guid.Empty

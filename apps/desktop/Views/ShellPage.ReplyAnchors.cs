@@ -13,12 +13,6 @@ public sealed partial class ShellPage
         var previous = pending?.Message ?? chat.Messages.LastOrDefault(message => message.Role == "assistant"
             && message.SupersededByUserMessageId is null && message.Status != "completed");
         if (pending is not null) FlushReply(pending, final: true);
-        if (previous is not null)
-        {
-            previous.Status = "interrupted";
-            previous.Error = string.Empty;
-            previous.SupersededByUserMessageId = prompt.Id;
-        }
         var submitted = chat.Messages.FirstOrDefault(message => message.Id == prompt.Id)
             ?? new ChatMessageState { Id = prompt.Id, Role = "user", Content = prompt.Text,
                 Attachments = prompt.Attachments.ToList() };
@@ -37,6 +31,12 @@ public sealed partial class ShellPage
             SetPendingReplyMessage(pending, reply);
             pending.WaitingReplyAnchorId = reply.Id;
         }
+        if (previous is not null)
+        {
+            previous.Status = "interrupted";
+            previous.Error = string.Empty;
+            previous.SupersededByUserMessageId = prompt.Id;
+        }
         if (ActiveChatId == conversation) UpdateConversationPresentation(openAtBottom: false);
         return submitted;
     }
@@ -45,9 +45,7 @@ public sealed partial class ShellPage
     {
         // Guidance replaces the reply row, not the running task or its existing monotonic clock.
         // 插话仅更换回复行；同一任务沿用已有单调计时，等待新输出期间也不能隐藏或归零。
-        if (pending.Message.GenerationStartedTimestamp is long taskStarted &&
-            (message.GenerationStartedTimestamp is not long replyStarted || taskStarted < replyStarted))
-            message.GenerationStartedTimestamp = taskStarted;
+        message.InheritGenerationTiming(pending.Message);
         pending.Message = message;
         pending.Content.Clear(); pending.Content.Append(message.Content);
         pending.Reasoning.Clear(); pending.Reasoning.Append(message.Reasoning);
@@ -65,12 +63,8 @@ public sealed partial class ShellPage
         // A later accepted steer owns new output; earlier output remains above it without further appends.
         // 后来的引导接收新输出，先前输出保留在上方且不再追加。
         if (pending.WaitingReplyAnchorId is Guid waiting && waiting != replyId) return;
-        if (update.SupersededReplyMessageId is Guid oldId
-            && chat.Messages.FirstOrDefault(message => message.Id == oldId) is { } old)
-        {
-            old.Status = "interrupted";
-            old.SupersededByUserMessageId = userId;
-        }
+        var old = update.SupersededReplyMessageId is Guid oldId
+            ? chat.Messages.FirstOrDefault(message => message.Id == oldId) : null;
         if (pending.Message.Id != replyId)
         {
             var reply = chat.Messages.FirstOrDefault(message => message.Id == replyId)
@@ -79,6 +73,13 @@ public sealed partial class ShellPage
                     InReplyToUserMessageId = userId, OriginUserMessageId = pending.UserMessageId };
             if (!chat.Messages.Contains(reply)) chat.Messages.Add(reply);
             SetPendingReplyMessage(pending, reply);
+        }
+        if (update.GenerationElapsedMs is long elapsed && update.GenerationActive is bool active)
+            pending.Message.ApplyGenerationTiming(elapsed, active);
+        if (old is not null && old != pending.Message)
+        {
+            old.Status = "interrupted";
+            old.SupersededByUserMessageId = userId;
         }
         pending.WaitingReplyAnchorId = null;
         if (ActiveChatId == chat.Id) UpdateConversationPresentation(openAtBottom: false);
