@@ -44,14 +44,12 @@ Windows x64 正式版已在 [1.7 发布页](https://github.com/jinpeng900/KYNXA/
 
 | 下载 | 用途 |
 | --- | --- |
-| [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
-| [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-online-setup.exe) | 下载并校验完整安装器，再进入同一安装界面。 |
-| [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
+| [安装包 ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | 解压后运行其中的 EXE，安装软件及完整基础运行资源。 |
 | [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 
-在线安装器使用已发布的完整包，核验大小与 SHA-256，并保留断点续传。它只减小首次下载文件，仍需取得完整运行载荷。
+1.7 公开分发仅安装包 ZIP 与运行资源 ZIP，不单独提供安装 EXE 或在线安装器；源码中的在线安装构建工具仍可供维护者使用。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 
@@ -75,7 +73,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 已有完整运行资源包可传入 `-ResourcePackRoot <ZIP路径>`；离线源码构建还需要对应 SDK、Cargo／NuGet 缓存，运行资源 ZIP 不能替代开发环境。已准备好的资源会继续复用。构建档位、下载源与离线选项见 [构建指南](apps/desktop/Build/README.md)。
 
-完整与在线 EXE 的形式、安装选项和升级行为见 [打包指南](apps/desktop/Build/Installer/README.md)。
+安装包 ZIP 内的 EXE、安装选项和升级行为见 [打包指南](apps/desktop/Build/Installer/README.md)。
 
 ## 当前架构
 
@@ -112,7 +110,7 @@ Rust 拥有正式 HTTP／SSE 后端、模型与工具 I/O、任务状态、检�
 | `docs/` | 持续维护的 Markdown 指南、架构、版本说明及团队文档。 |
 | `tests/` | 按需使用的桌面、存储、协议、打包和交互检查。 |
 
-源码仓库保留当前文档、代码、清单与准备脚本。EXE 和运行资源／模型／浏览器压缩包通过 Release 附件分发；验证产物不进入源码版本管理，历史设计压缩包不是当前构建或安装的前置条件。
+源码仓库保留当前文档、代码、清单与准备脚本。本版通过 Release 附件分发安装包 ZIP 和运行资源 ZIP；验证产物不进入源码版本管理，历史设计压缩包不是当前构建或安装的前置条件。
 
 常用入口：
 

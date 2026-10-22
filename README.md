@@ -44,14 +44,12 @@ The [1.7 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0) is pu
 
 | Download | Use |
 | --- | --- |
-| [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
-| [Online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-online-setup.exe) | Download and verify the full installer, then open the same installation interface. |
-| [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
+| [Installer ZIP](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | Extract the archive, then run the included EXE to install the application and its full base runtime payload. |
 | [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 
-The online installer uses the published full payload, validates its size and SHA-256, and retains resumable downloads. It reduces the initial download size; the full runtime payload is still required.
+Version 1.7 distributes only the installer ZIP and runtime resource ZIP. Standalone and online installer EXEs are not public release assets; online installer tooling remains available to maintainers in the source.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 
@@ -75,7 +73,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 `-ResourcePackRoot <ZIP path>` imports an available full runtime resource pack. Offline source builds also need the appropriate SDKs and Cargo/NuGet caches; a runtime resource ZIP does not replace them. Existing prepared assets are reused. See the [build guide](apps/desktop/Build/README.md) for profiles, download sources, and offline options.
 
-The full and online EXE formats, installation options, and upgrade behavior are described in the [packaging guide](apps/desktop/Build/Installer/README.md).
+The EXE inside the installer ZIP, installation options, and upgrade behavior are described in the [packaging guide](apps/desktop/Build/Installer/README.md).
 
 ## Architecture
 
@@ -112,7 +110,7 @@ Original conversation events, stable IDs, tool receipts, and source versions rem
 | `docs/` | Maintained Markdown guides, architecture, release notes, and team instructions. |
 | `tests/` | Targeted desktop, storage, protocol, packaging, and interaction checks. |
 
-The source repository keeps maintained documentation, code, manifests, and preparation scripts. Built EXEs and runtime/model/browser archives are distributed through Release assets. Generated verification artifacts are kept outside source control; historical design archives are not required for building or installing the current application.
+The source repository keeps maintained documentation, code, manifests, and preparation scripts. This release distributes the installer ZIP and runtime resource ZIP as Release assets. Generated verification artifacts are kept outside source control; historical design archives are not required for building or installing the current application.
 
 Useful entry points:
 

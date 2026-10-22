@@ -1,18 +1,18 @@
 # KYNXA 1.7 正式版：离线安装与多来源下载
 
-当前 Windows x64 首个正式版的完整安装文件名为 `KYNXA-1.7.0-windows-x64-setup.exe`，已在 [1.7 GitHub Release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)正式发布。安装程序包含桌面、自包含 .NET/WinUI、原生网关与资源服务、文档解析组件、私有 Node/MCP、Chromium、多语言 E5 以及 WebView2 离线先决组件。检索采用 E5 加词法 RRF 和轻量排序，不再打入 BGE；已有 E5 索引继续复用。基础安装读取本地载荷，不要求用户安装 SDK，也不因模型网站不可用而中断。
+当前 Windows x64 首个正式版以 `KYNXA-1.7.0-windows-x64-setup.zip` 在 [1.7 GitHub Release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)分发，普通用户解压后运行其中的 EXE。公开附件仅安装包 ZIP 与运行资源 ZIP。安装程序包含桌面、自包含 .NET/WinUI、原生网关与资源服务、文档解析组件、私有 Node/MCP、Chromium、多语言 E5 以及 WebView2 离线先决组件。检索采用 E5 加词法 RRF 和轻量排序，不再打入 BGE；已有 E5 索引继续复用。基础安装读取本地载荷，不要求用户安装 SDK，也不因模型网站不可用而中断。
 
 历史 1.5.3 的构建、运行与打包验证范围见 [历史版本说明](../releases/1.5.3.md#验证范围与边界)，其中安装 EXE 仅构建，未执行安装测试。这些记录不作为 1.7 的验收成绩；应用启动验证不替代安装验收。
 
 可选对话模型不默认打入基础包。用户勾选后，软件首次启动把下载交给原有 Rust 模型管理器，界面和 API 聊天可以先使用。未勾选时不下载对话模型。
 
-## 在线版与离线版
+## 离线安装与维护者在线入口
 
-1.7 提供完整离线 EXE、安装器 ZIP、资源 ZIP 及在线入口 `KYNXA-1.7.0-windows-x64-online-setup.exe`。在线入口使用已发布、已核验的完整包来源，显示实际下载进度，自动下载完整安装包，完成校验后打开同一套安装界面。关闭下载窗口会保留断点；再次运行继续下载。用户不需要选择来源或运行 PowerShell 命令。
+1.7 不单独分发安装 EXE、在线入口或维护清单。在线安装工具保留供维护者使用：另行配置已核验的完整 EXE 下载源后，可构建在线入口，显示实际下载进度，下载完整安装器并校验后打开同一套安装界面。关闭下载窗口会保留断点，再次运行继续下载；这不是本版公开分发方式。
 
 下载缓存优先放在在线 EXE 旁的专用文件夹；该目录不可写时使用当前用户的安装下载缓存。同目录已经存在完整离线安装包时直接复用。在线下载阶段不创建软件安装记录；正式安装仍由完整安装器处理。
 
-在线版只减少首次拿到的文件大小，仍需下载完整载荷；下载大小以该版本发布资产和清单记录的实际字节数为准。需要在无网络电脑安装时，提前保存完整离线 EXE，或下载 `KYNXA-1.7.0-windows-x64-setup.zip` 后解压取得安装器。`KYNXA-1.7.0-windows-x64-resources.zip` 用于源码构建准备运行资源，不能单独当作软件安装器。
+在线工具只减少首次拿到的文件大小，仍需下载完整载荷。需要在无网络电脑安装时，提前下载 `KYNXA-1.7.0-windows-x64-setup.zip`，解压取得安装器。`KYNXA-1.7.0-windows-x64-resources.zip` 用于源码构建准备运行资源，不能单独当作软件安装器。
 
 ## 两条下载路径
 
@@ -64,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 发行脚本的 `-ModelDownloadSourcesPath` 选择发布给用户的模型来源配置，`-DownloadSourcesPath` 配置构建机资源来源；两者分开，避免把构建机配置或认证带进产品。源码构建入口的 `-Offline` 需要已准备对应 SDK 和依赖缓存，完整离线 EXE 的用户安装无需此参数。
 
-完整包发布并把 `installer-release.json` 中的下载来源标记为 `available` 后，维护者可在发行工作区使用 `apps/desktop/Build/build-online-installer.ps1`，以版本 `1.7.0` 单独生成在线入口。
+维护者另行提供完整 EXE 下载源并把 `installer-release.json` 中对应来源标记为 `available` 后，可在发行工作区使用 `apps/desktop/Build/build-online-installer.ps1` 单独生成在线入口。本版不分发该入口，安装包 ZIP 也不能直接作为完整 EXE 的下载源。
 
 此入口只打包下载窗口、下载模块和现有发布清单，不重编 Rust、C# 或完整离线包。正常构建拒绝全部来源仍为 `pending` 的清单；维护者的 `-AllowUnpublished` 仅用于编译未发布模板，构建记录会标明不可直接下载。
 

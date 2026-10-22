@@ -6,7 +6,7 @@
 
 基础资源直接随完整 EXE 提供，基础安装无需联网。可选模型下载由后台自动选择原站、国内镜像及已配置的 GitHub 资产来源，失败时自动切换并保留断点；安装界面不要求用户选择站点。来源清单保存在实际模型目录中，升级保留已有自定义映射和下载断点，完整机制见[离线安装与多来源下载](../../../../docs/architecture/offline-installer.md)。
 
-完整包名为 `KYNXA-1.7.0-windows-x64-setup.exe`，同版提供小型在线入口 `KYNXA-1.7.0-windows-x64-online-setup.exe`。在线入口使用已发布、已核验的完整包来源，显示下载窗口，并在完整包下载校验成功后进入同一安装界面；支持暂停、继续及失败重试，不创建独立卸载项，不要求用户选择来源或运行下载脚本。
+普通用户下载 `KYNXA-1.7.0-windows-x64-setup.zip`，解压后运行其中的 `KYNXA-1.7.0-windows-x64-setup.exe`。本版公开附件仅安装包 ZIP 和资源 ZIP，不单独分发安装 EXE、在线入口或维护清单。
 
 同版本压缩分发文件名为 `KYNXA-1.7.0-windows-x64-setup.zip` 与 `KYNXA-1.7.0-windows-x64-resources.zip`，分别用于安装器压缩分发和源码构建的运行资源准备。资源包保留 E5、Office 解析与转换、Chromium、私有 Node／MCP 及原生运行依赖；检索使用 E5 加词法 RRF 和轻量排序，不再携带 BGE。各文件大小与 SHA-256 以实际产物和对应清单为准，生成清单不代表已经上传。
 
@@ -32,11 +32,11 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-desktop.ps1 -Action Build -Configuration Release
 ```
 
-该命令编译源码，不生成安装器。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 等打包工具整理载荷。源码、Markdown 开发文档和固定依赖清单保存在 Git 中；安装 EXE、运行资源 ZIP 和模型权重通过 Release 等渠道单独分发。历史设计归档不参与当前安装流程。
+该命令编译源码，不生成安装器。维护者在发行工作区使用 `apps/desktop/Build/build-installer.ps1` 等打包工具整理载荷。源码、Markdown 开发文档和固定依赖清单保存在 Git 中；本版通过 Release 分发安装包 ZIP 与运行资源 ZIP，安装 EXE 位于安装包 ZIP 内。历史设计归档不参与当前安装流程。
 
 构建输出同时提供 `installer-release.json`、`Get-KynxaInstaller.ps1` 与共用 `RuntimeDownloads.psm1`，供安装包本身的多来源续传。下载脚本默认只准备文件，显式指定 `-Install` 才启动 EXE；直接运行已经下载完整的 EXE 不需要这些脚本。清单将未上传的 GitHub 地址标为 `pending`，不会当成已经存在的下载源。
 
-发布完整包并更新清单的可用来源后，运行 `apps/desktop/Build/build-online-installer.ps1 -OutputDirectory <已有分发目录>` 生成在线 EXE。该入口复用完整包的清单，仅编译 `KYNXA.Online.iss` 与 `Start-KynxaOnline.ps1` 等小型下载载荷，不重编应用或完整包。
+在线入口工具保留供维护者使用，本版不分发在线入口。维护者另行提供完整 EXE 下载源并更新清单的可用来源后，可运行 `apps/desktop/Build/build-online-installer.ps1 -OutputDirectory <已有分发目录>` 生成在线 EXE。该入口复用完整包的清单，仅编译 `KYNXA.Online.iss` 与 `Start-KynxaOnline.ps1` 等小型下载载荷，不重编应用或完整包；不能把本版安装包 ZIP 当作其完整 EXE 来源。
 
 `-ModelDownloadSourcesPath` 用于选择随产品分发的模型来源模板；`-DownloadSourcesPath` 用于构建机下载来源及发布资产配置。`installerAssets.<资产ID>.sources` 可追加原站或镜像 URL，`installerReleaseSources` 可声明安装包实际分发地址，均不改变固定版本、大小和 SHA-256。
 
