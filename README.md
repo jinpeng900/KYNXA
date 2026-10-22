@@ -40,17 +40,18 @@ The full runtime includes the multilingual **E5 embedding model** for retrieval,
 
 ## Install and store your data
 
-The [1.7 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0) uses the versioned download entry points below. The assets are awaiting upload; links become available when the corresponding files are attached to the release:
+The [1.7 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0) is published with the following Windows x64 downloads:
 
 | Download | Use |
 | --- | --- |
 | [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
+| [Online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-online-setup.exe) | Download and verify the full installer, then open the same installation interface. |
 | [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
 | [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
 The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 
-The online installer workflow is retained in the source, with source selection, payload validation, and resumable downloads. Version 1.7 does not yet offer an online installer; it requires a published full payload and verified download sources first.
+The online installer uses the published full payload, validates its size and SHA-256, and retains resumable downloads. It reduces the initial download size; the full runtime payload is still required.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 

@@ -40,17 +40,18 @@ DOCX 先显示可操作页面，嵌入字体和图片在后台补齐；长文档
 
 ## 安装与数据位置
 
-以下为 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)的版本化下载入口；附件待实际上传，对应文件发布后链接才可用：
+Windows x64 正式版已在 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)发布，下载入口如下：
 
 | 下载 | 用途 |
 | --- | --- |
 | [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
+| [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-online-setup.exe) | 下载并校验完整安装器，再进入同一安装界面。 |
 | [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
 | [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
 EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 
-源码保留在线安装流程，支持来源选择、载荷校验和断点续传。1.7 暂不提供在线安装器，需先发布完整包并核验下载来源。
+在线安装器使用已发布的完整包，核验大小与 SHA-256，并保留断点续传。它只减小首次下载文件，仍需取得完整运行载荷。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 
