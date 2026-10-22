@@ -7,7 +7,8 @@ namespace RetrievalUiSmoke;
 internal sealed class FakeRetrievalApi : IRetrievalApi
 {
     public Guid ProjectId { get; } = Guid.NewGuid();
-    public RetrievalSettingsDocument Global { get; private set; } = new(1, 4, new(true, "auto", "builtin-multilingual"),
+    public RetrievalSettingsDocument Global { get; private set; } = new(1, 4, new(true, "auto", "builtin-multilingual",
+        RerankProfileId: "builtin-multilingual-reranker", RerankCandidates: 20, RerankDevicePolicy: "cpu"),
         new("auto", "auto", "standard", "auto"), new(67108864, 536870912));
     public ProjectRetrievalSettingsDocument Project { get; private set; }
     public RetrievalIndexJob Job { get; set; } = new("synthetic_job", "running", 1, 2);

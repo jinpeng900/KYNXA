@@ -22,6 +22,7 @@ struct DocumentValidation {
     result_ref: Value,
     page_count: Option<u64>,
     page_windows: BTreeMap<(u64, u64), DocumentReadWindow>,
+    version_check_required: bool,
 }
 
 #[derive(Default)]
@@ -120,6 +121,9 @@ impl RunProgress {
                 self.needs_validation(args["task"].as_str().unwrap_or(""))
             )),
             "progress.verification" => Ok(self.verification()),
+            "progress.documentReadbackTargets" => Ok(json!(self.document_readback_targets())),
+            "progress.restoreDocumentReadbackTargets" => Ok(self.restore_document_readback_targets(
+                &args["targets"], args["sameTaskCheckpoint"] == true)),
             "progress.completion" => Ok(self.complete(args)),
             "progress.diagnostics" => Ok(self.diagnostics.clone()),
             "progress.field" => self.field(args["name"].as_str().unwrap_or("")),
@@ -305,7 +309,10 @@ impl RunProgress {
         let status = result["status"].as_str().unwrap_or("");
         let completed =
             !truthy(&result["isError"]) && !["unknown", "cancelled", "error"].contains(&status);
-        if truthy(&result["reused"]) || result["executed"] == false || truthy(&call["unavailable"])
+        // Transparent loading may retain the model's original unavailable flag; a real dispatched receipt wins.
+        // 透明加载后原始模型调用仍可保留未加载标记；实际已派发回执优先，未执行调用继续不计完成覆盖。
+        if truthy(&result["reused"]) || result["executed"] == false
+            || truthy(&call["unavailable"]) && result["executed"] != true
         {
             return;
         }
@@ -330,7 +337,12 @@ impl RunProgress {
             .filter(|value| value.is_object())
             .or_else(|| canonical.get("value").filter(|value| value.is_object()))
             .unwrap_or(canonical);
+        if completed && matches!(name, "filesystem.stat" | "artifact.open") {
+            self.observe_document_version(output, name == "artifact.open");
+            return;
+        }
         if matches!(name, "filesystem.read" | "document.read") && completed {
+            self.observe_document_version(output, false);
             self.observe_document_read(output, result);
             return;
         }
@@ -385,6 +397,11 @@ impl RunProgress {
             if !isolated {
                 self.mutation_revision += 1;
                 self.unclassified_terminal_effects += 1;
+                // Unknown host effects require a fresh version check, not a blind loss of unchanged read ranges.
+                // 未分类宿主副作用需要重新核对版本；保留旧范围供同哈希复用，不能继续把旧版本当已验收。
+                for document in self.document_validations.values_mut() {
+                    document.version_check_required = true;
+                }
                 if uncertain {
                     self.uncertain_mutations
                         .insert(call["id"].as_str().unwrap_or("").to_owned());
@@ -500,6 +517,80 @@ impl RunProgress {
         );
     }
 
+    fn observe_document_version(&mut self, output: &Value, preview: bool) {
+        let Some(path) = output["path"].as_str() else { return; };
+        let Some(document) = self.document_validations.get_mut(path) else { return; };
+        let Some(hash) = content_hash(&output["sha256"])
+            .or_else(|| preview.then(|| content_hash(&output["version"])).flatten()) else {
+            // Large-file stat receipts may omit SHA-256; a subsequent original read must discover the version.
+            // 大文件属性回执可能不含哈希；明确转为未知版本，下一次原文读取取得真实版本，不能反复空查属性。
+            if !preview && output["type"] == "file" && document.version_check_required {
+                *document = DocumentValidation::default();
+            }
+            return;
+        };
+        if !document.sha256.eq_ignore_ascii_case(hash) {
+            // A real read/stat/preview version replaces the tracked output version; old receipts remain archived.
+            // 实际读取、属性或预览回执更新已跟踪产物版本；旧回执仍保留归档，只清当前版本的覆盖结论。
+            *document = DocumentValidation { sha256: hash.to_owned(), ..Default::default() };
+        }
+        document.version_check_required = false;
+    }
+
+    fn document_readback_targets(&self) -> Vec<Value> {
+        self.document_validations.iter().map(|(path, document)| json!({
+            "path":path,"sha256":document.sha256,"totalCharacters":document.total_characters,
+            "versionKnown":!document.sha256.is_empty(),
+            "readRanges":document.ranges,"versionCheckRequired":document.version_check_required,
+            "pageCount":document.page_count,"pageWindows":document.page_windows.iter().map(|(&(first,last),window)|
+                json!({"startPage":first,"endPage":last,"totalCharacters":window.total_characters,"readRanges":window.ranges})).collect::<Vec<_>>(),
+            "readBackComplete":document.read_back && !document.version_check_required,
+            "resultRef":document.result_ref
+        })).collect()
+    }
+
+    fn restore_document_readback_targets(&mut self, targets: &Value, same_task_checkpoint: bool) -> Value {
+        let mut restored = 0;
+        for target in targets.as_array().into_iter().flatten() {
+            let Some(path) = target["path"].as_str().filter(|path| is_document_target(path)) else { continue; };
+            let Some(hash) = content_hash(&target["sha256"]) else { continue; };
+            if self.document_validations.contains_key(path) || self.document_validations.len() >= MAX_DOCUMENT_TARGETS {
+                continue;
+            }
+            // Only authenticated same-task checkpoints retain coverage; all restores recheck the current file version.
+            // 仅已认证的同任务断点保留读取覆盖；跨任务仅恢复目标导航，两者都须重新核对当前文件版本。
+            let mut document = DocumentValidation {
+                sha256: hash.to_owned(),
+                total_characters: target["totalCharacters"].as_u64().filter(|total| *total <= MAX_SAFE_INTEGER),
+                version_check_required: true,
+                ..Default::default()
+            };
+            if same_task_checkpoint {
+                if let Some(total) = document.total_characters {
+                    restore_read_ranges(&mut document.ranges, &target["readRanges"], total);
+                }
+                if let Some(count) = target["pageCount"].as_u64().filter(|count| *count > 0 && *count <= MAX_SAFE_INTEGER) {
+                    document.page_count = Some(count);
+                    for window in target["pageWindows"].as_array().into_iter().flatten().take(MAX_DOCUMENT_TARGETS) {
+                        let Some(((first,last),total)) = window["startPage"].as_u64().zip(window["endPage"].as_u64())
+                            .zip(window["totalCharacters"].as_u64()).filter(|((first,last),total)|
+                                *first > 0 && first <= last && *last <= count && *total <= MAX_SAFE_INTEGER) else { continue; };
+                        let mut restored_window = DocumentReadWindow { total_characters:Some(total), ..Default::default() };
+                        restore_read_ranges(&mut restored_window.ranges, &window["readRanges"], total);
+                        document.page_windows.insert((first,last), restored_window);
+                    }
+                }
+                document.read_back = document_coverage_complete(&document);
+                if target["resultRef"].is_object() && target["resultRef"]["id"].as_str().is_some_and(|id| !id.is_empty()) {
+                    document.result_ref = target["resultRef"].clone();
+                }
+            }
+            self.document_validations.insert(path.to_owned(), document);
+            restored += 1;
+        }
+        json!({"restoredTargets":restored,"requiresCurrentVersionCheck":true})
+    }
+
     fn observe_document_read(&mut self, output: &Value, result: &Value) {
         let Some(path) = output["path"].as_str() else {
             return;
@@ -508,7 +599,9 @@ impl RunProgress {
             return;
         };
         if content_hash(&output["sha256"]) != Some(document.sha256.as_str()) {
+            document.version_check_required = true;
             document.read_back = false;
+            document.result_ref = Value::Null;
             document.ranges.clear();
             document.total_characters = None;
             document.page_count = None;
@@ -684,7 +777,7 @@ impl RunProgress {
         result
     }
 
-    fn verification(&self) -> Value {
+    pub(super) fn verification(&self) -> Value {
         let latest = self.validation_receipts.last().unwrap_or(&Value::Null);
         let failed = latest["passed"] == false;
         let version_unverified =
@@ -692,7 +785,7 @@ impl RunProgress {
         let pending_document = self
             .document_validations
             .values()
-            .any(|document| !document.read_back);
+            .any(|document| !document.read_back || document.version_check_required);
         let needs_check = self.pending_code_mutation() || pending_document;
         let pending =
             needs_check || failed || version_unverified || !self.uncertain_mutations.is_empty();
@@ -726,12 +819,9 @@ impl RunProgress {
                 "semanticCorrectnessCertified": false,
                 "pending": pending_document,
                 "targetCount": self.document_validations.len(),
-                "readBackCount": self.document_validations.values().filter(|document| document.read_back).count(),
+                "readBackCount": self.document_validations.values().filter(|document| document.read_back && !document.version_check_required).count(),
                 "omittedTargets": self.document_validations.len().saturating_sub(64),
-                "targets": self.document_validations.iter().take(64).map(|(path, document)| json!({
-                    "path": path, "sha256": document.sha256, "totalCharacters": document.total_characters,
-                    "readBackComplete": document.read_back, "resultRef": document.result_ref
-                })).collect::<Vec<_>>()
+                "targets": self.document_readback_targets().into_iter().take(64).collect::<Vec<_>>()
             },
             "codeVersionCoverage": {
                 "coverage": "observed-filesystem-targets",
@@ -769,6 +859,30 @@ fn merge_read_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
         } else { merged.push((start, end)); }
     }
     *ranges = merged;
+}
+
+fn restore_read_ranges(ranges: &mut Vec<(u64,u64)>, saved: &Value, total: u64) {
+    for range in saved.as_array().into_iter().flatten().take(MAX_DOCUMENT_TARGETS) {
+        if let Some((start,end)) = range.as_array().and_then(|range|
+            range.first()?.as_u64().zip(range.get(1)?.as_u64()))
+            .filter(|(start,end)| start <= end && *end <= total) {
+            merge_read_range(ranges, start, end);
+        }
+    }
+}
+
+fn document_coverage_complete(document: &DocumentValidation) -> bool {
+    if let Some(count) = document.page_count {
+        let mut pages = Vec::new();
+        for (&(first,last),window) in &document.page_windows {
+            if window.total_characters.is_some_and(|total| window.ranges.as_slice() == [(0,total)]) {
+                merge_read_range(&mut pages, first, last + 1);
+            }
+        }
+        pages.as_slice() == [(1,count + 1)]
+    } else {
+        document.total_characters.is_some_and(|total| document.ranges.as_slice() == [(0,total)])
+    }
 }
 
 fn content_hash(value: &Value) -> Option<&str> {
@@ -956,12 +1070,80 @@ mod document_validation_tests {
     }
 
     #[test]
-    fn document_pages_must_cover_the_current_written_hash_and_complete_range() {
+    fn document_readback_current_hash_stat_preserves_ranges_and_preview_invalidates_old_version() {
+        let mut progress = RunProgress::default();
+        let path = "/work/deck.pptx";
+        write(&mut progress, path, 'a');
+        read(&mut progress, path, 'a', 0, 8, "abcdefgh");
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 1);
+        let terminal = json!({"call":{"id":"host","name":"terminal.host.run","arguments":{"script":"inspect-helper"}},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"exitCode":0}});
+        progress.apply("progress.observeOutcome", &terminal).unwrap();
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 0);
+        assert_eq!(progress.document_readback_targets()[0]["versionCheckRequired"], true);
+        progress.apply("progress.observeOutcome", &json!({"call":{"name":"filesystem.stat"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":"a".repeat(64)}})).unwrap();
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 1);
+        progress.apply("progress.observeOutcome", &terminal).unwrap();
+        progress.apply("progress.observeOutcome", &json!({"call":{"name":"artifact.open"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"version":"b".repeat(64)}})).unwrap();
+        let target = progress.document_readback_targets().remove(0);
+        assert_eq!(target["sha256"], "b".repeat(64));
+        assert_eq!(target["readBackComplete"], false);
+        assert_eq!(target["readRanges"], json!([]));
+        assert_eq!(target["resultRef"], Value::Null);
+        read(&mut progress, path, 'b', 0, 8, "new body");
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 1);
+        assert_eq!(progress.document_readback_targets()[0]["sha256"], "b".repeat(64));
+        progress.apply("progress.observeOutcome", &terminal).unwrap();
+        progress.apply("progress.observeOutcome", &json!({"call":{"name":"filesystem.stat"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"type":"file","bytes":20_000_000}})).unwrap();
+        assert_eq!(progress.document_readback_targets()[0]["versionKnown"], false);
+        assert_eq!(progress.document_readback_targets()[0]["versionCheckRequired"], false);
+        read(&mut progress, path, 'c', 0, 8, "new body");
+        assert_eq!(progress.verification()["documentValidation"]["readBackCount"], 1);
+        assert_eq!(progress.document_readback_targets()[0]["sha256"], "c".repeat(64));
+        let mut continued = RunProgress::default();
+        continued.apply("progress.restoreDocumentReadbackTargets", &json!({"targets":progress.document_readback_targets()})).unwrap();
+        assert_eq!(continued.document_readback_targets()[0]["versionCheckRequired"], true);
+        assert_eq!(continued.document_readback_targets()[0]["readBackComplete"], false);
+        assert_eq!(continued.document_readback_targets()[0]["readRanges"], json!([]));
+        assert_eq!(continued.summary()["mutationRevision"], 0);
+    }
+
+    #[test]
+    fn document_readback_same_task_restore_checks_hash_then_reads_only_the_gap() {
+        let path = "/work/restored.docx";
+        let mut before = RunProgress::default();
+        write(&mut before, path, 'a');
+        read(&mut before, path, 'a', 4, 8, "tail");
+        let saved = before.document_readback_targets();
+        let mut restored = RunProgress::default();
+        restored.apply("progress.restoreDocumentReadbackTargets", &json!({
+            "targets":saved,"sameTaskCheckpoint":true})).unwrap();
+        assert_eq!(restored.document_readback_targets()[0]["readRanges"], json!([[4,8]]));
+        assert_eq!(restored.document_readback_targets()[0]["versionCheckRequired"], true);
+        restored.apply("progress.observeOutcome", &json!({"call":{"name":"filesystem.stat"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":"a".repeat(64)}})).unwrap();
+        assert_eq!(restored.document_readback_targets()[0]["readRanges"], json!([[4,8]]));
+        read(&mut restored, path, 'a', 0, 8, "head");
+        assert_eq!(restored.complete(&json!({"modelTaskState":{"state":"complete"}}))["completionState"], "completed");
+        let mut changed = RunProgress::default();
+        changed.apply("progress.restoreDocumentReadbackTargets", &json!({
+            "targets":saved,"sameTaskCheckpoint":true})).unwrap();
+        changed.apply("progress.observeOutcome", &json!({"call":{"name":"filesystem.stat"},
+            "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":"b".repeat(64)}})).unwrap();
+        assert_eq!(changed.document_readback_targets()[0]["readRanges"], json!([]));
+        assert_eq!(changed.document_readback_targets()[0]["sha256"], "b".repeat(64));
+    }
+
+    #[test]
+    fn document_pages_must_cover_the_current_observed_hash_and_complete_range() {
         let mut progress = RunProgress::default();
         write(&mut progress, "/work/report.txt", 'a');
         read(&mut progress, "/work/report.txt", 'a', 4, 8, "efgh");
         read(&mut progress, "/work/report.txt", 'b', 0, 8, "abcdefgh");
-        assert_eq!(progress.verification()["pendingValidation"], true);
+        assert_eq!(progress.verification()["pendingValidation"], false);
         read(&mut progress, "/work/report.txt", 'a', 0, 8, "abcd");
         assert_eq!(progress.verification()["pendingValidation"], true);
         read(&mut progress, "/work/report.txt", 'a', 4, 8, "efgh");
@@ -969,7 +1151,7 @@ mod document_validation_tests {
         write(&mut progress, "/work/report.txt", 'b');
         assert_eq!(progress.verification()["pendingValidation"], true);
         read(&mut progress, "/work/report.txt", 'a', 0, 8, "abcdefgh");
-        assert_eq!(progress.verification()["pendingValidation"], true);
+        assert_eq!(progress.verification()["pendingValidation"], false);
         read(&mut progress, "/work/report.txt", 'b', 0, 8, "new body");
         assert_eq!(progress.verification()["pendingValidation"], false);
     }
@@ -989,7 +1171,7 @@ mod document_validation_tests {
                     "result":{"status":"completed","isError":false},"canonicalResult":{"path":path,"sha256":hash.to_string().repeat(64),
                         "text":"正文42","offset":0,"nextOffset":4,"totalCharacters":4,"extractionComplete":complete,
                         "extraction":{"format":format,"complete":complete}}})).unwrap();
-                assert_eq!(progress.verification()["pendingValidation"], hash != 'a' || !complete);
+                assert_eq!(progress.verification()["pendingValidation"], !complete);
             }
             assert_eq!(progress.complete(&json!({"modelTaskState":{"state":"complete"}}))["completionState"], "completed");
         }
@@ -1086,6 +1268,15 @@ mod tests {
         assert_eq!(metrics["executedToolCalls"], 0);
         assert_eq!(metrics["blockedToolCalls"], 1);
         assert_eq!(metrics["toolCallsTiming"][0]["dispatched"], false);
+        let call = json!({"id":"transparent-write","name":"filesystem.write","unavailable":true});
+        let output = json!({"path":"/work/transparent.md","sha256":"a".repeat(64)});
+        progress.apply("progress.observeOutcome", &json!({"call":call,
+            "result":{"status":"completed","executed":false},"canonicalResult":output})).unwrap();
+        assert_eq!(progress.verification()["documentValidation"]["targetCount"], 0);
+        progress.apply("progress.observeOutcome", &json!({"call":call,
+            "result":{"status":"completed","executed":true},"canonicalResult":output})).unwrap();
+        assert_eq!(progress.verification()["documentValidation"]["targetCount"], 1,
+            "transparent schema loading cannot erase a real dispatched write receipt");
     }
 
     fn snapshot(hash: char) -> Value {

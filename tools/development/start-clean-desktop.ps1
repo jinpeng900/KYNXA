@@ -130,8 +130,7 @@ if (-not [IO.File]::Exists($manifestPath)) { throw "Finish the Full desktop buil
 
 $requiredFiles = @('KYNXA.Desktop.exe', 'runtime/agent/kynxa-gateway.exe',
     'runtime/resource/kynxa-resource-service.exe', 'runtime/native/vec0.dll', 'runtime/native/onnxruntime.dll',
-    'ToolHost/KYNXA.ToolHost.exe', 'runtime/embedding/builtin-multilingual/onnx/model_quantized.onnx',
-    'runtime/rerank/builtin-multilingual-reranker/onnx/model_quantized.onnx')
+    'ToolHost/KYNXA.ToolHost.exe', 'runtime/embedding/builtin-multilingual/onnx/model_quantized.onnx')
 $mcp = Get-Content -LiteralPath (Join-Path $repositoryRoot 'apps/desktop/Build/native-assets/mcp-runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $requiredFiles += @($mcp.node.path, $mcp.browser.path)
 $requiredFiles += @($mcp.services | ForEach-Object { $_.entry })

@@ -167,6 +167,8 @@ public sealed partial class ShellPage
                         if (_chatClosing || !_pendingReplies.TryGetValue(pending.ConversationId, out var current) || current != pending) return;
                         if (pending.WaitingReplyAnchorId is not null && update.Type is "reasoning_delta" or "text_delta"
                             or "assistant_segment" or "content_snapshot") continue;
+                        if (pending.WaitingReplyAnchorId is Guid expectedReply && (update.Type is "completed" or "cancelled" or "failed")
+                            && update.ReplyMessageId != expectedReply) continue;
                         // Transport acceptance can precede the durable write; model output confirms execution reached it.
                         // 传输接受可能早于正式写入；收到模型输出后才确认用户消息已进入持久化执行流程。
                         if (!pending.UserPersisted && update.Type is "reasoning_delta" or "text_delta" or "assistant_segment" or "completed")

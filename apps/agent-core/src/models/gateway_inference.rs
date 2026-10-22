@@ -22,7 +22,7 @@ use ort::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokenizers::{Encoding, Tokenizer, TruncationParams};
+use tokenizers::{Encoding, Tokenizer};
 
 use super::{batches::BatchState, document_fit::DocumentFitState, gateway::ModelError, registry};
 
@@ -64,18 +64,6 @@ pub struct EmbeddingBatch {
     pub model_version: String,
     pub space_id: String,
     pub dimensions: usize,
-    pub device: String,
-    pub inference_status: Value,
-    pub batch_measurements: Vec<Value>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RerankBatch {
-    pub scores: Vec<f64>,
-    pub truncated_inputs_count: usize,
-    pub profile_id: String,
-    pub model_version: String,
     pub device: String,
     pub inference_status: Value,
     pub batch_measurements: Vec<Value>,
@@ -144,49 +132,6 @@ const EMBEDDING_ASSETS: &[Asset] = &[
         sha256: "6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea",
     },
 ];
-const RERANK_ASSETS: &[Asset] = &[
-    Asset {
-        path: "config.json",
-        bytes: 782,
-        sha256: "b6575b9d5be20d6747417c8e20c5a0db1636356e0b6d422d7244c628423c4d4c",
-    },
-    Asset {
-        path: "tokenizer_config.json",
-        bytes: 443,
-        sha256: "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
-    },
-    Asset {
-        path: "special_tokens_map.json",
-        bytes: 279,
-        sha256: "d5469a60db23249c7f8945013d78df30b44b6bf686c6bb4740f4223f77b1b535",
-    },
-    Asset {
-        path: "tokenizer.json",
-        bytes: 17098079,
-        sha256: "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c",
-    },
-    Asset {
-        path: "onnx/model_quantized.onnx",
-        bytes: 279301077,
-        sha256: "dd98f3e67837d23210a6b7550c08cced4f61845b940ac45be3565840a10f3244",
-    },
-    Asset {
-        path: "MODEL_CARD.md",
-        bytes: 34111,
-        sha256: "b4223c8c1e95538f8c79168afc501f8b2da06c63221f013b79b28af78b59366d",
-    },
-    Asset {
-        path: "CONVERSION_MODEL_CARD.md",
-        bytes: 1135,
-        sha256: "2ccb3f72b5eb6205316c0b9dde944d6f944ec4a87b85706ce07ef9d9d02b4690",
-    },
-    Asset {
-        path: "LICENSE",
-        bytes: 1065,
-        sha256: "587a673933425dbc36ec61268d3b954051b2d3ef3c9b322ede357976055ffdd5",
-    },
-];
-
 static DLL: OnceLock<PathBuf> = OnceLock::new();
 static INITIALIZE_GATE: Mutex<()> = Mutex::new(());
 static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<Mutex<LoadedModel>>>>> = OnceLock::new();
@@ -201,13 +146,9 @@ struct LoadedModel {
 
 /// The additional CPU audit graph uses the existing resource estimate, and must have its own granted RAM.
 /// 额外 CPU 审计图复用现有资源估计，必须持有单独批准的 RAM 授额。
-pub fn qualification_request(rerank: bool, cpu_threads: usize) -> Result<Value, ModelError> {
-    let assets = if rerank {
-        RERANK_ASSETS
-    } else {
-        EMBEDDING_ASSETS
-    };
-    crate::resources::calculate("resources.inferenceRequest",&json!({"profile":{"dtype":"q8","dimensions":if rerank{768}else{384},"hiddenSize":if rerank{768}else{384},"attentionHeads":12,"maxInputTokens":512,
+pub fn qualification_request(cpu_threads: usize) -> Result<Value, ModelError> {
+    let assets = EMBEDDING_ASSETS;
+    crate::resources::calculate("resources.inferenceRequest",&json!({"profile":{"dtype":"q8","dimensions":384,"hiddenSize":384,"attentionHeads":12,"maxInputTokens":512,
         "files":assets.iter().map(|asset|json!({"path":asset.path,"bytes":asset.bytes})).collect::<Vec<_>>()},"backend":"cpu","sequenceTokens":512,"batchSize":1,"requestedCpuThreads":cpu_threads}))
         .map_err(ModelError::native)
 }
@@ -298,7 +239,6 @@ fn validate_options(options: &InferenceOptions) -> Result<(), ModelError> {
 
 fn loaded(
     root: &Path,
-    rerank: bool,
     options: &InferenceOptions,
     cancel: &AtomicBool,
 ) -> Result<Arc<Mutex<LoadedModel>>, ModelError> {
@@ -313,7 +253,7 @@ fn loaded(
     let key = format!(
         "{}:{}:{}:{}:{:?}",
         root.display(),
-        rerank,
+        false,
         options.device,
         options.cpu_threads,
         options.device_id
@@ -327,7 +267,7 @@ fn loaded(
     }
     // At most one session per model/device is retained; a thread-budget change retires the old cache entry.
     // 每种模型/设备最多保留一个会话；线程授额变更时淘汰旧缓存，活动请求仍持有自身句柄。
-    let prefix = format!("{}:{}:{}:", root.display(), rerank, options.device);
+    let prefix = format!("{}:{}:{}:", root.display(), false, options.device);
     if cache
         .iter()
         .any(|(name, model)| name.starts_with(&prefix) && Arc::strong_count(model) > 1)
@@ -340,16 +280,12 @@ fn loaded(
     }
     verify_assets(
         &root,
-        if rerank {
-            RERANK_ASSETS
-        } else {
-            EMBEDDING_ASSETS
-        },
+        EMBEDDING_ASSETS,
         cancel,
     )?;
-    let tokenizer = load_tokenizer(&root, rerank, cancel)?;
+    let tokenizer = load_tokenizer(&root, cancel)?;
     let mut session = if options.device == "dml" {
-        let requested = qualification_request(rerank, options.cpu_threads)?;
+        let requested = qualification_request(options.cpu_threads)?;
         if options.gpu_audit_memory_bytes
             < requested["memoryBytes"]
                 .as_f64()
@@ -358,7 +294,7 @@ fn loaded(
         {
             return Err(error("INFERENCE_GPU_AUDIT_RESOURCE_REQUIRED"));
         }
-        qualified_session(&root, tokenizer.clone(), rerank, options, cancel)?
+        qualified_session(&root, tokenizer.clone(), options, cancel)?
     } else {
         LoadedModel {
             tokenizer: tokenizer.clone(),
@@ -367,7 +303,7 @@ fn loaded(
             batch_state: Default::default(),
         }
     };
-    session.batch_state.apply("models.lifecycle.worker.init",&json!({"kind":if rerank{"reranker"}else{"embedding"},"profile":{"maxInputTokens":512,"embeddingSpaceId":embedding_metadata(&options.device)?["spaceId"]},"budget":options_budget(options)})).map_err(ModelError::native)?;
+    session.batch_state.apply("models.lifecycle.worker.init",&json!({"kind":"embedding","profile":{"maxInputTokens":512,"embeddingSpaceId":embedding_metadata(&options.device)?["spaceId"]},"budget":options_budget(options)})).map_err(ModelError::native)?;
     session
         .batch_state
         .apply(
@@ -424,7 +360,6 @@ impl Drop for AuditDirectory {
 fn qualified_session(
     root: &Path,
     tokenizer: Arc<Tokenizer>,
-    rerank: bool,
     options: &InferenceOptions,
     cancel: &AtomicBool,
 ) -> Result<LoadedModel, ModelError> {
@@ -432,30 +367,10 @@ fn qualified_session(
         std::env::temp_dir().join(format!("kynxa-inference-audit-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).map_err(|_| error("INFERENCE_GPU_AUDIT_FAILED"))?;
     let directory = AuditDirectory(directory);
-    let inputs = if rerank {
-        vec![
-            tokenizer.encode(
-                (
-                    "password recovery",
-                    "Reset your password in account settings.",
-                ),
-                true,
-            ),
-            tokenizer.encode(("password recovery", "Tomorrow will be sunny."), true),
-            tokenizer.encode(
-                ("如何重置密码", "Reset your password in account settings."),
-                true,
-            ),
-        ]
-    } else {
-        vec![
-            tokenizer.encode("query: 如何安全读取临时文件？", true),
-            tokenizer.encode(
-                "passage: This is a fixed multilingual model qualification probe.",
-                true,
-            ),
-        ]
-    };
+    let inputs = vec![
+        tokenizer.encode("query: 如何安全读取临时文件？", true),
+        tokenizer.encode("passage: This is a fixed multilingual model qualification probe.", true),
+    ];
     let encodings = inputs
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -476,7 +391,7 @@ fn qualified_session(
         let mut values = Vec::new();
         for encoding in &encodings {
             values
-                .extend(execute(model, std::slice::from_ref(encoding), cancel, rerank)?.remove(0));
+                .extend(execute(model, std::slice::from_ref(encoding), cancel)?.remove(0));
         }
         Ok(values)
     };
@@ -489,20 +404,10 @@ fn qualified_session(
         batch_state: Default::default(),
     };
     let actual = probe(&audited)?;
-    let compatibility = if rerank {
-        super::worker::WorkerState::default()
-            .apply(
-                "models.lifecycle.worker.probe",
-                &json!({"reference":reference,"actual":actual}),
-            )
-            .map_err(ModelError::native)?
-    } else {
-        super::inference::calculate(
-            "models.inference.qualifiedOutputs",
-            &json!({"reference":reference,"actual":actual,"dimensions":384}),
-        )
-        .map_err(ModelError::native)?
-    };
+    let compatibility = super::inference::calculate(
+        "models.inference.qualifiedOutputs",
+        &json!({"reference":reference,"actual":actual,"dimensions":384}),
+    ).map_err(ModelError::native)?;
     if compatibility.is_null() || compatibility == false {
         return Err(error("INFERENCE_GPU_OUTPUT_INCOMPATIBLE"));
     }
@@ -567,7 +472,6 @@ fn qualified_session(
 
 fn load_tokenizer(
     root: &Path,
-    rerank: bool,
     cancel: &AtomicBool,
 ) -> Result<Arc<Tokenizer>, ModelError> {
     check_cancelled(cancel)?;
@@ -586,11 +490,7 @@ fn load_tokenizer(
     }
     verify_assets(
         &root,
-        &(if rerank {
-            RERANK_ASSETS
-        } else {
-            EMBEDDING_ASSETS
-        })[..4],
+        &(EMBEDDING_ASSETS)[..4],
         cancel,
     )?;
     let mut tokenizer = Tokenizer::from_file(root.join("tokenizer.json"))
@@ -694,44 +594,6 @@ pub fn embedding_metadata(device: &str) -> Result<Value, ModelError> {
     )
 }
 
-/// Describe the pinned cross-encoder without creating a tokenizer, graph, GPU claim or vector space.
-/// 仅描述固定交叉编码器，不创建分词器或推理图，不宣称 GPU 已核验，也不虚构向量空间。
-pub fn reranker_metadata(device: &str) -> Result<Value, ModelError> {
-    let gpu = device == "dml";
-    if !gpu && device != "cpu" {
-        return Err(error("INFERENCE_DEVICE_UNAVAILABLE"));
-    }
-    let version = format!(
-        "280bcc27a84e0b898c251e06fddb25171bd9b101:q8{}",
-        if gpu { ":dml-hybrid-v1" } else { "" }
-    );
-    let profile = json!({"modelId":"Xenova/bge-reranker-base","modelVersion":version});
-    let manifest: Vec<String> = RERANK_ASSETS
-        .iter()
-        .map(|asset| {
-            format!(
-                "{{\"path\":{},\"bytes\":{},\"sha256\":{}}}",
-                json!(asset.path),
-                asset.bytes,
-                json!(asset.sha256)
-            )
-        })
-        .collect();
-    let descriptor=registry::calculate("models.registry.register",&json!({"kind":"reranker","profile":profile,
-        "implementationId":if gpu{"transformers-onnx-dml-hybrid-cross-encoder-q8-v1"}else{"transformers-onnx-cross-encoder-v1"},
-        "inputProjectionJson":"{\"version\":\"query-passage-pair-sigmoid-v1\",\"pairing\":\"text_pair\",\"scoring\":\"sigmoid\"}","manifestEntriesJson":manifest})).map_err(ModelError::native)?;
-    let mut metadata = json!({"kind":"reranker","profileId":if gpu{"builtin-multilingual-reranker-dml-q8"}else{"builtin-multilingual-reranker"},
-        "modelId":profile["modelId"],"modelVersion":version,"device":device,"dtype":"q8","maxInputTokens":512,"maxCandidates":256,
-        "implementationId":descriptor["implementationId"],"inputProjectionVersion":descriptor["inputProjectionVersion"],"inputProjection":descriptor["inputProjection"],
-        "modelAssetSignature":descriptor["modelAssetSignature"],"assetSignature":descriptor["assetSignature"],
-        "assetBytes":RERANK_ASSETS.iter().map(|asset|asset.bytes).sum::<u64>(),"modelBytes":RERANK_ASSETS.iter().find(|asset|asset.path.ends_with(".onnx")).unwrap().bytes});
-    if gpu {
-        metadata["requiredDevice"] = json!("dml");
-        metadata["backendContract"] = json!("audited-dml-hybrid-q8-v1");
-    }
-    Ok(metadata)
-}
-
 fn tensors(
     encodings: &[Encoding],
     session: &Session,
@@ -784,7 +646,6 @@ fn execute(
     model: &LoadedModel,
     encodings: &[Encoding],
     cancel: &AtomicBool,
-    rerank: bool,
 ) -> Result<Vec<Vec<f32>>, ModelError> {
     check_cancelled(cancel)?;
     let (inputs, mask, width) = tensors(encodings, &model.session)?;
@@ -819,19 +680,9 @@ fn execute(
                         error("INFERENCE_FAILED")
                     }
                 })?;
-            let tensor = output[if rerank {
-                "logits"
-            } else {
-                "last_hidden_state"
-            }]
-            .try_extract_tensor::<f32>()
-            .map_err(|_| error("INFERENCE_INVALID_OUTPUT"))?;
-            if rerank {
-                if tensor.len() != encodings.len() {
-                    return Err(error("RERANK_INVALID_OUTPUT"));
-                }
-                return Ok(tensor.iter().map(|value| vec![*value]).collect());
-            }
+            let tensor = output["last_hidden_state"]
+                .try_extract_tensor::<f32>()
+                .map_err(|_| error("INFERENCE_INVALID_OUTPUT"))?;
             if tensor.shape() != [encodings.len(), width, 384] {
                 return Err(error("EMBEDDING_INVALID_DIMENSIONS"));
             }
@@ -890,11 +741,10 @@ fn execute_batches(
     encodings: &[Encoding],
     options: &InferenceOptions,
     cancel: &AtomicBool,
-    rerank: bool,
 ) -> Result<(Vec<Vec<f32>>, Vec<Value>), ModelError> {
     let mut state = BatchState::default();
     state.apply("models.lifecycle.batchInit",&json!({"count":encodings.len(),"tokenLengths":encodings.iter().map(Encoding::len).collect::<Vec<_>>(),"batchSize":options.batch_size,
-        "batchTokenBudget":options.batch_token_budget,"activationMemoryBytes":options.activation_memory_bytes,"hiddenSize":if rerank{768}else{384},"attentionHeads":12,"cpuThreads":options.cpu_threads})).map_err(ModelError::native)?;
+        "batchTokenBudget":options.batch_token_budget,"activationMemoryBytes":options.activation_memory_bytes,"hiddenSize":384,"attentionHeads":12,"cpuThreads":options.cpu_threads})).map_err(ModelError::native)?;
     let mut output = vec![Vec::new(); encodings.len()];
     let mut measurements = Vec::new();
     loop {
@@ -910,7 +760,7 @@ fn execute_batches(
             .map(|index| encodings[index.as_u64().unwrap() as usize].clone())
             .collect();
         let started = std::time::Instant::now();
-        match execute(model, &subset, cancel, rerank) {
+        match execute(model, &subset, cancel) {
             Ok(values) => {
                 for (index, value) in indexes.iter().zip(values) {
                     output[index.as_u64().unwrap() as usize] = value;
@@ -986,13 +836,12 @@ fn audit_batch_budget(
                 ..applied.clone()
             },
             cancel,
-            false,
         )?
         .0
     };
     let mut first = true;
     loop {
-        let (actual, measurements) = execute_batches(model, &encodings, &applied, cancel, false)?;
+        let (actual, measurements) = execute_batches(model, &encodings, &applied, cancel)?;
         let expected: Vec<f32> = reference.iter().flatten().copied().collect();
         let actual: Vec<f32> = actual.into_iter().flatten().collect();
         let mut status = super::inference::calculate(
@@ -1059,7 +908,7 @@ pub fn embed_with_options(
     cancel: Arc<AtomicBool>,
 ) -> Result<EmbeddingBatch, ModelError> {
     let metadata = embedding_metadata(&options.device)?;
-    let model = loaded(root, false, options, &cancel)?;
+    let model = loaded(root, options, &cancel)?;
     let mut model = model
         .lock()
         .map_err(|_| error("INFERENCE_RUNTIME_LOCK_FAILED"))?;
@@ -1085,71 +934,13 @@ pub fn embed_with_options(
     }
     let applied = audit_batch_budget(&mut model, options, &cancel)?;
     let (vectors, batch_measurements) =
-        execute_batches(&model, &encodings, &applied, &cancel, false)?;
+        execute_batches(&model, &encodings, &applied, &cancel)?;
     Ok(EmbeddingBatch {
         vectors,
         profile_id: metadata["profileId"].as_str().unwrap().into(),
         model_version: metadata["modelVersion"].as_str().unwrap().into(),
         space_id: metadata["spaceId"].as_str().unwrap().into(),
         dimensions: 384,
-        device: options.device.clone(),
-        inference_status: model.audit.clone(),
-        batch_measurements,
-    })
-}
-
-pub fn rerank_blocking(
-    root: &Path,
-    query: &str,
-    texts: &[String],
-    options: &InferenceOptions,
-    cancel: Arc<AtomicBool>,
-) -> Result<RerankBatch, ModelError> {
-    let model = loaded(root, true, options, &cancel)?;
-    let model = model
-        .lock()
-        .map_err(|_| error("INFERENCE_RUNTIME_LOCK_FAILED"))?;
-    let mut tokenizer = model.tokenizer.as_ref().clone();
-    tokenizer
-        .with_truncation(Some(TruncationParams {
-            max_length: 512,
-            ..Default::default()
-        }))
-        .map_err(|_| error("RERANK_TOKENIZER_INVALID"))?;
-    let mut truncated = 0;
-    let mut encodings = Vec::with_capacity(texts.len());
-    for text in texts {
-        check_cancelled(&cancel)?;
-        let full = model
-            .tokenizer
-            .encode((query, text.as_str()), true)
-            .map_err(|_| error("RERANK_TOKENIZER_INVALID"))?;
-        truncated += usize::from(full.len() > 512);
-        encodings.push(
-            tokenizer
-                .encode((query, text.as_str()), true)
-                .map_err(|_| error("RERANK_TOKENIZER_INVALID"))?,
-        );
-    }
-    let (outputs, batch_measurements) =
-        execute_batches(&model, &encodings, options, &cancel, true)?;
-    let values=super::worker::WorkerState::default().apply("models.lifecycle.worker.scores",&json!({"count":encodings.len(),"logits":outputs.iter().map(|output|output[0]).collect::<Vec<_>>()})).map_err(ModelError::native)?;
-    let scores =
-        serde_json::from_value::<Vec<f64>>(values).map_err(|_| error("RERANK_INVALID_OUTPUT"))?;
-    let gpu = options.device == "dml";
-    Ok(RerankBatch {
-        scores,
-        truncated_inputs_count: truncated,
-        profile_id: if gpu {
-            "builtin-multilingual-reranker-dml-q8"
-        } else {
-            "builtin-multilingual-reranker"
-        }
-        .into(),
-        model_version: format!(
-            "280bcc27a84e0b898c251e06fddb25171bd9b101:q8{}",
-            if gpu { ":dml-hybrid-v1" } else { "" }
-        ),
         device: options.device.clone(),
         inference_status: model.audit.clone(),
         batch_measurements,
@@ -1163,7 +954,7 @@ pub fn fit_documents(
     documents: &[Value],
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<Value>, ModelError> {
-    let tokenizer = load_tokenizer(root, false, &cancel)?;
+    let tokenizer = load_tokenizer(root, &cancel)?;
     let mut output = Vec::new();
     for (index, document) in documents.iter().enumerate() {
         let text = document["text"]
@@ -1219,12 +1010,6 @@ mod tests {
         assert_ne!(cpu["spaceId"], gpu["spaceId"]);
         assert_eq!(cpu["profileId"], "builtin-multilingual");
         assert!(embedding_metadata("cuda").is_err());
-        let cpu = reranker_metadata("cpu").unwrap();
-        let gpu = reranker_metadata("dml").unwrap();
-        assert_ne!(cpu["profileId"], gpu["profileId"]);
-        assert_eq!(cpu["modelAssetSignature"], gpu["modelAssetSignature"]);
-        assert_eq!(cpu["modelBytes"], 279301077);
-        assert!(cpu.get("embeddingSpaceId").is_none());
         assert!(cpu.get("gpuValidated").is_none());
     }
     #[test]
@@ -1259,7 +1044,7 @@ mod tests {
         initialize_runtime(&dll).unwrap();
         let root = PathBuf::from(baseline["modelRoot"].as_str().unwrap());
         let cancel = Arc::new(AtomicBool::new(false));
-        let tokenizer = load_tokenizer(&root, false, &cancel).unwrap();
+        let tokenizer = load_tokenizer(&root, &cancel).unwrap();
         let mut reports = Vec::new();
         for sample in baseline["samples"].as_array().unwrap() {
             let encoding = tokenizer

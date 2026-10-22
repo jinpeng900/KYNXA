@@ -183,6 +183,15 @@ using var cancellation = new CancellationTokenSource();
 cancellation.Cancel();
 try { await api.GetSettingsAsync(cancellation.Token); throw new Exception("Cancelled load was accepted."); }
 catch (OperationCanceledException) { checks++; }
+transport.Respond = _ => Reply(new RetrievalProvidersResponse([
+    new("deepseek-search", "DeepSeek Search", false, "builtin", "credential-required", "unavailable")], "deepseek-search"));
+var missingSearchCredential = (await api.GetProvidersAsync()).Providers.Single();
+Check(missingSearchCredential is { Id: "deepseek-search", Ready: false, Origin: "builtin", CredentialState: "unavailable" },
+    "A built-in source remains selectable and reports unavailable credentials without claiming a tested connection.");
+transport.Respond = _ => Reply(new RetrievalProvidersResponse([
+    new("deepseek-search", "DeepSeek Search", true, "builtin", "configured", "configured")]));
+Check((await api.GetProvidersAsync()).Providers.Single().State == "configured",
+    "Configured built-in credentials survive the existing provider contract without exposing their contents.");
 Check(readyCalls >= 12, "All requests initialize or validate gateway availability.");
 Console.WriteLine($"Retrieval client smoke passed: {checks} checks; no real gateway, credentials, or source data used.");
 

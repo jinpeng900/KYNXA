@@ -119,20 +119,55 @@ pub fn build_summary_request(
     max_output_tokens: Option<u64>,
     stream: bool,
 ) -> Result<(Value, Value), ModelError> {
+    build_summary_request_with_tools(connection, model, messages, system, max_output_tokens, &[], stream)
+}
+
+/// Reuse an authorized request prefix for compaction while allowing text output only.
+/// 压缩复用当前授权的请求前缀，但摘要只能输出正文，不触发工具执行。
+pub fn build_summary_request_with_tools(
+    connection: &Value,
+    model: &str,
+    messages: &[Value],
+    system: &str,
+    max_output_tokens: Option<u64>,
+    tools: &[Value],
+    stream: bool,
+) -> Result<(Value, Value), ModelError> {
     let mut body = build_request(
         connection,
         model,
         messages,
         system,
         max_output_tokens,
-        &[],
+        tools,
         stream,
     )?;
+    if body["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
+        match protocol(connection) {
+            "anthropic-messages" => body["tool_choice"] = json!({"type":"none"}),
+            "ollama" => { body.as_object_mut().unwrap().remove("tools"); },
+            _ => body["tool_choice"] = json!("none"),
+        }
+    }
     let controls = summary_controls(connection, model)?;
     for (field, value) in controls["parameters"].as_object().into_iter().flatten() {
         body[field] = value.clone();
     }
     Ok((body, controls["audit"].clone()))
+}
+
+/// Append only a native summary tail to an already projected prefix; never translate its tool updates twice.
+/// 只给已投影的协议前缀追加原生摘要尾部；已有工具增量块不再翻译第二遍。
+pub(crate) fn build_summary_from_wire_prefix(connection: &Value, model: &str, prefix: &Value,
+    tail: &[Value], max_output_tokens: Option<u64>) -> Result<(Value, Value), ModelError> {
+    let (mut body, controls) = build_summary_request_with_tools(connection, model, tail, "",
+        max_output_tokens, protocol::array(&prefix["tools"]), false)?;
+    let mut messages = protocol::array(&prefix["messages"]).to_vec();
+    messages.extend_from_slice(protocol::array(&body["messages"]));
+    body["messages"] = json!(messages);
+    if let Some(system) = prefix.get("system") { body["system"] = system.clone(); }
+    else if let Some(object) = body.as_object_mut() { object.remove("system"); }
+    Ok((body, controls))
 }
 
 fn content_block(protocol: &str, role: &str, value: &Value) -> Value {
@@ -263,6 +298,15 @@ pub fn build_request(
                     .collect::<Vec<_>>()
             );
         }
+    }
+    if name == "anthropic-messages" {
+        // Messages endpoints reject empty turns; dropping them the same way every round keeps the prefix stable.
+        // Messages 接口拒绝空内容消息；每轮按同一规则去掉空消息，前缀保持一致，正式历史不变。
+        messages.retain(|message| match &message["content"] {
+            Value::String(text) => !text.is_empty(),
+            Value::Array(blocks) => !blocks.is_empty(),
+            _ => true,
+        });
     }
     if !supports_tools(connection) {
         // Broker notices and a new user message can share a turn; strict Gemma templates require alternating roles.
@@ -800,9 +844,9 @@ pub async fn history_projection_verified(
     declarations: &[Value],
 ) -> Result<HistoryProjection, ModelError> {
     let name = protocol(connection);
-    let mut projection = history_projection(name, formal_history, available_tools)?;
     let origin = json!({"providerId":connection["providerId"],"model":model,"protocol":name,
         "connectionFingerprint":fingerprint(&json!([connection["providerId"],model,name,connection["baseUrl"],connection["apiKey"].as_str().unwrap_or("")]))});
+    let mut projection = history_projection_for_origin(name, formal_history, available_tools, Some(&origin))?;
     for assistant in formal_history
         .iter()
         .filter(|message| message["Role"] == "assistant")
@@ -885,6 +929,17 @@ pub fn history_projection(
     formal_history: &[Value],
     available_tools: &[String],
 ) -> Result<HistoryProjection, ModelError> {
+    history_projection_for_origin(name, formal_history, available_tools, None)
+}
+
+/// Runtime broker messages replay only through the verified route, never through generic public history.
+/// 运行时代理消息仅在已核验路由内回放，不经通用公开历史取得系统权威。
+fn history_projection_for_origin(
+    name: &str,
+    formal_history: &[Value],
+    available_tools: &[String],
+    runtime_origin: Option<&Value>,
+) -> Result<HistoryProjection, ModelError> {
     let descriptors:Vec<Value>=formal_history.iter().map(|message|json!({"id":message["Id"],"key":message["Id"].as_str().unwrap_or("").to_lowercase(),
         "role":message["Role"],"status":message["Status"],"replyKey":message["ReplyTo"].as_str().map(str::to_lowercase),
         "hasContent":message["Content"].as_str().is_some_and(|s|!s.trim().is_empty()),"validUserContent":message["Content"].is_string(),"taskCompletion":task_completion(message)})).collect();
@@ -953,7 +1008,9 @@ pub fn history_projection(
         } else {
             planned["publicContent"].clone()
         };
-        let rounds = history_rounds(assistant)?;
+        let mut rounds = history_rounds(assistant)?;
+        let runtime_allowed = runtime_origin.is_some_and(|origin| assistant["ModelTranscript"]["origin"] == *origin);
+        for round in &mut rounds { round["runtimeReplayAllowed"] = json!(runtime_allowed); }
         summary_sources.push(summary_source(user, assistant, &rounds)?);
         let record = json!({"turn":{"user":{"Id":user["Id"],"Content":user["Content"],"contentJson":user["Content"].to_string()},
             "assistant":{"Id":assistant["Id"],"Content":content,"contentJson":content.to_string(),"Status":assistant["Status"]},"taskCompletion":task_completion(assistant)},"rounds":rounds});
@@ -1094,7 +1151,7 @@ fn history_rounds(assistant: &Value) -> Result<Vec<Value>, ModelError> {
             observation["contentJson"] = json!(observation["content"].to_string());
             observations.push(observation);
         }
-        records.push(json!({"round":round["round"],"text":round["text"],"textJson":round["text"].to_string(),"calls":round["calls"],"observations":observations}));
+        records.push(json!({"round":round["round"],"text":round["text"],"textJson":round["text"].to_string(),"calls":round["calls"],"observations":observations,"contextBefore":round["contextBefore"]}));
     }
     Ok(records)
 }
@@ -1312,6 +1369,19 @@ fn apply_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_requests_drop_empty_turns_while_other_protocols_keep_them() {
+        let history = [json!({"role":"user","content":"start"}), json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":[]}), json!({"role":"user","content":""}), json!({"role":"user","content":"review"})];
+        let messages = json!({"protocol":"anthropic-messages","baseUrl":"https://api.deepseek.com/anthropic","providerId":"fixture"});
+        let body = build_request(&messages, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert!(body["messages"].as_array().unwrap().iter().all(|message| message["content"] != json!([]) && message["content"] != ""));
+        let compatible = json!({"protocol":"openai-completions","baseUrl":"https://api.deepseek.com","providerId":"fixture"});
+        let body = build_request(&compatible, "deepseek-flash", &history, "", Some(64), &[], true).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), history.len());
+    }
 
     #[test]
     fn auxiliary_summary_cache_uses_native_system_fields_without_changing_roles_or_responses_instructions() {

@@ -384,6 +384,30 @@ impl EvidenceLedger {
                 json!({"key":args["key"],"snapshotKey":args["snapshotKey"],"gapKey":gap_key,"gap":args["gap"],"explicitGap":args["explicitGap"],"entrySearches":searches,"hasCached":cached,
                     "blocked":!cached && (self.searches>=self.maximum_searches() || searches>=self.maximum_per_gap())})
             }
+            "retrieval.refinement-restore" => {
+                let key=text(args,"gapKey");
+                let count=args["attempt"].as_u64().unwrap_or(0).min(3);
+                let previous=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps.set(key.to_owned(),json!(previous.max(count)));
+                Value::Null
+            }
+            "retrieval.refinement-reserve" => {
+                let key=text(args,"gapKey");
+                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let blocked=count>=3;
+                let attempt=if blocked {count} else {count+1};
+                if !blocked {self.gaps.set(key.to_owned(),json!(attempt));}
+                json!({"gapKey":key,"attempt":attempt,"executed":!blocked,
+                    "remainingSupplementalSearches":3u64.saturating_sub(attempt),"maximumSupplementalSearches":2,
+                    "state":if blocked {"unresolved"}else{"searching"},
+                    "next":if blocked {"state-missing-evidence-or-use-another-evidence-type"}else{"rewrite-keywords-or-narrow-directory-if-needed"}})
+            }
+            "retrieval.refinement-release" => {
+                let key=text(args,"gapKey");
+                let count=self.gaps.get(key).and_then(Value::as_u64).unwrap_or(0);
+                self.gaps.set(key.to_owned(),json!(count.saturating_sub(1)));
+                Value::Null
+            }
             "retrieval.evidence-invalidate" => {
                 self.cached.remove(text(args, "key"));
                 Value::Null

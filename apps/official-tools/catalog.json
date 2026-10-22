@@ -458,7 +458,7 @@
     },
     {
       "name": "filesystem.search",
-      "description": "Find literal UTF-8 content or paths without an index; path mode reads names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Ignore files apply by default. Changed sources require a fresh search.",
+      "description": "Find paths, globs, literal UTF-8 content or line-wise Rust regex without an index. Prefer exact path/glob and content/regex for known filenames or symbols, then filesystem.read at matching lines. Path/glob modes read names only. Continue nextCursor while hasMore, even with no matches; retain query/options. Honors ignore files by default; changed sources need a fresh search. Each page returns up to 1000 matches within 2 MiB and 30 seconds; content/regex skip files above 16 MiB and report incomplete coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -482,15 +482,17 @@
           "maxMatches": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 200
+            "maximum": 1000
           },
           "mode": {
             "type": "string",
             "enum": [
               "content",
-              "path"
+              "path",
+              "glob",
+              "regex"
             ],
-            "description": "Default content; path matches a literal relative-path/name substring (case-insensitive on Windows)."
+            "description": "Default content matches literal text. path matches a literal relative-path/name substring; glob matches path patterns such as **/*.rs (both case-insensitive on Windows). regex matches file content one line at a time, with Rust regex syntax; use (?i) for case-insensitive content. Glob/regex do not bypass ignore or workspace permissions."
           },
           "respectIgnoreFiles": {
             "type": "boolean",
@@ -836,7 +838,7 @@
     {
       "name": "knowledge.search",
       "source": "builtin",
-      "description": "Search authorized local documents and code. domain is an explicit scope; choose it from the user or verified source, not words like method/function or brand capitalization. Keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing mean only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
+      "description": "Search authorized local documents and code with E5 + lexical rank-RRF and lightweight structured sorting. For a known filename/path/function, prefer filesystem.search glob/regex then filesystem.read. domain is an explicit scope from the user or verified source, not words like method/function or brand capitalization; keep ambiguous queries mixed. symbol/path need an explicit identifier or known relative locator; OpenAI alone is not a code symbol. Preserve the same gap identity while rewriting keywords or narrowing directories: at most two supplemental searches for that gap, then state missing evidence or use another evidence type and continue the task. Bounded candidates are not exhaustive references/call graphs; no hits under incomplete indexing prove only current coverage. Read omitted sections with knowledge.read. Other chats are not shared.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1105,7 +1107,7 @@
     {
       "name": "knowledge.experience",
       "source": "builtin",
-      "description": "Recall current-chat navigation experience with live citation version checks. Historical answers are not current facts. Re-read and validate sources before reusing an experience; stale dependencies require repair.",
+      "description": "Recall receipt-verified procedure templates for the current project/chat and legacy current-chat retrieval navigation. Templates activate only after real-data maturation with matching current tool contracts; rebind parameters and obtain current permission, never inherit prior approval. Legacy navigation is not a verified procedure or current fact: reread original sources and validate versions. Missing evidence returns empty/collecting guidance without stopping the task. / 查询当前项目或聊天的回执验证模板及历史检索导航；真实数据成熟后才可复用，参数和权限重新核验，旧导航须回读原文，缺证据不阻断任务。",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1892,7 +1894,7 @@
     },
     {
       "name": "tool.load",
-      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service.",
+      "description": "Load exact tool/alias or mcp.<serverId> schemas within budget; connect selected service. Batch currently needed known names in one names array and reuse unchanged loaded schemas. Discover additional tools whenever the task needs them.",
       "inputSchema": {
         "type": "object",
         "properties": {

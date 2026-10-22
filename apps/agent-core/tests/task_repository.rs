@@ -80,7 +80,8 @@ fn reservation_usage_projection_keeps_scope_cache_coverage_and_exactly_once_chil
     let provider = ProviderTokenUsage { input_tokens:Some(100), output_tokens:Some(10),
         cache_read_tokens:Some(80), cache_creation_tokens:Some(10), uncached_input_tokens:Some(10),
         client_metrics:Some(ModelRequestClientMetrics {first_visible_text_ms:Some(125),
-            cache_policy:Some(json!({"provider":"openai","mode":"implicit","breakpoints":0}))}) };
+            cache_policy:Some(json!({"provider":"openai","mode":"implicit","breakpoints":0,
+                "prefix":{"schemaVersion":1,"scope":"main-request","state":"compared","breakAt":"tools","lostTokensEstimate":120}}))}) };
     fixture.repository.reserve_model_request(&parent.token, "root-request").unwrap();
     for _ in 0..2 {
         fixture.repository.settle_model_request_with_provider_usage(&parent.token, "root-request", true,
@@ -107,6 +108,9 @@ fn reservation_usage_projection_keeps_scope_cache_coverage_and_exactly_once_chil
     assert_eq!(summary["unknownTokenRequests"], 1);
     assert_eq!(summary["pendingRequests"], 1);
     assert_eq!(summary["knownCacheRequests"], 2);
+    assert_eq!(summary["prefixDiagnostics"]["observedMainRequests"], 1);
+    assert_eq!(summary["prefixDiagnostics"]["bySegment"]["tools"], 1);
+    assert_eq!(summary["prefixDiagnostics"]["lostTokensEstimate"], 120);
     assert_eq!(summary["cacheInputTokens"], 300);
     assert_eq!(summary["cacheReadTokens"], 80);
     assert_eq!(summary["cacheCreationTokens"], 10);

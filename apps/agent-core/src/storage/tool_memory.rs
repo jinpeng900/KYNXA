@@ -1,6 +1,7 @@
 use super::{ContractError, managed_files};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -98,6 +99,7 @@ fn declaration(source: &str, descriptor: Value) -> Option<(String, Value)> {
         "serverId",
         "toolName",
         "annotations",
+        "execution",
         "outputSchema",
         "enabled",
         "runtimeCompatible",
@@ -111,14 +113,79 @@ fn declaration(source: &str, descriptor: Value) -> Option<(String, Value)> {
     Some((name, Value::Object(fields)))
 }
 
-fn same_schema(previous: &Value, current: &Value) -> bool {
-    previous["inputSchema"] == current["inputSchema"]
-        && previous["originalInputSchema"] == current["originalInputSchema"]
-        && previous["outputSchema"] == current["outputSchema"]
-        && previous["toolName"] == current["toolName"]
+fn schema_map_contract(value: &Value) -> Value {
+    match value.as_object() {
+        Some(children) => Value::Object(children.iter().map(|(name, schema)| {
+            (name.clone(), schema_contract(schema))
+        }).collect()),
+        None => value.clone(),
+    }
+}
+
+/// Ignore documentation only at JSON Schema positions, never inside parameter names or literal payloads.
+/// 仅在 JSON Schema 位置忽略说明字段；参数名称以及 enum、const、default 的真实值不能被当作文案剔除。
+fn schema_contract(value: &Value) -> Value {
+    let Some(fields) = value.as_object() else { return value.clone(); };
+    Value::Object(fields.iter().filter_map(|(key, value)| {
+        if matches!(key.as_str(), "description" | "title" | "$comment" | "examples") { return None; }
+        let value = match key.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies" => {
+                schema_map_contract(value)
+            }
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => value.as_array()
+                .map(|schemas| Value::Array(schemas.iter().map(schema_contract).collect()))
+                .unwrap_or_else(|| value.clone()),
+            "items" if value.is_array() => Value::Array(value.as_array().unwrap().iter().map(schema_contract).collect()),
+            "items" | "additionalItems" | "additionalProperties" | "unevaluatedItems" | "unevaluatedProperties"
+                | "contains" | "propertyNames" | "not" | "if" | "then" | "else" | "contentSchema" => schema_contract(value),
+            _ => value.clone(),
+        };
+        Some((key.clone(), value))
+    }).collect())
+}
+
+fn annotations_contract(descriptor: &Value) -> Value {
+    let mut annotations = descriptor["annotations"].clone();
+    if let Some(fields) = annotations.as_object_mut() { fields.remove("title"); }
+    annotations
+}
+
+fn executable_contract(descriptor: &Value) -> Value {
+    serde_json::json!({"inputSchema":schema_contract(&descriptor["inputSchema"]),
+        "originalInputSchema":schema_contract(&descriptor["originalInputSchema"]),
+        "outputSchema":schema_contract(&descriptor["outputSchema"]),"serverId":descriptor["serverId"],
+        "toolName":descriptor["toolName"],"annotations":annotations_contract(descriptor),
+        "execution":descriptor["execution"],"runtimeCompatible":descriptor["runtimeCompatible"]})
+}
+
+fn canonical_contract(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => {
+            let ordered=fields.iter().collect::<BTreeMap<_,_>>();
+            Value::Object(ordered.into_iter().map(|(key,value)|(key.clone(),canonical_contract(value))).collect())
+        },
+        Value::Array(items) => Value::Array(items.iter().map(canonical_contract).collect()),
+        value => value.clone(),
+    }
+}
+
+fn same_contract(previous: &Value, current: &Value) -> bool {
+    executable_contract(previous) == executable_contract(current)
 }
 
 impl ToolMemory {
+    /// Recipe applicability uses the same executable contract as experience retention, not the full catalog hash.
+    /// 经验方案适用身份与统计保留共用执行契约，不使用整份内置目录哈希；MCP仍绑定其配置身份。
+    pub(crate) fn identity(&self, name: &str) -> Option<String> {
+        let entry=self.entries.get(name)?;
+        if self.disabled_tools.contains(name) || entry.descriptor["enabled"] == false
+            || entry.descriptor["runtimeCompatible"] == false { return None; }
+        let value=canonical_contract(&serde_json::json!({"version":"tool-contract-v1","name":name,
+            "source":entry.source,"configuration":if entry.source=="builtin" {Value::Null}else{Value::String(entry.fingerprint.clone())},
+            "contract":executable_contract(&entry.descriptor)}));
+        Some(format!("{:x}",Sha256::digest(serde_json::to_vec(&value).ok()?)))
+    }
+
     /// A failed disk cache can be bypassed without replacing its corrupt or future-version original.
     /// 磁盘缓存不可读时仅降级为内存缓存，不覆盖损坏或未来版本的原文件。
     pub(crate) fn memory_only(root: &Path) -> Self {
@@ -180,7 +247,13 @@ impl ToolMemory {
         self.disabled_tools = disabled_tools.clone();
         let previous_count = self.entries.len();
         self.entries.retain(|name, entry| {
-            sources.get(&entry.source) == Some(&entry.fingerprint) && !disabled_tools.contains(name)
+            // Builtin fingerprints describe the complete catalog, not an individual executable contract.
+            // 内置指纹描述整份目录，不代表单个工具契约；随后 replace_catalog 按工具逐项重核验，也兼容旧目录指纹。
+            // MCP fingerprints still identify the exact trusted server/configuration and cannot be substituted.
+            // MCP 指纹仍绑定明确受信任的服务与配置，不因说明或内置工具更新放松来源身份边界。
+            sources.get(&entry.source).is_some_and(|current| {
+                valid_fingerprint(current) && (entry.source == "builtin" || current == &entry.fingerprint)
+            }) && !disabled_tools.contains(name)
         });
         previous_count != self.entries.len()
     }
@@ -209,8 +282,8 @@ impl ToolMemory {
                 .get(&name)
                 .filter(|entry| {
                     entry.source == source
-                        && entry.fingerprint == fingerprint
-                        && same_schema(&entry.descriptor, &descriptor)
+                        && (source == "builtin" || entry.fingerprint == fingerprint)
+                        && same_contract(&entry.descriptor, &descriptor)
                 })
                 .map(|entry| entry.experience.clone())
                 .unwrap_or_default();
@@ -328,6 +401,115 @@ impl ToolMemory {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_memory_builtin_contracts_survive_catalog_updates_and_legacy_files() {
+        let old_fingerprint = "a".repeat(64);
+        let new_fingerprint = "b".repeat(64);
+        let read = json!({"name":"filesystem.read","description":"Read the file",
+            "inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}});
+        let write = json!({"name":"filesystem.write","description":"Write the file",
+            "inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}});
+        let legacy: Document = serde_json::from_value(json!({"schemaVersion":1,"entries":{
+            "filesystem.read":{"source":"builtin","fingerprint":old_fingerprint,"descriptor":read,
+                "experience":{"successes":7,"failures":1,"meanElapsedMs":20.0}},
+            "filesystem.write":{"source":"builtin","fingerprint":old_fingerprint,"descriptor":write,
+                "experience":{"successes":3,"failures":0,"meanElapsedMs":40.0}}
+        }})).unwrap();
+        assert_eq!(legacy.schema_version, SCHEMA_VERSION);
+        let mut memory = ToolMemory::memory_only(Path::new("unused-memory-only-root"));
+        memory.entries = legacy.entries;
+        let original_identity=memory.identity("filesystem.read").unwrap();
+        let sources = HashMap::from([("builtin".into(), new_fingerprint.clone())]);
+        assert!(!memory.reconcile(&sources, &HashSet::new()));
+        let mut revised_read = read.clone();
+        revised_read["description"] = json!("Corrected guidance; the operation contract is unchanged.");
+        assert!(memory.replace_catalog("builtin", &new_fingerprint, vec![revised_read.clone(), write.clone()]));
+        assert_eq!(memory.entries["filesystem.read"].experience.successes, 7);
+        assert_eq!(memory.entries["filesystem.read"].experience.failures, 1);
+        assert_eq!(memory.entries["filesystem.write"].experience.successes, 3);
+        assert_eq!(memory.identity("filesystem.read").as_deref(),Some(original_identity.as_str()));
+        assert_eq!(memory.catalog()[0]["configurationFingerprint"], new_fingerprint);
+
+        let mut revised_write = write.clone();
+        revised_write["inputSchema"]["properties"]["expectedHash"] = json!({"type":"string"});
+        assert!(memory.replace_catalog("builtin", &"c".repeat(64), vec![revised_read, revised_write]));
+        assert_eq!(memory.entries["filesystem.read"].experience.successes, 7);
+        assert_eq!(memory.entries["filesystem.write"].experience.successes, 0);
+        assert_eq!(memory.identity("filesystem.read").as_deref(),Some(original_identity.as_str()));
+    }
+
+    #[test]
+    fn tool_memory_documentation_edits_preserve_stats_but_contract_edits_reverify() {
+        let fingerprint = "a".repeat(64);
+        let descriptor = json!({"name":"mcp.fixture.apply","toolName":"apply","serverId":"fixture",
+            "description":"Apply a value","annotations":{"title":"Apply","readOnlyHint":false},
+            "execution":{"taskSupport":"optional"},"inputSchema":{"type":"object","description":"Input",
+            "properties":{"description":{"type":"string","description":"Human help","default":"first"},
+                "payload":{"const":{"description":"literal value"}}},"required":["description"]}});
+        let mut memory = ToolMemory::memory_only(Path::new("unused-memory-only-root"));
+        memory.replace_catalog("mcp:fixture", &fingerprint, vec![descriptor.clone()]);
+        let original_identity=memory.identity("mcp.fixture.apply").unwrap();
+        memory.record("mcp.fixture.apply", true, 25, None);
+        let mut documentation = descriptor.clone();
+        documentation["description"] = json!("New display instructions");
+        documentation["annotations"]["title"] = json!("Display title");
+        documentation["inputSchema"]["description"] = json!("Reworded root help");
+        documentation["inputSchema"]["properties"]["description"]["description"] = json!("Reworded parameter help");
+        memory.replace_catalog("mcp:fixture", &fingerprint, vec![documentation]);
+        assert_eq!(memory.entries["mcp.fixture.apply"].experience.successes, 1);
+        assert_eq!(memory.catalog()[0]["execution"]["taskSupport"], "optional");
+        assert_eq!(memory.identity("mcp.fixture.apply").as_deref(),Some(original_identity.as_str()));
+
+        let mut edits = Vec::new();
+        let mut parameter_type = descriptor.clone();
+        parameter_type["inputSchema"]["properties"]["description"]["type"] = json!("integer");
+        edits.push(parameter_type);
+        let mut default = descriptor.clone();
+        default["inputSchema"]["properties"]["description"]["default"] = json!("second");
+        edits.push(default);
+        let mut literal = descriptor.clone();
+        literal["inputSchema"]["properties"]["payload"]["const"]["description"] = json!("different literal value");
+        edits.push(literal);
+        let mut safety = descriptor.clone();
+        safety["annotations"]["readOnlyHint"] = json!(true);
+        edits.push(safety);
+        let mut execution = descriptor.clone();
+        execution["execution"]["taskSupport"] = json!("required");
+        edits.push(execution);
+        for changed in edits {
+            memory.replace_catalog("mcp:fixture", &fingerprint, vec![descriptor.clone()]);
+            memory.record("mcp.fixture.apply", true, 25, None);
+            memory.replace_catalog("mcp:fixture", &fingerprint, vec![changed]);
+            assert_eq!(memory.entries["mcp.fixture.apply"].experience.successes, 0);
+            assert_ne!(memory.identity("mcp.fixture.apply").as_deref(),Some(original_identity.as_str()));
+        }
+    }
+
+    #[test]
+    fn tool_memory_mcp_identity_changes_do_not_reuse_experience_or_clear_builtins() {
+        let fingerprint = "a".repeat(64);
+        let changed = "b".repeat(64);
+        let builtin = json!({"name":"filesystem.read","inputSchema":{"type":"object"}});
+        let external = json!({"name":"mcp.fixture.read","serverId":"fixture","toolName":"read",
+            "inputSchema":{"type":"object"}});
+        let mut memory = ToolMemory::memory_only(Path::new("unused-memory-only-root"));
+        memory.replace_catalog("builtin", &fingerprint, vec![builtin]);
+        memory.replace_catalog("mcp:fixture", &fingerprint, vec![external.clone()]);
+        let original_external_identity=memory.identity("mcp.fixture.read").unwrap();
+        memory.record("filesystem.read", true, 10, None);
+        memory.record("mcp.fixture.read", true, 10, None);
+        let sources = HashMap::from([("builtin".into(), changed.clone()), ("mcp:fixture".into(), changed.clone())]);
+        assert!(memory.reconcile(&sources, &HashSet::new()));
+        assert_eq!(memory.entries["filesystem.read"].experience.successes, 1);
+        assert!(!memory.entries.contains_key("mcp.fixture.read"));
+        memory.replace_catalog("mcp:fixture", &changed, vec![external]);
+        assert_eq!(memory.entries["mcp.fixture.read"].experience.successes, 0);
+        assert_ne!(memory.identity("mcp.fixture.read").as_deref(),Some(original_external_identity.as_str()));
+        assert!(memory.reconcile(&HashMap::from([("builtin".into(), changed)]), &HashSet::new()));
+        assert!(memory.entries.contains_key("filesystem.read"));
+        assert!(!memory.entries.contains_key("mcp.fixture.read"));
+    }
 
     #[test]
     fn tool_memory_restarts_and_invalidates_only_changed_declarations() {

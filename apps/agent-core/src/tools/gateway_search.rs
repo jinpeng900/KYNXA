@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_SEARCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// Sources tried for one query, including the built-in last-resort source.
+/// 一次查询最多尝试的来源数，包含内置最后备用来源。
+const MAX_SEARCH_SOURCES: usize = 8;
 
 type CachedSearch = Arc<Mutex<SharedSearch>>;
 
@@ -311,7 +314,10 @@ async fn search_provider(
         .filter(|query| !query.trim().is_empty())
         .ok_or_else(|| failure("INVALID_TOOL_ARGUMENTS", "搜索 query 不能为空。", 400))?;
     let count = input["limit"].as_u64().unwrap_or(10).clamp(1, 20);
-    let brave = server["id"].as_str().is_some_and(|id| id.contains("brave"));
+    if server["builtin"] == super::gateway_deepseek_search::SOURCE_ID {
+        return super::gateway_deepseek_search::search(query, count, server, ctx).await;
+    }
+    let brave =server["id"].as_str().is_some_and(|id| id.contains("brave"));
     let command = std::path::Path::new(server["command"].as_str().unwrap_or(""))
         .file_name()
         .and_then(|name| name.to_str())
@@ -460,8 +466,30 @@ async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, G
     let selected = ctx.config["retrieval"]["web"]["providerId"]
         .as_str()
         .unwrap_or("auto");
+    let servers = search_sources_for(selected, ctx).await;
+    if servers.is_empty() {
+        return Err(failure(
+            "WEB_SEARCH_PROVIDER_UNAVAILABLE",
+            "选定搜索服务未启用；未绕过设置启用其他远程服务。",
+            503,
+        ));
+    }
+    let key = SearchState::key(&json!({
+        "conversation":ctx.conversation_id,"project":ctx.project_id,"permission":ctx.permission_mode,
+        "roots":ctx.authorized_roots,"workdir":ctx.workdir,
+        "approved":ctx.approved,"provider":selected,"servers":servers.iter().map(SearchState::configuration_key).collect::<Vec<_>>(),
+        "query":input["query"],"limit":input["limit"].as_u64().unwrap_or(10).clamp(1,20),
+        "objective":input["reason"].as_str().filter(|reason| !reason.trim().is_empty()).unwrap_or_else(||input["query"].as_str().unwrap_or("")),
+        "language":ctx.config["retrieval"]["web"]["language"],"depth":ctx.config["retrieval"]["web"]["depth"],
+    }));
+    search_shared(input, servers, key, ctx).await
+}
+
+/// Ordered sources for one query: the selected or all configured search services, then the built-in fallback.
+/// 一次查询的有序来源：选定或全部已配置搜索服务在前，内置备用来源在后。
+async fn search_sources_for(selected: &str, ctx: &GatewayToolContext) -> Vec<Value> {
     let loaded = ctx.runtime.schemas.read().await.clone();
-    let servers = super::gateway_mcp::servers(ctx)
+    let mut servers = super::gateway_mcp::servers(ctx)
         .into_iter()
         .filter_map(|server| {
             // Discovery metadata must not change the connection's configuration identity and force another handshake.
@@ -479,21 +507,23 @@ async fn search_inner(input: Value, ctx: &GatewayToolContext) -> Result<Value, G
                 .then_some(server)
         })
         .collect::<Vec<_>>();
-    if servers.is_empty() {
-        return Err(failure(
-            "WEB_SEARCH_PROVIDER_UNAVAILABLE",
-            "选定搜索服务未启用；未绕过设置启用其他远程服务。",
-            503,
-        ));
+    // A configured official DeepSeek connection adds its hosted search last, used only after earlier sources fail or cool down.
+    // 已配置官方 DeepSeek 连接时将其托管搜索排在最后，只有前面的来源失败、限流或额度耗尽才会使用。
+    if selected == "auto" || selected == super::gateway_deepseek_search::SOURCE_ID {
+        if let Some(source) = super::gateway_deepseek_search::source(ctx).await {
+            servers.truncate(MAX_SEARCH_SOURCES - 1);
+            servers.push(source);
+        }
     }
-    let key = SearchState::key(&json!({
-        "conversation":ctx.conversation_id,"project":ctx.project_id,"permission":ctx.permission_mode,
-        "roots":ctx.authorized_roots,"workdir":ctx.workdir,
-        "approved":ctx.approved,"provider":selected,"servers":servers.iter().map(SearchState::configuration_key).collect::<Vec<_>>(),
-        "query":input["query"],"limit":input["limit"].as_u64().unwrap_or(10).clamp(1,20),
-        "objective":input["reason"].as_str().filter(|reason| !reason.trim().is_empty()).unwrap_or_else(||input["query"].as_str().unwrap_or("")),
-        "language":ctx.config["retrieval"]["web"]["language"],"depth":ctx.config["retrieval"]["web"]["depth"],
-    }));
+    servers
+}
+
+async fn search_shared(
+    input: Value,
+    servers: Vec<Value>,
+    key: String,
+    ctx: &GatewayToolContext,
+) -> Result<Value, GatewayError> {
     let request = ctx.runtime.web_search.shared(key);
     let (pending, should_start) = {
         let mut state = request.lock().unwrap_or_else(|error| error.into_inner());
@@ -587,7 +617,7 @@ async fn search_sources(
     let mut attempts = Vec::new();
     let mut last_error = None;
     let mut retries = Vec::new();
-    for (index, server) in servers.iter().enumerate().take(8) {
+    for (index, server) in servers.iter().enumerate().take(MAX_SEARCH_SOURCES) {
         if let Some(error) = ctx.runtime.web_search.cooling(server) {
             let mut receipt = failure_receipt(&error);
             receipt["providerId"] = server["id"].clone();
@@ -1069,6 +1099,34 @@ mod tests {
             "WEB_SEARCH_RATE_LIMITED"
         );
         assert_eq!(parallel.calls.load(Ordering::Acquire), 0);
+        cleanup_search(&ctx).await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_search_is_the_last_automatic_source_and_respects_explicit_choices() {
+        let exa = SearchFixture::start("exa", 0, 200, 0).await;
+        let parallel = SearchFixture::start("parallel", 0, 200, 0).await;
+        let (mut ctx, _cancel) = super::super::gateway::test_context();
+        ctx.config["mcpServers"] = json!([exa.server, parallel.server]);
+        let configured = search_sources_for("auto", &ctx).await;
+        assert!(!configured.iter().any(|server| server["id"] == super::super::gateway_deepseek_search::SOURCE_ID),
+            "Without an official DeepSeek connection nothing is added.");
+        let home = ctx.workdir.parent().unwrap().join("search-model-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("connections.json"), json!({"version":1,"providers":[{"providerId":"deepseek",
+            "displayName":"DeepSeek","baseUrl":"https://api.deepseek.com","apiKey":"fixture-official-key",
+            "models":["deepseek-flash"],"protocol":"openai-completions"}]}).to_string()).unwrap();
+        ctx.runtime.model_home.set(home).unwrap();
+        let ordered = search_sources_for("auto", &ctx).await;
+        assert_eq!(ordered.len(), configured.len() + 1);
+        assert_eq!(&ordered[..configured.len()], configured.as_slice(), "Configured sources keep their order and priority.");
+        assert_eq!(ordered.last().unwrap()["id"], super::super::gateway_deepseek_search::SOURCE_ID);
+        assert!(!json!(ordered).to_string().contains("fixture-official-key"));
+        let explicit = search_sources_for("official-exa", &ctx).await;
+        assert!(!explicit.iter().any(|server| server["builtin"].is_string()), "An explicit provider never gains a silent fallback.");
+        let selected = search_sources_for(super::super::gateway_deepseek_search::SOURCE_ID, &ctx).await;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["builtin"], super::super::gateway_deepseek_search::SOURCE_ID);
         cleanup_search(&ctx).await;
     }
 

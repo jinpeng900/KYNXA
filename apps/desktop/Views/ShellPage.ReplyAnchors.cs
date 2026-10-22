@@ -7,11 +7,27 @@ namespace KYNXA_Desktop.Views;
 
 public sealed partial class ShellPage
 {
+    private static ChatMessageState? FindTaskSteeringReply(ProjectChatState chat, Guid requestId)
+    {
+        int index = chat.Messages.FindIndex(message => message.Id == requestId && message.Role == "assistant");
+        if (index < 0) return null;
+        var root = chat.Messages[index];
+        Guid? origin = root.OriginUserMessageId ?? root.InReplyToUserMessageId ??
+            chat.Messages.Take(index).LastOrDefault(message => message.Role == "user")?.Id;
+        return chat.Messages.LastOrDefault(message => message.Role == "assistant" && message.SupersededByUserMessageId is null &&
+            (message.Id == requestId || origin is Guid user && message.OriginUserMessageId == user));
+    }
+
     private ChatMessageState PrepareSteeringReply(Guid conversation, QueuedPrompt prompt, PendingChatReply? pending)
     {
         var chat = FindChat(conversation).Chat!;
-        var previous = pending?.Message ?? chat.Messages.LastOrDefault(message => message.Role == "assistant"
-            && message.SupersededByUserMessageId is null && message.Status != "completed");
+        var previous = pending?.Message ?? (prompt.TargetRequestId is Guid originalRequest
+            ? FindTaskSteeringReply(chat, originalRequest)
+            : chat.Messages.LastOrDefault(message => message.Role == "assistant"
+                && message.SupersededByUserMessageId is null && message.Status != "completed"));
+        Guid? origin = pending?.UserMessageId ?? previous?.OriginUserMessageId ?? previous?.InReplyToUserMessageId;
+        if (origin is null && previous is not null)
+            origin = chat.Messages.Take(chat.Messages.IndexOf(previous)).LastOrDefault(message => message.Role == "user")?.Id;
         if (pending is not null) FlushReply(pending, final: true);
         var submitted = chat.Messages.FirstOrDefault(message => message.Id == prompt.Id)
             ?? new ChatMessageState { Id = prompt.Id, Role = "user", Content = prompt.Text,
@@ -23,7 +39,7 @@ public sealed partial class ShellPage
             Id = prompt.ReplyMessageId, Role = "assistant", Status = "streaming",
             Provider = previous?.Provider ?? prompt.Provider ?? "", Model = previous?.Model ?? prompt.Model ?? "",
             InReplyToUserMessageId = prompt.Id,
-            OriginUserMessageId = pending?.UserMessageId ?? previous?.OriginUserMessageId
+            OriginUserMessageId = origin
         };
         chat.Messages.Add(reply);
         if (pending is not null)

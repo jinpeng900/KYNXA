@@ -50,17 +50,19 @@ public sealed partial class ShellPage
         Guid? chatId = ActiveChatId;
         var messages = chatId is Guid id && _queuedPrompts.TryGetValue(id, out var queue) ? queue : [];
         PromptQueue.ShowMessages(messages, chatId is Guid active && !HasUnknownOutcome(active)
-            && (IsReplyInProgress(active) || _pausedTaskIds.ContainsKey(active)));
+            && (IsReplyInProgress(active) || _pausedTaskIds.ContainsKey(active) || messages.Any(prompt => prompt.TargetTaskId is not null)));
         PresentUnknownOutcome();
     }
 
     private bool TryQueuePrompt()
     {
         if (_savingOnClose || _chatClosing || ActiveChatId is not Guid chatId
-            || !(IsReplyInProgress(chatId) || _drainingPromptChats.Contains(chatId) || _pausedTaskIds.ContainsKey(chatId)))
+            || !(IsReplyInProgress(chatId) || _drainingPromptChats.Contains(chatId)))
             return false;
         string text = PromptTextBox.Text.Trim();
         if (text.Length == 0 && !HasAttachmentDrafts) return true;
+        if (!IsReplyInProgress(chatId) && !_drainingPromptChats.Contains(chatId) &&
+            RecoveredTaskContinuation.IsExplicit(text)) return false;
         // Queue entries become formal user messages only when sent or explicitly steered.
         // 排队内容在执行或明确引导时才成为正式用户消息，编辑等待项不会修改聊天日志。
         QueueFor(chatId).Add(new(Guid.NewGuid(), text, _selectedModel?.ProviderId,
@@ -78,6 +80,7 @@ public sealed partial class ShellPage
         // A pending unknown-outcome decision must not be bypassed by steering a queued message into the task.
         // 结果未知待用户决定时，不能把排队消息作为引导插入任务。
         if (_chatClosing || prompt.IsSubmitting || HasUnknownOutcome(chatId) || !_steeringPromptChats.Add(chatId)) return;
+        prompt.IsTaskGuidance = true;
         prompt.IsSubmitting = true;
         QueueFor(chatId).Remove(prompt);
         RefreshPromptQueue();
@@ -109,7 +112,9 @@ public sealed partial class ShellPage
                 && !IsReplyInProgress(chatId) && !_steeringPromptChats.Contains(chatId) && queue.Count > 0)
             {
                 var prompt = queue[0];
-                if (prompt.IsSubmitting || FindChat(chatId).Chat is not { } chat) break;
+                // A rejected/unknown recovered steer retains its identity until explicitly retried, never a fresh root.
+                // 恢复引导被拒或结果未知时保留原身份，等用户重试，不能自动降级为新根任务。
+                if (prompt.IsSubmitting || prompt.IsTaskGuidance || prompt.TargetTaskId is not null || FindChat(chatId).Chat is not { } chat) break;
                 queue.RemoveAt(0);
                 chat.Messages.Add(new ChatMessageState { Id = prompt.Id, Role = "user", Content = prompt.Text,
                     Attachments = prompt.Attachments.ToList() });

@@ -197,7 +197,12 @@ pub fn calculate(operation: &str, args: &Value) -> Result<Value, String> {
         return Ok(summary_controls(args));
     }
     if operation == "models.capabilities.lookup" {
-        if !exact_official_endpoint(endpoint) || !args["model"].is_string() {
+        // DeepSeek's Messages route serves the same official models under /anthropic.
+        // DeepSeek 的 Messages 路线在 /anthropic 下提供同一批官方模型，窗口与输出上限保持一致。
+        let deepseek_messages = endpoint["hostname"] == "api.deepseek.com"
+            && ["/anthropic", "/anthropic/"].contains(&string(&endpoint["pathname"]))
+            && exact_official_endpoint(&{ let mut root = endpoint.clone(); root["pathname"] = json!("/"); root });
+        if !(exact_official_endpoint(endpoint) || deepseek_messages) || !args["model"].is_string() {
             return Ok(json!({}));
         }
         return Ok(

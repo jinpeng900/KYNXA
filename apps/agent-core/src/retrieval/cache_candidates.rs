@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) const DEFAULT_BYTES: usize = 32 * 1024 * 1024;
 const TTL: Duration = Duration::from_secs(60);
-const KEY_VERSION: &str = "metadata-candidate-channels-v1";
+const KEY_VERSION: &str = "e5-lexical-rrf-structured-v2";
 const MAX_FLIGHTS: usize = 64;
 const FLIGHT_BYTES: usize = std::mem::size_of::<Flight>()
     + std::mem::size_of::<String>()

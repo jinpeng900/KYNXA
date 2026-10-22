@@ -63,7 +63,7 @@ pub(crate) fn requires_execution_verification(goal: &str) -> bool {
         r"(?:打开|启动|运行|执行|安装|下载|上传|搜索|抓取|读取|保存|导出|提交|修改|修复|创建|生成|制作|测试|删除|open\b|launch\b|run\b|execute\b|install\b|download\b|upload\b|search\b|read\b|save\b|export\b|modify\b|fix\b|create\b|build\b|test\b|delete\b)"
     )).expect("static explanatory additional action expression"));
     let negative=NEGATED_ACTION.get_or_init(||Regex::new(concat!(
-        r"(?ix)^\s*(?:(?:请|先|这次|这轮|本轮|当前|please)\s*)*(?:(?:不要|不再|无需|不用|不需要|禁止|别)",
+        r"(?ix)^\s*(?:(?:请|先|这次|这轮|本轮|当前|please)\s*)*(?:(?:不要|不再|无需|不用|不需要|不准|不允许|不必|禁止|别)",
         r"(?:再|继续|去|额外|实际|自动|重新|主动|帮我|任何|进行)*\s*",
         r"(?:打开|启动|运行|执行|安装|卸载|下载|上传|抓取|爬取|搜索|检索|浏览|访问|回读|读取|读写|读|扫描|渲染|建模|写入|写|保存|导出|提交|推送|修改|修复|重构|编译|测试|检查|验证|调用|删除|删|创建|生成|制作|更新)",
         r"|(?:don't|do\s+not|never|without|no\s+need\s+to)\s+(?:actually\s+|continue\s+|further\s+|automatically\s+)*",
@@ -329,6 +329,21 @@ pub struct TaskState {
 }
 
 impl TaskState {
+    /// Only broker-matched successful receipts suppress a requirement reminder; prose never does.
+    /// 仅程序匹配到的成功回执能消除该项提醒，模型自述不能消除提醒。
+    pub(crate) fn acceptance_gaps(&self, expected: &[String], valid: &[Value], review_current: bool) -> Vec<Value> {
+        let review = if review_current { self.last_review.as_ref() } else { None };
+        expected.iter().enumerate().filter_map(|(index, item)| {
+            let id = format!("requirement-{}", index + 1);
+            let covered = review.is_some_and(|review| review["met"].as_array().into_iter().flatten().any(|claim|
+                (claim["requirementId"].as_str() == Some(id.as_str())
+                    || normalized_evidence_text(claim["item"].as_str().unwrap_or("")) == normalized_evidence_text(item))
+                && claim["evidence"].as_array().into_iter().flatten().filter_map(Value::as_str)
+                    .any(|reference| known_completion_evidence(reference, valid))));
+            (!covered).then(|| json!({"requirementId":id,"item":item}))
+        }).collect()
+    }
+
     pub fn apply(&mut self, operation: &str, args: &Value) -> Result<Value, String> {
         match operation {
             "task.inspect" => Ok(self.inspect(string_field(args, "text"))),
@@ -408,6 +423,9 @@ impl TaskState {
                         if let Some(met) = value.get("met") {
                             status["met"] = met.clone();
                         }
+                        if let Some(action) = value.get("action") {
+                            status["action"] = action.clone();
+                        }
                         if status["state"] == "complete" && handoff(public_content) {
                             status["state"] = json!("review");
                             status["source"] = json!("conflicting-completion-cue");
@@ -479,6 +497,17 @@ impl TaskState {
 
         let mut remaining = remaining_work(reply);
         if boolean_field(args, "isReview") {
+            // Broker-owned failed or pending checks cannot be overruled by a successful unrelated receipt.
+            // 程序记录的失败或待核验不能被无关成功回执覆盖；先核验原结果，再接受模型完成声明。
+            if state == "complete" && args["verification"]["pendingValidation"] == true {
+                let next = match args["verification"]["state"].as_str() {
+                    Some("checks-failed") => "Inspect the failed validation, repair its cause and run the relevant check again; keep successful operations and outputs.",
+                    Some("execution-unconfirmed") => "Verify the original operation outcome before any retry; an unknown outcome does not authorize replay.",
+                    Some("checks-version-unverified") => "Validate the current output version; an earlier check does not cover changed files.",
+                    _ => "Complete the pending result readback or execution validation against its current version.",
+                };
+                remaining.push(next.into());
+            }
             // With real effects, a completion is accepted only when every claimed item cites real evidence.
             // 有真实操作时，只有每项已满足的要求都引用了真实证据，完成才被接受。
             if (boolean_field(args, "evidenceRequired") || boolean_field(args, "requiresVerification"))
@@ -554,6 +583,9 @@ impl TaskState {
         if !has_calls
             && can_continue
             && (args["supportsTaskMarkers"] != false || boolean_field(args, "requiresVerification"))
+            // Current intent is explicit at the production boundary; legacy callers retain their contract.
+            // 生产调用明确传入本轮真实执行意图；旧调用未传入时保持原合同兼容。
+            && args["executionIntent"] != false
             // A reply to live guidance can acknowledge work without completing the existing task.
             // 实时插话后的正文可能只是确认调整；原任务需沿用完成核对，不能仅因没有工具调用就结束。
             // Real external effects also need a review: unknown or self-reported completion is not proof.
@@ -572,6 +604,41 @@ impl TaskState {
             return json!({ "action": "review", "exhaustedBudget": exhausted });
         }
         decision("final", None)
+    }
+}
+
+#[cfg(test)]
+mod acceptance_reminder_tests {
+    use super::*;
+
+    #[test]
+    fn finite_context_followup_does_not_inherit_execution_review_from_steering_or_text_continuation() {
+        let state = TaskState::default();
+        let args = json!({"reply":{"state":"unknown","source":"legacy-response"},"executionIntent":false,
+            "steeredTask":true,"outputContinuations":7,"supportsTaskMarkers":true});
+        assert_eq!(state.decide(&args)["action"],"final");
+        let mut external = args.clone(); external["executionIntent"]=json!(true);
+        external["requiresVerification"]=json!(true);
+        assert_eq!(state.decide(&external)["action"],"review");
+        assert!(!requires_execution_verification("只根据已有上下文列出三项措施，不准修改文件，也不用重新验证"));
+        assert!(requires_execution_verification("不要修改文件；读取 report.docx 并核对内容"));
+    }
+
+    #[test]
+    fn acceptance_reminders_only_omit_requirements_with_current_successful_receipts() {
+        let mut task = TaskState::default();
+        task.apply("task.reviewResult", &json!({"value":{"state":"continue","met":[
+            {"requirementId":"requirement-1","evidence":["verified-call"]},
+            {"requirementId":"requirement-2","evidence":["invented-call"]}]}})).unwrap();
+        let expected = vec!["save the artifact".into(), "inspect the render".into(), "check the facade".into()];
+        let gaps = task.acceptance_gaps(&expected, &[json!("verified-call")], true);
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0]["requirementId"], "requirement-2");
+        assert_eq!(gaps[1]["item"], "check the facade");
+        assert_eq!(task.acceptance_gaps(&expected, &[json!("verified-call")], false).len(), 3,
+            "a new mutation or changed user requirements invalidates old reminder coverage");
+        assert_eq!(task.acceptance_gaps(&expected, &[], true).len(), 3,
+            "self-reported met labels alone cannot suppress reminders");
     }
 }
 
@@ -766,7 +833,13 @@ fn valid_footer(value: &Value) -> bool {
     matches!(state, "continue" | "complete" | "blocked")
         && object
             .keys()
-            .all(|key| matches!(key.as_str(), "state" | "next" | "reason" | "unmet" | "blocker" | "met"))
+            .all(|key| matches!(key.as_str(), "state" | "next" | "reason" | "unmet" | "blocker" | "met" | "action"))
+        && object.get("action").is_none_or(|action| {
+            state == "continue" && action.as_object().is_some_and(|fields| {
+                fields.len() == 2 && action["arguments"].is_object()
+                    && action["name"].as_str().is_some_and(|name| !name.is_empty() && name.len() <= 256)
+            })
+        })
         && object.get("met").is_none_or(valid_met)
         && object.get("unmet").is_none_or(|unmet| {
             unmet.as_array().is_some_and(|items| {
@@ -824,16 +897,16 @@ fn valid_met(met: &Value) -> bool {
 
 /// Requirements claimed as met whose evidence matches no real call ID or artifact path of this task.
 /// 自称已满足、但证据对不上本任务真实调用 ID 或产物路径的要求；它们按未完成处理。
-fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[Value]) -> Vec<String> {
-    let normalize = |text: &str| text.trim().replace('\\', "/").to_lowercase();
-    let known = |entry: &str| {
+fn normalized_evidence_text(text: &str) -> String { text.trim().replace('\\', "/").to_lowercase() }
+
+fn known_completion_evidence(entry: &str, valid_evidence: &[Value]) -> bool {
         let entry = entry.trim();
         let windows_path = |path: &str| path.as_bytes().get(1) == Some(&b':') || path.starts_with("\\\\") || path.starts_with("//");
         if entry.is_empty() { return false; }
         // Call IDs are exact, opaque identities; only Windows filesystem paths are case-insensitive.
         // 调用 ID 是必须精确匹配的不透明身份；仅 Windows 文件路径按不区分大小写处理。
         if valid_evidence.iter().filter_map(Value::as_str).any(|valid| valid.trim() == entry
-            || windows_path(valid) && normalize(valid) == normalize(entry)) {
+            || windows_path(valid) && normalized_evidence_text(valid) == normalized_evidence_text(entry)) {
             return true;
         }
         if entry.contains('/') || entry.contains('\\') { return false; }
@@ -847,7 +920,11 @@ fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[Va
                 valid_path.ends_with(&format!("/{entry}"))
             }
         }).count() == 1
-    };
+}
+
+fn unproven_requirements(reply: &Value, valid_evidence: &[Value], expected: &[Value]) -> Vec<String> {
+    let normalize = normalized_evidence_text;
+    let known = |entry: &str| known_completion_evidence(entry, valid_evidence);
     let Some(items) = reply.get("met").and_then(Value::as_array).filter(|items| !items.is_empty()) else {
         return vec!["List each explicit requirement in met with its tool call IDs or artifact paths as evidence.".into()];
     };
@@ -1199,6 +1276,28 @@ mod tests {
         assert_eq!(state.decide(&json!({"reply":external}))["code"], "TASK_BLOCKED");
         let invalid = state.inspect("x\n<kynxa_task>{\"state\":\"blocked\",\"reason\":\"r\",\"blocker\":\"tired\"}</kynxa_task>");
         assert_eq!(invalid["source"], "legacy-response");
+    }
+
+    #[test]
+    fn authoritative_failed_or_pending_checks_keep_proven_completion_in_the_same_task() {
+        let mut state=TaskState::default();
+        let complete=state.inspect("Completed output.\n<kynxa_task>{\"state\":\"complete\",\"met\":[{\"item\":\"output\",\"evidence\":[\"real-save\"]}]}</kynxa_task>");
+        let mut args=json!({"reply":complete,"isReview":true,"evidenceRequired":true,
+            "validEvidence":["real-save"],"verification":{"state":"checks-failed","pendingValidation":true}});
+        for reason in ["checks-failed","checks-version-unverified","execution-unconfirmed","needs-validation"] {
+            args["verification"]["state"]=json!(reason);
+            let decision=state.decide(&args);
+            assert_eq!(decision["action"],"resume","{reason}");
+            assert_eq!(decision["reviewed"],true);
+            assert!(!decision["remaining"].as_array().unwrap().is_empty());
+        }
+        args["verification"]=json!({"state":"checks-passed","pendingValidation":false});
+        assert_eq!(state.decide(&args)["action"],"final");
+        let action=state.inspect("Continuing.\n<kynxa_task>{\"state\":\"continue\",\"next\":\"inspect result\",\"action\":{\"name\":\"filesystem.read\",\"arguments\":{\"path\":\"result.txt\"}}}</kynxa_task>");
+        assert_eq!(action["source"],"model-task-state");
+        assert_eq!(action["action"]["name"],"filesystem.read");
+        assert_eq!(action["content"],"Continuing.");
+        assert!(!valid_footer(&json!({"state":"complete","action":{"name":"x","arguments":{}}})));
     }
 
     #[test]

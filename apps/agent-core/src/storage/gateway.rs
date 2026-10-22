@@ -298,7 +298,7 @@ fn validate_message_metadata(message: &Value) -> Result<(), ContractError> {
         let rounds=transcript["rounds"].as_array().ok_or_else(||error("模型续接记录无效。","INVALID_MODEL_TRANSCRIPT",400))?.iter().map(|round|{
             let calls=round["calls"].as_array().map(|calls|calls.iter().map(|call|json!({"object":call.is_object(),"id":text(&call["id"]),"name":text(&call["name"]),"arguments":{"object":call["arguments"].is_object(),"jsonLength":call["arguments"].to_string().encode_utf16().count()}})).collect::<Vec<_>>());
             let reference=&round["nativeContinuationRef"];
-            json!({"object":round.is_object(),"round":round["round"],"text":text(&round["text"]),"calls":calls,"hasReference":round.get("nativeContinuationRef").is_some(),"reference":{"object":reference.is_object(),"id":reference["id"],"sha256":reference["sha256"],"bytes":reference["bytes"]},"prefixFingerprint":round["prefixFingerprint"]})
+            json!({"object":round.is_object(),"round":round["round"],"text":text(&round["text"]),"calls":calls,"contextBefore":round["contextBefore"],"hasReference":round.get("nativeContinuationRef").is_some(),"reference":{"object":reference.is_object(),"id":reference["id"],"sha256":reference["sha256"],"bytes":reference["bytes"]},"prefixFingerprint":round["prefixFingerprint"]})
         }).collect::<Vec<_>>();
         crate::models::transcript::calculate("models.transcript.validate",&json!({"object":transcript.is_object(),"version":transcript["version"],"origin":{"object":origin.is_object(),"providerId":text(&origin["providerId"]),"model":text(&origin["model"]),"protocol":origin["protocol"],"connectionFingerprint":origin["connectionFingerprint"]},"rounds":rounds}))
             .map_err(|_|error("模型续接记录无效。","INVALID_MODEL_TRANSCRIPT",400))?;
@@ -640,11 +640,7 @@ pub(crate) fn commit_catalog(
         })
         .transpose()?;
     if let Some(previous) = original.as_ref().and_then(|raw|serde_json::from_str::<Value>(&raw_json::scalar_projection(raw)).ok()) {
-        for project in next["Projects"].as_array_mut().unwrap() {
-            if let Some(old) = previous["Projects"].as_array().into_iter().flatten().find(|old|old["Id"] == project["Id"]) {
-                *project = super::workspace_mounts::preserve_versions(project,old)?;
-            }
-        }
+        preserve_mount_versions(&mut next, &previous)?;
     }
     let encoded = encode_preserving(&next, &original.as_deref().into_iter().collect::<Vec<_>>());
     let transaction = format!(
@@ -652,13 +648,28 @@ pub(crate) fn commit_catalog(
         json!(moves),
         json!(writes)
     );
-    let receipt = catalog_transactions::apply(
+    let mut receipt = catalog_transactions::apply(
         "storage.conversations.commit",
         &json!({"root":root,"expectedHash":hash,
         "rawTransaction":transaction,"rawCatalog":encoded}),
     )?;
     ensure_layout(root, &next)?;
+    // Return the canonical bindings that were actually committed, not the caller's pre-normalized copy.
+    // 回传真实提交后的正式挂载版本，不能让调用方继续持有提交前的旧版本。
+    receipt["catalog"] = next;
     Ok(receipt)
+}
+
+/// Both the byte-preserving HTTP route and internal writers reconcile against the current formal catalog.
+/// 保留原始字节的 HTTP 路径与内部写入都须对照正式目录校正挂载版本。
+fn preserve_mount_versions(next: &mut Value, previous: &Value) -> Result<(), ContractError> {
+    for project in next["Projects"].as_array_mut().unwrap() {
+        if let Some(old) = previous["Projects"].as_array().into_iter().flatten()
+            .find(|old| old["Id"] == project["Id"]) {
+            *project = super::workspace_mounts::preserve_versions(project, old)?;
+        }
+    }
+    Ok(())
 }
 
 /// Re-encode only changed fields while retaining exact raw strings from their original object positions.
@@ -791,7 +802,8 @@ pub fn handle_raw(
             managed_files::read(root, &root.join("catalog.json"), 64 * 1024 * 1024)?.unwrap();
         let current = std::str::from_utf8(&current)
             .map_err(|_| error("目录编码无效。", "CORRUPT_STORAGE", 409))?;
-        let validated = validate_catalog(plan["next"].clone())?;
+        let mut validated = validate_catalog(plan["next"].clone())?;
+        preserve_mount_versions(&mut validated, document)?;
         let catalog_raw = encode_preserving(&validated, &[raw, current]);
         let mut writes = Vec::new();
         for write in plan["writes"].as_array().unwrap() {
@@ -2659,14 +2671,14 @@ pub fn handle(
                 )?;
                 writes.push(json!({"Location":write["Location"],"Message":message}));
             }
-            commit_catalog(
+            let committed = commit_catalog(
                 root,
                 &plan["next"],
                 hash,
                 plan["moves"].as_array().unwrap(),
                 &writes,
             )?;
-            catalog_response(root, &plan["next"], include_messages).map(|value| (200, value))
+            catalog_response(root, &committed["catalog"], include_messages).map(|value| (200, value))
         }));
     }
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();

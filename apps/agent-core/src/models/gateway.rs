@@ -1059,8 +1059,12 @@ async fn execute_request(
         )?;
     }
     let client = client()?;
-    let request = authenticated(&client, connection, Method::POST, &url)
-        .header(header::ACCEPT, "text/event-stream, application/json")
+    let mut request = authenticated(&client, connection, Method::POST, &url)
+        .header(header::ACCEPT, "text/event-stream, application/json");
+    if let Some(beta) = super::tool_updates::beta_header(connection, &body) {
+        request = request.header("anthropic-beta", beta);
+    }
+    let request = request
         .json(&body)
         .build()
         .map_err(|_| ModelError::new("INVALID_MODEL_REQUEST", "模型请求参数或连接头无效。", 400))?;

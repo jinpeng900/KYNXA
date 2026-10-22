@@ -26,7 +26,6 @@ public static partial class UiText
         ["工作目录已变更，旧资料任务已停止"] = "The work folder changed; the previous preparation task stopped",
         ["本地检索"] = "Local retrieval",
         ["语义检索"] = "Semantic retrieval",
-        ["复杂查询重排"] = "Complex-query reranking",
         ["按需启用"] = "Enable when needed",
         ["内置中英文模型"] = "Built-in multilingual model",
         ["全局资料"] = "Global sources",

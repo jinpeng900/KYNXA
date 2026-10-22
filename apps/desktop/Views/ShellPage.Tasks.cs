@@ -241,7 +241,7 @@ public sealed partial class ShellPage
             var selected = PausedTaskSelection.From(response);
             var owner = FindChat(conversation);
             if (!_chatClosing && owner.Chat is not null && owner.Project?.Id == projectId && selected.TaskId is Guid paused &&
-                !_pausedTaskIds.ContainsKey(conversation))
+                !_pendingReplies.ContainsKey(conversation) && !_pausedTaskIds.ContainsKey(conversation))
                 _pausedTaskIds[conversation] = paused;
             return selected;
         }
@@ -255,6 +255,7 @@ public sealed partial class ShellPage
 
     private async Task<bool> QueueRecoveredPausedPromptAsync(PendingChatReply pending)
     {
+        if (!RecoveredTaskContinuation.IsExplicit(pending.Question)) return false;
         var (chat, project) = FindChat(pending.ConversationId);
         if (chat is null) throw new OperationCanceledException(pending.Cancellation.Token);
         var selected = await GetPausedTaskRecovery(chat, project?.Id);
@@ -289,25 +290,57 @@ public sealed partial class ShellPage
     private async Task<bool> SendTaskSteeringAsync(Guid conversation, QueuedPrompt prompt)
     {
         if (_savingOnClose || _chatClosing) return false;
+        prompt.IsTaskGuidance = true;
         _pendingReplies.TryGetValue(conversation, out var pending);
-        Guid? taskId = pending?.TaskId;
+        Guid? taskId = prompt.TargetTaskId ?? pending?.TaskId;
         if (taskId is null && _pausedTaskIds.TryGetValue(conversation, out var paused)) taskId = paused;
         var (chat, project) = FindChat(conversation);
-        if (chat is null) return false;
-        var previous = pending?.Message ?? chat.Messages.LastOrDefault(message => message.Role == "assistant"
-            && message.SupersededByUserMessageId is null && message.Status != "completed");
+        if (chat is null || prompt.TargetTaskId is Guid target && pending?.TaskId is Guid active && target != active) return false;
+        bool CurrentScope() => !_savingOnClose && !_chatClosing && ActiveChatId == conversation &&
+            FindChat(conversation).Chat == chat && FindChat(conversation).Project?.Id == project?.Id;
+        if (!CurrentScope()) return false;
+        // Bind known live identity before any await; a failed registration or POST cannot turn guidance into a new request.
+        // 在任何等待前固定已知活动身份；注册或 POST 结果不明都不能把引导变成新请求。
+        prompt.TargetTaskId ??= taskId;
+        if (pending is not null && pending.StreamRequestId != Guid.Empty) prompt.TargetRequestId ??= pending.StreamRequestId;
+        var previous = pending?.Message ?? (prompt.TargetRequestId is Guid originalRequest
+            ? FindTaskSteeringReply(chat, originalRequest)
+            : chat.Messages.LastOrDefault(message => message.Role == "assistant"
+                && message.SupersededByUserMessageId is null && message.Status != "completed"));
+        if (prompt.TargetRequestId is not null && previous is null) return false;
         string? previousStatus = previous?.Status;
         var submitted = PrepareSteeringReply(conversation, prompt, pending);
         bool steeringAccepted = false;
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_historyLifetime.Token,
+            prompt.TargetTaskId is not null && _runningTaskRecovery?.Chat.Id == conversation
+                ? _runningTaskRecovery.Cancellation.Token : CancellationToken.None);
+        deadline.CancelAfter(TimeSpan.FromSeconds(60));
         try
         {
             await PrepareMessageAttachmentsAsync(conversation, submitted, deadline.Token);
+            if (!CurrentScope()) throw new OperationCanceledException(deadline.Token);
             prompt.Attachments = submitted.Attachments.ToList();
             if (taskId is null && pending is not null)
                 taskId = await pending.TaskRegistered.Task.WaitAsync(deadline.Token);
             if (taskId is null || _chatClosing) throw new InvalidOperationException("The task has no active continuation.");
+            prompt.TargetTaskId ??= taskId;
             var current = await _tasksApiClient.GetAsync(conversation, taskId.Value, project?.Id, deadline.Token);
+            if (!CurrentScope()) throw new OperationCanceledException(deadline.Token);
+            if (prompt.TargetRequestId is Guid expectedRequest &&
+                (!Guid.TryParse(current.Task.RequestId, out var currentRequest) || currentRequest != expectedRequest))
+                throw new InvalidDataException("The recovered task request changed.");
+            if (!Guid.TryParse(current.Task.RequestId, out var boundRequest) || boundRequest == Guid.Empty)
+                throw new InvalidDataException("The original task request is invalid.");
+            prompt.TargetRequestId ??= boundRequest;
+            if (current.Task.State == "partial" && RecoveredTaskContinuation.IsExplicit(prompt.Text))
+            {
+                // Partial is a resumable outcome, not permission to create another task or replay successful effects.
+                // 部分交付可在原任务恢复，不能因此创建新根或重放成功副作用；核验仍由正常 resume 入口负责。
+                var resumed = await _tasksApiClient.ControlAsync(conversation, taskId.Value, current.Task.Version,
+                    "resume", project?.Id, deadline.Token);
+                if (!CurrentScope()) throw new OperationCanceledException(deadline.Token);
+                current = current with { Task = resumed.Task };
+            }
             if (TaskStates.IsTerminal(current.Task.State))
             {
                 _pausedTaskIds.Remove(conversation);
@@ -327,7 +360,7 @@ public sealed partial class ShellPage
                 // Refresh only a rejected version; keep the same task and message identities.
                 // 仅对已明确拒绝的旧版本刷新一次，保持任务及引导消息身份，不重放未知操作。
                 current = await _tasksApiClient.GetAsync(conversation, taskId.Value, project?.Id, deadline.Token);
-                if (TaskStates.IsTerminal(current.Task.State)) throw;
+                if (TaskStates.IsTerminal(current.Task.State) || !CurrentScope()) throw;
                 receipt = await _tasksApiClient.SteerAsync(conversation, taskId.Value, current.Task.Version,
                     submitted.Id, prompt.Text, "continue", project?.Id, deadline.Token, replyMessageId: prompt.ReplyMessageId,
                     attachments: submitted.Attachments.ToArray());
@@ -337,8 +370,13 @@ public sealed partial class ShellPage
             if (receipt.Task.State == "paused")
             {
                 _pausedTaskIds[conversation] = taskId.Value;
-                return true;
+                if (prompt.TargetTaskId is null || !RecoveredTaskContinuation.IsExplicit(prompt.Text) || !CurrentScope()) return true;
+                // Only this explicit continuation may resume the paused root, through its normal verification gate.
+                // 只有本次明确续作才恢复暂停根，仍走既有核验入口，不能绕过未知副作用检查。
+                receipt = await _tasksApiClient.ControlAsync(conversation, taskId.Value, receipt.Task.Version,
+                    "resume", project?.Id, deadline.Token);
             }
+            if (!CurrentScope()) return true;
             _pausedTaskIds.Remove(conversation);
             ForgetPausedTaskRecovery(conversation);
             if (receipt.ReconnectRequired && pending is not null)
@@ -346,7 +384,8 @@ public sealed partial class ShellPage
                 pending.PauseConfirmed = true;
                 pending.Cancellation.Cancel();
             }
-            if (pending is null || receipt.ReconnectRequired) await ObserveResumedTaskAsync(receipt.Task);
+            if (pending is null || receipt.ReconnectRequired)
+                await ObserveResumedTaskAsync(receipt.Task, expectedReplyId: prompt.ReplyMessageId);
             return true;
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException
@@ -371,9 +410,10 @@ public sealed partial class ShellPage
             return false;
         }
     }
-    private async Task ObserveResumedTaskAsync(TaskRecord task)
+    private async Task ObserveResumedTaskAsync(TaskRecord task, TaskCheckpoint? checkpoint = null, bool showFeedback = true,
+        Guid? expectedReplyId = null)
     {
-        if (_chatClosing || task.ParentTaskId is not null || task.State is not ("queued" or "running")
+        if (_chatClosing || ActiveChatId != task.Scope.ConversationId || task.ParentTaskId is not null || task.State is not ("queued" or "running")
             || !Guid.TryParse(task.RequestId, out var requestId)) return;
         if (_pendingReplies.TryGetValue(task.Scope.ConversationId, out var prior))
         {
@@ -381,29 +421,44 @@ public sealed partial class ShellPage
             try { await prior.Finished.Task.WaitAsync(TimeSpan.FromSeconds(15)); }
             catch (TimeoutException)
             {
-                if (!_chatClosing) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。"));
+                if (!_chatClosing && showFeedback) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。"));
                 return;
             }
         }
-        var (chat, _) = FindChat(task.Scope.ConversationId);
-        var rootMessage = chat?.Messages.FirstOrDefault(item => item.Id == requestId && item.Role == "assistant");
-        if (chat is null || rootMessage is null)
+        var (chat, project) = FindChat(task.Scope.ConversationId);
+        if (chat is null || ActiveChatId != chat.Id || project?.Id != task.Scope.ProjectId) return;
+        var rootMessage = chat.Messages.FirstOrDefault(item => item.Id == requestId && item.Role == "assistant");
+        Guid? checkpointReplyId = null;
+        if (checkpoint?.ContextReference is { ValueKind: System.Text.Json.JsonValueKind.Object } context &&
+            context.TryGetProperty("conversationId", out var savedConversation) && savedConversation.TryGetGuid(out var savedChat) &&
+            savedChat == chat.Id && context.TryGetProperty("requestId", out var savedRequest) &&
+            savedRequest.TryGetGuid(out var originalRequest) && originalRequest == requestId &&
+            context.TryGetProperty("assistantMessageId", out var savedReply) && savedReply.TryGetGuid(out var replyId))
+            checkpointReplyId = replyId;
+        var checkpointMessage = chat.Messages.FirstOrDefault(item => item.Id == checkpointReplyId && item.Role == "assistant" &&
+            item.SupersededByUserMessageId is null);
+        var original = rootMessage is null ? null : chat.Messages.Take(chat.Messages.IndexOf(rootMessage)).LastOrDefault(item => item.Role == "user");
+        Guid? originalUserId = checkpointMessage?.OriginUserMessageId ?? rootMessage?.OriginUserMessageId ??
+            rootMessage?.InReplyToUserMessageId ?? original?.Id;
+        var message = checkpointMessage ?? chat.Messages.LastOrDefault(item => item.Role == "assistant" &&
+            item.SupersededByUserMessageId is null && (item.Id == requestId ||
+                originalUserId is Guid origin && item.OriginUserMessageId == origin));
+        originalUserId ??= message?.InReplyToUserMessageId;
+        if (message is null || originalUserId is not Guid userId)
         {
-            if (!_chatClosing) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。"));
+            if (!_chatClosing && showFeedback) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。"));
             return;
         }
-        int position = chat.Messages.IndexOf(rootMessage);
-        var original = chat.Messages.Take(position).LastOrDefault(item => item.Role == "user");
-        if (original is null) return;
-        var message = chat.Messages.LastOrDefault(item => item.Role == "assistant"
-            && item.SupersededByUserMessageId is null && (item.Id == requestId || item.OriginUserMessageId == original.Id))
-            ?? rootMessage;
         try
         {
-            await MessageTimePresentation.ForgetAsync(chat.Id, message);
+            // Cache invalidation is ordered per message in the background; observing never waits for global disk writes.
+            // 缓存失效按消息有序后台落盘；重接观察不能等待所有聊天的磁盘写入。
+            _ = MessageTimePresentation.ForgetAsync(chat.Id, message);
             if (_chatClosing || _pendingReplies.ContainsKey(chat.Id)) return;
-            var pending = new PendingChatReply(chat.Id, original.Id, original.Content, message.Provider, message.Model,
-                _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true, StreamRequestId = requestId };
+            original = chat.Messages.FirstOrDefault(item => item.Id == userId && item.Role == "user");
+            var pending = new PendingChatReply(chat.Id, userId, original?.Content ?? task.Goal, message.Provider, message.Model,
+                _layout.PermissionMode, message) { TaskId = task.TaskId, Started = true, StreamRequestId = requestId,
+                    WaitingReplyAnchorId = expectedReplyId };
             pending.TaskRegistered.TrySetResult(task.TaskId);
             // Seed persisted timing before entering streaming; process-local clocks do not survive a restart.
             // 先接续正式累计值再进入恢复准备；重启后没有本机时钟，等待新模型启动期间也要保留已有用时。
@@ -422,6 +477,6 @@ public sealed partial class ShellPage
             _ = ReceiveReplyAsync(pending, task.TaskId);
         }
         catch (Exception error) when (error is InvalidOperationException or IOException or UnauthorizedAccessException)
-        { if (!_chatClosing) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。")); }
+        { if (!_chatClosing && showFeedback) ShowActionFeedback(UiText.Get("任务已继续，打开原聊天可查看回复。")); }
     }
 }

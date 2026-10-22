@@ -279,7 +279,7 @@ public partial class App
                         await SettleAsync();
                         CheckNavigationLabels(languageId + " " + width + " DIP retrieval");
                         var scroll = ((Grid)retrieval).Children.OfType<ScrollViewer>().Single();
-                        var bounds = new[] { "RetrievalLocalMode", "RetrievalSemanticMode", "RetrievalRerankMode",
+                        var bounds = new[] { "RetrievalLocalMode", "RetrievalSemanticMode",
                             "RetrievalAddFile", "RetrievalAddFolder", "RetrievalAddLinks", "RetrievalWebMode",
                             "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage", "RetrievalRefresh" }
                             .Select(id => BoundsIn(NativeUi.ById<FrameworkElement>(retrieval, id), retrieval)).ToArray();

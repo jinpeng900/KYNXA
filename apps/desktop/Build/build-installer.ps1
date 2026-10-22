@@ -77,8 +77,7 @@ $required = @('KYNXA.Desktop.exe', 'KYNXA.Desktop.dll', 'coreclr.dll', 'Microsof
     'Styles/Colors.xbf', 'Styles/Dimensions.xbf', 'Styles/Icons.xbf', 'Styles/Controls.xbf',
     'Assets/AppIcon.ico', 'Resources/UI/Brand/kynxa-logo.png',
     'runtime/agent/kynxa-gateway.exe', 'runtime/resource/kynxa-resource-service.exe',
-    'runtime/embedding/builtin-multilingual/onnx/model_quantized.onnx',
-    'runtime/rerank/builtin-multilingual-reranker/onnx/model_quantized.onnx')
+    'runtime/embedding/builtin-multilingual/onnx/model_quantized.onnx')
 foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot $relative) -PathType Leaf)) {
         throw "The release payload is incomplete: $relative"

@@ -109,6 +109,15 @@ async fn execute(
         &Value::String(parts.first().copied().unwrap_or("").into()),
         "taskId",
     )?;
+    if method == "GET" && parts.get(1).copied() == Some("stream") {
+        // The stream gate validates the exact root scope; the runtime then checks the current attempt.
+        // 流入口只核验当前根任务范围；运行时随后核验执行者，不为重连读取完整诊断历史。
+        let task = runtime.tasks.metadata(&task_id).await?;
+        if task.scope.conversation_id != conversation || task.parent_task_id.is_some() {
+            return Err(denied());
+        }
+        return Ok((200, Value::Null));
+    }
     let detail = runtime.tasks.detail(&task_id).await?;
     let scope = &detail["task"]["scope"];
     if scope["conversationId"] != conversation

@@ -183,8 +183,7 @@ if ($Profile -eq 'Full') {
         [void]$bundle.Add($mcpFile.Substring($runtimeRoot.Length + 1).Replace('\', '/'))
     }
 
-    foreach ($model in @(@{ Manifest = 'embedding.json'; Cache = 'embedding/builtin-multilingual'; Output = 'runtime/embedding/builtin-multilingual' },
-                           @{ Manifest = 'reranker.json'; Cache = 'rerank/builtin-multilingual-reranker'; Output = 'runtime/rerank/builtin-multilingual-reranker' })) {
+    foreach ($model in @(@{ Manifest = 'embedding.json'; Cache = 'embedding/builtin-multilingual'; Output = 'runtime/embedding/builtin-multilingual' })) {
         $manifestPath = Join-Path $PSScriptRoot ('native-assets/' + $model.Manifest)
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($asset in $manifest.files) {
@@ -216,7 +215,7 @@ else { Write-Host '[Runtime] Core development profile skips optional models and 
 $assetInputHash = Get-KynxaNativeAssetsInputHash -Profile $Profile -RuntimeIdentifier $RuntimeIdentifier
 # Compiled executables are siblings of these resources; rebuilding them must not invalidate unchanged assets.
 # 编译产物与资源分开记录，重建程序不能使未变化的依赖资源失效。
-Save-KynxaPreparedComponent -Root $runtimeRoot -Component 'native-assets' -InputHash $assetInputHash -Files @($nativePreparedRecords.Values) -Scope @('runtime/native', 'runtime/mcp', 'runtime/embedding', 'runtime/rerank', 'runtime/office')
+Save-KynxaPreparedComponent -Root $runtimeRoot -Component 'native-assets' -InputHash $assetInputHash -Files @($nativePreparedRecords.Values) -Scope @('runtime/native', 'runtime/mcp', 'runtime/embedding', 'runtime/office')
 
 function Get-NativeSourceHash([string]$Directory) {
     $hasher = [Security.Cryptography.SHA256]::Create()

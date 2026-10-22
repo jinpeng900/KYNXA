@@ -43,19 +43,30 @@ public sealed class TasksApiClient : ITasksApi, IDisposable
         _http = http; _ensureReady = ensureReady ?? (_ => Task.CompletedTask); _ownsHttp = ownsHttp;
     }
 
-    public async Task<TaskListResponse> ListAsync(Guid conversationId, Guid? projectId = null,
-        Guid? afterTaskId = null, CancellationToken cancellationToken = default)
+    public Task<TaskListResponse> ListAsync(Guid conversationId, Guid? projectId = null,
+        Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
+        ReadListAsync(conversationId, projectId, afterTaskId, true, cancellationToken);
+
+    // Reopening one chat must not page through other chats in the same project.
+    // 重开单个聊天仅查询该聊天；仍用预期项目复核归属，不分页读取同项目其他聊天。
+    internal Task<TaskListResponse> ListConversationAsync(Guid conversationId, Guid? projectId = null,
+        Guid? afterTaskId = null, CancellationToken cancellationToken = default) =>
+        ReadListAsync(conversationId, projectId, afterTaskId, false, cancellationToken);
+
+    private async Task<TaskListResponse> ReadListAsync(Guid conversationId, Guid? projectId,
+        Guid? afterTaskId, bool includeProjectConversations, CancellationToken cancellationToken)
     {
         using var deadline = CreateDeadline(cancellationToken, 30);
         cancellationToken = deadline.Token;
         string path = $"/api/tasks?conversationId={ValidId(conversationId):D}";
-        if (projectId is Guid project) path += $"&projectId={ValidId(project):D}";
+        if (includeProjectConversations && projectId is Guid project) path += $"&projectId={ValidId(project):D}";
         if (afterTaskId is Guid after) path += $"&afterTaskId={ValidId(after):D}";
         await _ensureReady(cancellationToken);
         var result = await ReadProjectionAsync<TaskListResponse>(path, cancellationToken);
         if (result.Tasks is null || result.Tasks.Length > 100 || (result.HasMore && result.NextTaskId is not { } next)
             || (result.NextTaskId is Guid nextId && (nextId == Guid.Empty || nextId == afterTaskId))) throw Invalid();
-        foreach (var task in result.Tasks) Validate(task, conversationId, projectId, allowProjectConversations: projectId is not null);
+        foreach (var task in result.Tasks) Validate(task, conversationId, projectId,
+            allowProjectConversations: includeProjectConversations && projectId is not null);
         if (result.Tasks.Select(task => task.TaskId).Distinct().Count() != result.Tasks.Length) throw Invalid();
         return result;
     }

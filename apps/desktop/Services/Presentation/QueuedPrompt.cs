@@ -16,6 +16,11 @@ public sealed class QueuedPrompt(Guid id, string text, string? provider, string?
     public string? Model { get; } = model;
     public string PermissionMode { get; } = permissionMode;
     public bool IsSubmitting { get; set; }
+    // Every guidance keeps its original task/request across rejected or uncertain submissions.
+    // 所有引导均保留原任务和请求身份；提交被拒或结果不明时也不能改发新根任务。
+    public bool IsTaskGuidance { get; internal set; }
+    public Guid? TargetTaskId { get; internal set; }
+    public Guid? TargetRequestId { get; internal set; }
     public MessageAttachmentDraft[] AttachmentDrafts { get; } = attachmentDrafts ?? [];
     public List<ChatAttachment> Attachments { get; set; } = (attachmentDrafts ?? []).Select(file => file.ToAttachment()).ToList();
     public string DisplayText => AttachmentDrafts.Length == 0 ? Text :

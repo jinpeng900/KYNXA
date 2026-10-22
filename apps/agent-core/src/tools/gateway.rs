@@ -13,7 +13,7 @@ use std::sync::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-pub(crate) use super::gateway_mcp::{foreground, prewarm, reusable_catalog as reusable_mcp_catalog};
+pub(crate) use super::gateway_mcp::{foreground, reusable_catalog as reusable_mcp_catalog};
 pub(crate) use super::gateway_tool_memory::rank_tool_hints;
 use super::service::ToolSession;
 use crate::gateway_contract::GatewayError;
@@ -43,6 +43,8 @@ pub struct ToolRuntime {
     pub(crate) jobs: tokio::sync::Mutex<HashMap<String, super::gateway_process::HostJob>>,
     pub(crate) schemas: tokio::sync::RwLock<Vec<Value>>,
     pub(crate) tool_memory: super::gateway_tool_memory::ToolMemoryRuntime,
+    pub(crate) semantic: super::gateway_semantic::SemanticRuntime,
+    pub(crate) experience_repository: std::sync::OnceLock<crate::storage::task_repository::TaskRepository>,
     searches: Mutex<HashMap<String, Arc<Mutex<ToolSession>>>>,
     code_versions: Mutex<HashMap<String, Arc<Mutex<super::service_code_versions::CodeVersions>>>>,
     skill_headers: Mutex<HashMap<PathBuf, CachedSkillHeader>>,
@@ -50,6 +52,9 @@ pub struct ToolRuntime {
     pub(crate) mcp_aborters: Mutex<HashMap<String, watch::Sender<bool>>>,
     pub(crate) mcp_lifecycle: super::gateway_mcp::McpLifecycle,
     pub(crate) web_search: super::gateway_search::SearchState,
+    /// Model connection home for built-in sources that reuse a configured provider key.
+    /// 模型连接目录，供复用已配置供应商密钥的内置来源按需读取。
+    pub(crate) model_home: std::sync::OnceLock<PathBuf>,
     pub(crate) web_fetch: super::gateway_web_snapshot::FetchState,
     pub(crate) preview_grants: Mutex<HashMap<String, super::gateway_workspace_preview::PreviewGrant>>,
     pub(crate) terminals: tokio::sync::Mutex<HashMap<String, Arc<super::gateway_workspace_terminal::TerminalSession>>>,
@@ -70,6 +75,8 @@ impl Default for ToolRuntime {
             jobs: Default::default(),
             schemas: Default::default(),
             tool_memory: Default::default(),
+            semantic: Default::default(),
+            experience_repository: Default::default(),
             searches: Default::default(),
             code_versions: Default::default(),
             skill_headers: Default::default(),
@@ -77,6 +84,7 @@ impl Default for ToolRuntime {
             mcp_aborters: Default::default(),
             mcp_lifecycle: Default::default(),
             web_search: Default::default(),
+            model_home: Default::default(),
             web_fetch: Default::default(),
             preview_grants: Default::default(),
             terminals: Default::default(),
@@ -84,6 +92,29 @@ impl Default for ToolRuntime {
             configuration_generation: AtomicU64::new(0),
         }
     }
+}
+
+impl ToolRuntime {
+    pub(crate) fn with_gateway_config(config: &crate::gateway_contract::GatewayConfig) -> Self {
+        let runtime = Self::default();
+        runtime.semantic.install(config);
+        let _ = runtime.model_home.set(config.data_home.clone());
+        runtime
+    }
+}
+
+pub(crate) fn prewarm(context: &GatewayToolContext) -> Value {
+    super::gateway_semantic::prewarm(context);
+    super::gateway_mcp::prewarm(context)
+}
+
+pub(crate) fn experience_identities(context: &GatewayToolContext, names: &[String]) -> Result<Value,GatewayError> {
+    super::gateway_tool_memory::experience_identities(context,names)
+}
+
+pub(crate) async fn verified_experience_hint(context: &GatewayToolContext, query: &str) -> Value {
+    super::gateway_experience::hint(query,context).await
+        .unwrap_or_else(|_|json!({"entries":[],"navigationOnly":true}))
 }
 
 /// Approval belongs to this invocation, never to a model-supplied explanation.
@@ -1018,6 +1049,9 @@ async fn execute_inner(
         target["_metadataOnly"] = json!(true);
         return filesystem(tool_name, target, ctx).await;
     }
+    if tool_name == "knowledge.experience" {
+        return super::gateway_experience::query(args,ctx).await;
+    }
     if tool_name.starts_with("filesystem.") || ["document.read", "document.create", "artifact.open"].contains(&tool_name) {
         return filesystem(tool_name, args, ctx).await;
     }
@@ -1127,6 +1161,7 @@ async fn execute_inner(
         )
         .map_err(|message| failure("TOOL_DISCOVERY_FAILED", &message, 500))?;
         let mut indexes = indexes.as_array().cloned().unwrap_or_default();
+        let semantic = super::gateway_semantic::supplement(ctx,&all,args["query"].as_str().unwrap_or(""),&mut indexes).await;
         rank_tool_hints(ctx, &all, &mut indexes);
         let matching = indexes.iter()
             .filter_map(|hit| hit.as_u64().or_else(|| hit["index"].as_u64()))
@@ -1136,7 +1171,7 @@ async fn execute_inner(
         let limit = args["limit"].as_u64().unwrap_or(20).min(20) as usize;
         return Ok(
             json!({"tools":matching.iter().skip(offset).take(limit).map(|tool|json!({"name":tool["name"],"description":tool["description"],"source":tool["source"],"state":tool["state"],"runtimeCompatible":tool["runtimeCompatible"],"code":tool["code"]})).collect::<Vec<_>>(),
-            "total":matching.len(),"nextOffset":if offset+limit<matching.len(){json!(offset+limit)}else{Value::Null}}),
+            "total":matching.len(),"nextOffset":if offset+limit<matching.len(){json!(offset+limit)}else{Value::Null},"discovery":semantic}),
         );
     }
     if let Some(execute) = &ctx.external_execute {
@@ -1195,7 +1230,7 @@ fn execution_environment(
 
 /// Saved request snapshots can lose capabilities, but configuration changes cannot grant them new ones.
 /// 已保存的请求快照可以被撤销能力，配置更新不能给旧请求扩大能力。
-async fn checked_configuration(
+pub(crate) async fn checked_configuration(
     ctx: &GatewayToolContext,
 ) -> Result<GatewayToolContext, GatewayError> {
     let mut checked = ctx.clone();
@@ -1877,6 +1912,7 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     ctx.runtime
         .configuration_generation
         .fetch_add(1, Ordering::AcqRel);
+    ctx.runtime.semantic.clear();
     let result = native(ctx, "config.update", json!({"input":input})).await?;
     ctx.runtime.web_search.clear_queries();
     ctx.runtime.web_fetch.clear();
@@ -1885,16 +1921,16 @@ pub async fn update_config(input: Value, ctx: &GatewayToolContext) -> Result<Val
     let mut updated = ctx.clone();
     updated.config = result.clone();
     super::gateway_tool_memory::synchronize(&updated).await;
-    super::gateway_mcp::prewarm(&updated);
+    prewarm(&updated);
     Ok(result)
 }
 
-/// Read resolved MCP state only; a settings page must never initiate a connection handshake.
-/// 只读取已完成的 MCP 连接状态；打开设置不能发起握手，也不能把默认启用说成已就绪。
+/// Read saved source credentials and resolved MCP state; settings never initiate a connection handshake.
+/// 只读取来源已存凭据及已有 MCP 状态；打开设置不握手，也不把已配置说成网络已经连通。
 pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
     let diagnostics = super::gateway_mcp::diagnostics(ctx).await;
     let loaded = ctx.runtime.schemas.read().await;
-    let rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
+    let mut rows=ctx.config["mcpServers"].as_array().into_iter().flatten().filter(|server|{
         super::service_web::search_server(server)
             || loaded.iter().any(|tool|tool["serverId"]==server["id"]&&super::service_web::provider_kind(tool).is_some())
     }).map(|server|{
@@ -1907,6 +1943,17 @@ pub async fn providers(ctx: &GatewayToolContext, selected_id: &str) -> Value {
             "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms),
             "origin":server["origin"].as_str().unwrap_or("user")})
     }).collect::<Vec<_>>();
+    drop(loaded);
+    // This source uses the existing official model credential, never a copied key or a settings-time search request.
+    // 内置来源复用现有官方模型凭据，不复制密钥，也不因打开设置发出搜索请求。
+    let builtin = super::gateway_deepseek_search::source(ctx).await;
+    let has_credential = builtin.is_some();
+    let cooling = builtin.as_ref().and_then(|source| ctx.runtime.web_search.cooling(source));
+    rows.push(json!({"id":super::gateway_deepseek_search::SOURCE_ID,"name":"DeepSeek Search",
+        "origin":"builtin","enabled":true,"ready":has_credential && cooling.is_none(),
+        "state":if !has_credential{"credential-required"}else if cooling.is_some(){"cooldown"}else{"configured"},
+        "credentialState":if has_credential{"configured"}else{"unavailable"},
+        "retryAfterMs":cooling.as_ref().and_then(|error|error.retry_after_ms)}));
     json!({"selectedId":selected_id,"providers":rows})
 }
 
@@ -2214,6 +2261,33 @@ pub(crate) fn test_context() -> (GatewayToolContext, watch::Sender<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_providers_describe_builtin_credentials_without_connecting_or_exposing_them() {
+        let (ctx, _sender) = test_context();
+        let root = ctx.workdir.parent().unwrap().to_owned();
+        let missing = providers(&ctx, "deepseek-search").await;
+        let row = missing["providers"].as_array().unwrap().iter()
+            .find(|row| row["id"] == "deepseek-search").unwrap();
+        assert_eq!(row["ready"], false);
+        assert_eq!(row["credentialState"], "unavailable");
+        let home = root.join("models-home");
+        std::fs::create_dir_all(&home).unwrap();
+        ctx.runtime.model_home.set(home.clone()).unwrap();
+        std::fs::write(home.join("connections.json"), json!({"version":1,"providers":[{
+            "providerId":"deepseek","displayName":"DeepSeek","baseUrl":"https://api.deepseek.com",
+            "apiKey":"fixture-provider-list-secret","models":["deepseek-flash"],"protocol":"openai-completions"
+        }]}).to_string()).unwrap();
+        let configured = providers(&ctx, "deepseek-search").await;
+        let row = configured["providers"].as_array().unwrap().iter()
+            .find(|row| row["id"] == "deepseek-search").unwrap();
+        assert_eq!(row["state"], "configured");
+        assert_eq!(row["credentialState"], "configured");
+        assert_eq!(row["origin"], "builtin");
+        assert!(!configured.to_string().contains("fixture-provider-list-secret"));
+        assert!(super::super::gateway_mcp::diagnostics(&ctx).await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn task_file_write_binding_preserves_live_hash_protection_and_rejects_target_or_configuration_changes() {
@@ -2988,15 +3062,26 @@ mod tests {
                 .code,
             "APP_SKILL_NOT_FOUND"
         );
+        // A task grant bound to the skill call cannot be reused for another tool.
+        // 绑定到技能调用的任务授权不能挪用于其他工具。
         assert_eq!(
             execute("mcp.fixture.echo", json!({}), &approved)
+                .await
+                .unwrap_err()
+                .code,
+            "TOOL_APPROVAL_SCOPE_CHANGED"
+        );
+        let mut approved_without_grant = approved.clone();
+        approved_without_grant.config["approvedInvocation"] = Value::Null;
+        assert_eq!(
+            execute("mcp.fixture.echo", json!({}), &approved_without_grant)
                 .await
                 .unwrap_err()
                 .code,
             "MCP_SERVER_NOT_FOUND"
         );
         assert_eq!(
-            execute("mcp.replacement.echo", json!({}), &approved)
+            execute("mcp.replacement.echo", json!({}), &approved_without_grant)
                 .await
                 .unwrap_err()
                 .code,

@@ -143,7 +143,7 @@ public sealed class ConversationPromptQueue : UserControl
         row.Down.Click += (_, _) => Move(row, 1);
         row.Editor.TextChanged += (_, _) =>
         {
-            if (row.IsEditing && !row.Prompt.IsSubmitting)
+            if (row.IsEditing && !row.Prompt.IsSubmitting && !row.Prompt.IsTaskGuidance)
             {
                 row.Prompt.Text = row.Editor.Text;
                 row.Preview.Text = row.Prompt.DisplayText;
@@ -166,17 +166,19 @@ public sealed class ConversationPromptQueue : UserControl
     private void UpdateRow(MessageRow row, int index)
     {
         if (!row.IsEditing) { row.Preview.Text = row.Prompt.DisplayText; row.Editor.Text = row.Prompt.Text; }
-        bool editable = !row.Prompt.IsSubmitting;
+        bool interactive = !row.Prompt.IsSubmitting;
+        bool editable = interactive && !row.Prompt.IsTaskGuidance;
         row.Editor.IsReadOnly = !editable;
-        row.Steer.IsEnabled = editable && _canSteer;
-        row.Delete.IsEnabled = row.More.IsEnabled = row.Edit.IsEnabled = editable;
-        row.Up.IsEnabled = editable && index > 0 && !_messages[index - 1].IsSubmitting;
-        row.Down.IsEnabled = editable && index + 1 < _messages.Length && !_messages[index + 1].IsSubmitting;
+        row.Steer.IsEnabled = interactive && _canSteer;
+        row.Delete.IsEnabled = row.More.IsEnabled = interactive;
+        row.Edit.IsEnabled = editable;
+        row.Up.IsEnabled = interactive && index > 0 && !_messages[index - 1].IsSubmitting;
+        row.Down.IsEnabled = interactive && index + 1 < _messages.Length && !_messages[index + 1].IsSubmitting;
     }
 
     private static void BeginEdit(MessageRow row)
     {
-        if (row.Prompt.IsSubmitting) return;
+        if (row.Prompt.IsSubmitting || row.Prompt.IsTaskGuidance) return;
         row.OriginalText = row.Prompt.Text;
         row.Editor.Text = row.Prompt.Text;
         row.IsEditing = true;

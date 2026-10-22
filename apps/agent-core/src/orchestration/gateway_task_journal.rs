@@ -25,6 +25,45 @@ struct EventBuffer {
     bytes: usize,
 }
 
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn durable_journal_cancelled_flush_keeps_original_ids_until_commit_acknowledgement() {
+        let root = std::env::temp_dir().join(format!("kynxa-durable-journal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = TaskJournal::begin(&root, &NewTask {
+            request_id:uuid::Uuid::new_v4().to_string(), goal:"Durable stream fixture".into(), acceptance:Vec::new(),
+            scope:TaskScope { project_id:None, conversation_id:uuid::Uuid::new_v4().to_string(), permission_snapshot:json!({"permissionMode":"full"}) },
+            parent_task_id:None, dependency_ids:Vec::new(), budget:TaskBudget::default(), input_reference:None,
+        }, "journal-fixture", 60_000).unwrap();
+        // Disable only the test pump so cancellation targets the foreground flush deterministically.
+        // 仅在夹具中关闭定时泵，使取消准确作用于前台flush，而不是由时间竞争决定测试结果。
+        journal.scheduled.store(true, Ordering::Release);
+        journal.emit_control("text_delta", &json!({"type":"text_delta","delta":"preserved 🏰"})).unwrap();
+        let original_id = journal.pending.lock().unwrap().events[0].0.clone();
+        let writer = crate::storage::sqlite_connections::acquire_write(&root, &root.join("Agent/tasks.sqlite"), 30_000).unwrap();
+        let started = Arc::new(AtomicBool::new(false));
+        let operation = journal.clone(); let observed = started.clone();
+        let flushing = tokio::spawn(async move { observed.store(true, Ordering::Release); operation.flush().await });
+        while !started.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        flushing.abort(); assert!(flushing.await.unwrap_err().is_cancelled());
+        assert_eq!(journal.pending.lock().unwrap().events[0].0, original_id);
+        drop(writer);
+        journal.flush().await.unwrap();
+        assert!(journal.pending.lock().unwrap().events.is_empty());
+        let events = journal.repository.read_events(journal.task_id(), 0, 512).unwrap();
+        let saved = events.iter().filter(|event|event.kind=="text_delta").collect::<Vec<_>>();
+        assert_eq!(saved.len(),1); assert_eq!(saved[0].event_id,original_id);
+        assert_eq!(saved[0].payload["delta"],"preserved 🏰");
+        journal.scheduled.store(false, Ordering::Release);
+        journal.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        drop(journal); crate::storage::sqlite_connections::drain_root(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// An attempt owns this bridge; stable work identity stays in TaskRepository across replacement.
 /// 尝试拥有本接线；更换执行者时稳定工作身份和已取得回执继续由 TaskRepository 保存。
 pub struct TaskJournal {
@@ -257,26 +296,27 @@ impl TaskJournal {
     pub async fn flush(&self) -> Result<()> {
         let _serial = self.flush_serial.lock().await;
         let batch = {
-            let mut pending = self.pending.lock().map_err(|_| {
+            let pending = self.pending.lock().map_err(|_| {
                 GatewayError::new(
                     "TASK_EVENT_BUFFER_FAILED",
                     "Task event buffer is unavailable. / 任务事件缓存不可用。",
                     500,
                 )
             })?;
-            pending.bytes = 0;
-            std::mem::take(&mut pending.events)
+            // Keep originals owned by the journal until commit acknowledgement, including future cancellation.
+            // 提交确认前原事件始终归日志所有；等待future被取消也不能丢掉待确认正文。
+            pending.events.clone()
         };
         if batch.is_empty() {
             return Ok(());
         }
         let repository = self.repository.clone();
         let token = self.token.clone();
-        let dispatch = batch.clone();
+        let event_ids = batch.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>();
         let result = tokio::task::spawn_blocking(move || {
             // Stable event IDs make a partly committed batch safe to replay after a failure.
             // 稳定事件 ID 允许部分批次提交后安全重放，单次事务仍遵守仓储的 512 条上限。
-            for portion in dispatch.chunks(512) {
+            for portion in batch.chunks(512) {
                 repository.append_events(&token, portion)?;
             }
             Ok::<(), crate::storage::ContractError>(())
@@ -290,11 +330,16 @@ impl TaskJournal {
             )
         })
         .and_then(|result| result.map(|_| ()).map_err(GatewayError::from));
-        if let Err(error) = &result {
-            let mut pending = self.pending.lock().map_err(|_| error.clone())?;
-            let mut restored = batch;
-            restored.append(&mut pending.events);
-            pending.events = restored;
+        if result.is_ok() {
+            let mut pending = self.pending.lock().map_err(|_| GatewayError::new(
+                "TASK_EVENT_BUFFER_FAILED", "Task event buffer is unavailable. / 任务事件缓存不可用。", 500))?;
+            if pending.events.len() < event_ids.len()
+                || !pending.events.iter().zip(&event_ids).all(|((id, _, _), expected)| id == expected)
+            {
+                return Err(GatewayError::new("TASK_EVENT_BUFFER_FAILED",
+                    "Task event acknowledgement does not match the queued batch. / 事件提交确认与原队列不匹配。", 500));
+            }
+            pending.events.drain(..event_ids.len());
             pending.bytes = pending
                 .events
                 .iter()
@@ -315,6 +360,9 @@ impl TaskJournal {
             .lock()
             .ok()
             .and_then(|error| error.clone())
+    }
+    pub(crate) fn remember_persistence_error(&self, error: GatewayError) {
+        if let Ok(mut saved) = self.last_flush_error.lock() { *saved = Some(error); }
     }
 
     /// Only task-owned work context/logs use blobs; existing chat/tool originals stay referenced.

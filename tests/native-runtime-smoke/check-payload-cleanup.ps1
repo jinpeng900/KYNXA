@@ -5,13 +5,19 @@ $fixture = Join-Path $repositoryRoot ('artifacts/development/payload-cleanup-' +
 $script = Join-Path $repositoryRoot 'apps/desktop/Build/remove-obsolete-backend-payload.ps1'
 $utf8 = [Text.UTF8Encoding]::new($false)
 foreach ($relative in @('runtime/agent', 'runtime/node_modules/package', 'model-gateway/orchestration', 'Resources/Transcript', 'Data/Chats',
+    'runtime/rerank/builtin-multilingual-reranker/onnx', 'runtime/embedding/builtin-multilingual',
+    'AppX/runtime/rerank/builtin-multilingual-reranker/onnx', 'AppX/runtime/embedding/builtin-multilingual',
     'AppX/runtime/node_modules/package', 'AppX/model-gateway/orchestration', 'AppX/Resources/Transcript', 'AppX/Data/Chats')) {
     [IO.Directory]::CreateDirectory((Join-Path $fixture $relative)) | Out-Null
 }
 foreach ($relative in @('KYNXA.Desktop.dll', 'runtime/agent/kynxa-gateway.exe', 'runtime/node.exe', 'runtime/node_modules/package/index.js',
     'model-gateway/server.mjs', 'model-gateway/orchestration/runtime.mjs', 'Resources/Transcript/transcript.js', 'Data/Chats/user.json',
     'AppX/KYNXA.Desktop.dll', 'AppX/runtime/node.exe', 'AppX/runtime/node_modules/package/index.js', 'AppX/model-gateway/server.mjs',
-    'AppX/model-gateway/orchestration/runtime.mjs', 'AppX/Resources/Transcript/transcript.js', 'AppX/Data/Chats/user.json')) {
+    'AppX/model-gateway/orchestration/runtime.mjs', 'AppX/Resources/Transcript/transcript.js', 'AppX/Data/Chats/user.json',
+    'runtime/rerank/builtin-multilingual-reranker/manifest.json', 'runtime/rerank/builtin-multilingual-reranker/onnx/model_quantized.onnx',
+    'runtime/embedding/builtin-multilingual/manifest.json',
+    'AppX/runtime/rerank/builtin-multilingual-reranker/manifest.json', 'AppX/runtime/rerank/builtin-multilingual-reranker/onnx/model_quantized.onnx',
+    'AppX/runtime/embedding/builtin-multilingual/manifest.json')) {
     [IO.File]::WriteAllText((Join-Path $fixture $relative), 'isolated cleanup fixture', $utf8)
 }
 $legacyRevisionName = 'a' * 64
@@ -30,6 +36,10 @@ foreach ($prefix in @('', 'AppX/')) {
     if ([IO.File]::Exists((Join-Path $fixture ($prefix + 'runtime/node.exe'))) -or
         [IO.Directory]::Exists((Join-Path $fixture ($prefix + 'runtime/node_modules'))) -or
         [IO.Directory]::Exists((Join-Path $fixture ($prefix + 'model-gateway')))) { throw 'Known obsolete backend payload survived.' }
+    if ([IO.Directory]::Exists((Join-Path $fixture ($prefix + 'runtime/rerank/builtin-multilingual-reranker'))) -or
+        -not [IO.File]::Exists((Join-Path $fixture ($prefix + 'runtime/embedding/builtin-multilingual/manifest.json')))) {
+        throw 'Retired neural model survived cleanup or the retained E5 payload was removed.'
+    }
     if ([IO.Directory]::Exists((Join-Path $fixture ($prefix + 'runtime/agent/revisions/' + $legacyRevisionName))) -or
         -not [IO.File]::Exists((Join-Path $fixture ($prefix + 'runtime/agent/revisions/not-a-legacy-revision/preserved.txt')))) {
         throw 'Exact obsolete revision cleanup removed unknown content or retained a known NAPI revision.'
@@ -77,6 +87,19 @@ if (-not $rejected -or -not [IO.File]::Exists((Join-Path $invalidRevision 'kynxa
     -not [IO.File]::Exists((Join-Path $fixture 'runtime/node.exe'))) { throw 'Obsolete revision shape/data rejection was not atomic.' }
 Remove-Item -LiteralPath (Join-Path $invalidRevision 'catalog.json')
 
+# A model directory is not a blanket deletion grant; unknown user files preserve the whole batch.
+# 模型目录不是任意删除授权；发现用户未知文件时整批保留。
+$retiredModel = Join-Path $fixture 'runtime/rerank/builtin-multilingual-reranker'
+[IO.Directory]::CreateDirectory((Join-Path $retiredModel 'onnx')) | Out-Null
+[IO.File]::WriteAllText((Join-Path $retiredModel 'onnx/model_quantized.onnx'), 'retired model fixture', $utf8)
+[IO.File]::WriteAllText((Join-Path $retiredModel 'user.sqlite'), 'unknown data must survive', $utf8)
+$rejected = $false
+try { & $script -BundleRoot $fixture } catch { $rejected = $_.Exception.Message.Contains('Unknown content in the retired reranker') }
+if (-not $rejected -or -not [IO.File]::Exists((Join-Path $retiredModel 'user.sqlite')) -or
+    -not [IO.File]::Exists((Join-Path $retiredModel 'onnx/model_quantized.onnx')) -or
+    -not [IO.File]::Exists((Join-Path $fixture 'runtime/node.exe'))) { throw 'Retired model data rejection was not atomic.' }
+Remove-Item -LiteralPath (Join-Path $retiredModel 'user.sqlite')
+
 Remove-Item -LiteralPath (Join-Path $fixture 'AppX/KYNXA.Desktop.dll')
 $rejected = $false
 try { & $script -BundleRoot $fixture } catch { $rejected = $_.Exception.Message.Contains('Desktop assembly marker is absent in the package staging folder') }
@@ -95,4 +118,32 @@ $outside = Join-Path ([IO.Path]::GetTempPath()) ('kynxa-cleanup-scope-' + [Guid]
 $rejected = $false
 try { & $script -BundleRoot $outside } catch { $rejected = $_.Exception.Message.Contains('limited to the verified') }
 if (-not $rejected) { throw 'Unverified output scope was accepted.' }
-Write-Output 'PASS: 11 root/AppX/revision cleanup, unknown/frontend/data preservation, idempotency, atomic shape/data rejection, parent/staging identity and output-scope checks.'
+
+# Incremental publishing owns the retired model only; other runtimes and E5 must survive.
+# 增量发布清理仅负责旧模型，保留其他运行时与 E5 载荷。
+$publication = Join-Path $fixture 'published'
+foreach ($relative in @('runtime/agent', 'runtime/rerank/builtin-multilingual-reranker/onnx', 'runtime/embedding/builtin-multilingual')) {
+    [IO.Directory]::CreateDirectory((Join-Path $publication $relative)) | Out-Null
+}
+foreach ($relative in @('KYNXA.Desktop.dll', 'runtime/agent/kynxa-gateway.exe', 'runtime/node.exe',
+    'runtime/embedding/builtin-multilingual/manifest.json', 'runtime/rerank/builtin-multilingual-reranker/manifest.json',
+    'runtime/rerank/builtin-multilingual-reranker/onnx/model_quantized.onnx')) {
+    [IO.File]::WriteAllText((Join-Path $publication $relative), 'isolated publication fixture', $utf8)
+}
+& $script -BundleRoot $publication -PublishedOutput
+if ([IO.Directory]::Exists((Join-Path $publication 'runtime/rerank/builtin-multilingual-reranker')) -or
+    -not [IO.File]::Exists((Join-Path $publication 'runtime/embedding/builtin-multilingual/manifest.json')) -or
+    -not [IO.File]::Exists((Join-Path $publication 'runtime/node.exe'))) { throw 'Publication cleanup retained BGE or removed unrelated runtime assets.' }
+
+# Publication cannot broaden the old cleanup grant to an arbitrary caller-selected directory.
+# 发布不能把旧清理授权扩宽到任意调用方目录；外部输出只告警保留。
+[IO.File]::WriteAllText((Join-Path $outside 'preserved.txt'), 'unowned publication fixture', $utf8)
+& $script -BundleRoot $outside -PublishedOutput -WarningAction SilentlyContinue
+if (-not [IO.File]::Exists((Join-Path $outside 'preserved.txt'))) { throw 'Unmanaged publication was modified.' }
+
+$packaging = [xml][IO.File]::ReadAllText((Join-Path $repositoryRoot 'apps/desktop/Build/RuntimePackaging.targets'), $utf8)
+$publicationTarget = @($packaging.Project.Target | Where-Object { $_.Name -eq 'RemoveRetiredRetrievalModelFromPublishedOutput' })
+if ($publicationTarget.Count -ne 1 -or $publicationTarget[0].AfterTargets -ne 'Publish' -or
+    $publicationTarget[0].Exec.Command -notmatch '\$\(PublishDir\)' -or
+    $publicationTarget[0].Exec.Command -notmatch '-PublishedOutput') { throw 'The publication cleanup is not wired to the actual PublishDir after Publish.' }
+Write-Output 'PASS: 16 root/AppX/revision/model/publish cleanup, E5/frontend/data preservation, idempotency, atomic shape/data rejection, parent/staging identity, publish wiring and output-scope checks.'

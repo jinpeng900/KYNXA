@@ -65,6 +65,10 @@ struct WorkerContext {
     changed_files: Vec<Value>,
     #[serde(default)]
     loaded_tools: Vec<Value>,
+    /// In-memory request series; a resumed child simply starts a new one.
+    /// 仅在内存中的请求序列；恢复后的子任务重新开始序列。
+    #[serde(skip)]
+    tool_series: crate::models::tool_updates::ToolSeries,
     #[serde(default)]
     acceptance_requirements: Vec<String>,
     #[serde(default)]
@@ -515,10 +519,16 @@ async fn compact_child(
     catalog: &[Value],
     input_budget: u64,
     allocation: &Value,
+    structural_tools: bool,
 ) -> Result<()> {
     let original = checkpoint(run,journal, state, "compacting").await?;
     let protocol_name = protocol::protocol(connection);
     let schemas = gateway_loop::model_tool_declarations(protocol_name, catalog);
+    let schemas = if structural_tools {
+        protocol::project_tool_declarations(connection, &schemas, "structural")?
+    } else { schemas };
+    let wire_prefix = crate::models::gateway_context::summary_prefix(
+        connection, model, &state.history, system, &schemas, &state.tool_series)?;
     let summary_runtime = runtime.clone();
     let summary_run = run.clone();
     let summary_context = ctx.clone();
@@ -550,7 +560,7 @@ async fn compact_child(
                 .0
             })
         });
-    let projected = crate::models::gateway_context::compact_request_with_executor(connection, model, &state.history, system, &json!({"inputBudgetTokens":input_budget,"contextWindowTokens":window,"providerMaxInputTokens":allocation["providerMaxInputTokens"],"providerMaxOutputTokens":allocation["providerMaxOutputTokens"],"declarations":schemas,"summarySources":[],"historySources":state.history_sources,"resultSources":state.result_sources,"dataRoot":runtime.config.data_root,"conversationId":run.conversation_id,"requestId":run.request_id}), run.cancellation.subscribe(), None, Some(summary_executor)).await?;
+    let projected = crate::models::gateway_context::compact_request_with_executor(connection, model, &state.history, system, &json!({"inputBudgetTokens":input_budget,"contextWindowTokens":window,"providerMaxInputTokens":allocation["providerMaxInputTokens"],"providerMaxOutputTokens":allocation["providerMaxOutputTokens"],"declarations":schemas,"wireRequestPrefix":wire_prefix,"summarySources":[],"historySources":state.history_sources,"resultSources":state.result_sources,"dataRoot":runtime.config.data_root,"conversationId":run.conversation_id,"requestId":run.request_id}), run.cancellation.subscribe(), None, Some(summary_executor)).await?;
     if projected.audit["currentStepCheckpoint"] == true
         || projected.audit["reducedTokens"].as_u64().unwrap_or(0) > 0
     {
@@ -788,6 +798,7 @@ async fn execute_loop(
         })?;
     gateway_loop::prepare_managed_connection(runtime, &mut connection, model, run.cancellation.subscribe(),
         !run.is_background_recovery.load(std::sync::atomic::Ordering::Acquire)).await?;
+    crate::models::provider_routes::project_connection(&mut connection, model);
     let local =
         gateway_config::observe_local(&connection, model, None, run.cancellation.subscribe())
             .await
@@ -940,8 +951,25 @@ async fn execute_loop(
                 }
                 checkpoint(run,journal,state,"round-segment-renewed").await?;
             }
-            // Per-request declarations may shrink; loaded definitions remain available for decoding and execution.
-            // 单次声明可以裁剪；已加载定义保留供解码与执行，不能因上下文授额被永久卸载。
+            // Revocations and upgrades reconcile before pinning; cached metadata never grants a new child capability.
+            // 保留声明前先核对撤权与升级；仅刷新已有缓存定义，不能给子任务新增授权或发起连接。
+            ctx = tools::checked_configuration(&ctx).await?;
+            let reusable = tools::reusable_mcp_catalog(&ctx);
+            catalog.retain(|tool| !tool["name"].as_str().is_some_and(|name| name.starts_with("mcp.")) ||
+                reusable.iter().any(|current| current["name"] == tool["name"]));
+            for tool in &mut catalog {
+                if let Some(current) = reusable.iter().find(|current| current["name"] == tool["name"]) {
+                    *tool = current.clone();
+                }
+            }
+            let authority = json!([ctx.permission_mode,ctx.project_id,ctx.authorized_roots,
+                ctx.config["configurationGeneration"],ctx.config["mcpConfigurationGeneration"],live_memory.block]);
+            let authorized_schemas = gateway_loop::model_tool_declarations(protocol::protocol(&connection), &catalog);
+            let authorized_schemas = if repairs > 0 {
+                protocol::project_tool_declarations(&connection,&authorized_schemas,"structural")?
+            } else { authorized_schemas };
+            state.tool_series.reconcile(&connection,&authorized_schemas,&authority);
+            let mut required = state.tool_series.required_tool_names(&connection);
             let mut declared_catalog = catalog.clone();
             if state.review_pending { declared_catalog.clear(); }
             declared_catalog.sort_by_key(|tool| {
@@ -968,7 +996,20 @@ async fn execute_loop(
                 .saturating_add(crate::models::protocol::estimate_tokens(&system))
                     > input_budget * 7 / 10
             {
-                declared_catalog.pop();
+                if let Some(position) = declared_catalog.iter().rposition(|tool|
+                    !required.contains(&crate::models::protocol::wire_name(tool["name"].as_str().unwrap_or("")))) {
+                    declared_catalog.remove(position);
+                } else {
+                    let fixed = crate::models::protocol::estimate_tokens(&json!(gateway_loop::model_tool_declarations(
+                        protocol::protocol(&connection), &declared_catalog)).to_string())
+                        .saturating_add(crate::models::protocol::estimate_tokens(&system));
+                    if fixed > input_budget {
+                        // A genuine hard-window repair may rebuild declarations; soft compaction never drops pinned tools.
+                        // 真正硬窗口不足才明确重建声明；普通压缩不能删除已固定且仍获授权的工具。
+                        state.tool_series.reset();
+                        required.clear();
+                    } else { break; }
+                }
             }
             let previous_compactions = state.compactions;
             compact_child(
@@ -984,6 +1025,7 @@ async fn execute_loop(
                 &declared_catalog,
                 input_budget,
                 &allocation,
+                repairs > 0,
             )
             .await?;
             if state.compactions > previous_compactions {
@@ -1009,7 +1051,9 @@ async fn execute_loop(
                 &schemas,
                 true,
             )?;
-            let cache_policy = protocol::apply_prompt_cache(&connection, model, &mut body, &cache_scope, &cache_stable_system);
+            let tool_update = crate::models::tool_updates::project(&connection, &mut body, &mut state.tool_series);
+            let mut cache_policy = protocol::apply_prompt_cache(&connection, model, &mut body, &cache_scope, &cache_stable_system);
+            if !tool_update.is_null() { cache_policy["toolUpdates"] = tool_update; }
             let body_has_images = crate::models::protocol::image_inputs(&body) > 0;
             let body_hashes=if body_has_images{task::model_visual_hashes(&body)}else{Vec::new()};
             let delivered_visual_ids: Vec<String> = state.receipts.iter().filter(|saved|

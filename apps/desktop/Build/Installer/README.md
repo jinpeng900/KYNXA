@@ -40,7 +40,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/desktop/Build/build-des
 
 `-ModelDownloadSourcesPath` 用于选择随产品分发的模型来源模板；`-DownloadSourcesPath` 用于构建机下载来源及发布资产配置。`installerAssets.<资产ID>.sources` 可追加原站或镜像 URL，`installerReleaseSources` 可声明安装包实际分发地址，均不改变固定版本、大小和 SHA-256。
 
-载荷只包含软件运行文件、固定私有运行时、浏览器、E5/BGE 模型及许可证，不应含用户数据、开发缓存、测试文件、私有凭据或可选大型对话模型。`Data`、`Extensions`、开发 PDB 和 `prerequisites` 从软件通配复制中排除；WebView2 离线安装程序以临时先决组件单独打包。
+载荷只包含软件运行文件、固定私有运行时、浏览器、E5 模型及许可证，不应含用户数据、开发缓存、测试文件、私有凭据或可选大型对话模型。`Data`、`Extensions`、开发 PDB 和 `prerequisites` 从软件通配复制中排除；WebView2 离线安装程序以临时先决组件单独打包。
 
 ## 安装界面和配置合同
 

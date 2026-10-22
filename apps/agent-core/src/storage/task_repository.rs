@@ -5,8 +5,14 @@
 mod cleanup;
 #[path = "task_repository_contracts.rs"]
 mod contracts;
+#[path = "task_repository_experiences.rs"]
+mod verified_experiences;
 #[path = "task_repository_schema.rs"]
 mod schema;
+#[path = "task_event_codec.rs"]
+mod event_codec;
+#[path = "task_stream_projection.rs"]
+mod stream_projection;
 pub use cleanup::{TaskCleanupFile, TaskCleanupPlan};
 pub use contracts::*;
 
@@ -70,7 +76,8 @@ fn raw<T: Serialize>(value: &T) -> Result<String> {
     Ok(raw)
 }
 fn decode<T: DeserializeOwned>(raw: String) -> Result<T> {
-    serde_json::from_str(&raw).map_err(|_| failure())
+    let original = event_codec::expand(&raw, MAX_RECORD_BYTES).ok_or_else(failure)?;
+    serde_json::from_str(&original).map_err(|_| failure())
 }
 fn canonical(value: Value) -> Value {
     match value {
@@ -235,7 +242,8 @@ fn append(
         payload: payload.clone(),
         created_at_ms: now_ms(),
     };
-    connection.execute("INSERT INTO task_events(task_id,sequence,event_id,fingerprint,document) VALUES(?,?,?,?,?)",params![task.task_id,event.sequence,event_id,digest,raw(&event)?]).map_err(|_| failure())?;
+    let document = event_codec::store(&event, raw(&event)?);
+    connection.execute("INSERT INTO task_events(task_id,sequence,event_id,fingerprint,document) VALUES(?,?,?,?,?)",params![task.task_id,event.sequence,event_id,digest,document]).map_err(|_| failure())?;
     save_task(connection, task)?;
     Ok(event)
 }
@@ -1273,6 +1281,103 @@ impl TaskRepository {
         rows.map(|row| decode(row.map_err(|_| failure())?))
             .collect()
     }
+    /// Read a committed display suffix after the formal message's saved stream watermark.
+    /// 从正式消息已保存水位之后回读已提交展示增量；不结算模型、不复做工具，也不改变正式上下文。
+    pub fn stream_projection(&self, task_id: &str, request_id: &str, reply_id: &str, after_stream_sequence: u64) -> Result<Value> {
+        identifier(task_id)?; identifier(request_id)?; identifier(reply_id)?;
+        let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
+        let task = row_task(&connection, task_id)?;
+        if task.request_id != request_id && !(task.parent_task_id.is_some() && task.task_id == request_id) {
+            return Err(invalid("Stream request does not belong to this task. / 流请求不属于本任务。"));
+        }
+        let mut projection = stream_projection::StreamProjection::new(&task.scope.conversation_id, request_id, reply_id, after_stream_sequence);
+        let mut query = connection.prepare_cached("SELECT document FROM task_events WHERE task_id=? AND json_extract(document,'$.kind') IN ('text_delta','reasoning_delta','assistant_segment','content_snapshot') ORDER BY sequence")
+            .map_err(|_| failure())?;
+        let rows = query.query_map([task_id], |row| row.get::<_, String>(0)).map_err(|_| failure())?;
+        for row in rows { projection.observe(&decode::<TaskEvent>(row.map_err(|_| failure())?)?); }
+        Ok(projection.finish())
+    }
+
+    /// Page original committed display events by the task keyset, without rebuilding or retaining the old prefix.
+    /// 按任务键集分页读原始已提交展示事件；不在仓储重建或累计整段旧前缀，由调用端逐页核对和保存水位。
+    pub fn stream_projection_page(&self, task_id: &str, request_id: &str, reply_id: &str,
+        after_task_sequence: u64, through_task_sequence: Option<u64>, maximum_events: usize,
+        maximum_bytes: usize) -> Result<Value> {
+        identifier(task_id)?; identifier(request_id)?; identifier(reply_id)?;
+        let connection = sqlite_connections::acquire(&self.root,&self.path,30_000)?;
+        let task = row_task(&connection,task_id)?;
+        if task.request_id != request_id && !(task.parent_task_id.is_some() && task.task_id == request_id) {
+            return Err(invalid("Stream request does not belong to this task. / 流请求不属于本任务。"));
+        }
+        let horizon = through_task_sequence.unwrap_or(task.event_sequence).min(task.event_sequence);
+        let limit = maximum_events.clamp(1,512);
+        let byte_limit = maximum_bytes.clamp(1,8*1024*1024);
+        let mut query = connection.prepare_cached("SELECT sequence,document FROM task_events WHERE task_id=? AND sequence>? AND sequence<=? AND json_extract(document,'$.kind') IN ('text_delta','reasoning_delta','assistant_segment','content_snapshot') ORDER BY sequence LIMIT ?")
+            .map_err(|_|failure())?;
+        let rows = query.query_map(params![task_id,after_task_sequence,horizon,(limit+1) as i64],
+            |row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?))).map_err(|_|failure())?;
+        let mut events = Vec::<TaskEvent>::new();
+        let mut cursor = after_task_sequence;
+        let mut bytes = 0usize;
+        let mut visited = 0usize;
+        let mut has_more = false;
+        let mut stream_sequence = 0u64;
+        for row in rows {
+            let (sequence,document) = row.map_err(|_|failure())?;
+            if visited == limit {has_more=true;break;}
+            let event:TaskEvent = decode(document)?;
+            let owned = event.payload["conversationId"] == task.scope.conversation_id
+                && event.payload["requestId"] == request_id && event.payload["replyMessageId"] == reply_id;
+            let size = if owned {raw(&event)?.len()} else {0};
+            // A valid event is indivisible; one oversized event is bounded by the existing 64-KiB record contract.
+            // 有效事件不可拆分；单条大于页预算时单独返回，仍受既有64KiB记录合同约束，不截UTF8或分段元数据。
+            if owned && !events.is_empty() && bytes.saturating_add(size)>byte_limit {has_more=true;break;}
+            visited+=1; cursor=sequence;
+            if owned {
+                stream_sequence=stream_sequence.max(event.payload["eventSequence"].as_u64().unwrap_or(0));
+                bytes=bytes.saturating_add(size); events.push(event);
+            }
+        }
+        if !has_more {cursor=horizon.max(cursor);}
+        Ok(json!({"schemaVersion":1,"kind":"committed-stream-page","taskId":task_id,
+            "conversationId":task.scope.conversation_id,"requestId":request_id,"replyMessageId":reply_id,
+            "afterTaskSequence":after_task_sequence,"nextTaskSequence":cursor,"throughTaskSequence":horizon,
+            "throughStreamSequence":stream_sequence,"hasMore":has_more,"events":events,
+            "pageBytes":bytes,"maximumPageBytes":byte_limit,"indivisibleEventBytes":MAX_RECORD_BYTES,
+            "evidence":"committed-display-only; no execution or completion proof"}))
+    }
+
+    /// Recover a reply shadow from bounded committed pages; publish only after every prefix/overlap check succeeds.
+    /// 使用有界已提交页面恢复回复影子副本；全部前缀及重叠核对通过后才返回可发布正文，取消或冲突不推进原水位。
+    pub fn recover_stream(&self, task_id:&str, request_id:&str, reply_id:&str, after_stream_sequence:u64,
+        baseline:Value, cancelled:impl FnMut()->bool) -> Result<Value> {
+        self.recover_stream_with_limits(task_id,request_id,reply_id,after_stream_sequence,baseline,256,1024*1024,cancelled)
+    }
+
+    fn recover_stream_with_limits(&self, task_id:&str, request_id:&str, reply_id:&str, after_stream_sequence:u64,
+        baseline:Value, maximum_events:usize, maximum_bytes:usize, mut cancelled:impl FnMut()->bool) -> Result<Value> {
+        let mut recovery=stream_projection::StreamRecovery::new(baseline,after_stream_sequence);
+        if !recovery.complete() {return Ok(recovery.finish());}
+        let mut cursor=0u64;let mut horizon=None;let mut pages=0u64;
+        loop {
+            if cancelled() {return Ok(json!({"complete":false,"cancelled":true,"incompleteReasons":["recovery-cancelled"]}));}
+            let mut page=self.stream_projection_page(task_id,request_id,reply_id,cursor,horizon,maximum_events,maximum_bytes)?;
+            horizon=page["throughTaskSequence"].as_u64();pages=pages.saturating_add(1);
+            let events=page["events"].as_array_mut().map(std::mem::take).unwrap_or_default();
+            for event in events {
+                recovery.observe(&serde_json::from_value::<TaskEvent>(event).map_err(|_|failure())?);
+                if !recovery.complete() {return Ok(recovery.finish());}
+            }
+            let next=page["nextTaskSequence"].as_u64().ok_or_else(failure)?;
+            if page["hasMore"]!=true {
+                let mut result=recovery.finish();result["pageCount"]=json!(pages);
+                return Ok(result);
+            }
+            if next<=cursor {return Err(invalid("Stream page made no keyset progress. / 流分页键集未推进。"));}
+            cursor=next;
+        }
+    }
+
     pub fn operations(&self, task_id: &str) -> Result<Vec<TaskOperation>> {
         let connection = sqlite_connections::acquire(&self.root, &self.path, 30_000)?;
         read_operations(&connection, task_id)
@@ -1639,6 +1744,8 @@ impl TaskRepository {
         let (mut cache_read, mut cache_input, mut cache_known, mut updated) = (0u64, 0u64, 0u64, 0i64);
         let (mut cache_creation, mut uncached_input, mut creation_known, mut uncached_known) = (0u64, 0u64, 0u64, 0u64);
         let (mut first_visible_total, mut first_visible_known) = (0u64, 0u64);
+        let mut prefix_counts = json!({"baseline":0,"none":0,"route":0,"system":0,"tools":0,"message":0});
+        let (mut prefix_observed, mut prefix_incomplete, mut prefix_lost_estimate) = (0u64, 0u64, 0u64);
         for row in rows {
             let reservation: ModelRequestReservation = decode(row.map_err(|_| failure())?)?;
             updated = updated.max(reservation.updated_at_ms);
@@ -1656,6 +1763,19 @@ impl TaskRepository {
                 else { unknown = unknown.saturating_add(1); }
             } else { unknown = unknown.saturating_add(1); }
             if let Some(provider) = &reservation.provider_usage {
+                // Client prefix estimates are diagnostic coverage, never provider cache-hit receipts.
+                // 客户端前缀估算只统计诊断覆盖，不能混成供应商实际缓存命中回执。
+                if let Some(prefix) = provider.client_metrics.as_ref()
+                    .and_then(|metrics| metrics.cache_policy.as_ref()).and_then(|policy| policy.get("prefix"))
+                    .filter(|prefix| prefix["schemaVersion"] == 1 && prefix["scope"] == "main-request")
+                {
+                    if let Some(segment) = prefix["breakAt"].as_str().filter(|segment| prefix_counts.get(*segment).is_some()) {
+                        prefix_counts[segment] = json!(prefix_counts[segment].as_u64().unwrap_or(0).saturating_add(1));
+                        prefix_observed = prefix_observed.saturating_add(1);
+                        if prefix["state"] == "incomplete" { prefix_incomplete = prefix_incomplete.saturating_add(1); }
+                        prefix_lost_estimate = prefix_lost_estimate.saturating_add(prefix["lostTokensEstimate"].as_u64().unwrap_or(0));
+                    }
+                }
                 if let Some(milliseconds) = provider.client_metrics.as_ref().and_then(|metrics| metrics.first_visible_text_ms) {
                     first_visible_total = first_visible_total.saturating_add(milliseconds);
                     first_visible_known = first_visible_known.saturating_add(1);
@@ -1686,6 +1806,10 @@ impl TaskRepository {
             "firstVisibleTextMs":(first_visible_known>0).then(||first_visible_total as f64 / first_visible_known as f64),
             "firstVisibleTextMsTotal":(first_visible_known>0).then_some(first_visible_total),
             "knownFirstVisibleTextRequests":first_visible_known,
+            "prefixDiagnostics":{"observedMainRequests":prefix_observed,"bySegment":prefix_counts,
+                "incompleteRequests":prefix_incomplete,"lostTokensEstimate":prefix_lost_estimate,
+                "coverage":"dispatched main requests with saved client diagnostics; summaries excluded",
+                "method":"structural estimates; separate from provider cacheHitRate"},
             "updatedAtMs":updated}))
     }
 
@@ -1854,4 +1978,73 @@ fn preserve_unsettled_reservations(
         connection.execute("UPDATE task_model_reservations SET state='unknown',document=? WHERE task_id=? AND reservation_id=?",params![raw(&reservation)?,task_id,reservation.reservation_id]).map_err(|_|failure())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_page_tests {
+    use super::*;
+
+    #[test]
+    fn stream_projection_pages_are_bounded_lossless_owned_and_use_a_stable_keyset_horizon() {
+        let root=std::env::temp_dir().join(format!("kynxa-stream-pages-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let repository=TaskRepository::open(&root).unwrap();
+            let request=uuid::Uuid::new_v4().to_string();let chat=uuid::Uuid::new_v4().to_string();
+            let reply=uuid::Uuid::new_v4().to_string();
+            let task=repository.accept_task(&NewTask {request_id:request.clone(),goal:"fixture".into(),
+                acceptance:vec![],scope:TaskScope {project_id:None,conversation_id:chat.clone(),permission_snapshot:json!({})},
+                parent_task_id:None,dependency_ids:vec![],budget:TaskBudget::default(),input_reference:None}).unwrap();
+            let attempt=repository.start_attempt(&task.task_id,task.version,"fixture",60_000).unwrap();
+            repository.append_event(&attempt.token,"segment","assistant_segment",&json!({"conversationId":chat,
+                "requestId":request,"replyMessageId":reply,"eventSequence":1,"segment":{"id":"segment",
+                    "round":1,"order":1,"phase":"commentary","status":"streaming","emptyAtEmission":true}})).unwrap();
+            let mut expected=String::new();
+            for index in 0..5 {
+                let delta=if index==0 {"甲🏰".repeat(1024)} else {format!("第{index}页🏰")};
+                expected.push_str(&delta);
+                repository.append_event(&attempt.token,&format!("owned-{index}"),"text_delta",&json!({
+                    "conversationId":chat,"requestId":request,"replyMessageId":reply,
+                    "eventSequence":index+2,"segmentId":"segment","delta":delta})).unwrap();
+            }
+            repository.append_event(&attempt.token,"foreign","text_delta",&json!({"conversationId":chat,
+                "requestId":request,"replyMessageId":"another-reply","eventSequence":7,"delta":"FOREIGN"})).unwrap();
+            let first=repository.stream_projection_page(&task.task_id,&request,&reply,0,None,2,1).unwrap();
+            assert_eq!(first["events"].as_array().unwrap().len(),1);
+            assert!(first["pageBytes"].as_u64().unwrap()>first["maximumPageBytes"].as_u64().unwrap());
+            assert!(first["pageBytes"].as_u64().unwrap()<=first["indivisibleEventBytes"].as_u64().unwrap());
+            let horizon=first["throughTaskSequence"].as_u64().unwrap();
+            repository.append_event(&attempt.token,"later","text_delta",&json!({"conversationId":chat,
+                "requestId":request,"replyMessageId":reply,"eventSequence":8,"segmentId":"segment","delta":"LATER"})).unwrap();
+            let mut page=first;let mut actual=String::new();let mut count=0;
+            loop {
+                for event in page["events"].as_array().unwrap() {
+                    if let Some(delta)=event["payload"]["delta"].as_str() {actual.push_str(delta);count+=1;}
+                }
+                if page["hasMore"]!=true {break;}
+                let after=page["nextTaskSequence"].as_u64().unwrap();
+                let next=repository.stream_projection_page(&task.task_id,&request,&reply,after,Some(horizon),2,1).unwrap();
+                assert!(next["nextTaskSequence"].as_u64().unwrap()>after);
+                let repeated=repository.stream_projection_page(&task.task_id,&request,&reply,after,Some(horizon),2,1).unwrap();
+                assert_eq!(next,repeated,"a committed page has stable identity for retry before saving its watermark");
+                page=next;
+            }
+            assert_eq!(actual,expected);assert_eq!(count,5);
+            assert_eq!(page["nextTaskSequence"],horizon);
+            let baseline=json!({"content":"","reasoning":"","segments":[]});
+            let recovered=repository.recover_stream_with_limits(&task.task_id,&request,&reply,0,baseline.clone(),2,1,||false).unwrap();
+            assert_eq!(recovered["complete"],true,"{recovered}");
+            assert_eq!(recovered["content"],expected+"LATER");
+            assert!(recovered["pageCount"].as_u64().unwrap()>2);
+            let mut checks=0;
+            let cancelled=repository.recover_stream_with_limits(&task.task_id,&request,&reply,0,baseline,2,1,||{checks+=1;checks>1}).unwrap();
+            assert_eq!(cancelled["cancelled"],true);
+            assert!(cancelled.get("content").is_none(),"cancelled shadows cannot advance the formal message or watermark");
+            assert!(repository.stream_projection_page(&task.task_id,&uuid::Uuid::new_v4().to_string(),&reply,0,None,2,1).is_err());
+        }));
+        let _=super::sqlite_connections::close(&root,&root.join("Agent/tasks.sqlite"));
+        let _=std::fs::remove_dir_all(&root);
+        if let Err(error)=result {std::panic::resume_unwind(error);}
+    }
+
 }

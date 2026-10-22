@@ -46,6 +46,8 @@ struct Provider {
     skill_pagination_cycle: Arc<std::sync::atomic::AtomicBool>,
     parallel_cycle: Arc<std::sync::atomic::AtomicBool>,
     buffered_cycle: Arc<std::sync::atomic::AtomicBool>,
+    readback_gap_cycle: Arc<std::sync::atomic::AtomicBool>,
+    readback_gap_step: Arc<AtomicUsize>,
     memory_approval_target: Arc<Mutex<Option<String>>>,
 }
 fn system_text(request: &Value) -> String {
@@ -60,13 +62,18 @@ fn system_text(request: &Value) -> String {
 }
 
 fn is_completion_review_request(request: &Value) -> bool {
+    // Retired assessment instructions remain in the append-only prefix; tools identify a live execution phase.
+    // 已退役的验收指令仍保留在追加式前缀中；本轮有工具声明时属于执行阶段，不能误作再次验收。
+    if request["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
+        return false;
+    }
     request["messages"]
         .as_array()
         .into_iter()
         .flatten()
         .any(|message| {
             message["content"].as_str().is_some_and(|content| {
-                content.starts_with("Broker: compare the original requested work")
+                content.contains("Broker: compare the original requested work")
             })
         })
 }
@@ -76,7 +83,7 @@ fn is_completion_review_request(request: &Value) -> bool {
 fn completion_review_reply(request: &Value, reason: &str) -> Value {
     let note = request["messages"].as_array().unwrap().iter().rev()
         .filter_map(|message| message["content"].as_str())
-        .find(|content| content.starts_with("Broker: compare the original requested work")).unwrap();
+        .find(|content| content.contains("Broker: compare the original requested work")).unwrap();
     let requirements: Value = serde_json::from_str(note.split("Expected acceptance requirements: ").nth(1).unwrap()
         .lines().next().unwrap()).unwrap();
     let evidence: Value = serde_json::from_str(note.split("Verified completion evidence: ").nth(1).unwrap()
@@ -126,6 +133,45 @@ fn saved_document(request: &Value, path_suffix: &str) -> Value {
 async fn mock_provider(State(state): State<Provider>, Json(body): Json<Value>) -> Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
     state.requests.lock().await.push(body.clone());
+    if state.readback_gap_cycle.load(Ordering::Acquire) {
+        let messages = body["messages"].as_array().unwrap();
+        let context_followup = messages.iter().filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str()).any(|content| content.contains("只根据刚才的内容"));
+        let gap_step = state.readback_gap_step.load(Ordering::Acquire);
+        let recovered_gap = messages.iter().filter(|message| message["role"] == "tool")
+            .filter_map(|message| serde_json::from_str::<Value>(message["content"].as_str()?).ok())
+            .any(|receipt| receipt["offset"] == 0 && receipt["nextOffset"].as_u64().is_some_and(|end| end >= 3000)
+                && receipt["path"].as_str().is_some_and(|path| path.ends_with("gap-output.md")))
+            || messages.iter().filter_map(|message| message["content"].as_str()).filter_map(|content| {
+                let marker = "Saved document work: ";
+                let start = content.find(marker)? + marker.len();
+                serde_json::Deserializer::from_str(&content[start..]).into_iter::<Value>().next()?.ok()
+            }).any(|navigation| navigation["documents"].as_array().into_iter().flatten().any(|entry|
+                entry["source"].as_str().is_some_and(|path| path.ends_with("gap-output.md")) && entry["readState"] == "complete"));
+        let call = |id: &str, name: &str, arguments: Value| json!({"role":"assistant","content":"继续处理当前文档。",
+            "tool_calls":[{"id":id,"type":"function","function":{
+                "name":kynxa_agent_core_native::models::protocol::wire_name(name),"arguments":arguments.to_string()}}]});
+        let message = if context_followup {
+            json!({"role":"assistant","content":"已保留原文档和成功回执；摘要：文件已生成，缺口已补齐。"})
+        } else if is_completion_review_request(&body) {
+            completion_review_reply(&body, "The real generated document and its current readback are recorded")
+        } else if gap_step == 0 {
+            state.readback_gap_step.store(1, Ordering::Release);
+            call("gap-write", "filesystem.write", json!({"path":"gap-output.md","content":"检索和恢复记录。".repeat(600),"expectedHash":null}))
+        } else if gap_step == 1 {
+            state.readback_gap_step.store(2, Ordering::Release);
+            call("gap-read", "document.read", json!({"path":"gap-output.md","offset":3000,"maxChars":1000}))
+        } else if recovered_gap {
+            json!({"role":"assistant","content":"文档已生成，当前版本的未读范围已补齐。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"保留原写入并完成实际回读\"}</kynxa_task>"})
+        } else {
+            // A valid but premature completion used to alternate reviews and prose without filling the real gap.
+            // 合法但提前的完成声明曾使验收和空话反复循环；夹具必须由真实缺口回读推进，不能靠轮次结束。
+            json!({"role":"assistant","content":"文档已保存。\n<kynxa_task>{\"state\":\"complete\",\"next\":\"\",\"reason\":\"模型自报完成但实际回读有缺口\"}</kynxa_task>"})
+        };
+        let has_calls = message["tool_calls"].is_array();
+        return Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if has_calls {"tool_calls"} else {"stop"}}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}})).into_response();
+    }
     if state.buffered_cycle.load(Ordering::Acquire) {
         let reads = body["messages"].as_array().into_iter().flatten()
             .filter(|message| message["role"] == "tool").count();
@@ -542,6 +588,8 @@ impl Fixture {
             skill_pagination_cycle: Default::default(),
             parallel_cycle: Default::default(),
             buffered_cycle: Default::default(),
+            readback_gap_cycle: Default::default(),
+            readback_gap_step: Default::default(),
             memory_approval_target: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -709,6 +757,66 @@ fn assert_settled_public_segments(events: &[Value]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_context_is_private_and_replayed_at_its_original_position_across_user_turns() {
+    use kynxa_agent_core_native::storage::gateway as data;
+    let fixture = Fixture::new(false, false).await;
+    let goal = "你好";
+    let mut inputs = Vec::new();
+    for turn in 0..2 {
+        let mut input = fixture.request(goal);
+        if turn > 0 {
+            let user = new_id();
+            data::upsert_message(&fixture.root.join("Data"), &fixture.conversation,
+                &json!({"Id":user,"Role":"user","Status":"completed","Content":goal})).unwrap();
+            input["userMessageId"] = json!(user);
+        }
+        let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+            .json(&input).send().await.unwrap();
+        assert!(response.status().is_success());
+        let public = response.text().await.unwrap();
+        let events = event_values(&mut public.as_bytes().to_vec());
+        assert!(events.iter().any(|event| event["type"] == "completed"), "{public}");
+        assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{public}");
+        for private_field in ["ModelTranscript", "contextBefore", "snapshotHash", "authorityHash", "<kynxa_runtime_context>"] {
+            assert!(!public.contains(private_field), "Private runtime state leaked in SSE: {private_field}");
+        }
+        inputs.push(input);
+    }
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert_eq!(requests.len(), 2, "Runtime snapshots must not add planning or model requests.");
+    let first = requests[0]["messages"].as_array().unwrap();
+    let second = requests[1]["messages"].as_array().unwrap();
+    let formal = data::read_model_messages(&fixture.root.join("Data"), &fixture.conversation).unwrap();
+    let first_reply = formal.iter().find(|message| message["Role"] == "assistant"
+        && message["RequestId"] == inputs[0]["requestId"]).unwrap();
+    let snapshot = first_reply["ModelTranscript"]["rounds"].as_array().unwrap().iter()
+        .flat_map(|round| round["contextBefore"].as_array().into_iter().flatten()).next().unwrap();
+    assert_eq!(snapshot["message"]["role"], "user", "Unknown compatible routes keep runtime data out of new system/developer messages.");
+    assert_eq!(snapshot["source"]["runtimeContext"], true);
+    assert_eq!(snapshot["source"]["instructionAuthority"], false);
+    assert_eq!(first.as_slice(), &second[..first.len()], "Unchanged old request messages must survive as an exact prefix.");
+    let old_position = second.iter().position(|message| *message == snapshot["message"]).unwrap();
+    let original_goal = second.iter().position(|message| message["role"] == "user" && message["content"] == goal).unwrap();
+    let old_answer = second.iter().position(|message| message["role"] == "assistant" && message["content"] == first_reply["Content"]).unwrap();
+    let new_goal = second.iter().rposition(|message| message["role"] == "user" && message["content"] == goal).unwrap();
+    assert!(original_goal < old_position && old_position < old_answer && old_answer < new_goal);
+    assert_eq!(second.iter().filter(|message| **message == snapshot["message"]).count(), 1);
+    for request in &requests {
+        assert_eq!(request["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system").count(), 1);
+        assert!(!request["messages"].as_array().unwrap().iter().any(|message| message["role"] == "developer"));
+        for unsupported in ["prompt_cache_key", "prompt_cache_options", "cache_control", "defer_loading"] {
+            assert!(request.get(unsupported).is_none(), "Unknown routes must not receive unsupported provider controls: {unsupported}");
+        }
+    }
+    let public = fixture.messages().await;
+    assert_eq!(public.iter().filter(|message| message["Role"] == "user" && message["Content"] == goal).count(), 2);
+    for private_field in ["ModelTranscript", "contextBefore", "snapshotHash", "authorityHash", "<kynxa_runtime_context>"] {
+        assert!(!json!(public).to_string().contains(private_field), "Private runtime state leaked in public messages: {private_field}");
+    }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_output_limit_preserves_marked_body_continuation_in_final_and_formal_log() {
     let fixture = Fixture::new(false, false).await;
     fixture
@@ -727,9 +835,9 @@ async fn provider_output_limit_preserves_marked_body_continuation_in_final_and_f
         .await
         .unwrap();
     assert_eq!(response["type"], "completed", "{response}");
-    // The existing continuation contract also performs one completion review after the two text rounds.
-    // 既有续写合同在两次正文生成后还执行一次完成核验；核验不新增正文段。
-    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 3);
+    // An output-length continuation of a plain text answer needs no separate tool-work completion review.
+    // 普通文字回答的输出长度续写不需要单独的工具工作完成核验，只有两次正文生成。
+    assert_eq!(fixture.provider.calls.load(Ordering::Acquire), 2);
     let segments = response["assistantSegments"].as_array().unwrap();
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0]["phase"], "commentary");
@@ -837,7 +945,7 @@ async fn automatic_continuation_and_review_notes_do_not_change_compaction_user_g
     assert!(
         main_requests[4]
             .to_string()
-            .contains("Broker: verification found remaining work")
+            .contains("Broker: verified remaining work")
     );
     let summaries: Vec<Value> = requests
         .iter()
@@ -1545,6 +1653,20 @@ async fn memory_revocation_during_approval_skips_the_entire_stale_step_and_keeps
     }
     assert!(!system_text(refreshed).contains("MEMORY_APPROVAL_OLD_POLICY_v1"));
     assert!(refreshed["messages"].to_string().contains("native-file-body"));
+    // Revocation removes obsolete runtime projections from the next request, while the private log retains their history.
+    // 撤销后下一请求移除旧运行投影，私有正式日志仍保留历史；既有成功读取不得重做或丢失。
+    let formal = data::read_model_messages(&fixture.root.join("Data"), &fixture.conversation).unwrap();
+    let snapshots = formal.iter().filter(|message| message["Role"] == "assistant")
+        .flat_map(|message| message["ModelTranscript"]["rounds"].as_array().into_iter().flatten())
+        .flat_map(|round| round["contextBefore"].as_array().into_iter().flatten()).collect::<Vec<_>>();
+    let authorities = snapshots.iter().map(|snapshot| snapshot["source"]["authorityHash"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(authorities.len() >= 2, "Confirmed memory revocation must change the runtime authority fence.");
+    let current_snapshot = snapshots.last().unwrap();
+    let runtime_messages = refreshed["messages"].as_array().unwrap().iter().filter(|message|
+        message["content"].as_str().is_some_and(|text| text.starts_with("<kynxa_runtime_context>"))).collect::<Vec<_>>();
+    assert_eq!(runtime_messages.len(), 1, "The obsolete runtime projection must not remain beside its replacement.");
+    assert_eq!(*runtime_messages[0], current_snapshot["message"]);
     let messages=fixture.messages().await;
     let prior=messages.iter().flat_map(|message|message["ToolActivities"].as_array().into_iter().flatten())
         .find(|tool|tool["toolCallId"]=="memory-prior-read").expect("successful prior receipt must remain in the formal log");
@@ -2081,6 +2203,54 @@ async fn skill_pagination_correction_keeps_context_and_request_live_with_compati
         assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), calls_before_replay);
         fixture.close().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acceptance_readback_gap_executes_real_missing_reads_without_repeating_writes_or_summary_work() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.provider.readback_gap_cycle.store(true, Ordering::Release);
+    let mut input = fixture.request("生成 gap-output.md 文档并完整回读当前文件，然后给我简短结果。");
+    input["userMessageId"] = json!(new_id());
+    let response = fixture.client.post(format!("{}/api/chat/stream", fixture.url))
+        .json(&input).send().await.unwrap();
+    assert!(response.status().is_success());
+    let stream = response.text().await.unwrap();
+    let events = event_values(&mut stream.as_bytes().to_vec());
+    assert_settled_public_segments(&events);
+    assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("error" | "interrupted"))), "{stream}");
+    let completed = events.iter().find(|event| event["type"] == "completed").expect("real readback must settle the live task");
+    assert_eq!(completed["taskCompletion"]["completionState"], "completed", "{completed}");
+    let requests = fixture.provider.requests.lock().await.clone();
+    assert!(requests.len() <= 12, "the fixture must make actual progress rather than repeat valid reviews: {} requests", requests.len());
+    assert!(requests.iter().filter(|request| is_completion_review_request(request)).count() <= 3);
+    let messages = fixture.messages().await;
+    let saved = messages.last().unwrap();
+    let activities = saved["ToolActivities"].as_array().unwrap();
+    assert_eq!(activities.iter().filter(|activity| activity["name"] == "filesystem.write").count(), 1,
+        "gap recovery must retain the original successful write");
+    assert!(activities.iter().filter(|activity| activity["name"] == "document.read" && activity["status"] == "completed").count() >= 2,
+        "a generated path or repeated acceptance is not a real readback");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("work/gap-output.md")).unwrap(), "检索和恢复记录。".repeat(600));
+    let mut followup = fixture.request("只根据刚才的内容给我一句摘要，不要读取或修改文件。");
+    followup["userMessageId"] = json!(new_id());
+    let response: Value = fixture.client.post(format!("{}/api/chat", fixture.url)).json(&followup)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(response["type"], "completed", "{response}");
+    assert_eq!(response["taskCompletion"]["acceptanceReviewRequired"], false, "{response}");
+    let repository = kynxa_agent_core_native::storage::task_repository::TaskRepository::open(&fixture.root.join("Data")).unwrap();
+    let followup_task = repository.find_by_request_id(&fixture.conversation, followup["requestId"].as_str().unwrap()).unwrap().unwrap();
+    let reservations = repository.model_reservations(&followup_task.task_id).unwrap();
+    assert_eq!(reservations.iter().filter(|reservation|
+        reservation.provider_usage.as_ref().and_then(|usage| usage.client_metrics.as_ref())
+            .and_then(|metrics| metrics.cache_policy.as_ref())
+            .is_some_and(|policy| policy["prefix"]["scope"] == "main-request")).count(), 1,
+        "only one answer request is allowed; context-budget compaction stays separately metered");
+    let messages = fixture.messages().await;
+    assert!(messages.last().unwrap()["ToolActivities"].as_array().is_none_or(|activities|
+        activities.iter().all(|activity| activity["name"] == "context.compact")),
+        "context budgeting may compact history but must not start external work for this follow-up");
+    assert!(messages.last().unwrap()["Content"].as_str().unwrap().contains("摘要："));
+    fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2819,18 +2989,16 @@ async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarti
     let completed_model_calls = fixture.provider.calls.load(Ordering::Acquire);
     assert_eq!(
         completed_model_calls,
-        4,
-        "Two superseded generations, the final guided answer, and one independent review are required."
+        3,
+        "Two superseded generations and the final context-only answer need no independent execution review."
     );
     let actual = fixture.provider.requests.lock().await;
-    assert_eq!(actual.len(), 4);
+    assert_eq!(actual.len(), 3);
     assert_eq!(
         actual.iter().filter(|request| is_completion_review_request(request)).count(),
-        1,
-        "The guided answer must receive exactly one completion review."
+        0,
+        "Guidance that requests explanation without external work must not introduce an execution review."
     );
-    assert!(is_completion_review_request(&actual[3]));
-    assert!(actual[3]["tools"].as_array().is_none_or(Vec::is_empty));
     assert!(
         actual[1]["messages"]
             .as_array()
@@ -2843,7 +3011,7 @@ async fn user_steering_anchors_the_new_reply_after_formal_input_without_restarti
     assert_eq!(actual[1]["messages"].as_array().unwrap().last().unwrap()["content"], amendment);
     drop(actual);
     let settled=repository.load(&task_id).unwrap();
-    assert_eq!(settled.usage.model_requests,4);
+    assert_eq!(settled.usage.model_requests,3);
     assert_eq!(settled.usage.failed_requests,0,"User guidance is not a failed model request.");
     assert_eq!(settled.usage.retries,0);
     assert!(!fixture.root.join("work/obsolete.txt").exists(),"Partial tool arguments must never execute.");

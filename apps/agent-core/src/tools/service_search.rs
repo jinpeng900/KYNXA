@@ -8,6 +8,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::overrides::{Override, OverrideBuilder};
+use regex::Regex;
 use serde_json::{Value, json};
 
 use super::intent::utf16_length;
@@ -18,11 +20,16 @@ use super::local_files::{
 use super::service_error::{ServiceError, ServiceResult};
 use crate::models::protocol::{array, slice, string};
 
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PAGE_FILES: usize = 1000;
 const MAX_PAGE_ENTRIES: usize = 2000;
 const MAX_PAGE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PAGE_CHARACTERS: usize = 48000;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+// Leave room for paths, coverage and cursor metadata, not just the result array.
+// 为路径、覆盖说明与游标元数据预留空间，不能只计结果数组。
+const MAX_RESULT_BYTES: usize = MAX_RESPONSE_BYTES - 256 * 1024;
+const MAX_PAGE_DURATION: Duration = Duration::from_secs(30);
+const MAX_MATCHES: u64 = 1000;
 const MAX_DIRECTORIES: usize = 256;
 const MAX_SESSIONS: usize = 16;
 const MAX_VERSIONS: usize = 4096;
@@ -71,46 +78,72 @@ fn cancelled(cancellation: &Option<Arc<AtomicBool>>) -> ServiceResult<()> {
     Ok(())
 }
 
+fn invalid_argument(parameter: &str, message: &str) -> ServiceError {
+    ServiceError::new("INVALID_TOOL_ARGUMENTS", message, 400).with_details(json!({
+        "tool":"filesystem.search","parameter":parameter,
+        "executed":false,"requestDispatched":false,"recoverable":true
+    }))
+}
+
+fn compile_glob(root: &Path, query: &str) -> ServiceResult<Override> {
+    let mut pattern = query.replace('\\', "/");
+    // A search pattern describes a name; leading gitignore markers are literal names.
+    // 搜索模式描述文件名，开头的 gitignore 标记按字面文件名处理。
+    if pattern.starts_with(['!', '#']) {
+        pattern.insert(0, '\\');
+    }
+    let mut builder = OverrideBuilder::new(root);
+    builder
+        .case_insensitive(cfg!(windows))
+        .and_then(|builder| builder.add(&pattern))
+        .map_err(|error| invalid_argument("query", &format!("glob 模式无效：{error}")))?;
+    let matcher = builder
+        .build()
+        .map_err(|error| invalid_argument("query", &format!("glob 模式无效：{error}")))?;
+    if matcher.is_empty() {
+        return Err(invalid_argument("query", "glob 模式须包含可匹配的路径模式。"));
+    }
+    Ok(matcher)
+}
+
+fn compile_regex(query: &str) -> ServiceResult<Regex> {
+    Regex::new(query)
+        .map_err(|error| invalid_argument("query", &format!("正则表达式无效，请修正后重试：{error}")))
+}
+
 fn validate_input(input: &Value) -> ServiceResult<usize> {
     if !input["query"]
         .as_str()
         .is_some_and(|query| !query.is_empty() && utf16_length(query) <= 200)
     {
-        return Err(ServiceError::new(
-            "INVALID_TOOL_ARGUMENTS",
-            "搜索文本须为 1–200 个字符。",
-            400,
-        ));
+        return Err(invalid_argument("query", "搜索文本须为 1–200 个字符。"));
     }
     if input
         .get("mode")
-        .is_some_and(|mode| !["content", "path"].contains(&string(mode)))
+        .is_some_and(|mode| !["content", "path", "glob", "regex"].contains(&string(mode)))
     {
-        return Err(ServiceError::new(
-            "INVALID_TOOL_ARGUMENTS",
-            "搜索 mode 必须为 content 或 path。",
-            400,
-        ));
+        return Err(invalid_argument("mode", "搜索 mode 必须为 content、path、glob 或 regex。"));
+    }
+    match string(&input["mode"]) {
+        "glob" => { compile_glob(Path::new("."), string(&input["query"]))?; }
+        "regex" => { compile_regex(string(&input["query"]))?; }
+        _ => {}
     }
     if input
         .get("respectIgnoreFiles")
         .is_some_and(|value| !value.is_boolean())
     {
-        return Err(ServiceError::new(
-            "INVALID_TOOL_ARGUMENTS",
-            "respectIgnoreFiles 必须为布尔值。",
-            400,
-        ));
+        return Err(invalid_argument("respectIgnoreFiles", "respectIgnoreFiles 必须为布尔值。"));
     }
     if input["maxMatches"].is_null() {
         return Ok(100);
     }
     input["maxMatches"]
         .as_u64()
-        .filter(|maximum| (1..=200).contains(maximum))
+        .filter(|maximum| (1..=MAX_MATCHES).contains(maximum))
         .map(|maximum| maximum as usize)
         .ok_or_else(|| {
-            ServiceError::new("INVALID_TOOL_ARGUMENTS", "整数参数须在 1–200 范围内。", 400)
+            invalid_argument("maxMatches", "整数参数须在 1–1000 范围内。")
         })
 }
 
@@ -141,8 +174,8 @@ enum Authorization {
 
 struct Page {
     matches: Vec<Value>,
-    match_characters: usize,
-    failure_characters: usize,
+    match_bytes: usize,
+    failure_bytes: usize,
     result_full: bool,
     visited_files: usize,
     visited_entries: usize,
@@ -159,8 +192,8 @@ impl Page {
     fn new(maximum_matches: usize) -> Self {
         Self {
             matches: Vec::new(),
-            match_characters: 0,
-            failure_characters: 0,
+            match_bytes: 0,
+            failure_bytes: 0,
             result_full: false,
             visited_files: 0,
             visited_entries: 0,
@@ -179,22 +212,20 @@ impl Page {
             || self.visited_files >= MAX_PAGE_FILES
             || self.visited_entries >= MAX_PAGE_ENTRIES
             || self.read_bytes >= MAX_PAGE_BYTES
-            || self.started.elapsed() >= Duration::from_secs(1)
+            || self.started.elapsed() >= MAX_PAGE_DURATION
     }
     fn skip(&mut self, reason: &str) {
         self.skipped += 1;
         *self.skipped_by_reason.entry(reason.into()).or_default() += 1;
     }
     fn add(&mut self, value: Value) -> bool {
-        let characters = utf16_length(&serde_json::to_string(&value).unwrap()) + 1;
-        if (!self.matches.is_empty() || !self.failures.is_empty())
-            && self.failure_characters + self.match_characters + characters > MAX_PAGE_CHARACTERS
-        {
+        let bytes = serde_json::to_vec(&value).unwrap().len() + 1;
+        if self.failure_bytes + self.match_bytes + bytes > MAX_RESULT_BYTES {
             self.result_full = true;
             return false;
         }
         self.matches.push(value);
-        self.match_characters += characters;
+        self.match_bytes += bytes;
         true
     }
 }
@@ -203,6 +234,8 @@ struct SearchData {
     root: PathBuf,
     query: String,
     mode: String,
+    regex: Option<Regex>,
+    glob: Option<Override>,
     recursive: bool,
     respect_ignore: bool,
     root_is_directory: bool,
@@ -242,6 +275,8 @@ impl Default for SearchData {
             root: PathBuf::new(),
             query: String::new(),
             mode: "content".into(),
+            regex: None,
+            glob: None,
             recursive: true,
             respect_ignore: true,
             root_is_directory: false,
@@ -314,6 +349,8 @@ impl SearchData {
         self.changes.clear();
         self.page = None;
         self.authorization = None;
+        self.regex = None;
+        self.glob = None;
     }
     fn protected(&self, path: &Path) -> bool {
         self.protected.iter().any(|root| within(root, path))
@@ -412,13 +449,13 @@ impl SearchData {
         page.skip(code);
         page.failed_entries += 1;
         let failure = json!({"path":relative,"code":code});
-        let characters = utf16_length(&serde_json::to_string(&failure).unwrap()) + 1;
+        let bytes = serde_json::to_vec(&failure).unwrap().len() + 1;
         if page.failures.len() < 50
-            && page.failure_characters + characters <= 8000
-            && page.failure_characters + page.match_characters + characters <= MAX_PAGE_CHARACTERS
+            && page.failure_bytes + bytes <= 32 * 1024
+            && page.failure_bytes + page.match_bytes + bytes <= MAX_RESULT_BYTES
         {
             page.failures.push(failure);
-            page.failure_characters += characters;
+            page.failure_bytes += bytes;
         }
     }
     fn ignored(&self, path: &Path, directory: bool) -> bool {
@@ -566,8 +603,16 @@ impl SearchData {
             let text = content[offset..end]
                 .strip_suffix('\r')
                 .unwrap_or(&content[offset..end]);
-            if text.contains(&self.query) {
-                let matched = json!({"path":self.relative(&path),"line":line,"text":slice(text,0,400),"sha256":hash});
+            let match_start = self.regex.as_ref().map_or_else(
+                || text.find(&self.query),
+                |regex| regex.find(text).map(|matched| matched.start()),
+            );
+            if let Some(match_start) = match_start {
+                let match_column = utf16_length(&text[..match_start]);
+                let snippet_start = match_column.saturating_sub(80);
+                let matched = json!({"path":self.relative(&path),"line":line,
+                    "column":match_column+1,"textStartColumn":snippet_start+1,
+                    "text":slice(text,snippet_start,snippet_start+400),"sha256":hash});
                 if !self.page.as_mut().unwrap().add(matched) {
                     break;
                 }
@@ -576,7 +621,7 @@ impl SearchData {
             line += 1;
             let page = self.page.as_ref().unwrap();
             if page.matches.len() >= page.maximum_matches
-                || page.started.elapsed() >= Duration::from_secs(1)
+                || page.started.elapsed() >= MAX_PAGE_DURATION
             {
                 break;
             }
@@ -620,7 +665,7 @@ impl SearchData {
             return Ok(());
         }
         self.remember(path.clone(), file_version(&path, &metadata)?);
-        if self.mode == "path" && (metadata.is_file() || metadata.is_dir()) {
+        if ["path", "glob"].contains(&self.mode.as_str()) && (metadata.is_file() || metadata.is_dir()) {
             let relative = if path == self.root && metadata.is_dir() {
                 ".".into()
             } else {
@@ -628,7 +673,9 @@ impl SearchData {
             };
             let candidate = self.relative(&path).replace('\\', "/");
             let query = self.query.replace('\\', "/");
-            let matching = if cfg!(windows) {
+            let matching = if let Some(glob) = &self.glob {
+                glob.matched(&path, metadata.is_dir()).is_whitelist()
+            } else if cfg!(windows) {
                 candidate.to_lowercase().contains(&query.to_lowercase())
             } else {
                 candidate.contains(&query)
@@ -659,7 +706,7 @@ impl SearchData {
             }
         } else if metadata.is_file() {
             self.page.as_mut().unwrap().visited_files += 1;
-            if self.mode != "path" {
+            if !["path", "glob"].contains(&self.mode.as_str()) {
                 self.read_file(
                     PendingFile {
                         path,
@@ -799,12 +846,12 @@ impl SearchData {
         self.busy = false;
         self.idle_deadline = has_more.then(|| Instant::now() + Duration::from_millis(IDLE_MS));
         let limit_reasons = [
-            page.result_full.then_some("resultCharacters"),
+            page.result_full.then_some("resultBytes"),
             (page.matches.len() >= page.maximum_matches).then_some("matches"),
             (page.visited_files >= MAX_PAGE_FILES).then_some("files"),
             (page.visited_entries >= MAX_PAGE_ENTRIES).then_some("entries"),
             (page.read_bytes >= MAX_PAGE_BYTES).then_some("readBytes"),
-            (page.started.elapsed() >= Duration::from_secs(1)).then_some("duration"),
+            (page.started.elapsed() >= MAX_PAGE_DURATION).then_some("duration"),
         ]
         .into_iter()
         .flatten()
@@ -818,7 +865,8 @@ impl SearchData {
             "consistency":{"mode":if monitored && !self.unverified_changes{"live-walk"}else{"live-unverified"},
                 "directoryMonitoring":self.monitor_state,"atomicSnapshot":false,"changesDetected":false,"unverifiedChangeNotifications":self.unverified_changes,
                 "restartOnChange":true,"note":"Directory events, active directory versions and resumed file hashes are checked; rerun after edits. Results carry file hashes. No atomic whole-repository snapshot."},
-            "coverage":{"traversalComplete":!has_more,"fileSizeLimitBytes":MAX_FILE_BYTES,"fileSizeLimitAppliesTo":"content","respectIgnoreFiles":self.respect_ignore,
+            "coverage":{"traversalComplete":!has_more,"fileSizeLimitBytes":MAX_FILE_BYTES,"fileSizeLimitAppliesTo":"content","contentModes":["content","regex"],
+                "pageOutputLimitBytes":MAX_RESPONSE_BYTES,"pageDurationLimitMs":MAX_PAGE_DURATION.as_millis(),"respectIgnoreFiles":self.respect_ignore,
                 "ignoreFileNames":[".gitignore",".ignore"],"ignoreFilesRead":self.ignores_read,"failedEntries":self.total_failed,
                 "incompleteIgnoreFiles":self.incomplete_ignores,"excludedDirectories":EXCLUDED,"unreadableOrUnsupportedEntriesSkipped":self.total_skipped>0}});
         if !monitored {
@@ -830,6 +878,123 @@ impl SearchData {
             self.close();
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("kynxa-search-modes-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn request(&self, input: Value) -> Value {
+            json!({"path":self.0,"workspaceRoot":self.0,"input":input,
+                "context":{"requestId":"search-modes","conversationId":"fixture-chat","projectId":"fixture-work",
+                    "workspaceRoot":self.0,"permissionMode":"work"},
+                "contextIdentity":"fixture-chat","ownerIdentity":"fixture-chat","protectedRoots":[]})
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Only this test's unique temporary root is owned by the fixture.
+            // 夹具只拥有本次测试生成的唯一临时根目录。
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn page(service: &mut SearchService, request: &Value, continuation: bool) -> Value {
+        service.apply(if continuation { "search.acquire" } else { "search.init" }, request, &None).unwrap();
+        let mut phase = service.apply("search.pageStart", &json!({
+            "maxMatches":request["input"]["maxMatches"],"monitorState":"unavailable"
+        }), &None).unwrap();
+        while phase.get("authorization").is_some() {
+            phase = service.apply("search.step", &json!({"allowed":true}), &None).unwrap();
+        }
+        service.apply("search.pageFinish", &json!({"monitorState":"unavailable"}), &None).unwrap()
+    }
+
+    #[test]
+    fn glob_and_regex_preserve_ignore_and_protected_path_rules() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("src/private")).unwrap();
+        fs::write(fixture.0.join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(fixture.0.join("src/visible.rs"), "fn search_symbol() {}\n").unwrap();
+        fs::write(fixture.0.join("src/ignored.rs"), "fn ignored_symbol() {}\n").unwrap();
+        fs::write(fixture.0.join("src/private/secret.rs"), "fn secret_symbol() {}\n").unwrap();
+        let mut request = fixture.request(json!({"mode":"glob","query":"**/*.rs","maxMatches":1000}));
+        request["protectedRoots"] = json!([fixture.0.join("src/private")]);
+        let names = page(&mut SearchService::default(), &request, false);
+        assert_eq!(names["matches"].as_array().unwrap().len(), 1);
+        assert!(names["matches"][0]["path"].as_str().unwrap().ends_with("visible.rs"));
+        assert_eq!(names["hasMore"], false);
+        request["input"] = json!({"mode":"regex","query":r"^fn \w+_symbol\(","maxMatches":1000});
+        let content = page(&mut SearchService::default(), &request, false);
+        assert_eq!(content["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(content["matches"][0]["line"], 1);
+        assert_eq!(content["matches"][0]["column"], 1);
+        assert_eq!(content["coverage"]["traversalComplete"], true);
+    }
+
+    #[test]
+    fn thousand_match_pages_continue_without_loss_and_cursor_keeps_mode_binding() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("many.txt"), "needle\n".repeat(1005)).unwrap();
+        let mut request = fixture.request(json!({"mode":"regex","query":"^needle$","maxMatches":1000}));
+        let mut service = SearchService::default();
+        let first = page(&mut service, &request, false);
+        assert_eq!(first["matches"].as_array().unwrap().len(), 1000);
+        assert_eq!(first["hasMore"], true);
+        assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_RESPONSE_BYTES);
+        request["input"]["cursor"] = first["nextCursor"].clone();
+        let mut changed_request = request.clone();
+        changed_request["input"]["mode"] = json!("content");
+        assert_eq!(service.apply("search.acquire", &changed_request, &None).unwrap_err().code, "INVALID_TOOL_SEARCH_CURSOR");
+        let last = page(&mut service, &request, true);
+        assert_eq!(last["matches"].as_array().unwrap().len(), 5);
+        assert_eq!(last["matches"][0]["line"], 1001);
+        assert_eq!(last["hasMore"], false);
+    }
+
+    #[test]
+    fn expanded_file_limit_skips_oversize_and_reports_incomplete_coverage() {
+        let fixture = Fixture::new();
+        let mut content = " ".repeat(1024 * 1024 + 64);
+        content.push_str(" needle\n");
+        fs::write(fixture.0.join("large.txt"), content).unwrap();
+        fs::File::create(fixture.0.join("oversize.txt")).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        let request = fixture.request(json!({"mode":"content","query":"needle"}));
+        let result = page(&mut SearchService::default(), &request, false);
+        assert_eq!(result["matches"].as_array().unwrap().len(), 1);
+        assert!(result["matches"][0]["text"].as_str().unwrap().contains("needle"));
+        assert_eq!(result["skippedByReason"]["fileTooLarge"], 1);
+        assert_eq!(result["coverage"]["fileSizeLimitBytes"], MAX_FILE_BYTES);
+        assert_eq!(result["coverage"]["unreadableOrUnsupportedEntriesSkipped"], true);
+    }
+
+    #[test]
+    fn pattern_errors_are_correctable_and_output_budget_counts_encoded_bytes() {
+        let mut service = SearchService::default();
+        for input in [json!({"mode":"regex","query":"("}), json!({"mode":"glob","query":"["}), json!({"query":"x","maxMatches":1001})] {
+            let error = service.apply("search.validate", &json!({"input":input}), &None).unwrap_err();
+            assert_eq!(error.code, "INVALID_TOOL_ARGUMENTS");
+            assert_eq!(error.details["executed"], false);
+            assert_eq!(error.details["recoverable"], true);
+        }
+        assert_eq!(validate_input(&json!({"query":"x","maxMatches":1000})).unwrap(), 1000);
+        let mut page = Page::new(1000);
+        let large_unicode = json!({"text":"文\\\"".repeat(150_000)});
+        assert!(page.add(large_unicode.clone()));
+        assert!(!page.add(large_unicode));
+        assert!(page.result_full);
+        assert!(page.match_bytes <= MAX_RESULT_BYTES);
     }
 }
 
@@ -905,36 +1070,7 @@ impl SearchService {
             "search.init" => {
                 let input = &arguments["input"];
                 validate_input(input)?;
-                let query = input["query"]
-                    .as_str()
-                    .filter(|query| !query.is_empty() && utf16_length(query) <= 200)
-                    .ok_or_else(|| {
-                        ServiceError::new(
-                            "INVALID_TOOL_ARGUMENTS",
-                            "搜索文本须为 1–200 个字符。",
-                            400,
-                        )
-                    })?;
-                if input
-                    .get("mode")
-                    .is_some_and(|mode| !["content", "path"].contains(&string(mode)))
-                {
-                    return Err(ServiceError::new(
-                        "INVALID_TOOL_ARGUMENTS",
-                        "搜索 mode 必须为 content 或 path。",
-                        400,
-                    ));
-                }
-                if input
-                    .get("respectIgnoreFiles")
-                    .is_some_and(|value| !value.is_boolean())
-                {
-                    return Err(ServiceError::new(
-                        "INVALID_TOOL_ARGUMENTS",
-                        "respectIgnoreFiles 必须为布尔值。",
-                        400,
-                    ));
-                }
+                let query = string(&input["query"]);
                 let root = absolute_path(string(&arguments["path"]));
                 let metadata = inspect(&root, false, true)?.ok_or_else(changed)?;
                 *data = SearchData::default();
@@ -942,6 +1078,14 @@ impl SearchService {
                 data.query = query.into();
                 data.binding = binding(arguments);
                 data.mode = input["mode"].as_str().unwrap_or("content").into();
+                if data.mode == "regex" {
+                    data.regex = Some(compile_regex(query)?);
+                } else if data.mode == "glob" {
+                    let glob_root = if metadata.is_dir() { root.as_path() } else {
+                        root.parent().unwrap_or(&root)
+                    };
+                    data.glob = Some(compile_glob(glob_root, query)?);
+                }
                 data.recursive = input["recursive"] != false;
                 data.respect_ignore = input["respectIgnoreFiles"] != false;
                 data.root_is_directory = metadata.is_dir();
@@ -1013,15 +1157,11 @@ impl SearchService {
                 data.observe(arguments);
                 data.check()?;
                 let maximum = arguments["maxMatches"].as_u64().unwrap_or(100);
-                if !(1..=200).contains(&maximum)
+                if !(1..=MAX_MATCHES).contains(&maximum)
                     || !arguments["maxMatches"].is_null()
                         && arguments["maxMatches"].as_u64().is_none()
                 {
-                    return Err(ServiceError::new(
-                        "INVALID_TOOL_ARGUMENTS",
-                        "整数参数须在 1–200 范围内。",
-                        400,
-                    ));
+                    return Err(invalid_argument("maxMatches", "整数参数须在 1–1000 范围内。"));
                 }
                 data.page = Some(Page::new(maximum as usize));
                 data.step(true, cancellation)

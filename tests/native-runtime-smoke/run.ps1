@@ -96,7 +96,8 @@ foreach ($asset in $nativeManifest.localFiles) {
     $path=Join-Path $package $asset.path
     Assert-NativePackage ([IO.File]::Exists($path) -and (Get-Item -LiteralPath $path).Length -eq $asset.bytes -and (Get-PackageHash $path) -eq $asset.sha256) "Bundled upstream license matches: $($asset.path)"
 }
-foreach ($directory in @('runtime/embedding/builtin-multilingual','runtime/rerank/builtin-multilingual-reranker')) {
+Assert-NativePackage (-not [IO.Directory]::Exists((Join-Path $package 'runtime/rerank/builtin-multilingual-reranker'))) 'Removed neural reranker is absent from the portable payload.'
+foreach ($directory in @('runtime/embedding/builtin-multilingual')) {
     $manifest=Get-Content -LiteralPath (Join-Path $package ($directory+'/manifest.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($asset in $manifest.files) {
         $path=Join-Path $package ($directory+'/'+$asset.path)

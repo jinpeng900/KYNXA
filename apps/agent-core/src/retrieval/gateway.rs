@@ -32,6 +32,7 @@ struct BackgroundOwner {
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     embedding_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    chat_scan_pending: AtomicBool,
 }
 static BACKGROUND: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<BackgroundOwner>>>> =
     OnceLock::new();
@@ -86,6 +87,10 @@ fn schedule_memory(root: &Path, document: &Value) {
     let Some(id) = document["scopeId"].as_str() else {
         return;
     };
+    schedule_scope(root, scope, id);
+}
+
+fn schedule_scope(root: &Path, scope: &str, id: &str) -> bool {
     let mut pending = MEMORY_PENDING.get_or_init(Default::default).lock().unwrap();
     let scopes = pending.entry(root.to_path_buf()).or_default();
     if let Some(entry) = scopes
@@ -94,7 +99,7 @@ fn schedule_memory(root: &Path, document: &Value) {
     {
         entry.ready_at = std::time::Instant::now();
         entry.attempt = 0;
-        return;
+        return true;
     }
     if scopes.len() < 128 {
         scopes.push(PendingMemory {
@@ -103,7 +108,58 @@ fn schedule_memory(root: &Path, document: &Value) {
             ready_at: std::time::Instant::now(),
             attempt: 0,
         });
+        return true;
     }
+    false
+}
+
+/// Enqueue only an identity; the existing maintenance owner performs all storage and inference work.
+/// 仅排入聊天身份；现有后台维护执行正文读取与推理，前台保存不等待嵌入模型。
+pub(crate) fn enqueue_conversation_semantic(config: &GatewayConfig, conversation: &str) {
+    if !schedule_scope(&config.data_root, "message", conversation) {
+        if let Some(owner) = BACKGROUND.get().and_then(|owners| owners.lock().ok())
+            .and_then(|owners| owners.get(&config.data_root).cloned()) {
+            owner.chat_scan_pending.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Preserve complete original-message provenance; association never concatenates different source bodies.
+/// 保留完整原始消息与问答关联；关联元数据不会把不同消息正文拼成无法回读的合成来源。
+pub(crate) fn conversation_message_sources(chat: &str, messages: &[Value]) -> Vec<Value> {
+    let users = messages.iter().filter(|message| message["Role"] == "user")
+        .filter_map(|message| message["Id"].as_str()).collect::<HashSet<_>>();
+    messages.iter().filter(|message| {
+        message["Status"] == "completed"
+            && message["Content"].as_str().is_some_and(|text| !text.trim().is_empty())
+            && matches!(message["Role"].as_str(), Some("user" | "assistant"))
+            && (message["Role"] != "assistant" || message["TaskContinues"] != true)
+    }).map(|message| {
+        let text = message["Content"].as_str().unwrap();
+        let mut locator = json!({"conversationId":chat,"messageId":message["Id"],"role":message["Role"]});
+        if message["Role"] == "assistant" {
+            for field in ["ReplyTo", "InReplyToUserMessageId", "OriginUserMessageId"] {
+                if let Some(id) = message[field].as_str().filter(|id| users.contains(id)) {
+                    locator[field] = json!(id);
+                }
+            }
+            if let Some(previous) = message["PreviousReplyMessageId"].as_str() {
+                locator["PreviousReplyMessageId"] = json!(previous);
+            }
+        }
+        json!({"sourceId":gateway_index::hash(&json!(["message",chat,message["Id"]]).to_string()),
+            "scopeKey":format!("chat:{}",chat.to_ascii_lowercase()),"sourceType":"message",
+            "text":text,"contentHash":gateway_index::hash(text),"sourceRevision":gateway_index::hash(text),
+            "title":message["Role"],"locator":locator})
+    }).collect()
+}
+
+fn conversation_index_scopes(catalog: &Value) -> Vec<Value> {
+    catalog["Chats"].as_array().into_iter().flatten()
+        .chain(catalog["Projects"].as_array().into_iter().flatten()
+            .flat_map(|project| project["Chats"].as_array().into_iter().flatten()))
+        .filter_map(|chat| chat["Id"].as_str())
+        .map(|id| json!({"scope":"message","scopeId":id})).collect()
 }
 pub(crate) fn temporary_index_failure(code: &str) -> bool {
     matches!(
@@ -247,7 +303,11 @@ fn maintain_memory(config: &GatewayConfig, cancel: &Arc<AtomicBool>) -> Result<(
         let result = if cancel.load(Ordering::Acquire) {
             Err(gateway::error("记忆索引已暂停。", "INDEX_CANCELLED", 409))
         } else {
-            maintain_memory_scope(config, &item.scope, &item.id, cancel)
+            if item.scope == "message" {
+                maintain_conversation_scope(config, &item.id, cancel)
+            } else {
+                maintain_memory_scope(config, &item.scope, &item.id, cancel)
+            }
         };
         if let Err(error) = result {
             // Keep transient work bounded and retryable; deleting one scope does not discard other scopes.
@@ -307,9 +367,65 @@ pub(crate) fn retire_chat_index_work(root: &Path, conversation: &str) {
     if let Some(pending) = MEMORY_PENDING.get() {
         if let Some(queue) = pending.lock().unwrap().get_mut(root) {
             queue
-                .retain(|item| item.scope != "chat" || !item.id.eq_ignore_ascii_case(conversation));
+                .retain(|item| !["chat", "message"].contains(&item.scope.as_str())
+                    || !item.id.eq_ignore_ascii_case(conversation));
         }
     }
+}
+
+fn maintain_conversation_scope(
+    config: &GatewayConfig,
+    conversation: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), ContractError> {
+    let catalog = gateway::load_catalog(&config.data_root)?;
+    let relation = storage::catalog::apply("storage.catalog.relationship",
+        &json!({"current":catalog,"id":conversation}))?;
+    let settings = effective(config, relation["projectId"].as_str())?;
+    let messages = gateway::read_model_messages(&config.data_root, conversation)?;
+    let sources = conversation_message_sources(conversation, &messages);
+    for batch in sources.chunks(100) {
+        gateway_index::publish(config, batch)?;
+    }
+    let scope = format!("chat:{}", conversation.to_ascii_lowercase());
+    let keep = sources.iter().filter_map(|source| source["sourceId"].as_str()).collect::<HashSet<_>>();
+    let mut after = Value::Null;
+    loop {
+        let page = storage::sqlite_queries::apply("storage.index.listSources",
+            &gateway_index::arguments(config,
+                json!({"scopes":[scope],"sourceType":"message","afterSourceId":after})))?;
+        let rows = page["rows"].as_array().unwrap();
+        for row in rows {
+            if !keep.contains(row["sourceId"].as_str().unwrap_or("")) {
+                gateway_index::remove(config, row["sourceId"].as_str().unwrap(), &json!([scope]), false)?;
+            }
+        }
+        after = page["nextSourceId"].clone();
+        if rows.len() < 256 { break; }
+    }
+    if settings["local"]["enabled"] == false || settings["local"]["semantic"] == "off" {
+        return Ok(());
+    }
+    // Bound each maintenance visit; completed vectors are reused and remaining work returns to the same queue.
+    // 每次维护有界处理；已有向量直接复用，剩余来源仍回到同一队列，不占用聊天发送链路。
+    let mut generated = 0;
+    for source in &sources {
+        if cancel.load(Ordering::Acquire) {
+            return Err(gateway::error("聊天索引已暂停。", "INDEX_CANCELLED", 409));
+        }
+        if gateway_index::reuse_semantic(config, source, &settings["local"])?.is_some() {
+            continue;
+        }
+        if generated >= 8 {
+            enqueue_conversation_semantic(config, conversation);
+            break;
+        }
+        // publish_prepared checks the live catalog under its transaction; deleted chats cannot be resurrected.
+        // 发布事务重新检查当前聊天目录；后台推理期间删除的聊天不能重新写回索引。
+        gateway_index::publish_semantic(config, source, &settings["local"], cancel)?;
+        generated += 1;
+    }
+    Ok(())
 }
 fn maintain_memory_scope(
     config: &GatewayConfig,
@@ -513,6 +629,7 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
         stop: cancellation.token.clone(),
         worker: Mutex::new(None),
         embedding_worker: Mutex::new(None),
+        chat_scan_pending: AtomicBool::new(true),
     });
     let config = config.clone();
     let data_root = config.data_root.clone();
@@ -554,6 +671,16 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 maintain_active_project(&config, &shared.stop);
                 let _ = gateway_index::maintain_ann(&config, &shared.stop);
                 let cycle = (|| -> Result<(), ContractError> {
+                    if shared.chat_scan_pending.swap(false, Ordering::AcqRel) {
+                        if let Ok(catalog) = gateway::load_catalog(&config.data_root) {
+                            let queued = startup_memory.iter().filter_map(|entry| {
+                                Some((entry["scope"].as_str()?.to_owned(), entry["scopeId"].as_str()?.to_owned()))
+                            }).collect::<HashSet<_>>();
+                            startup_memory.extend(conversation_index_scopes(&catalog).into_iter()
+                                .filter(|entry| !queued.contains(&("message".to_owned(),
+                                    entry["scopeId"].as_str().unwrap_or("").to_owned()))));
+                        }
+                    }
                     enqueue_startup_memory(&config.data_root, &mut startup_memory);
                     maintain_memory(&config, &shared.stop)?;
                     let catalog = gateway::load_catalog(&config.data_root)?;
@@ -675,10 +802,8 @@ pub fn start_background(config: &GatewayConfig) -> Result<Value, ContractError> 
                 if let Err(error) = cycle {
                     let _ = error;
                 }
-                let _ = super::gateway_embedding::retire_after(
-                    &config,
-                    std::time::Duration::from_secs(120),
-                );
+// Resident E5 weights are reclaimed only by the pressure path after thirty idle minutes.
+                // E5 驻留权重仅在资源紧张且空闲三十分钟后回收，周期维护不再反复卸载。
                 for _ in 0..300 {
                     if shared.stop.load(Ordering::Acquire) {
                         break;
@@ -2192,6 +2317,83 @@ pub fn handle(
 #[cfg(test)]
 mod gateway_tests {
     use super::*;
+
+    #[test]
+    fn conversation_semantic_sources_keep_full_text_and_stable_message_associations() {
+        let chat = gateway::new_id();
+        let user = gateway::new_id();
+        let other = gateway::new_id();
+        let reply = gateway::new_id();
+        let text = format!("{} LATE_SEMANTIC_FACT", "完整正文 mixed text. ".repeat(500));
+        let messages = vec![
+            json!({"Id":user,"Role":"user","Status":"completed","Content":"Original question"}),
+            json!({"Id":other,"Role":"user","Status":"completed","Content":"Unrelated later question"}),
+            json!({"Id":reply,"Role":"assistant","Status":"completed","Content":text,
+                "ReplyTo":user,"OriginUserMessageId":user}),
+            json!({"Id":gateway::new_id(),"Role":"assistant","Status":"completed",
+                "TaskContinues":true,"Content":"Intermediate automatic continuation"}),
+            json!({"Id":gateway::new_id(),"Role":"assistant","Status":"interrupted","Content":"Partial output"}),
+        ];
+        let sources = conversation_message_sources(&chat, &messages);
+        assert_eq!(sources.len(), 3);
+        let answer = sources.iter().find(|source| source["locator"]["messageId"] == reply).unwrap();
+        assert_eq!(answer["text"], text);
+        assert_eq!(answer["locator"]["ReplyTo"], user);
+        assert_eq!(answer["locator"]["OriginUserMessageId"], user);
+        assert_eq!(answer["locator"]["role"], "assistant");
+        let prepared = gateway_index::prepare_source(answer, None).unwrap();
+        assert_eq!(prepared["chunks"].as_array().unwrap().last().unwrap()["endOffset"], text.encode_utf16().count());
+        let mut edited = messages.clone();
+        edited[2]["Content"] = json!("Updated final answer");
+        let changed = conversation_message_sources(&chat, &edited);
+        assert_eq!(changed[2]["sourceId"], answer["sourceId"]);
+        assert_ne!(changed[2]["sourceRevision"], answer["sourceRevision"]);
+    }
+
+    #[test]
+    fn conversation_semantic_queue_coalesces_and_chat_deletion_removes_only_its_work() {
+        let workspace = Workspace::new();
+        let chat = gateway::new_id();
+        let other = gateway::new_id();
+        enqueue_conversation_semantic(&workspace.config, &chat);
+        enqueue_conversation_semantic(&workspace.config, &chat);
+        enqueue_conversation_semantic(&workspace.config, &other);
+        schedule_memory(&workspace.config.data_root, &json!({"scope":"chat","scopeId":chat}));
+        {
+            let queues = MEMORY_PENDING.get().unwrap().lock().unwrap();
+            assert_eq!(queues[&workspace.config.data_root].len(), 3);
+        }
+        retire_chat_index_work(&workspace.config.data_root, &chat);
+        let mut queues = MEMORY_PENDING.get().unwrap().lock().unwrap();
+        let remaining = queues.remove(&workspace.config.data_root).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].scope, "message");
+        assert_eq!(remaining[0].id, other);
+    }
+
+    #[test]
+    fn conversation_semantic_maintenance_skips_disabled_inference_and_retires_nonfinal_sources() {
+        let workspace = Workspace::new();
+        let chat = gateway::new_id();
+        let reply = gateway::new_id();
+        gateway::ensure_conversation(&workspace.config.data_root, &chat, "Background chat fixture").unwrap();
+        gateway::upsert_message(&workspace.config.data_root, &chat, &json!({
+            "Id":reply,"Role":"assistant","Status":"completed","Content":"background vector source needle"})).unwrap();
+        let mut configured = settings::apply("storage.settings.defaults", &json!({})).unwrap();
+        configured["local"]["semantic"] = json!("off");
+        gateway::commit_json(&workspace.config.data_root,
+            &workspace.config.data_root.join("Retrieval/settings.json"), &configured, None, 8*1024*1024).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        maintain_conversation_scope(&workspace.config, &chat, &cancel).unwrap();
+        let scopes = json!([format!("chat:{chat}")]);
+        let indexed = gateway_index::search(&workspace.config, &json!({"query":"needle","scopeKeys":scopes})).unwrap();
+        assert!(!indexed["items"].as_array().unwrap().is_empty());
+        gateway::upsert_message(&workspace.config.data_root, &chat, &json!({
+            "Id":reply,"Status":"streaming","Content":"Unsettled replacement"})).unwrap();
+        maintain_conversation_scope(&workspace.config, &chat, &cancel).unwrap();
+        let retired = gateway_index::search(&workspace.config, &json!({"query":"needle","scopeKeys":scopes})).unwrap();
+        assert!(retired["items"].as_array().unwrap().is_empty());
+    }
     struct Workspace {
         root: std::path::PathBuf,
         config: GatewayConfig,

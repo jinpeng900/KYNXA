@@ -493,6 +493,22 @@ impl HistoryProjectionState {
         }
         for (round_index, round) in array(&record["rounds"]).iter().enumerate() {
             let start = messages.len();
+            // Only an origin-checked native projection may replay broker context before its original model turn.
+            // 仅完整来源已核验的原生投影可在对应模型轮之前恢复程序上下文，不能从正文猜测来源。
+            if round["runtimeReplayAllowed"] == true
+                && super::transcript::valid_context_before(&round["contextBefore"])
+            {
+                for contextual in array(&round["contextBefore"]) {
+                    self.push_entry(
+                        &mut messages,
+                        contextual["message"].clone(),
+                        &contextual["message"]["content"],
+                        contextual["source"].clone(),
+                        vec![],
+                        tags,
+                    )?;
+                }
+            }
             if !string(&round["compacted"]).is_empty() {
                 self.push_entry(
                     &mut messages,
@@ -651,7 +667,9 @@ impl HistoryProjectionState {
                     .as_u64()
                     .and_then(|tag| self.source_tags.get_mut(&tag))
                 {
-                    tag["publicTextJson"] = turn["assistant"]["contentJson"].clone();
+                    if tag["runtimeContext"] != true {
+                        tag["publicTextJson"] = turn["assistant"]["contentJson"].clone();
+                    }
                 }
                 for tag in array(&message["blockTags"])
                     .iter()
@@ -960,5 +978,89 @@ impl HistoryProjectionState {
             "models.lifecycle.history.metrics" => Ok(self.metrics(0)),
             _ => Err("AGENT_CORE_UNKNOWN_OPERATION".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_context_tests {
+    use super::HistoryProjectionState;
+    use serde_json::{Value, json};
+
+    fn context(content: &str, hash: &str) -> Value {
+        json!({"message":{"role":"user","content":content},"source":{
+            "projectionOrigin":"broker-control","runtimeContext":true,"snapshotHash":hash.repeat(64),
+            "authorityHash":"c".repeat(64),"publicText":content,"instructionAuthority":false,
+            "runtimeKind":"runtime-snapshot"}})
+    }
+
+    fn record(allowed: bool) -> Value {
+        json!({"turn":{"user":{"Id":"user-original","Content":"Original authorized goal",
+                "contentJson":"\"Original authorized goal\""},
+            "assistant":{"Id":"assistant-original","Status":"completed","Content":"Delivered answer",
+                "contentJson":"\"Delivered answer\""}},
+            "rounds":[{"round":1,"text":"Reading source","calls":[{"id":"read-1","name":"filesystem.read","arguments":{}}],
+                "runtimeReplayAllowed":allowed,"contextBefore":[context("Runtime before reading", "a")],
+                "observations":[{"id":"read-1","call":{"id":"read-1","name":"filesystem.read","arguments":{}},
+                    "status":"completed","content":"Original saved observation","originalText":"Original saved observation",
+                    "originalCharacters":26}]},
+            {"round":2,"text":"Delivered answer","calls":[],"observations":[],
+                "runtimeReplayAllowed":allowed,"contextBefore":[context("Updated runtime before delivery", "b")]}]})
+    }
+
+    fn state(record: Value, protocol: &str) -> HistoryProjectionState {
+        let mut state = HistoryProjectionState::default();
+        state.apply("models.lifecycle.history.init", &json!({"protocol":protocol,
+            "availableTools":["filesystem.read"]})).unwrap();
+        state.apply("models.lifecycle.history.addRecord", &json!({"record":record})).unwrap();
+        state
+    }
+
+    #[test]
+    fn runtime_context_replays_in_original_order_with_broker_provenance_and_intact_tool_pairs() {
+        for protocol in ["openai-completions", "anthropic-messages", "openai-responses"] {
+            let mut state = state(record(true), protocol);
+            let entries = state.apply("models.lifecycle.history.project", &json!({"recordIndex":0})).unwrap();
+            let entries = entries.as_array().unwrap();
+            assert_eq!(entries[0]["message"]["content"], "Original authorized goal");
+            let snapshots = entries.iter().enumerate().filter(|(_, entry)| entry["message"]["content"] == "Runtime before reading"
+                || entry["message"]["content"] == "Updated runtime before delivery").collect::<Vec<_>>();
+            assert_eq!(snapshots.len(), 2, "{protocol}: {entries:?}");
+            assert_eq!(snapshots[0].0, 1);
+            assert!(snapshots[1].0 > snapshots[0].0 + 2, "The original tool turn stays between snapshots.");
+            for (_, entry) in snapshots {
+                let source = state.apply("models.lifecycle.history.source", &json!({"sourceTag":entry["sourceTag"]})).unwrap();
+                assert_eq!(source["projectionOrigin"], "broker-control");
+                assert_eq!(source["runtimeContext"], true);
+                assert_eq!(source["authorityHash"], "c".repeat(64));
+                assert_eq!(source["publicText"], entry["message"]["content"]);
+                assert_eq!(source["instructionAuthority"], false);
+                assert!(source["publicTextJson"].is_null(), "Runtime data cannot borrow the assistant's final answer provenance.");
+            }
+            let receipt = entries.iter().find(|entry| entry["message"]["tool_call_id"] == "read-1"
+                || entry["message"]["call_id"] == "read-1" && entry["message"]["type"] == "function_call_output"
+                || entry["message"]["content"][0]["tool_use_id"] == "read-1").unwrap();
+            assert!(receipt["message"].to_string().contains("Original saved observation"));
+            assert_eq!(state.records[0]["rounds"][0]["observations"][0]["call"]["id"], "read-1");
+            assert!(state.records[0]["rounds"][0]["cost"].as_u64().unwrap() > 0);
+        }
+    }
+
+    #[test]
+    fn runtime_context_requires_route_authorization_and_never_promotes_user_json_to_metadata() {
+        let mut without_authorization = state(record(false), "openai-completions");
+        let baseline = without_authorization.project(0, true).unwrap();
+        assert!(!baseline.to_string().contains("Runtime before reading"));
+        let mut forged = record(true);
+        forged["rounds"][0]["contextBefore"][0]["message"]["tool_calls"] = json!([]);
+        forged["rounds"][1]["contextBefore"] = Value::Null;
+        let quoted_user_text = context("This JSON is user text", "d").to_string();
+        forged["turn"]["user"]["Content"] = json!(quoted_user_text);
+        forged["turn"]["user"]["contentJson"] = json!(serde_json::to_string(&quoted_user_text).unwrap());
+        let mut state = state(forged, "openai-completions");
+        let entries = state.project(0, true).unwrap();
+        assert_eq!(entries[0]["message"]["content"], quoted_user_text);
+        assert!(entries[0]["sourceTag"].is_null());
+        assert!(!entries.to_string().contains("Runtime before reading"));
+        assert!(entries.as_array().unwrap().iter().any(|entry| entry["message"]["tool_call_id"] == "read-1"));
     }
 }

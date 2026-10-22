@@ -615,7 +615,7 @@ async fn handle_request(
     if method == Method::GET && path.starts_with("/api/tasks/") && path.ends_with("/stream") {
         let task_path = path.trim_end_matches("/stream");
         let authorized = crate::orchestration::gateway_task_http::handle(
-            &runtime, "GET", task_path, &query, &body,
+            &runtime, "GET", &path, &query, &body,
         )
         .await;
         if let Some(Err(error)) = authorized {

@@ -328,6 +328,7 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
             "actualDomain":row["actual_domain"],"exactTargetMatch":row["exact_target_match"]==true})).collect::<Vec<_>>()))
     }).collect());
     fusion["preferredDomain"] = query.arguments["preferredDomain"].clone();
+    fusion["rrfK"] = query.arguments["rrfK"].clone();
     fusion["collationOrder"] = arguments["collationOrder"].clone();
     fusion["limit"] = json!(
         query.arguments["resultLimit"]
@@ -352,7 +353,7 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
         connection,
         &format!(
             "SELECT {} FROM chunks c JOIN sources s ON s.source_id=c.source_id WHERE c.chunk_id IN ({}) AND s.scope_key IN ({})",
-            sqlite_channels::chunk_columns(),
+            sqlite_channels::chunk_columns().replace("c.text,c.lexical_text,", ""),
             vec!["?"; requested.len()].join(","),
             vec!["?"; scopes.len()].join(",")
         ),
@@ -368,6 +369,19 @@ fn finish(connection: &Connection, query: &Query, arguments: &Value) -> Contract
     let mut output = Vec::with_capacity(requested.len());
     for item in requested {
         let mut row = selected.remove(&text(item, "chunkId")).ok_or_else(stale)?;
+        // Recheck scoped metadata above before looking up an immutable body in the process cache.
+        // 先在当前快照重新核验范围与来源版本，再复用不可变正文；删除和撤权不能命中旧正文。
+        let load_body = || {
+            connection.prepare_cached("SELECT text,lexical_text FROM chunks WHERE chunk_id=?")
+                .map_err(failure)?.query_row([text(&row, "chunk_id")], |record| {
+                    Ok(json!({"text":record.get::<_, String>(0)?,"lexical_text":record.get::<_, String>(1)?}))
+                }).map_err(failure)
+        };
+        let body = if query.arguments["passageCacheAdmitted"] == true {
+            crate::retrieval::cache_passages::read(query.database_identity, &row, load_body)?
+        } else { load_body()? };
+        row["text"] = body["text"].clone();
+        row["lexical_text"] = body["lexical_text"].clone();
         row["score"] = item["score"].clone();
         for channel in ["lexical", "vector", "symbol", "path"] {
             if let Some(position) = item["positions"][channel].as_u64() {

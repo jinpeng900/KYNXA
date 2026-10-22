@@ -2,7 +2,7 @@
 
 适用版本：**KYNXA 1.5**（产品版本 `1.5.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.5 版本说明](../../../docs/releases/1.5.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
 
-面向普通用户的 EXE 安装包使用 `build-installer.ps1 -OutputDirectory <输出目录>` 生成。此入口发布 Windows x64 Release 自包含应用，再编译 Inno Setup 安装器；它只生成文件，不启动或安装生成的 EXE。安装器支持软件、数据、用户工具目录及中英文界面，E5/BGE、私有 Node/MCP、Chromium 和运行依赖随基础包提供，勾选的对话模型交由首次启动后的 Rust 模型管理器下载。
+面向普通用户的 EXE 安装包使用 `build-installer.ps1 -OutputDirectory <输出目录>` 生成。此入口发布 Windows x64 Release 自包含应用，再编译 Inno Setup 安装器；它只生成文件，不启动或安装生成的 EXE。安装器支持软件、数据、用户工具目录及中英文界面，E5、私有 Node/MCP、Chromium 和运行依赖随基础包提供，勾选的对话模型交由首次启动后的 Rust 模型管理器下载。
 
 默认安装文件名为 `KYNXA-1.5.0-windows-x64-setup.exe`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。
 
@@ -78,7 +78,7 @@ powershell -NoProfile -File apps/desktop/Build/prepare-native-runtime.ps1 -Asset
 
 ## 固定资源包与离线源码构建
 
-维护者先按默认 `Full` 准备一次完整资源，再从 `artifacts/runtime/native-desktop/win-x64/asset-files.txt` 导出；该清单缺失时使用 `bundle-files.txt`。导出会加入现有 VC 缓存的明确 DLL 与许可证白名单，不加入下载归档、Rust `target`、Cargo/NuGet 缓存、用户 Data 或模型账号。ZIP 旁生成整包 `.sha256`，包内 `resource-pack.json` 记录每份文件摘要和当前原生库、E5、BGE、MCP 锁定清单的版本摘要。
+维护者先按默认 `Full` 准备一次完整资源，再从 `artifacts/runtime/native-desktop/win-x64/asset-files.txt` 导出；该清单缺失时使用 `bundle-files.txt`。导出会加入现有 VC 缓存的明确 DLL 与许可证白名单，不加入下载归档、Rust `target`、Cargo/NuGet 缓存、用户 Data 或模型账号。ZIP 旁生成整包 `.sha256`，包内 `resource-pack.json` 记录每份文件摘要和当前原生库、E5、MCP 锁定清单的版本摘要。
 
 ```powershell
 # 维护者：只处理已准备好的本地资源，不进行下载或编译。
@@ -110,7 +110,7 @@ powershell -NoProfile -File apps/desktop/Build/build-desktop.ps1 -Offline -NuGet
 
 下载源通过 `-DownloadSourcesPath` 或 MSBuild `KynxaDownloadSourcesPath` 配置。源文件可分别设置 `npmRegistry`、`cargoRegistryIndex`、`playwrightDownloadHost` 与 `mirrors`（原始 URL 前缀到可信镜像前缀的映射）。镜像只改变下载地址，版本及原始 SHA-256 保持不变；不设置时继续使用官方源。Cargo 离线规则参见 [Cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html)，浏览器下载服务器参见 [Playwright 官方说明](https://playwright.dev/docs/browsers#download-from-artifact-repository)。
 
-将 `download-sources.example.json` 复制到自己的配置位置，填入已选定的镜像，再通过 `-DownloadSourcesPath` 传入；不改用户全局 npm/Cargo 配置。原生库、E5/BGE、Node 与 VC 许可下载会保留断点；Chromium 继续使用 Playwright 自带的下载重试及服务器配置，完整资源包可以直接避开这一步下载。DirectML 与 ORT 的原始许可及来源已随源码和资源包提供，不再下载只用于提取许可的两份 NuGet 包。
+将 `download-sources.example.json` 复制到自己的配置位置，填入已选定的镜像，再通过 `-DownloadSourcesPath` 传入；不改用户全局 npm/Cargo 配置。原生库、E5、Node 与 VC 许可下载会保留断点；Chromium 继续使用 Playwright 自带的下载重试及服务器配置，完整资源包可以直接避开这一步下载。DirectML 与 ORT 的原始许可及来源已随源码和资源包提供，不再下载只用于提取许可的两份 NuGet 包。
 
 运行时检查复制本次构建的载荷到临时目录，清空系统 Node 路径并隐藏系统 .NET，仅使用隔离数据；`native-runtime-smoke/run.ps1` 核对主载荷，`check-mcp-runtime.ps1` 使用私有 Node 握手五个真实本地 MCP，数据库仅用内存演示夹具、Brave 仅用模拟 Key，Playwright 仅访问 about:blank。它们不调用真实模型，不替代正式 MSIX 安装、外部账号能力或其他架构设备的验收。
 

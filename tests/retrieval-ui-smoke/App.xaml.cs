@@ -4,6 +4,7 @@ using KYNXA_Desktop.Services;
 using KYNXA_Desktop.Views;
 using MemoryUiSmoke;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Foundation;
 using Windows.Graphics;
@@ -81,16 +82,13 @@ public partial class App : Application
                 return;
             }
             Check(!NativeUi.Descendants<Button>(_root).Any(button => button.Content?.ToString() == UiText.Get("关闭")), "Window uses native caption controls and has no bottom Close button.");
-            Check(Picker("RetrievalRerankMode").SelectedIndex == 0, "Optional reranking stays disabled until selected.");
-            Picker("RetrievalRerankMode").SelectedIndex = 1;
-            await WaitAsync(() => _api.Global.Local.RerankProfileId == "builtin-multilingual-reranker" && !_window!.HasPendingChanges,
-                "Enabling conditional reranking saves its stable profile reference.");
-            Picker("RetrievalRerankMode").SelectedIndex = 0;
-            await WaitAsync(() => _api.Global.Local.RerankProfileId is null && !_window!.HasPendingChanges,
-                "Disabling reranking explicitly clears the saved profile.");
+            Check(!NativeUi.Descendants<ComboBox>(_root).Any(picker => AutomationProperties.GetAutomationId(picker) == "RetrievalRerankMode"),
+                "The removed neural reranker is not offered in retrieval settings.");
             await NativeWindowCapture.CaptureAsync(_window!, Path.Combine(_directory, "global-zh.png"));
             Picker("RetrievalWebDepth").SelectedIndex = 1;
             await WaitAsync(() => _api.Global.Web.Depth == "deep" && !_window!.HasPendingChanges, "Selecting search depth saves immediately.");
+            Check(_api.Global.Local.RerankProfileId is null && _api.Global.Local.RerankDevicePolicy is null
+                && _api.Global.Local.RerankCandidates is null, "Saving settings clears retired neural reranker choices without changing E5.");
             Check(!Notice.IsOpen, "Successful auto-save does not add status clutter.");
             _api.ConflictNextSave = true;
             int beforeConflict = _api.GlobalWrites;
@@ -102,7 +100,6 @@ public partial class App : Application
             {
                 (Id: "RetrievalLocalMode", Chinese: "启用", English: "Enabled"),
                 (Id: "RetrievalSemanticMode", Chinese: "自动", English: "Automatic"),
-                (Id: "RetrievalRerankMode", Chinese: "停用", English: "Disabled"),
                 (Id: "RetrievalWebMode", Chinese: "按需搜索", English: "Search when needed"),
                 (Id: "RetrievalWebProvider", Chinese: "自动", English: "Automatic"),
                 (Id: "RetrievalWebDepth", Chinese: "深入", English: "Deep"),
@@ -114,8 +111,6 @@ public partial class App : Application
             await Task.Delay(100);
             Check(_window!.Title == "KYNXA · Retrieval and web search", "Open window title changes language without restart.");
             Check(((ComboBoxItem)Picker("RetrievalWebDepth").Items[0]).Content?.ToString() == "Standard", "Search choices are translated live.");
-            Check(((ComboBoxItem)Picker("RetrievalRerankMode").Items[1]).Content?.ToString() == "Enable when needed",
-                "Conditional reranking choices change language without restart.");
             Check(NativeUi.Descendants<TextBlock>(_root).Any(label => label.Text == "Ready locally"), "Dynamic model status is translated live.");
             foreach (var choice in choices)
                 Check(SelectedDisplayText(Picker(choice.Id)) == choice.English,
@@ -141,7 +136,7 @@ public partial class App : Application
             {
                 _window.AppWindow.Resize(new SizeInt32(width, 760));
                 await Task.Delay(100);
-                foreach (string id in new[] { "RetrievalRerankMode", "RetrievalWebMode", "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage" })
+                foreach (string id in new[] { "RetrievalWebMode", "RetrievalWebProvider", "RetrievalWebDepth", "RetrievalWebLanguage" })
                 {
                     var control = NativeUi.ById<FrameworkElement>(_root, id);
                     var bounds = control.TransformToVisual(_root).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));

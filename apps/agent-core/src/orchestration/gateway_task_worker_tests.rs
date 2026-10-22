@@ -1162,6 +1162,7 @@ async fn compaction_preserves_original_context_through_real_hub_readback() {
         &catalog,
         4096,
         &json!({"contextWindowTokens":8192,"providerMaxInputTokens":4096,"providerMaxOutputTokens":1024}),
+        false,
     )
     .await
     .unwrap();

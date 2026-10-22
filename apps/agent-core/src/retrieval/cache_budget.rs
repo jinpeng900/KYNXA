@@ -9,27 +9,33 @@ const ADJUST_INTERVAL_MS: u64 = 30_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CacheKind {
     QueryVectors,
-    RerankScores,
+    Passages,
     Candidates,
 }
 impl CacheKind {
-    pub(crate) const ALL: [Self; 3] = [Self::QueryVectors, Self::RerankScores, Self::Candidates];
+    pub(crate) const ALL: [Self; 3] = [Self::QueryVectors, Self::Passages, Self::Candidates];
     pub(crate) fn index(self) -> usize {
         match self {
             Self::QueryVectors => 0,
-            Self::RerankScores => 1,
+            Self::Passages => 1,
             Self::Candidates => 2,
         }
     }
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::QueryVectors => "query-vectors",
-            Self::RerankScores => "rerank-scores",
+            Self::Passages => "source-passages",
             Self::Candidates => "retrieval-candidates",
         }
     }
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+    pub(crate) fn maximum_bytes(self) -> usize {
+        match self {
+            Self::QueryVectors => 64 * MIB,
+            Self::Passages | Self::Candidates => 128 * MIB,
+        }
     }
 }
 
@@ -59,16 +65,16 @@ impl HardwareHeadroom {
             .saturating_add(self.approved_cache_bytes);
         let mut limit = (reusable / 4).min(self.capacity_bytes / 8);
         if let Some(total) = self.physical_total_bytes {
-            limit = limit.min(total / 32);
+            limit = limit.min(total / 16);
         }
         if let Some(free) = self.physical_available_bytes {
             limit = limit.min(free.saturating_add(self.approved_cache_bytes) / 4);
         }
         limit
     }
-    fn pressured(self) -> bool {
-        self.queued
-            || self.available_bytes < self.capacity_bytes / 100
+    fn pressured(self) -> bool { self.queued || self.memory_pressured() }
+    pub(crate) fn memory_pressured(self) -> bool {
+        self.available_bytes < self.capacity_bytes / 100
             || self
                 .physical_total_bytes
                 .zip(self.physical_available_bytes)
@@ -99,7 +105,7 @@ impl Default for BudgetController {
     fn default() -> Self {
         Self {
             enabled: [false; 3],
-            seeds: [32 * MIB, 16 * MIB, 32 * MIB],
+            seeds: [32 * MIB, 32 * MIB, 32 * MIB],
             caps: [None; 3],
             feedback: [Feedback::default(); 3],
             previous: [Feedback::default(); 3],
@@ -108,7 +114,7 @@ impl Default for BudgetController {
             hardware_limit: 0,
             total_cap: None,
             last_adjust: None,
-            weights: [32.0, 16.0, 32.0],
+            weights: [32.0, 32.0, 32.0],
             idle_windows: 0,
             foreground_baseline: 0.0,
             foreground_recent: 0.0,
@@ -129,6 +135,7 @@ impl BudgetController {
     }
     pub(crate) fn manual_limit(&mut self, kind: CacheKind, cap: Option<usize>) -> bool {
         let i = kind.index();
+        let cap = cap.map(|cap| cap.min(kind.maximum_bytes()));
         if self.caps[i] != cap {
             self.caps[i] = cap;
             self.dirty = true;
@@ -138,7 +145,7 @@ impl BudgetController {
         }
     }
     pub(crate) fn manual_cap(&self, kind: CacheKind) -> Option<usize> {
-        self.caps[kind.index()]
+        Some(self.caps[kind.index()].unwrap_or(usize::MAX).min(kind.maximum_bytes()))
     }
     pub(crate) fn total_limit(&mut self, cap: Option<usize>) {
         if self.total_cap != cap {
@@ -171,7 +178,11 @@ impl BudgetController {
         self.reason = "cache-memory-reclaimed";
     }
     pub(crate) fn update(&mut self, now_ms: u64, hardware: HardwareHeadroom) {
-        self.hardware_limit = hardware.limit().min(self.total_cap.unwrap_or(usize::MAX));
+        let caps = CacheKind::ALL.map(|kind| self.manual_cap(kind));
+        // Per-cache maxima and the physical-memory share apply together, not as additive allowances.
+        // 各缓存上限与物理内存份额同时约束；16 GiB 主机也不因此预分配 1 GiB。
+        self.hardware_limit = hardware.limit().min(self.total_cap.unwrap_or(usize::MAX))
+            .min(CacheKind::ALL.into_iter().map(CacheKind::maximum_bytes).sum());
         if let Some(latency) = hardware
             .foreground_latency_micros
             .filter(|latency| Some(*latency) != self.last_latency_sample)
@@ -191,7 +202,7 @@ impl BudgetController {
             .iter()
             .fold(0usize, |total, bytes| total.saturating_add(*bytes))
             > self.hardware_limit
-            || (0..3).any(|i| self.targets[i] > self.caps[i].unwrap_or(usize::MAX));
+            || (0..3).any(|i| self.targets[i] > caps[i].unwrap_or(usize::MAX));
         if !self.dirty
             && !must_shrink
             && self
@@ -234,7 +245,7 @@ impl BudgetController {
         }
         let seeds = (0..3)
             .filter(|i| self.enabled[*i] && self.caps[*i] != Some(0))
-            .map(|i| self.seeds[i].min(self.caps[i].unwrap_or(usize::MAX)))
+            .map(|i| self.seeds[i].min(caps[i].unwrap_or(usize::MAX)))
             .fold(0usize, usize::saturating_add);
         if requests == 0 {
             self.idle_windows = self.idle_windows.saturating_add(1);
@@ -263,7 +274,7 @@ impl BudgetController {
             self.total
         };
         self.total = next.min(self.hardware_limit);
-        let mut targets = allocate(self.total, &weights, &self.caps);
+        let mut targets = allocate(self.total, &weights, &caps);
         // Small normal variations keep their grant; hardware/cap reductions always win immediately.
         // 正常小幅波动保留已有授额；硬件或手动上限降低时立即优先收缩。
         if !must_shrink && !self.dirty {
@@ -294,7 +305,8 @@ impl BudgetController {
         json!({"automatic":true,"totalTargetBytes":self.total,"hardwareLimitBytes":self.hardware_limit,
             "adjustmentIntervalMs":ADJUST_INTERVAL_MS,"hysteresisFraction":0.125,"reason":self.reason,
             "pendingRecalculation":self.dirty,
-            "targets":CacheKind::ALL.map(|kind|json!({"name":kind.name(),"bytes":self.target(kind),"manualLimitBytes":self.caps[kind.index()]})),
+            "physicalMemoryFraction":0.0625,
+            "targets":CacheKind::ALL.map(|kind|json!({"name":kind.name(),"bytes":self.target(kind),"maximumBytes":kind.maximum_bytes(),"manualLimitBytes":self.caps[kind.index()]})),
             "localForegroundBaselineMicros":self.foreground_baseline,"localForegroundRecentMicros":self.foreground_recent})
     }
 }
@@ -344,17 +356,13 @@ mod tests {
         for kind in CacheKind::ALL {
             state.register(
                 kind,
-                if kind == CacheKind::RerankScores {
-                    16 * MIB
-                } else {
-                    32 * MIB
-                },
+                32 * MIB,
             );
         }
         state
     }
     #[test]
-    fn automatic_growth_crosses_old_product_caps_only_with_measured_benefit() {
+    fn automatic_growth_obeys_shared_and_per_cache_maxima() {
         let mut state = controller();
         state.update(0, hardware());
         for round in 1..18u64 {
@@ -374,7 +382,12 @@ mod tests {
             }
             state.update(round * ADJUST_INTERVAL_MS, hardware());
         }
-        assert!(state.target(CacheKind::QueryVectors) > 128 * MIB);
+        assert!(state.target(CacheKind::QueryVectors) > 32 * MIB);
+        assert!(state.total > 96 * MIB);
+        for kind in CacheKind::ALL {
+            assert!(state.target(kind) <= kind.maximum_bytes());
+        }
+        assert!(state.total <= 320 * MIB);
         assert!(state.targets.iter().sum::<usize>() <= state.hardware_limit);
     }
     #[test]
@@ -396,6 +409,19 @@ mod tests {
         assert!(state.total > 0);
     }
     #[test]
+    fn physical_share_and_user_overrides_cannot_expand_the_product_maxima() {
+        let mut state = controller();
+        state.manual_limit(CacheKind::QueryVectors, Some(512 * MIB));
+        assert_eq!(state.manual_cap(CacheKind::QueryVectors), Some(64 * MIB));
+        state.update(0, HardwareHeadroom {
+            physical_total_bytes: Some(1024 * MIB),
+            ..hardware()
+        });
+        assert!(state.total <= 64 * MIB);
+        assert_eq!(state.hardware_limit, 64 * MIB);
+        assert!(CacheKind::from_name("rerank-scores").is_none());
+    }
+    #[test]
     fn bounds_hysteresis_and_adjustment_interval_prevent_budget_churn() {
         let mut state = controller();
         state.update(0, hardware());
@@ -408,9 +434,9 @@ mod tests {
             },
         );
         assert_eq!(state.targets, targets);
-        state.manual_limit(CacheKind::RerankScores, Some(2 * MIB));
+        state.manual_limit(CacheKind::Passages, Some(2 * MIB));
         state.update(2, hardware());
-        assert!(state.target(CacheKind::RerankScores) <= 2 * MIB);
+        assert!(state.target(CacheKind::Passages) <= 2 * MIB);
         state.update(
             3,
             HardwareHeadroom {

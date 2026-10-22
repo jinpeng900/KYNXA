@@ -39,6 +39,57 @@ fn hex(value: &Value) -> bool {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     })
 }
+
+/// Runtime snapshots are bounded broker data, never replayed calls or another source of tool authority.
+/// 运行快照只承载有界程序资料，不能夹带待执行调用或变成另一套工具授权。
+pub(crate) fn valid_context_before(value: &Value) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    let Some(entries) = value.as_array().filter(|entries| entries.len() <= 64) else {
+        return false;
+    };
+    let mut characters = 0usize;
+    for entry in entries {
+        let Some(fields) = entry.as_object() else {
+            return false;
+        };
+        if fields.keys().any(|name| !["message", "source"].contains(&name.as_str())) {
+            return false;
+        }
+        let Some(message) = entry["message"].as_object() else {
+            return false;
+        };
+        if message.keys().any(|name| !["role", "content"].contains(&name.as_str()))
+            || !matches!(entry["message"]["role"].as_str(), Some("user" | "system" | "developer"))
+        {
+            return false;
+        }
+        let Some(content) = entry["message"]["content"].as_str().filter(|text| !text.trim().is_empty()) else {
+            return false;
+        };
+        let Some(source) = entry["source"].as_object() else {
+            return false;
+        };
+        if source.keys().any(|name| !["projectionOrigin", "runtimeContext", "snapshotHash", "authorityHash",
+            "publicText", "instructionAuthority", "runtimeKind"].contains(&name.as_str()))
+            || entry["source"]["projectionOrigin"] != "broker-control"
+            || entry["source"]["runtimeContext"] != true
+            || !hex(&entry["source"]["snapshotHash"])
+            || !hex(&entry["source"]["authorityHash"])
+            || entry["source"]["publicText"] != content
+            || entry["source"]["instructionAuthority"] != false
+            || entry["source"]["runtimeKind"] != "runtime-snapshot"
+        {
+            return false;
+        }
+        characters = characters.saturating_add(entry.to_string().encode_utf16().count());
+        if characters > 1024 * 1024 {
+            return false;
+        }
+    }
+    true
+}
 fn invalid() -> String {
     "INVALID_MODEL_TRANSCRIPT".into()
 }
@@ -91,7 +142,9 @@ fn validate(args: &Value) -> Result<Value, String> {
             .filter(|number| *number > previous && *number <= MAX_TRANSCRIPT_ROUNDS as u64)
             .ok_or_else(invalid)?;
         let calls = round["calls"].as_array().ok_or_else(invalid)?;
-        if round["object"] != true || !text(&round["text"], 2 * 1024 * 1024) {
+        if round["object"] != true || !text(&round["text"], 2 * 1024 * 1024)
+            || !valid_context_before(&round["contextBefore"])
+        {
             return Err(invalid());
         }
         validate_calls(calls)?;
@@ -190,6 +243,52 @@ mod tests {
                 "INVALID_MODEL_TRANSCRIPT"
             );
         }
+    }
+
+    #[test]
+    fn runtime_context_preserves_legacy_rounds_and_rejects_calls_or_forged_authority() {
+        let snapshot = json!({"message":{"role":"user","content":"Current runtime data"},
+            "source":{"projectionOrigin":"broker-control","runtimeContext":true,"snapshotHash":"a".repeat(64),
+                "authorityHash":"b".repeat(64),"publicText":"Current runtime data","instructionAuthority":false,
+                "runtimeKind":"runtime-snapshot"}});
+        assert!(valid_context_before(&Value::Null));
+        assert!(valid_context_before(&json!([])));
+        for role in ["user", "system", "developer"] {
+            let mut accepted = snapshot.clone();
+            accepted["message"]["role"] = json!(role);
+            let mut round = transcript(0);
+            round["rounds"][0]["contextBefore"] = json!([accepted]);
+            assert_eq!(calculate("models.transcript.validate", &round).unwrap(), true);
+        }
+        let mut invalid_entries = Vec::new();
+        for role in ["tool", "function", "assistant"] {
+            let mut invalid = snapshot.clone();
+            invalid["message"]["role"] = json!(role);
+            invalid_entries.push(invalid);
+        }
+        for (path, value) in [
+            (["message", "tool_calls"], json!([])),
+            (["source", "runtimeContext"], json!(false)),
+            (["source", "instructionAuthority"], json!(true)),
+            (["source", "executed"], json!(true)),
+            (["source", "snapshotHash"], json!("invalid")),
+            (["source", "authorityHash"], json!("B".repeat(64))),
+            (["source", "publicText"], json!("Another text")),
+        ] {
+            let mut invalid = snapshot.clone();
+            invalid[path[0]][path[1]] = value;
+            invalid_entries.push(invalid);
+        }
+        for invalid in invalid_entries {
+            let mut round = transcript(0);
+            round["rounds"][0]["contextBefore"] = json!([invalid]);
+            assert_eq!(calculate("models.transcript.validate", &round).unwrap_err(), "INVALID_MODEL_TRANSCRIPT");
+        }
+        assert!(!valid_context_before(&json!(vec![snapshot.clone(); 65])));
+        let mut oversized = snapshot;
+        oversized["message"]["content"] = json!("x".repeat(1024 * 1024));
+        oversized["source"]["publicText"] = oversized["message"]["content"].clone();
+        assert!(!valid_context_before(&json!([oversized])));
     }
 }
 

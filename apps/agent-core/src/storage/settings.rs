@@ -74,8 +74,8 @@ fn ann_defaults() -> Value {
 }
 fn defaults() -> Value {
     json!({"schemaVersion": 1, "revision": 0, "local": {"enabled": true, "semantic": "auto", "vectorBackend": "sqlite",
-        "embeddingProfileId": "builtin-multilingual", "embeddingDevicePolicy": "auto", "rerankProfileId": null,
-        "rerankCandidates": 20, "rerankDevicePolicy": "auto", "indexing": indexing_defaults(), "ann": ann_defaults()},
+        "embeddingProfileId": "builtin-multilingual", "embeddingDevicePolicy": "auto",
+        "rrfK": 60, "indexing": indexing_defaults(), "ann": ann_defaults()},
         "web": {"mode": "auto", "providerId": "auto", "depth": "standard", "language": "auto", "browserRead": "auto"},
         "cache": {"memoryLimitBytes": 64 * 1024 * 1024, "diskLimitBytes": 512 * 1024 * 1024}})
 }
@@ -165,6 +165,14 @@ fn merge_local(base: &Value, patch: &Value) -> Value {
             result[name] = merge_values(&base[name], &patch[name]);
         }
     }
+    // Ignore retired cross-encoder settings while accepting older persisted/client schemas.
+    // 接受旧持久设置与客户端字段，但不能重新启用已移除的交叉编码器。
+    if let Some(fields) = result.as_object_mut() {
+        for name in ["rerankProfileId", "rerankDevicePolicy", "rerankCandidates"] { fields.remove(name); }
+    }
+    if result.get("rrfK").is_some() {
+        result["rrfK"] = json!(result["rrfK"].as_u64().unwrap_or(60).clamp(20, 100));
+    }
     result
 }
 fn merge_settings(base: &Value, patch: &Value) -> Value {
@@ -190,6 +198,7 @@ fn patch(value: &Value) -> ContractResult {
                 "rerankProfileId",
                 "rerankCandidates",
                 "rerankDevicePolicy",
+                "rrfK",
                 "indexing",
                 "ann",
             ],
@@ -200,16 +209,12 @@ fn patch(value: &Value) -> ContractResult {
             clean[name] = match name.as_str() {
                 "enabled" => boolean(value, name)?,
                 "semantic" => choice(value, &["auto", "off"], name)?,
-                "embeddingDevicePolicy" | "rerankDevicePolicy" => {
+                "embeddingDevicePolicy" => {
                     choice(value, &["auto", "cpu", "gpu"], name)?
                 }
                 "vectorBackend" => choice(value, &["sqlite"], name)?,
-                "rerankCandidates" => {
-                    if !value.is_null() && ![json!(20), json!(40), json!(60)].contains(value) {
-                        return Err(failure(format!("Invalid {name}. / 配置选项无效。")));
-                    }
-                    value.clone()
-                }
+                "rerankProfileId" | "rerankCandidates" | "rerankDevicePolicy" => Value::Null,
+                "rrfK" => json!(integer(value, 20, 100, name)?),
                 "indexing" => indexing(value, true)?,
                 "ann" => {
                     ann(value).map_err(|error| failure(error.message))?;
@@ -551,5 +556,19 @@ pub fn apply(operation: &str, args: &Value) -> ContractResult {
             "AGENT_CORE_UNKNOWN_OPERATION",
             400,
         )),
+    }
+}
+
+#[cfg(test)]
+mod lightweight_settings_tests {
+    use super::*;
+    #[test]
+    fn retired_settings_cannot_reload_a_model_and_project_edits_preserve_global_rrf_k() {
+        let legacy=merge_local(&defaults()["local"],&json!({"rerankProfileId":"retired-profile","rerankDevicePolicy":"gpu","rerankCandidates":60}));
+        for field in ["rerankProfileId","rerankDevicePolicy","rerankCandidates"] {assert!(legacy.get(field).is_none());}
+        assert_eq!(legacy["rrfK"],60);
+        let local_patch=merge_local(&json!({}),&json!({"enabled":true}));
+        assert!(local_patch.get("rrfK").is_none());
+        assert_eq!(merge_local(&json!({"rrfK":35}),&local_patch)["rrfK"],35);
     }
 }

@@ -166,7 +166,7 @@ pub fn source_state(connection: &Connection, arguments: &Value) -> ContractResul
         rows(
             connection,
             &format!(
-                "SELECT s.source_id,s.scope_key,s.source_type,s.source_revision,s.content_hash,s.binding_revision,s.title,s.locator,s.parser_version,s.embedding_input_version,s.embedding_input_signature,
+                "SELECT s.source_id,s.scope_key,s.source_type,s.source_revision,s.content_hash,s.binding_revision,s.title,s.locator,s.parser_version,s.chunker_version,s.embedding_input_version,s.embedding_input_signature,
                 count(c.id) AS chunk_count,
                 count(CASE WHEN c.vector IS NOT NULL THEN 1 END) AS vector_chunks,
                 min(CASE WHEN c.vector IS NOT NULL THEN c.embedding_profile_id END) AS embedding_profile_id,

@@ -4,6 +4,63 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_AGE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 
+/// Templates deliberately contain no historical credentials, commands, URLs or personal filesystem values.
+/// 模板不保留历史凭据、命令、URL或个人文件路径；每次都须从当前任务重新绑定参数。
+pub(crate) fn procedure_arguments(value: &Value) -> Value {
+    fn mask(value: &Value, depth: usize) -> Value {
+        if depth >= 8 { return json!("{{current-value}}"); }
+        match value {
+            Value::Object(fields) => Value::Object(fields.iter().map(|(key,value)|(key.clone(),mask(value,depth+1))).collect()),
+            Value::Array(values) => json!(values.iter().take(16).map(|value|mask(value,depth+1)).collect::<Vec<_>>()),
+            Value::String(_) => json!("{{current-string}}"),
+            Value::Number(_) => json!("{{current-number}}"),
+            Value::Bool(_) => json!("{{current-boolean}}"),
+            Value::Null => Value::Null,
+        }
+    }
+    mask(value,0)
+}
+
+/// New identity-policy observations accumulate before promotion; legacy statistics cannot activate procedures.
+/// 新工具身份规则下的真实观察须先积累，旧统计和模拟回执不能使步骤模板提前激活。
+pub(crate) fn verified_procedure_candidate(goal: &str, observations: &[Value]) -> Option<Value> {
+    use sha2::{Digest,Sha256};
+    let mut seen = HashSet::new();
+    let steps = observations.iter().filter(|observation| observation["verifiedSuccess"] == true
+        && observation["ref"]["id"].is_string() && observation["ref"]["sha256"].is_string()
+        && observation["toolIdentity"].as_str().is_some_and(|identity|identity.len()==64 && identity.bytes().all(|byte|byte.is_ascii_hexdigit()))
+        && !matches!(observation["name"].as_str(),Some("tool.search"|"tool.load"|"knowledge.experience"))
+        && !observation["name"].as_str().unwrap_or("").starts_with("task.")
+        && seen.insert(observation["id"].as_str().unwrap_or("").to_owned()))
+        .map(|observation|json!({"tool":observation["name"],"identity":observation["toolIdentity"],
+            "callId":observation["id"],"receipt":observation["ref"],"argumentsTemplate":observation["argumentsTemplate"]}))
+        .collect::<Vec<_>>();
+    if steps.is_empty() || steps.len()>64 { return None; }
+    let trigger = goal.chars().take(2000).collect::<String>();
+    let signature_steps = steps.iter().map(|step|json!([step["tool"],step["identity"],step["argumentsTemplate"]])).collect::<Vec<_>>();
+    let signature = format!("{:x}",Sha256::digest(json!([trigger.trim().to_lowercase(),signature_steps]).to_string().as_bytes()));
+    Some(json!({"schemaVersion":1,"identityPolicy":"per-tool-contract-v2","signature":signature,
+        "trigger":trigger,"steps":steps,"acceptanceReviewed":true,"completeSequence":true,"state":"candidate"}))
+}
+
+#[cfg(test)]
+mod verified_procedure_tests {
+    use super::*;
+    #[test]
+    fn verified_procedure_templates_require_receipts_and_never_reuse_private_parameters() {
+        let arguments = procedure_arguments(&json!({"path":"C:/PRIVATE/user.txt","command":"SECRET COMMAND","nested":{"token":"SECRET"}}));
+        assert!(!arguments.to_string().contains("PRIVATE"));
+        assert!(!arguments.to_string().contains("SECRET"));
+        let observation=json!({"id":"call","name":"filesystem.write","verifiedSuccess":true,
+            "toolIdentity":"a".repeat(64),"ref":{"id":"receipt","sha256":"b".repeat(64)},"argumentsTemplate":arguments});
+        assert!(verified_procedure_candidate("save report",&[observation.clone()]).is_some());
+        let mut failed=observation.clone(); failed["verifiedSuccess"]=json!(false);
+        assert!(verified_procedure_candidate("save report",&[failed]).is_none());
+        let mut legacy=observation; legacy.as_object_mut().unwrap().remove("toolIdentity");
+        assert!(verified_procedure_candidate("save report",&[legacy]).is_none());
+    }
+}
+
 fn failure(message: &str) -> ContractError {
     ContractError::new(message, "INVALID_RETRIEVAL_INPUT", 400)
 }

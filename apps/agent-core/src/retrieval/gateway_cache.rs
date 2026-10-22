@@ -65,14 +65,14 @@ static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 fn resize_cache(kind: CacheKind, bytes: usize) {
     match kind {
         CacheKind::QueryVectors => super::gateway_embedding::resize_query_cache(bytes),
-        CacheKind::RerankScores => super::gateway_embedding::resize_score_cache(bytes),
+        CacheKind::Passages => super::cache_passages::set_capacity(bytes),
         CacheKind::Candidates => super::cache_candidates::set_capacity(bytes),
     }
 }
 fn cache_feedback(kind: CacheKind) -> Feedback {
     match kind {
         CacheKind::QueryVectors => super::gateway_embedding::query_cache_feedback(),
-        CacheKind::RerankScores => super::gateway_embedding::score_cache_feedback(),
+        CacheKind::Passages => super::cache_passages::budget_feedback(),
         CacheKind::Candidates => super::cache_candidates::budget_feedback(),
     }
 }
@@ -109,6 +109,21 @@ fn hardware_headroom(snapshot: &Value, approved: usize) -> HardwareHeadroom {
             .filter(|n| n.is_finite() && *n > 0.0)
             .map(|n| (n * 1000.0).min(u64::MAX as f64) as u64),
     }
+}
+
+/// Reuse the existing memory thresholds, excluding queue/CPU demand and untrusted missing telemetry.
+/// 复用已有内存阈值；队列或CPU准入需求不等于缺内存，缺失或不可信观测不触发模型卸载。
+pub(crate) fn confirmed_memory_pressure(snapshot:&Value)->bool {
+    let valid_pair=|total:&Value,free:&Value| total.as_f64().zip(free.as_f64()).is_some_and(|(total,free)|
+        total.is_finite() && total>0.0 && total<usize::MAX as f64 && free.is_finite() && free>=0.0 && free<=total);
+    let accounting=valid_pair(&snapshot["accounting"]["capacityMemoryBytes"],&snapshot["accounting"]["availableMemoryBytes"]);
+    let physical=valid_pair(&snapshot["memory"]["totalBytes"],&snapshot["memory"]["availableBytes"]);
+    if !accounting && !physical {return false;}
+    let mut headroom=hardware_headroom(snapshot,0);
+    if accounting {headroom.capacity_bytes=number_bytes(&snapshot["accounting"]["capacityMemoryBytes"]);}
+    else {headroom.available_bytes=headroom.capacity_bytes;}
+    if !physical {headroom.physical_total_bytes=None;headroom.physical_available_bytes=None;}
+    headroom.memory_pressured()
 }
 
 pub(crate) fn configure_cache_limit(name: &'static str, limit: Option<usize>) {
@@ -357,6 +372,8 @@ pub(crate) fn cache_memory_limit(name: &'static str, seed_bytes: usize, reclaim:
     };
     if kind == CacheKind::Candidates {
         configure_cache_limit(name, environment_limit("KYNXA_CANDIDATE_CACHE_MIB"));
+    } else if kind == CacheKind::Passages {
+        configure_cache_limit(name, environment_limit("KYNXA_PASSAGE_CACHE_MIB"));
     }
     monitor_pressure(&runtime, Arc::downgrade(&service));
     let Ok(mut state) = MEMORY.get_or_init(Default::default).try_lock() else {
@@ -881,5 +898,28 @@ mod tests {
         assert!(cache.get("running").is_none());
         assert!(cache.get("ready").is_none());
         assert_eq!(cache.stats()["pendingBytes"], 0);
+    }
+}
+
+#[cfg(test)]
+mod model_retirement_pressure_tests {
+    use super::*;
+    #[test]
+    fn model_retirement_requires_trusted_memory_pressure_not_just_admission_or_queueing() {
+        let mut snapshot=json!({"accounting":{"capacityMemoryBytes":16000,"availableMemoryBytes":12000},
+            "memory":{"totalBytes":32000,"availableBytes":18000},"queuedRequests":20});
+        assert!(!confirmed_memory_pressure(&snapshot));
+        snapshot["budget"]=json!({"memoryBytes":320000000});
+        assert!(!confirmed_memory_pressure(&snapshot));
+        snapshot["memory"]["availableBytes"]=json!(100);
+        assert!(confirmed_memory_pressure(&snapshot));
+        snapshot["memory"]["availableBytes"]=json!(18000);
+        snapshot["accounting"]["availableMemoryBytes"]=json!(100);
+        assert!(confirmed_memory_pressure(&snapshot));
+        snapshot["accounting"]["availableMemoryBytes"]=Value::Null;
+        snapshot["memory"]["availableBytes"]=json!(-1);
+        assert!(!confirmed_memory_pressure(&snapshot));
+        assert!(!confirmed_memory_pressure(&Value::Null));
+        assert!(!confirmed_memory_pressure(&json!({"memory":{"totalBytes":1e100,"availableBytes":0}})));
     }
 }

@@ -175,6 +175,7 @@ fn failure(error: crate::models::gateway::ModelError) -> ContractError {
         "INFERENCE_RUNTIME_UNAVAILABLE" => "INFERENCE_RUNTIME_UNAVAILABLE",
         "INFERENCE_RUNTIME_NOT_INITIALIZED" => "INFERENCE_RUNTIME_NOT_INITIALIZED",
         "EMBEDDING_ASSET_MISSING" => "EMBEDDING_ASSET_MISSING",
+        "EMBEDDING_CONTEXT_TOO_LONG" => "EMBEDDING_CONTEXT_TOO_LONG",
         "EMBEDDING_ASSET_INVALID" => "EMBEDDING_ASSET_INVALID",
         "INFERENCE_CANCELLED" => "INFERENCE_CANCELLED",
         _ => "RETRIEVAL_INFERENCE_FAILED",
@@ -308,32 +309,19 @@ fn owner(
     local: &Value,
     cold: bool,
 ) -> Result<Option<Arc<InferenceOwner>>, ContractError> {
-    owner_kind(config, local, cold, false)
-}
-fn owner_kind(
-    config: &GatewayConfig,
-    local: &Value,
-    cold: bool,
-    rerank: bool,
-) -> Result<Option<Arc<InferenceOwner>>, ContractError> {
-    let root = if rerank {
-        rerank_root(config)
-    } else {
-        model_root(config)
-    };
-    let preference = device_preference(local, rerank);
+    let root = model_root(config);
+    let preference = device_preference(local);
     let key = owner_key(config, &root, preference);
     let mut owners = OWNERS.get_or_init(Default::default).lock().map_err(|_| {
         gateway::error("推理会话暂时不可用。", "INFERENCE_RUNTIME_UNAVAILABLE", 503)
     })?;
     if let Some(owner) = owners.get(&key) {
         if !cold
-            && (owner
+            && owner
                 .observation
                 .lock()
                 .map(|owner| !owner.loaded)
                 .unwrap_or(true)
-                || owner.session.try_lock().is_err())
         {
             return Ok(None);
         }
@@ -353,7 +341,7 @@ fn owner_kind(
         .map(|cores| cores.get())
         .unwrap_or(1);
     let mut policy = ReservationState::default();
-    policy.apply("resources.reservation.init",&json!({"profile":{"id":if rerank{"builtin-multilingual-reranker"}else{"builtin-multilingual"},"dtype":"q8","dimensions":if rerank{768}else{384},"hiddenSize":if rerank{768}else{384},"attentionHeads":12,"maxInputTokens":512,"files":[{"path":"onnx/model_quantized.onnx","bytes":if rerank{279301077}else{118308185}},{"path":"tokenizer.json","bytes":if rerank{17098079}else{17082730}}]},
+    policy.apply("resources.reservation.init",&json!({"profile":{"id":"builtin-multilingual","dtype":"q8","dimensions":384,"hiddenSize":384,"attentionHeads":12,"maxInputTokens":512,"files":[{"path":"onnx/model_quantized.onnx","bytes":118308185},{"path":"tokenizer.json","bytes":17082730}]},
         "taskId":gateway::new_id(),"kind":"background","platform":"win32","arch":"x64","devicePreference":preference,"logicalCores":cores,"cpuThreads":local["cpuThreads"].as_u64().unwrap_or((cores/2).clamp(1,32) as u64),"gatewayProcessId":std::process::id()}))
         .map_err(|message|gateway::error(&message,"INFERENCE_RESERVATION_FAILED",503))?;
     policy
@@ -376,12 +364,8 @@ fn owner_kind(
     owners.insert(key, owner.clone());
     Ok(Some(owner))
 }
-fn device_preference(local: &Value, rerank: bool) -> &str {
-    local[if rerank {
-        "rerankDevicePolicy"
-    } else {
-        "embeddingDevicePolicy"
-    }]
+fn device_preference(local: &Value) -> &str {
+    local["embeddingDevicePolicy"]
     .as_str()
     .or_else(|| local["devicePreference"].as_str())
     .or_else(|| local["device"].as_str())
@@ -395,120 +379,6 @@ fn owner_key(config: &GatewayConfig, root: &Path, preference: &str) -> String {
         config.data_root.display(),
         root.display()
     )
-}
-fn rerank_root(config: &GatewayConfig) -> PathBuf {
-    let installed = config
-        .application_root
-        .join("runtime/rerank/builtin-multilingual-reranker");
-    if installed.is_dir() {
-        installed
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../artifacts/runtime/rerank/builtin-multilingual-reranker")
-    }
-}
-
-pub fn rerank(
-    config: &GatewayConfig,
-    query: &str,
-    texts: &[String],
-    local: &Value,
-    cancel: Arc<AtomicBool>,
-) -> Result<crate::models::gateway_inference::RerankBatch, ContractError> {
-    let observed = owner_kind(config, local, true, true)?.unwrap();
-    let mut owner = observed.session.lock().map_err(|_| {
-        gateway::error("重排会话暂时不可用。", "INFERENCE_RUNTIME_UNAVAILABLE", 503)
-    })?;
-    if cancel.load(Ordering::Acquire) {
-        return Err(gateway::error("推理已取消。", "INFERENCE_CANCELLED", 499));
-    }
-    if owner.retired {
-        return Err(gateway::error(
-            "重排会话已回收。",
-            "INFERENCE_SESSION_RETIRED",
-            409,
-        ));
-    }
-    native(&mut owner, "resources.reservation.admit", json!({}))?;
-    native(&mut owner, "resources.reservation.plan", json!({}))?;
-    let plan = native(&mut owner, "resources.reservation.residentPlan", json!({}))?;
-    acquire(&mut owner, "resident", plan, &cancel)?;
-    let plan = native(&mut owner, "resources.reservation.executionPlan", json!({}))?;
-    acquire(&mut owner, "execution", plan, &cancel)?;
-    let result = (|| {
-        let plan = native(&mut owner, "resources.reservation.gpuPlan", json!({}))?;
-        acquire(&mut owner, "gpu", plan, &cancel)?;
-        let budget = native(&mut owner, "resources.reservation.grant", json!({}))?;
-        let mut options = InferenceOptions {
-            device: budget["device"].as_str().unwrap_or("cpu").into(),
-            device_id: budget["deviceId"].as_u64().map(|id| id as usize),
-            cpu_threads: budget["cpuThreads"].as_u64().unwrap_or(1).max(1) as usize,
-            batch_size: budget["batchSize"]
-                .as_f64()
-                .unwrap_or(20.0)
-                .clamp(1.0, 128.0) as usize,
-            batch_token_budget: budget["batchTokenBudget"]
-                .as_f64()
-                .unwrap_or(16384.0)
-                .max(512.0) as usize,
-            activation_memory_bytes: budget["activationMemoryBytes"]
-                .as_f64()
-                .unwrap_or(0.0)
-                .ceil() as u64,
-            gpu_audit_memory_bytes: 0,
-        };
-        let audit = if options.device == "dml" {
-            let requested = gateway_inference::qualification_request(true, options.cpu_threads)
-                .map_err(failure)?;
-            acquire(
-                &mut owner,
-                "resident",
-                json!({"taskId":gateway::new_id(),"workspaceId":"local","kind":"background","cpuThreads":0,"memoryBytes":requested["memoryBytes"].as_f64().unwrap_or(0.0).ceil()as u64,"gpuMemoryBytes":0,"ttlMs":30000}),
-                &cancel,
-            )?;
-            let last = owner.leases.len() - 1;
-            options.gpu_audit_memory_bytes = owner.leases[last].allocation["memoryBytes"]
-                .as_u64()
-                .unwrap_or(0);
-            Some(owner.leases[last].allocation["leaseId"].clone())
-        } else {
-            None
-        };
-        gateway_inference::initialize_runtime(&config.inference_library).map_err(failure)?;
-        owner.device = options.device.clone();
-        let generated =
-            gateway_inference::rerank_blocking(&owner.root, query, texts, &options, cancel)
-                .map_err(failure);
-        if let Some(id) = audit {
-            if let Some(index) = owner
-                .leases
-                .iter()
-                .position(|lease| lease.allocation["leaseId"] == id)
-            {
-                release(&mut owner, index)?;
-            }
-        }
-        let batch = generated?;
-        observed.ready(batch.inference_status.clone());
-        native(
-            &mut owner,
-            "resources.reservation.backend",
-            json!({"status":batch.inference_status}),
-        )?;
-        Ok(batch)
-    })();
-    let idle = native(&mut owner, "resources.reservation.idlePlan", json!({}))?;
-    for item in idle.as_array().into_iter().flatten() {
-        if let Some(index) = owner
-            .leases
-            .iter()
-            .position(|lease| lease.allocation["leaseId"] == item["leaseId"])
-        {
-            release(&mut owner, index)?;
-        }
-    }
-    owner.last_used = Instant::now();
-    result
 }
 pub fn fit(
     config: &GatewayConfig,
@@ -551,22 +421,11 @@ pub fn fit(
     result
 }
 const QUERY_CACHE_NAME: &str = "query-vectors";
-const SCORE_CACHE_NAME: &str = "rerank-scores";
 static QUERY_CACHE: OnceLock<Arc<FlightCache<EmbeddingBatch>>> = OnceLock::new();
-static SCORE_CACHE: OnceLock<Arc<FlightCache<RerankValue>>> = OnceLock::new();
-
-enum RerankValue {
-    Score { score:f64, profile:String, version:String, device:String, computed_micros:u64 },
-    Batch(gateway_inference::RerankBatch),
-}
 fn query_cache() -> &'static Arc<FlightCache<EmbeddingBatch>> { QUERY_CACHE.get_or_init(FlightCache::new) }
-fn score_cache() -> &'static Arc<FlightCache<RerankValue>> { SCORE_CACHE.get_or_init(FlightCache::new) }
 fn reclaim_query_cache() { if let Some(cache)=QUERY_CACHE.get() { cache.clear(); } }
-fn reclaim_score_cache() { if let Some(cache)=SCORE_CACHE.get() { cache.clear(); } }
 pub(crate) fn resize_query_cache(bytes:usize) {query_cache().capacity(bytes);}
-pub(crate) fn resize_score_cache(bytes:usize) {score_cache().capacity(bytes);}
 pub(crate) fn query_cache_feedback() -> super::cache_budget::Feedback {QUERY_CACHE.get().map_or_else(Default::default,|cache|cache.feedback())}
-pub(crate) fn score_cache_feedback() -> super::cache_budget::Feedback {SCORE_CACHE.get().map_or_else(Default::default,|cache|cache.feedback())}
 
 fn cache_cap(local: &Value, name: &str, environment: &str) -> Option<usize> {
     let mib = local[name].as_u64().and_then(|n|usize::try_from(n).ok())
@@ -582,9 +441,6 @@ fn run_query_inference(config:&GatewayConfig,texts:&[String],local:&Value,cancel
     if let Some(batch)=&batch {query_cache().measured_compute(inference_micros(&batch.batch_measurements));}
     Ok(batch)
 }
-fn run_rerank_inference(config:&GatewayConfig,query:&str,texts:&[String],local:&Value,cancel:Arc<AtomicBool>) -> Result<gateway_inference::RerankBatch,ContractError> {
-    let batch=rerank(config,query,texts,local,cancel)?;score_cache().measured_compute(inference_micros(&batch.batch_measurements));Ok(batch)
-}
 fn hash_parts(parts: impl IntoIterator<Item=impl AsRef<[u8]>>) -> String {
     let mut hash=Sha256::new();
     for part in parts { let bytes=part.as_ref(); hash.update((bytes.len() as u64).to_le_bytes()); hash.update(bytes); }
@@ -596,17 +452,17 @@ fn text_key(identity: &str, tag: &str, texts: &[String]) -> String {
 
 /// Pinned SHA manifests describe the verified resident graph; cheap file stamps reject changed assets.
 /// 固定 SHA 清单描述原生加载时已核验的模型；文件时间与长度戳额外隔离磁盘资源变更，无需每次重读大权重。
-fn cache_identity(config: &GatewayConfig, scope:&Value, local:&Value, rerank:bool) -> Option<String> {
+fn cache_identity(config: &GatewayConfig, scope:&Value, local:&Value) -> Option<String> {
     if !scope["scopeKeys"].is_array() || scope["scopeKeys"].as_array()?.is_empty() { return None; }
-    let root=if rerank { rerank_root(config) } else { model_root(config) };
+    let root=model_root(config);
     let mut stamps=Vec::new();
     for relative in ["config.json","tokenizer_config.json","special_tokens_map.json","tokenizer.json","onnx/model_quantized.onnx"] {
         let metadata=std::fs::symlink_metadata(root.join(relative)).ok()?;
         if !metadata.is_file() || metadata.file_type().is_symlink() { return None; }
         stamps.push(json!([relative,metadata.len(),metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos().to_string()]));
     }
-    let metadata=if rerank { gateway_inference::reranker_metadata("cpu").ok()? } else { gateway_inference::embedding_metadata("cpu").ok()? };
-    let gpu_metadata=if rerank { gateway_inference::reranker_metadata("dml").ok()? } else { gateway_inference::embedding_metadata("dml").ok()? };
+    let metadata=gateway_inference::embedding_metadata("cpu").ok()?;
+    let gpu_metadata=gateway_inference::embedding_metadata("dml").ok()?;
     let mut scopes=scope["scopeKeys"].as_array()?.clone();
     if scopes.iter().any(|key|!key.is_string()) { return None; }
     scopes.sort_by(|a,b|a.as_str().cmp(&b.as_str())); scopes.dedup();
@@ -617,13 +473,13 @@ fn cache_identity(config: &GatewayConfig, scope:&Value, local:&Value, rerank:boo
     if !runtime.is_file() || runtime.file_type().is_symlink() { return None; }
     let runtime_stamp=json!([config.inference_library,runtime.len(),runtime.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos().to_string()]);
     let identity=json!({"version":"native-numeric-cache-v1","dataRoot":config.data_root,"root":root,
-        "scope":scope,"cpu":metadata,"dml":gpu_metadata,"files":stamps,"policy":device_preference(local,rerank),
-        "runtime":runtime_stamp,"projection":if rerank {"text-pair-longest-first-512-sigmoid"} else {"query-prefix-special-tokens-512-reject-overflow-mean-l2-384"}});
+        "scope":scope,"cpu":metadata,"dml":gpu_metadata,"files":stamps,"policy":device_preference(local),
+        "runtime":runtime_stamp,"projection":"query-prefix-special-tokens-512-reject-overflow-mean-l2-384"});
     Some(hash_parts([serde_json::to_vec(&identity).ok()?]))
 }
-fn resident_device(config:&GatewayConfig, local:&Value, rerank:bool) -> Option<String> {
-    let root=if rerank { rerank_root(config) } else { model_root(config) };
-    let key=owner_key(config,&root,device_preference(local,rerank));
+fn resident_device(config:&GatewayConfig, local:&Value) -> Option<String> {
+    let root=model_root(config);
+    let key=owner_key(config,&root,device_preference(local));
     let observed=OWNERS.get()?.try_lock().ok()?.get(&key)?.clone();
     let observation=observed.observation.try_lock().ok()?;
     if !observation.loaded { return None; }
@@ -643,38 +499,17 @@ fn embedding_bytes(batch:&EmbeddingBatch) -> usize {
         .saturating_add(batch.batch_measurements.iter().map(super::cache::retained_json_bytes).sum::<usize>())
         .saturating_add(batch.profile_id.capacity()+batch.model_version.capacity()+batch.space_id.capacity()+batch.device.capacity()+std::mem::size_of::<EmbeddingBatch>())
 }
-fn rerank_bytes(batch:&gateway_inference::RerankBatch) -> usize {
-    std::mem::size_of::<RerankValue>()+batch.scores.capacity()*std::mem::size_of::<f64>()
-        +batch.profile_id.capacity()+batch.model_version.capacity()+batch.device.capacity()
-        +super::cache::retained_json_bytes(&batch.inference_status)
-        +batch.batch_measurements.capacity()*std::mem::size_of::<Value>()
-        +batch.batch_measurements.iter().map(super::cache::retained_json_bytes).sum::<usize>()
-}
 fn valid_query_batch(batch:&EmbeddingBatch, count:usize) -> bool {
     batch.vectors.len()==count && batch.dimensions==384
         && batch.vectors.iter().all(|vector|vector.len()==batch.dimensions && vector.iter().all(|value|value.is_finite()))
 }
-fn retain_scores(identity:&str, query:&str, texts:&[String], batch:&gateway_inference::RerankBatch, generation:u64) {
-    if batch.truncated_inputs_count!=0 || batch.scores.len()!=texts.len() || batch.batch_measurements.is_empty() { return; }
-    for (text,score) in texts.iter().zip(&batch.scores) {
-        if !score.is_finite() { continue; }
-        let value=RerankValue::Score {score:*score,profile:batch.profile_id.clone(),version:batch.model_version.clone(),device:batch.device.clone(),
-            computed_micros:inference_micros(&batch.batch_measurements)/(texts.len().max(1) as u64)};
-        let bytes=std::mem::size_of::<RerankValue>()+batch.profile_id.len()+batch.model_version.len()+batch.device.len();
-        let key=text_key(identity,&format!("pair:{}",batch.device),&[query.to_owned(),text.clone()]);
-        score_cache().insert_generation(key,Arc::new(value),bytes,generation);
-    }
-}
-
-/// Only query vectors enter this cache; document batches and warmup keep their original resource path.
-/// 仅缓存查询向量；文档批处理与预热继续走原有路径，键不依赖索引代次或聊天请求 ID。
 pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, local:&Value, cancel:Arc<AtomicBool>, cold:bool) -> Result<Option<EmbeddingBatch>,ContractError> {
     let lookup_started=Instant::now();
     let cap=cache_cap(local,"queryVectorCacheMiB","KYNXA_QUERY_VECTOR_CACHE_MIB");
     super::gateway_cache::configure_cache_limit(QUERY_CACHE_NAME,cap);
     if cap==Some(0) {return run_query_inference(config,texts,local,cancel,cold);}
-    let identity=cache_identity(config,scope,local,false);
-    let device=resident_device(config,local,false);
+    let identity=cache_identity(config,scope,local);
+    let device=resident_device(config,local);
     if identity.is_none() || (!cold && device.is_none()) { return run_query_inference(config,texts,local,cancel,cold); }
     let identity=identity.unwrap();
     let bytes=32*1024*1024;
@@ -699,7 +534,7 @@ pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, 
             // Publish the actual-device entry before retiring its flight, closing the completion race.
             // 必须先发布实际设备的就绪条目，再结束共享计算，避免完成瞬间的新请求重复推理。
             if let Some(batch)=batch.as_ref().filter(|batch|valid_query_batch(batch,owned_texts.len()) && !token.load(Ordering::Acquire)) {
-                if cache_identity(&owned_config,&owned_scope,&owned_local,false).as_ref()==Some(&owned_identity) {
+                if cache_identity(&owned_config,&owned_scope,&owned_local).as_ref()==Some(&owned_identity) {
                     let key=text_key(&owned_identity,&format!("ready:{}",batch.device),&owned_texts);
                     query_cache().insert_generation(key,Arc::new(batch.clone()),embedding_bytes(batch),generation);
                 }
@@ -707,7 +542,7 @@ pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, 
             Ok(batch.map(|batch|{let bytes=embedding_bytes(&batch);(batch,bytes)}))
         });
         match computed {
-            Ok(Lookup::Value {value:Some(batch),reused}) if !reused || resident_device(config,local,false).as_deref()==Some(batch.device.as_str()) => { let mut batch=batch.as_ref().clone(); cache_receipt(&mut batch,if reused {"shared"}else{"miss"}); Some(batch) },
+            Ok(Lookup::Value {value:Some(batch),reused}) if !reused || resident_device(config,local).as_deref()==Some(batch.device.as_str()) => { let mut batch=batch.as_ref().clone(); cache_receipt(&mut batch,if reused {"shared"}else{"miss"}); Some(batch) },
             Ok(Lookup::Value {value:Some(_),..}) => run_query_inference(config,texts,local,cancel.clone(),cold)?,
             Ok(Lookup::Value {value:None,..}) => None,
             Ok(Lookup::Bypass) => run_query_inference(config,texts,local,cancel.clone(),cold)?,
@@ -717,7 +552,7 @@ pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, 
     } else { run_query_inference(config,texts,local,cancel.clone(),cold)? };
     if cancel.load(Ordering::Acquire) { return Err(gateway::error("检索推理已取消。","INFERENCE_CANCELLED",499)); }
     if let Some(batch)=batch.as_ref().filter(|batch|valid_query_batch(batch,texts.len()) && !batch.batch_measurements.is_empty()
-        && cache_identity(config,scope,local,false).as_ref()==Some(&identity)) {
+        && cache_identity(config,scope,local).as_ref()==Some(&identity)) {
         let _=cache_memory_limit(QUERY_CACHE_NAME,bytes,reclaim_query_cache);
         let key=text_key(&identity,&format!("ready:{}",batch.device),texts);
         let mut retained=batch.clone();
@@ -727,85 +562,213 @@ pub fn embed_query_cached(config:&GatewayConfig, texts:&[String], scope:&Value, 
     Ok(batch)
 }
 
-/// Numeric pair scores are reusable; candidate selection, fusion, source readback and authorization are not.
-/// 仅复用查询与实际片段窗口的数字得分；候选选择、融合、原文读回与授权仍由原链路逐次处理。
-pub fn rerank_cached(config:&GatewayConfig, query:&str, texts:&[String], scope:&Value, local:&Value, cancel:Arc<AtomicBool>) -> Result<gateway_inference::RerankBatch,ContractError> {
-    let lookup_started=Instant::now();
-    let cap=cache_cap(local,"rerankScoreCacheMiB","KYNXA_RERANK_SCORE_CACHE_MIB");
-    super::gateway_cache::configure_cache_limit(SCORE_CACHE_NAME,cap);
-    if cap==Some(0) {return run_rerank_inference(config,query,texts,local,cancel);}
-    let Some(identity)=cache_identity(config,scope,local,true) else { return run_rerank_inference(config,query,texts,local,cancel); };
-    let budget=16*1024*1024;
-    let _=cache_memory_limit(SCORE_CACHE_NAME,budget,reclaim_score_cache);
-    let generation=score_cache().generation();
-    let mut scores=vec![None;texts.len()]; let mut descriptor=None;
-    if let Some(device)=resident_device(config,local,true) {
-        for (index,text) in texts.iter().enumerate() {
-            let key=text_key(&identity,&format!("pair:{device}"),&[query.to_owned(),text.clone()]);
-            if let Some(value)=score_cache().get(&key) {
-                if let RerankValue::Score {score,profile,version,device,computed_micros}=value.as_ref() {
-                    score_cache().saved_compute(*computed_micros);
-                    scores[index]=Some(*score); descriptor=Some((profile.clone(),version.clone(),device.clone()));
-                }
-            }
+type EmbeddingReply = Result<Option<EmbeddingBatch>,ContractError>;
+struct EmbeddingJob {
+    config:GatewayConfig, local:Value, texts:Vec<String>, kind:EmbedKind,
+    cancel:Arc<AtomicBool>, cold:bool, reply:std::sync::mpsc::SyncSender<EmbeddingReply>,
+}
+#[derive(Clone)]
+struct EmbeddingQueue {
+    id:u64, queries:std::sync::mpsc::SyncSender<EmbeddingJob>, passages:std::sync::mpsc::SyncSender<EmbeddingJob>,
+}
+static EMBEDDING_QUEUES:OnceLock<Mutex<HashMap<String,EmbeddingQueue>>>=OnceLock::new();
+static EMBEDDING_QUEUE_ID:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
+fn request_concurrency(cores:usize)->usize {if cores>=8 {4}else{2}}
+fn inference_concurrency()->usize {
+    request_concurrency(std::thread::available_parallelism().map(|cores|cores.get()).unwrap_or(1))
+}
+fn discard_queue(key:&str,id:u64) {
+    if let Some(queues)=EMBEDDING_QUEUES.get() {
+        if let Ok(mut queues)=queues.lock() {
+            if queues.get(key).is_some_and(|queue|queue.id==id) {queues.remove(key);}
         }
     }
-    let missing=scores.iter().enumerate().filter_map(|(index,score)|score.is_none().then_some(index)).collect::<Vec<_>>();
-    let hits=texts.len()-missing.len();
-    super::gateway_cache::record_local_foreground_latency(lookup_started.elapsed());
-    if cancel.load(Ordering::Acquire) { return Err(gateway::error("检索推理已取消。","INFERENCE_CANCELLED",499)); }
-    let mut batch=if missing.is_empty() && !texts.is_empty() {
-        let (profile_id,model_version,device)=descriptor.unwrap();
-        gateway_inference::RerankBatch {scores:Vec::new(),truncated_inputs_count:0,profile_id,model_version,device:device.clone(),
-            inference_status:json!({"device":device,"cached":true}),batch_measurements:Vec::new()}
-    } else {
-        let pending=missing.iter().map(|index|texts[*index].clone()).collect::<Vec<_>>();
-        let owned_config=config.clone(); let owned_query=query.to_owned(); let owned_texts=pending.clone(); let owned_local=local.clone();
-        let owned_scope=scope.clone(); let owned_identity=identity.clone();
-        let input_bytes=query.len()+pending.iter().map(|text|text.capacity()+std::mem::size_of::<String>()).sum::<usize>()
-            +super::cache::retained_json_bytes(local)+8192;
-        let mut flight_texts=Vec::with_capacity(pending.len()+1); flight_texts.push(query.to_owned()); flight_texts.extend(pending.iter().cloned());
-        let flight_key=text_key(&identity,"batch-flight",&flight_texts); drop(flight_texts);
-        let permit=memory_grant(SCORE_CACHE_NAME);
-        let computed=if permit.is_some() {score_cache().compute(flight_key,input_bytes,cancel.clone(),permit,true,move |token| {
-            let batch=run_rerank_inference(&owned_config,&owned_query,&owned_texts,&owned_local,token.clone())?;
-            if !token.load(Ordering::Acquire) && cache_identity(&owned_config,&owned_scope,&owned_local,true).as_ref()==Some(&owned_identity) {
-                retain_scores(&owned_identity,&owned_query,&owned_texts,&batch,generation);
-            }
-            let bytes=rerank_bytes(&batch); Ok(Some((RerankValue::Batch(batch),bytes)))
-        })} else {Ok(Lookup::Bypass)};
-        let mut generated=match computed {
-            Ok(Lookup::Value {value:Some(value),reused}) => match value.as_ref() {
-                RerankValue::Batch(batch) if !reused || resident_device(config,local,true).as_deref()==Some(batch.device.as_str()) => {
-                    let mut batch=batch.clone(); if reused { score_cache().saved_compute(inference_micros(&batch.batch_measurements)); batch.batch_measurements.clear(); } batch
-                },
-                _=>run_rerank_inference(config,query,&pending,local,cancel.clone())?
-            },
-            Ok(_) => run_rerank_inference(config,query,&pending,local,cancel.clone())?,
-            Err(error) if error.code()=="CACHE_WORKER_UNAVAILABLE" => run_rerank_inference(config,query,&pending,local,cancel.clone())?,
-            Err(error) => return Err(error),
-        };
-        if generated.scores.len()!=missing.len() || descriptor.as_ref().is_some_and(|(profile,version,device)|profile!=&generated.profile_id || version!=&generated.model_version || device!=&generated.device) {
-            return run_rerank_inference(config,query,texts,local,cancel);
-        }
-        let unchanged=cache_identity(config,scope,local,true).as_ref()==Some(&identity);
-        let _=cache_memory_limit(SCORE_CACHE_NAME,budget,reclaim_score_cache);
-        for (index,score) in missing.iter().zip(generated.scores.iter()) {
-            scores[*index]=Some(*score);
-        }
-        // Truncated-pair counts are never guessed; only confirmed non-truncated pairs are retained.
-        // 不猜测批内截断归属，仅缓存确认未截断批次的得分，保留精确截断回执。
-        if unchanged { retain_scores(&identity,query,&pending,&generated,generation); }
-        generated.scores.clear(); generated
-    };
-    if cancel.load(Ordering::Acquire) { return Err(gateway::error("检索推理已取消。","INFERENCE_CANCELLED",499)); }
-    batch.scores=scores.into_iter().collect::<Option<Vec<_>>>().unwrap_or_default();
-    if !batch.inference_status.is_object() { batch.inference_status=json!({}); }
-    batch.inference_status["scoreCache"]=json!({"hits":hits,"misses":missing.len(),"memory":score_cache().stats()});
-    Ok(batch)
 }
 
+/// Independent observers share one admitted E5 batch; only cancellation of all observers stops it.
+/// 独立请求共用单实例 E5 及一轮准入批次；单个请求取消不终止其余请求，全部取消才停止本批。
+fn run_embedding_group(
+    mut jobs:Vec<EmbeddingJob>,
+    mut execute:impl FnMut(&GatewayConfig,&[String],EmbedKind,&Value,Arc<AtomicBool>,bool)->EmbeddingReply,
+) {
+    let mut active=Vec::new();
+    for job in jobs.drain(..) {
+        if job.cancel.load(Ordering::Acquire) {let _=job.reply.send(Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499)));}
+        else {active.push(job);}
+    }
+    if active.is_empty(){return;}
+    let lengths=active.iter().map(|job|job.texts.len()).collect::<Vec<_>>();
+    let mut texts=Vec::with_capacity(lengths.iter().sum());
+    for job in &mut active {texts.append(&mut job.texts);}
+    let shared=Arc::new(AtomicBool::new(false));let done=AtomicBool::new(false);
+    let result=std::thread::scope(|scope| {
+        let monitor=scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                if active.iter().all(|job|job.cancel.load(Ordering::Acquire)) {shared.store(true,Ordering::Release);break;}
+                std::thread::park_timeout(Duration::from_millis(5));
+            }
+        });
+        let first=&active[0];
+        let result=execute(&first.config,&texts,first.kind,&first.local,shared.clone(),active.iter().any(|job|job.cold));
+        done.store(true,Ordering::Release);monitor.thread().unpark();let _=monitor.join();result
+    });
+    let count=active.len();
+    match result {
+        Ok(Some(mut batch)) if batch.vectors.len()==texts.len() => {
+            let mut vectors=std::mem::take(&mut batch.vectors).into_iter();
+            for (job,length) in active.into_iter().zip(lengths) {
+                let mut part=batch.clone();part.vectors=vectors.by_ref().take(length).collect();
+                part.inference_status["coalescedRequests"]=json!(count);
+                part.inference_status["requestConcurrency"]=json!(inference_concurrency());
+                // Apportion measured batch compute once, rather than charging each observer the entire batch.
+                // 按实际输入数量分摊批次耗时，避免每个观察者重复统计整批计算成本。
+                for sample in &mut part.batch_measurements {
+                    if let Some(latency)=sample["latencyMs"].as_f64() {sample["latencyMs"]=json!(latency*length as f64/texts.len().max(1) as f64);}
+                }
+                let response=if job.cancel.load(Ordering::Acquire) {Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499))} else {Ok(Some(part))};
+                let _=job.reply.send(response);
+            }
+        }
+        Ok(Some(_)) => {for job in active {let _=job.reply.send(Err(gateway::error("嵌入批次维度无效。","RETRIEVAL_INFERENCE_FAILED",503)));}}
+        Err(error) if active.len()>1 && error.code()=="EMBEDDING_CONTEXT_TOO_LONG" => {
+            // An oversized input must not poison unrelated observers in the same microbatch.
+            // 一个超长输入不能使同批其他请求失败；只对这类纯输入失败拆分重试。
+            let mut offset=0;
+            for (job,length) in active.into_iter().zip(lengths) {
+                let result=execute(&job.config,&texts[offset..offset+length],job.kind,&job.local,job.cancel.clone(),job.cold);
+                offset+=length;let _=job.reply.send(result);
+            }
+        }
+        result=> {for job in active {let _=job.reply.send(result.clone());}}
+    }
+}
+
+const PASSAGE_SLICE_TEXTS:usize=8;
+struct PassageWork {job:EmbeddingJob,next:usize,batch:Option<EmbeddingBatch>,slices:usize}
+
+/// Derived passage vectors commit only as a complete, ordered batch from one compatible vector space.
+/// 派生向量按原顺序汇合且仅整批交付；批间设备/空间改变时不能把不同向量空间混写进索引。
+fn run_passage_slice(
+    work:&mut PassageWork,
+    execute:&mut impl FnMut(&GatewayConfig,&[String],EmbedKind,&Value,Arc<AtomicBool>,bool)->EmbeddingReply,
+)->bool {
+    if work.job.cancel.load(Ordering::Acquire) {
+        let _=work.job.reply.send(Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499)));return true;
+    }
+    let end=work.next.saturating_add(PASSAGE_SLICE_TEXTS).min(work.job.texts.len());
+    let result=execute(&work.job.config,&work.job.texts[work.next..end],EmbedKind::Passage,&work.job.local,work.job.cancel.clone(),work.job.cold);
+    let mut part=match result {
+        Ok(Some(part)) if part.vectors.len()==end-work.next=>part,
+        Ok(Some(_))=>{let _=work.job.reply.send(Err(gateway::error("嵌入批次维度无效。","RETRIEVAL_INFERENCE_FAILED",503)));return true;}
+        result=>{let _=work.job.reply.send(result);return true;}
+    };
+    if let Some(batch)=&mut work.batch {
+        if batch.profile_id!=part.profile_id || batch.model_version!=part.model_version || batch.space_id!=part.space_id
+            || batch.dimensions!=part.dimensions || batch.device!=part.device {
+            let _=work.job.reply.send(Err(gateway::error("分批期间嵌入设备或向量空间改变，派生索引将重新准入。","INFERENCE_RESOURCE_BUSY",503)));return true;
+        }
+        batch.vectors.append(&mut part.vectors);batch.batch_measurements.append(&mut part.batch_measurements);
+        batch.inference_status=part.inference_status;
+    }else{work.batch=Some(part);}
+    work.next=end;work.slices+=1;
+    if end<work.job.texts.len(){return false;}
+    let mut batch=work.batch.take().unwrap();
+    batch.inference_status["schedulerSlices"]=json!(work.slices);
+    batch.inference_status["passageSliceTexts"]=json!(PASSAGE_SLICE_TEXTS);
+    let result=if work.job.cancel.load(Ordering::Acquire) {Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499))}else{Ok(Some(batch))};
+    let _=work.job.reply.send(result);true
+}
+
+/// Query work has reserved queue access; background passages yield every bounded slice and still make progress.
+/// 查询使用独立有界入口；后台长文每小批让出同一模型，连续四轮查询后也给文档一批，避免饥饿。
+fn run_embedding_queues(
+    queries:std::sync::mpsc::Receiver<EmbeddingJob>,passages:std::sync::mpsc::Receiver<EmbeddingJob>,maximum:usize,
+    mut execute:impl FnMut(&GatewayConfig,&[String],EmbedKind,&Value,Arc<AtomicBool>,bool)->EmbeddingReply,
+) {
+    use std::sync::mpsc::{TryRecvError,RecvTimeoutError};
+    let mut ready_queries=std::collections::VecDeque::<EmbeddingJob>::new();
+    let mut ready_passages=std::collections::VecDeque::<PassageWork>::new();
+    let (mut queries_closed,mut passages_closed)=(false,false);
+    let mut query_streak=0usize;let mut last_work=Instant::now();
+    loop {
+        while ready_queries.len()<maximum && !queries_closed {
+            match queries.try_recv(){Ok(job)=>ready_queries.push_back(job),Err(TryRecvError::Disconnected)=>{queries_closed=true;break;},Err(TryRecvError::Empty)=>break}
+        }
+        while ready_passages.len()<maximum && !passages_closed {
+            match passages.try_recv(){Ok(job)=>ready_passages.push_back(PassageWork{job,next:0,batch:None,slices:0}),Err(TryRecvError::Disconnected)=>{passages_closed=true;break;},Err(TryRecvError::Empty)=>break}
+        }
+        if !ready_queries.is_empty() && (query_streak<4 || ready_passages.is_empty()) {
+            let first=ready_queries.pop_front().unwrap();let mut group=vec![first];
+            let deadline=Instant::now()+Duration::from_millis(2);
+            loop {
+                if group.len()>=maximum {break;}
+                if let Some(index)=ready_queries.iter().position(|job|job.local==group[0].local) {
+                    group.push(ready_queries.remove(index).unwrap());continue;
+                }
+                if queries_closed || group.len()+ready_queries.len()>=maximum || Instant::now()>=deadline {break;}
+                match queries.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(job)=>ready_queries.push_back(job),Err(RecvTimeoutError::Disconnected)=>{queries_closed=true;break;},Err(RecvTimeoutError::Timeout)=>break,
+                }
+            }
+            run_embedding_group(group,&mut execute);query_streak+=1;last_work=Instant::now();continue;
+        }
+        if let Some(mut work)=ready_passages.pop_front() {
+            if !run_passage_slice(&mut work,&mut execute) {ready_passages.push_back(work);}
+            query_streak=0;last_work=Instant::now();continue;
+        }
+        if (queries_closed && passages_closed) || last_work.elapsed()>=Duration::from_secs(120){break;}
+        if !queries_closed {
+            match queries.recv_timeout(Duration::from_millis(5)) {Ok(job)=>ready_queries.push_back(job),Err(RecvTimeoutError::Disconnected)=>queries_closed=true,Err(RecvTimeoutError::Timeout)=>{}}
+        }else if !passages_closed {
+            match passages.recv_timeout(Duration::from_millis(5)) {Ok(job)=>ready_passages.push_back(PassageWork{job,next:0,batch:None,slices:0}),Err(RecvTimeoutError::Disconnected)=>passages_closed=true,Err(RecvTimeoutError::Timeout)=>{}}
+        }
+    }
+}
+
+fn embedding_queue(config:&GatewayConfig,local:&Value)->Option<(String,EmbeddingQueue)> {
+    let key=owner_key(config,&model_root(config),device_preference(local));
+    let mut queues=EMBEDDING_QUEUES.get_or_init(Default::default).lock().ok()?;
+    if let Some(queue)=queues.get(&key) {return Some((key,queue.clone()));}
+    let maximum=inference_concurrency();
+    let (queries,query_receiver)=std::sync::mpsc::sync_channel::<EmbeddingJob>(maximum);
+    let (passages,passage_receiver)=std::sync::mpsc::sync_channel::<EmbeddingJob>(maximum);
+    let id=EMBEDDING_QUEUE_ID.fetch_add(1,Ordering::Relaxed);let worker_key=key.clone();
+    std::thread::Builder::new().name("kynxa-e5-batches".into()).spawn(move|| {
+        run_embedding_queues(query_receiver,passage_receiver,maximum,embed_direct);
+        discard_queue(&worker_key,id);
+    }).ok()?;
+    let queue=EmbeddingQueue{id,queries,passages};queues.insert(key.clone(),queue.clone());Some((key,queue))
+}
+
+/// Concurrent queries are queued and microbatched, never rejected just because E5 is occupied.
+/// E5 忙碌时请求排队并按二/四请求微批处理，不复制权重，也不因并发槽占满而中断任务。
 pub fn embed(
+    config:&GatewayConfig,texts:&[String],kind:EmbedKind,local:&Value,cancel:Arc<AtomicBool>,cold:bool,
+)->EmbeddingReply {
+    if !cold && owner(config,local,false)?.is_none() {return Ok(None);}
+    let Some((key,queue))=embedding_queue(config,local) else {return embed_direct(config,texts,kind,local,cancel,cold);};
+    let (reply,receiver)=std::sync::mpsc::sync_channel(1);
+    let mut job=EmbeddingJob{config:config.clone(),local:local.clone(),texts:texts.to_vec(),kind,cancel:cancel.clone(),cold,reply};
+    let sender=if kind==EmbedKind::Query {&queue.queries}else{&queue.passages};
+    loop {
+        if cancel.load(Ordering::Acquire) {return Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499));}
+        match sender.try_send(job) {
+            Ok(())=>break,
+            Err(std::sync::mpsc::TrySendError::Full(waiting))=>{job=waiting;std::thread::sleep(Duration::from_millis(5));}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_))=>{discard_queue(&key,queue.id);return embed_direct(config,texts,kind,local,cancel,cold);}
+        }
+    }
+    loop {
+        if cancel.load(Ordering::Acquire) {return Err(gateway::error("推理已取消。","INFERENCE_CANCELLED",499));}
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(result)=>return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{},
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>{discard_queue(&key,queue.id);return embed_direct(config,texts,kind,local,cancel,cold);}
+        }
+    }
+}
+
+fn embed_direct(
     config: &GatewayConfig,
     texts: &[String],
     kind: EmbedKind,
@@ -884,7 +847,7 @@ fn embed_owned(
             };
             let audit = if options.device == "dml" {
                 let requested =
-                    gateway_inference::qualification_request(false, options.cpu_threads)
+                    gateway_inference::qualification_request(options.cpu_threads)
                         .map_err(failure)?;
                 let memory = requested["memoryBytes"].as_f64().unwrap_or(0.0).ceil() as u64;
                 acquire(
@@ -973,12 +936,19 @@ fn embed_owned(
     result
 }
 pub fn retire_idle_models(config: &GatewayConfig) -> Result<Value, ContractError> {
+    let pressured=hardware::global().and_then(|service| {
+        let runtime=runtime().ok()?;
+        runtime.block_on(service.request("snapshot",json!({}),Duration::from_millis(150))).ok()
+    }).is_some_and(|snapshot|super::gateway_cache::confirmed_memory_pressure(&snapshot));
+    if !pressured {return Ok(json!({"retired":0,"confirmedUnload":false,"memoryPressureConfirmed":false}));}
     super::gateway_cache::reclaim_memory("model-resource-pressure");
-    retire_after(config, Duration::ZERO)
+    let mut result=retire_after(config,Duration::from_secs(30*60))?;
+    result["memoryPressureConfirmed"]=json!(true);
+    Ok(result)
 }
 
-/// Warm the selected embedding owner under existing background leases; never load a reranker here.
-/// 仅用既有后台租约预热选定嵌入模型；执行锁内再次核验就绪状态，不重复预热或加载重排模型。
+/// Warm the selected embedding owner once under existing background leases.
+/// 仅用既有后台租约预热选定嵌入模型；执行锁内再次核验就绪状态，不重复加载。
 pub fn warm(
     config: &GatewayConfig,
     local: &Value,
@@ -1011,7 +981,7 @@ pub(crate) fn waiting_retry(config: &GatewayConfig, local: &Value, delay: Durati
                 .get(&owner_key(
                     config,
                     &model_root(config),
-                    device_preference(local, false),
+                    device_preference(local),
                 ))
                 .cloned()
         })
@@ -1073,7 +1043,7 @@ pub fn status(config: &GatewayConfig, local: &Value) -> Value {
         .flatten()
         .find(|profile| profile["id"] == configured && profile["kind"] == "embedding");
     let available = selected.is_some_and(|profile| profile["available"] == true);
-    let key = owner_key(config, &model_root(config), device_preference(local, false));
+    let key = owner_key(config, &model_root(config), device_preference(local));
     let observed = OWNERS
         .get()
         .and_then(|owners| owners.lock().ok())
@@ -1081,7 +1051,7 @@ pub fn status(config: &GatewayConfig, local: &Value) -> Value {
     let mut value = json!({"state":if available {"unloaded"} else {"unavailable"},"phase":"idle",
         "reason":if selected.is_none() {"unsupported-profile"} else if !available {"assets-missing"} else {"not-loaded"},
         "profileId":configured,"dimensions":384,"available":available,"loaded":false,
-        "elapsedMs":0,"inferenceBackend":null,"errorCode":null,"message":null,"retryAfterMs":null});
+        "elapsedMs":0,"requestConcurrency":inference_concurrency(),"inferenceBackend":null,"errorCode":null,"message":null,"retryAfterMs":null});
     if selected.is_some() {
         if let Some(owner) = observed {
             if let Ok(observation) = owner.observation.lock() {
@@ -1120,8 +1090,8 @@ pub fn status(config: &GatewayConfig, local: &Value) -> Value {
             "semantic-off"
         });
     }
-    value["caches"]=json!({"queryVectors":QUERY_CACHE.get().map(|cache|cache.stats()),"rerankScores":SCORE_CACHE.get().map(|cache|cache.stats()),
-        "candidates":super::cache_candidates::status(),"automaticBudget":super::gateway_cache::budget_status()});
+    value["caches"]=json!({"queryVectors":QUERY_CACHE.get().map(|cache|cache.stats()),
+        "sourcePassages":super::cache_passages::status(),"candidates":super::cache_candidates::status(),"automaticBudget":super::gateway_cache::budget_status()});
     value
 }
 pub fn profiles(config: &GatewayConfig) -> Value {
@@ -1129,7 +1099,7 @@ pub fn profiles(config: &GatewayConfig) -> Value {
     let available = root.join("onnx/model_quantized.onnx").is_file()
         && root.join("tokenizer.json").is_file()
         && config.inference_library.is_file();
-    let mut values = ["cpu", "dml"]
+    let values = ["cpu", "dml"]
         .iter()
         .filter_map(|device| gateway_inference::embedding_metadata(device).ok())
         .map(|mut metadata| {
@@ -1139,27 +1109,98 @@ pub fn profiles(config: &GatewayConfig) -> Value {
             metadata
         })
         .collect::<Vec<_>>();
-    let root = rerank_root(config);
-    let available = root.join("onnx/model_quantized.onnx").is_file()
-        && root.join("tokenizer.json").is_file()
-        && config.inference_library.is_file();
-    values.extend(
-        ["cpu", "dml"]
-            .iter()
-            .filter_map(|device| gateway_inference::reranker_metadata(device).ok())
-            .map(|mut metadata| {
-                metadata["id"] = metadata["profileId"].clone();
-                metadata["kind"] = json!("reranker");
-                metadata["available"] = json!(available);
-                metadata
-            }),
-    );
     json!({"profiles":values})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_job(config:&GatewayConfig,text:&str,cancel:Arc<AtomicBool>) -> (EmbeddingJob,std::sync::mpsc::Receiver<EmbeddingReply>) {
+        let (reply,receiver)=std::sync::mpsc::sync_channel(1);
+        (EmbeddingJob{config:config.clone(),local:json!({}),texts:vec![text.into()],kind:EmbedKind::Query,cancel,cold:true,reply},receiver)
+    }
+    #[test]
+    fn single_e5_microbatch_keeps_other_observers_and_splits_vectors_correctly() {
+        assert_eq!(request_concurrency(4),2);assert_eq!(request_concurrency(8),4);
+        let workspace=PrewarmWorkspace::new();
+        let first_token=Arc::new(AtomicBool::new(false));let second_token=Arc::new(AtomicBool::new(false));
+        let (first,first_reply)=test_job(&workspace.config,"first",first_token.clone());
+        let (second,second_reply)=test_job(&workspace.config,"second",second_token);
+        run_embedding_group(vec![first,second],|_,texts,kind,_,shared,_| {
+            assert_eq!(texts,["first","second"]);assert_eq!(kind,EmbedKind::Query);
+            first_token.store(true,Ordering::Release);
+            std::thread::sleep(Duration::from_millis(15));assert!(!shared.load(Ordering::Acquire));
+            Ok(Some(EmbeddingBatch{vectors:vec![vec![1.0;384],vec![2.0;384]],profile_id:"e5".into(),model_version:"fixed".into(),
+                space_id:"unchanged-space".into(),dimensions:384,device:"cpu".into(),inference_status:json!({}),
+                batch_measurements:vec![json!({"phase":"hot-inference","latencyMs":10.0})]}))
+        });
+        assert_eq!(first_reply.recv().unwrap().unwrap_err().code(),"INFERENCE_CANCELLED");
+        let result=second_reply.recv().unwrap().unwrap().unwrap();
+        assert_eq!(result.vectors,vec![vec![2.0;384]]);assert_eq!(result.space_id,"unchanged-space");
+        assert_eq!(result.inference_status["coalescedRequests"],2);assert_eq!(result.batch_measurements[0]["latencyMs"],5.0);
+    }
+    #[test]
+    fn all_microbatch_observers_cancel_the_underlying_batch() {
+        let workspace=PrewarmWorkspace::new();let one=Arc::new(AtomicBool::new(false));let two=Arc::new(AtomicBool::new(false));
+        let (first,first_reply)=test_job(&workspace.config,"one",one.clone());let (second,second_reply)=test_job(&workspace.config,"two",two.clone());
+        run_embedding_group(vec![first,second],|_,_,_,_,shared,_| {
+            one.store(true,Ordering::Release);two.store(true,Ordering::Release);
+            let start=Instant::now();while !shared.load(Ordering::Acquire)&&start.elapsed()<Duration::from_secs(2){std::thread::sleep(Duration::from_millis(1));}
+            assert!(shared.load(Ordering::Acquire));Err(gateway::error("取消","INFERENCE_CANCELLED",499))
+        });
+        for reply in [first_reply,second_reply] {assert_eq!(reply.recv().unwrap().unwrap_err().code(),"INFERENCE_CANCELLED");}
+    }
+
+    fn numbered_batch(texts:&[String])->EmbeddingReply {
+        Ok(Some(EmbeddingBatch{vectors:texts.iter().map(|text|vec![text.parse::<f32>().unwrap_or(999.0);384]).collect(),
+            profile_id:"e5".into(),model_version:"fixed".into(),space_id:"same-space".into(),dimensions:384,device:"cpu".into(),
+            inference_status:json!({}),batch_measurements:vec![json!({"phase":"hot-inference","latencyMs":1.0})]}))
+    }
+    #[test]
+    fn foreground_query_runs_between_document_slices_and_document_order_is_preserved() {
+        let workspace=PrewarmWorkspace::new();
+        let (queries,query_receiver)=std::sync::mpsc::sync_channel(4);
+        let (passages,passage_receiver)=std::sync::mpsc::sync_channel(4);
+        let (mut document,document_reply)=test_job(&workspace.config,"0",Arc::new(AtomicBool::new(false)));
+        document.kind=EmbedKind::Passage;document.texts=(0..19).map(|number|number.to_string()).collect();
+        passages.send(document).unwrap();drop(passages);
+        let (query,query_reply)=test_job(&workspace.config,"query",Arc::new(AtomicBool::new(false)));
+        let mut injection=Some((queries,query));let mut order=Vec::new();
+        run_embedding_queues(query_receiver,passage_receiver,4,|_,texts,kind,_,_,_| {
+            order.push((kind,texts.len()));
+            if kind==EmbedKind::Passage {
+                if let Some((sender,job))=injection.take(){sender.send(job).unwrap();}
+            }
+            numbered_batch(texts)
+        });
+        assert_eq!(order,vec![(EmbedKind::Passage,8),(EmbedKind::Query,1),(EmbedKind::Passage,8),(EmbedKind::Passage,3)]);
+        let result=document_reply.recv().unwrap().unwrap().unwrap();
+        assert_eq!(result.vectors.iter().map(|vector|vector[0] as usize).collect::<Vec<_>>(),(0..19).collect::<Vec<_>>());
+        assert_eq!(result.inference_status["schedulerSlices"],3);
+        assert_eq!(query_reply.recv().unwrap().unwrap().unwrap().vectors[0][0],999.0);
+    }
+    #[test]
+    fn cancelling_a_document_discards_remaining_slices_but_not_the_queued_query() {
+        let workspace=PrewarmWorkspace::new();let cancel=Arc::new(AtomicBool::new(false));
+        let (queries,query_receiver)=std::sync::mpsc::sync_channel(4);let (passages,passage_receiver)=std::sync::mpsc::sync_channel(4);
+        let (mut document,document_reply)=test_job(&workspace.config,"0",cancel.clone());
+        document.kind=EmbedKind::Passage;document.texts=(0..19).map(|number|number.to_string()).collect();
+        passages.send(document).unwrap();drop(passages);
+        let (query,query_reply)=test_job(&workspace.config,"query",Arc::new(AtomicBool::new(false)));
+        let mut injection=Some((queries,query));let mut order=Vec::new();
+        run_embedding_queues(query_receiver,passage_receiver,4,|_,texts,kind,_,_,_| {
+            order.push(kind);
+            if kind==EmbedKind::Passage {
+                cancel.store(true,Ordering::Release);
+                if let Some((sender,job))=injection.take(){sender.send(job).unwrap();}
+            }
+            numbered_batch(texts)
+        });
+        assert_eq!(order,vec![EmbedKind::Passage,EmbedKind::Query]);
+        assert_eq!(document_reply.recv().unwrap().unwrap_err().code(),"INFERENCE_CANCELLED");
+        assert_eq!(query_reply.recv().unwrap().unwrap().unwrap().vectors[0][0],999.0);
+    }
 
     #[test]
     fn numeric_cache_identity_separates_authority_assets_and_queries_but_not_index_generation() {
@@ -1172,21 +1213,19 @@ mod tests {
         std::fs::write(&workspace.config.inference_library,b"fixture-runtime").unwrap();
         let scope=json!({"scopeKeys":["project:a","chat:a"],"conversationId":"a","permissionMode":"approval","indexGeneration":1});
         let local=json!({"embeddingDevicePolicy":"auto"});
-        let first=cache_identity(&workspace.config,&scope,&local,false).unwrap();
+        let first=cache_identity(&workspace.config,&scope,&local).unwrap();
         let mut reordered=scope.clone(); reordered["scopeKeys"]=json!(["chat:a","project:a"]); reordered["indexGeneration"]=json!(99);
-        assert_eq!(cache_identity(&workspace.config,&reordered,&local,false).unwrap(),first);
+        assert_eq!(cache_identity(&workspace.config,&reordered,&local).unwrap(),first);
         let mut other=scope.clone(); other["scopeKeys"]=json!(["chat:a","project:b"]);
-        assert_ne!(cache_identity(&workspace.config,&other,&local,false).unwrap(),first);
+        assert_ne!(cache_identity(&workspace.config,&other,&local).unwrap(),first);
         other=scope.clone(); other["permissionMode"]=json!("read-only");
-        assert_ne!(cache_identity(&workspace.config,&other,&local,false).unwrap(),first);
+        assert_ne!(cache_identity(&workspace.config,&other,&local).unwrap(),first);
         let mut other_root=workspace.config.clone(); other_root.data_root=workspace.root.join("other-data");
-        assert_ne!(cache_identity(&other_root,&scope,&local,false).unwrap(),first);
+        assert_ne!(cache_identity(&other_root,&scope,&local).unwrap(),first);
         assert_ne!(text_key(&first,"ready:cpu",&["query one".into()]),text_key(&first,"ready:cpu",&["query two".into()]));
         assert_ne!(text_key(&first,"ready:cpu",&["query one".into()]),text_key(&first,"ready:dml",&["query one".into()]));
-        let pair_a=text_key(&first,"pair:cpu",&["query".into(),"actual window A".into()]);
-        assert_ne!(pair_a,text_key(&first,"pair:cpu",&["query".into(),"actual window B".into()]));
         std::fs::write(root.join("tokenizer.json"),b"a different tokenizer fixture").unwrap();
-        assert_ne!(cache_identity(&workspace.config,&scope,&local,false).unwrap(),first);
+        assert_ne!(cache_identity(&workspace.config,&scope,&local).unwrap(),first);
         assert!(!first.contains("query")); assert_eq!(first.len(),64);
     }
 
@@ -1265,7 +1304,7 @@ mod tests {
         let cleanup_config = workspace.config.clone();
         let cleanup = tokio::task::spawn_blocking(move || {
             super::super::gateway::drain_background(&cleanup_config)?;
-            retire_idle_models(&cleanup_config)
+            retire_after(&cleanup_config,Duration::ZERO)
         })
         .await
         .unwrap();
@@ -1288,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn embedding_status_excludes_reranker_and_keeps_auto_cpu_owner_identity() {
+    fn embedding_status_keeps_auto_cpu_owner_identity() {
         let fixture = std::env::temp_dir().join(format!(
             "kynxa-embedding-status-{}",
             crate::gateway_contract::new_id()
@@ -1303,11 +1342,9 @@ mod tests {
             vector_extension: fixture.join("vec0.dll"),
             inference_library: fixture.join("onnxruntime.dll"),
         };
-        let local = json!({"embeddingDevicePolicy":"auto","rerankDevicePolicy":"auto"});
+        let local = json!({"embeddingDevicePolicy":"auto"});
         let embedding_root = model_root(&config);
-        let reranker_root = rerank_root(&config);
         let embedding_key = owner_key(&config, &embedding_root, "auto");
-        let reranker_key = owner_key(&config, &reranker_root, "auto");
         let observed = |root: PathBuf, model: &str| {
             let owner = Arc::new(InferenceOwner {
                 session: Mutex::new(InferenceSession {
@@ -1323,11 +1360,6 @@ mod tests {
             owner.ready(json!({"device":"cpu","gpuValidated":false,"model":model}));
             owner
         };
-        OWNERS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert(reranker_key.clone(), observed(reranker_root, "BGE"));
         let unloaded = status(&config, &local);
         assert_eq!(unloaded["loaded"], false);
         assert!(unloaded["inferenceBackend"].is_null());
@@ -1335,8 +1367,7 @@ mod tests {
         // An auto owner may execute on CPU; observed device must not replace its lookup policy.
         // auto 所有者可能实际使用 CPU；状态查询不能用实际设备替换所有者的请求策略。
         OWNERS
-            .get()
-            .unwrap()
+            .get_or_init(Default::default)
             .lock()
             .unwrap()
             .insert(embedding_key.clone(), observed(embedding_root, "E5"));
@@ -1347,7 +1378,7 @@ mod tests {
         let observed_owner = OWNERS.get().unwrap().lock().unwrap()[&embedding_key].clone();
         let execution = observed_owner.session.lock().unwrap();
         assert_eq!(status(&config, &local)["state"], "ready");
-        assert!(owner(&config, &local, false).unwrap().is_none());
+        assert!(owner(&config, &local, false).unwrap().is_some());
         drop(execution);
         for fallback in [json!({"devicePreference":"auto"}), json!({"device":"auto"})] {
             assert_eq!(status(&config, &fallback)["loaded"], true);
@@ -1358,7 +1389,37 @@ mod tests {
         );
         let mut owners = OWNERS.get().unwrap().lock().unwrap();
         owners.remove(&embedding_key);
-        owners.remove(&reranker_key);
+    }
+
+    #[test]
+    fn loaded_busy_owner_accepts_warm_queries_without_starting_a_cold_model() {
+        let fixture = std::env::temp_dir().join(format!("kynxa-busy-embedding-owner-{}", gateway::new_id()));
+        let config = GatewayConfig {
+            data_home: fixture.clone(), data_root: fixture.join("Data"),
+            extension_root: fixture.join("Extensions"), application_root: fixture.join("App"),
+            port: 0, toolhost_exe: fixture.join("toolhost.exe"),
+            vector_extension: fixture.join("vec0.dll"), inference_library: fixture.join("ort.dll"),
+        };
+        let local = json!({"embeddingDevicePolicy":"auto"});
+        let model = model_root(&config);
+        let key = owner_key(&config, &model, "auto");
+        let observed = Arc::new(InferenceOwner {
+            session: Mutex::new(InferenceSession {
+                policy: ReservationState::default(), leases: Vec::new(), root: model,
+                device: "cpu".into(), last_used: Instant::now(), retired: false,
+            }),
+            observation: Mutex::new(InferenceObservation::default()),
+        });
+        OWNERS.get_or_init(Default::default).lock().unwrap().insert(key.clone(), observed.clone());
+        let executing = observed.session.lock().unwrap();
+        assert!(owner(&config, &local, false).unwrap().is_none());
+        observed.ready(json!({"device":"cpu"}));
+        // Loaded queries join the queue while execution is busy; unloaded queries still avoid cold startup.
+        // 已加载模型忙碌时暖查询进入队列；确实尚未加载的模型仍旁路，不为聊天触发冷启动。
+        let queued_owner = owner(&config, &local, false).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&queued_owner, &observed));
+        drop(executing);
+        OWNERS.get().unwrap().lock().unwrap().remove(&key);
     }
 
     #[test]

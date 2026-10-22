@@ -22,6 +22,7 @@ public static class MessageTimePresentation
     private static ConditionalWeakTable<ChatMessageState, EndObservation> Observations = new();
     private static MessageEndTimeCache? Cache;
     private static readonly HashSet<Task<bool>> PendingWrites = [];
+    private static readonly Dictionary<(Guid ConversationId, Guid MessageId), Task<bool>> MessageWrites = [];
     private static readonly HashSet<(Guid ConversationId, Guid MessageId)> RetriedMessages = [];
 
     public static void ConfigureCache(string? desktopDirectory)
@@ -34,6 +35,7 @@ public static class MessageTimePresentation
             Cache = cache;
             Observations = new();
             RetriedMessages.Clear();
+            MessageWrites.Clear();
         }
     }
 
@@ -85,23 +87,26 @@ public static class MessageTimePresentation
             var cache = Cache;
             var observations = Observations;
             bool replace = RetriedMessages.Contains((conversationId, message.Id));
-            Task<bool> write = SaveCoreAsync(cache, observations, message, entry, signature, replace);
-            PendingWrites.Add(write);
-            _ = write.ContinueWith(completed => { lock (Sync) PendingWrites.Remove(completed); }, TaskScheduler.Default);
+            var identity = (conversationId, message.Id);
+            MessageWrites.TryGetValue(identity, out var preceding);
+            Task<bool> write = SaveCoreAsync(cache, observations, observation, message, entry, signature, replace, preceding);
+            TrackWrite(identity, write);
             return write;
         }
     }
 
     private static async Task<bool> SaveCoreAsync(MessageEndTimeCache cache,
-        ConditionalWeakTable<ChatMessageState, EndObservation> observations, ChatMessageState message,
-        MessageEndTimeEntry entry, string signature, bool replace)
+        ConditionalWeakTable<ChatMessageState, EndObservation> observations, EndObservation observation, ChatMessageState message,
+        MessageEndTimeEntry entry, string signature, bool replace, Task<bool>? preceding)
     {
-        bool saved = await cache.WriteAsync(entry, replace);
+        if (preceding is not null) await preceding.ConfigureAwait(false);
+        bool saved = await cache.WriteAsync(entry, replace).ConfigureAwait(false);
         lock (Sync)
         {
-            if (saved && ReferenceEquals(cache, Cache) && ReferenceEquals(observations, Observations))
+            if (saved && ReferenceEquals(cache, Cache) && ReferenceEquals(observations, Observations) &&
+                observations.TryGetValue(message, out var current) && ReferenceEquals(current, observation))
             {
-                observations.GetValue(message, _ => new EndObservation()).SavedSignature = signature;
+                observation.SavedSignature = signature;
                 RetriedMessages.Remove((entry.ConversationId, entry.MessageId));
             }
         }
@@ -145,17 +150,44 @@ public static class MessageTimePresentation
         }
     }
 
-    public static async Task<bool> ForgetAsync(Guid conversationId, ChatMessageState message)
+    public static Task<bool> ForgetAsync(Guid conversationId, ChatMessageState message)
     {
-        MessageEndTimeCache? cache;
-        await FlushAsync();
         lock (Sync)
         {
-            cache = Cache;
             Observations.Remove(message);
             RetriedMessages.Add((conversationId, message.Id));
+            if (Cache is not { } cache) return Task.FromResult(true);
+            var identity = (conversationId, message.Id);
+            MessageWrites.TryGetValue(identity, out var preceding);
+            // Invalidate immediately in memory, then order disk removal before this message's next terminal write.
+            // 内存立即失效；磁盘删除仅排在同一消息旧写入之后、新终态写入之前，不等待其他聊天。
+            var removal = ForgetCoreAsync(cache, conversationId, message.Id, preceding);
+            TrackWrite(identity, removal);
+            return removal;
         }
-        return cache is null || await cache.RemoveAsync(conversationId, message.Id);
+    }
+
+    private static async Task<bool> ForgetCoreAsync(MessageEndTimeCache cache, Guid conversationId, Guid messageId,
+        Task<bool>? preceding)
+    {
+        if (preceding is not null) await preceding.ConfigureAwait(false);
+        return await cache.RemoveAsync(conversationId, messageId).ConfigureAwait(false);
+    }
+
+    private static void TrackWrite((Guid ConversationId, Guid MessageId) identity, Task<bool> write)
+    {
+        MessageWrites[identity] = write;
+        PendingWrites.Add(write);
+        _ = write.ContinueWith(completed =>
+        {
+            lock (Sync)
+            {
+                PendingWrites.Remove(completed);
+                if (MessageWrites.TryGetValue(identity, out var latest) && ReferenceEquals(latest, completed))
+                    MessageWrites.Remove(identity);
+            }
+            if (completed.IsFaulted) System.Diagnostics.Debug.WriteLine($"Message time cache: {completed.Exception}");
+        }, TaskScheduler.Default);
     }
 
     public static async Task<bool> RemoveConversationAsync(Guid conversationId)

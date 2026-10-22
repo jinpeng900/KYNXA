@@ -154,7 +154,12 @@ public sealed partial class ShellPage
             if (!_projectViewClosed && !_chatClosing)
                 await ShowProjectErrorAsync(UiText.Get("项目操作未完成"), error.Message);
         }
-        finally { state.Loading = false; }
+        finally
+        {
+            state.Loading = false;
+            if (ActiveChatId == state.Chat.Id)
+                RecoverRunningTaskObservation(state.Chat, FindChat(state.Chat.Id).Project?.Id);
+        }
         // Display the small recent tail before fetching the ordinary page; reuse refresh anchoring for readers who scroll up.
         // 最近尾部显示后再后台补齐普通页；用户已上翻时沿用刷新锚点保护，不替换正在阅读的内容。
         if (direction == "initial" && state.Initialized && state.HasMore && !_projectViewClosed

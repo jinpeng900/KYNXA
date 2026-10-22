@@ -321,6 +321,7 @@
       ],
       "executionModules": [
         "bin/kynxa-gateway.rs",
+        "bin/kynxa-cache-replay.rs",
         "file_identity.rs",
         "gateway.rs",
         "main.rs",
@@ -391,8 +392,12 @@
         "tools/gateway_skill_authoring.rs",
         "tools/gateway_extension_install.rs",
         "tools/gateway_tool_memory.rs",
+        "tools/gateway_semantic.rs",
+        "tools/gateway_experience.rs",
+        "storage/task_repository_experiences.rs",
         "tools/gateway_mcp_budget.rs",
         "tools/gateway_process.rs",
+        "tools/gateway_deepseek_search.rs",
         "tools/gateway_search.rs",
         "tools/gateway_web.rs",
         "tools/gateway_web_proxy.rs",
@@ -538,6 +543,11 @@
           "purpose": "Native production CLI startup / 原生正式 CLI 启动"
         },
         {
+          "path": "bin/kynxa-cache-replay.rs",
+          "allowedDomains": ["models"],
+          "purpose": "Development-only offline copied-request analysis; no API or tool dispatch / 仅开发用离线请求副本分析，不连接API或派发工具"
+        },
+        {
           "path": "orchestration/gateway_runtime.rs",
           "allowedDomains": [
             "models",
@@ -669,6 +679,21 @@
           "purpose": "Persistent capability hints and derived usage experience without permission or execution ownership / 持久能力提示与使用经验汇总，不拥有权限或执行账本"
         },
         {
+          "path": "tools/gateway_semantic.rs",
+          "allowedDomains": ["models", "retrieval", "resources"],
+          "purpose": "Optional E5 capability ranking with shared inference and background admission / 可选E5能力排序复用推理和后台资源准入"
+        },
+        {
+          "path": "tools/gateway_experience.rs",
+          "allowedDomains": ["storage"],
+          "purpose": "Scope-checked receipt-backed procedure navigation without execution / 范围核验的回执支持步骤导航，不执行历史操作"
+        },
+        {
+          "path": "storage/task_repository_experiences.rs",
+          "allowedDomains": [],
+          "purpose": "Read derived procedures from existing accepted task receipts / 从既有已验收任务回执读取衍生步骤"
+        },
+        {
           "path": "tools/gateway_mcp.rs",
           "allowedDomains": [
             "resources", "storage"
@@ -704,6 +729,11 @@
           "path": "tools/gateway_web.rs",
           "allowedDomains": [],
           "purpose": "Bounded actual web transport / 有界真实网页传输"
+        },
+        {
+          "path": "tools/gateway_deepseek_search.rs",
+          "allowedDomains": ["models"],
+          "purpose": "Built-in last-resort DeepSeek search reusing a configured official connection key / 复用已配置官方连接密钥的内置 DeepSeek 最后备用搜索"
         },
         {
           "path": "tools/gateway_search.rs",

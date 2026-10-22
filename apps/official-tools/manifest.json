@@ -119,6 +119,22 @@
       ]
     },
     {
+      "name": "blender-visual-check",
+      "path": "blender-visual-check/SKILL.md",
+      "license": "Apache-2.0",
+      "source": {
+        "publisher": "KYNXA",
+        "sourceUrl": "https://github.com/jinpeng900/KYNXA",
+        "licenseFile": "LICENSE.txt"
+      },
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "2d7b32a9eb7cefab2ca7069de4548b9bb3aea5c00384e79f8213180cb6efd869"
+        }
+      ]
+    },
+    {
       "name": "terminal-workflow",
       "path": "terminal-workflow/SKILL.md",
       "license": "Apache-2.0",
@@ -162,7 +178,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "a9e395f47e5c998fb314efd25f6de9addc9ab81f08aaed301ce5482c20853cd9"
+          "sha256": "649bcf5086dc1803a7591067e9b2a5a36ff421bcd6dcc7ebc25b3b07316f6eb6"
         }
       ]
     },
@@ -178,7 +194,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "d97388fd590fae9015aecf721268c8811cbdf095b85c371ad8018d54ccacb43f"
+          "sha256": "3a478ca3491c5b72d3f84eafb3540d9d4ece2442f97960e509f305b571fe9978"
         }
       ]
     },
@@ -194,7 +210,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "2cd2b62ce4a02dee1834cf1fb2d529da28d268e094a2a914bf4f120e0e12aa23"
+          "sha256": "f56d9c36d9459c0f2a39c8cbbd89837c9f0a152c942bf47ed5797926276c1c19"
         }
       ]
     },

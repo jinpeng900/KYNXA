@@ -132,7 +132,7 @@ public sealed partial class RetrievalSettingsWindow : Window
         _rendering = true;
         try
         {
-            foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
+            foreach (var picker in new[] { _localMode, _semanticMode, _webMode, _webProvider, _webDepth, _webLanguage })
             {
                 if (picker.SelectedItem is not { } selected) continue;
                 picker.SelectedItem = null;
@@ -172,14 +172,11 @@ public sealed partial class RetrievalSettingsWindow : Window
             _inherit.IsChecked = _project?.Overrides is { Local: null, Web: null };
             Select(_localMode, local.Enabled ? "true" : "false");
             Select(_semanticMode, local.Semantic);
-            if (local.RerankProfileId is { } profileId && !_rerankMode.Items.OfType<ComboBoxItem>().Any(item => Equals(item.Tag, profileId)))
-                _rerankMode.Items.Add(new ComboBoxItem { Tag = profileId, Content = profileId });
-            Select(_rerankMode, local.RerankProfileId ?? "off");
             if (providers is not null)
             {
                 while (_webProvider.Items.Count > 1) _webProvider.Items.RemoveAt(1);
                 foreach (var provider in providers.Providers.Where(provider => provider.Id != "auto"))
-                    _webProvider.Items.Add(new ComboBoxItem { Tag = provider.Id, Content = provider.Name });
+                    _webProvider.Items.Add(new ComboBoxItem { Tag = provider.Id, Content = SearchProviderLabel(provider) });
             }
             // Keep unavailable selected providers visible; do not silently replace the user's selection.
             // 保留当前不可用服务的选中项；不静默替换用户选择。
@@ -190,10 +187,23 @@ public sealed partial class RetrievalSettingsWindow : Window
             Select(_webDepth, web.Depth);
             Select(_webLanguage, web.Language);
             bool inherits = _projectId is not null && _inherit.IsChecked == true;
-            foreach (var picker in new[] { _localMode, _semanticMode, _rerankMode, _webMode, _webProvider, _webDepth, _webLanguage })
+            foreach (var picker in new[] { _localMode, _semanticMode, _webMode, _webProvider, _webDepth, _webLanguage })
                 picker.IsEnabled = !inherits;
         }
         finally { _rendering = false; }
+    }
+
+    private static string SearchProviderLabel(RetrievalProvider provider)
+    {
+        string? status = provider.State switch
+        {
+            "cooldown" => "稍后重试",
+            "disabled" => "已停用",
+            "error" => "暂不可用",
+            "disconnected" => "未连接",
+            _ => provider.CredentialState switch { "configured" => "凭据已配置", "unavailable" => "凭据未就绪", _ => null }
+        };
+        return status is null ? provider.Name : $"{provider.Name} · {UiText.Get(status)}";
     }
 
     private static void Select(ComboBox picker, string value)
@@ -209,9 +219,10 @@ public sealed partial class RetrievalSettingsWindow : Window
         if (_busy || _global is null || _closed) return;
         var previousLocal = _project?.Effective.Local ?? _global.Local;
         var previousWeb = _project?.Effective.Web ?? _global.Web;
-        string rerankProfileId = Value(_rerankMode, previousLocal.RerankProfileId ?? "off");
+        // Retain legacy read compatibility, but never reactivate the removed neural reranker on save.
+        // 保留旧配置读取兼容；保存时不再重新启用已移除的神经重排模型。
         var local = previousLocal with { Enabled = Value(_localMode, "true") == "true", Semantic = Value(_semanticMode, previousLocal.Semantic),
-            RerankProfileId = rerankProfileId == "off" ? null : rerankProfileId };
+            RerankProfileId = null, RerankDevicePolicy = null, RerankCandidates = null };
         var web = previousWeb with { Mode = Value(_webMode, previousWeb.Mode), ProviderId = Value(_webProvider, previousWeb.ProviderId),
             Depth = Value(_webDepth, previousWeb.Depth), Language = Value(_webLanguage, previousWeb.Language) };
         bool inherits = _inherit.IsChecked == true;

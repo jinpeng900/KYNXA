@@ -593,14 +593,9 @@ fn ensure_vector_extension(
     let parent = path
         .parent()
         .ok_or_else(|| failure("missing packaged vector extension"))?;
-    let (package, filename) = if cfg!(windows) {
-        ("sqlite-vec-windows-x64", "vec0.dll")
-    } else {
-        ("sqlite-vec-linux-x64", "vec0.so")
-    };
+    let (package, filename) = ("sqlite-vec-windows-x64", "vec0.dll");
     let legacy_layout = parent.file_name().and_then(|name| name.to_str()) == Some(package);
-    let native_layout = cfg!(windows)
-        && parent.file_name().and_then(|name| name.to_str()) == Some("native")
+    let native_layout = parent.file_name().and_then(|name| name.to_str()) == Some("native")
         && parent
             .parent()
             .and_then(Path::file_name)

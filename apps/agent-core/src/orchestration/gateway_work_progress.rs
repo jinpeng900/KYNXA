@@ -20,6 +20,9 @@ pub struct RoundProgress {
     pub discovery_calls: u64,
     pub work_calls: u64,
     pub waiting_only: bool,
+    /// An execution turn that only narrates unchanged work is stagnant, unlike an ordinary text answer.
+    /// 执行阶段只叙述未变工作的轮次计为停滞；普通文字回答不传入此标记。
+    pub execution_without_action: bool,
 }
 
 /// These counters may travel in the task checkpoint; stored document facts remain elsewhere.
@@ -78,7 +81,8 @@ impl WorkProgress {
         let has_calls = round.work_calls > 0
             || round.source_reads > 0
             || round.discovery_calls > 0
-            || round.repeated_reads > 0;
+            || round.repeated_reads > 0
+            || round.execution_without_action;
         if made_progress {
             self.work_started = true;
             self.no_progress_rounds = 0;
@@ -168,6 +172,20 @@ pub fn delivery_budget_plan(max_tool_calls: u64, used_tool_calls: u64) -> Delive
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_prose_without_action_changes_strategy_without_ending_or_spending_tools() {
+        let mut progress = WorkProgress::default();
+        for round in 1..=3 {
+            let plan = progress.observe_round(&RoundProgress { execution_without_action:true,..Default::default() });
+            assert_eq!(plan.no_progress_rounds,round);
+            assert_eq!(plan.correction_due,round==3);
+        }
+        assert!(progress.needs_strategy_change());
+        assert_eq!(progress.delivery_plan(256,14).remaining_tool_calls,242);
+        let useful = progress.observe_round(&RoundProgress { new_read_range:true,source_reads:1,..Default::default() });
+        assert!(useful.made_progress); assert_eq!(useful.no_progress_rounds,0);
+    }
 
     #[test]
     fn repeated_reads_correct_strategy_without_blocking_new_evidence() {

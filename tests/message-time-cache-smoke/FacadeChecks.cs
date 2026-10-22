@@ -29,6 +29,8 @@ internal static class FacadeChecks
                 check(!pendingWrite.IsCompleted, "facade: the previous attempt's save is still pending behind the root write lock");
                 forget = MessageTimePresentation.ForgetAsync(chat, original);
                 check(!forget.IsCompleted, "facade: retry invalidation waits for the previous in-flight save");
+                check(MessageTimePresentation.GetEnd(chat, original) is null,
+                    "facade: observation invalidates the visible old end time immediately without awaiting disk writes");
             }
             check(await forget.WaitAsync(TimeSpan.FromSeconds(6)) && await pendingWrite,
                 "facade: retry invalidation finishes after releasing the previous write");
@@ -42,6 +44,25 @@ internal static class FacadeChecks
             await MessageTimePresentation.RestoreAsync(chat, [reloadedRetry]);
             check(MessageTimePresentation.GetEnd(chat, reloadedRetry) == retryTime,
                 "facade: a new message object restores the new attempt's time rather than a late old save");
+
+            // An unrelated old cache write cannot become a gate in front of a new observer.
+            // 无关旧缓存写入不能成为新观察者的前置门槛；同消息新终态仍按失效顺序保存。
+            var blocked = Message(Guid.NewGuid(), "Synthetic unrelated reply.", firstTime.AddMinutes(-1));
+            using (var occupied = new FileStream(Path.Combine(retryCache.DirectoryPath, ".write.lock"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                MessageTimePresentation.RecordEnd(chat, blocked, firstTime);
+                pendingWrite = MessageTimePresentation.SaveAsync(chat, blocked);
+                MessageTimePresentation.ConfigureCache(Path.Combine(temporaryRoot, "IndependentObservation", "Desktop"));
+                var observed = Message(Guid.NewGuid(), content, firstTime.AddMinutes(-1));
+                var invalidation = MessageTimePresentation.ForgetAsync(chat, observed);
+                check(invalidation.IsCompletedSuccessfully && !pendingWrite.IsCompleted,
+                    "facade: a new observer does not wait for unrelated global pending cache writes");
+                MessageTimePresentation.RecordEnd(chat, observed, retryTime);
+                check(await MessageTimePresentation.SaveAsync(chat, observed),
+                    "facade: a fresh terminal observation is saved after its own queued invalidation");
+            }
+            await pendingWrite;
 
             string failedForgetRoot = Path.Combine(temporaryRoot, "FailedForget", "Desktop");
             var failedForgetCache = new MessageEndTimeCache(failedForgetRoot);

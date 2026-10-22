@@ -154,6 +154,13 @@
     <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
           Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(TargetDir).&quot;" />
   </Target>
+  <!-- Incremental publish can retain files omitted from the new item list; retire only the known model payload.
+       增量发布可能保留已不在新清单中的旧文件；只清理已知模型载荷，外部或在用输出保持不动。 -->
+  <Target Name="RemoveRetiredRetrievalModelFromPublishedOutput" AfterTargets="Publish"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(PublishDir)' != '' and Exists('$(PublishDir)\KYNXA.Desktop.dll')">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\remove-obsolete-backend-payload.ps1&quot; -BundleRoot &quot;$(PublishDir)\.&quot; -PublishedOutput" />
+  </Target>
   <!-- Copy/extraction inherits the destination ACL; prepare sandbox RX again in the actual executable layout.
        复制或解压会继承目标 ACL；在实际可执行布局中再次补齐浏览器沙箱的只读执行权限。 -->
   <Target Name="PrepareBrowserSandboxOutput" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(DesignTimeBuild)' != 'true' and Exists('$(TargetDir)KYNXA.Desktop.dll')">

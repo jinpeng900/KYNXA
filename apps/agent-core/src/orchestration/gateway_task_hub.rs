@@ -180,6 +180,12 @@ impl TaskHub {
             Ok(json!({"tasks":tasks,"hasMore":has_more,"nextTaskId":next}))
         }).await
     }
+    /// Observe only the authoritative task row; attaching to a live run needs no child or receipt scan.
+    /// 只读取正式任务行；连接活动回复无需扫描子任务、回执或成果记录。
+    pub(crate) async fn metadata(&self, id: &str) -> Result<TaskRecord> {
+        let id = id.to_owned();
+        self.store(move |repository| repository.load(&id)).await
+    }
     pub async fn detail(&self, id: &str) -> Result<Value> {
         let id = id.to_owned();
         self.store(move|repository| {

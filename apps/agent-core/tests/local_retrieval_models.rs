@@ -1,5 +1,5 @@
-//! Small offline checks exercise the installed E5 and BGE models through native inference.
-//! 少量离线样本通过原生推理验证随包 E5 和 BGE，不访问用户数据或下载模型。
+//! Small offline checks exercise the installed E5 model through native inference.
+//! 少量离线样本通过原生推理验证随包 E5，不访问用户数据或下载模型。
 
 use kynxa_agent_core_native::models::gateway_inference::{self, EmbedKind, InferenceOptions};
 use serde_json::{Value, json};
@@ -64,20 +64,15 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
 /// 显式选择已准备载荷，确保检查离线且独立于用户配置；CPU 验收不宣称 GPU 已通过。
 #[test]
 #[ignore = "requires KYNXA_LOCAL_RETRIEVAL_BUNDLE_ROOT pointing to the prepared Windows x64 payload"]
-fn installed_e5_bge_cpu_support_chinese_and_english() {
+fn installed_e5_cpu_support_chinese_and_english() {
     let started = Instant::now();
     let bundle = std::env::var_os("KYNXA_LOCAL_RETRIEVAL_BUNDLE_ROOT")
         .map(std::path::PathBuf::from)
         .expect("Select a prepared payload with KYNXA_LOCAL_RETRIEVAL_BUNDLE_ROOT");
     let embedding_root = bundle.join("runtime/embedding/builtin-multilingual");
-    let reranker_root = bundle.join("runtime/rerank/builtin-multilingual-reranker");
     let embedding_assets = verified_assets(
         &embedding_root,
         include_str!("../../desktop/Build/native-assets/embedding.json"),
-    );
-    let reranker_assets = verified_assets(
-        &reranker_root,
-        include_str!("../../desktop/Build/native-assets/reranker.json"),
     );
     let runtime_manifest: Value = serde_json::from_str(include_str!(
         "../../desktop/Build/native-assets/native-runtime.json"
@@ -148,48 +143,22 @@ fn installed_e5_bge_cpu_support_chinese_and_english() {
             similarities[0] > similarities[1],
             "E5 {language}: {similarities:?}"
         );
-        let ranked = gateway_inference::rerank_blocking(
-            &reranker_root,
-            query,
-            &texts,
-            &options,
-            cancel.clone(),
-        )
-        .unwrap();
-        assert_eq!(ranked.scores.len(), 2);
-        assert!(
-            ranked
-                .scores
-                .iter()
-                .all(|score| score.is_finite() && (0.0..=1.0).contains(score))
-        );
-        assert!(
-            ranked.scores[0] > ranked.scores[1],
-            "BGE {language}: {:?}",
-            ranked.scores
-        );
-        assert_eq!(ranked.truncated_inputs_count, 0);
-        assert_eq!(ranked.profile_id, "builtin-multilingual-reranker");
-        assert_eq!(ranked.inference_status["device"], "cpu");
-        assert_eq!(ranked.inference_status["gpuValidated"], false);
         reports.push(json!({
             "language":language,"query":query,"passages":passages,"dimensions":384,
-            "vectorNorms":norms,"embeddingCosines":similarities,"rerankScores":ranked.scores,
-            "truncatedInputsCount":ranked.truncated_inputs_count,"embeddingProfileId":query_batch.profile_id,
+            "vectorNorms":norms,"embeddingCosines":similarities,
+            "embeddingProfileId":query_batch.profile_id,
             "embeddingModelVersion":query_batch.model_version,"embeddingSpaceId":query_batch.space_id,
-            "rerankProfileId":ranked.profile_id,"rerankModelVersion":ranked.model_version,
-            "embeddingBackend":query_batch.inference_status,"rerankBackend":ranked.inference_status,
+            "embeddingBackend":query_batch.inference_status,
             "elapsedMs":sample_started.elapsed().as_secs_f64()*1000.0
         }));
     }
     assert!(gateway_inference::retire_idle(&embedding_root, "cpu").unwrap());
-    assert!(gateway_inference::retire_idle(&reranker_root, "cpu").unwrap());
     let report = json!({
         "schemaVersion":1,"createdAt":chrono::Utc::now().to_rfc3339(),"passed":true,
         "scope":"fixed Chinese and English CPU inference; GPU and HTTP resource admission are separate checks",
         "queryPrefix":"query: ","documentPrefix":"passage: ","pooling":"mean","normalization":"L2",
         "runtimeVersion":runtime_manifest["onnxRuntimeVersion"],"runtimeAssets":runtime_assets,
-        "embeddingAssets":embedding_assets,"rerankerAssets":reranker_assets,"samples":reports,
+        "embeddingAssets":embedding_assets,"samples":reports,
         "elapsedMs":started.elapsed().as_secs_f64()*1000.0
     });
     if let Some(output) = std::env::var_os("KYNXA_LOCAL_RETRIEVAL_REPORT") {

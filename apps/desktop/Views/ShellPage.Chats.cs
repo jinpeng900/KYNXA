@@ -181,6 +181,7 @@ public sealed partial class ShellPage
             _ = GetPausedTaskRecovery(chat, FindChat(chat.Id).Project?.Id);
         if (chat is not null) _ = EnsureRecentHistoryAsync(chat);
         else _historyConversationId = null;
+        RecoverRunningTaskObservation(chat, chat is null ? null : FindChat(chat.Id).Project?.Id);
         if (chat is null || ActiveMessages.Count > 0 && ActiveMessages[0].ConversationId != chat.Id)
             ActiveMessages.Clear();
         if (chat is not null)
@@ -246,6 +247,8 @@ public sealed partial class ShellPage
         PendingChatReply? preparedReply = null;
         try
         {
+            if (await TryRouteRecoveredContinuationAsync(text, originalDraft, attachmentDraftKey, attachmentDrafts,
+                selectedProvider, selectedModel)) return;
             await RunProjectActionAsync(() =>
             {
                 ProjectChatState chat;
@@ -314,6 +317,13 @@ public sealed partial class ShellPage
                 }
                 if (ViewModel.IsChatMode == chatMode && ActiveChatId == chat.Id && PromptTextBox.Text == originalDraft)
                     PromptTextBox.Text = ViewModel.Prompt = string.Empty;
+                if (!RecoveredTaskContinuation.IsExplicit(text))
+                {
+                    // A new topic releases only the local pause shortcut; the original durable task remains paused.
+                    // 新话题只解除本地暂停快捷绑定；原持久任务仍保持暂停，不被恢复或删除。
+                    _pausedTaskIds.Remove(chat.Id);
+                    ForgetPausedTaskRecovery(chat.Id);
+                }
                 preparedReply = BeginPendingReply(chat.Id, text, selectedProvider, selectedModel);
                 UpdateConversationTitle();
                 UpdateConversationPresentation(openAtBottom: false);

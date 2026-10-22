@@ -39,6 +39,41 @@ await Reject(() => api.ListAsync(conversation, project));
 transport.Reply = _ => Reply(new TaskListResponse([task], true, taskId));
 await Reject(() => api.ListAsync(conversation, project, taskId));
 
+// A reopened client observes an existing root by GET and checks both identities without project-wide enumeration.
+// 重开客户端只用 GET 观察已有根，复核聊天及项目身份，不枚举整个项目或提交控制命令。
+transport.Reply = _ => Reply(new TaskListResponse([task with { State = "running" }], false, null));
+var runningPage = await api.ListConversationAsync(conversation, project);
+Check(new[] { "继续", "继续完善刚才的文档", "请接着做", "continue the previous task", "resume current work" }
+    .All(RecoveredTaskContinuation.IsExplicit) && new[] { "你好", "今天天气如何", "新问题：解释什么是缓存", "继续教育是什么意思", "continue education policies" }
+    .All(text => !RecoveredTaskContinuation.IsExplicit(text)),
+    "Only explicit continuation reuses a root; greetings and independent questions remain normal requests.");
+Check(RecoveredTaskContinuation.Select([task], conversation, project).Task is { TaskId: var pausedIdentity, State: "paused" }
+    && pausedIdentity == taskId && RecoveredTaskContinuation.Select([task with { State = "running" }, task with { State = "partial", TaskId = nextId }],
+        conversation, project).Task?.TaskId == taskId,
+    "Discovery preserves a paused root without resuming it and selects the actual active root over ended history.");
+Check(RecoveredTaskContinuation.Select([task, task with { TaskId = nextId, State = "running" }], conversation, project).IsAmbiguous &&
+    RecoveredTaskContinuation.Select([task], Guid.NewGuid(), project).Task is null &&
+    RecoveredTaskContinuation.Select([task], conversation, Guid.NewGuid()).Task is null &&
+    RecoveredTaskContinuation.Select([task with { ParentTaskId = nextId }], conversation, project).Task is null,
+    "Multiple roots require selection; navigation, scope changes and child tasks cannot supply another continuation identity.");
+Check(RecoveredTaskContinuation.Select([task with { State = "partial" }], conversation, project).Task?.TaskId == taskId &&
+    RecoveredTaskContinuation.Select([task with { State = "partial" }, task with { TaskId = nextId, State = "partial" }],
+        conversation, project).IsAmbiguous &&
+    RecoveredTaskContinuation.Select([task with { State = "completed" }], conversation, project).Task is null,
+    "Explicit continuation selects one partial root only without live work; multiple partial roots still require a choice.");
+Check(transport.Path == $"/api/tasks?conversationId={conversation:D}" && transport.Body is null,
+    "Automatic observation reads only this chat and sends no prompt or control body.");
+Check(RunningTaskObservation.Select(runningPage.Tasks, conversation, project)?.TaskId == taskId,
+    "A unique running root can be observed after restart with its existing stable request identity.");
+Check(RunningTaskObservation.Select([task, task with { State = "partial" }], conversation, project) is null &&
+    RunningTaskObservation.Select([task with { State = "running", ParentTaskId = nextId }], conversation, project) is null &&
+    RunningTaskObservation.Select(runningPage.Tasks, Guid.NewGuid(), project) is null &&
+    RunningTaskObservation.Select(runningPage.Tasks, conversation, Guid.NewGuid()) is null &&
+    RunningTaskObservation.Select([task with { State = "running" }, task with { TaskId = nextId, State = "running" }], conversation, project) is null,
+    "Observation never resumes paused/partial work, selects child tasks, guesses between roots or follows stale scope.");
+transport.Reply = _ => Reply(new TaskListResponse([sameWorkChat], false, null));
+await Reject(() => api.ListConversationAsync(conversation, project));
+
 // A fresh page has no process-local pause map; only the bounded formal lookup can restore its identity.
 // 新页面没有进程内暂停映射；只能从有界正式查询恢复身份，不能猜选或另建任务。
 transport.Reply = _ => Reply(new TaskPausedResponse([]));
@@ -220,6 +255,23 @@ using (var body = JsonDocument.Parse(transport.Body!))
         && body.RootElement.GetProperty("expectedVersion").GetUInt64() == 4 && body.RootElement.GetProperty("action").GetString() == "update",
         "Steering submits a real stable user message identity, explicit action and observed task version.");
 Check(steered.ReconnectRequired && steered.Task.TaskId == taskId, "Steering retains the task identity and explicitly reconnects its observation.");
+var retryReply = Guid.NewGuid();
+string? uncertainBody = null;
+transport.Reply = _ => { uncertainBody = transport.Body; throw new HttpRequestException("Fixture lost steering response."); };
+int beforeUnknownSteering = transport.Requests;
+try
+{
+    await api.SteerAsync(conversation, taskId, 4, steeringMessage, "继续原任务", "continue", project,
+        replyMessageId: retryReply);
+    throw new Exception("The fixture must lose the first steering response.");
+}
+catch (HttpRequestException) { checks++; }
+Check(transport.Requests == beforeUnknownSteering + 1, "An uncertain steering POST is never automatically replayed.");
+transport.Reply = _ => Reply(new TaskControlResponse(task with { State = "running", Version = 5 }, [taskId]));
+await api.SteerAsync(conversation, taskId, 4, steeringMessage, "继续原任务", "continue", project,
+    replyMessageId: retryReply);
+Check(transport.Body == uncertainBody && transport.Path == $"/api/tasks/{taskId:D}/steer",
+    "An explicit retry preserves the same task, user and reply identities instead of dispatching a chat request.");
 string allowedChineseUpdate = new string('文', 10922) + "ab";
 Check(System.Text.Encoding.UTF8.GetByteCount(allowedChineseUpdate) == 32768, "The Chinese steering boundary uses UTF-8 bytes.");
 int beforeChineseBoundary = transport.Requests;

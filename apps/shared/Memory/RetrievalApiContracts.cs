@@ -103,7 +103,8 @@ public sealed record RetrievalStatus(string Backend, int SourceCount, int ChunkC
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Parsing = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? ModelProfiles = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ConfiguredEmbeddingProfileId = null);
-public sealed record RetrievalProvider(string Id, string Name, bool Ready, string? Origin = null);
+public sealed record RetrievalProvider(string Id, string Name, bool Ready, string? Origin = null,
+    string? State = null, string? CredentialState = null);
 public sealed record RetrievalProvidersResponse(RetrievalProvider[] Providers, string SelectedId = "auto");
 public sealed record RetrievalSource(string Id, string Title, string Scope, Guid? ProjectId, string Path,
     string Status, string? Error = null, long? Revision = null, int? ImportedCount = null, string? JobId = null,

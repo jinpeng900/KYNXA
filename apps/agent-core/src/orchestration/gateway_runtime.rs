@@ -5,7 +5,7 @@ use crate::{
     gateway_contract::{GatewayConfig, GatewayError, new_id, now_iso8601},
     models::gateway_config::ModelConfigStore,
     models::gateway_preparation::PreparationService,
-    storage::gateway as data,
+    storage::{gateway as data, task_repository::TaskState},
     tools::gateway::{GatewayToolContext, ToolRuntime},
 };
 use serde_json::{Value, json};
@@ -23,6 +23,46 @@ use tokio::sync::{Mutex, broadcast, oneshot, watch};
 
 const MAXIMUM_REPLAY_CONTROLS: usize = 4096;
 const MAXIMUM_REPLAY_BYTES: usize = 128 * 1024 * 1024;
+const MAXIMUM_SAFE_ELAPSED_MS: u64 = 9_007_199_254_740_991;
+
+/// Use only saved generation time and a real monotonic start, never a message creation date.
+/// 仅使用已保存的生成用时与真实单调起点，不根据消息创建日期推算工作时间。
+pub(crate) fn generation_elapsed_ms(base: Option<u64>, started: Option<Instant>) -> Option<u64> {
+    if base.is_none() && started.is_none() {
+        return None;
+    }
+    Some(base.unwrap_or(0).saturating_add(
+        started.map_or(0, |start| start.elapsed().as_millis().min(MAXIMUM_SAFE_ELAPSED_MS as u128) as u64),
+    ).min(MAXIMUM_SAFE_ELAPSED_MS))
+}
+
+fn saved_generation_elapsed(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|elapsed| *elapsed <= MAXIMUM_SAFE_ELAPSED_MS)
+}
+
+#[derive(Default)]
+struct GenerationTiming {
+    elapsed_ms: Option<u64>,
+    started: Option<Instant>,
+}
+
+impl GenerationTiming {
+    fn elapsed(&self) -> Option<u64> {
+        generation_elapsed_ms(self.elapsed_ms, self.started)
+    }
+
+    fn set(&mut self, elapsed_ms: u64, active: bool) {
+        self.elapsed_ms = Some(elapsed_ms.min(MAXIMUM_SAFE_ELAPSED_MS));
+        self.started = active.then(Instant::now);
+    }
+
+    fn project(&self, event: &mut Value) {
+        if let Some(elapsed) = self.elapsed() {
+            event["generationElapsedMs"] = json!(elapsed);
+            event["generationActive"] = json!(self.started.is_some());
+        }
+    }
+}
 
 #[derive(Default)]
 struct ReplayState {
@@ -33,6 +73,7 @@ struct ReplayState {
     reasoning: String,
     active_segment: Option<Value>,
     reply_anchor: Option<Value>,
+    generation: GenerationTiming,
     unavailable: bool,
 }
 
@@ -79,6 +120,35 @@ pub struct RequestRun {
     pub recovery_stalled: std::sync::atomic::AtomicBool,
 }
 impl RequestRun {
+    /// Reuse the current replay projection across reattachment; offline time is never added.
+    /// 复用现有回放投影恢复计时；离线与暂停等待不计入已生成用时。
+    pub(crate) async fn restore_generation_timing(&self, saved: Option<u64>) -> Option<u64> {
+        let _emission = self.emission.lock().await;
+        let mut replay = self.replay.lock().await;
+        let elapsed = match (replay.generation.elapsed(), saved) {
+            (Some(current), Some(saved)) => Some(current.max(saved)),
+            (current, saved) => current.or(saved),
+        };
+        if let Some(elapsed) = elapsed {
+            replay.generation.set(elapsed, false);
+        }
+        elapsed
+    }
+
+    /// Freeze the existing projection when execution yields, independently of visible text segments.
+    /// 执行让出时冻结现有计时投影，不依赖是否发布了可见文字分段。
+    pub(crate) async fn freeze_generation_timing(&self, settled: Option<u64>) {
+        let elapsed = settled.or(self.replay.lock().await.generation.elapsed());
+        if let Some(elapsed) = elapsed {
+            self.emit(json!({"type":"generation_timing","generationElapsedMs":elapsed,
+                "generationActive":false})).await;
+        }
+    }
+
+    pub(crate) async fn generation_elapsed(&self) -> Option<u64> {
+        self.replay.lock().await.generation.elapsed()
+    }
+
     /// Model-step retries share learned limits only while the verified connection identity stays unchanged.
     /// 仅在核验连接身份不变时跨模型步骤复用已学额度；请求重建不能恢复已被拒绝的预算。
     pub(crate) fn observed_model_limits(&self, origin: &str) -> Value {
@@ -130,7 +200,7 @@ impl RequestRun {
         journal: &Arc<super::gateway_task_journal::TaskJournal>,
         kind: &str,
         durable: &Value,
-        terminal: bool,
+        _terminal: bool,
     ) -> Result<(), GatewayError> {
         let mut queued = false;
         let mut cancellation = self.cancellation.subscribe();
@@ -146,9 +216,8 @@ impl RequestRun {
                     Err(error) => break Err(error),
                 }
             }
-            if queued && !terminal {
-                break Ok(());
-            }
+            // A displayed delta is a durable promise too: enqueueing alone cannot acknowledge it.
+            // 可见正文增量同样承诺可恢复；仅入内存队列不能作为提交确认或推进回放水位。
             match journal.flush().await {
                 Ok(()) if queued => break Ok(()),
                 Ok(()) => continue,
@@ -182,7 +251,39 @@ impl RequestRun {
         result
     }
 
-    pub async fn emit(&self, mut event: Value) {
+    pub(crate) async fn published_stream_sequence(&self) -> u64 {
+        self.replay.lock().await.sequence
+    }
+
+    pub async fn emit(&self, event: Value) {
+        // Large provider chunks are split on UTF-8 boundaries, never replaced by an empty archive marker.
+        // 供应商大块正文按UTF-8边界拆分；已发布的任何字符都不能被空归档标记替代。
+        if matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta")) {
+            if let Some(delta) = event["delta"].as_str().filter(|delta| delta.len() > 16 * 1024 || event.to_string().len() > 32 * 1024) {
+                let mut start: usize = 0;
+                while start < delta.len() {
+                    let mut end = start.saturating_add(16 * 1024).min(delta.len());
+                    while !delta.is_char_boundary(end) { end -= 1; }
+                    let mut portion = event.clone();
+                    portion["delta"] = json!(&delta[start..end]);
+                    while portion.to_string().len() > 32 * 1024 && end > start + 1 {
+                        let first_character_end = start + delta[start..].chars().next().unwrap().len_utf8();
+                        if end <= first_character_end { break; }
+                        end = start + (end - start) / 2;
+                        while end > start && !delta.is_char_boundary(end) { end -= 1; }
+                        if end == start { end = start + delta[start..].chars().next().unwrap().len_utf8(); }
+                        portion["delta"] = json!(&delta[start..end]);
+                    }
+                    self.emit_one(portion).await;
+                    start = end;
+                }
+                return;
+            }
+        }
+        self.emit_one(event).await;
+    }
+
+    async fn emit_one(&self, mut event: Value) {
         // Remote task handles are private recovery evidence, never an unrecognized desktop stream event.
         // 远端任务句柄属于私有恢复证据，不能作为桌面无法识别的新事件进入聊天流。
         if event["type"] == "mcp_task_checkpoint" {
@@ -194,7 +295,7 @@ impl RequestRun {
             return;
         }
         let _emission = self.emission.lock().await;
-        let replay = self.replay.lock().await;
+        let mut replay = self.replay.lock().await;
         if self.finished.load(Ordering::Acquire) {
             return;
         }
@@ -207,6 +308,23 @@ impl RequestRun {
                 .map(|anchor| anchor["replyMessageId"].clone())
                 .unwrap_or_else(||json!(self.request_id));
         }
+        if event["type"] == "generation_timing" {
+            if let (Some(elapsed), Some(active)) = (
+                saved_generation_elapsed(&event["generationElapsedMs"]),
+                event["generationActive"].as_bool(),
+            ) {
+                replay.generation.set(elapsed, active);
+            }
+        } else if terminal_event(&event) {
+            if let Some(elapsed) = saved_generation_elapsed(&event["durationMs"])
+                .or_else(|| replay.generation.elapsed()) {
+                replay.generation.set(elapsed, false);
+            }
+        }
+        if matches!(event["type"].as_str(), Some("generation_timing" | "reply_anchor" | "content_snapshot"))
+            || terminal_event(&event) {
+            replay.generation.project(&mut event);
+        }
         drop(replay);
         // Persist compact deltas and formal references; never re-encode the growing full reply per token.
         // 持久化小增量和正式引用；每个 token 不重复编码不断增长的完整正文。
@@ -215,15 +333,26 @@ impl RequestRun {
                 event["taskId"] = json!(journal.task_id());
             }
             event["rootRequestTaskId"] = json!(journal.task_id());
-            let durable = if terminal_event(&event) {
+            let mut durable = if terminal_event(&event) {
                 json!({"type":event["type"],"code":event["code"],"conversationId":self.conversation_id,"requestId":self.request_id,"assistantMessageId":event["replyMessageId"],"taskCompletion":event["taskCompletion"]})
+            } else if matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta")) {
+                event.clone()
             } else if event["type"] == "assistant_segment" {
-                json!({"type":"assistant_segment","segmentId":event["segment"]["id"],"phase":event["segment"]["phase"],"status":event["segment"]["status"]})
+                let mut segment = event["segment"].clone();
+                let empty = segment["content"].as_str() == Some("") && segment["reasoning"].as_str() == Some("");
+                if let Some(fields) = segment.as_object_mut() { fields.remove("content"); fields.remove("reasoning"); }
+                segment["emptyAtEmission"] = json!(empty);
+                json!({"type":"assistant_segment","segmentId":segment["id"],"phase":segment["phase"],"status":segment["status"],"segment":segment})
             } else if event.to_string().len() <= 24 * 1024 {
                 event.clone()
             } else {
                 json!({"type":event["type"],"conversationId":self.conversation_id,"requestId":self.request_id,"toolCallId":event["tool"]["toolCallId"],"resultRef":event["tool"]["resultRef"],"archived":true})
             };
+            // Preserve the original stream identity even when a control body uses a compact reference.
+            // 控制正文采用精简引用时也保留原请求、回复与流序号；恢复不得猜归属或从零复用序号。
+            for field in ["conversationId", "requestId", "replyMessageId", "eventSequence"] {
+                durable[field] = event[field].clone();
+            }
             if !journal.is_released() {
                 if let Err(error) = self
                     .persist_event(
@@ -236,7 +365,10 @@ impl RequestRun {
                 {
                     // Ownership/invariant failures stay diagnostic; they are never forged into a user cancellation.
                     // 执行权或不变量错误继续保留诊断，不伪装成用户取消；后续派发仍须通过正式日志围栏。
-                    event["persistenceError"] = json!({"code":error.code,"message":error.message});
+                    journal.remember_persistence_error(error);
+                    // Never publish an uncommitted event; cancellation/ownership recovery retains the journal.
+                    // 未提交事件不能发布；取消或执行权恢复保留原日志，不伪造已交付内容或终态。
+                    return;
                 }
             }
         }
@@ -358,6 +490,15 @@ impl RequestRun {
             .cloned()
             .collect();
         if replay.sequence <= after || replay.sequence == 0 {
+            if replay.generation.elapsed().is_some() {
+                let mut timing = json!({"type":"generation_timing",
+                    "replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"])
+                        .unwrap_or(&Value::Null),
+                    "conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),
+                    "replayThrough":replay.sequence});
+                replay.generation.project(&mut timing);
+                events.push_back(timing);
+            }
             return Ok(RecoveryBatch {
                 events,
                 through: replay.sequence,
@@ -366,7 +507,9 @@ impl RequestRun {
         let terminal = events.back().filter(|event| terminal_event(event)).cloned();
         if let Some(anchor) = &replay.reply_anchor {
             if !events.iter().any(|event|event["type"]=="reply_anchor") {
-                events.push_front(anchor.clone());
+                let mut anchor = anchor.clone();
+                replay.generation.project(&mut anchor);
+                events.push_front(anchor);
             }
         }
         if terminal.is_some() {
@@ -377,7 +520,9 @@ impl RequestRun {
                 events.push_back(json!({"type":"assistant_segment","replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"]),"segment":segment,"toolStreamProtocol":3,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
             }
         }
-        events.push_back(json!({"type":"content_snapshot","replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"]),"content":replay.content,"reasoning":replay.reasoning,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence}));
+        let mut snapshot = json!({"type":"content_snapshot","replyMessageId":replay.reply_anchor.as_ref().map(|anchor|&anchor["replyMessageId"]),"content":replay.content,"reasoning":replay.reasoning,"conversationId":self.conversation_id,"requestId":self.request_id,"createdAt":now_iso8601(),"replayThrough":replay.sequence});
+        replay.generation.project(&mut snapshot);
+        events.push_back(snapshot);
         if let Some(terminal) = terminal {
             events.push_back(terminal);
         }
@@ -493,8 +638,8 @@ impl GatewayRuntime {
             model_slots: Arc::new(super::gateway_model_pool::ModelSlots::default()),
             task_runs: Default::default(),
             task_journals: Default::default(),
+            tools: Arc::new(ToolRuntime::with_gateway_config(&config)),
             config,
-            tools: Arc::new(ToolRuntime::default()),
             runs: Default::default(),
             conversations: Default::default(),
             approvals: Default::default(),
@@ -763,7 +908,9 @@ impl GatewayRuntime {
             emission: Default::default(),
             native_cancellation,
             cancellation_key,
-            replay: Default::default(),
+            // The ledger high-water includes every published event and survives a new execution attempt.
+            // 账本水位覆盖已发布事件并跨尝试保留；私有记录只造成跳号，不复用客户端已经确认的序号。
+            replay: Mutex::new(ReplayState { sequence:task.event_sequence, ..Default::default() }),
             finished: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
@@ -829,10 +976,16 @@ impl GatewayRuntime {
             .filter(|run| run.conversation_id == conversation)
             .cloned()?;
         let result = run.result.lock().await.clone();
-        let reply_anchor = run.replay.lock().await.reply_anchor.clone();
-        Some(
-            json!({"requestId":request,"conversationId":conversation,"status":if run.finished.load(Ordering::Acquire){"completed"}else{"running"},"result":result,"replyAnchor":reply_anchor}),
-        )
+        let replay = run.replay.lock().await;
+        let mut reply_anchor = replay.reply_anchor.clone();
+        if let Some(anchor) = &mut reply_anchor {
+            replay.generation.project(anchor);
+        }
+        let mut status = json!({"requestId":request,"conversationId":conversation,
+            "status":if run.finished.load(Ordering::Acquire){"completed"}else{"running"},
+            "result":result,"replyAnchor":reply_anchor});
+        replay.generation.project(&mut status);
+        Some(status)
     }
     /// Reattach only to an already accepted request in this exact conversation.
     /// 仅重新连接当前聊天中已接受的原请求；观察不创建任务，也不重复发送用户消息。
@@ -858,28 +1011,27 @@ impl GatewayRuntime {
     ) -> Result<Arc<RequestRun>, GatewayError> {
         let deadline = Instant::now() + Duration::from_secs(35);
         loop {
-            let detail = self.tasks.detail(task_id).await?;
-            let task = &detail["task"];
-            if task["scope"]["conversationId"] != conversation || !task["parentTaskId"].is_null() {
+            let task = self.tasks.metadata(task_id).await?;
+            if task.scope.conversation_id != conversation || task.parent_task_id.is_some() {
                 return Err(GatewayError::new(
                     "TASK_SCOPE_DENIED",
                     "只能观察本聊天的主任务回复。",
                     403,
                 ));
             }
-            let request = task["requestId"].as_str().unwrap_or("");
-            if let Some(run) = self.runs.lock().await.get(request).cloned() {
+            if let Some(run) = self.runs.lock().await.get(&task.request_id).cloned() {
                 let owns_attempt = run.journal.as_ref().is_some_and(|journal| {
-                    detail["attempt"]["token"]["attemptId"] == journal.token().attempt_id
-                        && detail["attempt"]["token"]["executionVersion"]
-                            == journal.token().execution_version
+                    journal.task_id() == task.task_id
+                        && task.current_attempt_id.as_deref() == Some(journal.token().attempt_id.as_str())
+                        && task.execution_version == journal.token().execution_version
                 });
-                if task["state"] != "queued" && owns_attempt {
+                if task.state != TaskState::Queued && owns_attempt
+                    && run.conversation_id == conversation
+                {
                     return Ok(run);
                 }
             }
-            if !["queued", "running", "waiting-children"]
-                .contains(&task["state"].as_str().unwrap_or(""))
+            if !matches!(task.state, TaskState::Queued | TaskState::Running | TaskState::WaitingChildren)
                 || Instant::now() >= deadline
             {
                 return Err(GatewayError::new(
@@ -939,7 +1091,7 @@ impl GatewayRuntime {
             cancellation_key,
             events,
             emission: Default::default(),
-            replay: Default::default(),
+            replay: Mutex::new(ReplayState { sequence:task.event_sequence, ..Default::default() }),
             finished: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             result: Default::default(),
@@ -1341,6 +1493,66 @@ pub fn checked_id(value: &Value, field: &str) -> Result<String, GatewayError> {
 }
 
 #[cfg(test)]
+mod generation_timing_tests {
+    use super::*;
+
+    #[test]
+    fn generation_timing_requires_a_real_start_and_preserves_restored_duration() {
+        assert_eq!(generation_elapsed_ms(None, None), None);
+        assert_eq!(generation_elapsed_ms(Some(12_345), None), Some(12_345));
+        let started = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        assert!(generation_elapsed_ms(Some(12_345), Some(started)).unwrap() >= 14_345);
+        assert_eq!(generation_elapsed_ms(Some(u64::MAX), Some(started)), Some(MAXIMUM_SAFE_ELAPSED_MS));
+    }
+
+    #[tokio::test]
+    async fn generation_timing_survives_reply_anchor_and_replays_without_visible_segments() {
+        let run = RequestRun::test_run(8);
+        run.emit(json!({"type":"started","status":"queued"})).await;
+        let before = run.recovery(0).await.unwrap();
+        assert!(before.events.iter().all(|event| event["generationElapsedMs"].is_null()));
+
+        run.emit(json!({"type":"generation_timing","generationElapsedMs":12_000,
+            "generationActive":true})).await;
+        let reply = new_id();
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,
+            "userMessageId":new_id()})).await;
+        let recovered = run.recovery(0).await.unwrap();
+        assert!(!recovered.events.iter().any(|event| event["type"] == "assistant_segment"));
+        for kind in ["reply_anchor", "content_snapshot"] {
+            let event = recovered.events.iter().find(|event| event["type"] == kind).unwrap();
+            assert_eq!(event["replyMessageId"], reply);
+            assert!(event["generationElapsedMs"].as_u64().unwrap() >= 12_000);
+            assert_eq!(event["generationActive"], true);
+        }
+        let caught_up = run.recovery(recovered.through).await.unwrap();
+        let timing = caught_up.events.iter().find(|event| event["type"] == "generation_timing").unwrap();
+        assert!(timing["createdAt"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(timing["generationElapsedMs"].as_u64().unwrap() >= 12_000);
+        assert_eq!(timing["generationActive"], true);
+    }
+
+    #[tokio::test]
+    async fn generation_timing_freezes_and_restores_without_counting_offline_time() {
+        let run = RequestRun::test_run(8);
+        assert_eq!(run.restore_generation_timing(Some(21_000)).await, Some(21_000));
+        assert_eq!(run.replay.lock().await.generation.elapsed(), Some(21_000));
+        assert!(run.replay.lock().await.generation.started.is_none());
+        run.emit(json!({"type":"generation_timing","generationElapsedMs":21_000,
+            "generationActive":true})).await;
+        run.freeze_generation_timing(Some(22_000)).await;
+        assert_eq!(run.replay.lock().await.generation.elapsed(), Some(22_000));
+        assert_eq!(run.restore_generation_timing(Some(20_000)).await, Some(22_000));
+        run.finish(json!({"type":"completed","durationMs":22_500})).await;
+        let recovered = run.recovery(0).await.unwrap();
+        let snapshot = recovered.events.iter().find(|event| event["type"] == "content_snapshot").unwrap();
+        assert_eq!(snapshot["generationElapsedMs"], 22_500);
+        assert_eq!(snapshot["generationActive"], false);
+        assert_eq!(run.replay.lock().await.generation.elapsed(), Some(22_500));
+    }
+}
+
+#[cfg(test)]
 mod approval_tests {
     use super::*;
 
@@ -1397,6 +1609,50 @@ mod approval_tests {
         .unwrap();
         Arc::get_mut(&mut run).unwrap().journal = Some(journal);
         run
+    }
+
+    #[tokio::test]
+    async fn durable_stream_publication_preserves_large_unicode_deltas_and_owned_recovery_suffix() {
+        use crate::storage::task_repository::TaskState;
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let reply = new_id(); let segment = new_id();
+        let mut wire = run.events.subscribe();
+        run.emit(json!({"type":"reply_anchor","replyMessageId":reply,"userMessageId":new_id()})).await;
+        run.emit(json!({"type":"assistant_segment","segment":{"id":segment,"phase":"commentary","status":"streaming","round":1,"order":1,"content":"","reasoning":""}})).await;
+        let text = "金色 🏰\n\0".repeat(4000);
+        run.emit(json!({"type":"text_delta","segmentId":segment,"delta":text})).await;
+        run.emit(json!({"type":"reasoning_delta","segmentId":segment,"delta":"saved visible reasoning"})).await;
+        let committed = journal.repository().read_events(journal.task_id(),0,512).unwrap();
+        let mut published_text = String::new(); let mut first_delta = None;
+        while let Ok(event) = wire.try_recv() {
+            if event["type"] == "text_delta" {
+                first_delta.get_or_insert(event["eventSequence"].as_u64().unwrap());
+                published_text.push_str(event["delta"].as_str().unwrap());
+                let saved = committed.iter().find(|saved|saved.payload["eventSequence"] == event["eventSequence"]
+                    && saved.payload["requestId"] == run.request_id).expect("broadcast requires committed original observation");
+                assert_eq!(saved.payload["delta"],event["delta"]);
+            }
+        }
+        assert_eq!(published_text,text);
+        let full = journal.repository().stream_projection(journal.task_id(),&run.request_id,&reply,0).unwrap();
+        assert_eq!(full["complete"],true); assert_eq!(full["content"],text);
+        assert_eq!(full["reasoning"],"saved visible reasoning");
+        let suffix = journal.repository().stream_projection(journal.task_id(),&run.request_id,&reply,first_delta.unwrap()).unwrap();
+        assert_eq!(suffix["baseContent"].as_str().unwrap().to_owned()+suffix["content"].as_str().unwrap(),text);
+        assert!(journal.repository().stream_projection(journal.task_id(),&new_id(),&reply,0).is_err());
+        let connection = crate::storage::sqlite_connections::acquire(&runtime.config.data_root,
+            &runtime.config.data_root.join("Agent/tasks.sqlite"),30_000).unwrap();
+        let compressed: i64 = connection.query_row("SELECT count(*) FROM task_events WHERE task_id=? AND json_extract(document,'$.streamEncoding')='zlib-task-event-v1'",
+            [journal.task_id()],|row|row.get(0)).unwrap();
+        assert!(compressed>0,"real ledger stores lossless compact stream records");
+        drop(connection);
+        assert_eq!(journal.load_current().unwrap().usage.model_requests,0);
+        assert!(journal.repository().operations(journal.task_id()).unwrap().is_empty());
+        journal.finish(TaskState::Partial,Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run); drop(runtime); std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1528,6 +1784,50 @@ mod approval_tests {
         assert_eq!(saved_pending, queued);
         journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
         crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(run);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_task_reconnect_uses_metadata_without_scanning_auxiliary_history() {
+        let (runtime, root) = runtime();
+        let run = durable_run(&runtime);
+        let journal = run.journal.as_ref().unwrap();
+        let task_id = journal.task_id().to_owned();
+        runtime.runs.lock().await.insert(run.request_id.clone(), run.clone());
+        data::ensure_conversation(&runtime.config.data_root, &run.conversation_id, "Reconnect fixture").unwrap();
+        runtime.tasks.metadata(&task_id).await.unwrap();
+        // An unreadable diagnostic artifact must not enter the live stream's permission/attempt check.
+        // 无法读取的诊断成果不应参与活动回复的范围与执行者核验；原记录仍保留供独立诊断。
+        let connection = rusqlite::Connection::open(runtime.config.data_root.join("Agent/tasks.sqlite")).unwrap();
+        connection.execute(
+            "INSERT INTO task_artifacts(task_id,artifact_id,fingerprint,document) VALUES(?,?,?,?)",
+            rusqlite::params![&task_id, new_id(), "fixture", "{}"],
+        ).unwrap();
+        drop(connection);
+        assert!(runtime.tasks.detail(&task_id).await.is_err());
+        let attached = tokio::time::timeout(Duration::from_secs(5), runtime.observe_task(&task_id, &run.conversation_id))
+            .await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&run, &attached));
+        assert_eq!(runtime.observe_task(&task_id, &new_id()).await.err().unwrap().code, "TASK_SCOPE_DENIED");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = crate::gateway::router(runtime.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let response = tokio::time::timeout(Duration::from_secs(5), reqwest::Client::new()
+            .get(format!("http://{address}/api/tasks/{task_id}/stream?conversationId={}", run.conversation_id))
+            .send()).await.unwrap().unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        drop(response);
+        assert_eq!(runtime.runs.lock().await.len(), 1);
+        assert_eq!(journal.load_current().unwrap().usage.model_requests, 0);
+        assert!(!*run.cancellation.borrow());
+        server.abort();
+        journal.finish(TaskState::Completed, Some("fixture-complete")).await.unwrap();
+        crate::storage::sqlite_connections::drain_root(&runtime.config.data_root).unwrap();
+        drop(attached);
         drop(run);
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();

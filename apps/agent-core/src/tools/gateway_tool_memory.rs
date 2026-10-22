@@ -48,6 +48,8 @@ fn builtins() -> &'static (Vec<Value>, String) {
     static CATALOG: OnceLock<(Vec<Value>, String)> = OnceLock::new();
     CATALOG.get_or_init(|| {
         let descriptors = super::gateway::builtin_catalog();
+        // The full catalog hash refreshes metadata; storage validates experience against each tool's own contract.
+        // 整份目录哈希仅用于刷新元信息；存储层按每个工具自身契约核验经验，不据此清空全部内置统计。
         let fingerprint = digest(&json!(descriptors));
         (descriptors, fingerprint)
     })
@@ -147,6 +149,37 @@ pub(crate) fn cached_catalog(ctx: &GatewayToolContext) -> Vec<Value> {
         .filter(|state| state.root == ctx.data_home)
         .and_then(|state| state.store.as_ref().map(ToolMemory::catalog))
         .unwrap_or_default()
+}
+
+/// Capture only identities from the current verified metadata view, before the operation is dispatched.
+/// 操作派发前只捕获当前已核验元信息视图的身份；缺失、撤销或繁忙时不猜测身份，也不执行工具。
+pub(crate) fn experience_identities(ctx: &GatewayToolContext, names: &[String]) -> Result<Value,GatewayError> {
+    super::gateway::check_configuration_generation(ctx)?;
+    let (sources,disabled,signature)=configuration(ctx);
+    let state=ctx.runtime.tool_memory.state.try_lock()
+        .map_err(|_|super::gateway::failure("TOOL_MEMORY_BUSY","工具身份元信息暂忙，可跳过本次经验收集。",503))?;
+    let mut identities=serde_json::Map::new();
+    if state.root!=ctx.data_home || state.signature!=signature { return Ok(Value::Object(identities)); }
+    let Some(store)=state.store.as_ref() else { return Ok(Value::Object(identities)); };
+    let all_names;
+    let names=if names.is_empty() {
+        all_names=store.catalog().iter().filter_map(|tool|tool["name"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        &all_names
+    } else { names };
+    for name in names {
+        if disabled.contains(name) || state.disabled.contains(name) { continue; }
+        let source=name.strip_prefix("mcp.").and_then(|suffix|suffix.split_once('.'))
+            .filter(|_|!super::gateway_mcp::builtin_task(name))
+            .map(|(server,_)|format!("mcp:{server}")).unwrap_or_else(||"builtin".into());
+        let Some(expected)=sources.get(&source) else { continue; };
+        if state.sources.get(&source)!=Some(expected) { continue; }
+        if source!="builtin" {
+            let Ok(server)=super::gateway_mcp::authorized_server(name,ctx) else { continue; };
+            if server["trusted"]!=true { continue; }
+        }
+        if let Some(identity)=store.identity(name) { identities.insert(name.clone(),Value::String(identity)); }
+    }
+    Ok(Value::Object(identities))
 }
 
 pub(crate) async fn remember_catalog(
@@ -288,6 +321,29 @@ pub(crate) fn rank_tool_hints(ctx: &GatewayToolContext, descriptors: &[Value], h
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_memory_server_identity_ignores_only_existing_cosmetic_preferences() {
+        let server = json!({"id":"fixture","name":"Fixture","transport":"stdio","command":"mcp.exe",
+            "args":["serve"],"cwd":"D:/fixture","envRefs":{"TOKEN":"TOKEN_A"},"enabled":true,"trusted":true});
+        let fingerprint = server_fingerprint(&server);
+        let mut cosmetic = server.clone();
+        cosmetic["name"] = json!("Display name");
+        cosmetic["disabledTools"] = json!(["one_tool"]);
+        cosmetic["backgroundTask"] = json!(true);
+        cosmetic["prewarmPriority"] = json!(2);
+        assert_eq!(server_fingerprint(&cosmetic), fingerprint);
+        for (field, value) in [
+            ("command", json!("different.exe")), ("args", json!(["different-mode"])),
+            ("cwd", json!("D:/other-fixture")), ("envRefs", json!({"TOKEN":"TOKEN_B"})),
+            ("trusted", json!(false)), ("enabled", json!(false)), ("url", json!("https://another.invalid/mcp")),
+            ("headers", json!({"Authorization":"fixture-only"})),
+        ] {
+            let mut changed = server.clone();
+            changed[field] = value;
+            assert_ne!(server_fingerprint(&changed), fingerprint, "{field} remains an identity boundary");
+        }
+    }
 
     #[test]
     fn tool_memory_learns_usable_evidence_and_validated_documents_only() {

@@ -21,7 +21,8 @@ $ArchivePath = [IO.Path]::GetFullPath($ArchivePath)
 $utf8 = [Text.UTF8Encoding]::new($false)
 $checkedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $versionPaths = @('native-assets/native-runtime.json', 'native-assets/embedding.json',
-    'native-assets/reranker.json', 'native-assets/mcp-runtime.json', 'native-assets/mcp/package-lock.json', 'vc-runtime.json')
+    'native-assets/mcp-runtime.json', 'native-assets/mcp/package-lock.json', 'vc-runtime.json')
+$removedRerankerPrefix = 'runtime/rerank/builtin-multilingual-reranker/'
 
 function Get-ResourcePackHash([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -71,11 +72,14 @@ if ($Action -eq 'Export') {
         }
         $relativePath = $sourcePath.Substring($SourceRoot.TrimEnd('\', '/').Length + 1).Replace('\', '/')
         if (-not $relativePath.StartsWith('runtime/', [StringComparison]::Ordinal)) { throw 'Only runtime payload files belong in a resource pack.' }
+        # Old verified inventories may still mention the retired model; never re-export its weights.
+        # 旧的已验证清单可能仍列出被移除模型；不再把其权重带入新资源包。
+        if ($relativePath.StartsWith($removedRerankerPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
         $payload[$relativePath] = Get-ResourcePackPath $SourceRoot $relativePath
     }
     if ($Profile -eq 'Full') {
         foreach ($required in @('runtime/native/vec0.dll', 'runtime/mcp/manifest.json',
-            'runtime/embedding/builtin-multilingual/manifest.json', 'runtime/rerank/builtin-multilingual-reranker/manifest.json')) {
+            'runtime/embedding/builtin-multilingual/manifest.json')) {
             if (-not $payload.ContainsKey($required)) { throw "Full resource pack is missing $required. Prepare the Full assets once before exporting." }
         }
         if (-not $VisualCppCacheDirectory) { $VisualCppCacheDirectory = Join-Path $repositoryRoot 'artifacts/runtime/vc/win-x64' }
@@ -132,6 +136,10 @@ else {
         }
         $manifest = $manifestText | ConvertFrom-Json
         if ($manifest.schemaVersion -ne 1 -or $manifest.runtimeIdentifier -ne 'win-x64' -or $manifest.profile -notin @('Full', 'Core')) { throw 'Unsupported resource pack manifest.' }
+        # Reuse the verified E5/runtime portion of older packs without extracting their retired BGE payload.
+        # 旧资源包仍可复用已验证的 E5 与运行依赖，但不再提取已移除的 BGE 载荷。
+        $manifest.versions = @($manifest.versions | Where-Object { $_.path -ne 'native-assets/reranker.json' })
+        $manifest.files = @($manifest.files | Where-Object { -not $_.path.StartsWith($removedRerankerPrefix, [StringComparison]::OrdinalIgnoreCase) })
         $currentVersions = Get-ResourcePackVersions
         if (@($manifest.versions).Count -ne $currentVersions.Count) { throw 'Resource pack version list differs from this checkout.' }
         foreach ($current in $currentVersions) {
@@ -143,7 +151,6 @@ else {
                 # 旧包仅能通过包内绑定原摘要的配置原文证明语义一致，不能从未知摘要猜测兼容版本。
                 $configEntries = @{'native-assets/native-runtime.json'='runtime/native/licenses/native-runtime-manifest.json';
                     'native-assets/embedding.json'='runtime/embedding/builtin-multilingual/manifest.json';
-                    'native-assets/reranker.json'='runtime/rerank/builtin-multilingual-reranker/manifest.json';
                     'native-assets/mcp-runtime.json'='runtime/mcp/licenses/source-manifest.json';
                     'native-assets/mcp/package-lock.json'='runtime/mcp/services/package-lock.json'}
                 if ($configEntries.ContainsKey($current.path)) {
@@ -188,7 +195,7 @@ else {
             if ($entries.Count -eq 0) { throw 'The resource pack file list is empty.' }
             $required = @('runtime/native/vec0.dll')
             if ($manifest.profile -eq 'Full') { $required += @('runtime/mcp/manifest.json',
-                'runtime/embedding/builtin-multilingual/manifest.json', 'runtime/rerank/builtin-multilingual-reranker/manifest.json') }
+                'runtime/embedding/builtin-multilingual/manifest.json') }
             foreach ($path in $required) { if (-not $entries.Contains($path)) { throw "Resource pack is missing $path." } }
             if ($Action -eq 'Inspect') {
                 [pscustomobject]@{schemaVersion=1;runtimeIdentifier=$manifest.runtimeIdentifier;profile=$manifest.profile;

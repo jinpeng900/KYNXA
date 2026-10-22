@@ -193,7 +193,7 @@ function Get-KynxaNativeAssetsInputHash {
         (Join-Path $PSScriptRoot 'native-assets/licenses/sources.json'))
     if ($Profile -eq 'Full') {
         $paths += @('prepare-mcp-runtime.ps1', 'prepare-browser-sandbox.ps1', 'prepare-office-preview-runtime.ps1',
-            'native-assets/embedding.json', 'native-assets/reranker.json', 'native-assets/mcp-runtime.json',
+            'native-assets/embedding.json', 'native-assets/mcp-runtime.json',
             'native-assets/mcp/package.json', 'native-assets/mcp/package-lock.json', 'office-preview-runtime.json') |
             ForEach-Object { Join-Path $PSScriptRoot $_ }
     }

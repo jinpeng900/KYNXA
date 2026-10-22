@@ -180,6 +180,39 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn catalog_mount_save_returns_the_committed_binding_revision() {
+    let fixture = Fixture::new().await;
+    let url = format!("{}/api/conversations/catalog?includeMessages=false", fixture.url);
+    let mut catalog: Value = fixture.client.get(&url).send().await.unwrap().json().await.unwrap();
+    let project_id = new_id();
+    let mount_id = new_id();
+    catalog["Projects"].as_array_mut().unwrap().push(json!({
+        "Id":project_id,"Name":"Mount revision fixture","Chats":[],"DefaultMountId":mount_id,
+        "Mounts":[{"Id":mount_id,"Name":"Source","Path":fixture.root.join("mount-a"),"BindingRevision":1}]
+    }));
+    let response = fixture.client.put(&url).json(&catalog).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut saved: Value = response.json().await.unwrap();
+    let position = saved["Projects"].as_array().unwrap().iter().position(|project| project["Id"] == project_id).unwrap();
+    assert_eq!(saved["Projects"][position]["Mounts"][0]["BindingRevision"], 1);
+    saved["Projects"][position]["Mounts"][0]["Path"] = json!(fixture.root.join("mount-b"));
+    let response = fixture.client.put(&url).json(&saved).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut rebound: Value = response.json().await.unwrap();
+    assert_eq!(rebound["Projects"][position]["Mounts"][0]["BindingRevision"], 2,
+        "The PUT response must return the normalized version actually committed.");
+    let read_back: Value = fixture.client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(read_back["Projects"][position]["Mounts"], rebound["Projects"][position]["Mounts"]);
+    let manifest: Value = serde_json::from_slice(&std::fs::read(fixture.config.data_root.join("Projects").join(&project_id).join("project.json")).unwrap()).unwrap();
+    assert_eq!(manifest["Mounts"][0]["BindingRevision"], 2);
+    rebound["Projects"][position]["Mounts"][0]["Name"] = json!("Renamed source");
+    let renamed: Value = fixture.client.put(&url).json(&rebound).send().await.unwrap().json().await.unwrap();
+    assert_eq!(renamed["Projects"][position]["Mounts"][0]["BindingRevision"], 2,
+        "A display-name edit must not invalidate unchanged indexed sources.");
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn storage_http_recovers_after_invalid_maintenance_marker_is_removed() {
     let fixture = Fixture::new().await;
     let marker = fixture.root.join("migration.lock");
