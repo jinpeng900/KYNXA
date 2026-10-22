@@ -141,6 +141,9 @@ public sealed partial class ConversationChromeView : Grid, IDisposable
     public void SetActive(bool active)
     {
         _active = active && !_disposed;
+        // An inactive page keeps its transparent input layer out of hit testing, so views stacked beneath it still scroll.
+        // 非活动网页的透明输入层不参与命中测试，叠在其下方的文档视图才能正常滚动与翻页。
+        IsHitTestVisible = _active;
         if (_active) { PositionWindow(); _timer.Start(); } else _timer.Stop();
         if (!_active) { ReleaseBrowserInput(); HideBrowserWindow(); }
     }
