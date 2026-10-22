@@ -1,6 +1,6 @@
 # KYNXA 五人开发分工
 
-更新日期：2026-10-16，当前版本目标为 1.5.0。当前正式链路为 WinUI/WebView2 → Windows 原生 Rust 网关 → 模型接口、Rust 推理/工具/存储服务及 C# ToolHost；独立资源服务提供真实硬件准入。入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包路径为 `runtime/agent/kynxa-gateway.exe`，公开 HTTP/SSE 保持桌面合同。WebView 界面 JavaScript 保留，产品后端不依赖 Node/NAPI；私有 Node 只随包服务扩展 MCP 和已核验的 JS Skill。实际范围见 [原生架构](../architecture/native-gateway.md)，本版变化见 [1.5 说明](../releases/1.5.md)，全部维护入口见 [文档索引](../README.md)。
+更新日期：2026-10-22，当前为 Windows x64 首个正式版 1.7（安装发行版本 `1.7.0`）。当前正式链路为 WinUI/WebView2 → Windows 原生 Rust 网关 → 模型接口、Rust 推理/工具/存储服务及 C# ToolHost；独立资源服务提供真实硬件准入。入口为 `apps/agent-core/src/bin/kynxa-gateway.rs`，随包路径为 `runtime/agent/kynxa-gateway.exe`，公开 HTTP/SSE 保持桌面合同。WebView 界面 JavaScript 保留，产品后端不依赖 Node/NAPI；私有 Node 只随包服务扩展 MCP 和已核验的 JS Skill。实际范围见 [原生架构](../architecture/native-gateway.md)，本版变化见 [1.7 说明](../releases/1.7.md)，全部维护入口见 [文档索引](../README.md)。
 
 | 成员 | 主责 | 可分配目录 | 任务入口 |
 |---|---|---|---|
@@ -42,7 +42,7 @@ RAG 不另设第六位负责人，也不把所有检索代码集中给一个人�
 |---|---|
 | A | `orchestration/gateway_loop.rs` 与根 HTTP 接线：请求路由、候选组合、证据缺口回读和任务生命周期 |
 | B | 检索设置窗口、来源/引用展示、聊天与右侧面板接线 |
-| C | `models/gateway_inference.rs`：真实 ORT 嵌入/重排与固定资产空间；模型上下文和观察预算 |
+| C | `models/gateway_inference.rs`：真实 ORT E5 嵌入与固定资产空间；模型上下文和观察预算；检索使用词法/E5 RRF 与轻量排序，不再随包运行 BGE |
 | D | `tools/service_source_reading.rs`、网页/浏览器服务：来源扫描、权限与原生取消、工具描述和执行 |
 | E | `retrieval/` 与 `storage/`：SQLite/向量索引、分块、来源库、后台索引作业、资源租约与证据版本；检索 API 客户端与共享 DTO |
 

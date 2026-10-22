@@ -1,6 +1,6 @@
 [package]
 name = "kynxa-resource-service"
-version = "1.65.0"
+version = "1.7.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false

@@ -1,15 +1,15 @@
 # Rust Agent 业务核心与原生网关
 
-当前正式后端是 Windows x64 原生 Rust 网关。`src/bin/kynxa-gateway.rs` 启动公开 HTTP/SSE，`src/gateway.rs` 处理传输，`src/gateway_contract.rs` 维护配置与错误合同。桌面启动随包 `runtime/agent/kynxa-gateway.exe`；后端不启动或发货 Node/NAPI。WinUI/C# 与 WebView2 界面保持，渲染 JavaScript 继续保留。实际接线见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
+当前正式后端是 Windows x64 原生 Rust 网关，随首个正式版 1.7（安装发行版本 `1.7.0`）发布。`src/bin/kynxa-gateway.rs` 启动公开 HTTP/SSE，`src/gateway.rs` 处理传输，`src/gateway_contract.rs` 维护配置与错误合同。桌面启动随包 `runtime/agent/kynxa-gateway.exe`；后端不启动或发货 Node/NAPI。WinUI/C# 与 WebView2 界面保持，渲染 JavaScript 继续保留。实际接线见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
 
 ## 六个领域
 
 | 目录 | 职责 |
 |---|---|
 | `src/orchestration/` | 任务、步骤、来源/证据发布、上下文预算、审批、取消、恢复与完成核验；`gateway_loop.rs`、`gateway_runtime.rs` 接真实请求生命周期 |
-| `src/models/` | OpenAI Chat/Responses、Anthropic、Ollama 请求与流、能力/配置、历史/私有续接、语义压缩及原生 ORT 嵌入/重排 |
+| `src/models/` | OpenAI Chat/Responses、Anthropic、Ollama 请求与流、能力/配置、历史/私有续接、语义压缩及原生 ORT E5 嵌入 |
 | `src/tools/` | 权限、发现、MCP/Skill、受控文件/来源扫描、网页/CDP、终端和 C# ToolHost；保存实际执行回执，不由模型声明成功 |
-| `src/retrieval/` | 词法/向量/原生 ANN、分块/结构、来源与证据版本、后台索引/资料作业及资源授权 |
+| `src/retrieval/` | 词法/E5 向量/RRF 轻量排序/原生 ANN、分块/结构、来源与证据版本、后台索引/资料作业及资源授权 |
 | `src/storage/` | 正式会话/记忆/资料、JSONL/CAS、历史分页、受控文件与 SQLite 事务、归属/迁移和私有归档 |
 | `src/resources/` | 请求资源需求、准入/驻留、设备资格、外部模型观察和独立 Rust 资源进程 IPC；未确认回收不释放占用 |
 

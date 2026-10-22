@@ -1,6 +1,6 @@
 # KYNXA resource service
 
-当前所有者是 Windows 原生网关，实际 IPC 接线位于 `apps/agent-core/src/resources/gateway.rs` 的 `ResourceService` / `ResourceLease`，独立服务随包为 `runtime/resource/kynxa-resource-service.exe`。下文出现的旧 JavaScript 接口名称属于迁移前接线记录；历史验收不代替本轮原生测试。当前架构见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
+本服务随 Windows x64 首个正式版 1.7（安装发行版本 `1.7.0`）提供。当前所有者是 Windows 原生网关，实际 IPC 接线位于 `apps/agent-core/src/resources/gateway.rs` 的 `ResourceService` / `ResourceLease`，独立服务随包为 `runtime/resource/kynxa-resource-service.exe`。下文出现的旧 JavaScript 接口名称属于迁移前接线记录；历史验收不代替本轮原生测试。当前架构见 [独立 Rust 网关](../../docs/architecture/native-gateway.md)。
 
 该 Rust 子进程由网关拥有，不是系统级服务。通过私有 stdin/stdout JSONL 接收
 `health`、`snapshot`、`acquire`、`cancelAcquire`、`renew`、`release`、`registerExecutor`、`report`；单帧最多 64 KiB，有限排队，拥有者

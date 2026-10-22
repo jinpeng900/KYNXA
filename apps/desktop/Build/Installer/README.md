@@ -1,14 +1,14 @@
 # KYNXA EXE 安装器
 
-当前产品版本为 **1.65**，安装发行版本为 **1.65.0**，安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0)分发。源码工程与安装包使用对应版本；更新安装文件需要维护者重新生成载荷，并以匹配的发布标签记录源码。
+当前版本为 Windows x64 首个正式版 **1.7**，安装发行版本为 **1.7.0**。分发入口见 [1.7 GitHub Release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)，附件待实际上传。源码工程与安装包使用对应版本；更新安装文件需要维护者重新生成载荷，并以匹配的发布标签记录源码。
 
-**历史验证：** 1.5.3 的 Debug Full 构建、启动和 17 项打包守卫成绩记录在 [1.5.3 更新说明](../../../../docs/releases/1.5.3.md)，不作为当前 1.65 的验收成绩。该历史版本的安装 EXE 只构建，未执行安装测试；编译成功或应用启动不能代替安装验收。
+**历史验证：** 1.5.3 的 Debug Full 构建、启动和 17 项打包守卫成绩记录在 [1.5.3 更新说明](../../../../docs/releases/1.5.3.md)，不作为当前 1.7 的验收成绩。该历史版本的安装 EXE 只构建，未执行安装测试；编译成功或应用启动不能代替安装验收。
 
 基础资源直接随完整 EXE 提供，基础安装无需联网。可选模型下载由后台自动选择原站、国内镜像及已配置的 GitHub 资产来源，失败时自动切换并保留断点；安装界面不要求用户选择站点。来源清单保存在实际模型目录中，升级保留已有自定义映射和下载断点，完整机制见[离线安装与多来源下载](../../../../docs/architecture/offline-installer.md)。
 
-完整包名为 `KYNXA-1.65.0-windows-x64-setup.exe`，另提供小型在线入口 `KYNXA-1.65.0-windows-x64-online-setup.exe`。用户双击在线入口后看到下载窗口，完整包下载并校验成功才进入正式安装界面。在线入口支持暂停、继续及失败重试，不创建独立卸载项；不要求用户选择来源。普通用户无需运行下载脚本。
+首发完整包名为 `KYNXA-1.7.0-windows-x64-setup.exe`。源码保留小型在线入口 `KYNXA-1.7.0-windows-x64-online-setup.exe` 的构建支持，需在完整包发布并核验下载来源后另行提供。在线入口的流程是显示下载窗口，完整包下载并校验成功后进入同一安装界面；支持暂停、继续及失败重试，不创建独立卸载项，不要求用户选择来源或运行下载脚本。
 
-同一发布页还提供 `KYNXA-1.65.0-windows-x64-setup.zip` 与 `KYNXA-1.65.0-windows-x64-resources.zip`，分别用于安装器压缩分发和源码构建的运行资源准备。各文件大小以发布资产和对应清单的实际字节数为准。
+同版本压缩分发文件名为 `KYNXA-1.7.0-windows-x64-setup.zip` 与 `KYNXA-1.7.0-windows-x64-resources.zip`，分别用于安装器压缩分发和源码构建的运行资源准备。资源包保留 E5、Office 解析与转换、Chromium、私有 Node／MCP 及原生运行依赖；检索使用 E5 加词法 RRF 和轻量排序，不再携带 BGE。各文件大小与 SHA-256 以实际产物和对应清单为准，生成清单不代表已经上传。
 
 `KYNXA.iss` 由发布入口使用 Inno Setup 6.4 或更新版本编译，只接收经过整理的 Windows x64 Release 暂存目录。安装器本身不依赖用户已有的 Node、Rust、.NET SDK、Python、Git 或编译工具。
 
@@ -20,7 +20,7 @@
 |---|---|
 | `PayloadRoot` | 必填，已准备好的 Release 软件载荷 |
 | `PackageOutputDir` | 输出目录，默认项目内 `artifacts/installer/output`，可传入独立分发目录 |
-| `PackageVersion` | 安装发行版本，生成当前包时使用 `1.65.0` |
+| `PackageVersion` | 安装发行版本，生成当前包时使用 `1.7.0` |
 | `LauncherFile` | 相对软件根目录的启动器，默认 `KYNXA.Desktop.exe` |
 | `IconFile`、`BrandImageFile` | 可选，安装器图标和项目 PNG 标识 |
 

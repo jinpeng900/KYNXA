@@ -1,15 +1,16 @@
-# KYNXA 1.5 文档
+# KYNXA 1.7 正式版文档
 
-当前安装发行版为 **1.5.3**，安装文件通过 [GitHub Release 附件](https://github.com/jinpeng900/KYNXA/releases/tag/v1.5.3)分发，修正内容见 [1.5.3 更新说明](releases/1.5.3.md)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
+当前版本为 Windows x64 的首个正式版 **1.7**，安装包版本为 **1.7.0**。版本变化见 [1.7 更新说明](releases/1.7.md)，版本化安装入口及附件状态见 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)。功能与架构以所用版本和下面的维护文档为准；带日期的测试和迁移记录保留各自当时的环境、版本和结果。
 
-本版的构建、恢复、资源配额及打包验证记录见 [1.5.3 更新说明](releases/1.5.3.md#验证范围与边界)。安装 EXE 仅构建，未执行安装测试。
+1.7 的产品定位、分发文件和验证边界统一记录在 [1.7 更新说明](releases/1.7.md)。[1.5.3 更新说明](releases/1.5.3.md#验证范围与边界)中的构建、恢复、资源配额和打包结果属于历史记录，不改记为本版成绩。
 
 ## 使用与开发入口
 
 | 内容 | 入口 |
 | --- | --- |
 | 项目介绍、快速开始 | [项目 README](../README.md) |
-| 本版变化与验证范围 | [1.5 系列总览](releases/1.5.md)、[1.5.3 更新说明](releases/1.5.3.md) |
+| 本版变化与验证范围 | [1.7 更新说明](releases/1.7.md) |
+| 历史版本 | [1.5 系列总览](releases/1.5.md)、[1.5.3 更新说明](releases/1.5.3.md) |
 | 源码环境、增量构建与启动 | [桌面构建说明](../apps/desktop/Build/README.md) |
 | EXE 安装器、目录与发布载荷 | [安装器说明](../apps/desktop/Build/Installer/README.md) |
 | 完整离线安装、原站／GitHub／国内源与断点恢复 | [离线安装与多来源下载](architecture/offline-installer.md) |
@@ -22,7 +23,7 @@
 | --- | --- |
 | Rust 网关、桌面通信、运行目录与随包资源 | [原生网关](architecture/native-gateway.md) |
 | 模块所有者、依赖与跨端合同 | [团队边界](architecture/team-boundaries.md)、[主责清单](team/module-ownership.json) |
-| 本地检索、E5/BGE、ANN 与增量索引 | [检索架构](architecture/retrieval.md) |
+| 本地检索、E5／词法 RRF、ANN 与增量索引 | [检索架构](architecture/retrieval.md) |
 | 本地对话模型安装、导入、启用和资源策略 | [本地模型管理](architecture/local-models.md) |
 | 文档、图片与离线 OCR | [文档入库](architecture/document-ingestion.md) |
 | 压缩文件和网站链接解析 | [压缩与网址入库](architecture/archive-and-url-ingestion.md) |

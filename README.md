@@ -1,4 +1,4 @@
-# KYNXA 1.65
+# KYNXA 1.7
 
 <p align="center">
   English | <a href="./README.zh.md">中文</a>
@@ -6,15 +6,15 @@
 
 **KYNXA** is a local-first personal agent application for Windows. It brings cloud and local models, durable tasks, document retrieval, tools, and a file/browser/terminal workspace into one desktop application.
 
-**Desktop release: `1.65` (package version `1.65.0`) · Windows x64 · Active development**
+**First stable release: `1.7` (package version `1.7.0`) · Windows x64**
 
-Version 1.65 improves long-task continuation and recovery, unknown-operation verification, request/cache usage reporting, retrieval caching and background warmup, and desktop settings and previews. Direct DOCX/PPTX/XLSX previews, native Office document generation, and terminal execution receipts remain included. Download packages from the [1.65 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0); see the [documentation index](docs/README.md) for architecture and usage.
+Version 1.7 is KYNXA's first stable release. It combines durable task continuation and recovery, scoped memory and tools, retrieval and cache reuse, desktop control, and document creation and previews. Local retrieval now uses multilingual E5 plus lexical rank fusion (RRF) and lightweight sorting, replacing BGE. Direct DOCX/PPTX/XLSX previews, native Office document generation, and terminal execution receipts remain included. See the [1.7 release notes](docs/releases/1.7.md), [package release page](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0), and [documentation index](docs/README.md).
 
 **Release/source note:** Use the matching release tag when building a published package from source; a different branch or revision may contain different implementation changes.
 
 Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cover the exercised paths, not every model, website, installation scenario, or large-library retrieval workload. Earlier results remain in the [1.5.3 patch notes](docs/releases/1.5.3.md).
 
-## Capabilities in the 1.65 package
+## Capabilities in the 1.7 package
 
 | Area | Current capabilities |
 | --- | --- |
@@ -23,7 +23,7 @@ Validation uses focused Rust, HTTP/SSE, and Windows UI checks. These checks cove
 | Projects | Multiple folder mounts in one project, scoped code/file retrieval, incremental indexing, and background preparation when a project becomes active. |
 | Memory | Chat, work/project, and user scopes; memory candidates, confirmation, editing, and deletion. Relevant confirmed, valid memories are selected within their authorized scope instead of injecting the whole memory store. |
 | Tool experience | Persistent tool catalogs and settled success/failure/latency experience. Configuration, schema, trust, disable, and deletion changes invalidate affected entries; ordinary chat adds no tool-memory calls. |
-| Documents and retrieval | Direct path reads and attachment parsing; PDF, DOC/DOCX, PPT/PPTX, spreadsheets, Markdown/text/code, images/OCR, archives, and website sources. Background indexing, lexical/vector search, source references, and optional reranking use the same scoped store. |
+| Documents and retrieval | Direct path reads and attachment parsing; PDF, DOC/DOCX, PPT/PPTX, spreadsheets, Markdown/text/code, images/OCR, archives, and website sources. Background indexing, E5/lexical RRF, lightweight sorting, and source references use the same scoped store. Known paths and symbols can use glob/regex search directly. |
 | Document creation | Native `document.create` writes real editable DOCX, PPTX, and XLSX packages; PDF export uses the bundled Office converter. Writes return validated file sizes, hashes, and paths. XLSX formulas store supplied cached results without executing formulas. |
 | Right workspace | Direct DOCX/PPTX/XLSX previews for files and attachments, cached file tabs, Markdown/math/Mermaid, code highlighting, images/SVG/isolated HTML, uncommitted Git changes, and multiple embedded terminals. |
 | Websites | On-demand bundled Chromium, address or keyword navigation, back/forward/refresh, interactive pages, and a persistent application browser profile. |
@@ -36,22 +36,21 @@ DOCX exposes its first usable page before embedded fonts and images finish; long
 
 Document extraction, generation, and visual rendering are separate operations. A text read does not imply full layout recovery, and spreadsheet preview does not recalculate formulas. Format-specific behavior is described in the [document guide](docs/architecture/document-ingestion.md). Website login, verification, and media availability still depend on the website and browser capabilities.
 
-The multilingual **E5 embedding model** and **BGE reranker** are included in the full runtime payload. They provide retrieval, not conversation generation. Reranking is optional and combines its ranking with the original search order; it is not assumed to improve every query. Large-library storage, ANN readiness, and retrieval quality have separate validation scopes; see the [retrieval architecture](docs/architecture/retrieval.md).
+The full runtime includes the multilingual **E5 embedding model** for retrieval, separate from conversation models. E5 and lexical candidates are fused by rank using **RRF**, followed by lightweight structured sorting; **BGE is no longer bundled or required**. Existing E5 indexes remain reusable. Query, retrieval, and model-prefix caches reduce repeated work while scope and source-version checks remain effective. Large-library storage, ANN readiness, and retrieval quality have separate validation scopes; see the [retrieval architecture](docs/architecture/retrieval.md).
 
 ## Install and store your data
 
-Downloads are published as EXE and ZIP assets of the [1.65 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0):
+The [1.7 release](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0) uses the versioned download entry points below. The assets are awaiting upload; links become available when the corresponding files are attached to the release:
 
 | Download | Use |
 | --- | --- |
-| [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
-| [Online installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-online-setup.exe) | Download the verified full payload during installation. |
-| [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
-| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
+| [Full offline installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | Install the application with its full base runtime payload. |
+| [Compressed installer](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | Extract the archive, then run the included installer. |
+| [Runtime resource pack](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | Supply runtime resources to a source build; this is not a standalone application or developer SDK bundle. |
 
-The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5/BGE, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
+The EXE installer supports application, data, and user-tool locations, Chinese/English UI, desktop shortcuts, and an optional hardware-based local chat model recommendation. The full base payload includes the native services, E5, document conversion components, private Node/MCP dependencies, and Chromium. An optional chat model is downloaded through the application's model manager after first launch.
 
-The online installer automatically selects configured download sources, validates the full payload, and retains resumable partial downloads. Users do not need to choose mirrors or run download scripts.
+The online installer workflow is retained in the source, with source selection, payload validation, and resumable downloads. Version 1.7 does not yet offer an online installer; it requires a published full payload and verified download sources first.
 
 **End users of a complete installer do not need development SDKs, Rust, Node, Python, or manual PATH configuration.** Cloud model credentials and third-party services that require accounts remain user-configured. The current installer build is not production-code-signed, and its generated EXE has not undergone an installation run; see [installer packaging](apps/desktop/Build/Installer/README.md).
 
@@ -116,7 +115,7 @@ The source repository keeps maintained documentation, code, manifests, and prepa
 
 Useful entry points:
 
-* [Documentation index](docs/README.md) and [1.5 notes](docs/releases/1.5.md)
+* [Documentation index](docs/README.md) and [1.7 release notes](docs/releases/1.7.md)
 * [Core guide](apps/agent-core/README.md) and [native architecture](docs/architecture/native-gateway.md)
 * [Memory and conversations](docs/architecture/chat-work-memory.md)
 * [Document parsing](docs/architecture/document-ingestion.md) and [retrieval](docs/architecture/retrieval.md)
@@ -129,7 +128,7 @@ Use the repository's [development skill](.agents/skills/kynxa-development/SKILL.
 
 Choose checks that cover the changed behavior, preserve existing local edits and formal data, and distinguish current results from historical benchmark records. Source implementation, compilation, Windows interaction, retrieval quality, and installer execution are separate forms of evidence. The [validation guide](.agents/skills/kynxa-development/references/validation.md) lists the relevant commands.
 
-KYNXA remains under active development. Report reproducible problems with the affected version, action, and relevant sanitized logs. Do not include credentials, private chats, memory, or personal browser data in issues or contributions.
+Report reproducible problems with the affected release version, action, and relevant sanitized logs. Do not include credentials, private chats, memory, or personal browser data in issues or contributions.
 
 ## License
 

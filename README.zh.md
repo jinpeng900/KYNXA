@@ -1,4 +1,4 @@
-# KYNXA 1.65
+# KYNXA 1.7
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
@@ -6,15 +6,15 @@
 
 **KYNXA** 是面向 Windows 的本地优先个人 Agent 应用，将云端与本地模型、长任务、文档检索、工具，以及文件／网页／终端工作区整合在桌面中。
 
-**桌面发行版本：`1.65`（安装包版本 `1.65.0`）· Windows x64 · 持续开发中**
+**首个正式版：`1.7`（安装包版本 `1.7.0`）· Windows x64**
 
-1.65 改进长任务续跑与恢复、结果未知操作核验、模型请求与缓存用量统计、检索缓存和后台预热，以及设置界面和文档预览。继续保留 DOCX／PPTX／XLSX 原格式预览、原生 Office 文档生成和终端执行回执。成品下载见 [1.65 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0)，架构与使用入口见 [文档索引](docs/README.md)。
+1.7 是 KYNXA 的首个正式版，整合长任务续跑与恢复、有范围隔离的记忆和工具、检索与缓存复用、桌面操作，以及文档生成和预览。本地检索改用多语言 E5 加词法检索、RRF 名次融合与轻量排序，替代 BGE。DOCX／PPTX／XLSX 原格式预览、原生 Office 文档生成和终端执行回执均继续保留。版本变化见 [1.7 更新说明](docs/releases/1.7.md)，安装入口见 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)，架构与使用入口见 [文档索引](docs/README.md)。
 
 **成品与源码说明：** 从源码构建已发布版本时，请使用对应的发布标签；不同分支或修订可能包含不同实现。
 
 验证采用 Rust、HTTP／SSE 和 Windows UI 定向检查，覆盖实际执行的路径，不等于所有模型、网站、安装场景或大库检索质量均已覆盖；历史验证结果保留在 [1.5.3 补丁说明](docs/releases/1.5.3.md)。
 
-## 1.65 成品能力
+## 1.7 成品能力
 
 | 领域 | 已接入的功能 |
 | --- | --- |
@@ -23,7 +23,7 @@
 | 项目 | 一个项目关联多个文件夹，按工作范围检索代码与文件，增量更新索引，并在项目激活后后台准备。 |
 | 记忆 | 聊天、工作／项目、用户三个范围；候选、确认、修改和删除。按当前问题和授权范围选择有效的已确认记忆，不把整个记忆库塞入每轮上下文。 |
 | 工具经验 | 持久工具目录，以及已结算调用的成败和耗时经验。配置、schema、信任、禁用或删除变化时更新相应条目；普通聊天不增加工具记忆调用。 |
-| 文档与检索 | 按路径直接读取和附件解析；支持 PDF、DOC／DOCX、PPT／PPTX、表格、Markdown／文本／代码、图像 OCR、压缩包及网站来源。后台索引、词法／向量检索、来源引用和可选重排共用有范围隔离的资料库。 |
+| 文档与检索 | 按路径直接读取和附件解析；支持 PDF、DOC／DOCX、PPT／PPTX、表格、Markdown／文本／代码、图像 OCR、压缩包及网站来源。后台索引、E5／词法 RRF、轻量排序与来源引用共用有范围隔离的资料库；明确路径或符号可直接使用 glob／正则搜索。 |
 | 文档生成 | 原生 `document.create` 生成真正可编辑的 DOCX、PPTX、XLSX；PDF 导出复用随包 Office 转换器。写入返回已核验的文件大小、哈希及路径；XLSX 公式保存显式提供的缓存值，不自行执行计算。 |
 | 右侧工作区 | 文件与附件的 DOCX／PPTX／XLSX 直接预览，缓存文件标签，Markdown／公式／Mermaid，代码高亮，图片／SVG／隔离 HTML，Git 未提交变更及多个内嵌终端。 |
 | 网站 | 按需启动随包 Chromium，直接输入网址或关键词，前进／后退／刷新、网页交互，以及应用持久浏览器配置。 |
@@ -36,22 +36,21 @@ DOCX 先显示可操作页面，嵌入字体和图片在后台补齐；长文档
 
 正文提取、文档生成与版式预览分别处理。提取文字不等于完整恢复排版，表格预览也不会重新计算公式；各格式的实际范围见 [文档解析说明](docs/architecture/document-ingestion.md)。网站登录、验证及媒体可用性仍由网站和浏览器能力共同决定。
 
-完整运行资源包含多语言 **E5 嵌入模型**与 **BGE 重排模型**，两者用于检索，不是对话生成模型。重排按需启用，与原检索排名融合，不假定每个问题都会提升。大库容量、ANN 就绪衔接与检索质量分别记录验证范围，详见 [检索架构](docs/architecture/retrieval.md)。
+完整运行资源包含用于检索的多语言 **E5 嵌入模型**，与对话生成模型分开。E5 与词法候选通过 **RRF 名次融合**后进行轻量结构化排序，**不再随包提供或依赖 BGE**，已有 E5 索引继续复用。查询、检索及模型前缀缓存减少重复工作，范围与来源版本检查保持有效。大库容量、ANN 就绪衔接与检索质量分别记录验证范围，详见 [检索架构](docs/architecture/retrieval.md)。
 
 ## 安装与数据位置
 
-安装包以 EXE 和 ZIP 附件发布于 [1.65 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.65.0)：
+以下为 [1.7 发布页](https://github.com/jinpeng900/KYNXA/releases/tag/v1.7.0)的版本化下载入口；附件待实际上传，对应文件发布后链接才可用：
 
 | 下载 | 用途 |
 | --- | --- |
-| [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
-| [在线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-online-setup.exe) | 安装时下载并校验完整运行载荷。 |
-| [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
-| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.65.0/KYNXA-1.65.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
+| [完整离线安装包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.exe) | 安装软件及完整基础运行资源。 |
+| [安装器压缩包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-setup.zip) | 解压后运行其中的安装器。 |
+| [运行资源整合包](https://github.com/jinpeng900/KYNXA/releases/download/v1.7.0/KYNXA-1.7.0-windows-x64-resources.zip) | 为源码构建提供运行资源，不能单独当作软件运行，也不包含开发 SDK。 |
 
-EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5／BGE、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
+EXE 安装器支持软件、数据、用户工具位置，中英文界面、桌面快捷方式，以及根据硬件推荐的可选本地对话模型。完整基础包包含原生服务、E5、文档转换组件、私有 Node／MCP 依赖和 Chromium；勾选的对话模型在首次启动后通过软件内模型管理器下载。
 
-在线安装器自动选择已配置来源、校验完整载荷并保留可续传的下载断点，不要求用户选择镜像或运行下载脚本。
+源码保留在线安装流程，支持来源选择、载荷校验和断点续传。1.7 暂不提供在线安装器，需先发布完整包并核验下载来源。
 
 **使用完整安装包的普通用户不需要安装开发 SDK、Rust、Node、Python 或手动配置 PATH。** 云端模型凭据及需要账号的第三方服务仍由用户配置。当前安装器构建尚未配置生产代码签名，生成的 EXE 尚未进行安装运行测试，详见 [安装打包说明](apps/desktop/Build/Installer/README.md)。
 
@@ -116,7 +115,7 @@ Rust 拥有正式 HTTP／SSE 后端、模型与工具 I/O、任务状态、检�
 
 常用入口：
 
-* [文档索引](docs/README.md) 与 [1.5 更新说明](docs/releases/1.5.md)
+* [文档索引](docs/README.md) 与 [1.7 更新说明](docs/releases/1.7.md)
 * [核心指南](apps/agent-core/README.md) 与 [原生架构](docs/architecture/native-gateway.md)
 * [聊天与工作记忆](docs/architecture/chat-work-memory.md)
 * [文档解析](docs/architecture/document-ingestion.md) 与 [检索](docs/architecture/retrieval.md)
@@ -129,7 +128,7 @@ Rust 拥有正式 HTTP／SSE 后端、模型与工具 I/O、任务状态、检�
 
 根据改动选择必要检查，保留已有本地改动和正式数据，将本轮结果与历史评测分开。源码接线、编译、Windows 交互、检索质量和安装器执行分别记录，具体命令见 [验证指南](.agents/skills/kynxa-development/references/validation.md)。
 
-KYNXA 持续开发中。反馈问题时提供受影响版本、操作步骤和脱敏日志，不在 Issue 或贡献内容中包含凭据、私有聊天、记忆及个人浏览器数据。
+反馈问题时提供受影响的正式版本、操作步骤和脱敏日志，不在 Issue 或贡献内容中包含凭据、私有聊天、记忆及个人浏览器数据。
 
 ## 许可证
 

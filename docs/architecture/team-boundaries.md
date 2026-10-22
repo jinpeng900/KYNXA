@@ -1,6 +1,6 @@
 # 五人模块边界与源码参考
 
-更新日期：2026-10-16，适用于 1.5.0。五人职责继续保留；当前正式后端为 Windows 原生 Rust 网关，公开 HTTP/SSE 与桌面合同保持兼容。业务与执行接线见 [原生架构](native-gateway.md) 和 [团队入口](../team/README.md)。历史 Node 迁移记录仍保留，但不是当前源码入口或本轮验收成绩。
+更新日期：2026-10-22，适用于 Windows x64 首个正式版 1.7（安装发行版本 `1.7.0`）。五人职责继续保留；当前正式后端为 Windows 原生 Rust 网关，公开 HTTP/SSE 与桌面合同保持兼容。业务与执行接线见 [原生架构](native-gateway.md) 和 [团队入口](../team/README.md)。历史 Node 迁移记录仍保留，但不是当前源码入口或本轮验收成绩。
 
 ## 实际调用链
 
@@ -36,7 +36,7 @@ flowchart TD
 |---|---|---|
 | agent-core gateway / 组合 / orchestration | A | `gateway.rs`、`gateway_contract.rs`、`bin/kynxa-gateway.rs`、任务循环、HTTP/SSE、取消、回执/核验和恢复预算 |
 | agent-core tools | D | Rust 工具/审批/浏览器/终端作业状态、Skill/配置与受控文件服务；桌面/终端执行事实来自 ToolHost |
-| agent-core models | C | 四种协议普通/工具流、供应商 HTTP、配置/观察、上下文/摘要、私有续传核验、固定 ORT/tokenizer 嵌入/重排 |
+| agent-core models | C | 四种协议普通/工具流、供应商 HTTP、配置/观察、上下文/摘要、私有续传核验、固定 ORT/tokenizer E5 嵌入；BGE 已移除，RRF 轻量排序归检索链路 |
 | agent-core retrieval / storage | E | 检索/分块、证据与记忆状态、正式 JSONL/SQLite/资料事务、页游标/原始 UTF-16/哈希身份、ANN 和有资源授额的后台发布 |
 | agent-core resources | A | Rust 兼容资源建议、反馈与推理需求；准入/驻留/外部模型预测协调由业务核心管理，真实硬件采样及总租约仍归独立资源服务 |
 | official-tools | D | `apps/official-tools/catalog.json` / `manifest.json`、Skills 与第三方许可证，作为静态资源随包 |

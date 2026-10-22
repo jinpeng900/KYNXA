@@ -1,10 +1,12 @@
 # 桌面运行时打包
 
-适用版本：**KYNXA 1.5**（产品版本 `1.5.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.5 版本说明](../../../docs/releases/1.5.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
+适用版本：Windows x64 首个正式版 **KYNXA 1.7**（安装发行版本 `1.7.0`）。当前入口见 [文档索引](../../../docs/README.md) 和 [1.7 版本说明](../../../docs/releases/1.7.md)。修改版本配置不会自动重命名或更新旧安装 EXE。
+
+Windows 包身份内部版本为 `1.70.0.0`，用于保持相对旧 `1.65.0.0` 的升级顺序；对外产品与安装版本使用 `1.7`／`1.7.0`。首发文件为完整离线 EXE、安装器 ZIP 和资源 ZIP；在线入口需在完整包发布、来源核验后另行生成。
 
 面向普通用户的 EXE 安装包使用 `build-installer.ps1 -OutputDirectory <输出目录>` 生成。此入口发布 Windows x64 Release 自包含应用，再编译 Inno Setup 安装器；它只生成文件，不启动或安装生成的 EXE。安装器支持软件、数据、用户工具目录及中英文界面，E5、私有 Node/MCP、Chromium 和运行依赖随基础包提供，勾选的对话模型交由首次启动后的 Rust 模型管理器下载。
 
-默认安装文件名为 `KYNXA-1.5.0-windows-x64-setup.exe`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。
+默认安装文件名为 `KYNXA-1.7.0-windows-x64-setup.exe`，同版本运行资源文件名为 `KYNXA-1.7.0-windows-x64-resources.zip`。生成的 EXE、资源 ZIP 与本机模型保留在忽略的输出目录或独立分发目录；仓库只维护源码、Markdown 开发说明和依赖清单，旧设计压缩包与生成文档不再纳入 Git。
 
 完整基础包不依赖安装时的外网连接；可选模型以及安装包本身的联网下载分别复用 Rust 模型管理器和 `RuntimeDownloads.psm1`，支持原站、明确发布的 GitHub 资产、国内镜像和独立来源断点。输出目录带有安装包下载入口及版本清单，详情见[离线安装与多来源下载](../../../docs/architecture/offline-installer.md)。
 
@@ -16,7 +18,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `RuntimePackaging.targets` | 加入原生网关、资源服务、ToolHost、本地嵌入与重排模型、私有 MCP 运行时、原始许可证及 PRI 处理 |
+| `RuntimePackaging.targets` | 加入原生网关、资源服务、ToolHost、本地 E5 嵌入模型、私有 MCP 运行时、原始许可证及 PRI 处理 |
 | `native-assets/*.json` | 固定 ORT 1.21.0、DirectML 1.15.4、sqlite-vec 0.1.9、模型与许可的原始下载地址、长度和 SHA-256 |
 | `prepare-native-runtime.ps1` | PowerShell 5.1 构建/校验原生载荷，复用 Cargo 与模型缓存；下载归档只提取白名单 DLL/许可，不执行 SDK 安装代码 |
 | `RuntimeDownloads.psm1` | 原生库、模型与 Node 的共用下载：保留 `.part`，核对范围和文件身份后续传，有限重试及配置镜像回退，显示大小与速度，完成后校验固定 SHA-256 |
@@ -33,7 +35,7 @@
 
 所有项目路径以 `MSBuildProjectDirectory` 和项目内相对路径解析，输出缓存位于项目的中间目录或忽略的 `artifacts/runtime`。不根据开发机用户名、盘符或安装 SDK 的猜测版本定位运行时。嵌入权重和 VC 文件仅按验证后的发布清单复制，缓存杂项不进入安装包。模型资产清单位于 `Build/native-assets`；官方只读资料位于 `apps/official-tools`。实际发布根据 bundle-files.txt 白名单，不将下载归档、旧 Node 目录或缓存杂项打包。
 
-默认嵌入模型、分词资源、CPU 原生推理和必要的 VC DLL 均随 x64 包提供；用户不需要 Python、Docker 或另下载嵌入模型。首次构建需要下载固定权重，并需要对应版本且有许可的正式 Visual Studio Redist；这些是构建机依赖，不是用户运行依赖。当前未验收 Windows arm64 的 `sqlite-vec` 原生发布和正式安装器首用。
+默认 E5 嵌入模型、分词资源、CPU 原生推理和必要的 VC DLL 均随 x64 包提供；用户不需要 Python、Docker 或另下载嵌入模型。检索采用 E5 加词法 RRF 与轻量排序，BGE 权重及专属清单不再进入安装器或资源 ZIP，已有 E5 索引继续使用。首次构建需要下载固定权重，并需要对应版本且有许可的正式 Visual Studio Redist；这些是构建机依赖，不是用户运行依赖。Windows arm64 不在本版发行范围，安装器首用验收须与构建和启动结果分别记录。
 
 内置 Node 包固定为 Playwright MCP 0.0.83、Context7 MCP 4.1.1、Chrome DevTools MCP 1.10.1、Brave Search MCP 2.1.4 和 DBHub 1.4.0。Context7 默认仍走官方远程 HTTP，随包保留本地入口。Brave 仍需真实 API Key；DBHub 仍需用户明确的只读配置与数据库连接，特定数据库可能另需客户端。用户第三方 MCP 的依赖不会自动下载；Python/uvx 服务不因随附 Node 而自动可用。
 
